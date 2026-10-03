@@ -1,4 +1,5 @@
-use crate::{BranchReference, Cell, RemoteAddress, RemoteRepository, Revision};
+use crate::schema::Branch as BranchConcept;
+use crate::{BranchReference, Cell, ConnectedReplica, RemoteAddress, Revision};
 
 mod fetch;
 pub use fetch::*;
@@ -15,18 +16,18 @@ pub use publish::*;
 mod reference;
 pub use reference::*;
 
-/// A loaded remote branch.
+/// A branch of a [`ConnectedReplica`], loaded.
 ///
 /// Produced by opening or loading a [`LoadedRemoteBranchReference`].
-/// Carries the already-loaded [`RemoteRepository`] it lives at, the
+/// Carries the already-loaded [`ConnectedReplica`] it lives at, the
 /// branch capability at the remote's subject, and the two cells used
 /// at runtime: the local snapshot cache and the in-memory handle to
 /// the remote's revision cell used by fork-based resolve/publish.
 #[derive(Debug, Clone)]
-pub struct RemoteBranch {
+pub struct ConnectedBranch {
     /// The loaded remote repository this branch lives at (site +
     /// retained address).
-    repository: RemoteRepository,
+    repository: ConnectedReplica,
     /// Names the branch at the remote repository's subject. Rooted at
     /// the remote repo's subject; path `memory/branch/{branch_name}`.
     branch: BranchReference,
@@ -42,10 +43,10 @@ pub struct RemoteBranch {
     upstream: Cell<Revision>,
 }
 
-impl RemoteBranch {
+impl ConnectedBranch {
     /// Construct from the loaded repository + branch and the two cells.
     pub(super) fn new(
-        repository: RemoteRepository,
+        repository: ConnectedReplica,
         branch: BranchReference,
         cache: Cell<RemoteEdition>,
         upstream: Cell<Revision>,
@@ -59,7 +60,7 @@ impl RemoteBranch {
     }
 
     /// The loaded remote repository this branch lives at.
-    pub fn repository(&self) -> &RemoteRepository {
+    pub fn repository(&self) -> &ConnectedReplica {
         &self.repository
     }
 
@@ -71,6 +72,12 @@ impl RemoteBranch {
     /// The branch name.
     pub fn name(&self) -> &str {
         self.branch.name()
+    }
+
+    /// The branch as a concept: its entity, derived from the peer's
+    /// replica and the name.
+    pub fn concept(&self) -> BranchConcept {
+        self.repository.replica().branch(self.name())
     }
 
     /// The full remote address (site + subject).

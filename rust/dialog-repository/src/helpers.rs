@@ -8,105 +8,106 @@ use dialog_capability::{Command, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use parking_lot::Mutex;
 
-// Operator-dependent helpers (test_operator, unique_name, ...) live in
-// `dialog_operator::helpers`: the operator sits above this crate, so tests
+// Operator-dependent helpers (test_session, unique_name, ...) live in
+// `dialog_peer::helpers`: the operator sits above this crate, so tests
 // import them from there via the dev-dependency. `test_repo` is the one
 // exception: it returns THIS crate's types, and through the dev-dependency
 // cycle the operator's copy of this crate is a distinct compilation — its
 // `Repository` is not `crate::Repository` — so this crate's tests need a
 // local one built from `crate::` paths.
 
-/// Create a test repository (this crate's types) using the given operator
-/// as the effect environment.
+/// Create a test repository (this crate's types) under `peer`, through
+/// `session` as the effect environment.
 #[cfg(test)]
-pub async fn test_repo(
-    operator: &dialog_operator::Operator<VolatileSpaceForTests>,
-    profile: &dialog_identity::Profile,
-) -> crate::Repository<dialog_credentials::Credential> {
+pub async fn test_repo<S: PeerSpace, M: Mode>(
+    session: &Peer<S, M>,
+    peer: &Peer<S>,
+) -> Repository<Credential> {
     use crate::RepositoryExt as _;
     use dialog_identity::SpaceHandle;
-    use dialog_operator::helpers::unique_name;
+    use dialog_peer::helpers::unique_name;
     let handle = SpaceHandle {
-        profile_did: dialog_varsig::Principal::did(profile),
+        peer: peer.did(),
         name: unique_name("repo"),
     };
     handle
         .open()
-        .perform(operator)
+        .perform(session)
         .await
         .expect("test_repo: failed to open repository")
 }
 
-/// The environment this crate's own tests run stacks against: the test
-/// operator for every effect, and this crate's own
-/// [`EphemeralRegistry`](crate::EphemeralRegistry) for creating and
-/// opening ephemeral layers. The operator sits above this crate, so
-/// through the dev-dependency cycle its `Ephemeral` is not
-/// `crate::Ephemeral` and its ephemeral providers cannot serve tests
-/// written against this crate's types; the effects that cross the
-/// boundary are all leaf-crate types and delegate straight through.
+/// The space a flaky test peer runs over: volatile, with a memory
+/// provider that loses the publishes a test plans.
 #[cfg(test)]
-#[derive(dialog_capability::Provider, Clone)]
-pub struct TestEnv {
-    #[provide(
-        Get,
-        Put,
-        Import,
-        Resolve,
-        Publish,
-        Identify,
-        Attest,
-        Write,
-        BlobRead,
-        BlobImport,
-        Retract,
-        Hydrate,
-        Preload,
-        Speculation,
-        Fork<Network, Get>,
-        Fork<Network, Put>,
-        Fork<Network, Resolve>,
-        Fork<Network, Publish>,
-        Fork<Network, BlobImport>,
-        Fork<Network, BlobRead>
-    )]
-    operator: Operator<VolatileSpaceForTests>,
-    #[provide(CreateEphemeral, OpenEphemeral)]
-    ephemerals: Arc<EphemeralRegistry>,
+pub type FlakySpace = Space<Volatile, Flaky, Volatile, Volatile, Volatile>;
+
+/// A session on a peer whose memory loses the publishes a test plans,
+/// and the peer it was built from: the peer's storage is how a test
+/// reaches the [`Flaky`] memory of a repository, by its DID, to plan
+/// them.
+#[cfg(test)]
+pub async fn flaky_session_with_peer() -> (Peer<FlakySpace, Session>, Peer<FlakySpace>) {
+    use dialog_capability::Subject;
+    use dialog_effects::storage::Location;
+    use dialog_peer::helpers::{open_peer, test_owned, unique_name};
+    let peer = open_peer(
+        test_owned(Storage::<FlakySpace>::new()).await,
+        Location::profile(unique_name("test")),
+    )
+    .await
+    .expect("flaky_session_with_peer: failed to open peer");
+    let session = peer
+        .session(b"test")
+        .space(peer.state())
+        .allow(Subject::any())
+        .await
+        .expect("flaky_session_with_peer: failed to build session");
+    (session, peer)
 }
 
 #[cfg(test)]
-impl TestEnv {
-    /// Wrap a test operator with a fresh ephemeral registry.
-    pub fn new(operator: Operator<VolatileSpaceForTests>) -> Self {
-        Self {
-            operator,
-            ephemerals: Arc::default(),
-        }
-    }
-
-    /// The ephemeral layers this environment holds.
-    pub fn ephemerals(&self) -> &EphemeralRegistry {
-        &self.ephemerals
-    }
-}
-
+use crate::{ConnectedReplica, PeersEnv, Repository, SiteAddress, contact, peer_did};
 #[cfg(test)]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<CreateEphemeral> for Arc<EphemeralRegistry> {
-    async fn execute(&self, input: ()) -> Ephemeral {
-        Provider::<CreateEphemeral>::execute(self.as_ref(), input).await
-    }
-}
-
+use dialog_credentials::Credential;
 #[cfg(test)]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Provider<OpenEphemeral> for Arc<EphemeralRegistry> {
-    async fn execute(&self, input: Entity) -> Result<Ephemeral, EphemeralError> {
-        Provider::<OpenEphemeral>::execute(self.as_ref(), input).await
-    }
+use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
+#[cfg(test)]
+use dialog_peer::{Mode, Peer, PeerSpace, Session};
+#[cfg(test)]
+use dialog_storage::Flaky;
+#[cfg(test)]
+use dialog_storage::provider::storage::Storage;
+#[cfg(test)]
+use dialog_storage::provider::{Space, Volatile};
+#[cfg(test)]
+use dialog_varsig::Did;
+
+/// Make the peer reached at `address` a contact named `name`, and connect
+/// to its replica of the repository `subject`: what tests once did by
+/// creating a named remote. The peer's DID is derived from the address,
+/// and connecting goes by it: names are the host's, so two tests' peers
+/// may share one.
+#[cfg(test)]
+pub async fn connect<Env: PeersEnv>(
+    name: &str,
+    address: impl Into<SiteAddress>,
+    subject: Did,
+    env: &Env,
+) -> anyhow::Result<ConnectedReplica> {
+    let address = address.into();
+    let did = peer_did(&address)?;
+    contact(&did)
+        .add_address(address)
+        .name(name)
+        .perform(env)
+        .await?;
+    Ok(contact(&did)
+        .connect()
+        .repository(subject)
+        .open()
+        .perform(env)
+        .await?)
 }
 
 /// Fill `branch` with what a tonk profile's account branch carries, at a
@@ -136,7 +137,9 @@ pub async fn fill_account_branch<Env>(
     env: &Env,
 ) -> anyhow::Result<usize>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobImport>
+        + Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Publish>
@@ -195,28 +198,17 @@ where
 }
 
 #[cfg(test)]
-use crate::{
-    CreateEphemeral, Ephemeral, EphemeralError, EphemeralRegistry, Hydrate, OpenEphemeral,
-};
-#[cfg(test)]
-use dialog_artifacts::{Entity, Preload, Speculation};
-#[cfg(test)]
 use dialog_capability::Fork;
 #[cfg(test)]
 use dialog_effects::archive::{Get, Import, Put};
 #[cfg(test)]
 use dialog_effects::authority::{Attest, Identify};
 #[cfg(test)]
-use dialog_effects::blob::{Import as BlobImport, Read as BlobRead, Write};
+use dialog_effects::blob::Write;
 #[cfg(test)]
-use dialog_effects::memory::{Publish, Resolve, Retract};
+use dialog_effects::memory::{Publish, Resolve};
 #[cfg(test)]
 use dialog_network::Network;
-#[cfg(test)]
-use dialog_operator::Operator;
-/// The volatile space type test operators run over.
-#[cfg(test)]
-use dialog_storage::provider::storage::VolatileSpace as VolatileSpaceForTests;
 
 /// A [`Provider`] wrapper that tallies every effect execution by its
 /// type name, so a test can measure an operation's cost in effect
@@ -239,6 +231,16 @@ pub struct Counting<P> {
     counts: Arc<Mutex<BTreeMap<&'static str, u64>>>,
     reads: Arc<Mutex<InFlight>>,
     forks: Arc<Mutex<InFlight>>,
+}
+
+impl<P: dialog_common::Holds> dialog_common::Holds for Counting<P> {
+    fn held(&self, key: &str) -> Option<dialog_common::Held> {
+        self.inner.held(key)
+    }
+
+    fn hold(&self, key: String, handle: dialog_common::Held) {
+        self.inner.hold(key, handle)
+    }
 }
 
 /// How many reads are open now, and the most that were ever open at once.

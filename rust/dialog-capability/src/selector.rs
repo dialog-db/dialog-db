@@ -37,6 +37,7 @@ impl Selector<Subject, Here> for Subject {
 
 #[cfg(test)]
 mod tests {
+    use crate::Policy;
     use crate::*;
     use crate::{Attenuation, Effect};
     use serde::{Deserialize, Serialize};
@@ -64,8 +65,11 @@ mod tests {
         name: String,
     }
 
-    impl Effect for Level3 {
+    impl Policy for Level3 {
         type Of = Level2;
+    }
+
+    impl Effect for Level3 {
         type Output = ();
     }
 

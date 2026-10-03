@@ -36,21 +36,22 @@
 //! leaf paths, and the diff exchanges fewer blocks); bulk-load paths
 //! canonicalize once, explicitly, at the end of the import.
 
+use crate::{ArchiveDelta, ArchiveReader, DeltaOverlay};
 use async_trait::async_trait;
+use dialog_capability::Provider;
 use dialog_common::ConditionalSend;
 use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
+use dialog_search_tree::LoadBlock;
 use dialog_search_tree::{
-    Buffer, Cache, ContentAddressedStorage, Delta, DialogSearchTreeError, Entry, HitchhikerTree,
-    Manifest, TransientTree,
+    Buffer, DialogSearchTreeError, Entry, HitchhikerTree, Manifest, TransientTree,
 };
-use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
 use futures_util::Stream;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 
-use crate::history::Version;
-use crate::tree::{ArtifactTree, TreeStorageBridge, WriteScope, write_instructions};
+use crate::history::{RecordEntries, Version};
+use crate::tree::{ArtifactNodeCache, ArtifactTree, Stamp, WriteScope, write_instructions};
 use crate::{Datum, DialogArtifactsError, Instruction, Key, State};
 
 /// The buffered counterpart of [`ArtifactTree`].
@@ -78,11 +79,10 @@ pub trait ArtifactWriter: Sized {
         self,
         key: Key,
         value: State<Datum>,
-        storage: &ContentAddressedStorage<S>,
+        storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync;
+        S: Provider<LoadBlock> + ConditionalSync;
 
     /// Insert (or overwrite) a batch of entries, one write at a time.
     ///
@@ -96,11 +96,10 @@ pub trait ArtifactWriter: Sized {
     async fn write_all<S>(
         mut self,
         entries: Vec<(Key, State<Datum>)>,
-        storage: &ContentAddressedStorage<S>,
+        storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
         Self: ConditionalSend,
     {
         for (key, value) in entries {
@@ -110,24 +109,18 @@ pub trait ArtifactWriter: Sized {
     }
 
     /// Remove `key`, if present.
-    async fn erase<S>(
-        self,
-        key: &Key,
-        storage: &ContentAddressedStorage<S>,
-    ) -> Result<Self, DialogSearchTreeError>
+    async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync;
+        S: Provider<LoadBlock> + ConditionalSync;
 
     /// Read the value at `key`, seeing this batch's own pending writes.
     async fn read<S>(
         &self,
         key: &Key,
-        storage: &ContentAddressedStorage<S>,
+        storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync;
+        S: Provider<LoadBlock> + ConditionalSync;
 
     /// Scan `range` in key order, seeing this batch's own pending writes.
     ///
@@ -138,11 +131,10 @@ pub trait ArtifactWriter: Sized {
     fn scan<'a, S>(
         &'a self,
         range: RangeInclusive<Key>,
-        storage: &'a ContentAddressedStorage<S>,
+        storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync;
+        S: Provider<LoadBlock> + ConditionalSync;
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -152,23 +144,17 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
         self,
         key: Key,
         value: State<Datum>,
-        storage: &ContentAddressedStorage<S>,
+        storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.insert(key, value, storage).await
     }
 
-    async fn erase<S>(
-        self,
-        key: &Key,
-        storage: &ContentAddressedStorage<S>,
-    ) -> Result<Self, DialogSearchTreeError>
+    async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.delete(key, storage).await
     }
@@ -176,11 +162,10 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
     async fn read<S>(
         &self,
         key: &Key,
-        storage: &ContentAddressedStorage<S>,
+        storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.get(key, storage).await
     }
@@ -188,11 +173,10 @@ impl ArtifactWriter for TransientTree<Key, State<Datum>> {
     fn scan<'a, S>(
         &'a self,
         range: RangeInclusive<Key>,
-        storage: &'a ContentAddressedStorage<S>,
+        storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.stream_range(range, storage)
     }
@@ -211,23 +195,17 @@ impl ArtifactWriter for BufferedArtifactTree {
         self,
         key: Key,
         value: State<Datum>,
-        storage: &ContentAddressedStorage<S>,
+        storage: &S,
     ) -> Result<Self, DialogSearchTreeError>
     where
-        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.insert_deferred(key, value, storage).await
     }
 
-    async fn erase<S>(
-        self,
-        key: &Key,
-        storage: &ContentAddressedStorage<S>,
-    ) -> Result<Self, DialogSearchTreeError>
+    async fn erase<S>(self, key: &Key, storage: &S) -> Result<Self, DialogSearchTreeError>
     where
-        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.delete_deferred(key.clone(), storage).await
     }
@@ -235,11 +213,10 @@ impl ArtifactWriter for BufferedArtifactTree {
     async fn read<S>(
         &self,
         key: &Key,
-        storage: &ContentAddressedStorage<S>,
+        storage: &S,
     ) -> Result<Option<State<Datum>>, DialogSearchTreeError>
     where
-        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.get(key, storage).await
     }
@@ -247,11 +224,10 @@ impl ArtifactWriter for BufferedArtifactTree {
     fn scan<'a, S>(
         &'a self,
         range: RangeInclusive<Key>,
-        storage: &'a ContentAddressedStorage<S>,
+        storage: &'a S,
     ) -> impl Stream<Item = Result<Entry<Key, State<Datum>>, DialogSearchTreeError>> + 'a
     where
-        S: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        S: Provider<LoadBlock> + ConditionalSync,
     {
         self.stream_range(range, storage)
     }
@@ -281,10 +257,13 @@ impl ArtifactWriter for BufferedArtifactTree {
 /// seal.
 pub struct BufferedBatch {
     tree: BufferedArtifactTree,
-    cache: Cache<NodeHash, Buffer>,
+    cache: ArtifactNodeCache,
     manifest: Manifest,
     changed: bool,
     slot: Option<SpineSlot>,
+    /// The values this batch spilled, staged until [`seal`](Self::seal)
+    /// hands them to the caller's delta with the batch's nodes.
+    staged: ArchiveDelta,
 }
 
 /// A slot holding one live buffered spine between commits, keyed by the root
@@ -360,18 +339,16 @@ impl BufferedBatch {
     #[tracing::instrument(skip_all, name = "apply_batch")]
     pub async fn apply<S, I>(
         tree: &ArtifactTree,
-        store: &mut S,
+        store: &S,
         version: Option<Version>,
         instructions: I,
         scope: WriteScope,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
-        Self::open_batch(tree, store, version, instructions, scope, None).await
+        Self::open_batch(tree, store, version.into(), instructions, scope, None).await
     }
 
     /// [`apply`](Self::apply) with a live spine carried across commits.
@@ -388,21 +365,52 @@ impl BufferedBatch {
     pub async fn apply_reusing<S, I>(
         slot: &SpineSlot,
         tree: &ArtifactTree,
-        store: &mut S,
+        store: &S,
         version: Option<Version>,
         instructions: I,
         scope: WriteScope,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
         Self::open_batch(
             tree,
             store,
-            version,
+            version.into(),
+            instructions,
+            scope,
+            Some(slot.clone()),
+        )
+        .await
+    }
+
+    /// [`apply_reusing`](Self::apply_reusing) amending `version`: `tree`
+    /// already carries writes under it (a commit being amended), and this
+    /// batch writes more under the same version.
+    ///
+    /// Datums are tagged with `version` as in any versioned batch; the
+    /// history each instruction records folds into what `tree` already
+    /// records under `version` at the same history key, exactly as two
+    /// writes within one batch fold. So applying a stream in two amending
+    /// passes records what applying it in one pass records.
+    #[tracing::instrument(skip_all, name = "amend_batch_reusing")]
+    pub async fn amend_reusing<S, I>(
+        slot: &SpineSlot,
+        tree: &ArtifactTree,
+        store: &S,
+        version: Version,
+        instructions: I,
+        scope: WriteScope,
+    ) -> Result<Self, DialogArtifactsError>
+    where
+        S: ArchiveReader + Clone,
+        I: Stream<Item = Instruction> + ConditionalSend,
+    {
+        Self::open_batch(
+            tree,
+            store,
+            Stamp::Amend(version),
             instructions,
             scope,
             Some(slot.clone()),
@@ -412,19 +420,20 @@ impl BufferedBatch {
 
     async fn open_batch<S, I>(
         tree: &ArtifactTree,
-        store: &mut S,
-        version: Option<Version>,
+        store: &S,
+        stamp: Stamp,
         instructions: I,
         scope: WriteScope,
         slot: Option<SpineSlot>,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
         I: Stream<Item = Instruction> + ConditionalSend,
     {
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+        // The batch reads through what it stages, so a value it spills is
+        // readable before the commit writes it.
+        let mut staged = ArchiveDelta::zero();
+        let storage = DeltaOverlay::new(&staged, store);
         // Keys are built under the target tree's own format, read from the
         // manifest its root node carries. Writes preserve that format, so the
         // manifest captured here also governs the record entries appended
@@ -436,9 +445,9 @@ impl BufferedBatch {
             .unwrap_or_else(|| HitchhikerTree::open(tree));
         let (buffered, changed) = write_instructions(
             spine,
-            store,
             &storage,
-            version,
+            &mut staged,
+            stamp,
             &manifest,
             instructions,
             scope,
@@ -450,6 +459,46 @@ impl BufferedBatch {
             manifest,
             changed,
             slot,
+            staged,
+        })
+    }
+
+    /// Applies a further instruction stream to this still open batch, under
+    /// its own `scope`, with the same semantics and version as the first.
+    ///
+    /// A commit uses it to write the facts it derives itself, such as an
+    /// asset's `dialog.asset/size`, under
+    /// [`Machinery`](WriteScope::Machinery) scope in the same batch as the
+    /// application's own instructions, which stay under
+    /// [`Application`](WriteScope::Application) scope. The batch counts as
+    /// changed when either stream changed the indexes.
+    pub async fn then_apply<S, I>(
+        mut self,
+        store: &S,
+        stamp: Stamp,
+        instructions: I,
+        scope: WriteScope,
+    ) -> Result<Self, DialogArtifactsError>
+    where
+        S: ArchiveReader + Clone,
+        I: Stream<Item = Instruction> + ConditionalSend,
+    {
+        // Read through what the batch staged so far, as its first pass did.
+        let storage = DeltaOverlay::new(&self.staged, store);
+        let (tree, changed) = write_instructions(
+            self.tree,
+            &storage,
+            &mut self.staged,
+            stamp,
+            &self.manifest,
+            instructions,
+            scope,
+        )
+        .await?;
+        Ok(Self {
+            tree,
+            changed: self.changed || changed,
+            ..self
         })
     }
 
@@ -486,14 +535,18 @@ impl BufferedBatch {
     pub async fn record<S>(
         mut self,
         store: &S,
-        entries: Vec<(Key, State<Datum>)>,
+        entries: impl Into<RecordEntries>,
     ) -> Result<Self, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
     {
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+        let RecordEntries { entries, spill } = entries.into();
+        // A spilled record value is staged with the batch's other spills,
+        // as the instruction path stages a spilling fact's.
+        if let Some((_, bytes)) = spill {
+            self.staged.stage_blob(Buffer::from(bytes));
+        }
+        let storage = DeltaOverlay::new(&self.staged, store);
         self.tree = self.tree.write_all(entries, &storage).await?;
         Ok(self)
     }
@@ -516,17 +569,20 @@ impl BufferedBatch {
     /// each other as equal and do merge work that finds nothing.
     #[tracing::instrument(skip_all, name = "seal_batch")]
     pub async fn seal<S>(
-        self,
+        mut self,
         store: &S,
-        delta: &mut Delta<NodeHash, Buffer>,
+        delta: &mut ArchiveDelta,
         canonicalize: bool,
     ) -> Result<ArtifactTree, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone,
     {
-        let storage = ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+        // The values the batch spilled go out with its nodes.
+        for blob in self.staged.flush_blobs() {
+            delta.stage_blob(blob);
+        }
+        let delta = delta.blocks();
+        let storage = store.clone();
         Ok(if canonicalize {
             // Canonicalizing consumes the spine (and drains every buffer, so
             // the batch's deferred flush decision is moot); a slot the batch
@@ -566,16 +622,14 @@ impl BufferedBatch {
 #[tracing::instrument(skip_all, name = "apply_buffered")]
 pub async fn apply_buffered<S, I>(
     tree: &mut ArtifactTree,
-    store: &mut S,
-    delta: &mut Delta<NodeHash, Buffer>,
+    store: &S,
+    delta: &mut ArchiveDelta,
     version: Option<Version>,
     instructions: I,
     canonicalize: bool,
 ) -> Result<bool, DialogArtifactsError>
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + Clone
-        + ConditionalSync,
+    S: ArchiveReader + Clone,
     I: Stream<Item = Instruction> + ConditionalSend,
 {
     let batch =
@@ -591,16 +645,14 @@ where
 pub async fn apply_buffered_reusing<S, I>(
     slot: &SpineSlot,
     tree: &mut ArtifactTree,
-    store: &mut S,
-    delta: &mut Delta<NodeHash, Buffer>,
+    store: &S,
+    delta: &mut ArchiveDelta,
     version: Option<Version>,
     instructions: I,
     canonicalize: bool,
 ) -> Result<bool, DialogArtifactsError>
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + Clone
-        + ConditionalSync,
+    S: ArchiveReader + Clone,
     I: Stream<Item = Instruction> + ConditionalSend,
 {
     let batch = BufferedBatch::apply_reusing(
@@ -623,21 +675,25 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use dialog_search_tree::Delta;
-    use dialog_storage::{CborEncoder, MemoryStorageBackend, Storage, StorageBackend as _};
+
+    use crate::ArchiveDelta;
+    use dialog_search_tree::MemoryBlocks;
+
     use futures_util::stream;
 
     use super::{BufferedBatch, WriteScope, apply_buffered};
     use crate::history::{Edition, Origin, Version};
-    use crate::key::{FromKey as _, default_manifest};
+    use crate::key::FromKey as _;
+    use crate::tree::Stamp;
     use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
-    use crate::{Artifact, AttributeKey, Datum, EntityKey, Instruction, State, Value};
+    use crate::{
+        Artifact, Asset, AttributeKey, BlobChange, BlobIndexExt as _, Datum, DialogArtifactsError,
+        EntityKey, Instruction, State, Value, blob_changes,
+    };
+    use futures_util::TryStreamExt as _;
 
-    fn store() -> Storage<CborEncoder, MemoryStorageBackend<[u8; 32], Vec<u8>>> {
-        Storage {
-            encoder: CborEncoder,
-            backend: MemoryStorageBackend::default(),
-        }
+    fn store() -> MemoryBlocks {
+        MemoryBlocks::new()
     }
 
     fn assert_of(entity: &str, value: &str) -> Instruction {
@@ -680,13 +736,13 @@ mod tests {
 
         const COMMITS: usize = 200;
 
-        let mut store = store();
+        let store = store();
         let mut tree = ArtifactTree::empty();
         for i in 0..COMMITS {
-            let mut delta = Delta::zero();
+            let mut delta = ArchiveDelta::zero();
             apply_buffered(
                 &mut tree,
-                &mut store,
+                &store,
                 &mut delta,
                 Some(Version::new(
                     Origin::from([7u8; 32]),
@@ -696,12 +752,7 @@ mod tests {
                 false,
             )
             .await?;
-            for (hash, buffer) in delta.flush() {
-                use dialog_storage::StorageBackend as _;
-                store
-                    .set(*hash.as_bytes(), buffer.as_ref().to_vec())
-                    .await?;
-            }
+            delta.flush_into(&store);
         }
 
         let the = "test/field".parse().unwrap();
@@ -731,19 +782,18 @@ mod tests {
     async fn it_keeps_buffered_ops_when_the_revision_record_is_written() -> Result<()> {
         use crate::key::FromKey as _;
         use crate::tree::ArtifactTreeExt as _;
-        use dialog_storage::StorageBackend as _;
 
-        let mut store = store();
+        let store = store();
         let mut tree = ArtifactTree::empty();
 
         // Enough commits that the spine grows and the buffers matter, each one
         // buffering its batch and then writing a record entry, as a commit does.
         const COMMITS: usize = 300;
         for i in 0..COMMITS {
-            let mut delta = Delta::zero();
+            let mut delta = ArchiveDelta::zero();
             apply_buffered(
                 &mut tree,
-                &mut store,
+                &store,
                 &mut delta,
                 None,
                 stream::iter(vec![assert_of(&format!("user:{i}"), "resident")]),
@@ -758,24 +808,24 @@ mod tests {
                 is: Value::String(format!("{i}")),
                 cause: None,
             };
-            let entity_key = crate::EntityKey::from_artifact(&artifact, &default_manifest());
+            let entity_key = crate::EntityKey::from_artifact(
+                &artifact,
+                &dialog_search_tree::Manifest::default(),
+            );
             let attribute_key = crate::AttributeKey::from_key(&entity_key);
             let added = crate::State::Added(crate::Datum::for_artifact(&artifact));
             tree.record(
-                &mut store,
+                &store,
                 &mut delta,
                 vec![
                     (entity_key.into_key(), added.clone()),
                     (attribute_key.into_key(), added),
-                ],
+                ]
+                .into(),
             )
             .await?;
 
-            for (hash, buffer) in delta.flush() {
-                store
-                    .set(*hash.as_bytes(), buffer.as_ref().to_vec())
-                    .await?;
-            }
+            delta.flush_into(&store);
         }
 
         let the = "test/field".parse().unwrap();
@@ -815,40 +865,30 @@ mod tests {
             ]
         }
 
-        let mut direct_store = store();
+        let direct_store = store();
         let mut direct = ArtifactTree::empty();
         for batch in batches() {
-            let mut delta = Delta::zero();
+            let mut delta = ArchiveDelta::zero();
             direct
-                .apply_versioned(&mut direct_store, &mut delta, None, stream::iter(batch))
+                .apply_versioned(&direct_store, &mut delta, None, stream::iter(batch))
                 .await?;
-            for (hash, buffer) in delta.flush() {
-                use dialog_storage::StorageBackend as _;
-                direct_store
-                    .set(*hash.as_bytes(), buffer.as_ref().to_vec())
-                    .await?;
-            }
+            delta.flush_into(&direct_store);
         }
 
-        let mut buffered_store = store();
+        let buffered_store = store();
         let mut buffered = ArtifactTree::empty();
         for batch in batches() {
-            let mut delta = Delta::zero();
+            let mut delta = ArchiveDelta::zero();
             apply_buffered(
                 &mut buffered,
-                &mut buffered_store,
+                &buffered_store,
                 &mut delta,
                 None,
                 stream::iter(batch),
                 true,
             )
             .await?;
-            for (hash, buffer) in delta.flush() {
-                use dialog_storage::StorageBackend as _;
-                buffered_store
-                    .set(*hash.as_bytes(), buffer.as_ref().to_vec())
-                    .await?;
-            }
+            delta.flush_into(&buffered_store);
         }
 
         assert_eq!(
@@ -874,12 +914,12 @@ mod tests {
         let of = "user:1".parse().unwrap();
 
         for canonicalize in [true, false] {
-            let mut buffered_store = store();
+            let buffered_store = store();
             let mut tree = ArtifactTree::empty();
-            let mut delta = Delta::zero();
+            let mut delta = ArchiveDelta::zero();
             let changed = apply_buffered(
                 &mut tree,
-                &mut buffered_store,
+                &buffered_store,
                 &mut delta,
                 None,
                 stream::iter(vec![
@@ -889,11 +929,7 @@ mod tests {
                 canonicalize,
             )
             .await?;
-            for (hash, buffer) in delta.flush() {
-                buffered_store
-                    .set(*hash.as_bytes(), buffer.as_ref().to_vec())
-                    .await?;
-            }
+            delta.flush_into(&buffered_store);
 
             assert!(
                 changed,
@@ -909,12 +945,12 @@ mod tests {
             if canonicalize {
                 // The same batch through the canonical path on a fresh tree
                 // must land on the identical root.
-                let mut direct_store = store();
+                let direct_store = store();
                 let mut direct = ArtifactTree::empty();
-                let mut direct_delta = Delta::zero();
+                let mut direct_delta = ArchiveDelta::zero();
                 direct
                     .apply_versioned(
-                        &mut direct_store,
+                        &direct_store,
                         &mut direct_delta,
                         None,
                         stream::iter(vec![
@@ -957,7 +993,8 @@ mod tests {
                 is: Value::String("record".to_string()),
                 cause: None,
             };
-            let entity_key = EntityKey::from_artifact(&artifact, &default_manifest());
+            let entity_key =
+                EntityKey::from_artifact(&artifact, &dialog_search_tree::Manifest::default());
             let attribute_key = AttributeKey::from_key(&entity_key);
             let added = State::Added(Datum::for_artifact(&artifact));
             vec![
@@ -968,29 +1005,29 @@ mod tests {
 
         // The canonical reference: data through the canonical edit path, then
         // the record through the canonical `record` surface.
-        let mut direct_store = store();
+        let direct_store = store();
         let mut direct = ArtifactTree::empty();
-        let mut direct_delta = Delta::zero();
+        let mut direct_delta = ArchiveDelta::zero();
         direct
             .apply_versioned(
-                &mut direct_store,
+                &direct_store,
                 &mut direct_delta,
                 Some(version()),
                 stream::iter(data()),
             )
             .await?;
         direct
-            .record(&mut direct_store, &mut direct_delta, entries())
+            .record(&direct_store, &mut direct_delta, entries().into())
             .await?;
 
         // The batch surface, sealed canonical: the same fact set must land on
         // the byte-identical root.
-        let mut batch_store = store();
+        let batch_store = store();
         let base = ArtifactTree::empty();
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         let batch = BufferedBatch::apply(
             &base,
-            &mut batch_store,
+            &batch_store,
             Some(version()),
             stream::iter(data()),
             WriteScope::Application,
@@ -1012,11 +1049,11 @@ mod tests {
 
         // The batch surface, sealed buffered: the record must read back
         // through the novelty-aware read path.
-        let mut buffered_store = store();
-        let mut delta = Delta::zero();
+        let buffered_store = store();
+        let mut delta = ArchiveDelta::zero();
         let batch = BufferedBatch::apply(
             &ArtifactTree::empty(),
-            &mut buffered_store,
+            &buffered_store,
             Some(version()),
             stream::iter(data()),
             WriteScope::Application,
@@ -1024,11 +1061,7 @@ mod tests {
         .await?;
         let batch = batch.record(&buffered_store, entries()).await?;
         let sealed = batch.seal(&buffered_store, &mut delta, false).await?;
-        for (hash, buffer) in delta.flush() {
-            buffered_store
-                .set(*hash.as_bytes(), buffer.as_ref().to_vec())
-                .await?;
-        }
+        delta.flush_into(&buffered_store);
         let records = sealed
             .select_record(
                 buffered_store.clone(),
@@ -1045,6 +1078,74 @@ mod tests {
                 .is_empty(),
             "the batch's data survives alongside the record"
         );
+        Ok(())
+    }
+
+    fn asset_version() -> Version {
+        Version::new(Origin::from([3u8; 32]), Edition::new(0))
+    }
+
+    /// A commit writes the facts it derives under machinery scope after the
+    /// application's own instructions, in one batch. An asset's fact then
+    /// vouches for its content: the tree answers its size, and the
+    /// differential names its bytes for push to ship.
+    #[dialog_common::test]
+    async fn it_records_an_asset_fact_under_machinery_scope() -> Result<()> {
+        let store = store();
+        let mut delta = ArchiveDelta::zero();
+        let asset = Asset::new(b"asset bytes".to_vec());
+
+        let batch = BufferedBatch::apply(
+            &ArtifactTree::empty(),
+            &store,
+            Some(asset_version()),
+            stream::iter(vec![assert_of("user:alice", "Alice")]),
+            WriteScope::Application,
+        )
+        .await?;
+        let batch = batch
+            .then_apply(
+                &store,
+                Stamp::Amend(asset_version()),
+                stream::iter(vec![Instruction::Assert(asset.fact()?)]),
+                WriteScope::Machinery,
+            )
+            .await?;
+        assert!(batch.changed());
+        let tree = batch.seal(&store, &mut delta, false).await?;
+        delta.flush_into(&store);
+
+        assert_eq!(
+            tree.content_size(&store, asset.hash()).await?,
+            Some(asset.size())
+        );
+        assert_eq!(tree.content_size(&store, &[0u8; 32]).await?, None);
+
+        let changes: Vec<_> = blob_changes(ArtifactTree::empty(), tree, store.clone())
+            .try_collect()
+            .await?;
+        assert_eq!(changes, vec![BlobChange::Added(*asset.hash())]);
+        Ok(())
+    }
+
+    /// Application instructions cannot write an asset's fact, so its size
+    /// is always the one a commit derived from the bytes.
+    #[dialog_common::test]
+    async fn it_refuses_an_asset_fact_from_an_application() -> Result<()> {
+        let store = store();
+        let asset = Asset::new(b"asset bytes".to_vec());
+        let refused = BufferedBatch::apply(
+            &ArtifactTree::empty(),
+            &store,
+            Some(asset_version()),
+            stream::iter(vec![Instruction::Assert(asset.fact()?)]),
+            WriteScope::Application,
+        )
+        .await;
+        assert!(matches!(
+            refused,
+            Err(DialogArtifactsError::ReservedAttribute(_))
+        ));
         Ok(())
     }
 }

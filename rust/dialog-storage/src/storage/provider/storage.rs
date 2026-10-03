@@ -1,5 +1,6 @@
 //! Storage: composes Router (DID routing) and Loader (space load/create).
 
+mod credential_store;
 mod loader;
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
@@ -11,10 +12,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dialog_capability::access::{AuthorizeError, Export, Forget, Protocol, Prove, Retain};
-use dialog_capability::{Capability, Did, Provider};
+use dialog_capability::{Capability, Did, Policy, Provider, Subject};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::Credential;
-use dialog_effects::credential::Secret;
+use dialog_effects::credential::prelude::*;
+use dialog_effects::storage::LocationExt as _;
 use dialog_effects::{archive, blob, credential, memory, storage};
 
 use loader::Loader;
@@ -23,6 +25,7 @@ use router::Router;
 use crate::provider::{Space, Volatile};
 use crate::resource::Pool;
 
+pub use credential_store::CredentialStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::NativeSpace;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -31,26 +34,33 @@ pub use web::{WebOpfsSpace, WebSpace};
 /// Storage: the runtime context for capability dispatch.
 #[derive(Provider)]
 pub struct Storage<S: Clone> {
-    #[provide(storage::Load, storage::Create)]
-    loader: Loader<S>,
+    /// Mounts spaces. Not a provider of its own: a storage hands over
+    /// what it mounts through [`Provider<storage::Load>`] and
+    /// [`Provider<storage::Create>`] below, which keep a signing key out.
+    pub(super) loader: Loader<S>,
 
+    /// Serves a mounted space's data by its DID. No credential effect
+    /// is served: a storage keeps no signing key and no site secret, and
+    /// a space's own identity is read through [`Storage::identity`].
     #[provide(
         archive::Get,
         archive::Put,
         archive::Import,
         blob::Read,
+        blob::Size,
         blob::Write,
         blob::Import,
         memory::Resolve,
         memory::Publish,
         memory::Retract,
-        credential::Load<Credential>,
-        credential::Save<Credential>,
-        credential::Load<Secret>,
-        credential::Save<Secret>,
-        credential::Retract<Secret>
+        memory::List
     )]
-    router: Router<S>,
+    pub(super) router: Router<S>,
+
+    /// The principal whose authority mounting a space in this storage
+    /// takes: a peer opens a space only if it can prove the system's
+    /// grant. Only its DID is kept: the storage cannot grant anything.
+    system: Option<Did>,
 }
 
 /// Cloning yields a second handle onto the *same* spaces, not a second
@@ -67,7 +77,112 @@ impl<S: Clone> Clone for Storage<S> {
         Self {
             loader: self.loader.clone(),
             router: self.router.clone(),
+            system: self.system.clone(),
         }
+    }
+}
+
+/// The credential a storage hands over for `credential`: its verifier,
+/// when it is a signing key. A storage keeps no signing key; keys belong
+/// to a credential store. What a space from before the credential store
+/// still holds is not handed over either: it is read as its verifier
+/// until [`CredentialStore::adopt_from`] moves it.
+pub(super) fn kept(credential: &Credential) -> Credential {
+    match credential.signer() {
+        Some(signer) => Credential::from(signer.verifier()),
+        None => credential.clone(),
+    }
+}
+
+/// Whether `location` names where a credential store keeps its keys
+/// rather than a space: a storage refuses it, so keys are never reached
+/// through a handle that mounts spaces.
+pub(super) fn is_credential_store(location: &storage::Location) -> bool {
+    location.name == credential_store::VAULT
+}
+
+/// A location a storage refuses because a credential store keeps its keys
+/// there.
+fn refused(location: &storage::Location) -> storage::StorageError {
+    storage::StorageError::Storage(format!(
+        "{} is where a credential store keeps its keys, not a space",
+        location.name
+    ))
+}
+
+/// A space is handed over as its verifier: a signing key it still holds
+/// from before the credential store is never given out.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S> Provider<storage::Load> for Storage<S>
+where
+    S: Clone + ConditionalSync,
+    Loader<S>: Provider<storage::Load>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<storage::Load>,
+    ) -> Result<Credential, storage::StorageError> {
+        let location = storage::Location::of(&input).clone();
+        if is_credential_store(&location) {
+            return Err(refused(&location));
+        }
+        let loaded = Subject::from(input.subject().clone())
+            .attenuate(storage::Storage)
+            .attenuate(location)
+            .load()
+            .perform(&self.loader)
+            .await?;
+        Ok(kept(&loaded))
+    }
+}
+
+/// A space created from a signing key is created from its verifier.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S> Provider<storage::Create> for Storage<S>
+where
+    S: Clone + ConditionalSync,
+    Loader<S>: Provider<storage::Create>,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<storage::Create>,
+    ) -> Result<Credential, storage::StorageError> {
+        let location = storage::Location::of(&input).clone();
+        if is_credential_store(&location) {
+            return Err(refused(&location));
+        }
+        let credential = kept(&storage::Create::of(&input).credential);
+        Subject::from(input.subject().clone())
+            .attenuate(storage::Storage)
+            .attenuate(location)
+            .create(credential)
+            .perform(&self.loader)
+            .await
+    }
+}
+
+impl<S> Storage<S>
+where
+    S: crate::provider::SpaceProvider + Clone + ConditionalSync,
+    Self: ConditionalSend + ConditionalSync,
+{
+    /// The identity of the space `did`, if it is mounted here: its
+    /// verifier, never a signing key. The one way a space's own
+    /// credential is read; no credential effect reaches a space through
+    /// a storage.
+    pub async fn identity(&self, did: &Did) -> Option<Credential> {
+        Subject::from(did.clone())
+            .credential()
+            .key(credential::SELF)
+            .load()
+            .perform(&self.router)
+            .await
+            .ok()
+            .map(|credential| kept(&credential))
     }
 }
 
@@ -144,12 +259,33 @@ impl<S: Clone> Storage<S> {
         Self {
             loader: Loader::new(Arc::clone(&spaces)),
             router: Router::new(spaces),
+            system: None,
         }
+    }
+
+    /// This storage, owned by `system`: mounting a space in it takes a
+    /// grant from `system`, which whoever holds its key issues.
+    pub fn owned_by(mut self, system: Did) -> Self {
+        self.system = Some(system);
+        self
+    }
+
+    /// The system this storage belongs to, when it has one: the
+    /// principal a peer proves its authority to mount spaces from.
+    pub fn system(&self) -> Option<&Did> {
+        self.system.as_ref()
     }
 
     /// Check if a DID is mounted.
     pub fn contains(&self, did: &Did) -> bool {
         self.router.spaces.contains(did)
+    }
+
+    /// The space mounted for `did`, if one is: a handle onto the same
+    /// providers the router dispatches to, for a test that needs to
+    /// reach past the effects -- to plan a provider's failures, say.
+    pub fn space(&self, did: &Did) -> Option<S> {
+        self.router.spaces.get(did)
     }
 }
 
@@ -175,6 +311,109 @@ mod tests {
     use dialog_effects::prelude::*;
     use dialog_effects::storage::{LocationExt, Storage as StorageFx};
     use dialog_varsig::Principal;
+
+    /// A storage keeps no signing key: a space created from a signer, or
+    /// a signer saved into one, is kept as its verifier. Keys belong to a
+    /// credential store, never to the storage spaces live in.
+    #[dialog_common::test]
+    async fn it_keeps_only_the_verifier_of_a_signing_key() {
+        let env = Storage::volatile();
+        let credential = test_credential().await;
+
+        let created = StorageFx::profile("keyless")
+            .create(credential.clone())
+            .perform(&env)
+            .await
+            .unwrap();
+        assert!(
+            matches!(created, Credential::Verifier(_)),
+            "the storage handed a signing key back"
+        );
+        let stored = env.identity(&created.did()).await.unwrap();
+        assert!(
+            matches!(stored, Credential::Verifier(_)),
+            "the storage kept a signing key"
+        );
+        let loaded = StorageFx::profile("keyless")
+            .load()
+            .perform(&env)
+            .await
+            .unwrap();
+        assert!(
+            matches!(loaded, Credential::Verifier(_)),
+            "the storage handed a signing key back on load"
+        );
+    }
+
+    /// A space from before the credential store still holds its signing
+    /// key. A storage reads it as its verifier: the key it kept is never
+    /// handed out, whichever way the space is asked for.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_hands_a_legacy_space_over_as_its_verifier() {
+        use crate::provider::FileSystem;
+        use crate::provider::storage::NativeSpace;
+        use crate::resource::Resource as _;
+        use dialog_effects::storage::{Directory, Location};
+
+        let root = tempfile::tempdir().unwrap();
+        let base = Directory::At(root.path().to_string_lossy().into_owned());
+        let location = Location::new(base, "legacy");
+        let key = test_credential().await;
+        key.did()
+            .credential()
+            .key(credential::SELF)
+            .save(key.clone())
+            .perform(&FileSystem::open(&location).await.unwrap())
+            .await
+            .unwrap();
+
+        let env = Storage::<NativeSpace>::default();
+        let loaded = Subject::from(did!("local:storage"))
+            .attenuate(StorageFx)
+            .attenuate(location)
+            .load()
+            .perform(&env)
+            .await
+            .unwrap();
+        assert_eq!(loaded.did(), key.did());
+        assert!(
+            matches!(loaded, Credential::Verifier(_)),
+            "the storage handed out the key a legacy space holds"
+        );
+        assert!(
+            matches!(
+                env.identity(&key.did()).await,
+                Some(Credential::Verifier(_))
+            ),
+            "the storage read out the key a legacy space holds"
+        );
+    }
+
+    /// A storage refuses the name a credential store keeps its keys
+    /// under, so keys are never reached through a handle that mounts
+    /// spaces.
+    #[dialog_common::test]
+    async fn it_refuses_where_a_credential_store_keeps_a_key() {
+        let env = Storage::volatile();
+        let credential = test_credential().await;
+        let refused = StorageFx::profile("dialog.credential")
+            .create(credential)
+            .perform(&env)
+            .await;
+        assert!(
+            matches!(refused, Err(storage::StorageError::Storage(_))),
+            "{refused:?}"
+        );
+        let refused = StorageFx::profile("dialog.credential")
+            .load()
+            .perform(&env)
+            .await;
+        assert!(
+            matches!(refused, Err(storage::StorageError::Storage(_))),
+            "{refused:?}"
+        );
+    }
 
     #[dialog_common::test]
     async fn it_shares_mounted_spaces_with_a_clone() {
@@ -250,6 +489,7 @@ mod tests {
         let digest = Blake3Hash::hash(&content);
 
         did.clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(content.clone()))
@@ -258,6 +498,7 @@ mod tests {
             .unwrap();
 
         let result = did
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -283,6 +524,7 @@ mod tests {
 
         let etag = did
             .clone()
+            .writer()
             .memory()
             .space("data")
             .cell("head")
@@ -294,6 +536,7 @@ mod tests {
         assert!(!etag.is_empty());
 
         let resolved = did
+            .reader()
             .memory()
             .space("data")
             .cell("head")
@@ -323,6 +566,7 @@ mod tests {
 
         let result = subject
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get([0u8; 32])
@@ -362,7 +606,8 @@ mod tests {
         let content = b"dave only".to_vec();
         let digest = Blake3Hash::hash(&content);
 
-        did1.archive()
+        did1.writer()
+            .archive()
             .catalog("index")
             .put(Buffer::from(content))
             .perform(&env)
@@ -370,6 +615,7 @@ mod tests {
             .unwrap();
 
         let result = did2
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -465,6 +711,7 @@ mod tests {
             let digest = Blake3Hash::hash(&content);
 
             did.clone()
+                .writer()
                 .archive()
                 .catalog("index")
                 .put(Buffer::from(content.clone()))
@@ -473,6 +720,7 @@ mod tests {
                 .unwrap();
 
             let result = did
+                .reader()
                 .archive()
                 .catalog("index")
                 .get(digest)
@@ -549,8 +797,8 @@ mod tests {
 
             let env: Storage<WebSpace> = Storage::default();
             let name = unique_name("idb-load-missing");
-            // `Directory::Profile` names the database `"{name}.profile"`.
-            let db_name = format!("{name}.profile");
+            // `Directory::Profile` names the database by the name alone.
+            let db_name = name.clone();
 
             assert!(
                 !idb_database_exists(&db_name).await,
@@ -619,6 +867,7 @@ mod tests {
             let content = b"opfs archive blob".to_vec();
             let digest = Blake3Hash::hash(&content);
             did.clone()
+                .writer()
                 .archive()
                 .catalog("index")
                 .put(Buffer::from(content.clone()))
@@ -627,6 +876,7 @@ mod tests {
                 .unwrap();
             let got = did
                 .clone()
+                .reader()
                 .archive()
                 .catalog("index")
                 .get(digest)
@@ -638,6 +888,7 @@ mod tests {
             // Memory (-> OPFS).
             let cell = b"opfs cell value".to_vec();
             did.clone()
+                .writer()
                 .memory()
                 .space("data")
                 .cell("head")
@@ -646,6 +897,7 @@ mod tests {
                 .await
                 .unwrap();
             let resolved = did
+                .reader()
                 .memory()
                 .space("data")
                 .cell("head")
@@ -679,6 +931,7 @@ mod tests {
 
             let mut sink = did
                 .clone()
+                .writer()
                 .archive()
                 .blob()
                 .write()
@@ -689,7 +942,14 @@ mod tests {
             let hash = sink.finish().await.unwrap();
             assert_eq!(hash, expected);
 
-            let mut reader = did.archive().blob().read(hash).perform(&env).await.unwrap();
+            let mut reader = did
+                .reader()
+                .archive()
+                .blob()
+                .read(hash)
+                .perform(&env)
+                .await
+                .unwrap();
             let mut out = Vec::new();
             while let Some(chunk) = reader.next().await.unwrap() {
                 out.extend(chunk);
@@ -734,6 +994,7 @@ mod tests {
                 .did();
 
             did.clone()
+                .writer()
                 .memory()
                 .space("data")
                 .cell("head")
@@ -744,6 +1005,7 @@ mod tests {
 
             // A second IfNoneMatch publish must fail: the cell already exists.
             let result = did
+                .writer()
                 .memory()
                 .space("data")
                 .cell("head")
@@ -772,6 +1034,7 @@ mod tests {
             let content = b"alice only".to_vec();
             let digest = Blake3Hash::hash(&content);
             alice
+                .writer()
                 .archive()
                 .catalog("index")
                 .put(Buffer::from(content))
@@ -780,6 +1043,7 @@ mod tests {
                 .unwrap();
 
             let seen = bob
+                .reader()
                 .archive()
                 .catalog("index")
                 .get(digest)
@@ -803,6 +1067,7 @@ mod tests {
             let content: Vec<u8> = (0..1_048_576).map(|i| (i % 251) as u8).collect();
             let digest = Blake3Hash::hash(&content);
             did.clone()
+                .writer()
                 .archive()
                 .catalog("index")
                 .put(Buffer::from(content.clone()))
@@ -810,6 +1075,7 @@ mod tests {
                 .await
                 .unwrap();
             let got = did
+                .reader()
                 .archive()
                 .catalog("index")
                 .get(digest)

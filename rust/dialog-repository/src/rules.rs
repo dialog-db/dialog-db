@@ -199,7 +199,90 @@ pub(crate) fn builtin(concept: &Entity) -> Vec<DeductiveRule> {
             .clone();
     }
 
+    let pull = <schema::PullUpstream as Descriptor<ConceptDescriptor>>::descriptor();
+    if *concept == pull.this() {
+        static PULL: OnceLock<DeductiveRule> = OnceLock::new();
+        return vec![
+            PULL.get_or_init(|| {
+                upstream_rule(
+                    pull.clone(),
+                    <schema::BranchPull as Descriptor<ConceptDescriptor>>::descriptor().clone(),
+                    "pull",
+                )
+            })
+            .clone(),
+        ];
+    }
+
+    let push = <schema::PushUpstream as Descriptor<ConceptDescriptor>>::descriptor();
+    if *concept == push.this() {
+        static PUSH: OnceLock<DeductiveRule> = OnceLock::new();
+        return vec![
+            PUSH.get_or_init(|| {
+                upstream_rule(
+                    push.clone(),
+                    <schema::BranchPush as Descriptor<ConceptDescriptor>>::descriptor().clone(),
+                    "push",
+                )
+            })
+            .clone(),
+        ];
+    }
+
     Vec::new()
+}
+
+/// The rule resolving a branch's pull or push relation to where the
+/// tracked branch lives:
+///
+/// ```text
+/// upstream(this, upstream, name, subject, peer) :-
+///     relation(this, upstream),
+///     branch(upstream, name, replica),
+///     replica(replica, subject, peer).
+/// ```
+///
+/// `relation` is [`schema::BranchPull`] or [`schema::BranchPush`], and
+/// `field` the name of its tracked-branch field.
+fn upstream_rule(
+    conclusion: ConceptDescriptor,
+    relation: ConceptDescriptor,
+    field: &str,
+) -> DeductiveRule {
+    fn premise(predicate: ConceptDescriptor, terms: &[(&str, &str)]) -> Premise {
+        let mut parameters = Parameters::new();
+        for (field, var) in terms {
+            parameters.insert((*field).to_string(), Term::<Any>::var(*var));
+        }
+        Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms: parameters,
+            predicate,
+        }))
+    }
+
+    DeductiveRule::new(
+        conclusion,
+        vec![
+            premise(relation, &[("this", "this"), (field, "upstream")]),
+            premise(
+                <schema::Branch as Descriptor<ConceptDescriptor>>::descriptor().clone(),
+                &[
+                    ("this", "upstream"),
+                    ("name", "name"),
+                    ("replica", "replica"),
+                ],
+            ),
+            premise(
+                <schema::Replica as Descriptor<ConceptDescriptor>>::descriptor().clone(),
+                &[
+                    ("this", "replica"),
+                    ("subject", "subject"),
+                    ("peer", "peer"),
+                ],
+            ),
+        ],
+    )
+    .expect("the upstream rule compiles")
 }
 
 /// The recursive pair concluding [`schema::RevisionAncestor`]:
@@ -284,6 +367,10 @@ pub(crate) struct TriggerFootprint {
     pub(crate) reads: BTreeSet<Entity>,
 }
 
+/// The tree root of every layer a rule set was resolved from, in layer
+/// order: `None` for a layer with no tree yet.
+type LayerRoots = Vec<Option<[u8; 32]>>;
+
 #[derive(Debug, Default)]
 struct RuleCacheInner {
     /// Which rule entities conclude a concept, as of a branch head.
@@ -310,6 +397,26 @@ struct RuleCacheInner {
     /// The committed attribute placements (`dialog.attribute/scope`),
     /// as of a branch head. One range scan on a miss.
     placements: Option<(Revision, CommittedPlacements)>,
+    /// A concept's assembled rule set -- built-in, committed, and its
+    /// program analysis attached -- as of the tree root of every layer
+    /// it was resolved from. Assembling it is most of what planning a
+    /// warm query costs, and it changes only when a layer does. Only
+    /// sets resolved without overlay rules are kept, since those are
+    /// read fresh per query.
+    ///
+    /// Kept with the descriptor it was assembled for: the set carries
+    /// that descriptor's implicit rule, which binds its field names, and
+    /// descriptors differing only in field names share an identity.
+    bundles: HashMap<Entity, Bundle>,
+}
+
+/// A rule set assembled for one descriptor, as of the roots of the
+/// layers it was resolved from.
+#[derive(Debug, Clone)]
+struct Bundle {
+    roots: LayerRoots,
+    descriptor: ConceptDescriptor,
+    rules: ConceptRules,
 }
 
 impl RuleCache {
@@ -334,6 +441,43 @@ impl RuleCache {
             .write()
             .discovery
             .insert(concept, (head, entities));
+    }
+
+    /// The rule set assembled for `descriptor` over layers at `roots`,
+    /// if one was recorded for exactly that descriptor at exactly those
+    /// roots.
+    pub(crate) fn bundle(
+        &self,
+        descriptor: &ConceptDescriptor,
+        roots: &[Option<[u8; 32]>],
+    ) -> Option<ConceptRules> {
+        let inner = self.inner.read();
+        match inner.bundles.get(&descriptor.this()) {
+            Some(bundle)
+                if bundle.roots.as_slice() == roots && bundle.descriptor == *descriptor =>
+            {
+                Some(bundle.rules.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Record the rule set assembled for `descriptor` over layers at
+    /// `roots`, replacing one recorded for its concept before.
+    pub(crate) fn record_bundle(
+        &self,
+        descriptor: ConceptDescriptor,
+        roots: LayerRoots,
+        rules: ConceptRules,
+    ) {
+        self.inner.write().bundles.insert(
+            descriptor.this(),
+            Bundle {
+                roots,
+                descriptor,
+                rules,
+            },
+        );
     }
 
     /// A cached hydrated body by rule entity, if present.
@@ -451,6 +595,23 @@ pub(crate) fn assemble(
         concept_rules.install(rule);
     }
     concept_rules
+}
+
+/// Whether an overlay [`Changes`] batch installs any rule at all. Rule
+/// sets resolved from an overlay without rules can be cached with the
+/// committed layers alone.
+pub(crate) fn has_overlay_rules(changes: &Changes) -> bool {
+    let conclusion = conclusion_attr();
+    changes
+        .iter()
+        .any(|(_, attribute, _)| *attribute == conclusion)
+}
+
+/// Whether a session overlay holds any rule, for any concept.
+pub(crate) fn holds_rules(overlay: &crate::Ephemeral) -> bool {
+    !overlay
+        .scan(&ArtifactSelector::new().the(conclusion_attr()))
+        .is_empty()
 }
 
 /// Read rules from an overlay [`Changes`] batch concluding `concept`.

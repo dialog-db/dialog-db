@@ -19,58 +19,65 @@ use crate::term::Term;
 
 /// Compact representation of which concept parameters are bound.
 ///
-/// Each bit represents one parameter (ordered alphabetically by name):
-/// bound = 1, free = 0. Supports up to 64 parameters.
+/// Each bit is one of the concept's operands, in the order the concept
+/// lists them (see [`ConceptDescriptor::sorted_operands`]): bound = 1,
+/// free = 0. Supports up to 64 operands.
+///
+/// The bits are numbered over the concept, not over the call. A call
+/// names only the operands it uses, so numbering by its own terms gave
+/// `{name, this}` with `this` bound and `{age, name, this}` with `name`
+/// bound the same adornment, and one call was planned as the other.
 ///
 /// In magic set terminology, this is the "adornment string" — a sequence of
 /// b(ound)/f(ree) markers that determines how a rule should be specialized
 /// for a particular calling pattern.
+///
+/// [`ConceptDescriptor::sorted_operands`]: crate::concept::descriptor::ConceptDescriptor::sorted_operands
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Adornment(u64);
 
 impl Adornment {
-    /// Derive an adornment from a concept's terms and the current match.
+    /// Derive an adornment for a call of a concept whose operands are
+    /// `operands`, from the call's terms and the current match.
     ///
-    /// Parameters are sorted alphabetically by name for determinism.
-    /// A parameter is "bound" if:
-    /// - Its term is a `Constant`
-    /// - Its term is a named `Variable` that the match contains
-    pub fn derive(terms: &Parameters, matched: &Match) -> Self {
-        let mut sorted_keys: Vec<&String> = terms.keys().collect();
-        sorted_keys.sort();
-
+    /// An operand is "bound" if the call gives it a term that is
+    /// - a `Constant`, or
+    /// - a named `Variable` that the match contains.
+    ///
+    /// An operand the call does not name is free.
+    pub fn derive(operands: &[String], terms: &Parameters, matched: &Match) -> Self {
         let mut bits: u64 = 0;
-        for (i, key) in sorted_keys.iter().enumerate() {
-            debug_assert!(i < 64, "Adornment supports at most 64 parameters");
-            if let Some(param) = terms.get(key) {
-                let bound = match param {
-                    Term::Constant(_) => true,
-                    Term::Variable { name: Some(_), .. } => matched.contains(param),
-                    Term::Variable { name: None, .. } => false,
-                };
-                if bound {
-                    bits |= 1 << i;
-                }
+        for (i, operand) in operands.iter().enumerate() {
+            debug_assert!(i < 64, "Adornment supports at most 64 operands");
+            let bound = match terms.get(operand) {
+                Some(Term::Constant(_)) => true,
+                Some(param @ Term::Variable { name: Some(_), .. }) => matched.contains(param),
+                Some(Term::Variable { name: None, .. }) | None => false,
+            };
+            if bound {
+                bits |= 1 << i;
             }
         }
 
         Adornment(bits)
     }
 
-    /// Reconstruct an `Environment` from this adornment and the concept's terms.
+    /// Reconstruct the scope a rule is planned in from this adornment and
+    /// the concept's operands.
     ///
-    /// Bridges the adornment back to the planner's `Environment` type so
-    /// existing `Conjunction::plan(&scope)` works without changes to the planner.
-    pub fn into_environment(self, terms: &Parameters) -> Environment {
-        let mut sorted_keys: Vec<&String> = terms.keys().collect();
-        sorted_keys.sort();
-
+    /// A rule's body is evaluated over the concept's own parameter names:
+    /// the caller's bindings are carried over under the field they are
+    /// given for, constants included (see `extract_parameters`). So the
+    /// scope names the *fields* that are bound -- not the caller's
+    /// variables, which the body never sees. Naming the caller's instead
+    /// planned every rule called with a constant, or with variables named
+    /// unlike its fields, as though those fields were free: a lookup by a
+    /// known entity became a scan of every entity.
+    pub fn into_environment(self, operands: &[String]) -> Environment {
         let mut env = Environment::new();
-        for (i, key) in sorted_keys.iter().enumerate() {
-            if self.0 & (1 << i) != 0
-                && let Some(param) = terms.get(key)
-            {
-                param.bind(&mut env);
+        for (i, operand) in operands.iter().enumerate() {
+            if self.0 & (1 << i) != 0 {
+                env.add(operand.clone());
             }
         }
 
@@ -82,6 +89,11 @@ impl Adornment {
 mod tests {
     use super::*;
     use crate::{Term, Value};
+
+    /// The operands of a concept with the given names, in order.
+    fn operands(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
 
     fn bind(frame: &mut Match, var_name: &str, value: Value) {
         let param = Term::var(var_name);
@@ -95,7 +107,7 @@ mod tests {
         terms.insert("name".into(), Term::var("n"));
 
         let frame = Match::new();
-        let adornment = Adornment::derive(&terms, &frame);
+        let adornment = Adornment::derive(&operands(&["age", "name"]), &terms, &frame);
 
         assert_eq!(adornment, Adornment(0));
     }
@@ -107,7 +119,7 @@ mod tests {
         terms.insert("name".into(), Term::var("n"));
 
         let candidate = Match::new();
-        let adornment = Adornment::derive(&terms, &candidate);
+        let adornment = Adornment::derive(&operands(&["age", "name"]), &terms, &candidate);
 
         // "age" sorts first → bit 0 (bound), "name" → bit 1 (free)
         assert_eq!(adornment, Adornment(0b01));
@@ -122,7 +134,7 @@ mod tests {
         let mut frame = Match::new();
         bind(&mut frame, "n", Value::String("Alice".into()));
 
-        let adornment = Adornment::derive(&terms, &frame);
+        let adornment = Adornment::derive(&operands(&["age", "name"]), &terms, &frame);
 
         // "age" = bit 0 (free), "name" = bit 1 (bound via match)
         assert_eq!(adornment, Adornment(0b10));
@@ -135,7 +147,7 @@ mod tests {
         terms.insert("name".into(), Term::constant("Bob".to_string()));
 
         let frame = Match::new();
-        let adornment = Adornment::derive(&terms, &frame);
+        let adornment = Adornment::derive(&operands(&["age", "name"]), &terms, &frame);
 
         // "age" = bit 0 (blank = free), "name" = bit 1 (constant = bound)
         assert_eq!(adornment, Adornment(0b10));
@@ -148,7 +160,7 @@ mod tests {
         terms.insert("name".into(), Term::constant("Bob".to_string()));
 
         let frame = Match::new();
-        let adornment = Adornment::derive(&terms, &frame);
+        let adornment = Adornment::derive(&operands(&["age", "name"]), &terms, &frame);
 
         assert_eq!(adornment, Adornment(0b11));
     }
@@ -164,9 +176,10 @@ mod tests {
         terms2.insert("name".into(), Term::var("n"));
 
         let frame = Match::new();
+        let names = operands(&["age", "name"]);
         assert_eq!(
-            Adornment::derive(&terms1, &frame),
-            Adornment::derive(&terms2, &frame)
+            Adornment::derive(&names, &terms1, &frame),
+            Adornment::derive(&names, &terms2, &frame)
         );
     }
 
@@ -180,14 +193,18 @@ mod tests {
         let mut frame = Match::new();
         bind(&mut frame, "e", Value::String("entity1".into()));
 
-        let adornment = Adornment::derive(&terms, &frame);
-        let env = adornment.into_environment(&terms);
+        let names = operands(&["age", "name", "this"]);
+        let adornment = Adornment::derive(&names, &terms, &frame);
+        let env = adornment.into_environment(&names);
 
-        // "name" is a constant — Environment.add ignores constants
-        // "this" maps to var "e" which is bound → should be in env
-        // "age" maps to var "a" which is free → should not be in env
-        assert!(env.contains("e"));
-        assert!(!env.contains("a"));
+        // The scope names the concept's fields, which the rule body is
+        // evaluated over -- never the caller's variables.
+        // "this" is bound through the caller's "e", "name" by a constant,
+        // and "age" is free.
+        assert!(env.contains("this"));
+        assert!(env.contains("name"));
+        assert!(!env.contains("age"));
+        assert!(!env.contains("e"), "the caller's variable is not in scope");
     }
 
     #[dialog_common::test]
@@ -203,8 +220,8 @@ mod tests {
         bind(&mut second, "n", Value::String("Bob".into()));
 
         assert_eq!(
-            Adornment::derive(&terms, &first),
-            Adornment::derive(&terms, &second),
+            Adornment::derive(&operands(&["age", "name"]), &terms, &first),
+            Adornment::derive(&operands(&["age", "name"]), &terms, &second),
             "Same binding pattern should produce same adornment"
         );
     }
@@ -222,9 +239,39 @@ mod tests {
         bind(&mut second, "a", Value::UnsignedInt(25));
 
         assert_ne!(
-            Adornment::derive(&terms, &first),
-            Adornment::derive(&terms, &second),
+            Adornment::derive(&operands(&["age", "name"]), &terms, &first),
+            Adornment::derive(&operands(&["age", "name"]), &terms, &second),
             "Different binding patterns should produce different adornments"
+        );
+    }
+
+    /// An operand the call does not name keeps its own bit, free, so
+    /// calls naming different subsets of a concept's operands never
+    /// collide.
+    #[dialog_common::test]
+    fn it_numbers_bits_over_the_concept_not_the_call() {
+        let names = operands(&["age", "name", "this"]);
+
+        let mut by_entity = Parameters::new();
+        by_entity.insert("name".into(), Term::var("n"));
+        by_entity.insert("this".into(), Term::var("e"));
+        let mut entity_bound = Match::new();
+        bind(&mut entity_bound, "e", Value::String("entity1".into()));
+
+        let mut by_name = Parameters::new();
+        by_name.insert("age".into(), Term::var("a"));
+        by_name.insert("name".into(), Term::var("n"));
+        by_name.insert("this".into(), Term::var("e"));
+        let mut name_bound = Match::new();
+        bind(&mut name_bound, "n", Value::String("Alice".into()));
+
+        assert_eq!(
+            Adornment::derive(&names, &by_entity, &entity_bound),
+            Adornment(0b100)
+        );
+        assert_eq!(
+            Adornment::derive(&names, &by_name, &name_bound),
+            Adornment(0b010)
         );
     }
 }

@@ -14,10 +14,16 @@ web-integration-tests = ["dialog-artifacts/web-integration-tests"]
 
 [dependencies]
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 base58 = { workspace = true }
 dialog-artifacts = { workspace = true, features = ["csv", "debug"] }
-dialog-search-tree = { workspace = true }
+dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
+dialog-csv = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-peer = { workspace = true, features = ["helpers"] }
+dialog-repository = { workspace = true }
+dialog-search-tree = { workspace = true }
 dialog-storage = { workspace = true }
 futures-util = { workspace = true }
 

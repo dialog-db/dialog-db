@@ -1,7 +1,7 @@
 //! Repository layer for Dialog-DB.
 //!
 //! This crate layers a capability-based repository abstraction on top of
-//! the operator (`dialog-operator`) and effect (`dialog-effects`) crates.
+//! the operator (`dialog-peer`) and effect (`dialog-effects`) crates.
 //! It provides:
 //!
 //! - [`Repository`] — a subject-scoped handle over a space, generic over
@@ -14,9 +14,8 @@
 //!   transactional memory cells with built-in edition tracking, plus
 //!   `.fork(&address)` variants that retarget the same commands at a
 //!   remote site.
-//! - [`RepositoryArchiveExt`] and [`LocalIndex`] — extensions and CAS
-//!   adapters that bridge archive capabilities with the search tree's
-//!   `ContentAddressedStorage` trait.
+//! - [`LocalIndex`] — loads a branch's tree nodes and spilled values
+//!   through archive capabilities.
 //!
 //! Branches, remotes, and sync operations build on this base in
 //! follow-up crates / PRs.
@@ -52,9 +51,7 @@ pub use rules::{RuleCache, Transient};
 
 /// Attribute placement: which layer an attribute's facts live in.
 pub mod placement;
-pub use placement::{
-    Bindings, DefaultScope, Placement, Target, TransientAttribute, attribute_entity,
-};
+pub use placement::{Bindings, DefaultScope, Placement, TransientAttribute, attribute_entity};
 
 pub mod stack;
 pub use stack::{

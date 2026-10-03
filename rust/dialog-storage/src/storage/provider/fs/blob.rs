@@ -15,9 +15,9 @@ use base58::ToBase58;
 use blake3::Hasher;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
+use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _, BlobSizeExt as _};
 use dialog_effects::blob::{
-    BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Import, Read, Write,
+    BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Import, Read, Size, Write,
 };
 use futures_util::StreamExt;
 
@@ -148,6 +148,17 @@ impl Provider<Read> for FileSystem {
     }
 }
 
+/// The blob file's length, from its metadata (natively) or its `File`
+/// (on the web); its bytes are not read.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Size> for FileSystem {
+    async fn execute(&self, effect: Capability<Size>) -> Result<Option<u64>, BlobError> {
+        let handle = self.blob()?.resolve(&blob_key(effect.digest()))?;
+        Ok(handle.size().await?)
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<Write> for FileSystem {
@@ -205,6 +216,7 @@ mod tests {
 
         // Ingest: stream in, get the discovered hash back.
         let mut sink = subject()
+            .writer()
             .archive()
             .blob()
             .write()
@@ -219,6 +231,7 @@ mod tests {
 
         // Read the whole blob back by hash.
         let reader = subject()
+            .reader()
             .archive()
             .blob()
             .read(hash.clone())
@@ -229,6 +242,7 @@ mod tests {
 
         // Ranged read: 9 bytes from offset 10.
         let reader = subject()
+            .reader()
             .archive()
             .blob()
             .invoke(Read::range(hash, 10, Some(9)))
@@ -242,6 +256,7 @@ mod tests {
     async fn it_reports_missing_blobs() {
         let fs = test_space("blob-missing").await;
         let result = subject()
+            .reader()
             .archive()
             .blob()
             .read([9u8; 32])
@@ -258,6 +273,7 @@ mod tests {
 
         // Import under the correct digest succeeds.
         let mut sink = subject()
+            .writer()
             .archive()
             .blob()
             .import(digest.clone(), payload.len() as u64)
@@ -268,6 +284,7 @@ mod tests {
         assert_eq!(sink.finish().await.unwrap(), digest.clone());
 
         let reader = subject()
+            .reader()
             .archive()
             .blob()
             .read(digest)
@@ -279,6 +296,7 @@ mod tests {
         // Import claiming a wrong digest is rejected at finish.
         let wrong = Blake3Hash::from([0u8; 32]);
         let mut sink = subject()
+            .writer()
             .archive()
             .blob()
             .import(wrong, payload.len() as u64)

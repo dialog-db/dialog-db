@@ -4,6 +4,7 @@
 //! `{audience}/{subject}/{issuer}.{hash}` (or `{audience}/_/{issuer}.{hash}`
 //! for powerlines). Uses IDBKeyRange for efficient prefix queries.
 
+use crate::storage::idb::KeyRange;
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::access::{
@@ -12,7 +13,6 @@ use dialog_capability::access::{
 };
 use dialog_capability::{Capability, Policy, Provider};
 use dialog_varsig::Did;
-use rexie::KeyRange;
 use wasm_bindgen::JsValue;
 
 use super::{IndexedDb, to_uint8array};

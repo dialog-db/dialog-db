@@ -22,12 +22,11 @@ use anyhow::Result;
 use futures_util::stream;
 
 use dialog_artifacts::history::{Context, context_of};
-use dialog_artifacts::{Artifact, Instruction, Value};
+use dialog_artifacts::{ArchiveDelta, Artifact, Instruction, Value};
 
 use crate::RepositoryExt as _;
 use crate::helpers::Counting;
-use dialog_artifacts::tree::TreeStorageBridge;
-use dialog_operator::helpers::{test_operator_with_profile, unique_name};
+use dialog_peer::helpers::{test_session_with_peer, unique_name};
 
 fn assert_fact(entity: usize, value: &str) -> Instruction {
     Instruction::Assert(Artifact {
@@ -106,10 +105,10 @@ macro_rules! measured {
 }
 
 async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let env = Counting::new(operator);
     let repo = profile
-        .repository(unique_name("bench"))
+        .space(unique_name("bench"))
         .open()
         .perform(&env)
         .await?;
@@ -177,7 +176,7 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
     let head = feature
         .revision()
         .expect("feature has a head after the merge");
-    let history = feature.history(&env).await;
+    let history = feature.history(&env);
     measured!(
         samples,
         env,
@@ -195,10 +194,10 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
 /// not the adopted bulk — this is the scenario the graft merge exists
 /// for, and the row that shows whether it is doing its job.
 async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let env = Counting::new(operator);
     let repo = profile
-        .repository(unique_name("bench"))
+        .space(unique_name("bench"))
         .open()
         .perform(&env)
         .await?;
@@ -286,13 +285,12 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
 /// entries and how many tree nodes it holds. Grounds the read counts:
 /// a merge's reads should be compared against these totals.
 async fn measure_shape(depth: usize) -> Result<()> {
-    use crate::RepositoryArchiveExt as _;
     use dialog_search_tree::TreeDifference;
 
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let env = Counting::new(operator);
     let repo = profile
-        .repository(unique_name("bench"))
+        .space(unique_name("bench"))
         .open()
         .perform(&env)
         .await?;
@@ -306,7 +304,7 @@ async fn measure_shape(depth: usize) -> Result<()> {
     let root = main.revision().expect("committed").tree;
     let store = crate::NetworkedIndex::new(&env, main.archive().index(), None);
     let tree = crate::Index::from_hash(dialog_common::Blake3Hash::from(*root.hash()));
-    let tree_store = dialog_search_tree::ContentAddressedStorage::new(TreeStorageBridge(store));
+    let tree_store = store;
 
     let entries = {
         use futures_util::StreamExt as _;
@@ -320,7 +318,7 @@ async fn measure_shape(depth: usize) -> Result<()> {
         count
     };
 
-    let empty = crate::Index::from_hash(dialog_common::Blake3Hash::from(crate::EMPTY_TREE_HASH));
+    let empty = crate::Index::empty();
     let difference = TreeDifference::compute(&empty, &tree, &tree_store, &tree_store).await?;
     let nodes = {
         use futures_util::StreamExt as _;
@@ -354,17 +352,14 @@ async fn measure_shape(depth: usize) -> Result<()> {
 ///   would look like if it could defer the flush (publishing a head only at a
 ///   sync/publish point). This is the regime the buffer is designed for.
 async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
-    use crate::RepositoryArchiveExt as _;
     use dialog_artifacts::tree::ArtifactTreeExt as _;
-    use dialog_artifacts::tree::{WriteScope, write_instructions};
+    use dialog_artifacts::tree::{Stamp, WriteScope, write_instructions};
     use dialog_artifacts::{Instruction as I, apply_buffered};
-    use dialog_effects::prelude::CatalogExt as _;
-    use dialog_search_tree::Delta;
 
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let env = Counting::new(operator);
     let repo = profile
-        .repository(unique_name("bench"))
+        .space(unique_name("bench"))
         .open()
         .perform(&env)
         .await?;
@@ -389,20 +384,20 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
         ($delta:expr) => {
             main.archive()
                 .index()
-                .import($delta.flush().map(|(_, buffer)| buffer))
+                .import($delta.flush_blocks().chain($delta.flush_blobs()))
                 .perform(&env)
                 .await?
         };
     }
 
     // Canonical: reshape per batch, exactly what the commit path does today.
-    let mut store = crate::NetworkedIndex::new(&env, main.archive().index(), None);
+    let store = crate::NetworkedIndex::new(&env, main.archive().index(), None);
     let mut canonical = base.clone();
     let started = Instant::now();
     for i in 0..batches {
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         canonical
-            .apply_versioned(&mut store, &mut delta, None, stream::iter(batch(i)))
+            .apply_versioned(&store, &mut delta, None, stream::iter(batch(i)))
             .await?;
         persist!(delta);
     }
@@ -412,10 +407,10 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     let mut per_batch = base.clone();
     let started = Instant::now();
     for i in 0..batches {
-        let mut delta = Delta::zero();
+        let mut delta = ArchiveDelta::zero();
         apply_buffered(
             &mut per_batch,
-            &mut store,
+            &store,
             &mut delta,
             None,
             stream::iter(batch(i)),
@@ -427,16 +422,16 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
     let per_batch_ms = started.elapsed().as_millis();
 
     // Buffered, flushed once at the end: the regime buffering is built for.
-    let storage =
-        dialog_search_tree::ContentAddressedStorage::new(TreeStorageBridge(store.clone()));
+    let mut delta = ArchiveDelta::zero();
+    let staged = dialog_artifacts::DeltaOverlay::new(&delta, &store);
     let mut deferred = dialog_search_tree::HitchhikerTree::open(&base);
     let started = Instant::now();
     for i in 0..batches {
         let (next, _) = write_instructions(
             deferred,
-            &mut store,
-            &storage,
-            None,
+            &staged,
+            &mut delta,
+            Stamp::Unversioned,
             // The bench tree carries the default manifest.
             &dialog_search_tree::Manifest::default(),
             stream::iter(batch(i)),
@@ -445,8 +440,7 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
         .await?;
         deferred = next;
     }
-    let mut delta = Delta::zero();
-    let _ = deferred.canonicalize(&storage, &mut delta).await?;
+    let _ = deferred.canonicalize(&staged, delta.blocks()).await?;
     let deferred_ms = started.elapsed().as_millis();
     persist!(delta);
 
@@ -514,10 +508,10 @@ async fn read_amplification_by_depth() -> Result<()> {
 #[ignore]
 async fn current_costs() -> Result<()> {
     for depth in [1_000usize, 10_000] {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let env = Counting::new(operator);
         let repo = profile
-            .repository(unique_name("bench"))
+            .space(unique_name("bench"))
             .open()
             .perform(&env)
             .await?;

@@ -32,7 +32,11 @@
 //! twice therefore produces different bytes, and a later compromise of the
 //! sender's own keys does not open past messages.
 
-use crate::ed25519::{Ed25519Signer, Ed25519Verifier, X25519PublicKey, X25519SecretKey};
+use crate::ed25519::{
+    Ed25519Signer, Ed25519Verifier, Extractable, Sealed, X25519PublicKey, X25519SecretKey,
+};
+use crate::key::ExtractableKey;
+use std::future::Future;
 
 mod error;
 mod message;
@@ -105,12 +109,12 @@ impl Seal<'_> {
 /// Obtained from [`Ed25519Signer::secret`]. Backed by a signing key, so it can
 /// both conceal (to itself) and reveal.
 #[derive(Debug, Clone, Copy)]
-pub struct Secret<'a> {
-    signer: &'a Ed25519Signer,
+pub struct Secret<'a, E = crate::ed25519::Sealed> {
+    signer: &'a Ed25519Signer<E>,
     context: Context,
 }
 
-impl Secret<'_> {
+impl<E> Secret<'_, E> {
     /// Reveal a secret concealed to this identity.
     ///
     /// # Errors
@@ -121,6 +125,53 @@ impl Secret<'_> {
     pub async fn reveal(&self, sealed: &SealedSecret) -> Result<Vec<u8>, SecretError> {
         let key: X25519SecretKey = self.signer.agreement_key().await?;
         platform::reveal(&key, self.signer.ed25519_did(), self.context, sealed).await
+    }
+
+    /// Derive a signer from this identity, deterministically.
+    ///
+    /// The same identity, context and `label` yield the same signer on every
+    /// platform, so a derived DID is stable across sessions and across native
+    /// and the browser.
+    ///
+    /// The derivation is a key agreement against this identity's own agreement
+    /// key. Ed25519 signatures are not a pseudo-random function: RFC 8032
+    /// specifies a deterministic nonce, but hedged variants that fold in fresh
+    /// entropy are conforming and deployed (Apple's CryptoKit, and so WebKit's
+    /// `Ed25519`). Agreement has no nonce to hedge.
+    ///
+    /// The result is always [`Sealed`]: its material cannot be read back, and
+    /// no call site can ask this method for anything else. A consumer that
+    /// needs raw bytes names [`SecretExtractableDerive`] instead:
+    ///
+    /// ```no_run
+    /// # use dialog_credentials::{Ed25519Signer, secret::{Context, SecretExtractableDerive}};
+    /// # async fn example(signer: &Ed25519Signer) -> Result<(), Box<dyn std::error::Error>> {
+    /// # const CTX: Context = Context::new("example/v1");
+    /// let readable = SecretExtractableDerive::derive(&signer.secret(CTX), b"peer").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SecretError::AgreementKeyUnavailable`] when this identity
+    /// carries no agreement key -- reachable only in the browser, for a key
+    /// restored from an archive written before agreement keys were stored,
+    /// whose seed is gone and cannot be re-derived. Otherwise returns an error
+    /// if a platform crypto operation fails.
+    pub async fn derive(&self, label: &[u8]) -> Result<Ed25519Signer<Sealed>, SecretError> {
+        let seed = self.derive_bytes(label).await?;
+        Ed25519Signer::import(&seed)
+            .await
+            .map_err(|error| SecretError::Crypto(error.to_string()))
+    }
+
+    /// The derived 32 bytes.
+    ///
+    /// Private: material leaves this module only inside a signer.
+    async fn derive_bytes(&self, label: &[u8]) -> Result<[u8; 32], SecretError> {
+        let key: X25519SecretKey = self.signer.agreement_key().await?;
+        platform::derive(&key, self.context, label).await
     }
 
     /// Conceal `plain` to this same identity.
@@ -139,6 +190,54 @@ impl Secret<'_> {
     }
 }
 
+/// Derive a signer whose material can be read back.
+///
+/// The counterpart to [`Secret::derive`], deriving the same key under the same
+/// label and differing only in extractability.
+///
+/// `Secret`'s inherent `derive` shadows this one, which is the point:
+/// `.derive()` yields a sealed key whatever the call site expects, so a
+/// readable one is never what a binding's type quietly turned it into. Asking
+/// for it means naming the trait:
+///
+/// ```no_run
+/// # use dialog_credentials::{Ed25519Signer, secret::{Context, SecretExtractableDerive}};
+/// # async fn example(signer: &Ed25519Signer) -> Result<(), Box<dyn std::error::Error>> {
+/// # const CTX: Context = Context::new("example/v1");
+/// let readable = SecretExtractableDerive::derive(&signer.secret(CTX), b"peer").await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Security Warning
+///
+/// A derived extractable key yields its seed to anyone holding it. Derive one
+/// only for a consumer that is built from raw bytes and cannot take a signer,
+/// such as `iroh::SecretKey`, whose QUIC stack needs the material in process.
+pub trait SecretExtractableDerive {
+    /// Derive an extractable signer, deterministically.
+    ///
+    /// # Errors
+    ///
+    /// As [`Secret::derive`].
+    fn derive(
+        &self,
+        label: &[u8],
+    ) -> impl Future<Output = Result<Ed25519Signer<Extractable>, SecretError>>;
+}
+
+impl<E> SecretExtractableDerive for Secret<'_, E> {
+    async fn derive(&self, label: &[u8]) -> Result<Ed25519Signer<Extractable>, SecretError> {
+        let seed = self.derive_bytes(label).await?;
+        // `ExtractableKey::import` asks `WebCrypto` for a `CryptoKey` that will
+        // give its seed back, where the default import asks for one that will
+        // not.
+        <Ed25519Signer<Extractable> as ExtractableKey>::import(&seed)
+            .await
+            .map_err(|error| SecretError::Crypto(error.to_string()))
+    }
+}
+
 impl Ed25519Verifier {
     /// Seal secrets to this identity, scoped to `context`.
     #[must_use]
@@ -150,10 +249,10 @@ impl Ed25519Verifier {
     }
 }
 
-impl Ed25519Signer {
+impl<E> Ed25519Signer<E> {
     /// Seal and open secrets for this identity, scoped to `context`.
     #[must_use]
-    pub const fn secret(&self, context: Context) -> Secret<'_> {
+    pub const fn secret(&self, context: Context) -> Secret<'_, E> {
         Secret {
             signer: self,
             context,
@@ -164,6 +263,7 @@ impl Ed25519Signer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::key::KeyExport;
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
@@ -173,6 +273,46 @@ mod tests {
 
     async fn signer(seed: u8) -> Ed25519Signer {
         Ed25519Signer::import(&[seed; 32]).await.unwrap()
+    }
+
+    /// Both derivations give the same identity; only extractability differs.
+    #[dialog_common::test]
+    async fn extractable_derivation_is_the_same_key() {
+        let profile = signer(1).await;
+
+        let sealed = profile.secret(VAULT).derive(b"peer").await.unwrap();
+        let readable = SecretExtractableDerive::derive(&profile.secret(VAULT), b"peer")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sealed.ed25519_did(),
+            readable.ed25519_did(),
+            "one derivation, two extractabilities"
+        );
+    }
+
+    /// A key derived as extractable exports its seed.
+    ///
+    /// Only a real assertion in the browser: native keys are readable
+    /// whatever the type says.
+    #[dialog_common::test]
+    async fn an_extractable_derivation_exports() {
+        let profile = signer(1).await;
+        let readable = SecretExtractableDerive::derive(&profile.secret(VAULT), b"peer")
+            .await
+            .unwrap();
+
+        // Matched rather than destructured: on native `KeyExport` has only
+        // the one variant, so a `let...else` here is irrefutable and the
+        // compiler says so.
+        match readable.export().await.unwrap() {
+            KeyExport::Extractable(seed) => assert_eq!(seed.len(), 32),
+            #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+            KeyExport::NonExtractable { .. } => {
+                panic!("a key derived as extractable must export its seed")
+            }
+        }
     }
 
     #[dialog_common::test]
@@ -246,6 +386,91 @@ mod tests {
             ),
             "context is domain separation: the wrong label must not reveal"
         );
+    }
+
+    #[dialog_common::test]
+    async fn derivation_is_deterministic() {
+        let profile = signer(10).await;
+
+        let first = profile
+            .secret(VAULT)
+            .derive_bytes(b"operator")
+            .await
+            .unwrap();
+        let second = profile
+            .secret(VAULT)
+            .derive_bytes(b"operator")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            first, second,
+            "the same identity, context and label must derive the same secret"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn derivation_separates_labels_contexts_and_identities() {
+        let profile = signer(11).await;
+        let other = signer(12).await;
+
+        let base = profile
+            .secret(VAULT)
+            .derive_bytes(b"operator")
+            .await
+            .unwrap();
+
+        assert_ne!(
+            base,
+            profile.secret(VAULT).derive_bytes(b"other").await.unwrap(),
+            "a different label must derive an unrelated secret"
+        );
+        assert_ne!(
+            base,
+            profile
+                .secret(OTHER)
+                .derive_bytes(b"operator")
+                .await
+                .unwrap(),
+            "a different context must derive an unrelated secret"
+        );
+        assert_ne!(
+            base,
+            other.secret(VAULT).derive_bytes(b"operator").await.unwrap(),
+            "a different identity must derive an unrelated secret"
+        );
+    }
+
+    /// A known-answer vector, and the structural guard on this derivation.
+    ///
+    /// Determinism alone is not enough: a signature-based derivation is
+    /// deterministic too, on every platform whose Ed25519 does not hedge the
+    /// nonce. This test pins the derivation to one value asserted by the same
+    /// code on native AND wasm, so it fails the moment the derivation stops
+    /// being a pure function of the key material -- including a relapse into
+    /// signing, and including the two platform arms silently diverging, which
+    /// is what the derivation this replaced actually did.
+    ///
+    /// Do not delete it as redundant with the determinism tests. If the
+    /// derivation changes on purpose, bump the context label (which re-derives
+    /// every operator and forks each profile's replica lineage) and record the
+    /// new vector deliberately.
+    #[dialog_common::test]
+    async fn derivation_matches_a_known_vector() {
+        const EXPECTED: [u8; 32] = [
+            0x14, 0xaa, 0x7e, 0x0e, 0x1f, 0x45, 0x62, 0xb6, 0xf4, 0xdc, 0x84, 0xdc, 0x26, 0x0c,
+            0x81, 0x07, 0xef, 0x76, 0xb3, 0x08, 0x52, 0x7e, 0xb4, 0x7b, 0x8a, 0x2f, 0xdc, 0x6b,
+            0xe7, 0x7a, 0xf0, 0xa8,
+        ];
+
+        let profile = Ed25519Signer::import(&[42u8; 32]).await.unwrap();
+        let derived = profile
+            .secret(VAULT)
+            .derive_bytes(b"operator")
+            .await
+            .unwrap();
+
+        assert_eq!(derived, EXPECTED);
     }
 
     #[dialog_common::test]
@@ -381,6 +606,123 @@ mod tests {
 // Cross-session tests: the signer is archived, dropped, and restored before
 // revealing. On the browser this is where the agreement key has to survive,
 // since a non-extractable key cannot re-derive it from a seed.
+/// Derivation under the archive shape WebKit forces.
+///
+/// WebKit cannot deserialize an X25519 `CryptoKey` -- `structuredClone`
+/// throws `TypeError: Unable to deserialize data`, verified against a real
+/// WebKit build -- so a profile there archives its agreement key AES-KW
+/// wrapped instead (see [`AgreementArchive::Wrapped`](crate::key::AgreementArchive)).
+/// Derivation reads that key, so it has to come back through the wrap and
+/// derive the same value it did before.
+///
+/// CI runs wasm tests in Chromium, which clones X25519 keys happily and so
+/// never takes this path on its own. `assume_x25519_keys_are_cloneable`
+/// forces it, which is what makes the WebKit-only behaviour testable here.
+#[cfg(all(test, target_arch = "wasm32", target_os = "unknown"))]
+mod web_tests {
+    use super::*;
+    use crate::ed25519::web::assume_x25519_keys_are_cloneable;
+    use crate::key::KeyExport;
+    use js_sys::Reflect;
+    use wasm_bindgen::JsValue;
+
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
+
+    const VAULT: Context = Context::new("dialog/vault/v1");
+
+    /// The vector from `tests::derivation_matches_a_known_vector`, which the
+    /// wrapped path must reach too.
+    const EXPECTED: [u8; 32] = [
+        0x14, 0xaa, 0x7e, 0x0e, 0x1f, 0x45, 0x62, 0xb6, 0xf4, 0xdc, 0x84, 0xdc, 0x26, 0x0c, 0x81,
+        0x07, 0xef, 0x76, 0xb3, 0x08, 0x52, 0x7e, 0xb4, 0x7b, 0x8a, 0x2f, 0xdc, 0x6b, 0xe7, 0x7a,
+        0xf0, 0xa8,
+    ];
+
+    /// Makes this thread behave like WebKit, and probes again once dropped.
+    struct Uncloneable;
+
+    impl Uncloneable {
+        fn assume() -> Self {
+            assume_x25519_keys_are_cloneable(Some(false));
+            Self
+        }
+    }
+
+    impl Drop for Uncloneable {
+        fn drop(&mut self) {
+            assume_x25519_keys_are_cloneable(None);
+        }
+    }
+
+    #[dialog_common::test]
+    async fn derivation_survives_the_wrapped_archive() {
+        let _webkit = Uncloneable::assume();
+
+        let signer = Ed25519Signer::import(&[42u8; 32]).await.unwrap();
+        let before = signer
+            .secret(VAULT)
+            .derive_bytes(b"operator")
+            .await
+            .unwrap();
+        assert_eq!(
+            before, EXPECTED,
+            "the wrapped archive must not change the derived value"
+        );
+
+        // Through the shape storage sees, as IndexedDB would hand it back.
+        let export = signer.export().await.unwrap();
+        assert!(
+            matches!(
+                &export,
+                KeyExport::NonExtractable {
+                    agreement: Some(crate::key::AgreementArchive::Wrapped(_)),
+                    ..
+                }
+            ),
+            "this test is only meaningful if the wrapped path was actually taken"
+        );
+
+        let archived: JsValue = export.into();
+        let restored = Ed25519Signer::import(KeyExport::try_from(archived).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            restored
+                .secret(VAULT)
+                .derive_bytes(b"operator")
+                .await
+                .unwrap(),
+            EXPECTED,
+            "a profile restored from a wrapped archive must derive the same operator"
+        );
+    }
+
+    /// A profile archived before agreement keys existed has no seed to
+    /// re-derive one from, so derivation fails cleanly instead of deriving
+    /// something wrong. The signature-based path this replaced would have
+    /// derived an operator here -- a different one on every call, in Safari.
+    #[dialog_common::test]
+    async fn derivation_without_an_agreement_key_fails_cleanly() {
+        let signer = Ed25519Signer::import(&[42u8; 32]).await.unwrap();
+        let archived: JsValue = signer.export().await.unwrap().into();
+
+        // An export written before the agreement component existed.
+        Reflect::delete_property(&archived.clone().into(), &"agreementKey".into()).unwrap();
+        let restored = Ed25519Signer::import(KeyExport::try_from(archived).unwrap())
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(
+                restored.secret(VAULT).derive_bytes(b"operator").await,
+                Err(SecretError::AgreementKeyUnavailable)
+            ),
+            "a profile with no agreement key must fail, not derive"
+        );
+    }
+}
+
 #[cfg(test)]
 mod session_tests {
     use super::*;

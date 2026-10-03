@@ -5,10 +5,6 @@ use crate::DialogArtifactsError;
 
 use super::Blake3Hash;
 
-/// A hash representing a null [`IndexRoot`] that represents an empty (perhaps
-/// newly created) [`Artifacts`].
-pub static NULL_REVISION_HASH: Blake3Hash = [0; 32];
-
 /// A [`IndexRoot`] represents the root of [`Artifacts`] for a given set of data.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct IndexRoot {

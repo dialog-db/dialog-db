@@ -14,11 +14,12 @@ use dialog_capability::access::{Authorization as _, AuthorizeError, TimeRange};
 use dialog_capability::{Ability, Capability, Effect, ForkInvocation, Provider, Subject};
 use dialog_common::{Blake3Hash, Buffer};
 use dialog_credentials::{Ed25519Signer, Signer};
+use dialog_effects::MethodExt as _;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::archive::prelude::*;
 use dialog_effects::blob::BlobError;
 use dialog_effects::blob::prelude::*;
-use dialog_effects::memory::prelude::*;
+use dialog_effects::memory::prelude::CellScope;
 use dialog_effects::memory::{MemoryError, Version};
 use dialog_ucan::Scope;
 use dialog_ucan_core::{Container, Tag};
@@ -90,6 +91,7 @@ async fn it_stores_a_block_and_serves_it_back(service: UcanServiceAddress) -> an
         &signer,
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(content.clone())),
@@ -98,7 +100,7 @@ async fn it_stores_a_block_and_serves_it_back(service: UcanServiceAddress) -> an
     let served = perform(
         &service,
         &signer,
-        subject.archive().catalog("index").get(digest),
+        subject.reader().archive().catalog("index").get(digest),
     )
     .await?;
 
@@ -115,6 +117,7 @@ async fn it_answers_none_for_a_block_it_does_not_hold(
         &service,
         &signer,
         subject
+            .reader()
             .archive()
             .catalog("index")
             .get(Blake3Hash::hash(b"never stored")),
@@ -134,6 +137,7 @@ async fn it_keeps_catalogs_apart(service: UcanServiceAddress) -> anyhow::Result<
         &signer,
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(content)),
@@ -142,7 +146,7 @@ async fn it_keeps_catalogs_apart(service: UcanServiceAddress) -> anyhow::Result<
     let elsewhere = perform(
         &service,
         &signer,
-        subject.archive().catalog("blob").get(digest),
+        subject.reader().archive().catalog("blob").get(digest),
     )
     .await?;
     assert_eq!(elsewhere, None, "a block is served only from its catalog");
@@ -154,7 +158,7 @@ async fn it_publishes_resolves_and_updates_a_cell(
     service: UcanServiceAddress,
 ) -> anyhow::Result<()> {
     let (signer, subject) = owner().await;
-    let cell = || subject.clone().memory().space("sync").cell("head");
+    let cell = || CellScope::new(subject.clone(), "sync", "head");
 
     let first = perform(&service, &signer, cell().publish(b"one".to_vec(), None)).await?;
     let resolved = perform(&service, &signer, cell().resolve())
@@ -183,7 +187,7 @@ async fn it_refuses_a_publish_against_a_stale_version(
     service: UcanServiceAddress,
 ) -> anyhow::Result<()> {
     let (signer, subject) = owner().await;
-    let cell = || subject.clone().memory().space("sync").cell("head");
+    let cell = || CellScope::new(subject.clone(), "sync", "head");
 
     let first = perform(&service, &signer, cell().publish(b"one".to_vec(), None)).await?;
     perform(
@@ -215,7 +219,7 @@ async fn it_refuses_to_create_over_a_cell_that_exists(
     service: UcanServiceAddress,
 ) -> anyhow::Result<()> {
     let (signer, subject) = owner().await;
-    let cell = || subject.clone().memory().space("sync").cell("head");
+    let cell = || CellScope::new(subject.clone(), "sync", "head");
     perform(&service, &signer, cell().publish(b"one".to_vec(), None)).await?;
     let again = perform(&service, &signer, cell().publish(b"other".to_vec(), None)).await;
     assert!(matches!(again, Err(MemoryError::VersionMismatch { .. })));
@@ -225,7 +229,7 @@ async fn it_refuses_to_create_over_a_cell_that_exists(
 #[dialog_common::test]
 async fn it_retracts_a_cell_at_its_version(service: UcanServiceAddress) -> anyhow::Result<()> {
     let (signer, subject) = owner().await;
-    let cell = || subject.clone().memory().space("sync").cell("head");
+    let cell = || CellScope::new(subject.clone(), "sync", "head");
     let version = perform(&service, &signer, cell().publish(b"one".to_vec(), None)).await?;
 
     let wrong = perform(&service, &signer, cell().retract(Version::from("v0"))).await;
@@ -248,6 +252,7 @@ async fn it_refuses_an_invocation_its_subject_did_not_issue(
         &stranger,
         subject
             .clone()
+            .reader()
             .archive()
             .catalog("index")
             .get(Blake3Hash::hash(b"anything")),
@@ -303,6 +308,7 @@ async fn it_imports_a_blob_and_streams_it_back(service: UcanServiceAddress) -> a
         &signer,
         subject
             .clone()
+            .writer()
             .archive()
             .blob()
             .import(digest.clone(), content.len() as u64),
@@ -313,7 +319,12 @@ async fn it_imports_a_blob_and_streams_it_back(service: UcanServiceAddress) -> a
     }
     assert_eq!(sink.finish().await?, digest);
 
-    let reader = perform(&service, &signer, subject.archive().blob().read(digest)).await?;
+    let reader = perform(
+        &service,
+        &signer,
+        subject.reader().archive().blob().read(digest),
+    )
+    .await?;
     let (served, chunks) = drain(reader).await?;
     assert_eq!(served, content);
     assert!(chunks >= 1, "the blob came back as {chunks} chunks");
@@ -330,6 +341,7 @@ async fn it_reads_a_range_of_a_blob(service: UcanServiceAddress) -> anyhow::Resu
         &signer,
         subject
             .clone()
+            .writer()
             .archive()
             .blob()
             .import(digest.clone(), content.len() as u64),
@@ -338,20 +350,23 @@ async fn it_reads_a_range_of_a_blob(service: UcanServiceAddress) -> anyhow::Resu
     sink.write_all(&content).await?;
     sink.finish().await?;
 
-    let ranged = subject
-        .clone()
-        .archive()
-        .blob()
-        .invoke(dialog_effects::blob::Read::range(
-            digest.clone(),
-            10_000,
-            Some(5_000),
-        ));
+    let ranged =
+        subject
+            .clone()
+            .reader()
+            .archive()
+            .blob()
+            .invoke(dialog_effects::blob::Read::range(
+                digest.clone(),
+                10_000,
+                Some(5_000),
+            ));
     let reader = perform(&service, &signer, ranged).await?;
     let (served, _) = drain(reader).await?;
     assert_eq!(served, &content[10_000..15_000]);
 
     let tail = subject
+        .reader()
         .archive()
         .blob()
         .invoke(dialog_effects::blob::Read::range(digest, 70_000, None));
@@ -370,6 +385,7 @@ async fn it_answers_not_found_for_a_blob_it_does_not_hold(
         &service,
         &signer,
         subject
+            .reader()
             .archive()
             .blob()
             .read(Blake3Hash::hash(b"never imported")),
@@ -393,6 +409,7 @@ async fn it_refuses_an_import_whose_bytes_do_not_hash_to_the_digest(
         &service,
         &signer,
         subject
+            .writer()
             .archive()
             .blob()
             .import(Blake3Hash::hash(&content), content.len() as u64),
@@ -415,6 +432,7 @@ async fn it_labels_the_request_with_the_command_and_the_subject() {
     let (signer, subject) = owner().await;
     let capability = subject
         .clone()
+        .writer()
         .archive()
         .catalog("index")
         .put(Buffer::from(b"content".to_vec()));
@@ -495,6 +513,7 @@ mod layer {
         let (signer, subject) = owner().await;
         let content = b"content".to_vec();
         let put = subject
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(content.clone()));
@@ -515,6 +534,7 @@ mod layer {
     async fn it_requires_the_body_a_write_stores() {
         let (signer, subject) = owner().await;
         let capability = subject
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(b"content".to_vec()));
@@ -529,6 +549,7 @@ mod layer {
     async fn it_refuses_a_body_that_is_not_what_the_invocation_bound() {
         let (signer, subject) = owner().await;
         let capability = subject
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(b"content".to_vec()));
@@ -549,6 +570,7 @@ mod layer {
         let (signer, subject) = owner().await;
         let content = b"a blob of some length".to_vec();
         let capability = subject
+            .writer()
             .archive()
             .blob()
             .import(Blake3Hash::hash(&content), content.len() as u64);
@@ -569,6 +591,7 @@ mod layer {
         let (signer, subject) = owner().await;
         let content = b"a blob of some length".to_vec();
         let capability = subject
+            .writer()
             .archive()
             .blob()
             .import(Blake3Hash::hash(&content), content.len() as u64);
@@ -591,6 +614,7 @@ mod layer {
         let content = b"content".to_vec();
         let put = subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(content.clone()));
@@ -601,6 +625,7 @@ mod layer {
         assert_eq!(status, 200);
 
         let get = subject
+            .reader()
             .archive()
             .catalog("index")
             .get(Blake3Hash::hash(&content));
@@ -620,6 +645,7 @@ mod layer {
         let digest = Blake3Hash::hash(&content);
         let import = subject
             .clone()
+            .writer()
             .archive()
             .blob()
             .import(digest.clone(), content.len() as u64);
@@ -633,7 +659,7 @@ mod layer {
         assert_eq!(status, 200);
         assert_eq!(access.provider().blobs(), 1);
 
-        let read = subject.archive().blob().read(digest);
+        let read = subject.reader().archive().blob().read(digest);
         let value = credential_for(&signer, &read).await;
         match access.handle(Request::new(Some(&value))).await {
             Answer::Performed(response) => {

@@ -8,8 +8,11 @@ use rkyv::{
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
 };
 
+use bijoux::{Decode as _, Encode as _};
+
 use crate::{
-    Buffer, DialogSearchTreeError, Entry, Key, Link, Manifest, Scale, Schema, Value,
+    Buffer, DialogSearchTreeError, Entry, Key, LegacyManifest, Link, Manifest, Scale, Schema,
+    Value,
     node::codec::{common_prefix, encode_keys},
     node::columnar::{ColumnData, StreamingLeaf, column_slices, encode_column_values},
 };
@@ -74,6 +77,7 @@ impl DecodedKeys {
     /// entry (sorted) order, so this is a binary search — O(log n) key
     /// comparisons against the linear front-coded stream a fresh decode
     /// requires.
+    #[inline]
     pub fn binary_search(&self, probe: &[u8]) -> Option<usize> {
         let mut low = 0usize;
         let mut high = self.len();
@@ -89,28 +93,125 @@ impl DecodedKeys {
     }
 }
 
+/// The node layout version of a tagged node (see `notes/tree-node-format.md`
+/// and `format/table.csv`): `version, kind, header length, manifest fields,
+/// zero padding to 16 bytes, rkyv body`.
+pub const TAGGED_LAYOUT: u64 = 0x02;
+
+/// The layout version the legacy (untagged) layout is known by. Never
+/// written as a tag: a legacy node is bare rkyv bytes.
+pub const LEGACY_LAYOUT: u64 = 0x01;
+
+/// The node kind code of a leaf segment.
+const SEGMENT_KIND: u64 = 0x00;
+
+/// The node kind code of an index node.
+const INDEX_KIND: u64 = 0x01;
+
+/// The alignment the body of a tagged node starts at. Node bytes live in a
+/// 16-byte-aligned [`AlignedVec`], and rkyv reads the body in place.
+const BODY_ALIGNMENT: usize = 16;
+
+/// What a tagged node's prelude says beyond its kind: where its manifest
+/// fields sit, and how long it is.
+#[derive(Clone, Copy, Debug)]
+struct Prelude {
+    /// Byte range of the manifest fields.
+    fields: (u32, u32),
+    /// The prelude's length: the byte offset of the body, a nonzero multiple
+    /// of 16.
+    len: u32,
+}
+
 /// A tree node in its serialized, content-addressed form.
 ///
-/// A [`PersistentNode`] holds the serialized [`PersistentNodeBody`] as bytes in
-/// a [`Buffer`] and is identified by its [`Blake3Hash`]. The structured
-/// contents are recovered as a zero-copy [`ArchivedNodeBody`] view via
-/// [`body`](PersistentNode::body).
+/// A [`PersistentNode`] holds the node's bytes in a [`Buffer`] and is
+/// identified by its [`Blake3Hash`]. The structured contents are recovered as
+/// a zero-copy [`NodeBody`] view via [`body`](PersistentNode::body).
+///
+/// Two layouts are read. A **tagged** node (every node written now) starts
+/// with its layout version and kind, then the tree's manifest as encoded
+/// fields, zero padding to 16 bytes, and the rkyv body of its kind. A
+/// **legacy** node (written before the tagged layout) is bare rkyv bytes with
+/// the manifest inlined as a fixed struct; it stays readable, and nothing
+/// writes it any more.
 ///
 /// Validity is a type invariant: a `PersistentNode` can only be constructed
 /// through one of two [`TryFrom`] conversions. [`TryFrom<Buffer>`] runs full
-/// archive validation on untrusted bytes (storage, cache, the network).
-/// [`TryFrom<&PersistentNodeBody<Value>>`] serializes a body this crate built,
+/// validation on untrusted bytes (storage, the network).
+/// [`TryFrom<&PersistentNodeBody<Value>>`] encodes a body this crate built,
 /// which is valid by construction and needs no revalidation. No unsafe
 /// constructor exists, and a [`PersistentNodeBody`] cannot itself be built from
-/// raw bytes, only from typed data. Either way the buffer is a valid archive of
-/// exactly `ArchivedNodeBody<Value>`, so [`body`](Self::body) is infallible and
-/// costs a pointer cast rather than a bytecheck pass per access.
-#[derive(Clone, Debug)]
+/// raw bytes, only from typed data. Either way the body bytes are a valid
+/// archive of the node's kind, so [`body`](Self::body) is infallible and costs
+/// a pointer cast rather than a bytecheck pass per access.
+///
+/// The key and value types are markers only, so a node is `Send` and `Sync`
+/// exactly when its buffer is, whatever the types it is read as. That lets
+/// a [`NodeCache`](crate::NodeCache) share checked nodes across threads.
+#[derive(Debug)]
 pub struct PersistentNode<Key, Value> {
-    key: PhantomData<Key>,
-    value: PhantomData<Value>,
+    key: PhantomData<fn() -> Key>,
+    value: PhantomData<fn() -> Value>,
 
     buffer: Buffer,
+    /// Where the node's archived index or segment sits in its bytes, found
+    /// once when the node is built: its byte offset, with [`INDEX_BIT`] set
+    /// for an index and [`LEGACY_BIT`] for a node in the legacy layout (both
+    /// archived types align to 4, so the low two bits are free). This is all
+    /// a node keeps beside its bytes, and it makes [`body`](Self::body) an
+    /// addition and a bit test.
+    root: usize,
+}
+
+/// [`PersistentNode::root`]'s bit for an index.
+const INDEX_BIT: usize = 1;
+/// [`PersistentNode::root`]'s bit for a node in the legacy layout.
+const LEGACY_BIT: usize = 2;
+/// The bits of [`PersistentNode::root`] that are not the offset.
+const ROOT_BITS: usize = INDEX_BIT | LEGACY_BIT;
+
+const _: () = {
+    assert!(std::mem::align_of::<ArchivedIndex<Vec<u8>>>() > ROOT_BITS);
+    assert!(std::mem::align_of::<ArchivedSegment<Vec<u8>>>() > ROOT_BITS);
+};
+
+/// The packed [`PersistentNode::root`] for `body`, a reference into `bytes`
+/// that rkyv returned from validating them (or that points into bytes just
+/// serialized), so it lies within `bytes`, at an offset aligned to 4.
+#[inline(always)]
+fn root_of<Value: self::Value>(bytes: &[u8], body: NodeBody<'_, Value>, legacy: bool) -> usize {
+    let (at, index) = match body {
+        NodeBody::Index(index) => (std::ptr::from_ref(index).addr(), INDEX_BIT),
+        NodeBody::Segment(segment) => (std::ptr::from_ref(segment).addr(), 0),
+    };
+    let offset = at - bytes.as_ptr().addr();
+    debug_assert_eq!(offset & ROOT_BITS, 0);
+    offset | index | if legacy { LEGACY_BIT } else { 0 }
+}
+
+/// A node's body: the archived index or segment it holds, borrowed from its
+/// bytes.
+pub enum NodeBody<'a, Value>
+where
+    Value: self::Value,
+{
+    /// An index node containing links to child nodes.
+    Index(&'a ArchivedIndex<Value>),
+    /// A leaf segment containing key-value entries.
+    Segment(&'a ArchivedSegment<Value>),
+}
+
+// Manual impl: a clone shares the buffer, whatever the marker types are.
+impl<Key, Value> Clone for PersistentNode<Key, Value> {
+    fn clone(&self) -> Self {
+        Self {
+            key: PhantomData,
+            value: PhantomData,
+            buffer: self.buffer.clone(),
+            root: self.root,
+        }
+    }
 }
 
 impl<Key, Value> PersistentNode<Key, Value>
@@ -157,8 +258,8 @@ where
     /// double-count once they flush.
     pub fn scale(&self) -> Scale {
         match self.body() {
-            ArchivedNodeBody::Index(index) => Scale::total(index.scales.iter().map(Scale::from)),
-            ArchivedNodeBody::Segment(segment) => Scale::of(segment.count.to_native() as u64),
+            NodeBody::Index(index) => Scale::total(index.scales.iter().map(Scale::from)),
+            NodeBody::Segment(segment) => Scale::of(segment.count.to_native() as u64),
         }
     }
 
@@ -169,8 +270,8 @@ where
     /// returns `None` for an index; full bounds exist only in leaves.
     pub fn upper_bound(&self) -> Result<Option<Vec<u8>>, DialogSearchTreeError> {
         match self.body() {
-            ArchivedNodeBody::Index(_) => Ok(None),
-            ArchivedNodeBody::Segment(segment) => segment.last_key::<Key>().map(Some),
+            NodeBody::Index(_) => Ok(None),
+            NodeBody::Segment(segment) => segment.last_key::<Key>().map(Some),
         }
     }
 
@@ -179,17 +280,46 @@ where
     /// Infallible: validity is the type's construction invariant. The two
     /// [`TryFrom`] conversions are the only ways to build a node, and neither
     /// can admit an invalid archive, so no per-access validation runs.
-    pub fn body(&self) -> &ArchivedNodeBody<Value> {
-        // SAFETY: `buffer` is a valid archive of exactly
-        // `ArchivedNodeBody<Value>`. A node can only be built through one of
-        // two conversions: `TryFrom<Buffer>`, which proved validity by running
-        // the full bytecheck validation on untrusted bytes, or
-        // `TryFrom<&PersistentNodeBody<Value>>`, which serialized a typed body
-        // whose `rkyv::to_bytes` output is by construction a valid archive of
-        // that type. No unsafe constructor exists, and a `PersistentNodeBody`
-        // cannot itself be built from raw bytes, so `access_unchecked` is
-        // sound. Buffers are immutable and aligned.
-        unsafe { rkyv::access_unchecked::<ArchivedNodeBody<Value>>(self.buffer.as_ref()) }
+    pub fn body(&self) -> NodeBody<'_, Value> {
+        // SAFETY: `root` is the offset of an archived index (with `INDEX_BIT`)
+        // or segment in this node's bytes, taken from a reference into them:
+        // either one rkyv returned after its full validation of the node
+        // (`TryFrom<Buffer>`), or one into bytes serialized from a typed body
+        // (`TryFrom<&PersistentNodeBody<Value>>`), a valid archive by
+        // construction. No unsafe constructor exists, and a
+        // `PersistentNodeBody` cannot itself be built from raw bytes. Buffers
+        // are immutable and every clone shares one allocation, so the
+        // reference is as valid now as when the offset was taken.
+        unsafe {
+            let at = self.buffer.as_ref().as_ptr().add(self.root & !ROOT_BITS);
+            if self.root & INDEX_BIT != 0 {
+                NodeBody::Index(&*at.cast::<ArchivedIndex<Value>>())
+            } else {
+                NodeBody::Segment(&*at.cast::<ArchivedSegment<Value>>())
+            }
+        }
+    }
+
+    /// The body of a legacy node.
+    ///
+    /// # Safety
+    ///
+    /// The node must be a legacy node (`self.root & LEGACY_BIT != 0`),
+    /// whose whole buffer `TryFrom<Buffer>` validated as this type.
+    unsafe fn legacy(&self) -> &ArchivedLegacyNodeBody<Value> {
+        // SAFETY: the caller guarantees a legacy node, whose buffer was
+        // validated as exactly this type when the node was built.
+        unsafe { rkyv::access_unchecked::<ArchivedLegacyNodeBody<Value>>(self.buffer.as_ref()) }
+    }
+
+    /// The node's layout version: [`TAGGED_LAYOUT`], or [`LEGACY_LAYOUT`] for
+    /// a node written before the tagged layout.
+    pub fn layout_version(&self) -> u64 {
+        if self.root & LEGACY_BIT != 0 {
+            LEGACY_LAYOUT
+        } else {
+            TAGGED_LAYOUT
+        }
     }
 
     /// Whether a scan over this leaf should reuse a memoized decode
@@ -224,7 +354,7 @@ where
     /// populate the memo and, on a first (un-memoized) touch, transiently.
     fn materialize_keys(&self) -> Result<DecodedKeys, DialogSearchTreeError> {
         match self.body() {
-            ArchivedNodeBody::Segment(segment) => {
+            NodeBody::Segment(segment) => {
                 let mut keys = segment.keys::<Key>()?;
                 let mut arena = Vec::new();
                 let mut ends = Vec::new();
@@ -234,7 +364,7 @@ where
                 }
                 Ok(DecodedKeys { arena, ends })
             }
-            ArchivedNodeBody::Index(_) => Err(DialogSearchTreeError::Access(
+            NodeBody::Index(_) => Err(DialogSearchTreeError::Access(
                 "decoded_keys called on an index node".to_string(),
             )),
         }
@@ -247,20 +377,46 @@ where
     /// parameter, separator bound, value inline-vs-spill threshold) without a
     /// side channel: any node hash is a complete, self-describing tree root.
     pub fn manifest(&self) -> Result<Manifest, DialogSearchTreeError> {
-        let header = match self.body() {
-            ArchivedNodeBody::Index(index) => &index.header,
-            ArchivedNodeBody::Segment(segment) => &segment.header,
-        };
-        rkyv::deserialize::<Manifest, rkyv::rancor::Error>(header)
-            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))
+        if self.root & LEGACY_BIT != 0 {
+            // SAFETY: checked just above that this is a legacy node.
+            let header = match unsafe { self.legacy() } {
+                ArchivedLegacyNodeBody::Index(legacy) => &legacy.header,
+                ArchivedLegacyNodeBody::Segment(legacy) => &legacy.header,
+            };
+            let header = rkyv::deserialize::<LegacyManifest, rkyv::rancor::Error>(header)
+                .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
+            return Ok(Manifest::from(header));
+        }
+        let bytes = self.buffer.as_ref();
+        let (start, end) = tagged_prelude(bytes)
+            .ok_or_else(|| {
+                DialogSearchTreeError::Access("A tagged node lost its prelude".to_string())
+            })?
+            .fields;
+        decode_manifest(&bytes[start as usize..end as usize])
+    }
+
+    /// Whether this node is the empty tree's node: an index with no
+    /// children and no buffered ops, carrying the format manifest and
+    /// nothing else (see [`persist_empty_root`](crate::persist_empty_root)),
+    /// so every root, the empty one included, is an index. A zero-entry
+    /// segment, the empty tree's node before, reads as empty too. Such a
+    /// node is a pure format marker — the persisted root of an empty tree,
+    /// never an interior node — and load paths treat it as the absence of a
+    /// root.
+    pub fn is_empty(&self) -> Result<bool, DialogSearchTreeError> {
+        Ok(match self.body() {
+            NodeBody::Index(index) => index.is_empty() && index.novelty_len() == 0,
+            NodeBody::Segment(segment) => segment.len() == 0,
+        })
     }
 
     /// Interprets this node as an index node, returning an error if it's a
     /// segment.
     pub fn as_index(&self) -> Result<&ArchivedIndex<Value>, DialogSearchTreeError> {
         match self.body() {
-            ArchivedNodeBody::Index(index) => Ok(index),
-            ArchivedNodeBody::Segment(_) => Err(DialogSearchTreeError::Access(
+            NodeBody::Index(index) => Ok(index),
+            NodeBody::Segment(_) => Err(DialogSearchTreeError::Access(
                 "Attempted to interpret a segment node as an index node".to_string(),
             )),
         }
@@ -270,16 +426,16 @@ where
     /// index.
     pub fn as_segment(&self) -> Result<&ArchivedSegment<Value>, DialogSearchTreeError> {
         match self.body() {
-            ArchivedNodeBody::Segment(segment) => Ok(segment),
-            ArchivedNodeBody::Index(_) => Err(DialogSearchTreeError::Access(
+            NodeBody::Segment(segment) => Ok(segment),
+            NodeBody::Index(_) => Err(DialogSearchTreeError::Access(
                 "Attempted to interpret a index node as an segment node".to_string(),
             )),
         }
     }
 }
 
-/// Builds a node from a buffer of untrusted bytes (storage, cache, the
-/// network), validating that it archives as `ArchivedNodeBody<Value>`. This
+/// Builds a node from a buffer of untrusted bytes (storage, the network),
+/// validating that it is a tagged or legacy node of its kind. This
 /// is the only validation the node ever runs; it establishes the invariant
 /// that [`body`](PersistentNode::body) relies on for the node and all its
 /// clones.
@@ -294,21 +450,385 @@ where
     type Error = DialogSearchTreeError;
 
     fn try_from(buffer: Buffer) -> Result<Self, Self::Error> {
-        rkyv::access::<ArchivedNodeBody<Value>, rkyv::rancor::Error>(buffer.as_ref())
-            .map_err(|error| DialogSearchTreeError::Access(format!("{error}")))?;
+        // The node of a tree under the default manifest, which is nearly every
+        // node read: its prelude is one fixed 16-byte word, so recognizing it
+        // and validating the body is all a read does. Everything else (a
+        // manifest with fields, a legacy node, bytes that are neither) goes
+        // through `from_other`, kept out of line so this path stays small.
+        let checked = check_tagged_body::<Value>(buffer.as_ref());
+        if checked & OTHER_PRELUDE == 0 {
+            return Ok(Self {
+                key: PhantomData,
+                value: PhantomData,
+                root: checked,
+                buffer,
+            });
+        }
+        Self::from_other(buffer, checked & !OTHER_PRELUDE)
+    }
+}
+
+impl<Key, Value> PersistentNode<Key, Value>
+where
+    Key: self::Key,
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+{
+    /// [`TryFrom<Buffer>`] for any node but a tagged one under the default
+    /// manifest.
+    #[cold]
+    #[inline(never)]
+    fn from_other(buffer: Buffer, root: usize) -> Result<Self, DialogSearchTreeError> {
+        // `root` is the body [`check_tagged_body`] already validated, as the
+        // kind the prelude states, or 0 when the bytes are not a valid tagged
+        // body. A validated body needs no second check: what is left is the
+        // rest of the prelude, plain bytes read here. Bytes whose prelude is
+        // not a well-formed tagged one are read as a legacy node: its
+        // first bytes are arbitrary rkyv data and may happen to equal a
+        // version, but then fail these checks within a few bytes.
+        let bytes = buffer.as_ref();
+        let mut refused = None;
+        if root != 0
+            && let Some(prelude) = tagged_prelude(bytes)
+        {
+            let (start, end) = prelude.fields;
+            // The fields are decoded here only to check this build can read
+            // them. Fields it cannot read (malformed, or an unknown critical
+            // field) make the bytes not a tagged node of this build. They are
+            // almost surely a tagged node all the same, so the manifest's
+            // error is the one reported unless the bytes happen to read as a
+            // legacy node.
+            match decode_manifest(&bytes[start as usize..end as usize]) {
+                Ok(_) => {
+                    PreludeMemo::remember(bytes, &prelude);
+                    return Ok(Self {
+                        key: PhantomData,
+                        value: PhantomData,
+                        root,
+                        buffer,
+                    });
+                }
+                Err(error) => refused = Some(error),
+            }
+        }
+        Self::from_legacy(buffer, refused)
+    }
+
+    /// Reads bytes that are not a tagged node as a legacy node, or reports
+    /// why they are neither: `refused` when they were a tagged node whose
+    /// fields this build cannot read.
+    fn from_legacy(
+        buffer: Buffer,
+        refused: Option<DialogSearchTreeError>,
+    ) -> Result<Self, DialogSearchTreeError> {
+        // Validated with rkyv's shared-pointer validator, unlike the hot
+        // tagged path, so every nested check is compiled separately from that
+        // path's. Sharing them gave those checks a second caller, and the
+        // compiler then stopped inlining them into the tagged path, costing
+        // every read.
+        let bytes = buffer.as_ref();
+        let legacy =
+            match rkyv::access::<ArchivedLegacyNodeBody<Value>, rkyv::rancor::Error>(bytes) {
+                Ok(legacy) => legacy,
+                Err(error) => {
+                    return Err(refused
+                        .unwrap_or_else(|| DialogSearchTreeError::Access(format!("{error}"))));
+                }
+            };
+        let body = match legacy {
+            ArchivedLegacyNodeBody::Index(legacy) => NodeBody::Index(legacy.index()),
+            ArchivedLegacyNodeBody::Segment(legacy) => NodeBody::Segment(legacy.segment()),
+        };
+        let root = root_of(bytes, body, true);
         Ok(Self {
-            buffer,
             key: PhantomData,
             value: PhantomData,
+            root,
+            buffer,
         })
     }
 }
 
-/// Seals a node body this crate built into its persistent form. Validity is
-/// carried by the type: `rkyv::to_bytes` of a `PersistentNodeBody<Value>` is
-/// by construction a valid archive of `ArchivedNodeBody<Value>`, exactly what
-/// [`body`](PersistentNode::body) accesses unchecked, so no revalidation and no
-/// caller assertion are needed.
+/// [`check_tagged_body`]'s flag for bytes that are not a finished tagged node
+/// under the default manifest. Only in that function's result: a node's own
+/// `root` uses this bit as [`LEGACY_BIT`].
+const OTHER_PRELUDE: usize = LEGACY_BIT;
+
+/// Validates `bytes` as a tagged node's body and checks for the default
+/// manifest's prelude. Returns:
+///
+/// - the packed [`PersistentNode::root`] when they are a valid tagged node
+///   under the default manifest (without [`OTHER_PRELUDE`]);
+/// - that root with [`OTHER_PRELUDE`] set when the body is valid but the
+///   prelude is some other one, left to the cold path to parse;
+/// - [`OTHER_PRELUDE`] alone when they are not a valid tagged body.
+///
+/// A body at offset 0 would overlap its own prelude; no writer makes one,
+/// and both paths refuse it: this one reports "not a valid body", and a
+/// root of 0 with [`OTHER_PRELUDE`] is what the cold path refuses too.
+///
+/// Every tagged node is validated here and nowhere else. This is the whole
+/// read path of nearly every node, so it is held to the
+/// cost of reading an untagged node:
+///
+/// - One out-of-line function returning one word, so the caller keeps nothing
+///   live across it but the buffer.
+/// - Validation through rkyv's low-level entry point, with no shared-pointer
+///   validator: tagged bodies hold no shared pointers, and the shared one
+///   builds and drops an empty map for every node. No other path uses this
+///   validator, so its checks have this single caller and are inlined here.
+/// - The prelude's kind byte picks the type the body is validated as, so the
+///   kind is stated once and cannot disagree with the body.
+/// - It validates the whole buffer rather than the bytes after the prelude:
+///   the archive's root is at the end either way. A body could then point
+///   into its own prelude and read those bytes as data, which is memory-safe
+///   and which no writer produces.
+#[inline(never)]
+fn check_tagged_body<Value>(bytes: &[u8]) -> usize
+where
+    Value: self::Value,
+    Value::Archived: for<'a> CheckBytes<
+        Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+    >,
+{
+    let Some(head) = bytes.first_chunk::<BODY_ALIGNMENT>() else {
+        return OTHER_PRELUDE;
+    };
+    // The kind code is the root's `INDEX_BIT`, so it packs in as is.
+    const _: () = assert!(SEGMENT_KIND == 0 && INDEX_KIND as usize == INDEX_BIT);
+    // The version is checked with the rest of the prelude below: a node of
+    // another version fails that and is left to the cold path.
+    let kind = head[1];
+    let at = match u64::from(kind) {
+        SEGMENT_KIND => {
+            rkyv::api::low::access::<ArchivedSegment<Value>, rkyv::rancor::Error>(bytes)
+                .map(|segment| std::ptr::from_ref(segment).addr())
+        }
+        INDEX_KIND => rkyv::api::low::access::<ArchivedIndex<Value>, rkyv::rancor::Error>(bytes)
+            .map(|index| std::ptr::from_ref(index).addr()),
+        _ => return OTHER_PRELUDE,
+    };
+    let Ok(at) = at else {
+        return OTHER_PRELUDE;
+    };
+    let offset = at - bytes.as_ptr().addr();
+    // A body at offset 0 sits where its prelude is: the bytes then read
+    // as two things at once, which no writer produces. Refused here as
+    // the cold path refuses it, rather than accepted with a root of 0.
+    if offset == 0 {
+        return OTHER_PRELUDE;
+    }
+    let root = offset | usize::from(kind);
+    // One comparison of the first 16 bytes against the default manifest's
+    // prelude for this kind checks the empty header and the padding.
+    if u128::from_le_bytes(*head) != TAGGED_LAYOUT as u128 | u128::from(kind) << 8
+        && !PreludeMemo::accepts(bytes, u64::from(kind))
+    {
+        return root | OTHER_PRELUDE;
+    }
+    root
+}
+
+/// The tagged prelude of `bytes`, if they start with one. `None` when the
+/// bytes do not start with a well-formed prelude of a known layout version:
+/// an unknown version or kind, a header running past the end, or padding that
+/// is not exactly zero bytes up to the body.
+fn tagged_prelude(bytes: &[u8]) -> Option<Prelude> {
+    // The version and kind are values below 248, so each is exactly one byte
+    // in the only encoding bijou64 allows; any other byte is not a tagged
+    // node of a known version.
+    let [version, kind, ..] = *bytes else {
+        return None;
+    };
+    if u64::from(version) != TAGGED_LAYOUT {
+        return None;
+    }
+    if u64::from(kind) != SEGMENT_KIND && u64::from(kind) != INDEX_KIND {
+        return None;
+    }
+    let (length, read) = u64::decode(bytes.get(2..)?).ok()?;
+    let start = 2 + read;
+    let end = start.checked_add(usize::try_from(length).ok()?)?;
+    let body = end.checked_next_multiple_of(BODY_ALIGNMENT)?;
+    if body >= bytes.len() {
+        return None;
+    }
+    // The padding is the tail of the 16 bytes before the body (the body sits
+    // at least 16 bytes in, past the 3-byte preamble), under 16 bytes long:
+    // check it as one word rather than byte by byte.
+    let padding = body - end;
+    let window: [u8; BODY_ALIGNMENT] = bytes[body - BODY_ALIGNMENT..body].try_into().ok()?;
+    if padding > 0 && u128::from_le_bytes(window) >> (8 * (BODY_ALIGNMENT - padding)) != 0 {
+        return None;
+    }
+    Some(Prelude {
+        fields: (u32::try_from(start).ok()?, u32::try_from(end).ok()?),
+        len: u32::try_from(body).ok()?,
+    })
+}
+
+/// The prelude of the last node under a non-default manifest this thread
+/// accepted. Every node of a tree carries the same prelude but for its kind
+/// byte, so the rest of that tree's nodes are accepted by comparing their
+/// first bytes against it, without parsing the prelude or its fields again.
+/// Sound because equal bytes parse equally: an identical prelude is as
+/// well-formed, and its fields as readable, as the one accepted.
+///
+/// A prelude is a multiple of 16 bytes long; one of 16 or 32 (up to 29
+/// bytes of fields) is remembered, as its two 16-byte words with the kind
+/// byte cleared.
+struct PreludeMemo;
+
+impl PreludeMemo {
+    /// Clears the kind byte of a prelude's first word.
+    const WITHOUT_KIND: u128 = !(0xff << 8);
+
+    thread_local! {
+        /// Whether a prelude is remembered, its first word with the kind byte
+        /// cleared, and its second word with the mask that selects it (all
+        /// ones for a 32-byte prelude, zero for a 16-byte one).
+        static LAST: std::cell::Cell<(bool, u128, u128, u128)> =
+            const { std::cell::Cell::new((false, 0, 0, 0)) };
+    }
+
+    /// The first two 16-byte words of `bytes`, if it holds them.
+    #[inline(always)]
+    fn words(bytes: &[u8]) -> Option<(u128, u128)> {
+        let head = bytes.first_chunk::<{ 2 * BODY_ALIGNMENT }>()?;
+        let (low, high) = head.split_at(BODY_ALIGNMENT);
+        Some((
+            u128::from_le_bytes(low.try_into().ok()?),
+            u128::from_le_bytes(high.try_into().ok()?),
+        ))
+    }
+
+    /// Whether `bytes`, whose body is of `kind`, start with the prelude last
+    /// accepted.
+    #[inline(always)]
+    fn accepts(bytes: &[u8], kind: u64) -> bool {
+        let (known, low, high, mask) = Self::LAST.get();
+        let Some((first, second)) = Self::words(bytes) else {
+            return false;
+        };
+        known & (first == low | u128::from(kind) << 8) & (second & mask == high)
+    }
+
+    /// Remembers the prelude of `bytes`, just accepted.
+    fn remember(bytes: &[u8], prelude: &Prelude) {
+        let mask = match prelude.len as usize {
+            BODY_ALIGNMENT => 0,
+            len if len == 2 * BODY_ALIGNMENT => u128::MAX,
+            _ => return,
+        };
+        if let Some((first, second)) = Self::words(bytes) {
+            Self::LAST.set((true, first & Self::WITHOUT_KIND, second & mask, mask));
+        }
+    }
+}
+
+/// The manifest that encodes to no fields: every field at its table default.
+/// Recognizing it lets a node's prelude be written and read as a fixed word.
+fn fieldless() -> &'static Manifest {
+    static FIELDLESS: std::sync::OnceLock<Manifest> = std::sync::OnceLock::new();
+    FIELDLESS.get_or_init(|| Manifest::decode(&[]).expect("no fields decode"))
+}
+
+/// Writes a tagged node's prelude into the empty `bytes`: its layout version,
+/// its kind, the manifest's fields and zero padding to the body.
+///
+/// Every node of a tree carries the same fields, so they are not encoded per
+/// node. Under a manifest with no fields the prelude is a fixed 16-byte word;
+/// otherwise the fields encoded for the previous node this thread wrote are
+/// reused when its manifest is the same, which it is for every node an edit
+/// writes after the first.
+fn write_prelude(bytes: &mut AlignedVec, manifest: &Manifest, index: bool) {
+    use std::cell::RefCell;
+    thread_local! {
+        static LAST: RefCell<Option<(Manifest, Vec<u8>)>> = const { RefCell::new(None) };
+    }
+
+    let kind = if index { INDEX_KIND } else { SEGMENT_KIND };
+    if manifest.is_fieldless() {
+        let mut word = [0u8; BODY_ALIGNMENT];
+        word[0] = TAGGED_LAYOUT as u8;
+        word[1] = kind as u8;
+        bytes.extend_from_slice(&word);
+        return;
+    }
+    LAST.with_borrow_mut(|last| {
+        if last.as_ref().is_none_or(|(known, _)| known != manifest) {
+            let mut fields = Vec::new();
+            manifest.encode(&mut fields);
+            *last = Some((manifest.clone(), fields));
+        }
+        let (_, fields) = last.as_ref().expect("just filled");
+        let mut preamble = Vec::with_capacity(4);
+        TAGGED_LAYOUT.encode(&mut preamble);
+        kind.encode(&mut preamble);
+        (fields.len() as u64).encode(&mut preamble);
+        let body = (preamble.len() + fields.len()).next_multiple_of(BODY_ALIGNMENT);
+        bytes.reserve(body);
+        bytes.extend_from_slice(&preamble);
+        bytes.extend_from_slice(fields);
+        bytes.resize(body, 0);
+    });
+}
+
+/// Decodes a node's manifest fields, remembering the result by their bytes.
+///
+/// Every node of a tree carries byte-identical fields, so after the first node
+/// of a tree this is one lookup; the default manifest (no fields) is never
+/// parsed at all. Bounded by clearing when full: every entry is cheap to
+/// recover.
+fn decode_manifest(fields: &[u8]) -> Result<Manifest, DialogSearchTreeError> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    const CAPACITY: usize = 1024;
+    static MEMO: OnceLock<Mutex<HashMap<Box<[u8]>, Manifest>>> = OnceLock::new();
+    thread_local! {
+        // The last fields this thread decoded: a run of reads nearly always
+        // stays within one tree, so this answers without a lock or a hash.
+        static LAST: RefCell<Option<(Box<[u8]>, Manifest)>> = const { RefCell::new(None) };
+    }
+
+    if fields.is_empty() {
+        return Ok(fieldless().clone());
+    }
+    let last = LAST.with_borrow(|last| {
+        last.as_ref()
+            .filter(|(bytes, _)| **bytes == *fields)
+            .map(|(_, manifest)| manifest.clone())
+    });
+    if let Some(manifest) = last {
+        return Ok(manifest);
+    }
+    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    let manifest = match memo.lock().ok().and_then(|memo| memo.get(fields).cloned()) {
+        Some(manifest) => manifest,
+        None => {
+            let manifest = Manifest::decode(fields)?;
+            if let Ok(mut memo) = memo.lock() {
+                if memo.len() >= CAPACITY {
+                    memo.clear();
+                }
+                memo.insert(fields.into(), manifest.clone());
+            }
+            manifest
+        }
+    };
+    LAST.set(Some((fields.into(), manifest.clone())));
+    Ok(manifest)
+}
+
+/// Seals a node body this crate built into its persistent (tagged) form.
+/// Validity is carried by the type: the rkyv body of a `PersistentNodeBody`'s
+/// index or segment is by construction a valid archive of that type, exactly
+/// what [`body`](PersistentNode::body) accesses unchecked, so no revalidation
+/// and no caller assertion are needed.
 impl<Key, Value> TryFrom<&PersistentNodeBody<Value>> for PersistentNode<Key, Value>
 where
     Key: self::Key,
@@ -320,10 +840,25 @@ where
     type Error = DialogSearchTreeError;
 
     fn try_from(body: &PersistentNodeBody<Value>) -> Result<Self, Self::Error> {
+        let (bytes, at) = body.encode()?;
+        // SAFETY: the bytes after `at` were just serialized from a typed
+        // index or segment, so they are a valid archive of it.
+        let archived = unsafe {
+            match &body.node {
+                NodeKind::Index(_) => {
+                    NodeBody::Index(rkyv::access_unchecked::<ArchivedIndex<Value>>(&bytes[at..]))
+                }
+                NodeKind::Segment(_) => NodeBody::Segment(rkyv::access_unchecked::<
+                    ArchivedSegment<Value>,
+                >(&bytes[at..])),
+            }
+        };
+        let root = root_of(&bytes, archived, false);
         Ok(Self {
-            buffer: Buffer::from(body.as_bytes()?),
+            buffer: Buffer::from(bytes),
             key: PhantomData,
             value: PhantomData,
+            root,
         })
     }
 }
@@ -519,8 +1054,9 @@ where
         Ok((count, layout, columns))
     }
 
-    /// The buffered weight this sealed buffer carries (key bytes plus value
-    /// payload weights, retracts charged at 16), for the byte-capped flush
+    /// The raw buffered weight this sealed buffer carries (key bytes plus
+    /// value payload weights, retracts charged at 16; the per-op overhead is
+    /// added from the manifest by the caller), for the byte-capped flush
     /// trigger: computed by streaming the key columns, with no entry
     /// materialization.
     pub fn weight<Key: self::Key>(&self) -> Result<usize, DialogSearchTreeError> {
@@ -535,7 +1071,6 @@ where
             .map(|value| value.payload_weight())
             .sum::<usize>();
         weight += 16 * self.polarity.iter().filter(|&&p| p == 0).count();
-        weight += crate::entry::ENTRY_ENCODING_OVERHEAD * self.count as usize;
         Ok(weight)
     }
 
@@ -779,10 +1314,6 @@ where
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedIndex)]
 pub struct PersistentIndex<Value> {
-    /// The tree's format header, carried by every node so any node hash is a
-    /// complete, self-describing tree root. Identical across a tree's nodes,
-    /// so structural sharing stores it once in practice.
-    pub header: Manifest,
     /// Longest common prefix of all child separators, stored once.
     pub prefix: Vec<u8>,
     /// Concatenated separator suffixes (each separator minus `prefix`), in
@@ -825,7 +1356,7 @@ impl<Value> PersistentIndex<Value> {
     /// The table layout is a pure function of the links: the prefix is the
     /// longest common prefix of the first and last separator (separators are
     /// sorted), so identical link lists yield identical bytes.
-    pub fn from_links(links: Vec<Link>, header: Manifest) -> Self {
+    pub fn from_links(links: Vec<Link>) -> Self {
         let prefix_length = match (links.first(), links.last()) {
             (Some(first), Some(last)) => common_prefix(&first.separator, &last.separator),
             _ => 0,
@@ -858,7 +1389,6 @@ impl<Value> PersistentIndex<Value> {
         }
 
         Self {
-            header,
             prefix,
             suffixes,
             ends,
@@ -889,10 +1419,6 @@ pub const MIXED_LAYOUT: u8 = u8::MAX;
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[rkyv(archived = ArchivedSegment)]
 pub struct PersistentSegment<Value> {
-    /// The tree's format header, carried by every node so any node hash is a
-    /// complete, self-describing tree root. Identical across a tree's nodes,
-    /// so structural sharing stores it once in practice.
-    pub header: Manifest,
     /// Number of entries in the segment.
     pub count: u32,
     /// The layout id shared by every key in this leaf (see
@@ -921,15 +1447,19 @@ where
     /// change; such leaves are rare (one per layout boundary in the tree).
     pub fn from_entries<Key: self::Key>(
         entries: Vec<Entry<Key, Value>>,
-        header: Manifest,
     ) -> Result<Self, DialogSearchTreeError> {
         let count = entries.len() as u32;
-        let first_layout = entries
-            .first()
-            .map(|entry| entry.key.layout())
-            .ok_or_else(|| {
-                DialogSearchTreeError::Node("Attempted to encode an empty segment".into())
-            })?;
+        let Some(first_layout) = entries.first().map(|entry| entry.key.layout()) else {
+            // The empty tree's node: the manifest with no entries (and, being
+            // a leaf, no children or novelty). This is the persisted form of
+            // an empty tree under every manifest — the format must survive
+            // emptiness, or a session reopening the tree would silently
+            // continue under the defaults (the manifest-continuity bug the
+            // adversarial soak caught). The encoding is fixed — opaque
+            // layout, one empty arena column — so every replica's empty tree
+            // under a given manifest is byte-identical.
+            return Ok(Self::empty());
+        };
         let uniform = entries
             .iter()
             .all(|entry| entry.key.layout() == first_layout);
@@ -959,35 +1489,107 @@ where
 
         let values = entries.into_iter().map(|entry| entry.value).collect();
         Ok(Self {
-            header,
             count,
             layout,
             columns,
             values,
         })
     }
+
+    /// The zero-entry segment: a tree node that carries the format manifest
+    /// and nothing else. It was the empty tree's persisted representation
+    /// before that became an index with no children (see
+    /// `persist_empty_root`), and still reads as an empty tree. The column set mirrors the [`MIXED_LAYOUT`] opaque schema
+    /// (one whole-key arena column, here empty) so decode paths see the
+    /// arity they expect.
+    pub fn empty() -> Self {
+        Self {
+            count: 0,
+            layout: MIXED_LAYOUT,
+            columns: vec![ColumnData::Arena {
+                prefix: Vec::new(),
+                stream: Vec::new(),
+            }],
+            values: Vec::new(),
+        }
+    }
 }
 
-/// The body of a tree node, either an index or a leaf segment.
+/// The body of a tree node, either an index or a leaf segment, together with
+/// the tree manifest it is stamped with.
 ///
 /// Load-bearing invariant: a `PersistentNodeBody` is only ever built from typed
 /// data (its constructors take entries, links, and buffers), never decoded from
 /// raw bytes. [`PersistentNode`]'s [`body`](PersistentNode::body) relies on this
 /// for the soundness of its unchecked archive access: because every body is a
-/// genuine typed value, `rkyv::to_bytes` of one is by construction a valid
-/// archive of `ArchivedNodeBody<Value>`, so the node sealed from it
+/// genuine typed value, the rkyv bytes of its index or segment are by
+/// construction a valid archive of that type, so the node sealed from it
 /// ([`TryFrom<&PersistentNodeBody<Value>>`](PersistentNode)) needs no
 /// revalidation. Do not add a constructor that builds a body from untrusted
 /// bytes; that would let a node be sealed around an unvalidated archive and make
 /// `body`'s `access_unchecked` unsound. Untrusted bytes must instead go through
 /// [`TryFrom<Buffer>`](PersistentNode), which validates.
-#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
-#[rkyv(archived = ArchivedNodeBody)]
-pub enum PersistentNodeBody<Value> {
-    /// An index node containing links to child nodes.
-    Index(PersistentIndex<Value>),
-    /// A leaf segment containing key-value entries.
+#[derive(Debug, Clone)]
+pub struct PersistentNodeBody<Value> {
+    manifest: Manifest,
+    node: NodeKind<Value>,
+}
+
+impl<Value: self::Value> NodeKind<Value> {
+    /// About how many bytes this node encodes to, prelude included: enough
+    /// that encoding it rarely reallocates, not so much that a cached node
+    /// holds much spare capacity.
+    fn size_hint(&self) -> usize {
+        const FIXED: usize = 96;
+        let columns = |columns: &[ColumnData]| -> usize {
+            columns
+                .iter()
+                .map(|column| match column {
+                    ColumnData::Arena { prefix, stream } => 16 + prefix.len() + stream.len(),
+                    ColumnData::Dictionary {
+                        table,
+                        table_ends,
+                        indices,
+                    } => 24 + table.len() + table_ends.len() + indices.len(),
+                })
+                .sum()
+        };
+        let values = |values: &[Value]| -> usize {
+            values.iter().map(|value| 8 + value.payload_weight()).sum()
+        };
+        // Content bytes under-count the archive (lengths, relative pointers,
+        // alignment, and value payloads beyond their weight estimate) by about
+        // a quarter; an estimate short of the real size costs a reallocation
+        // to the next power of two, one over it only the difference.
+        let content = match self {
+            NodeKind::Index(index) => {
+                index.prefix.len()
+                    + index.suffixes.len()
+                    + 4 * index.ends.len()
+                    + 32 * index.hashes.len()
+                    + std::mem::size_of::<Scale>() * index.scales.len()
+                    + index
+                        .novelty
+                        .iter()
+                        .map(|buffer| {
+                            32 + columns(&buffer.columns)
+                                + buffer.polarity.len()
+                                + values(&buffer.values)
+                        })
+                        .sum::<usize>()
+            }
+            NodeKind::Segment(segment) => columns(&segment.columns) + values(&segment.values),
+        };
+        FIXED + content + content / 3
+    }
+}
+
+/// The node a [`PersistentNodeBody`] holds. Only the index or segment itself
+/// is archived: a tagged node states its kind once, in the prelude.
+#[derive(Debug, Clone)]
+enum NodeKind<Value> {
     Segment(PersistentSegment<Value>),
+    Index(PersistentIndex<Value>),
 }
 
 impl<Value> PersistentNodeBody<Value>
@@ -997,13 +1599,37 @@ where
             Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
         >,
 {
-    /// Serializes this node body to bytes.
+    /// Encodes this body as a tagged node: its layout version, kind, header
+    /// length and manifest fields, zero padding to a 16-byte boundary, then
+    /// the rkyv body. Returns the bytes and the body's offset in them.
     ///
-    /// Returns the serializer's [`AlignedVec`] directly so the alignment
-    /// that in-place archive access depends on is preserved all the way
-    /// into the node [`Buffer`](crate::Buffer).
+    /// The bytes are the serializer's [`AlignedVec`], so the alignment that
+    /// in-place archive access depends on is preserved all the way into the
+    /// node [`Buffer`](crate::Buffer); the body is serialized straight after
+    /// the padding, at an aligned offset, with no copy.
+    pub fn encode(&self) -> Result<(AlignedVec, usize), DialogSearchTreeError> {
+        // Sized for the whole node up front: the prelude alone would be a
+        // 16-byte allocation that serialization immediately outgrows.
+        let mut bytes = AlignedVec::with_capacity(self.node.size_hint());
+        write_prelude(
+            &mut bytes,
+            &self.manifest,
+            matches!(self.node, NodeKind::Index(_)),
+        );
+        let body = bytes.len();
+        let bytes = match &self.node {
+            NodeKind::Index(index) => rkyv::api::high::to_bytes_in(index, bytes),
+            NodeKind::Segment(segment) => rkyv::api::high::to_bytes_in(segment, bytes),
+        }
+        .map_err(|error: rkyv::rancor::Error| {
+            DialogSearchTreeError::Encoding(format!("{error}"))
+        })?;
+        Ok((bytes, body))
+    }
+
+    /// Serializes this node body to its node bytes (see [`encode`](Self::encode)).
     pub fn as_bytes(&self) -> Result<AlignedVec, DialogSearchTreeError> {
-        rkyv::to_bytes(self).map_err(|error| DialogSearchTreeError::Encoding(format!("{error}")))
+        Ok(self.encode()?.0)
     }
 }
 
@@ -1012,7 +1638,7 @@ where
     Value: self::Value,
 {
     /// Builds an index node body from child links, stamping the tree's format
-    /// header.
+    /// manifest.
     ///
     /// `novelty` is the buffer of ops pending against this subtree, sorted by
     /// key; it is grouped per child link here (by the same rule routing and a
@@ -1022,17 +1648,17 @@ where
     pub fn index_from_links<Key>(
         links: Vec<Link>,
         novelty: Vec<NoveltyEntry<Value>>,
-        header: Manifest,
+        manifest: Manifest,
     ) -> Result<Self, DialogSearchTreeError>
     where
         Key: self::Key,
     {
         let buffers = group_novelty::<Key, Value>(&links, novelty)?;
-        Self::index_from_buffers(links, buffers, header)
+        Self::index_from_buffers(links, buffers, manifest)
     }
 
     /// Builds an index node body from child links and per-link novelty buffers
-    /// already in stored form, stamping the tree's format header.
+    /// already in stored form, stamping the tree's format manifest.
     ///
     /// This is the persist path for a transient index whose grouping happened
     /// at enqueue time: each buffer is either a sealed stored encoding reused
@@ -1041,7 +1667,7 @@ where
     pub fn index_from_buffers(
         links: Vec<Link>,
         buffers: Vec<NoveltyBuffer<Value>>,
-        header: Manifest,
+        manifest: Manifest,
     ) -> Result<Self, DialogSearchTreeError> {
         if links.is_empty() {
             return Err(DialogSearchTreeError::Node(
@@ -1055,29 +1681,163 @@ where
                     .is_none_or(|buffer| (buffer.child as usize) < links.len()),
             "novelty buffers must be in strictly ascending child order within the links"
         );
-        let mut index = PersistentIndex::from_links(links, header);
+        let mut index = PersistentIndex::from_links(links);
         index.novelty = buffers;
-        Ok(PersistentNodeBody::Index(index))
+        Ok(Self {
+            manifest,
+            node: NodeKind::Index(index),
+        })
+    }
+
+    /// Wraps a built index under the tree's format manifest.
+    pub fn from_index(index: PersistentIndex<Value>, manifest: Manifest) -> Self {
+        Self {
+            manifest,
+            node: NodeKind::Index(index),
+        }
+    }
+
+    /// Wraps a built segment under the tree's format manifest.
+    pub fn from_segment(segment: PersistentSegment<Value>, manifest: Manifest) -> Self {
+        Self {
+            manifest,
+            node: NodeKind::Segment(segment),
+        }
+    }
+
+    /// The segment this body holds, or `None` for an index.
+    #[cfg(test)]
+    pub(crate) fn into_segment(self) -> Option<PersistentSegment<Value>> {
+        match self.node {
+            NodeKind::Segment(segment) => Some(segment),
+            NodeKind::Index(_) => None,
+        }
     }
 
     /// Builds a leaf segment node body from entries, stamping the tree's
-    /// format header.
+    /// format manifest. Zero entries build the empty tree's node — the
+    /// manifest-carrying format marker (see [`PersistentSegment::empty`]),
+    /// legitimate only as the root of an empty tree, never interior.
     pub fn segment_from_entries<Key>(
         entries: Vec<Entry<Key, Value>>,
-        header: Manifest,
+        manifest: Manifest,
     ) -> Result<Self, DialogSearchTreeError>
     where
         Key: self::Key,
     {
-        if entries.is_empty() {
-            return Err(DialogSearchTreeError::Node(
-                "Attempted to create a segment from zero entries".into(),
-            ));
-        }
-        Ok(PersistentNodeBody::Segment(
-            PersistentSegment::from_entries(entries, header)?,
-        ))
+        Ok(Self {
+            manifest,
+            node: NodeKind::Segment(PersistentSegment::from_entries(entries)?),
+        })
     }
+}
+
+/// An index node as the legacy (untagged) layout archives it: the manifest as
+/// a fixed struct, then the index's fields inline. Read only; nothing writes
+/// it.
+///
+/// The fields repeat [`PersistentIndex`]'s, in order, rather than nesting it:
+/// a nested index would share its validation code with tagged nodes, and code
+/// with two callers is not inlined, which cost every tagged read. Archived
+/// structs are `repr(C)` and every field here aligns to 4, so the fields after
+/// the header are laid out exactly as an [`ArchivedIndex`], which is how a
+/// legacy node hands one out ([`ArchivedLegacyIndex::index`]). The layout is
+/// asserted at compile time below, and the legacy fixtures in
+/// `tests/legacy_nodes.rs` pin the bytes.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[rkyv(archived = ArchivedLegacyIndex)]
+pub struct LegacyIndex<Value> {
+    /// The tree's manifest in its legacy form.
+    pub header: LegacyManifest,
+    /// See [`PersistentIndex::prefix`].
+    pub prefix: Vec<u8>,
+    /// See [`PersistentIndex::suffixes`].
+    pub suffixes: Vec<u8>,
+    /// See [`PersistentIndex::ends`].
+    pub ends: Vec<u32>,
+    /// See [`PersistentIndex::hashes`].
+    pub hashes: Vec<Blake3Hash>,
+    /// See [`PersistentIndex::scales`].
+    pub scales: Vec<Scale>,
+    /// See [`PersistentIndex::novelty`].
+    pub novelty: Vec<NoveltyBuffer<Value>>,
+}
+
+/// A segment as the legacy (untagged) layout archives it: the manifest, then
+/// [`PersistentSegment`]'s fields inline. See [`LegacyIndex`] for why the
+/// fields repeat rather than nest.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[rkyv(archived = ArchivedLegacySegment)]
+pub struct LegacySegment<Value> {
+    /// The tree's manifest in its legacy form.
+    pub header: LegacyManifest,
+    /// See [`PersistentSegment::count`].
+    pub count: u32,
+    /// See [`PersistentSegment::layout`].
+    pub layout: u8,
+    /// See [`PersistentSegment::columns`].
+    pub columns: Vec<ColumnData>,
+    /// See [`PersistentSegment::values`].
+    pub values: Vec<Value>,
+}
+
+impl<Value: self::Value> ArchivedLegacyIndex<Value> {
+    /// The index this legacy node holds, read in place.
+    pub fn index(&self) -> &ArchivedIndex<Value> {
+        // SAFETY: from `prefix` on, this struct's fields are exactly
+        // `ArchivedIndex<Value>`'s, in order, at the same relative offsets
+        // (both `repr(C)`; asserted below), and `prefix` sits at an offset
+        // aligned for it. Relative pointers resolve from their own address,
+        // which is unchanged, and the whole struct was validated.
+        unsafe { &*std::ptr::from_ref(&self.prefix).cast::<ArchivedIndex<Value>>() }
+    }
+}
+
+impl<Value: self::Value> ArchivedLegacySegment<Value> {
+    /// The segment this legacy node holds, read in place.
+    pub fn segment(&self) -> &ArchivedSegment<Value> {
+        // SAFETY: as for `ArchivedLegacyIndex::index`, from `count` on.
+        unsafe { &*std::ptr::from_ref(&self.count).cast::<ArchivedSegment<Value>>() }
+    }
+}
+
+// The in-place views above rely on these layouts. Field types archive to the
+// same size and alignment whatever `Value` is (relative pointers and lengths),
+// so checking one instantiation checks them all.
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+    type Index = ArchivedIndex<Vec<u8>>;
+    type Legacy = ArchivedLegacyIndex<Vec<u8>>;
+    let base = offset_of!(Legacy, prefix);
+    assert!(base % align_of::<Index>() == 0);
+    assert!(offset_of!(Legacy, suffixes) == base + offset_of!(Index, suffixes));
+    assert!(offset_of!(Legacy, ends) == base + offset_of!(Index, ends));
+    assert!(offset_of!(Legacy, hashes) == base + offset_of!(Index, hashes));
+    assert!(offset_of!(Legacy, scales) == base + offset_of!(Index, scales));
+    assert!(offset_of!(Legacy, novelty) == base + offset_of!(Index, novelty));
+    assert!(offset_of!(Index, prefix) == 0);
+    assert!(size_of::<Legacy>() >= base + size_of::<Index>());
+
+    type Segment = ArchivedSegment<Vec<u8>>;
+    type LegacySeg = ArchivedLegacySegment<Vec<u8>>;
+    let base = offset_of!(LegacySeg, count);
+    assert!(base % align_of::<Segment>() == 0);
+    assert!(offset_of!(LegacySeg, layout) == base + offset_of!(Segment, layout));
+    assert!(offset_of!(LegacySeg, columns) == base + offset_of!(Segment, columns));
+    assert!(offset_of!(LegacySeg, values) == base + offset_of!(Segment, values));
+    assert!(offset_of!(Segment, count) == 0);
+    assert!(size_of::<LegacySeg>() >= base + size_of::<Segment>());
+};
+
+/// The root of a node in the legacy (untagged) layout: bare rkyv bytes with
+/// the manifest inlined. Read only; nothing writes it.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+#[rkyv(archived = ArchivedLegacyNodeBody)]
+pub enum LegacyNodeBody<Value> {
+    /// An index node.
+    Index(LegacyIndex<Value>),
+    /// A leaf segment.
+    Segment(LegacySegment<Value>),
 }
 
 /// The winning buffered op for `key` in a decoded (transient) buffer, or
@@ -1103,5 +1863,82 @@ pub fn resolve_pending<'a, Value>(
         Some(&novelty[last].op)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The prelude's kind byte decides which type the body is read as: a
+    /// segment whose kind byte is changed to an index's does not read as the
+    /// segment it holds.
+    #[test]
+    fn it_reads_the_body_as_the_kind_the_prelude_states() {
+        let good = segment_under(Manifest::default());
+        let node = PersistentNode::<[u8; 4], Vec<u8>>::try_from(good.clone()).expect("reads");
+        assert!(matches!(node.body(), NodeBody::Segment(_)));
+        assert_eq!(u64::from(good.as_ref()[1]), SEGMENT_KIND);
+        let mut bytes = rkyv::util::AlignedVec::<16>::new();
+        bytes.extend_from_slice(good.as_ref());
+        bytes[1] = INDEX_KIND as u8;
+        assert!(PersistentNode::<[u8; 4], Vec<u8>>::try_from(Buffer::from(bytes)).is_err());
+    }
+
+    fn segment_under(manifest: Manifest) -> Buffer {
+        let entries = (0u8..4)
+            .map(|i| Entry {
+                key: [i; 4],
+                value: vec![i; 8],
+            })
+            .collect();
+        let body: PersistentNodeBody<Vec<u8>> =
+            PersistentNodeBody::segment_from_entries::<[u8; 4]>(entries, manifest)
+                .expect("a segment encodes");
+        Buffer::from(body.as_bytes().expect("encodes"))
+    }
+
+    /// Nodes of trees under different non-default manifests, read alternately,
+    /// each report their own manifest: the remembered prelude of one tree
+    /// never stands in for another's.
+    #[test]
+    fn it_reads_alternating_non_default_manifests() {
+        let four = Manifest {
+            fanout_n: 4,
+            ..Manifest::default()
+        };
+        let five = Manifest {
+            fanout_n: 5,
+            ..Manifest::default()
+        };
+        let (a, b) = (segment_under(four.clone()), segment_under(five.clone()));
+        for _ in 0..3 {
+            for (buffer, manifest) in [(&a, &four), (&b, &five), (&b, &five), (&a, &four)] {
+                let node =
+                    PersistentNode::<[u8; 4], Vec<u8>>::try_from(buffer.clone()).expect("reads");
+                assert_eq!(&node.manifest().expect("has a manifest"), manifest);
+            }
+        }
+    }
+
+    /// A node whose prelude differs from the remembered one only in a padding
+    /// byte is refused, not accepted by the memo.
+    #[test]
+    fn it_refuses_a_remembered_prelude_with_nonzero_padding() {
+        let four = Manifest {
+            fanout_n: 4,
+            ..Manifest::default()
+        };
+        let good = segment_under(four);
+        PersistentNode::<[u8; 4], Vec<u8>>::try_from(good.clone()).expect("reads");
+        let mut bytes = rkyv::util::AlignedVec::<16>::new();
+        bytes.extend_from_slice(good.as_ref());
+        assert_eq!(
+            bytes[BODY_ALIGNMENT - 1],
+            0,
+            "the last prelude byte is padding"
+        );
+        bytes[BODY_ALIGNMENT - 1] = 1;
+        assert!(PersistentNode::<[u8; 4], Vec<u8>>::try_from(Buffer::from(bytes)).is_err());
     }
 }

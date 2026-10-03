@@ -5,6 +5,7 @@ use crate::{Bindings, Branch, BranchReference, Ephemeral, ResolveError};
 use dialog_artifacts::history::{CausalityCache, ContextCache};
 use dialog_artifacts::tree::spill_cache;
 use dialog_capability::Provider;
+use dialog_effects::branch::invalid_name;
 use dialog_effects::memory::Resolve;
 use dialog_query::concept::query::PlanCache;
 
@@ -23,23 +24,37 @@ impl From<BranchReference> for OpenBranch {
 
 impl OpenBranch {
     /// Execute the open operation.
+    ///
+    /// A name that is not a branch name (see
+    /// [`invalid_name`](dialog_effects::branch::invalid_name)) is refused
+    /// before any cell is touched: a store lays a branch's cells out under
+    /// its name, and a name such as `meta?x` or `x/../meta` would open
+    /// another branch's cells, however it got here.
     pub async fn perform<Env>(self, env: &Env) -> Result<Branch, ResolveError>
     where
         Env: Provider<Resolve>,
     {
+        if let Some(reason) = invalid_name(self.branch.name()) {
+            return Err(ResolveError::Storage(format!(
+                "{:?} is not a branch name: {reason}",
+                self.branch.name()
+            )));
+        }
+
         let revision = self.branch.revision();
         revision.resolve().perform(env).await?;
 
-        let upstream = self.branch.upstream();
-        upstream.resolve().perform(env).await?;
+        let tracking = self.branch.tracking();
+        tracking.resolve().perform(env).await?;
 
         let induction = self.branch.induction();
         induction.resolve().perform(env).await?;
 
         Ok(Branch {
+            writer: Branch::writer_of(&self.branch),
             reference: self.branch,
             revision,
-            upstream,
+            tracking,
             induction,
             node_cache: dialog_search_tree::Cache::new(),
             spill_cache: spill_cache(),
@@ -50,8 +65,11 @@ impl OpenBranch {
             record_cache: dialog_search_tree::Cache::new(),
             spine: dialog_artifacts::SpineSlot::new(),
             identity_cache: Arc::new(Mutex::new(None)),
-            overlay: Ephemeral::detached(),
+            metadata_cache: Arc::new(Mutex::new(None)),
+            layer_metadata_cache: Arc::new(Mutex::new(None)),
+            overlay: Ephemeral::default(),
             bindings: Bindings::default(),
+            answers: Arc::default(),
         })
     }
 }
@@ -92,6 +110,40 @@ mod tests {
         let branch = subject.branch("main").open().perform(&provider).await?;
 
         assert_eq!(branch.name(), "main");
+        Ok(())
+    }
+
+    /// A name that is not a branch name is refused on open and on
+    /// load, not only on create and delete: a store lays a branch's
+    /// cells out under its name, so `meta?x` or `x/../meta` would open
+    /// the registry's cells, and a name that was stored somewhere is no
+    /// more a name for having been stored.
+    #[dialog_common::test]
+    async fn it_refuses_to_open_a_name_that_is_not_a_branch_name() -> Result<()> {
+        use crate::{LoadBranchError, ResolveError};
+
+        let provider = Volatile::new();
+        let subject = Subject::from(did!("key:zBranchOpenBadName"));
+
+        for name in ["meta?x", "meta#x", "x/../meta", "mét@", ".meta", ""] {
+            let opened = subject.branch(name).open().perform(&provider).await;
+            assert!(
+                matches!(&opened, Err(ResolveError::Storage(reason)) if reason.contains("not a branch name")),
+                "opening {name:?}: {:?}",
+                opened.map(|branch| branch.name().to_string())
+            );
+
+            let loaded = subject.branch(name).load().perform(&provider).await;
+            assert!(
+                matches!(
+                    &loaded,
+                    Err(LoadBranchError::Resolve(ResolveError::Storage(reason)))
+                        if reason.contains("not a branch name")
+                ),
+                "loading {name:?}: {:?}",
+                loaded.map(|branch| branch.name().to_string())
+            );
+        }
         Ok(())
     }
 }

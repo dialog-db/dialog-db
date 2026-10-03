@@ -624,6 +624,8 @@ impl From<&[u8; 32]> for Pkcs8 {
 // ============================================================================
 
 impl ExtractableKey for SigningKey {
+    type Error = WebCryptoError;
+
     async fn generate() -> Result<Self, WebCryptoError> {
         // Same extractable-first flow as `SigningKey::generate`, but both the
         // signing key and the agreement key stay extractable.

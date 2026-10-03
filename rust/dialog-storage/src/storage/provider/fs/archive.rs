@@ -119,6 +119,7 @@ mod tests {
         let digest = Blake3Hash::hash(b"nonexistent");
 
         let result = subject
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -143,6 +144,7 @@ mod tests {
         // Put content
         let put_effect = subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(content.clone()));
@@ -151,6 +153,7 @@ mod tests {
 
         // Get content
         let result = subject
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -177,6 +180,7 @@ mod tests {
         // Store in different catalogs
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("catalog1")
             .put(Buffer::from(content1.clone()))
@@ -185,6 +189,7 @@ mod tests {
 
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("catalog2")
             .put(Buffer::from(content2.clone()))
@@ -194,6 +199,7 @@ mod tests {
         // Retrieve from catalog1
         let result1 = subject
             .clone()
+            .reader()
             .archive()
             .catalog("catalog1")
             .get(digest1)
@@ -204,6 +210,7 @@ mod tests {
         // Retrieve from catalog2
         let result2 = subject
             .clone()
+            .reader()
             .archive()
             .catalog("catalog2")
             .get(digest2.clone())
@@ -213,6 +220,7 @@ mod tests {
 
         // Cross-catalog lookup should return None
         let cross = subject
+            .reader()
             .archive()
             .catalog("catalog1")
             .get(digest2)
@@ -237,6 +245,7 @@ mod tests {
         // Put twice - should succeed both times
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(content.clone()))
@@ -245,6 +254,7 @@ mod tests {
 
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(content.clone()))
@@ -253,6 +263,7 @@ mod tests {
 
         // Should still be retrievable
         let result = subject
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -274,6 +285,7 @@ mod tests {
 
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(content.clone()))
@@ -281,6 +293,7 @@ mod tests {
             .await?;
 
         let result = subject
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -303,6 +316,7 @@ mod tests {
 
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .put(Buffer::from(content.clone()))
@@ -310,6 +324,7 @@ mod tests {
             .await?;
 
         let result = subject
+            .reader()
             .archive()
             .catalog("index")
             .get(digest)
@@ -335,6 +350,7 @@ mod tests {
 
         subject
             .clone()
+            .writer()
             .archive()
             .catalog("index")
             .import(blocks)
@@ -344,6 +360,7 @@ mod tests {
         for (i, digest) in digests.into_iter().enumerate() {
             let content = subject
                 .clone()
+                .reader()
                 .archive()
                 .catalog("index")
                 .get(digest)

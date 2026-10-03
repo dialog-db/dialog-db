@@ -358,11 +358,17 @@ impl<P: Protocol> Clone for Prove<P> {
     }
 }
 
-impl<P: Protocol> crate::Effect for Prove<P>
+impl<P: Protocol> crate::Policy for Prove<P>
 where
     P::Access: ConditionalSend + 'static,
 {
     type Of = Access;
+}
+
+impl<P: Protocol> crate::Effect for Prove<P>
+where
+    P::Access: ConditionalSend + 'static,
+{
     type Output = Result<P::Proof, AuthorizeError>;
 }
 
@@ -413,11 +419,17 @@ impl<P: Protocol> From<Authorize<P>> for Prove<P> {
     }
 }
 
-impl<P: Protocol> Effect for Authorize<P>
+impl<P: Protocol> crate::Policy for Authorize<P>
 where
     P::Access: ConditionalSend + 'static,
 {
     type Of = Access;
+}
+
+impl<P: Protocol> Effect for Authorize<P>
+where
+    P::Access: ConditionalSend + 'static,
+{
     type Output = Result<P::Authorization, AuthorizeError>;
 }
 
@@ -442,11 +454,17 @@ impl<P: Protocol> Retain<P> {
     }
 }
 
-impl<P: Protocol> crate::Effect for Retain<P>
+impl<P: Protocol> crate::Policy for Retain<P>
 where
     P::Delegation: ConditionalSend + 'static,
 {
     type Of = Access;
+}
+
+impl<P: Protocol> crate::Effect for Retain<P>
+where
+    P::Delegation: ConditionalSend + 'static,
+{
     type Output = Result<(), AuthorizeError>;
 }
 
@@ -473,11 +491,17 @@ impl<P: Protocol> Forget<P> {
     }
 }
 
-impl<P: Protocol> crate::Effect for Forget<P>
+impl<P: Protocol> crate::Policy for Forget<P>
 where
     P::Certificate: Serialize + for<'de> Deserialize<'de> + ConditionalSend + 'static,
 {
     type Of = Access;
+}
+
+impl<P: Protocol> crate::Effect for Forget<P>
+where
+    P::Certificate: Serialize + for<'de> Deserialize<'de> + ConditionalSend + 'static,
+{
     type Output = Result<(), AuthorizeError>;
 }
 
@@ -510,11 +534,17 @@ impl<P: Protocol> Default for Export<P> {
     }
 }
 
-impl<P: Protocol> crate::Effect for Export<P>
+impl<P: Protocol> crate::Policy for Export<P>
 where
     P::Certificate: 'static,
 {
     type Of = Access;
+}
+
+impl<P: Protocol> crate::Effect for Export<P>
+where
+    P::Certificate: 'static,
+{
     type Output = Result<Vec<P::Certificate>, AuthorizeError>;
 }
 

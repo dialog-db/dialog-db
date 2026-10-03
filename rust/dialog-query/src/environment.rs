@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::sync::Arc;
 
 /// The set of variable names that have been bound so far during query planning.
 ///
@@ -19,9 +20,14 @@ use std::fmt;
 /// variables must already be bound before it can execute. A premise becomes
 /// viable once its prerequisites are all satisfied (i.e. present in the
 /// planning environment).
+///
+/// The set is shared and copied on write: every step of a cached plan
+/// carries environments, and evaluating the plan clones it once per
+/// row that reaches it, where copying each set would allocate every
+/// name again.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Environment {
-    variables: HashSet<String>,
+    variables: Arc<HashSet<String>>,
 }
 
 impl Environment {
@@ -32,7 +38,10 @@ impl Environment {
 
     /// Adds a variable name to the bound set. Returns `&mut Self` for chaining.
     pub fn add(&mut self, name: impl Into<String>) -> &mut Self {
-        self.variables.insert(name.into());
+        let name = name.into();
+        if !self.variables.contains(&name) {
+            Arc::make_mut(&mut self.variables).insert(name);
+        }
         self
     }
 
@@ -43,7 +52,7 @@ impl Environment {
 
     /// Removes a variable name from the bound set. Returns true if it was present.
     pub fn remove(&mut self, name: &str) -> bool {
-        self.variables.remove(name)
+        self.variables.contains(name) && Arc::make_mut(&mut self.variables).remove(name)
     }
 
     /// Returns the number of bound variables.
@@ -60,11 +69,11 @@ impl Environment {
     /// delta (the set of names that were new to this environment).
     pub fn extend(&mut self, other: &Environment) -> Environment {
         let mut delta = Environment::new();
-        for name in &other.variables {
+        for name in other.variables.iter() {
             if !self.variables.contains(name) {
-                delta.variables.insert(name.clone());
+                delta.add(name.clone());
+                Arc::make_mut(&mut self.variables).insert(name.clone());
             }
-            self.variables.insert(name.clone());
         }
         delta
     }

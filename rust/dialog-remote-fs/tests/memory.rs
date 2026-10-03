@@ -10,6 +10,8 @@ mod helpers;
 
 use anyhow::Result;
 use dialog_common::Blake3Hash;
+use dialog_effects::MethodExt as _;
+use dialog_effects::UseExt as _;
 use dialog_effects::memory::prelude::*;
 use dialog_effects::memory::{MemoryError, Version};
 use helpers::{perform, setup};
@@ -24,6 +26,7 @@ async fn it_resolves_none_for_missing_cell() -> Result<()> {
     let result = perform(
         env.subject
             .clone()
+            .reader()
             .memory()
             .space("local")
             .cell("head")
@@ -44,6 +47,7 @@ async fn it_publishes_initial_content() -> Result<()> {
     let version = perform(
         env.subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -56,6 +60,7 @@ async fn it_publishes_initial_content() -> Result<()> {
     let resolved = perform(
         env.subject
             .clone()
+            .reader()
             .memory()
             .space("local")
             .cell("head")
@@ -76,6 +81,7 @@ async fn it_rejects_initial_publish_when_cell_exists() -> Result<()> {
     perform(
         env.subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -87,6 +93,7 @@ async fn it_rejects_initial_publish_when_cell_exists() -> Result<()> {
     let result = perform(
         env.subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -106,6 +113,7 @@ async fn it_updates_with_correct_ifmatch_version() -> Result<()> {
     let v1 = perform(
         env.subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -117,6 +125,7 @@ async fn it_updates_with_correct_ifmatch_version() -> Result<()> {
     let v2 = perform(
         env.subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -128,6 +137,7 @@ async fn it_updates_with_correct_ifmatch_version() -> Result<()> {
     let resolved = perform(
         env.subject
             .clone()
+            .reader()
             .memory()
             .space("local")
             .cell("head")
@@ -149,6 +159,7 @@ async fn it_rejects_update_with_wrong_ifmatch() -> Result<()> {
     perform(
         env.subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -160,6 +171,7 @@ async fn it_rejects_update_with_wrong_ifmatch() -> Result<()> {
     let result = perform(
         env.subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -179,6 +191,7 @@ async fn it_is_idempotent_when_republishing_same_content() -> Result<()> {
     let v1 = perform(
         env.subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -190,6 +203,7 @@ async fn it_is_idempotent_when_republishing_same_content() -> Result<()> {
     let v2 = perform(
         env.subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -208,6 +222,7 @@ async fn it_retracts_with_correct_version() -> Result<()> {
     let version = perform(
         env.subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -219,6 +234,8 @@ async fn it_retracts_with_correct_version() -> Result<()> {
     perform(
         env.subject
             .clone()
+            .user()
+            .delete()
             .memory()
             .space("local")
             .cell("head")
@@ -230,6 +247,7 @@ async fn it_retracts_with_correct_version() -> Result<()> {
     let resolved = perform(
         env.subject
             .clone()
+            .reader()
             .memory()
             .space("local")
             .cell("head")
@@ -249,6 +267,7 @@ async fn it_writes_byte_compatibly_with_a_direct_filesystem() -> Result<()> {
     perform(
         env.subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("head")
@@ -260,6 +279,7 @@ async fn it_writes_byte_compatibly_with_a_direct_filesystem() -> Result<()> {
     let resolved = env
         .subject
         .clone()
+        .reader()
         .memory()
         .space("local")
         .cell("head")
@@ -281,6 +301,7 @@ async fn it_writes_a_nested_cell_path() -> Result<()> {
     perform(
         env.subject
             .clone()
+            .writer()
             .memory()
             .space("local")
             .cell("branch/main")
@@ -292,6 +313,7 @@ async fn it_writes_a_nested_cell_path() -> Result<()> {
     let resolved = perform(
         env.subject
             .clone()
+            .reader()
             .memory()
             .space("local")
             .cell("branch/main")
@@ -312,6 +334,7 @@ async fn it_reads_byte_compatibly_from_a_direct_filesystem() -> Result<()> {
 
     env.subject
         .clone()
+        .writer()
         .memory()
         .space("local")
         .cell("head")
@@ -322,6 +345,7 @@ async fn it_reads_byte_compatibly_from_a_direct_filesystem() -> Result<()> {
     let resolved = perform(
         env.subject
             .clone()
+            .reader()
             .memory()
             .space("local")
             .cell("head")

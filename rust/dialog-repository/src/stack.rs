@@ -103,9 +103,9 @@ use dialog_artifacts::{
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::{Blake3Hash, ConditionalSync};
-use dialog_effects::archive::{Get, Import, Put};
-use dialog_effects::authority::{Attest, Identify};
-use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
+use dialog_effects::archive::{Get, Put};
+use dialog_effects::authority::Identify;
+use dialog_effects::blob::{Import as BlobImport, Read as BlobRead, Size as BlobSize};
 use dialog_effects::memory::{Publish, Resolve, Version as MemoryVersion};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
@@ -114,15 +114,50 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::placement::{Placements, Target};
-use crate::repository::branch::session::{Composite, QueryEnv, session_metadata};
+use crate::repository::branch::QueryLayer;
+use crate::repository::branch::registry::RegistryEnv;
+use crate::repository::branch::resolve::ResolveEnv;
+use crate::repository::branch::session::{Composite, QueryEnv};
 use crate::repository::branch::transaction::induce::{Witness, induce};
 use crate::repository::source::{Source, SourceRef};
 use crate::schema::DidExt as _;
 use crate::{
-    Branch, CommitError, Delta, Ephemeral, EphemeralError, EphemeralRevision, OpenEphemeral,
-    PullError, PushError, RemoteSite, ResolveError, Revision, Snapshot, Subscription,
-    TransactionBatch,
+    Branch, CommitError, Delta, Ephemeral, EphemeralError, EphemeralRevision, PullError, PushError,
+    RemoteSite, ResolveError, Revision, Snapshot, Subscription, TransactionBatch,
 };
+use dialog_common::Holds;
+
+/// The environment a stack's reads and writes run against: every
+/// effect a branch commit, publish or registry read needs, plus the
+/// handles the environment holds (the ephemeral registry among them).
+pub trait StackEnv: RegistryEnv + Provider<BlobSize> {}
+
+impl<T> StackEnv for T where T: RegistryEnv + Provider<BlobSize> {}
+
+/// The environment a stack's [`pull`](Stack::pull) and
+/// [`push`](Stack::push) run against: a branch pull's, plus the forks
+/// a branch push makes to a peer.
+pub trait StackSyncEnv:
+    StackEnv
+    + ResolveEnv
+    + Provider<Fork<RemoteSite, Get>>
+    + Provider<Fork<RemoteSite, Put>>
+    + Provider<Fork<RemoteSite, Publish>>
+    + Provider<Fork<RemoteSite, BlobImport>>
+    + Provider<Fork<RemoteSite, BlobRead>>
+{
+}
+
+impl<T> StackSyncEnv for T where
+    T: StackEnv
+        + ResolveEnv
+        + Provider<Fork<RemoteSite, Get>>
+        + Provider<Fork<RemoteSite, Put>>
+        + Provider<Fork<RemoteSite, Publish>>
+        + Provider<Fork<RemoteSite, BlobImport>>
+        + Provider<Fork<RemoteSite, BlobRead>>
+{
+}
 
 /// Who can read a layer: the set of principals its facts reach.
 /// Ordered by inclusion, narrowest first.
@@ -239,7 +274,9 @@ impl Head {
     fn bytes(&self) -> Vec<u8> {
         match self {
             Head::Tree(Some(revision)) => revision.tree.hash().to_vec(),
-            Head::Tree(None) => crate::EMPTY_TREE_HASH.to_vec(),
+            // A branch captured before its first commit has no tree:
+            // no bytes, which no tree hash can collide with.
+            Head::Tree(None) => Vec::new(),
             Head::Ephemeral(revision) => revision.hash.as_bytes().to_vec(),
         }
     }
@@ -261,7 +298,7 @@ impl Layer {
     /// Who can read this layer.
     pub fn audience(&self) -> Audience {
         match self {
-            Layer::Branch(branch) if branch.upstream().is_some() => Audience::Peers,
+            Layer::Branch(branch) if !branch.upstreams().is_empty() => Audience::Peers,
             Layer::Branch(_) | Layer::Snapshot(_) => Audience::Device,
             Layer::Ephemeral(_) => Audience::Process,
         }
@@ -761,21 +798,7 @@ impl OpenStack {
     /// wiring in one commit published bottom to top.
     pub async fn perform<Env>(self, env: &Env) -> Result<Stack, StackError>
     where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Import>
-            + Provider<Resolve>
-            + Provider<Publish>
-            + Provider<Identify>
-            + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<crate::Hydrate>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<dialog_artifacts::Speculation>
-            + Provider<OpenEphemeral>
-            + ConditionalSync
-            + 'static,
+        Env: StackSyncEnv,
     {
         let topology = walk(self.top, env).await?;
         let stack = Stack::from_topology(topology);
@@ -791,14 +814,7 @@ impl OpenStack {
 /// Read every link `layer` holds, in declaration order.
 async fn recorded_links<Env>(layer: &Layer, env: &Env) -> Result<Vec<Recorded>, StackError>
 where
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + Provider<crate::Hydrate>
-        + ConditionalSync
-        + 'static,
+    Env: StackEnv,
 {
     let address = layer.address_entity();
     let from = ArtifactSelector::new()
@@ -877,14 +893,7 @@ async fn held<Env>(
     env: &Env,
 ) -> Result<Vec<Artifact>, StackError>
 where
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + Provider<crate::Hydrate>
-        + ConditionalSync
-        + 'static,
+    Env: StackEnv,
 {
     use futures_util::{StreamExt as _, TryStreamExt as _};
     let source = match layer {
@@ -906,7 +915,7 @@ where
 /// Resolve the layer a link's address names, through the environment.
 async fn resolve_layer<Env>(link: &Recorded, env: &Env) -> Result<Layer, StackError>
 where
-    Env: Provider<Resolve> + Provider<OpenEphemeral> + ConditionalSync,
+    Env: Provider<Resolve> + Holds + ConditionalSync,
 {
     use crate::RepositoryMemoryExt as _;
     use dialog_capability::{Did, Subject};
@@ -963,15 +972,7 @@ type Expanded = (Layer, Vec<Edge>);
 /// recorded identity is the identity of the shape found beneath it.
 async fn walk<Env>(top: Layer, env: &Env) -> Result<Topology, StackError>
 where
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Get>>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + Provider<crate::Hydrate>
-        + Provider<OpenEphemeral>
-        + ConditionalSync
-        + 'static,
+    Env: StackEnv,
 {
     // Expand every reachable layer once, keyed by address; each keeps
     // the addresses its links name, in recorded order.
@@ -1243,22 +1244,11 @@ impl Stack {
     /// pull; `advance` captures it alone.
     pub async fn pull<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
     where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Import>
-            + Provider<Resolve>
-            + Provider<Publish>
-            + Provider<Identify>
-            + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<crate::Hydrate>
-            + ConditionalSync
-            + 'static,
+        Env: StackSyncEnv,
     {
         for layer in self.layers() {
             if let Layer::Branch(branch) = &layer
-                && branch.upstream().is_some()
+                && !branch.upstreams().is_empty()
             {
                 branch.refresh(env).await?;
                 Box::pin(branch.pull().perform(env)).await?;
@@ -1284,18 +1274,7 @@ impl Stack {
     /// ever move through it never needs one.
     pub async fn advance<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
     where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Import>
-            + Provider<Resolve>
-            + Provider<Publish>
-            + Provider<Identify>
-            + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<crate::Hydrate>
-            + ConditionalSync
-            + 'static,
+        Env: StackSyncEnv,
     {
         let topology = self.topology();
         for layer in &topology.layers {
@@ -1311,8 +1290,15 @@ impl Stack {
             state.versions = versions_of(&topology.layers);
             state.staged = topology.layers.iter().map(|_| None).collect();
         }
-        self.capture(&topology, BTreeMap::new(), live, &previous, env)
-            .await?;
+        self.capture(
+            &topology,
+            BTreeMap::new(),
+            &Upkeep::new(),
+            live,
+            &previous,
+            env,
+        )
+        .await?;
         self.publish(env).await
     }
 
@@ -1322,24 +1308,11 @@ impl Stack {
     /// commits are not pushed until [`publish`](Self::publish)ed.
     pub async fn push<Env>(&self, env: &Env) -> Result<(), StackError>
     where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<Publish>
-            + Provider<BlobRead>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Put>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<Fork<RemoteSite, Publish>>
-            + Provider<Fork<RemoteSite, BlobImport>>
-            + Provider<Fork<RemoteSite, BlobRead>>
-            + Provider<crate::Hydrate>
-            + ConditionalSync
-            + 'static,
+        Env: StackSyncEnv,
     {
         for layer in self.layers() {
             if let Layer::Branch(branch) = &layer
-                && branch.upstream().is_some()
+                && !branch.upstreams().is_empty()
             {
                 Box::pin(branch.push().perform(env)).await?;
             }
@@ -1419,7 +1392,9 @@ impl Stack {
                 Layer::Branch(branch)
                     if index == top && self.state.read().staged[index].is_none() =>
                 {
-                    composite.sources.push(Source::Branch(branch.clone()))
+                    composite
+                        .sources
+                        .push(Source::Branch(Arc::new(branch.clone())))
                 }
                 Layer::Branch(branch) => {
                     let revision = match heads.get(index) {
@@ -1428,11 +1403,11 @@ impl Stack {
                     };
                     composite
                         .sources
-                        .push(Source::Pinned(branch.clone(), revision))
+                        .push(Source::Pinned(Arc::new(branch.clone()), revision))
                 }
-                Layer::Snapshot(snapshot) => {
-                    composite.sources.push(Source::Snapshot(snapshot.clone()))
-                }
+                Layer::Snapshot(snapshot) => composite
+                    .sources
+                    .push(Source::Snapshot(Arc::new(snapshot.clone()))),
                 Layer::Ephemeral(ephemeral) => composite.ephemerals.push(ephemeral.clone()),
             }
         }
@@ -1457,7 +1432,6 @@ impl Stack {
             changes: Changes::new(),
             transients: Changes::new(),
             edits: Vec::new(),
-            into: BTreeMap::new(),
             stores: Vec::new(),
         }
     }
@@ -1465,31 +1439,23 @@ impl Stack {
     /// Stage `batch` on layer `index` on top of `heads[index]`, with
     /// its links at `heads`. A branch layer extends its staged chain
     /// (or opens one on its published head); an ephemeral layer is
-    /// written directly. A layer with nothing to write and no links
-    /// is left alone; one whose link facts already hold stages a
-    /// no-op and keeps its head.
+    /// written directly, its `maintenance` (clear, forget) landing in
+    /// the same instant as the batch. A layer with nothing to write,
+    /// no maintenance and no links is left alone; one whose link facts
+    /// already hold stages a no-op and keeps its head.
     async fn refresh_links<Env>(
         &self,
         topology: &Topology,
         index: usize,
         heads: &[Head],
         mut batch: Changes,
+        maintenance: Option<&(bool, HashSet<Entity>)>,
         env: &Env,
     ) -> Result<Option<Head>, CommitError>
     where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Import>
-            + Provider<Resolve>
-            + Provider<Identify>
-            + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<crate::Hydrate>
-            + ConditionalSync
-            + 'static,
+        Env: StackEnv,
     {
-        if batch.is_empty() && topology.links[index].is_empty() {
+        if batch.is_empty() && maintenance.is_none() && topology.links[index].is_empty() {
             return Ok(None);
         }
         topology.link_facts(index, heads, &mut batch);
@@ -1526,7 +1492,15 @@ impl Stack {
                 Ok(Some(Head::Tree(Some(tip))))
             }
             Layer::Ephemeral(ephemeral) => {
-                ephemeral.apply(batch);
+                match maintenance {
+                    // Maintenance clears user state while the stack keeps
+                    // its wiring, re-stamped by the link facts above, and
+                    // the layer's share of the commit lands with it.
+                    Some((clear, forgotten)) => ephemeral.maintain(batch, *clear, forgotten),
+                    None => {
+                        ephemeral.apply(batch)?;
+                    }
+                }
                 let head = Head::Ephemeral(ephemeral.revision());
                 self.state.write().published[index] = head.clone();
                 Ok(Some(head))
@@ -1547,22 +1521,13 @@ impl Stack {
         &self,
         topology: &Topology,
         mut batches: BTreeMap<usize, Changes>,
+        upkeep: &Upkeep,
         mut heads: Vec<Head>,
         previous: &[Head],
         env: &Env,
     ) -> Result<Vec<Head>, CommitError>
     where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Import>
-            + Provider<Resolve>
-            + Provider<Identify>
-            + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<crate::Hydrate>
-            + ConditionalSync
-            + 'static,
+        Env: StackEnv,
     {
         let mut moved: Vec<bool> = heads
             .iter()
@@ -1571,11 +1536,12 @@ impl Stack {
             .collect();
         for index in 0..topology.layers.len() {
             let batch = batches.remove(&index).unwrap_or_default();
-            if batch.is_empty() && !topology.reaches_moved(index, &moved) {
+            let maintenance = upkeep.get(&index);
+            if batch.is_empty() && maintenance.is_none() && !topology.reaches_moved(index, &moved) {
                 continue;
             }
             if let Some(head) = self
-                .refresh_links(topology, index, &heads, batch, env)
+                .refresh_links(topology, index, &heads, batch, maintenance, env)
                 .await?
             {
                 if heads[index] != head {
@@ -1774,12 +1740,15 @@ pub struct StackTransaction<'a> {
     changes: Changes,
     transients: Changes,
     edits: Vec<LinkEdit>,
-    /// Facts bound for a named scope regardless of their attributes'
-    /// placements, by scope.
-    into: BTreeMap<Entity, Changes>,
     /// Maintenance of the ephemeral layers under a scope, in order.
     stores: Vec<(Entity, Maintenance)>,
 }
+
+/// The maintenance a commit applies per layer, by index: whether to
+/// clear the layer, and the entities to forget. Applied in the same
+/// instant as the layer's share of the commit, so readers and
+/// observers never see an entity between forget and its re-stamp.
+type Upkeep = BTreeMap<usize, (bool, HashSet<Entity>)>;
 
 /// What a transaction does to the ephemeral layers under a scope,
 /// besides writing facts.
@@ -1808,23 +1777,6 @@ impl<'a> StackTransaction<'a> {
     /// commit's induction, never written anywhere.
     pub fn dispatch<C: Statement>(mut self, claim: C) -> Self {
         claim.assert(&mut self.transients);
-        self
-    }
-
-    /// Assert a claim into the layers linked under `scope`, whatever
-    /// its attributes' placements say. The explicit form of placement,
-    /// for a writer that knows where a fact belongs when the schema
-    /// does not say: session facts a process keeps for itself. Induction
-    /// does not see these facts; they are written as given.
-    pub fn assert_into<C: Statement>(mut self, scope: Entity, claim: C) -> Self {
-        claim.assert(self.into.entry(scope).or_default());
-        self
-    }
-
-    /// Retract a claim from the layers linked under `scope`; see
-    /// [`assert_into`](Self::assert_into).
-    pub fn retract_from<C: Statement>(mut self, scope: Entity, claim: C) -> Self {
-        claim.retract(self.into.entry(scope).or_default());
         self
     }
 
@@ -1882,7 +1834,6 @@ impl<'a> StackTransaction<'a> {
             changes: self.changes,
             transients: self.transients,
             edits: self.edits,
-            into: self.into,
             stores: self.stores,
         }
     }
@@ -1894,7 +1845,6 @@ pub struct StackCommit<'a> {
     changes: Changes,
     transients: Changes,
     edits: Vec<LinkEdit>,
-    into: BTreeMap<Entity, Changes>,
     stores: Vec<(Entity, Maintenance)>,
 }
 
@@ -1911,19 +1861,7 @@ impl<'a> StackCommit<'a> {
     /// afterwards, bottom first.
     pub async fn perform<Env>(self, env: &Env) -> Result<Vec<Head>, StackError>
     where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Import>
-            + Provider<Resolve>
-            + Provider<Identify>
-            + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<dialog_artifacts::Speculation>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<crate::Hydrate>
-            + ConditionalSync
-            + 'static,
+        Env: StackEnv,
     {
         let stack = self.stack;
         let mut batches: BTreeMap<usize, Changes> = BTreeMap::new();
@@ -1954,7 +1892,7 @@ impl<'a> StackCommit<'a> {
         let topology = stack.topology();
 
         // Resolve and validate every explicit scope before touching any store.
-        let mut maintenance: BTreeMap<usize, (bool, HashSet<Entity>)> = BTreeMap::new();
+        let mut maintenance = Upkeep::new();
         for (scope, operation) in self.stores {
             let Some(indices) = topology.bound.get(&scope) else {
                 return Err(StackError::UnboundScope { scope });
@@ -1970,38 +1908,21 @@ impl<'a> StackCommit<'a> {
                 }
             }
         }
-        // Facts placed by the writer land where the scope's links say,
-        // untouched by induction or the declarations.
-        for (scope, changes) in self.into {
-            let Some(indices) = topology.bound.get(&scope) else {
-                return Err(StackError::UnboundScope { scope });
-            };
-            for instruction in changes.into_instructions() {
-                let (op, artifact) = split(instruction);
-                for index in indices {
-                    apply(batches.entry(*index).or_default(), op, artifact.clone());
-                }
-            }
-        }
-        // Maintenance and explicitly placed replacement facts land together:
-        // readers and observers never see an entity between forget and assert.
-        for (index, (clear, forgotten)) in maintenance {
-            let Layer::Ephemeral(ephemeral) = &topology.layers[index] else {
-                unreachable!("maintenance targets were validated above");
-            };
-            let mut batch = batches.remove(&index).unwrap_or_default();
-            // Scope maintenance clears user state, while the stack retains
-            // its declared wiring. Re-stamp it in the same atomic instant.
-            topology.link_facts(index, &stack.captured(), &mut batch);
-            ephemeral.maintain(batch, clear, &forgotten);
-            stack.state.write().published[index] = Head::Ephemeral(ephemeral.revision());
-        }
-        // Maintenance moved ephemeral heads: re-read what the stack reads at.
         let captured = stack.captured();
 
         if self.changes.is_empty() && self.transients.is_empty() && !rewired {
+            // Maintenance alone: each store's lands as one instant, its
+            // wiring re-stamped, through the same staging pass a write
+            // takes.
             return Ok(stack
-                .capture(&topology, batches, captured.clone(), &previous, env)
+                .capture(
+                    &topology,
+                    batches,
+                    &maintenance,
+                    captured.clone(),
+                    &previous,
+                    env,
+                )
                 .await?);
         }
         let Some(primary) = stack.primary() else {
@@ -2072,8 +1993,18 @@ impl<'a> StackCommit<'a> {
             }
         }
 
+        // Maintenance lands with each layer's share of the settled batch:
+        // readers and observers never see an entity between forget and
+        // its re-stamp.
         Ok(stack
-            .capture(&topology, batches, captured.clone(), &previous, env)
+            .capture(
+                &topology,
+                batches,
+                &maintenance,
+                captured.clone(),
+                &previous,
+                env,
+            )
             .await?)
     }
 }
@@ -2088,20 +2019,7 @@ impl StackPublish<'_> {
     /// to top. Returns the heads the stack reads at afterwards.
     pub async fn perform<Env>(self, env: &Env) -> Result<Vec<Head>, StackError>
     where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Import>
-            + Provider<Resolve>
-            + Provider<Publish>
-            + Provider<Identify>
-            + Provider<Attest>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<dialog_artifacts::Speculation>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<crate::Hydrate>
-            + ConditionalSync
-            + 'static,
+        Env: StackSyncEnv,
     {
         let stack = self.commit.stack;
         self.commit.perform(env).await?;
@@ -2156,16 +2074,7 @@ impl<Q: Application> StackSelect<Q> {
     /// Execute the query, returning a stream of results.
     pub fn perform<'a, Env>(self, env: &'a Env) -> impl Output<Q::Conclusion> + 'a
     where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<crate::Hydrate>
-            + ConditionalSync
-            + 'static,
+        Env: StackEnv,
     {
         let StackSelect {
             composite,
@@ -2177,10 +2086,12 @@ impl<Q: Application> StackSelect<Q> {
                 .perform(env)
                 .await
                 .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
-            let mut overlay = changes;
-            session_metadata(composite.sources.iter().map(Source::as_ref), &operator)
-                .assert(&mut overlay);
-            let query_env = QueryEnv::new(composite, overlay, env);
+            let mut layer = QueryLayer::new();
+            for source in &composite.sources {
+                layer = layer.join(QueryLayer::from(source.as_ref()));
+            }
+            let overlay = layer.with(changes).overlay(&operator);
+            let query_env = QueryEnv::over(composite.clone(), overlay, env);
             let results = Box::pin(query.perform(&query_env));
             for await result in results {
                 yield result?;
@@ -2210,17 +2121,7 @@ where
         env: &'a Env,
     ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError>
     where
-        Env: Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<Identify>
-            + Provider<Fork<RemoteSite, Get>>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<dialog_artifacts::Speculation>
-            + Provider<dialog_artifacts::Preload>
-            + Provider<crate::Hydrate>
-            + ConditionalSync
-            + 'static,
+        Env: StackEnv,
     {
         self.inner.retarget(self.stack.composite());
         self.inner.poll(env).await
@@ -2279,16 +2180,16 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::helpers::TestEnv;
+    use crate::Placement;
     use crate::helpers::test_repo;
     use crate::{Demand, Drained};
-    use crate::{Placement, RemoteSite};
     use anyhow::Result;
     use dialog_artifacts::{ArtifactSelector, Value};
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::The;
     use dialog_query::types::Scalar;
     use dialog_query::{AttributeQuery, Term};
+    use dialog_search_tree::Manifest;
     use futures_util::TryStreamExt as _;
 
     fn name(name: &str) -> Entity {
@@ -2298,19 +2199,7 @@ mod tests {
     /// The values a `(the, of)` pair holds in a stack's composite read.
     async fn values<V: Scalar>(
         stack: &Stack,
-        env: &(
-             impl Provider<Get>
-             + Provider<Put>
-             + Provider<Resolve>
-             + Provider<Identify>
-             + Provider<crate::Hydrate>
-             + Provider<dialog_artifacts::Preload>
-             + Provider<dialog_artifacts::Speculation>
-             + Provider<Fork<RemoteSite, Get>>
-             + Provider<Fork<RemoteSite, Resolve>>
-             + ConditionalSync
-             + 'static
-         ),
+        env: &impl StackEnv,
         the: &str,
         of: &Entity,
     ) -> Result<Vec<Value>> {
@@ -2326,16 +2215,7 @@ mod tests {
     /// The values a `(the, of)` pair holds in a branch's tree only.
     async fn committed(
         branch: &Branch,
-        env: &(
-             impl Provider<Get>
-             + Provider<Put>
-             + Provider<Resolve>
-             + Provider<crate::Hydrate>
-             + Provider<Fork<RemoteSite, Get>>
-             + Provider<Fork<RemoteSite, Resolve>>
-             + ConditionalSync
-             + 'static
-         ),
+        env: &impl StackEnv,
         the: &str,
         of: &Entity,
     ) -> Result<Vec<Value>> {
@@ -2356,9 +2236,8 @@ mod tests {
     /// subscription over the stack maintains the state half.
     #[dialog_common::test]
     async fn it_routes_by_name_across_lines() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
 
@@ -2459,9 +2338,8 @@ mod tests {
     /// link on the branch above it in the same commit.
     #[dialog_common::test]
     async fn it_records_links_and_refreshes_them_when_the_target_moves() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
 
@@ -2569,9 +2447,8 @@ mod tests {
     /// never moves. Topology chooses what is captured.
     #[dialog_common::test]
     async fn it_refreshes_only_the_lines_above_a_moved_one() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
@@ -2620,9 +2497,8 @@ mod tests {
     /// that moves shared refreshes local's link in the same commit.
     #[dialog_common::test]
     async fn it_keeps_wiring_where_it_is_made() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
@@ -2690,9 +2566,8 @@ mod tests {
     /// pulls, and then the top's wiring names the new head.
     #[dialog_common::test]
     async fn it_reads_at_captured_heads_until_pulled() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
 
@@ -2747,9 +2622,8 @@ mod tests {
     /// reports it as a delta.
     #[dialog_common::test]
     async fn it_lands_external_movement_on_pull() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
 
         let top = Ephemeral::create().perform(&operator).await;
@@ -2803,9 +2677,8 @@ mod tests {
     /// re-resolves the head from storage and then captures.
     #[dialog_common::test]
     async fn it_notices_movement_through_another_handle_on_pull() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let other = repo.branch("main").open().perform(&operator).await?;
 
@@ -2853,9 +2726,8 @@ mod tests {
     /// captures it, exactly as `pull` does after its upstream pulls.
     #[dialog_common::test]
     async fn it_captures_movement_through_another_handle_on_advance() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let other = repo.branch("main").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
@@ -2912,9 +2784,8 @@ mod tests {
     /// handle's commit.
     #[dialog_common::test]
     async fn it_fails_a_stale_publish_and_recovers_on_pull() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let other = repo.branch("main").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
@@ -2999,9 +2870,8 @@ mod tests {
     /// a second commit chains onto it; one publish makes both visible.
     #[dialog_common::test]
     async fn it_stages_commits_and_publishes_the_chain() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
 
         let top = Ephemeral::create().perform(&operator).await;
@@ -3072,9 +2942,8 @@ mod tests {
     /// the movement in and the write is re-run.
     #[dialog_common::test]
     async fn it_stages_on_captured_heads_and_publishes_against_them() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
@@ -3197,9 +3066,8 @@ mod tests {
     /// does not stop a write routed only to state.
     #[dialog_common::test]
     async fn it_leaves_a_moved_line_alone_when_the_write_misses_it() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
@@ -3258,9 +3126,8 @@ mod tests {
     /// link an ephemeral store beneath it.
     #[dialog_common::test]
     async fn it_rejects_an_audience_violation() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
 
@@ -3285,9 +3152,8 @@ mod tests {
     /// A failed wiring batch preserves its original shape and staged data.
     #[dialog_common::test]
     async fn it_preserves_a_stack_after_rejected_wiring() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
         let top = Ephemeral::create().perform(&operator).await;
@@ -3335,9 +3201,8 @@ mod tests {
     /// A link must name a layer already beneath the linking one.
     #[dialog_common::test]
     async fn it_rejects_a_link_to_an_unknown_line() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let elsewhere = Ephemeral::create().perform(&operator).await;
 
@@ -3358,9 +3223,8 @@ mod tests {
     /// encloser's identity but not the enclosed layer's.
     #[dialog_common::test]
     async fn it_derives_identities_from_shape() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
 
@@ -3393,9 +3257,8 @@ mod tests {
     /// both layers, and the composite read dedups the fact.
     #[dialog_common::test]
     async fn it_fans_out_a_name_bound_twice() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let (left, right) = (
             Ephemeral::create().perform(&operator).await,
@@ -3443,8 +3306,7 @@ mod tests {
     /// declarations or undeclared attributes to go: read-only.
     #[dialog_common::test]
     async fn it_refuses_to_transact_without_a_branch_bottom() -> Result<()> {
-        let (operator, _profile) = test_operator_with_profile().await;
-        let operator = TestEnv::new(operator);
+        let (operator, _peer) = test_session_with_peer().await;
         let top = Ephemeral::create().perform(&operator).await;
         let stack = Stack::open(top.clone()).perform(&operator).await?;
         let doc: Entity = "doc:1".parse()?;
@@ -3513,9 +3375,8 @@ mod tests {
     /// bottom, where the counter lives.
     #[dialog_common::test]
     async fn it_fires_a_rule_committed_on_an_upper_layer() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let local = repo.branch("main.local").open().perform(&operator).await?;
 
@@ -3573,9 +3434,8 @@ mod tests {
     /// part of the slice dispatch discovers rules in.
     #[dialog_common::test]
     async fn it_fires_a_rule_held_in_an_ephemeral_layer() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
 
@@ -3594,7 +3454,7 @@ mod tests {
         shared.refresh(&operator).await?;
         let mut rule = Changes::new();
         increment_rule().assert(&mut rule);
-        state.apply(rule);
+        state.apply(rule).unwrap();
 
         let stack = Stack::open(state.clone())
             .link(&state, &shared, name("shared"))
@@ -3628,9 +3488,8 @@ mod tests {
     /// rule it fires still lands its conclusion by placement.
     #[dialog_common::test]
     async fn it_witnesses_a_placed_transient_on_its_layer() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
 
@@ -3662,7 +3521,10 @@ mod tests {
 
         let commands = || {
             let demand = Demand::new();
-            demand.record(&ArtifactSelector::new().the("cmd.increment/counter".parse().unwrap()));
+            demand.record(
+                &ArtifactSelector::new().the("cmd.increment/counter".parse().unwrap()),
+                &Manifest::default(),
+            );
             demand
         };
         let on_state = state.observe(commands());
@@ -3717,9 +3579,8 @@ mod tests {
     /// carries the identities the links recorded.
     #[dialog_common::test]
     async fn it_reopens_a_stack_from_its_top_layer() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
         let tab = Ephemeral::create().perform(&operator).await;
@@ -3770,9 +3631,8 @@ mod tests {
     /// the encloser's identity changes with its shape.
     #[dialog_common::test]
     async fn it_swaps_a_linked_branch_by_unlinking_and_linking() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let main = repo.branch("main").open().perform(&operator).await?;
         let seed_v1 = repo.branch("seed.v1").open().perform(&operator).await?;
         let seed_v2 = repo.branch("seed.v2").open().perform(&operator).await?;
@@ -3856,15 +3716,14 @@ mod tests {
         Ok(())
     }
 
-    /// A writer that knows where a fact belongs says so: `assert_into`
-    /// lands it under the scope regardless of placements, `forget`
-    /// drops an entity's facts from the scope's layer, `clear` empties
-    /// it, and none of it touches the tree.
+    /// Placement says where a fact belongs: a declared attribute lands
+    /// under its scope, `forget` drops an entity's facts from the
+    /// scope's layer, `clear` empties it, and none of it touches the
+    /// tree.
     #[dialog_common::test]
-    async fn it_writes_and_maintains_a_scope_explicitly() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
-        let repo = test_repo(&operator, &profile).await;
-        let operator = TestEnv::new(operator);
+    async fn it_maintains_a_scope() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let state = Ephemeral::create().perform(&operator).await;
         let top = Ephemeral::create().perform(&operator).await;
@@ -3878,14 +3737,13 @@ mod tests {
         let other: Entity = "site:2".parse()?;
         stack
             .transaction()
-            .assert_into(
-                name("state"),
+            .assert(Placement::new("site/path".parse()?, name("state")))
+            .assert(
                 dialog_query::the!("site/path")
                     .of(site.clone())
                     .is("/a".to_string()),
             )
-            .assert_into(
-                name("state"),
+            .assert(
                 dialog_query::the!("site/path")
                     .of(other.clone())
                     .is("/b".to_string()),
@@ -3909,13 +3767,12 @@ mod tests {
         assert_eq!(state.scan(&paths).len(), 2);
 
         let demand = crate::Demand::new();
-        demand.record(&paths);
+        demand.record(&paths, &Manifest::default());
         let observer = state.observe(demand);
         stack
             .transaction()
             .forget(name("state"), vec![site.clone()])
-            .assert_into(
-                name("state"),
+            .assert(
                 dialog_query::the!("site/path")
                     .of(site.clone())
                     .is("/restamped".to_string()),
@@ -3989,16 +3846,22 @@ mod tests {
         );
         let unbound = stack
             .transaction()
-            .assert_into(
-                name("nowhere"),
-                dialog_query::the!("site/path")
+            .assert(Placement::new("site/other".parse()?, name("nowhere")))
+            .assert(
+                dialog_query::the!("site/other")
                     .of(site)
                     .is("/c".to_string()),
             )
             .commit()
             .perform(&operator)
             .await;
-        assert!(matches!(unbound, Err(StackError::UnboundScope { .. })));
+        assert!(
+            matches!(
+                unbound,
+                Err(StackError::Commit(CommitError::UnboundScope { .. }))
+            ),
+            "a scope nothing is linked under refuses the write: {unbound:?}"
+        );
         Ok(())
     }
 }

@@ -21,46 +21,49 @@ use crate::rule::deductive::DeductiveRule;
 use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::Selection;
 use crate::source::SelectRules;
+use crate::stream::{fork_stream, stream_select};
 use crate::types::Any;
 use crate::{
     Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Schema, Term, try_stream,
 };
 use dialog_capability::Provider;
+use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Display;
+use std::pin::Pin;
+use std::sync::Arc;
 
 /// Extract a Match with parameter names from a Match with user
 /// variable names. Maps values from user-specified variable names
 /// to internal parameter names for scoped evaluation. Both Present
 /// and Absent bindings are propagated.
+///
+/// Parameters are bound by name: a concept's parameter variables are
+/// untyped (`Term::var`), so no kind check applies to them.
 fn extract_parameters(source: &Match, terms: &Parameters) -> Result<Match, EvaluationError> {
     let mut matched = Match::new();
 
     for (param_name, user_param) in terms.iter() {
         match user_param {
-            Term::Variable { name: Some(_), .. } => {
-                let param = Term::var(param_name);
-                match source.lookup(user_param) {
-                    Ok(Binding::Present(value)) => {
-                        matched.bind(&param, value)?;
-                    }
-                    Ok(Binding::Absent) => {
-                        matched.bind_absent(&param)?;
-                    }
-                    // Unbound is expected here: the user supplied a
-                    // placeholder term (e.g. `Term::var("alice")` in
-                    // `Query<Person> { this: ..., ... }`) that the
-                    // concept query is about to bind. Skip it:
-                    // downstream evaluation fills it in. Propagate
-                    // any other error.
-                    Err(EvaluationError::UnboundVariable { .. }) => {}
-                    Err(e) => return Err(e),
+            Term::Variable {
+                name: Some(name), ..
+            } => match source.get(name) {
+                Some(Binding::Present(value)) => {
+                    matched.bind_variable(param_name, None, value.clone())?;
                 }
-            }
+                Some(Binding::Absent) => {
+                    matched.bind_absent_variable(param_name)?;
+                }
+                // Unbound is expected here: the user supplied a
+                // placeholder term (e.g. `Term::var("alice")` in
+                // `Query<Person> { this: ..., ... }`) that the
+                // concept query is about to bind. Skip it:
+                // downstream evaluation fills it in.
+                None => {}
+            },
             Term::Constant(value) => {
-                let param = Term::var(param_name);
-                matched.bind(&param, value.clone())?;
+                matched.bind_variable(param_name, None, value.clone())?;
             }
             Term::Variable { name: None, .. } => {}
         }
@@ -84,20 +87,18 @@ fn merge_parameters(
             continue;
         }
 
-        let param = Term::var(param_name);
-        match result.lookup(&param) {
-            Ok(Binding::Present(value)) => {
-                merged.bind(user_param, value)?;
+        match result.get(param_name) {
+            Some(Binding::Present(value)) => {
+                merged.bind(user_param, value.clone())?;
             }
-            Ok(Binding::Absent) => {
+            Some(Binding::Absent) => {
                 merged.bind_absent(user_param)?;
             }
             // Unbound is expected: not every parameter survives the
             // concept evaluation (e.g. a blank slot the rule never
             // touched). Skip and let the user variable stay
-            // un-extended. Propagate any other error.
-            Err(EvaluationError::UnboundVariable { .. }) => {}
-            Err(e) => return Err(e),
+            // un-extended.
+            None => {}
         }
     }
 
@@ -367,6 +368,12 @@ impl ConceptQuery {
     /// key insight from magic set optimization applied locally: the adornment
     /// is computed at the point of use from what's actually bound, rather
     /// than carried globally through every evaluation step.
+    ///
+    /// Every incoming row goes through one evaluation of that plan: each is
+    /// renamed into the concept's parameters and placed in a scope nested in
+    /// it ([`Match::within`]), and each result is merged back into the row it
+    /// came from. Evaluating the plan once per row instead rebuilt the whole
+    /// pipeline, every step's stream and a copy of the plan, for every row.
     pub fn evaluate<'a, Env, M: Selection + 'a>(
         self,
         selection: M,
@@ -378,76 +385,107 @@ impl ConceptQuery {
         let app = self;
 
         try_stream! {
-            let mut plan = None;
-            let mut table: Option<Vec<fixpoint::Row>> = None;
-            let mut reduced: Vec<fixpoint::Row> = Vec::new();
+            let mut selection = Box::pin(selection);
+            let Some(first) = selection.next().await else {
+                return;
+            };
+            let first = first?;
 
-            for await each in selection {
-                let input = each?;
-
-                // Derive the binding pattern from the first match and cache the
-                // plan. All matches in the selection share the same binding pattern
-                // (same variables bound), only the values differ.
-                if plan.is_none() && table.is_none() {
-                    let rules = Provider::<SelectRules>::execute(env, app.predicate.clone()).await?;
-                    // A concept on a dependency cycle cannot evaluate
-                    // top-down (it would recurse unboundedly): its
-                    // component's semi-naive fixpoint is computed once
-                    // and the caller's bindings join against the rows.
-                    if let Some(analysis) = rules.recursion() {
-                        table = Some(match rules.continuation() {
-                            Some(continuation) => {
-                                continuation.rows(&app.predicate, analysis, env).await?
-                            }
-                            None => fixpoint::evaluate(&app.predicate, analysis, env).await?,
-                        });
-                    } else {
-                        // A reducing rule's fold reads its whole body
-                        // relation, so caller bindings must never
-                        // restrict the body: each reducing rule's
-                        // folded rows are computed once, over the full
-                        // relation, and the caller's bindings join
-                        // against the output — the fixpoint-table
-                        // shape. The plain rules plan as usual.
-                        for rule in rules.reducing() {
-                            reduced.extend(reduce_rows(rule, env).await?);
-                        }
-                        plan = Some(rules.plan(&app.terms, &input));
+            let rules = Provider::<SelectRules>::execute(env, app.predicate.clone()).await?;
+            // A concept on a dependency cycle cannot evaluate top-down (it
+            // would recurse unboundedly): its component's semi-naive fixpoint
+            // is computed once and the caller's bindings join against the
+            // rows.
+            if let Some(analysis) = rules.recursion() {
+                let table = match rules.continuation() {
+                    Some(continuation) => {
+                        continuation.rows(&app.predicate, analysis, env).await?
                     }
-                }
-
-                if let Some(rows) = table.as_ref() {
-                    for row in rows {
+                    None => fixpoint::evaluate(&app.predicate, analysis, env).await?,
+                };
+                let rows = stream::once(async { Ok(first) }).chain(selection);
+                for await each in rows {
+                    let input = each?;
+                    for row in table.iter() {
                         if let Some(merged) = fixpoint::join(&input, &app.terms, row)? {
                             yield merged;
                         }
                     }
-                    continue;
                 }
+                return;
+            }
 
-                for row in reduced.iter() {
-                    if let Some(merged) = fixpoint::join(&input, &app.terms, row)? {
-                        yield merged;
-                    }
+            // A reducing rule's fold reads its whole body relation, so caller
+            // bindings must never restrict the body: each reducing rule's
+            // folded rows are computed once, over the full relation, and the
+            // caller's bindings join against the output (the fixpoint-table
+            // shape). The plain rules plan as usual.
+            let mut reduced: Vec<fixpoint::Row> = Vec::new();
+            for rule in rules.reducing() {
+                reduced.extend(reduce_rows(rule, env).await?);
+            }
+            // All matches in the selection share the first one's binding
+            // pattern (same variables bound), only the values differ.
+            let plan = rules.plan(&app.terms, &first);
+            let rows = stream::once(async { Ok(first) }).chain(selection);
+
+            if reduced.is_empty() {
+                for await merged in app.through(&plan, rows, env) {
+                    yield merged?;
                 }
-                let plan = plan.as_ref().unwrap();
-
-                // Extract match with parameter names for scoped evaluation
-                // Maps user variable names → internal parameter names
-                let initial_match = extract_parameters(&input, &app.terms)
-                    .map_err(|e| EvaluationError::Store(e.to_string()))?;
-                let seed = initial_match.seed();
-
-                // Merge results back, mapping parameter names → user variable names
-                // All factors are copied with their original provenance
-                for await result in Disjunction::clone(plan).evaluate(seed, env) {
-                    let result_match = result?;
-                    let merged = merge_parameters(&input, &result_match, &app.terms)
-                        .map_err(|e| EvaluationError::Store(e.to_string()))?;
-                    yield merged;
+            } else {
+                let (joining, planned) = fork_stream(rows);
+                let terms = app.terms.clone();
+                let joined = joining.map_ok(move |input| {
+                    let rows: Vec<Result<Match, EvaluationError>> = reduced
+                        .iter()
+                        .filter_map(|row| fixpoint::join(&input, &terms, row).transpose())
+                        .collect();
+                    stream::iter(rows)
+                })
+                .try_flatten();
+                let planned = app.through(&plan, planned, env);
+                for await merged in stream_select!(Box::pin(joined), planned) {
+                    yield merged?;
                 }
             }
         }
+    }
+
+    /// Evaluate `plan` once for every row of `rows`: each row is renamed
+    /// into this concept's parameters in a scope nested in it, and each
+    /// result is merged back into the row it came from.
+    fn through<'a, Env, M: Selection + 'a>(
+        &self,
+        plan: &Disjunction,
+        rows: M,
+        env: &'a Env,
+    ) -> Pin<Box<dyn Selection + 'a>>
+    where
+        Env: crate::Scope<'a>,
+    {
+        let into = self.terms.clone();
+        let back = self.terms.clone();
+        let scoped = rows.map(move |each| {
+            let mut input = each?;
+            // Every result merges back into a clone of this row: share its
+            // bindings rather than copy them into each.
+            input.share();
+            let inner = extract_parameters(&input, &into)
+                .map_err(|e| EvaluationError::Store(e.to_string()))?;
+            Ok(inner.within(Arc::new(input)))
+        });
+        let results = plan.clone().evaluate(scoped, env);
+        Box::pin(results.map(move |result| {
+            let mut result = result?;
+            let caller = result.take_caller().ok_or_else(|| {
+                EvaluationError::Store(
+                    "a concept's result lost the row it was evaluated for".to_string(),
+                )
+            })?;
+            merge_parameters(&caller, &result, &back)
+                .map_err(|e| EvaluationError::Store(e.to_string()))
+        }))
     }
 }
 
@@ -603,7 +641,7 @@ mod tests {
         Proposition, Query, Term, Type, Value,
     };
     use dialog_artifacts::Entity;
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use futures_util::TryStreamExt;
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
@@ -612,7 +650,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_executes_concept_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -715,7 +753,7 @@ mod tests {
     /// concept lowering emits for `maybe` fields.
     #[dialog_common::test]
     async fn it_executes_concept_with_optional_field() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -836,7 +874,7 @@ mod tests {
     /// `bio` then runs with `this` known and set-widens correctly.
     #[dialog_common::test]
     async fn it_set_widens_optional_field_sorted_before_required() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -967,7 +1005,7 @@ mod tests {
             pub nickname: Option<employee::Nickname>,
         }
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1025,7 +1063,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_executes_query_with_bound_entity() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1340,7 +1378,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_constant_entity_parameter() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1402,7 +1440,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_constant_attribute_parameter() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1475,7 +1513,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_respects_multiple_constant_parameters() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1718,7 +1756,7 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_evaluates_grouped_sum() -> anyhow::Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1793,7 +1831,7 @@ mod tests {
         /// query's row for that dept.
         #[dialog_common::test]
         async fn it_folds_the_full_group_under_caller_binding() -> anyhow::Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1896,7 +1934,7 @@ mod tests {
         /// shape.
         #[dialog_common::test]
         async fn it_pins_key_times_count_for_grouped_and_folded_variable() -> anyhow::Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1981,7 +2019,7 @@ mod tests {
         /// input binds the maximum.
         #[dialog_common::test]
         async fn it_binds_absent_for_the_all_absent_group() -> anyhow::Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2080,7 +2118,7 @@ mod tests {
         /// consumes a reducing rule's concept like any other.
         #[dialog_common::test]
         async fn it_composes_plain_rule_over_reducing_concept() -> anyhow::Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2147,7 +2185,7 @@ mod tests {
         /// employees.
         #[dialog_common::test]
         async fn it_composes_reducing_rule_over_reducing_concept() -> anyhow::Result<()> {
-            let (operator, profile) = test_operator_with_profile().await;
+            let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2268,7 +2306,7 @@ mod tests {
                 people.clone(),
                 people.iter().rev().cloned().collect::<Vec<_>>(),
             ] {
-                let (operator, profile) = test_operator_with_profile().await;
+                let (operator, profile) = test_session_with_peer().await;
                 let repo = test_repo(&operator, &profile).await;
                 let branch = repo.branch("main").open().perform(&operator).await?;
                 let mut tx = branch.transaction();

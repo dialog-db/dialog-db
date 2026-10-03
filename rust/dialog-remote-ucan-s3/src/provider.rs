@@ -89,7 +89,7 @@ where
         // a cold replica.
         tracing::debug!(
             target: "dialog::remote::ucan",
-            command = Fx::command(),
+            command = std::any::type_name::<Fx>(),
             permit_cache_hit = from_cache,
             redeem_ms = redeemed
                 .duration_since(now)
@@ -108,7 +108,7 @@ where
                 cache.invalidate(&key, &permit);
                 tracing::debug!(
                     target: "dialog::remote::ucan",
-                    command = Fx::command(),
+                    command = std::any::type_name::<Fx>(),
                     "cached permit rejected; re-redeeming"
                 );
                 match retry {
@@ -129,13 +129,14 @@ where
 
 #[cfg(test)]
 mod tests {
+    use dialog_effects::prelude::*;
     use std::collections::HashMap;
 
     use super::*;
     use dialog_capability::{Principal, Subject, did};
     use dialog_credentials::Ed25519Signer;
-    use dialog_effects::Use;
-    use dialog_effects::archive::{Archive, ArchiveError, Catalog, Get};
+
+    use dialog_effects::archive::ArchiveError;
     use dialog_remote_s3::Permit;
     use dialog_ucan::UcanInvocation;
     use dialog_ucan_core::{InvocationBuilder, InvocationChain};
@@ -188,10 +189,10 @@ mod tests {
     async fn it_retains_the_permit_after_a_transport_error() {
         let signer = Ed25519Signer::import(&[9u8; 32]).await.unwrap();
         let capability = Subject::from(did!("key:zPermitCacheTransportTest"))
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("blobs"))
-            .invoke(Get::new([0u8; 32]));
+            .reader()
+            .archive()
+            .catalog("blobs")
+            .get([0u8; 32]);
 
         let site = UcanSite::default();
         let address = UcanAddress::new("http://127.0.0.1:1/redeem");
@@ -224,10 +225,10 @@ mod tests {
     #[dialog_common::test]
     fn it_scopes_cached_permits_to_the_site() {
         let capability = Subject::from(did!("key:zPermitCacheScopeTest"))
-            .attenuate(Use)
-            .attenuate(Archive)
-            .attenuate(Catalog::new("blobs"))
-            .invoke(Get::new([0u8; 32]));
+            .reader()
+            .archive()
+            .catalog("blobs")
+            .get([0u8; 32]);
         let address = UcanAddress::new("http://127.0.0.1:1/redeem");
         let key = PermitKey::cacheable(&address, capability.to_request())
             .expect("a GET request is cacheable");
@@ -252,7 +253,6 @@ mod tests {
         use super::*;
         use dialog_common::Blake3Hash;
         use dialog_effects::blob::BlobError;
-        use dialog_effects::blob::prelude::{ArchiveBlobExt, BlobExt};
         use dialog_remote_s3::helpers::LocalS3;
 
         /// A one-shot access service: answers every POST with the given
@@ -299,10 +299,10 @@ mod tests {
             let signer = Ed25519Signer::import(&[11u8; 32]).await.unwrap();
             let capability = || {
                 Subject::from(did!("key:zSharedRedeemTest"))
-                    .attenuate(Use)
-                    .attenuate(Archive)
-                    .attenuate(Catalog::new("blocks"))
-                    .invoke(Get::new([3u8; 32]))
+                    .reader()
+                    .archive()
+                    .catalog("blocks")
+                    .get([3u8; 32])
             };
 
             let site = UcanSite::default();
@@ -353,8 +353,8 @@ mod tests {
             let signer = Ed25519Signer::import(&[7u8; 32]).await.unwrap();
             let digest = Blake3Hash::hash(b"not uploaded yet");
             let capability = Subject::from(did!("key:zPermitCacheProbeTest"))
-                .attenuate(Use)
-                .attenuate(Archive)
+                .reader()
+                .archive()
                 .blob()
                 .read(digest);
 
@@ -403,10 +403,10 @@ mod tests {
 
             let signer = Ed25519Signer::import(&[8u8; 32]).await.unwrap();
             let capability = Subject::from(did!("key:zPermitCacheRejectTest"))
-                .attenuate(Use)
-                .attenuate(Archive)
-                .attenuate(Catalog::new("blocks"))
-                .invoke(Get::new([2u8; 32]));
+                .reader()
+                .archive()
+                .catalog("blocks")
+                .get([2u8; 32]);
 
             let site = UcanSite::default();
             let address = UcanAddress::new("http://127.0.0.1:1/redeem");

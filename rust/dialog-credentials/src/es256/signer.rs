@@ -84,6 +84,8 @@ impl From<web::SigningKey> for Es256Signer {
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 impl ExtractableKey for Es256Signer {
+    type Error = WebCryptoError;
+
     async fn generate() -> Result<Self, WebCryptoError> {
         let key = <web::SigningKey as ExtractableKey>::generate().await?;
         Ok(Es256SigningKey::from(key).into())

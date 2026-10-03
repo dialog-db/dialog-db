@@ -38,10 +38,16 @@ impl Branch {
 
 impl Reset<'_> {
     /// Execute the reset operation.
+    ///
+    /// The head moves under the branch's write lock, as it does for a
+    /// commit or a pull: a writer of this branch minting on the head in
+    /// this process sees it move before or after, never in between.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), PublishError>
     where
         Env: Provider<Publish>,
     {
+        let writer = self.branch.writer();
+        let _writing = writer.lock().await;
         self.branch
             .revision
             .publish(self.revision)
@@ -63,7 +69,7 @@ mod tests {
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
-    use crate::{EMPTY_TREE_HASH, RepositoryMemoryExt, Revision, TreeReference};
+    use crate::{RepositoryMemoryExt, Revision, TreeReference};
 
     #[dialog_common::test]
     async fn it_sets_revision() -> Result<()> {
@@ -76,7 +82,7 @@ mod tests {
         let revision = Revision {
             branch: "branch:main".parse()?,
             issuer: subject.did().clone(),
-            tree: TreeReference::from(EMPTY_TREE_HASH),
+            tree: TreeReference::from([7u8; 32]),
             edition: Edition::GENESIS,
             context: None,
             signature: Vec::new(),

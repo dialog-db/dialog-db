@@ -7,6 +7,7 @@ use dialog_common::Buffer;
 use dialog_effects::archive::prelude::*;
 
 use super::environment::Environment;
+use dialog_effects::MethodExt as _;
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -20,6 +21,7 @@ async fn it_returns_none_for_missing_content() -> anyhow::Result<()> {
 
     let result = env
         .subject()
+        .reader()
         .archive()
         .catalog(catalog)
         .get(digest.clone())
@@ -39,6 +41,7 @@ async fn it_puts_and_gets_content() -> anyhow::Result<()> {
     let digest = Blake3Hash::hash(&content);
 
     env.subject()
+        .writer()
         .archive()
         .catalog(catalog)
         .put(Buffer::from(content.clone()))
@@ -48,6 +51,7 @@ async fn it_puts_and_gets_content() -> anyhow::Result<()> {
 
     let retrieved = env
         .subject()
+        .reader()
         .archive()
         .catalog(catalog)
         .get(digest.clone())
@@ -67,6 +71,7 @@ async fn it_handles_binary_content() -> anyhow::Result<()> {
     let digest = Blake3Hash::hash(&content);
 
     env.subject()
+        .writer()
         .archive()
         .catalog(catalog)
         .put(Buffer::from(content.clone()))
@@ -76,6 +81,7 @@ async fn it_handles_binary_content() -> anyhow::Result<()> {
 
     let retrieved = env
         .subject()
+        .reader()
         .archive()
         .catalog(catalog)
         .get(digest.clone())
@@ -97,6 +103,7 @@ async fn it_isolates_catalogs() -> anyhow::Result<()> {
 
     // Put in catalog A
     env.subject()
+        .writer()
         .archive()
         .catalog(catalog_a)
         .put(Buffer::from(content.clone()))
@@ -107,6 +114,7 @@ async fn it_isolates_catalogs() -> anyhow::Result<()> {
     // Should exist in catalog A
     let result_a = env
         .subject()
+        .reader()
         .archive()
         .catalog(catalog_a)
         .get(digest.clone())
@@ -118,6 +126,7 @@ async fn it_isolates_catalogs() -> anyhow::Result<()> {
     // Should not exist in catalog B
     let result_b = env
         .subject()
+        .reader()
         .archive()
         .catalog(catalog_b)
         .get(digest.clone())
@@ -137,6 +146,7 @@ async fn it_handles_large_content() -> anyhow::Result<()> {
     let digest = Blake3Hash::hash(&content);
 
     env.subject()
+        .writer()
         .archive()
         .catalog(catalog)
         .put(Buffer::from(content.clone()))
@@ -146,6 +156,7 @@ async fn it_handles_large_content() -> anyhow::Result<()> {
 
     let retrieved = env
         .subject()
+        .reader()
         .archive()
         .catalog(catalog)
         .get(digest.clone())

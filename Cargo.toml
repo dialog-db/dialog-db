@@ -38,7 +38,7 @@ members = [
     "rust/dialog-remote-fs",
     "rust/dialog-network",
     "rust/dialog-identity",
-    "rust/dialog-operator",
+    "rust/dialog-peer",
     "rust/dialog-repository",
     "rust/dialog-soak",
     "rust/dialog-varsig",
@@ -133,9 +133,9 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "json",
 ] }
-rexie = "0.6"
 memchr = "2"
 rkyv = "0.8"
+bijoux = { version = "0.3.2", default-features = false, features = ["u64"] }
 rsa = "0.9"
 rusqlite = { version = "0.32", features = ["bundled"] }
 s3s = "0.13"
@@ -247,8 +247,8 @@ path = "./rust/dialog-remote-fs"
 [workspace.dependencies.dialog-identity]
 path = "./rust/dialog-identity"
 
-[workspace.dependencies.dialog-operator]
-path = "./rust/dialog-operator"
+[workspace.dependencies.dialog-peer]
+path = "./rust/dialog-peer"
 
 [workspace.dependencies.dialog-repository]
 path = "./rust/dialog-repository"

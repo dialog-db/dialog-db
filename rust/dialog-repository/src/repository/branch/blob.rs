@@ -1,11 +1,16 @@
 //! Entity-addressed blob API.
 //!
-//! A blob is a whole, hash-addressable binary object that rides the artifact
-//! tree via the blob index. It is referenced by its content-derived entity
-//! `blob:<hash>` (see [`Entity::from_blob`]), so a blob is a first-class
-//! resource other facts can point at — attach a name, a media type, an author
-//! as ordinary assertions, then find blobs with a normal datalog query rather
-//! than a full-index scan.
+//! A blob is a whole, hash-addressable binary object the line records as an
+//! asset (see [`asset`](super::asset)): its bytes live in the blob store and
+//! its `asset:<hash> dialog.asset/size <size>` fact rides the tree. It is
+//! referenced by that content-derived entity (see [`Entity::from_blob`]), so
+//! a blob is a first-class resource other facts can point at: attach a name,
+//! a media type, an author as ordinary assertions, then find blobs with a
+//! normal datalog query.
+//!
+//! Trees written before assets recorded their blobs in the blob index
+//! instead. Those entries are still read wherever content is sized,
+//! hydrated or shipped, and nothing writes new ones.
 //!
 //! The surface is [`Blob`] (the noun) plus a [`BlobArchive`] target that a
 //! [`Branch`] converts into:
@@ -14,9 +19,7 @@
 //! # use dialog_capability::{Fork, Provider};
 //! # use dialog_effects::archive::{Get, Import, Put};
 //! # use dialog_effects::authority::{Attest, Identify};
-//! # use dialog_effects::blob::{
-//! #     BlobError, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
-//! # };
+//! # use dialog_effects::blob::{//! #     BlobError, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite, //! #};
 //! # use dialog_effects::memory::{Publish, Resolve};
 //! # use dialog_repository::{Blob, Branch, CommitError, RemoteSite};
 //! # async fn example<Env>(
@@ -50,50 +53,48 @@
 //!     .read(branch.into())
 //!     .perform(env)
 //!     .await?;
-//! let size = Blob::from(entity).size(branch.into()).perform(env).await?; // index-only
+//! let size = Blob::from(entity).size(branch.into()).perform(env).await?; // no fetch
 //!
-//! // write: stream chunks in, get the blob's entity back (recorded in the
-//! // index so `push` replicates it)
+//! // write: stream chunks in, get the blob's entity back (recorded as an
+//! // asset so `push` replicates it)
 //! let entity = Blob::import(chunks).write(branch.into()).perform(env).await?;
 //!
-//! // retract: drop the index reference (the removal replicates like any
+//! // retract: drop the line's reference (the removal replicates like any
 //! // commit); the bytes stay in the blob store
 //! Blob::from(entity).retract(branch.into()).perform(env).await?;
 //! # Ok(())
 //! # }
 //! ```
 
+use crate::repository::branch::asset::recorded_size;
+use crate::repository::remote::Step;
 use crate::repository::source::SourceRef;
 use crate::{
-    Branch, CommitError, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteFallback, RemoteSite,
-    RepositoryArchiveExt as _, RepositoryMemoryExt as _, Revision, Snapshot, TreeReference,
-    Upstream,
+    Branch, CommitError, Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite, Snapshot,
 };
-use dialog_artifacts::history::{Context, TreeHistory, context_of, extend_skips};
-use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::{BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity};
+use dialog_artifacts::{Asset, BlobIndexExt as _, BlobRecord, Entity, Instruction};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
-use dialog_effects::archive::prelude::{ArchiveSubjectExt as _, CatalogExt as _};
+use dialog_effects::MethodExt as _;
+use dialog_effects::archive::prelude::ArchiveExt as _;
 use dialog_effects::archive::{Get, Import, Put};
-use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
-use dialog_effects::blob::prelude::{ArchiveBlobExt as _, BlobExt as _};
+use dialog_effects::authority::{Attest, Identify};
+use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
 use dialog_effects::blob::{
     BlobError, BlobReader, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
 };
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_search_tree::Delta;
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, stream};
 
-/// A layer's blob store: the target that blob reads and writes bind to.
+/// A line's blob store: the target that blob reads and writes bind to.
 ///
 /// Holds a reference to the [`Branch`] or [`Snapshot`], so it carries the
-/// subject (for the capability chain), the blob index (for size lookups),
-/// and — for a branch — the upstream (for remote hydration). Obtain one
+/// subject (for the capability chain), the tree (for size lookups), and,
+/// for a branch, the upstream (for remote hydration). Obtain one
 /// with [`Branch::blobs`], [`Snapshot::blobs`], or `branch.into()`.
 ///
-/// Reads bind to either kind. Writes and retractions advance the layer,
+/// Reads bind to either kind. Writes and retractions advance the line,
 /// which a reference to a snapshot cannot do (its revision is held by
 /// value): they fail with [`CommitError::Detached`], and the snapshot is
 /// advanced by consuming it instead.
@@ -179,7 +180,7 @@ impl Blob {
         }
     }
 
-    /// Look up the blob's size from `archive`'s index, without fetching bytes.
+    /// Look up the blob's size from `archive`'s tree, without fetching bytes.
     pub fn size<'a>(self, archive: BlobArchive<'a>) -> BlobSize<'a> {
         BlobSize {
             archive,
@@ -187,7 +188,7 @@ impl Blob {
         }
     }
 
-    /// Retract the blob from `archive`'s index, without touching its bytes.
+    /// Drop `archive`'s reference to the blob, without touching its bytes.
     pub fn retract<'a>(self, archive: BlobArchive<'a>) -> RetractBlob<'a> {
         RetractBlob {
             archive,
@@ -212,7 +213,7 @@ impl<S> BlobImportBuilder<S> {
     }
 }
 
-/// The `blob:<hash>` hash carried by `entity`, or a `NotFound` error naming it.
+/// The hash an `asset:<hash>` entity names, or a `NotFound` error naming it.
 fn blob_hash(entity: &Entity) -> Result<Blake3Hash, BlobError> {
     entity
         .blob_hash()
@@ -220,10 +221,10 @@ fn blob_hash(entity: &Entity) -> Result<Blake3Hash, BlobError> {
         .ok_or_else(|| BlobError::NotFound(format!("not a blob entity: {entity}")))
 }
 
-/// Build the tree store for blob-index reads.
+/// Build the tree store for reading the content a line vouches for.
 ///
 /// A branch tracking a remote upstream may need remote-only tree nodes to read
-/// its blob index — after a fast-forward pull only the revision pointer is
+/// it — after a fast-forward pull only the revision pointer is
 /// local, and the index nodes hydrate lazily. Fall back to the remote archive
 /// on a local miss (caching what lands), as `commit` does. With no remote
 /// upstream (a snapshot never has one) this degrades to a plain local index.
@@ -235,30 +236,21 @@ where
     Env: Provider<Resolve> + ConditionalSync + 'static,
 {
     let source = source.into();
-    let remote = match source.upstream() {
-        Some(Upstream::Remote { remote: name, .. }) => {
-            let loaded = source
-                .subject()
-                .remote(name.clone())
-                .load()
-                .perform(env)
-                .await;
-            RemoteFallback::from_load(name, loaded)
-        }
-        _ => RemoteFallback::None,
-    };
+    let remote = source.fallback();
     NetworkedIndex::new(env, source.archive().index(), remote)
 }
 
-/// The size recorded for `hash` in the layer's blob index, or `None` if the
-/// current tree does not reference it.
+/// The size of the content the line's current tree vouches for under `hash`,
+/// by an asset's `dialog.asset/size` fact or a legacy blob-index entry, or
+/// `None` when it vouches for no such content.
 async fn index_size<Env>(
     source: SourceRef<'_>,
     hash: &Blake3Hash,
     env: &Env,
 ) -> Result<Option<u64>, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -270,13 +262,35 @@ where
     };
     let store = index_store(source, env).await;
     let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
-    Ok(tree
-        .get_blob(&store, hash.as_bytes())
-        .await?
-        .map(|r| r.size))
+    Ok(tree.content_size(&store, hash.as_bytes()).await?)
 }
 
-/// Look up a blob's size from the blob index. Created by [`Blob::size`].
+/// Whether the line's blob index itself still references `hash`: content a
+/// tree recorded before assets, which a retraction tombstones.
+async fn index_references<Env>(
+    source: SourceRef<'_>,
+    hash: &Blake3Hash,
+    env: &Env,
+) -> Result<bool, CommitError>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + ConditionalSync
+        + 'static,
+{
+    let Some(revision) = source.revision() else {
+        return Ok(false);
+    };
+    let store = index_store(source, env).await;
+    let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
+    Ok(tree.get_blob(&store, hash.as_bytes()).await?.is_some())
+}
+
+/// Look up a blob's size from the line's tree, without fetching its bytes.
+/// Created by [`Blob::size`].
 pub struct BlobSize<'a> {
     archive: BlobArchive<'a>,
     entity: Entity,
@@ -286,7 +300,8 @@ impl BlobSize<'_> {
     /// Execute the lookup, returning the size or `None` if unreferenced.
     pub async fn perform<Env>(self, env: &Env) -> Result<Option<u64>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -346,55 +361,64 @@ impl ReadBlob<'_> {
             Err(other) => return Err(other.into()),
         };
 
-        // Local miss. Hydrate from the remote upstream, if any (a
-        // snapshot has none: its reads are local).
-        let Some(Upstream::Remote { remote: name, .. }) = line.upstream() else {
-            return Err(BlobError::NotFound(miss_key).into());
+        // Local miss. Hydrate from the upstream peer, if any (a snapshot
+        // has none: its reads are local).
+        let remote = match line.fallback() {
+            RemoteFallback::Remote(remote) => remote,
+            RemoteFallback::None => return Err(BlobError::NotFound(miss_key).into()),
+            RemoteFallback::Unavailable { remote, reason } => {
+                return Err(CommitError::Blob(BlobError::Storage(format!(
+                    "upstream {remote} is unreachable: {reason}"
+                ))));
+            }
         };
 
-        // The index must already reference the blob for us to import it; without
+        // The tree must already vouch for the blob for us to import it; without
         // a size we have no import to issue and the miss is genuine.
         let Some(size) = index_size(line, &hash, env).await? else {
             return Err(BlobError::NotFound(miss_key).into());
         };
 
-        let remote = line
-            .subject()
-            .remote(name)
-            .load()
-            .perform(env)
+        // Full-blob read from the remote, forked to its site, written
+        // through a local digest-verified import sink. An attempt is the
+        // whole transfer, since the read can fail at any point.
+        let hash = &hash;
+        // Only the peer's side fails over: the local import would fail the
+        // same at every address.
+        remote
+            .reach(|address| async move {
+                let mut source = address
+                    .subject
+                    .clone()
+                    .reader()
+                    .archive()
+                    .blob()
+                    .read(hash.clone())
+                    .fork(address.site())
+                    .perform(env)
+                    .await
+                    .map_err(Step::Remote)?;
+                let mut sink = line
+                    .archive()
+                    .blob()
+                    .import(hash.clone(), size)
+                    .perform(env)
+                    .await
+                    .map_err(Step::Local)?;
+                while let Some(chunk) = source.next().await.map_err(Step::Remote)? {
+                    sink.write_all(&chunk).await.map_err(Step::Local)?;
+                }
+                sink.finish().await.map_err(Step::Local)?;
+                Ok::<_, Step<BlobError>>(())
+            })
             .await
-            .map_err(|e| CommitError::Blob(BlobError::Storage(e.to_string())))?;
-        let address = remote.address();
-
-        // Full-blob read from the remote, forked to its site.
-        let mut source = address
-            .subject
-            .clone()
-            .archive()
-            .blob()
-            .read(hash.clone())
-            .fork(address.site())
-            .perform(env)
-            .await?;
-
-        // Write the bytes through a local digest-verified import sink.
-        let mut sink = line
-            .archive()
-            .blob()
-            .import(hash.clone(), size)
-            .perform(env)
-            .await?;
-        while let Some(chunk) = source.next().await? {
-            sink.write_all(&chunk).await?;
-        }
-        sink.finish().await?;
+            .map_err(Step::into_inner)?;
 
         // Serve the requested read from the now-local copy.
         line.archive()
             .blob()
             .invoke(BlobRead {
-                digest: hash,
+                digest: hash.clone(),
                 range,
             })
             .perform(env)
@@ -403,8 +427,8 @@ impl ReadBlob<'_> {
     }
 }
 
-/// Ingest a blob and record it in the blob index as one new revision. Created
-/// by [`Blob::import`] then [`write`](BlobImportBuilder::write).
+/// Ingest a blob and record it as an asset in one new revision. Created by
+/// [`Blob::import`] then [`write`](BlobImportBuilder::write).
 pub struct WriteBlob<'a, S> {
     archive: BlobArchive<'a>,
     chunks: S,
@@ -414,17 +438,17 @@ impl<S> WriteBlob<'_, S>
 where
     S: Stream<Item = Result<Vec<u8>, BlobError>> + ConditionalSend + Unpin,
 {
-    /// Execute the write, returning the blob's entity (`blob:<hash>`).
+    /// Execute the write, returning the blob's entity (`asset:<hash>`).
     ///
     /// Streams the source into the local blob store (hashing and counting bytes
-    /// as it goes), records the resulting `{size}` in the blob index, then
-    /// publishes a new revision CAS'd against the head this write was built on —
-    /// so the bytes are durable before any revision references them, and a
-    /// concurrent write that advanced the head makes this publish fail loudly
-    /// rather than clobber it.
-    pub async fn perform<Env>(mut self, env: &Env) -> Result<Entity, CommitError>
+    /// as it goes), then commits the asset's `dialog.asset/size` fact, so the
+    /// bytes are durable before any revision references them. Recording an
+    /// asset the line already records mints nothing.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Entity, CommitError>
     where
-        Env: Provider<BlobWrite>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<BlobWrite>
             + Provider<Get>
             + Provider<Put>
             + Provider<Import>
@@ -438,204 +462,33 @@ where
             + 'static,
     {
         let branch = self.archive.branch()?;
-
-        // 1. Stream the bytes into the local blob store. The hash is discovered
-        //    as the bytes are written; the size is counted alongside. The bytes
-        //    are durable once `finish` returns, before any revision points at
-        //    the record below.
-        let mut sink = branch.archive().blob().write().perform(env).await?;
-        let mut size: u64 = 0;
-        while let Some(chunk) = self.chunks.next().await {
-            let chunk = chunk?;
-            size += chunk.len() as u64;
-            sink.write_all(&chunk).await?;
-        }
-        let hash = sink.finish().await?;
-
-        // 2. Record the blob in the index and advance the head.
-        let index_hash: dialog_storage::Blake3Hash = *hash.as_bytes();
-        advance_blob_index(
-            branch,
-            env,
-            BlobIndexEdit::Put {
-                hash: index_hash,
-                record: BlobRecord::new(size),
-            },
+        let asset = branch.asset(self.chunks).import().perform(env).await?;
+        let entity = asset.entity()?;
+        // A replace, as a transaction's import records it: an asset has one
+        // size, and replacing a fact with the value it holds is a no-op.
+        Box::pin(
+            branch
+                .commit(stream::iter(vec![Instruction::Replace(asset.fact()?)]))
+                .machinery()
+                .perform(env),
         )
         .await?;
-
-        Ok(Entity::from_blob(&index_hash)?)
+        Ok(entity)
     }
 }
 
-/// The single blob-index edit [`advance_blob_index`] applies while minting a
-/// revision.
-enum BlobIndexEdit {
-    /// Record a blob reference (see [`WriteBlob`]).
-    Put {
-        hash: dialog_storage::Blake3Hash,
-        record: BlobRecord,
-    },
-    /// Tombstone a blob reference (see [`RetractBlob`]).
-    Retract { hash: dialog_storage::Blake3Hash },
-}
-
-/// Apply one blob-index edit as a new revision. Mirrors `commit`: checkpoint
-/// the head so the publish CAS's against it, walk from the current tree root
-/// (or the empty tree), apply the edit, flush the new nodes, then publish the
-/// advanced revision with the full version-control treatment (signed record,
-/// skip table, causal context).
-async fn advance_blob_index<Env>(
-    branch: &Branch,
-    env: &Env,
-    edit: BlobIndexEdit,
-) -> Result<(), CommitError>
-where
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Import>
-        + Provider<Resolve>
-        + Provider<Publish>
-        + Provider<Identify>
-        + Provider<Attest>
-        + Provider<crate::Hydrate>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
-    let head = branch.revision.checkpoint();
-    let base_revision = branch.revision();
-
-    // Same remote-fallback selection as `commit`: the first remote among
-    // ALL tracked upstreams, not only a remote default — a branch whose
-    // default upstream is local but which tracks a remote must still be
-    // able to hydrate blocks it holds by reference.
-    let upstreams = branch.upstreams();
-    let remote = match upstreams.remote_name() {
-        Some(name) => {
-            let loaded = branch
-                .subject()
-                .remote(name.to_string())
-                .load()
-                .perform(env)
-                .await;
-            RemoteFallback::from_load(name, loaded)
-        }
-        None => RemoteFallback::None,
-    };
-    let mut store = NetworkedIndex::new(env, branch.archive().index(), remote);
-
-    let base_tree_hash = base_revision
-        .as_ref()
-        .map(|rev| *rev.tree.hash())
-        .unwrap_or(EMPTY_TREE_HASH);
-    let mut tree = Index::from_hash(NodeHash::from(base_tree_hash));
-
-    let mut delta = Delta::zero();
-    match &edit {
-        BlobIndexEdit::Put { hash, record } => {
-            tree.put_blob(&mut store, &mut delta, hash, *record).await?;
-        }
-        BlobIndexEdit::Retract { hash } => {
-            tree.retract_blob(&mut store, &mut delta, hash).await?;
-        }
-    }
-
-    // A blob-index edit advances the branch like any commit, so its
-    // revision gets the full version-control treatment: a DAG edge and
-    // skip table in a signed revision record, and an issuer-signed head —
-    // otherwise the published head would fail pull-side verification and
-    // leave a hole in the ancestry walk.
-    let authority = Identify.perform(env).await?;
-    let issuer = authority.did();
-    let profile = authority.profile().clone();
-
-    let parent = base_revision.as_ref().map(Revision::version);
-    let skips = match &parent {
-        Some(parent) => {
-            let history = TreeHistory::from_root_with_cache(
-                &base_tree_hash,
-                store.clone(),
-                branch.node_cache(),
-            )
-            .with_record_cache(branch.records());
-            extend_skips(&history, parent).await?
-        }
-        None => Vec::new(),
-    };
-    let base_context = base_revision.as_ref().and_then(|base| base.context.clone());
-    let branch_entity = crate::branch_of(branch.of(), &profile, branch.name());
-    let mut revision = match base_revision {
-        Some(base) => base.advance(TreeReference::default(), branch_entity.clone(), issuer),
-        None => Revision::new(TreeReference::default(), branch_entity.clone(), issuer),
-    };
-    let mut record = revision.record(&profile, parent.into_iter().collect(), skips);
-    record.signature = Attest::new(record.payload()?).perform(env).await?;
-    // The record's key carries its value through the tree's own
-    // inline-vs-spill threshold, so read it off the tree rather than
-    // assuming the default.
-    let manifest = tree.format_manifest(store.clone(), &delta).await?;
-    tree.record(&mut store, &mut delta, record.entries(&manifest)?)
-        .await?;
-
-    // Persist the tree's pending nodes before referencing the root in a
-    // revision; a revision must only point at durable blocks.
-    branch
-        .archive()
-        .index()
-        .import(delta.flush().map(|(_, buffer)| buffer))
-        .perform(env)
-        .await
-        .map_err(DialogArtifactsError::from)?;
-
-    // The new head's causal context: the parent's plus this write's
-    // own version, exactly as `Commit` derives it — a blob write
-    // advances the head like any commit and publishes its watermark
-    // the same way.
-    let contexts = branch.contexts();
-    let minted = revision.version();
-    let context = {
-        let mut context = match (&parent, base_context) {
-            (None, _) => Context::new(),
-            (Some(_), Some(context)) => context,
-            (Some(parent), None) => match contexts.cached(parent).await {
-                Some(context) => context,
-                None => {
-                    let history = TreeHistory::from_root_with_cache(
-                        &base_tree_hash,
-                        store.clone(),
-                        branch.node_cache(),
-                    )
-                    .with_record_cache(branch.records());
-                    context_of(parent, &history).await?
-                }
-            },
-        };
-        context.record(minted);
-        context
-    };
-
-    revision.tree = TreeReference::from(*tree.root().as_bytes());
-    revision.context = Some(context.clone());
-    revision.signature = Attest::new(revision.payload()).perform(env).await?;
-
-    head.publish(revision, env).await?;
-
-    // Advance the branch memo so later pulls through this handle
-    // answer the context from memory.
-    contexts.insert(minted, context);
-
-    Ok(())
-}
-
-/// Retract a blob's index reference as one new revision. Created by
+/// Drop a line's reference to a blob as one new revision. Created by
 /// [`Blob::retract`].
 ///
-/// Removes the blob from the index only: the bytes stay in the blob store,
-/// so a replica that already holds them can still read them locally.
-/// Reclaiming bytes no index references is a separate, local concern. The
-/// removal travels with the tree like any commit, so replicas that pull it
-/// stop referencing the blob and can no longer hydrate it from a remote.
+/// The asset fact the line records for the hash is retracted, as a
+/// transaction's `retract(asset)` would, and so is the blob-index entry a
+/// tree written before assets holds for it, by a tombstone.
+///
+/// The bytes stay in the blob store, so a replica that already holds them
+/// can still read them locally. Reclaiming bytes nothing references is a
+/// separate, local concern. The removal travels with the tree like any
+/// commit, so replicas that pull it stop referencing the blob and can no
+/// longer hydrate it from a remote.
 pub struct RetractBlob<'a> {
     archive: BlobArchive<'a>,
     entity: Entity,
@@ -644,12 +497,14 @@ pub struct RetractBlob<'a> {
 impl RetractBlob<'_> {
     /// Execute the retraction.
     ///
-    /// Idempotent at the branch level: when the index does not reference the
+    /// Idempotent at the branch level: when the line does not reference the
     /// blob (never written, or already retracted), this is a no-op that mints
     /// no revision.
     pub async fn perform<Env>(self, env: &Env) -> Result<(), CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobImport>
+            + Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -663,25 +518,35 @@ impl RetractBlob<'_> {
     {
         let branch = self.archive.branch()?;
         let hash = blob_hash(&self.entity)?;
-        if index_size(SourceRef::from(branch), &hash, env)
-            .await?
-            .is_none()
-        {
+        let source = SourceRef::from(branch);
+        let mut retractions = Vec::new();
+        if let Some(size) = recorded_size(source, hash.as_bytes(), env).await? {
+            retractions.push(Instruction::Retract(
+                Asset::stored(*hash.as_bytes(), size).fact()?,
+            ));
+        }
+        let mut entries = Vec::new();
+        if index_references(source, &hash, env).await? {
+            entries.push(BlobRecord::retract_entry(hash.as_bytes()));
+        }
+        if retractions.is_empty() && entries.is_empty() {
             return Ok(());
         }
-        advance_blob_index(
-            branch,
-            env,
-            BlobIndexEdit::Retract {
-                hash: *hash.as_bytes(),
-            },
+        Box::pin(
+            branch
+                .commit(stream::iter(retractions))
+                .machinery()
+                .with_entries(entries)
+                .perform(env),
         )
-        .await
+        .await?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use dialog_effects::storage::Location;
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -689,12 +554,11 @@ mod tests {
     use super::Blob;
     use crate::RepositoryExt as _;
     use anyhow::Result;
+    use dialog_artifacts::{BlobIndexExt as _, BlobRecord, Entity};
     use dialog_capability::Subject;
     use dialog_effects::blob::{BlobError, BlobReader, ByteRange};
-    use dialog_network::Network;
-    use dialog_operator::helpers::unique_name;
-    use dialog_operator::{DeriveOperator as _, Profile};
-    use dialog_storage::provider::storage::Storage;
+    use dialog_peer::helpers::{open_peer, test_storage, unique_name};
+
     use futures_util::stream;
 
     async fn drain(mut reader: BlobReader) -> Vec<u8> {
@@ -709,16 +573,15 @@ mod tests {
     // both native and wasm — no filesystem, no target gate.
     #[dialog_common::test]
     async fn it_writes_a_blob_and_reads_it_back_by_entity() -> Result<()> {
-        let storage = Storage::volatile();
-        let profile = Profile::open(unique_name("blob")).perform(&storage).await?;
+        let storage = test_storage().await;
+        let profile = open_peer(storage.clone(), Location::profile(unique_name("blob"))).await?;
         let operator = profile
-            .derive(b"test")
+            .session(b"test")
+            .space(profile.state())
             .allow(Subject::any())
-            .network(Network::default())
-            .build(storage)
             .await?;
         let repo = profile
-            .repository(unique_name("repo"))
+            .space(unique_name("repo"))
             .open()
             .perform(&operator)
             .await?;
@@ -733,7 +596,7 @@ mod tests {
             .write((&branch).into())
             .perform(&operator)
             .await?;
-        assert!(entity.as_str().starts_with("blob:"));
+        assert!(entity.as_str().starts_with("asset:"));
 
         // size from the index, no fetch
         assert_eq!(
@@ -767,18 +630,19 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_retracts_a_blob_from_the_index_but_not_the_store() -> Result<()> {
-        let storage = Storage::volatile();
-        let profile = Profile::open(unique_name("blob-retract"))
-            .perform(&storage)
-            .await?;
+        let storage = test_storage().await;
+        let profile = open_peer(
+            storage.clone(),
+            Location::profile(unique_name("blob-retract")),
+        )
+        .await?;
         let operator = profile
-            .derive(b"test")
+            .session(b"test")
+            .space(profile.state())
             .allow(Subject::any())
-            .network(Network::default())
-            .build(storage)
             .await?;
         let repo = profile
-            .repository(unique_name("repo"))
+            .space(unique_name("repo"))
             .open()
             .perform(&operator)
             .await?;
@@ -838,20 +702,125 @@ mod tests {
         Ok(())
     }
 
+    /// An import is recorded by the asset's fact; the retired blob index
+    /// gets no entry.
     #[dialog_common::test]
-    async fn it_rejects_a_non_blob_entity() -> Result<()> {
-        let storage = Storage::volatile();
-        let profile = Profile::open(unique_name("blob-reject"))
-            .perform(&storage)
-            .await?;
+    async fn it_records_an_import_as_an_asset() -> Result<()> {
+        let storage = test_storage().await;
+        let profile = open_peer(
+            storage.clone(),
+            Location::profile(unique_name("blob-asset")),
+        )
+        .await?;
         let operator = profile
-            .derive(b"test")
+            .session(b"test")
+            .space(profile.state())
             .allow(Subject::any())
-            .network(Network::default())
-            .build(storage)
             .await?;
         let repo = profile
-            .repository(unique_name("repo"))
+            .space(unique_name("repo"))
+            .open()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let payload = b"recorded as an asset".to_vec();
+        let entity = Blob::import(stream::iter(vec![Ok::<_, BlobError>(payload.clone())]))
+            .write((&branch).into())
+            .perform(&operator)
+            .await?;
+        let hash = entity.blob_hash().expect("an asset entity");
+
+        let store = super::index_store(&branch, &operator).await;
+        let revision = branch.revision().expect("the import minted a revision");
+        let tree = crate::Index::from_hash(super::NodeHash::from(*revision.tree.hash()));
+        assert_eq!(
+            tree.asset_size(&store, &hash).await?,
+            Some(payload.len() as u64)
+        );
+        assert_eq!(tree.get_blob(&store, &hash).await?, None);
+        Ok(())
+    }
+
+    /// A blob a tree written before assets recorded only in the blob index
+    /// is still sized and read through it, and retracting it tombstones the
+    /// entry.
+    #[dialog_common::test]
+    async fn it_reads_and_retracts_a_blob_only_the_legacy_index_records() -> Result<()> {
+        let storage = test_storage().await;
+        let profile = open_peer(
+            storage.clone(),
+            Location::profile(unique_name("blob-legacy")),
+        )
+        .await?;
+        let operator = profile
+            .session(b"test")
+            .space(profile.state())
+            .allow(Subject::any())
+            .await?;
+        let repo = profile
+            .space(unique_name("repo"))
+            .open()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let payload = b"recorded in the index".to_vec();
+        let mut sink = branch.archive().blob().write().perform(&operator).await?;
+        sink.write_all(&payload).await?;
+        let hash = *sink.finish().await?.as_bytes();
+        branch
+            .commit(stream::iter(Vec::new()))
+            .machinery()
+            .with_entries(vec![
+                BlobRecord::new(payload.len() as u64).legacy_entry(&hash),
+            ])
+            .perform(&operator)
+            .await?;
+        let entity = Entity::from_blob(&hash)?;
+
+        assert_eq!(
+            Blob::from(entity.clone())
+                .size((&branch).into())
+                .perform(&operator)
+                .await?,
+            Some(payload.len() as u64)
+        );
+        let reader = Blob::from(entity.clone())
+            .read((&branch).into())
+            .perform(&operator)
+            .await?;
+        assert_eq!(drain(reader).await, payload);
+
+        Blob::from(entity.clone())
+            .retract((&branch).into())
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            Blob::from(entity)
+                .size((&branch).into())
+                .perform(&operator)
+                .await?,
+            None
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_rejects_a_non_blob_entity() -> Result<()> {
+        let storage = test_storage().await;
+        let profile = open_peer(
+            storage.clone(),
+            Location::profile(unique_name("blob-reject")),
+        )
+        .await?;
+        let operator = profile
+            .session(b"test")
+            .space(profile.state())
+            .allow(Subject::any())
+            .await?;
+        let repo = profile
+            .space(unique_name("repo"))
             .open()
             .perform(&operator)
             .await?;

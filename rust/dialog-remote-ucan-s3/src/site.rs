@@ -274,6 +274,7 @@ mod tests {
     use dialog_capability::Principal;
     #[cfg(not(target_arch = "wasm32"))]
     use dialog_credentials::Ed25519Signer;
+    use dialog_effects::MethodExt as _;
     #[cfg(not(target_arch = "wasm32"))]
     use dialog_ucan_core::subject::Subject as DelegatedSubject;
     #[cfg(not(target_arch = "wasm32"))]
@@ -339,6 +340,7 @@ mod tests {
 
         let before = now_s();
         let fork = Subject::from(profile)
+            .reader()
             .archive()
             .catalog("data")
             .get(dialog_common::Blake3Hash::hash(b"block"))

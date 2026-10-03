@@ -25,10 +25,9 @@
 
 use anyhow::Result;
 use dialog_common::Blake3Hash;
-use dialog_search_tree::{Buffer, ContentAddressedStorage, Delta, HitchhikerTree, PersistentTree};
-use dialog_storage::MemoryStorageBackend;
+use dialog_search_tree::{Buffer, Delta, HitchhikerTree, MemoryBlocks, PersistentTree};
 
-type Store = ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
+type Store = MemoryBlocks;
 type Tree = PersistentTree<[u8; 4], Vec<u8>>;
 
 /// One write op. Keys are `u32` big-endian so byte order is key order;
@@ -113,9 +112,7 @@ fn generate(seed: u64, op_count: usize) -> Program {
 
 async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
     for (_, buffer) in delta.flush() {
-        storage
-            .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-            .await?;
+        storage.store(buffer);
     }
     Ok(())
 }
@@ -134,7 +131,7 @@ async fn checkpoint_root(tree: &Tree, storage: &Store, label: &str) -> Result<Bl
 
 /// Canonical sequential edits: persist + settle every op.
 async fn run_canonical(program: &Program) -> Result<Vec<Blake3Hash>> {
-    let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+    let mut storage: Store = MemoryBlocks::new();
     let mut tree = Tree::empty();
     let mut roots = Vec::new();
     for (at, op) in program.ops.iter().enumerate() {
@@ -168,7 +165,7 @@ async fn run_buffered(
     op_buf: Option<usize>,
     persist_every: usize,
 ) -> Result<Vec<Blake3Hash>> {
-    let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+    let mut storage: Store = MemoryBlocks::new();
     let mut tree = Tree::empty();
     let mut roots = Vec::new();
     let open = |tree: &Tree, op_buf: Option<usize>| {

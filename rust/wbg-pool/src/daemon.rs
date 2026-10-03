@@ -57,12 +57,33 @@ pub fn main(args: Vec<OsString>) -> Result<()> {
 }
 
 /// Where shims and the daemon rendezvous. Overridable with WBG_POOL_DIR.
+///
+/// This holds only the daemon's state file. What the daemon generates,
+/// every test binary's bindings and the browser profile, goes in its work
+/// directory under [`work_root`].
 pub fn default_state_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("WBG_POOL_DIR") {
         return PathBuf::from(dir);
     }
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         return PathBuf::from(dir).join("wbg-pool");
+    }
+    let uid = unsafe { libc::geteuid() };
+    std::env::temp_dir().join(format!("wbg-pool-{uid}"))
+}
+
+/// Where daemons keep their work directories: the bindings generated for
+/// every test binary they serve, for as long as they run, and the browser
+/// profile.
+///
+/// Not the state dir's `XDG_RUNTIME_DIR`, which is a small in-memory
+/// filesystem meant for sockets and state files: a cross-target run
+/// generates bindings for every crate's test binary, hundreds of megabytes,
+/// and filled it. A `WBG_POOL_DIR` override keeps everything in that one
+/// directory, as it always has.
+fn work_root(state_dir: &Path) -> PathBuf {
+    if std::env::var_os("WBG_POOL_DIR").is_some() {
+        return state_dir.to_path_buf();
     }
     let uid = unsafe { libc::geteuid() };
     std::env::temp_dir().join(format!("wbg-pool-{uid}"))
@@ -114,9 +135,14 @@ async fn run(state_dir: PathBuf, idle_timeout: u64) -> Result<()> {
     std::fs::create_dir_all(&state_dir)
         .with_context(|| format!("failed to create state dir {}", state_dir.display()))?;
 
+    // Work directories of daemons from before they moved out of the state
+    // dir are swept there too.
+    let root = work_root(&state_dir);
     sweep_stale_work_dirs(&state_dir);
-    let work_dir = state_dir.join(format!("work-{}", std::process::id()));
-    std::fs::create_dir_all(&work_dir)?;
+    sweep_stale_work_dirs(&root);
+    let work_dir = root.join(format!("work-{}", std::process::id()));
+    std::fs::create_dir_all(&work_dir)
+        .with_context(|| format!("failed to create work dir {}", work_dir.display()))?;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();

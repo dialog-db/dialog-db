@@ -2,14 +2,15 @@
 
 use crate::ed25519::{Ed25519KeyError, Ed25519SignerError};
 
-/// Errors from [`Seal::conceal`] and [`Secret::reveal`].
+/// Errors from sealing, revealing and deriving.
 ///
 /// [`Seal::conceal`]: super::Seal::conceal
 /// [`Secret::reveal`]: super::Secret::reveal
+/// [`Secret::derive`]: super::Secret::derive
 #[derive(Debug, Clone)]
 #[allow(missing_copy_implementations)] // Crypto carries a String
 pub enum SecretError {
-    /// The secret could not be revealed.
+    /// A sealed secret could not be revealed.
     ///
     /// The message was sealed to a different identity or context, or it has
     /// been tampered with. These are deliberately not distinguished: telling
@@ -17,7 +18,7 @@ pub enum SecretError {
     /// was wrong.
     Failed,
 
-    /// The encoded message is malformed or truncated.
+    /// A sealed secret is malformed or truncated.
     Malformed,
 
     /// No X25519 agreement key is available for this identity.
@@ -29,7 +30,8 @@ pub enum SecretError {
     /// The recipient's DID does not yield a usable agreement key.
     InvalidRecipient,
 
-    /// A platform crypto operation failed.
+    /// A platform crypto operation failed: agreement, HKDF, AEAD, or
+    /// importing a derived seed as a signer.
     Crypto(String),
 }
 

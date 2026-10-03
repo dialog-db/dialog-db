@@ -24,7 +24,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use dialog_artifacts::{Artifact, Changes, Entity, Update as _, default_sort_key};
+use dialog_artifacts::{Artifact, Changes, Entity, Update as _};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
@@ -253,7 +253,8 @@ impl Channel {
                                 }
                                 StoreChange::Shadow(fact) => state.shadow(fact, &mut delta),
                                 StoreChange::Unshadow(fact) => {
-                                    state.unshadow(&default_sort_key(&fact), &mut delta)
+                                    let key = state.key(&fact);
+                                    state.unshadow(&key, &mut delta)
                                 }
                             }
                         }
@@ -281,7 +282,7 @@ impl Channel {
         let mut log = self.log.lock();
         let mut state = self.layer.state.write();
         let mut delta = Delta::default();
-        let held: Vec<_> = state.facts.values().cloned().collect();
+        let held: Vec<_> = state.facts.iter().cloned().collect();
         for fact in held {
             state.remove(&fact, &mut delta);
         }
@@ -382,9 +383,9 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::helpers::TestEnv;
     use dialog_artifacts::{ArtifactSelector, Value};
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_common::Holdings;
+    use dialog_search_tree::Manifest;
 
     fn fact(of: &str, the_: &str, is: &str) -> Artifact {
         Artifact {
@@ -402,7 +403,7 @@ mod tests {
     fn write(channel: &Channel, facts: Vec<Artifact>) {
         let mut changes = Changes::new();
         assert_all(&mut changes, facts);
-        channel.layer().apply(changes);
+        channel.layer().apply(changes).unwrap();
     }
 
     fn titles(channel: &Channel) -> Vec<String> {
@@ -419,9 +420,8 @@ mod tests {
         titles
     }
 
-    async fn two_channels() -> (Channel, Channel, TestEnv) {
-        let (operator, _profile) = test_operator_with_profile().await;
-        let env = TestEnv::new(operator);
+    async fn two_channels() -> (Channel, Channel, Holdings) {
+        let env = Holdings::default();
         let a = Channel::over(Ephemeral::create().perform(&env).await, 8);
         let b = Channel::over(Ephemeral::create().perform(&env).await, 8);
         (a, b, env)
@@ -499,7 +499,7 @@ mod tests {
         let mut changes = Changes::new();
         let gone = fact("doc:1", "doc/title", "Notes");
         changes.dissociate(gone.the, gone.of, gone.is);
-        a.layer().apply(changes);
+        a.layer().apply(changes).unwrap();
         b.receive(&pa, a.since(&pb));
         assert!(titles(&b).is_empty());
     }
@@ -552,24 +552,30 @@ mod tests {
         let hidden = fact("doc:lower", "doc/title", "Below");
         let mut changes = Changes::new();
         changes.dissociate(hidden.the.clone(), hidden.of.clone(), hidden.is.clone());
-        a.layer().apply(changes);
+        a.layer().apply(changes).unwrap();
         b.receive(&pa, a.since(&pb));
-        assert_eq!(a.layer().tombstones(), b.layer().tombstones());
-        assert_eq!(b.layer().tombstones().len(), 1);
+        assert_eq!(
+            a.layer().tombstones(&Manifest::default()),
+            b.layer().tombstones(&Manifest::default())
+        );
+        assert_eq!(b.layer().tombstones(&Manifest::default()).len(), 1);
         a.layer().clear();
         b.receive(&pa, a.since(&pb));
         assert!(
             b.layer().is_empty(),
             "lifting a tombstone must not store its fact"
         );
-        assert!(b.layer().tombstones().is_empty());
+        assert!(b.layer().tombstones(&Manifest::default()).is_empty());
 
         let mut changes = Changes::new();
         changes.dissociate(hidden.the.clone(), hidden.of.clone(), hidden.is.clone());
-        a.layer().apply(changes);
+        a.layer().apply(changes).unwrap();
         write(&b, vec![fact("doc:stale", "doc/title", "Stale")]);
         b.receive(&pa, a.snapshot());
-        assert_eq!(a.layer().tombstones(), b.layer().tombstones());
+        assert_eq!(
+            a.layer().tombstones(&Manifest::default()),
+            b.layer().tombstones(&Manifest::default())
+        );
         assert!(b.layer().is_empty());
         a.receive(&pb, b.since(&pa));
         assert!(
@@ -579,7 +585,7 @@ mod tests {
         a.layer().clear();
         b.receive(&pa, a.snapshot());
         assert!(
-            b.layer().tombstones().is_empty(),
+            b.layer().tombstones(&Manifest::default()).is_empty(),
             "a resync clears stale tombstones"
         );
     }
@@ -664,7 +670,7 @@ mod tests {
             b.layer().is_empty(),
             "a witnessed command must not become stored state"
         );
-        assert!(b.layer().tombstones().is_empty());
+        assert!(b.layer().tombstones(&Manifest::default()).is_empty());
         let super::super::Drained::Instants(instants) = observer.drain() else {
             panic!("one command cannot overflow the observer");
         };
