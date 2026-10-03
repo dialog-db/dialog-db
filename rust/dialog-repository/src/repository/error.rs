@@ -520,10 +520,17 @@ pub enum CommitError {
     #[error("Sealing failed: {0}")]
     Sealing(#[from] dialog_keyring::KeyringError),
 
-    /// A sealed line does not store assets: their bytes would reach the
-    /// blob store, and every remote a push reaches, in the clear.
-    #[error("A sealed line does not store assets")]
-    SealedAsset,
+    /// A sealed line was asked to record an asset naming plaintext bytes
+    /// the asset did not mark [`plaintext`](dialog_artifacts::Asset::plaintext):
+    /// recording it would keep content in the clear without anyone having
+    /// chosen to.
+    #[error("A sealed line keeps an asset in plain text only when it is marked plaintext")]
+    PlaintextAsset,
+
+    /// A line that is not sealed was asked to record a sealed asset, which
+    /// nothing reading the line could open.
+    #[error("A line that is not sealed cannot record a sealed asset")]
+    SealedAssetOnPlainLine,
 }
 
 /// Errors specific to a pull operation.

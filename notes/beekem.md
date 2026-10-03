@@ -1111,9 +1111,34 @@ remote serves sealed blocks exactly as it serves plain ones.
 - Snapshot export yields envelopes and sealed values on a sealed line, and
   download carries the branch's space into its walk.
 
-**Assets are refused.** An asset streams whole into the blob store under
-its plaintext hash. Sealing does not cover it, so a sealed line refuses it
-with `SealedAsset` rather than store it in the clear.
+**Assets are sealed in pieces, unless marked plaintext.** An asset can be
+far larger than memory and is read in ranges, so it is sealed in 64 KiB
+pieces (`layered/asset.rs`) under `keyed_hash(content_secret, salt)`. Each
+piece's nonce names its position and whether it is the last, so pieces
+cannot be reordered or the asset cut short at a piece boundary, and every
+piece authenticates the header (version, content generation, salt).
+- **Salt.** Content asserted in memory gets a convergent salt keyed from
+  its hash, so the same asset seals to the same copy and re-asserting it
+  mints nothing. Content streamed in, whose hash is known only at the end,
+  gets a random one.
+- **Where it is recorded.** The sealed copy is an ordinary blob under the
+  hash of its own bytes. A sealed asset records one fact, `asset:<hash>
+  dialog.asset/sealed`, in place of `dialog.asset/size`; its value is the
+  copy's address, the asset's size and the copy's length. Push and export
+  read that fact straight from its key and ship the copy like any blob, and
+  the plaintext is stored nowhere to be shipped.
+- **Reads.** A read finds the fact, hydrates the copy whole on a local
+  miss, reads the header, then reads and opens only the pieces the
+  requested range touches.
+- **Opting out.** `Asset::plaintext`, `AssetStream::plaintext` and
+  `Blob::import(..).plaintext()` keep an asset in the clear on a sealed
+  line, for content meant to be public. A stored asset naming plaintext
+  bytes without that mark is refused (`PlaintextAsset`), so nothing is
+  kept in the clear without someone choosing it. A plain line refuses a
+  sealed asset (`SealedAssetOnPlainLine`), since nothing reading it could
+  open it.
+- **What a copy reveals.** Its length, which is the asset's length plus
+  the header and 16 bytes per piece.
 
 **What a head reveals.** Its plaintext root lets whoever reads it confirm an
 exact guess of the root node, and nothing more. Its structure key lets them
@@ -1130,10 +1155,19 @@ on the filesystem one:
   `MissingGeneration`, naming the generation they lack.
 - A reader is refused a commit with `ReadOnly`, and the head stays put.
 - A handle without the space finds nothing under the plaintext root.
-- An asset import and an asset assertion are both refused with
-  `SealedAsset`. Nothing reaches the blob store, and the head stays put.
-- On disk (native), a sealed commit's values appear nowhere, while the same
-  values on a plain branch of the same repository do.
+- An asserted asset and a streamed import are stored only as sealed
+  copies, which carry none of the plaintext. They read back whole and in
+  ranges across piece boundaries, nothing is stored under the plaintext
+  hash, and re-asserting mints nothing.
+- An asset marked plaintext is stored in the clear and reads back.
+- Refusals, each with the head unmoved: an unmarked plaintext asset
+  (`PlaintextAsset`), a sealed asset on a plain line
+  (`SealedAssetOnPlainLine`), and a reader sealing an asset by import or
+  assertion (`ReadOnly`), which also records and stores nothing.
+- Retracting a sealed asset retracts its fact.
+- On disk (native), a sealed commit's values and sealed assets appear
+  nowhere, while the same values on a plain branch, and an asset marked
+  plaintext, do.
 
 `sealing/remote_tests.rs` (integration tests, against S3):
 
@@ -1145,6 +1179,10 @@ on the filesystem one:
   sealed sync points, and the pull mints a real merge (its tree is neither
   side's) and seals it. Both sides converge, and the remote still holds no
   plaintext.
+- A sealed asset pushed to the remote is held there only as its sealed
+  copy. Another replica, which does not hold the copy until it reads,
+  pulls, reads a range across a piece boundary (hydrating and opening the
+  copy), then downloads and reads it whole.
 
 ### What it is not
 

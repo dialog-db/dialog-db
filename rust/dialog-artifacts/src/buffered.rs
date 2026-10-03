@@ -688,7 +688,7 @@ mod tests {
     use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
     use crate::{
         Artifact, Asset, AttributeKey, BlobChange, BlobIndexExt as _, Datum, DialogArtifactsError,
-        EntityKey, Instruction, State, Value, blob_changes,
+        EntityKey, Instruction, SealedCopy, State, Value, blob_changes,
     };
     use futures_util::TryStreamExt as _;
 
@@ -1125,6 +1125,42 @@ mod tests {
             .try_collect()
             .await?;
         assert_eq!(changes, vec![BlobChange::Added(*asset.hash())]);
+        Ok(())
+    }
+
+    /// A sealed asset's one fact vouches for its size and ships as its
+    /// sealed copy: the blob it names is the copy, never the plaintext.
+    #[dialog_common::test]
+    async fn it_ships_a_sealed_asset_as_its_copy() -> Result<()> {
+        let store = store();
+        let mut delta = ArchiveDelta::zero();
+        let copy = SealedCopy {
+            address: [9u8; 32],
+            length: 99,
+        };
+        let asset = Asset::sealed([7u8; 32], 34, copy);
+
+        let batch = BufferedBatch::apply(
+            &ArtifactTree::empty(),
+            &store,
+            Some(asset_version()),
+            stream::iter(vec![Instruction::Assert(asset.sealed_fact(&copy)?)]),
+            WriteScope::Machinery,
+        )
+        .await?;
+        let tree = batch.seal(&store, &mut delta, false).await?;
+        delta.flush_into(&store);
+
+        assert_eq!(tree.content_size(&store, asset.hash()).await?, Some(34));
+        assert_eq!(tree.asset_size(&store, asset.hash()).await?, None);
+        assert_eq!(
+            tree.sealed_asset(&store, asset.hash()).await?,
+            Some((copy, 34))
+        );
+        let changes: Vec<_> = blob_changes(ArtifactTree::empty(), tree, store.clone())
+            .try_collect()
+            .await?;
+        assert_eq!(changes, vec![BlobChange::Added(copy.address)]);
         Ok(())
     }
 

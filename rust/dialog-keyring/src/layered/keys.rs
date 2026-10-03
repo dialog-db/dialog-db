@@ -46,6 +46,15 @@
 //! reference is the value's plaintext hash, which the node records. Only the
 //! content secret opens it: a party that can read the node that names the
 //! value can read the value, and no one else can.
+//!
+//! # Assets
+//!
+//! An asset is sealed in chunks under `keyed_hash(content_secret, salt)`,
+//! where the salt is carried in the sealed asset's header (see
+//! [`asset`](super::asset)). Content in hand gets a convergent salt,
+//! `keyed_hash(content_secret, reference)`, so sealing it twice gives the
+//! same bytes; content streamed in, whose hash is known only at the end,
+//! gets a random one. Either way only the content secret opens it.
 
 use std::collections::BTreeMap;
 
@@ -61,6 +70,10 @@ const RANGE_DOMAIN: &[u8] = b"dialog/keyring/layered/range/v1";
 const CONTENT_DOMAIN: &[u8] = b"dialog/keyring/layered/content/v1";
 /// Domain separator for a sealed value's key.
 const VALUE_DOMAIN: &[u8] = b"dialog/keyring/layered/value/v1";
+/// Domain separator for a sealed asset's key.
+const ASSET_DOMAIN: &[u8] = b"dialog/keyring/layered/asset/v1";
+/// Domain separator for a convergent asset salt.
+const ASSET_SALT_DOMAIN: &[u8] = b"dialog/keyring/layered/asset-salt/v1";
 
 /// The one per-node key: opens a node's header, and — with a level secret —
 /// derives the node's other keys.
@@ -233,6 +246,20 @@ impl Access {
             .ok_or_else(|| crate::KeyringError::MissingGeneration(generation.clone()))?;
         Ok(derive_value(secret, reference))
     }
+
+    /// The key for a sealed asset with this salt, if this party holds the
+    /// content generation it was sealed under.
+    pub(crate) fn asset_key(
+        &self,
+        generation: &EpochId,
+        salt: &[u8; 32],
+    ) -> Result<[u8; 32], crate::KeyringError> {
+        let secret = self
+            .content
+            .get(generation)
+            .ok_or_else(|| crate::KeyringError::MissingGeneration(generation.clone()))?;
+        Ok(derive_asset(secret, salt))
+    }
 }
 
 /// The generations a writer seals new nodes under.
@@ -286,6 +313,22 @@ impl Writer {
     pub(crate) fn value_key(&self, reference: &Blake3Hash) -> [u8; 32] {
         derive_value(&self.content.secret, reference)
     }
+
+    /// The key for an asset sealed with `salt` under this writer's content
+    /// generation.
+    pub(crate) fn asset_key(&self, salt: &[u8; 32]) -> [u8; 32] {
+        derive_asset(&self.content.secret, salt)
+    }
+
+    /// The convergent salt for an asset whose plaintext hashes to
+    /// `reference`: keyed, so the header that carries it says nothing of the
+    /// content to anyone without the content secret.
+    pub(crate) fn asset_salt(&self, reference: &Blake3Hash) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new_keyed(&self.content.secret);
+        hasher.update(ASSET_SALT_DOMAIN);
+        hasher.update(reference.as_bytes());
+        *hasher.finalize().as_bytes()
+    }
 }
 
 /// `R = keyed_hash(range_secret, S)`.
@@ -311,5 +354,14 @@ fn derive_value(secret: &[u8; 32], reference: &Blake3Hash) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new_keyed(secret);
     hasher.update(VALUE_DOMAIN);
     hasher.update(reference.as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+/// `A = keyed_hash(content_secret, salt)`. One key per sealed asset; its
+/// chunks take distinct nonces under it.
+fn derive_asset(secret: &[u8; 32], salt: &[u8; 32]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_keyed(secret);
+    hasher.update(ASSET_DOMAIN);
+    hasher.update(salt);
     *hasher.finalize().as_bytes()
 }

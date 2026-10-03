@@ -54,6 +54,9 @@
 mod archive;
 pub use archive::LayeredArchive;
 
+pub mod asset;
+pub use asset::{AssetOpener, AssetSealer};
+
 mod envelope;
 pub use envelope::Envelope;
 

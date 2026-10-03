@@ -23,10 +23,13 @@
 //!   root, whose structure key lets whoever reads the head walk the tree's
 //!   shape (how many nodes, how they link, how large each envelope is)
 //!   and copy it, which is what a remote has to do.
-//! - Assets. Their bytes stream into the blob store whole, under their
-//!   plaintext hash, so a sealed line refuses them
-//!   ([`CommitError::SealedAsset`](crate::CommitError::SealedAsset))
-//!   rather than store them in the clear.
+//! - Assets marked [`plaintext`](dialog_artifacts::Asset::plaintext), and
+//!   only those. Every other asset is sealed in pieces
+//!   ([`layered::asset`](dialog_keyring::layered::asset)) and
+//!   stored as its sealed copy, under the hash of the copy's bytes; the
+//!   fact recording where that copy lives sits in the sealed tree. What a
+//!   copy's length says of the asset's length is the one thing it gives
+//!   away.
 //! - Sync records, which stay on the replica that keeps them.
 
 use std::collections::BTreeSet;
@@ -190,6 +193,8 @@ impl From<SealedReadError> for ArchiveError {
         }
     }
 }
+
+pub(crate) mod asset;
 
 #[cfg(test)]
 mod tests;

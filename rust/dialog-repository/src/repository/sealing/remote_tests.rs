@@ -9,15 +9,16 @@
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use anyhow::Result;
-use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+use dialog_artifacts::{Artifact, ArtifactSelector, Asset, Instruction, Value};
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::{Blake3Hash, ConditionalSync};
 use dialog_effects::MethodExt as _;
 use dialog_effects::archive::Get;
 use dialog_effects::archive::prelude::{ArchiveExt as _, CatalogExt as _, GetBlockExt as _};
-use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
+use dialog_effects::blob::{BlobError, ByteRange, Read as BlobRead};
 use dialog_keyring::EpochId;
+use dialog_keyring::layered::asset::CHUNK;
 use dialog_keyring::layered::{Access, Envelope, Level, LevelSecret, StructureKey, Writer};
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use dialog_remote_s3::helpers::S3Address;
@@ -28,7 +29,8 @@ use futures_util::{StreamExt, stream};
 use super::{TreeSpace, writer_space};
 use crate::helpers::connect;
 use crate::repository::archive::local::read_all;
-use crate::{ConnectedReplica, RemoteSite, RepositoryExt as _, Revision};
+use crate::repository::source::SourceRef;
+use crate::{Blob, ConnectedReplica, RemoteSite, RepositoryExt as _, Revision, recorded_sealed};
 
 fn secret(tag: u8) -> LevelSecret {
     LevelSecret::new(EpochId::from([tag; 32]), [tag.wrapping_mul(31); 32])
@@ -376,5 +378,142 @@ async fn it_merges_concurrent_sealed_edits_through_a_remote(s3: S3Address) -> Re
             "a note reached the remote in the clear"
         );
     }
+    Ok(())
+}
+
+/// The bytes `remote`'s blob store holds under `digest`, or `None`.
+async fn remote_blob<Env>(
+    remote: &ConnectedReplica,
+    digest: [u8; 32],
+    env: &Env,
+) -> Result<Option<Vec<u8>>>
+where
+    Env: Provider<Fork<RemoteSite, BlobRead>> + ConditionalSync + 'static,
+{
+    let read = Subject::from(remote.did())
+        .reader()
+        .archive()
+        .blob()
+        .read(Blake3Hash::from(digest))
+        .perform(&remote.connection(env))
+        .await;
+    match read {
+        Ok(reader) => Ok(Some(read_all(reader).await?)),
+        Err(BlobError::NotFound(_)) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A sealed asset pushed to a remote crosses as its sealed copy only: the
+/// remote holds nothing under the asset's plaintext hash, and the copy it
+/// holds carries none of the plaintext. Another replica holding the keys
+/// pulls, reads the asset (hydrating the copy and opening it), and
+/// downloads the branch, after which the copy is held locally.
+#[dialog_common::test]
+async fn it_pushes_and_pulls_a_sealed_asset_through_a_remote(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    profile
+        .secrets()
+        .site(site(&s3))
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&profile)
+        .await?;
+
+    let alice = profile
+        .space(unique_name("alice"))
+        .create()
+        .perform(&operator)
+        .await?;
+    let origin = connect("origin", site(&s3), alice.did(), &operator).await?;
+    let branch = alice
+        .branch("main")
+        .open()
+        .sealed(writer())
+        .perform(&operator)
+        .await?;
+    let upstream = origin.branch("main").open().perform(&operator).await?;
+    branch.set_upstream(upstream).perform(&operator).await?;
+
+    let marker = unique_name("remote-asset");
+    let mut bytes = Vec::new();
+    while bytes.len() < 2 * CHUNK + 1000 {
+        bytes.extend_from_slice(marker.as_bytes());
+    }
+    let asset = Asset::new(bytes.clone());
+    branch
+        .transaction()
+        .assert(asset.clone())
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    branch.push().perform(&operator).await?.expect("a push");
+
+    let (copy, _) = recorded_sealed(SourceRef::from(&branch), asset.hash(), &operator)
+        .await?
+        .expect("a sealed copy");
+    assert_eq!(remote_blob(&origin, *asset.hash(), &operator).await?, None);
+    let sealed = remote_blob(&origin, copy.address, &operator)
+        .await?
+        .expect("the remote holds the sealed copy");
+    assert_eq!(sealed.len() as u64, copy.length);
+    assert!(
+        !holds(&sealed, &marker),
+        "the asset reached the remote in the clear"
+    );
+
+    let bob = profile
+        .space(unique_name("bob"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin_for_bob = connect("origin", site(&s3), alice.did(), &operator).await?;
+    let bob_branch = bob
+        .branch("main")
+        .open()
+        .sealed(writer())
+        .perform(&operator)
+        .await?;
+    let upstream = origin_for_bob
+        .branch("main")
+        .open()
+        .perform(&operator)
+        .await?;
+    bob_branch.set_upstream(upstream).perform(&operator).await?;
+    bob_branch.pull().perform(&operator).await?.expect("a pull");
+    let before = bob_branch
+        .archive()
+        .blob()
+        .read(Blake3Hash::from(copy.address))
+        .perform(&operator)
+        .await;
+    assert!(
+        matches!(before, Err(BlobError::NotFound(_))),
+        "Bob held the sealed copy before reading it"
+    );
+
+    let read = Blob::from(asset.entity()?)
+        .slice(ByteRange {
+            offset: CHUNK as u64 - 3,
+            length: Some(10),
+        })
+        .read((&bob_branch).into())
+        .perform(&operator)
+        .await?;
+    assert_eq!(read_all(read).await?, &bytes[CHUNK - 3..CHUNK + 7]);
+
+    bob_branch.download().perform(&operator).await?;
+    let held = bob_branch
+        .archive()
+        .blob()
+        .read(Blake3Hash::from(copy.address))
+        .perform(&operator)
+        .await;
+    assert!(held.is_ok(), "the download left the sealed copy local");
+    let whole = Blob::from(asset.entity()?)
+        .read((&bob_branch).into())
+        .perform(&operator)
+        .await?;
+    assert_eq!(read_all(whole).await?, bytes);
     Ok(())
 }

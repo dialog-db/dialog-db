@@ -21,10 +21,11 @@ use dialog_search_tree::{Change, LoadBlock, TreeDifference};
 use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
-use crate::key::varkey::{ValueRef, parse_key_ref};
+use crate::key::varkey::{KeyRef, ValueRef, parse_key_ref};
 use crate::{
-    ASSET_SIZE, BLOB_KEY_TAG, BlobKey, BlobRecord, COVERAGE_KEY_TAG, Datum, DialogArtifactsError,
-    ENTITY_KEY_TAG, Entity, Key, State, Value, ValueDataType, decode_value, tree::ArtifactTree,
+    ASSET_SEALED, ASSET_SIZE, BLOB_KEY_TAG, BlobKey, BlobRecord, COVERAGE_KEY_TAG, Datum,
+    DialogArtifactsError, ENTITY_KEY_TAG, Entity, Key, SealedCopy, State, Value, ValueDataType,
+    decode_value, tree::ArtifactTree,
 };
 
 /// One content-addressed block a push must ship to the remote before
@@ -38,6 +39,17 @@ pub enum ShipmentRef {
         /// The blob's content hash.
         hash: Blake3Hash,
         /// The blob's size, from its index record.
+        size: u64,
+    },
+    /// A sealed asset newly recorded in the target tree, by its
+    /// `dialog.asset/sealed` fact: its sealed copy ships as an ordinary
+    /// blob, and its plaintext, stored nowhere, does not.
+    SealedAdded {
+        /// The asset's plaintext hash, which names it.
+        hash: Blake3Hash,
+        /// The hash of the sealed copy, which the blob store keeps it under.
+        address: Blake3Hash,
+        /// The sealed copy's length.
         size: u64,
     },
     /// A blob reference removed in the target tree; ships nothing.
@@ -133,6 +145,9 @@ pub fn shipment_ref(
 /// Anything else, a malformed asset fact included, names no asset.
 fn asset_ref(key: &Key) -> Option<ShipmentRef> {
     let parts = parse_key_ref(key.as_ref())?;
+    if parts.attribute.as_ref() == ASSET_SEALED.as_bytes() {
+        return sealed_ref(&parts);
+    }
     if parts.attribute.as_ref() != ASSET_SIZE.as_bytes()
         || parts.value_type != ValueDataType::UnsignedInt
     {
@@ -148,6 +163,28 @@ fn asset_ref(key: &Key) -> Option<ShipmentRef> {
     Some(ShipmentRef::BlobAdded {
         hash: entity.blob_hash()?,
         size: u64::try_from(size).ok()?,
+    })
+}
+
+/// The sealed copy a `dialog.asset/sealed` fact's key records, when it
+/// records one. Its value is 48 bytes, so the key carries all of it: inline
+/// under any usual threshold, and whole in a spilled value's prefix under
+/// one smaller than that. The key alone says what ships.
+fn sealed_ref(parts: &KeyRef<'_>) -> Option<ShipmentRef> {
+    if parts.value_type != ValueDataType::Bytes {
+        return None;
+    }
+    let payload = match parts.value {
+        ValueRef::Inline(payload) => payload,
+        ValueRef::Spilled { prefix, .. } => prefix,
+    };
+    let (value, _) = decode_value(ValueDataType::Bytes, payload)?;
+    let (copy, _) = SealedCopy::from_value(&value)?;
+    let entity: Entity = from_utf8(&parts.entity).ok()?.parse().ok()?;
+    Some(ShipmentRef::SealedAdded {
+        hash: entity.blob_hash()?,
+        address: copy.address,
+        size: copy.length,
     })
 }
 
@@ -184,6 +221,7 @@ where
             let first = match &reference {
                 ShipmentRef::SpilledValue(spilled) => seen.insert(*spilled),
                 ShipmentRef::BlobAdded { hash, .. } => blobs.insert(*hash),
+                ShipmentRef::SealedAdded { address, .. } => blobs.insert(*address),
                 ShipmentRef::BlobRemoved(_) => true,
             };
             if !first {
