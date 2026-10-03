@@ -77,7 +77,21 @@ where
     ForkInvocation<Fs, Fx>: ConditionalSend,
     Fs: Provider<ForkInvocation<Fs, Fx>> + ConditionalSync,
 {
+    perform_through(&Fs::default(), fork).await
+}
+
+/// [`perform`] through `site`. A site owns its in-flight block reads, so
+/// concurrent calls through one site join one another's, and calls
+/// through different sites never do.
+pub async fn perform_through<Fx>(site: &Fs, fork: Fork<Fs, Fx>) -> anyhow::Result<Fx::Output>
+where
+    Fx: Effect + 'static,
+    Fx::Of: Constraint,
+    Capability<Fx>: Ability,
+    ForkInvocation<Fs, Fx>: ConditionalSend,
+    Fs: Provider<ForkInvocation<Fs, Fx>> + ConditionalSync,
+{
     let filesystem = FileSystem::open(fork.address().location()).await?;
     let invocation = fork.attest(FsAuthorization::new(filesystem));
-    Ok(invocation.perform(&Fs).await)
+    Ok(invocation.perform(site).await)
 }

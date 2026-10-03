@@ -2,7 +2,7 @@ use super::memory::Cell;
 use crate::rules::SharedRuleCache;
 use crate::{Ephemeral, RemoteFallback, ResolveError, Revision};
 use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds, held_key};
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
@@ -25,7 +25,7 @@ use dialog_query::query::Application;
 use futures_util::lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 mod asset;
 pub use asset::*;
@@ -218,7 +218,7 @@ pub struct Branch {
     /// shared by every clone, so a remote built from a route fails over
     /// as the host's connection does rather than starting afresh.
     answers: Answers,
-    /// What every handle of this branch in the process shares as its
+    /// What every handle of this branch in the environment shares as its
     /// writer: the lock the head moves under, and the head the writer's
     /// last pull adopted. See [`Writer`].
     writer: Arc<Writer>,
@@ -228,9 +228,16 @@ pub struct Branch {
 /// connections keeps, collected as a branch connects.
 pub(crate) type Answers = Arc<Mutex<HashMap<Entity, Arc<AtomicUsize>>>>;
 
-/// The writer of a branch in this process, shared by every handle of
-/// the branch: origins are unique per process, so the handles mint under
-/// one origin and must take turns moving the head.
+/// The key an environment holds its branch writers under.
+const WRITERS: &str = "dialog.writers";
+
+/// The writers of the branches open through an environment, by branch.
+/// Weak, so a writer lives as long as some handle of its branch does.
+type Writers = Mutex<HashMap<String, Weak<Writer>>>;
+
+/// The writer of a branch in an environment, shared by every handle of
+/// the branch opened through it: an environment writes as one issuer, so
+/// its handles mint under one origin and must take turns moving the head.
 #[derive(Debug)]
 pub(crate) struct Writer {
     /// Held while the head moves, by a commit, a pull or a reset, so two
@@ -244,24 +251,38 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
-    /// The writer of the branch `key` names, shared with every handle of
-    /// it that is open. Origins are unique per process, so no sharing is
-    /// needed beyond it.
-    fn shared(key: String) -> Arc<Self> {
-        static WRITERS: OnceLock<Mutex<HashMap<String, Weak<Writer>>>> = OnceLock::new();
-        let mut writers = WRITERS
-            .get_or_init(Mutex::default)
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+    fn new() -> Self {
+        Self {
+            lock: AsyncMutex::new(()),
+            adopted: Mutex::new(None),
+        }
+    }
+
+    /// The writer of the branch `key` names in `env`, shared with every
+    /// handle of it that is open through `env`.
+    ///
+    /// The environment holds the registry. Two environments that write as
+    /// the same issuer do not share a writer; a race between them is a
+    /// writer racing itself, which a merging commit refuses rather than
+    /// mint an edition twice (see `merge`). An environment that holds
+    /// nothing, such as a bare storage provider, gives every handle a
+    /// writer of its own, as two environments would.
+    fn held<Env: Holds>(env: &Env, key: String) -> Arc<Self> {
+        let held = env.held_or(&held_key::<Writers>(WRITERS), &|| {
+            Arc::new(Writers::default())
+        });
+        let Some(writers) = held.downcast_ref::<Writers>() else {
+            // Something else is held under the key: a writer of this
+            // handle's own, which takes turns with no other handle.
+            return Arc::new(Self::new());
+        };
+        let mut writers = writers.lock().unwrap_or_else(|poison| poison.into_inner());
         if let Some(writer) = writers.get(&key).and_then(Weak::upgrade) {
             return writer;
         }
         // Drop the entries of branches no handle is open for any more.
         writers.retain(|_, writer| writer.strong_count() > 0);
-        let writer = Arc::new(Writer {
-            lock: AsyncMutex::new(()),
-            adopted: Mutex::new(None),
-        });
+        let writer = Arc::new(Self::new());
         writers.insert(key, Arc::downgrade(&writer));
         writer
     }
@@ -412,19 +433,19 @@ impl Branch {
             .insert(peer, answered);
     }
 
-    /// This branch's writer in the process: the lock a commit, a pull or
-    /// a reset holds while it moves the head, and the head the last pull
-    /// adopted. Every handle of the branch shares it, so a commit and a
-    /// pull by one writer take turns instead of minting the same edition
-    /// twice.
+    /// This branch's writer in the environment it was opened through: the
+    /// lock a commit, a pull or a reset holds while it moves the head, and
+    /// the head the last pull adopted. Every handle of the branch opened
+    /// through that environment shares it, so a commit and a pull by one
+    /// writer take turns instead of minting the same edition twice.
     pub(crate) fn writer(&self) -> Arc<Writer> {
         self.writer.clone()
     }
 
-    /// The writer shared by every open handle of the branch `reference`
-    /// names.
-    pub(crate) fn writer_of(reference: &BranchReference) -> Arc<Writer> {
-        Writer::shared(format!("{}:{}", reference.subject(), reference.name()))
+    /// The writer shared by every handle of the branch `reference` names
+    /// that is open through `env`.
+    pub(crate) fn writer_of<Env: Holds>(env: &Env, reference: &BranchReference) -> Arc<Writer> {
+        Writer::held(env, format!("{}:{}", reference.subject(), reference.name()))
     }
 
     /// Where a read of content this branch holds by reference falls back

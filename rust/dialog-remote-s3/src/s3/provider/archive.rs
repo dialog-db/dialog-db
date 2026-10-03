@@ -10,36 +10,7 @@ use dialog_effects::archive::*;
 use reqwest::StatusCode;
 
 use crate::S3Error;
-use crate::flight::Flight;
 use crate::s3::{S3, S3Invocation};
-
-/// In-flight block GETs, joined by presigned URL.
-///
-/// A block is immutable content, so every caller holding the same
-/// presigned URL gets the same bytes — the one read that is always safe
-/// to share. The URL's signature binds it to the permit (and through it
-/// the operator) that redeemed it, so a process-wide registry shares
-/// nothing across operators: a different operator's request for the
-/// same object carries a different signature and never joins.
-///
-/// Mutable reads (memory cells) deliberately do not come through here.
-type BlockGets = Flight<String, Result<(u16, Arc<Vec<u8>>), S3Error>>;
-
-#[cfg(not(target_arch = "wasm32"))]
-fn block_gets() -> &'static BlockGets {
-    static BLOCK_GETS: std::sync::LazyLock<BlockGets> = std::sync::LazyLock::new(Flight::default);
-    &BLOCK_GETS
-}
-
-/// See the native arm; a worker context is single-threaded, so the
-/// registry lives in a thread-local and is handed out by `Rc`.
-#[cfg(target_arch = "wasm32")]
-fn block_gets() -> std::rc::Rc<BlockGets> {
-    thread_local! {
-        static BLOCK_GETS: std::rc::Rc<BlockGets> = Default::default();
-    }
-    BLOCK_GETS.with(std::rc::Rc::clone)
-}
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -62,12 +33,13 @@ impl Provider<ForkInvocation<S3, Get>> for S3 {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<S3Invocation<Get>> for S3 {
     async fn execute(&self, input: S3Invocation<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
-        // Concurrent readers of one block join a single request; see
-        // `block_gets`. The future owns its permit, so it outlives any
-        // one caller and whoever still cares drives it.
+        // Concurrent readers of one block through this site join a single
+        // request; see `S3::gets`. The future owns its permit, so it
+        // outlives any one caller and whoever still cares drives it.
         let key = input.permit.url.to_string();
         let permit = input.permit;
-        let (status, bytes) = block_gets()
+        let (status, bytes) = self
+            .gets()
             .join(key, move || async move {
                 let response = permit.send().await?;
                 let status = response.status().as_u16();
@@ -171,12 +143,13 @@ mod tests {
                 .get([4u8; 32])
         };
 
+        let site = S3::default();
         let first = Provider::<S3Invocation<Get>>::execute(
-            &S3,
+            &site,
             S3Invocation::new(permit.clone(), capability()),
         );
         let second = Provider::<S3Invocation<Get>>::execute(
-            &S3,
+            &site,
             S3Invocation::new(permit.clone(), capability()),
         );
         let (first, second) = tokio::join!(first, second);
@@ -192,7 +165,7 @@ mod tests {
         // The flight holds in-flight work only: a later read fetches
         // afresh rather than being served yesterday's response.
         let third =
-            Provider::<S3Invocation<Get>>::execute(&S3, S3Invocation::new(permit, capability()))
+            Provider::<S3Invocation<Get>>::execute(&site, S3Invocation::new(permit, capability()))
                 .await
                 .unwrap();
         assert_eq!(third, Some(b"block bytes".to_vec()));
