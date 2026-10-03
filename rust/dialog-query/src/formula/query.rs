@@ -3,6 +3,7 @@ use std::fmt;
 use crate::artifact::Type as ValueType;
 use crate::error::EvaluationError;
 use crate::formula::bindings::Bindings;
+use crate::formula::cache::FormulaCache;
 use crate::formula::cell::Cells;
 use crate::formula::conversions::{self, ParseFloat, ParseSignedInteger, ParseUnsignedInteger};
 use crate::formula::logic::{And, Not, Or};
@@ -13,6 +14,7 @@ use crate::selection::{Match, Selection};
 use crate::term::Term;
 use crate::types::Any;
 use crate::{Binding, Environment, Formula, Parameters, Schema, Value, try_stream};
+use dialog_common::Holds;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -69,6 +71,16 @@ macro_rules! define_formulas {
             /// Runs the formula's resolve logic against the given bindings.
             fn resolve(&self, bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
                 match self { $( Self::$variant(_) => <$ty>::resolve(bindings), )* }
+            }
+
+            /// Runs the formula's resolve logic against the given bindings,
+            /// through `cache` if the formula keeps its outputs.
+            fn resolve_with(
+                &self,
+                bindings: &mut Bindings,
+                cache: &FormulaCache,
+            ) -> Result<Vec<Match>, EvaluationError> {
+                match self { $( Self::$variant(_) => <$ty>::resolve_with(bindings, cache), )* }
             }
 
             /// Returns the base cost of evaluating this formula.
@@ -220,6 +232,17 @@ impl FormulaQuery {
     /// Anything else (an unbound required input, a type mismatch) is
     /// a genuine evaluation failure and propagates.
     pub fn expand(&self, matched: Match) -> Result<Vec<Match>, EvaluationError> {
+        self.expand_with(matched, &FormulaCache::with_capacity(1))
+    }
+
+    /// [`expand`](Self::expand), through `cache`: a formula derived with
+    /// `#[formula(cached)]` computes each set of inputs once for as long as
+    /// the cache remembers it.
+    pub fn expand_with(
+        &self,
+        matched: Match,
+        cache: &FormulaCache,
+    ) -> Result<Vec<Match>, EvaluationError> {
         let formula = Arc::new(self.clone());
         let Some(parameters) = self.adapt_literals(&matched) else {
             // A literal has no lossless form in the row's type: the
@@ -227,7 +250,7 @@ impl FormulaQuery {
             return Ok(vec![]);
         };
         let mut bindings = Bindings::new(formula, matched, parameters);
-        match self.resolve(&mut bindings) {
+        match self.resolve_with(&mut bindings, cache) {
             Ok(output) => Ok(output),
             Err(EvaluationError::Conflict { .. })
             | Err(EvaluationError::Absent { .. })
@@ -238,12 +261,19 @@ impl FormulaQuery {
         }
     }
 
-    /// Evaluate this formula against the given selection stream
-    pub fn evaluate<M: Selection>(self, selection: M) -> impl Selection {
+    /// Evaluate this formula against the given selection stream, keeping
+    /// the outputs of a formula that asks for it in the cache `env` holds
+    /// (see [`FormulaCache`]).
+    pub fn evaluate<M: Selection, Env: Holds + ?Sized>(
+        self,
+        selection: M,
+        env: &Env,
+    ) -> impl Selection {
         let formula = self;
+        let cache = FormulaCache::of(env);
         try_stream! {
             for await candidate in selection {
-                for extension in formula.expand(candidate?)? {
+                for extension in formula.expand_with(candidate?, &cache)? {
                     yield extension;
                 }
             }

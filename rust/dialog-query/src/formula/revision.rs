@@ -22,28 +22,20 @@
 //!   replayed at another revision entity.
 
 use dialog_artifacts::history::{RevisionRecord, verify_issuer_signature};
-use dialog_common::Blake3Hash;
-use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::collections::HashSet;
 
 use crate::formula::Input;
 use crate::types::RecordBytes;
 use crate::{Entity, Formula};
 
-/// Entries the verified-record memo holds before it resets. Entries are
-/// re-verifiable, so an occasional refill only costs the verification it
-/// would have paid anyway.
-const VERIFIED_MEMO_BOUND: usize = 4096;
-
 /// Decode and verify the [`RevisionRecord`] carried by `of`, or `None`
 /// if the record is malformed or does not vouch for itself.
 ///
-/// Memoized by the blake3 of the record bytes: Ed25519 verification
-/// dominates projecting a record, and the fixpoint evaluator re-applies
-/// these formulas to the same records across delta rounds — an ancestry
-/// closure over n revisions otherwise pays O(n · rounds) verifications.
-/// Record bytes are immutable, so an entry (positive or negative) never
-/// invalidates.
+/// Ed25519 verification dominates projecting a record, and the fixpoint
+/// evaluator re-applies these formulas to the same records across delta
+/// rounds, so both formulas are derived `#[formula(cached)]`: the engine
+/// keeps their outputs by record in the cache the environment holds, and
+/// a record is verified once for as long as that cache remembers it.
 ///
 /// Only the signature is checked here: the slot binding
 /// [`RevisionRecord::verify`] adds compares the derived version against
@@ -51,29 +43,16 @@ const VERIFIED_MEMO_BOUND: usize = 4096;
 /// replay rejection happens in the join on `this` instead (see the
 /// module docs).
 fn verified(of: &RecordBytes) -> Option<RevisionRecord> {
-    static MEMO: OnceLock<Mutex<HashMap<[u8; 32], Option<RevisionRecord>>>> = OnceLock::new();
-    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = *Blake3Hash::hash(&of.0).as_bytes();
-    if let Some(hit) = memo.lock().expect("verified-record memo lock").get(&key) {
-        return hit.clone();
-    }
-    let record = (|| {
-        let record = RevisionRecord::try_from_bytes(&of.0).ok()?;
-        verify_issuer_signature(&record.issuer, &record.payload().ok()?, &record.signature).ok()?;
-        Some(record)
-    })();
-    let mut memo = memo.lock().expect("verified-record memo lock");
-    if memo.len() >= VERIFIED_MEMO_BOUND {
-        memo.clear();
-    }
-    memo.insert(key, record.clone());
-    record
+    let record = RevisionRecord::try_from_bytes(&of.0).ok()?;
+    verify_issuer_signature(&record.issuer, &record.payload().ok()?, &record.signature).ok()?;
+    Some(record)
 }
 
 /// Projects the scalar fields of a revision record: attribution
 /// (issuer, authority), the branch, the causal depth, and the
 /// revision entity derived from the record itself.
 #[derive(Debug, Clone, Formula)]
+#[formula(cached)]
 pub struct Revision {
     /// The revision record bytes — the value of a `dialog.db/revision`
     /// fact.
@@ -123,6 +102,7 @@ impl Revision {
 /// each parent named by its content-derived revision entity. A genesis
 /// revision (no parents) projects nothing.
 #[derive(Debug, Clone, Formula)]
+#[formula(cached)]
 pub struct RevisionParent {
     /// The revision record bytes — the value of a `dialog.db/revision`
     /// fact.
@@ -163,6 +143,12 @@ impl RevisionParent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::formula::FormulaCache;
+    use crate::formula::math::SumQuery;
+    use crate::selection::Match;
+    use crate::term::Term;
+    use crate::types::Any;
+    use crate::{FormulaQuery, Value};
     use base58::ToBase58 as _;
     use dialog_artifacts::history::{Edition, Origin, REVISION_RECORD_FORMAT, Version};
     use ed25519_dalek::Signer as _;
@@ -250,6 +236,103 @@ mod tests {
             1,
             "the row agreeing with the bound parent survives its conflicting sibling"
         );
+    }
+
+    /// The query that projects `record`'s parents, with the record bound.
+    fn parents_of(record: &RevisionRecord) -> (FormulaQuery, Match) {
+        let query = RevisionParentQuery {
+            of: Term::var("record"),
+            this: Term::var("this"),
+            parent: Term::var("parent"),
+        }
+        .into();
+        let mut matched = Match::new();
+        matched
+            .bind(
+                &Term::<Any>::var("record"),
+                Value::Record(record.to_bytes().expect("record encodes")),
+            )
+            .expect("record binds");
+        (query, matched)
+    }
+
+    /// A cached formula is computed once for the same inputs: the second
+    /// application is answered from the cache with the same rows, and the
+    /// cache holds one entry for it.
+    #[test]
+    fn it_computes_a_cached_formula_once_for_the_same_inputs() {
+        let parents = vec![
+            Version::new(Origin::from([3u8; 32]), Edition::new(4)),
+            Version::new(Origin::from([5u8; 32]), Edition::new(4)),
+        ];
+        let (record, _) = signed_record(parents);
+        let (query, matched) = parents_of(&record);
+        let cache = FormulaCache::new();
+
+        let first = query
+            .expand_with(matched.clone(), &cache)
+            .expect("expansion succeeds");
+        assert_eq!(first.len(), 2);
+        assert_eq!(cache.len(), 1);
+
+        let second = query
+            .expand_with(matched, &cache)
+            .expect("expansion succeeds");
+        assert_eq!(second, first);
+        assert_eq!(cache.len(), 1, "the same inputs are not computed again");
+
+        let input = [Value::Record(record.to_bytes().expect("record encodes"))];
+        let kept = cache
+            .outputs::<RevisionParent>(&input, || {
+                panic!("a remembered application is not computed")
+            })
+            .expect("the application is remembered");
+        assert_eq!(kept.len(), 2);
+    }
+
+    /// A forged record projects nothing whether or not the answer is
+    /// remembered: the cache keeps the empty answer, never a verified one.
+    #[test]
+    fn it_remembers_that_a_forged_record_projects_nothing() {
+        let (record, _) = signed_record(Vec::new());
+        let mut forged = record.clone();
+        forged.branch = "test:elsewhere".parse().expect("valid entity");
+        let (query, matched) = parents_of(&forged);
+        let cache = FormulaCache::new();
+
+        for _ in 0..2 {
+            let rows = query
+                .expand_with(matched.clone(), &cache)
+                .expect("expansion succeeds");
+            assert!(rows.is_empty());
+        }
+        assert_eq!(cache.len(), 1);
+    }
+
+    /// A formula that is not marked cached leaves the cache alone.
+    #[test]
+    fn it_leaves_the_cache_alone_for_an_uncached_formula() {
+        let query: FormulaQuery = SumQuery {
+            of: Term::var("x"),
+            with: Term::var("y"),
+            is: Term::var("sum"),
+        }
+        .into();
+        let mut matched = Match::new();
+        matched
+            .bind(&Term::<Any>::var("x"), Value::UnsignedInt(2))
+            .expect("x binds");
+        matched
+            .bind(&Term::<Any>::var("y"), Value::UnsignedInt(3))
+            .expect("y binds");
+        let cache = FormulaCache::new();
+
+        let rows = query
+            .expand_with(matched, &cache)
+            .expect("expansion succeeds");
+
+        assert_eq!(rows.len(), 1);
+        assert!(cache.is_empty());
     }
 
     #[test]
