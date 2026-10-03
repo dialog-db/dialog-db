@@ -281,20 +281,36 @@ hydration.
 ### Identity
 
 A rule's identity is the hash of its canonical spelling, not of the
-bytes its author wrote. The head's operands (`this` and the field
-names) are fixed; every other variable is a local, and locals are
-renamed by a labeling that depends only on the body's structure:
-colour refinement over where each local occurs (which premise shape,
-under which parameter, beside which other locals), then
-individualisation of any locals refinement leaves tied, keeping the
-spelling with the smallest encoding. Premises are sorted by their
-encoding under that labeling. So two authors writing one body with
-different names and in a different order install one rule: one
-entity its facts are stored under, one plan cache entry, one body
-memo. The authored spelling is kept beside the canonical one and is
-what the rule stores and shows, so a rule reads back as written; the
+bytes its author wrote. Every variable but `this` is renamed by a
+labeling that depends only on the rule's structure: colour refinement
+over where each variable occurs (which premise shape, under which
+parameter, beside which other variables), then individualisation of
+any variables refinement leaves tied, keeping the spelling with the
+smallest encoding. The head's field names are variables like the
+rest: a field name only ties a body variable to an attribute, and
+the attribute is what pins it, which the labeling sees as one more
+place the variable occurs. A keyed field's key operand follows its
+field. Premises are sorted by their encoding under the labeling and
+the head is re-keyed by it. So two authors writing one rule under
+different names, for the head and the body alike, and in a different
+order install one rule: one entity its facts are stored under, one
+plan cache entry, one body memo.
+
+The rule evaluates under a working spelling that keeps the head's
+field names as given, because a caller's query binds the head by
+those names, and renames only the body's locals. What is keyed by
+identity is keyed by the head's spelling as well, so two spellings
+of one rule never share a plan or a body's rows. A rule installed
+into a concept's bundle under other field names is re-headed onto
+the bundle's names first, pairing fields by attribute, which also
+closes a gap the old field-named identity left open: a caller
+spelling a concept under its own names used to reach stored rules
+whose operands it could not bind.
+
+The authored spelling is kept beside the canonical one and is what
+the rule stores and shows, so a rule reads back as written; the
 content-address check on hydration compares identities, which the
-canonical spelling makes a pure function of the body. A body the
+canonical spelling makes a pure function of the rule. A body the
 notation cannot express (a raw attribute scan, as in a concept's
 implicit rule) has no encoding, hence no identity, and keeps the
 spelling it was given.

@@ -32,7 +32,7 @@ use crate::{Environment, Term};
 use descriptor::DeductiveRuleDescriptor;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::iter;
 use std::sync::Arc;
@@ -194,7 +194,7 @@ impl DeductiveRule {
     pub fn descriptor(&self) -> DeductiveRuleDescriptor {
         match &self.analysis.authored {
             Some(authored) => self.describe(&authored.premises, &authored.reduce),
-            None => self.canonical_descriptor(),
+            None => self.describe(&self.analysis.premises, &self.analysis.reduce),
         }
     }
 
@@ -204,7 +204,87 @@ impl DeductiveRule {
     /// of writing the body. Its encoding is what the rule's identity
     /// hashes.
     pub fn canonical_descriptor(&self) -> DeductiveRuleDescriptor {
-        self.describe(&self.analysis.premises, &self.analysis.reduce)
+        match &self.analysis.canonical {
+            Some(identity) => {
+                let (when, unless) = split(&identity.premises);
+                DeductiveRuleDescriptor {
+                    description: None,
+                    deduce: identity.conclusion.clone(),
+                    when,
+                    unless,
+                    reduce: identity.reduce.iter().cloned().collect(),
+                }
+            }
+            None => self.describe(&self.analysis.premises, &self.analysis.reduce),
+        }
+    }
+
+    /// The head's spelling: what the identity leaves out. Two rules of
+    /// one identity under different field names plan and remember
+    /// their bodies under different variables, so what is keyed by
+    /// identity is keyed by this as well.
+    pub fn spelling(&self) -> Vec<u8> {
+        let operands = self.conclusion().sorted_operands();
+        let parts: Vec<&[u8]> = operands.iter().map(|name| name.as_bytes()).collect();
+        blake3::hash(&parts.concat()).as_bytes()[..8].to_vec()
+    }
+
+    /// This rule re-headed onto `target`, a concept of the same
+    /// attributes under other field names: the body's variables
+    /// renamed onto the target's operands, so a caller binding the
+    /// target's names reaches the head. `None` when the fields do not
+    /// pair up one to one by attribute, and `Ok(None)` as well when
+    /// nothing needs renaming.
+    pub fn respelled(&self, target: &ConceptDescriptor) -> Result<Option<Self>, TypeError> {
+        use rename::{Rename, fresh_name, rename_premises, variables};
+
+        let mut unpaired: Vec<(&str, &ConceptFieldDescriptor)> =
+            self.conclusion().with().iter().collect();
+        let mut map = Rename::new();
+        for (name, field) in target.with().iter() {
+            let Some(index) = unpaired.iter().position(|(_, mine)| {
+                same_attribute(mine, field) && mine.is_optional() == field.is_optional()
+            }) else {
+                return Ok(None);
+            };
+            let (mine, _) = unpaired.remove(index);
+            if mine != name {
+                map.insert(mine.to_string(), name.to_string());
+                if matches!(field.the(), Relation::Collection { .. }) {
+                    map.insert(Relation::key_operand(mine), Relation::key_operand(name));
+                }
+            }
+        }
+        if !unpaired.is_empty() || map.is_empty() {
+            return Ok(None);
+        }
+        let premises = &self.analysis.premises;
+        let taken = variables(premises);
+        let targets: BTreeSet<&String> = map.values().collect();
+        let mut aside = Rename::new();
+        for variable in &taken {
+            if targets.contains(variable) && !map.contains_key(variable) {
+                let fresh = fresh_name(variable, &taken, &map);
+                aside.insert(variable.clone(), fresh);
+            }
+        }
+        map.extend(aside);
+        let premises = rename_premises(premises, &map)?;
+        let reduce: BTreeMap<String, ReduceSpec> = self
+            .analysis
+            .reduce
+            .iter()
+            .map(|entry| {
+                let field = map
+                    .get(&entry.field)
+                    .cloned()
+                    .unwrap_or_else(|| entry.field.clone());
+                let mut spec = ReduceSpec::from(entry);
+                spec.of = rename::rename_term(&spec.of, &map);
+                (field, spec)
+            })
+            .collect();
+        Ok(Some(Self::with_reduce(target.clone(), premises, reduce)?))
     }
 
     fn describe(&self, premises: &[Premise], reduce: &[ReduceEntry]) -> DeductiveRuleDescriptor {
@@ -289,7 +369,7 @@ impl DeductiveRule {
     /// has a key.
     pub fn memo_key(&self) -> Vec<u8> {
         match self.try_this() {
-            Some(entity) => entity.to_string().into_bytes(),
+            Some(entity) => [entity.to_string().into_bytes(), self.spelling()].concat(),
             None => (Arc::as_ptr(&self.analysis) as usize)
                 .to_le_bytes()
                 .to_vec(),
@@ -665,6 +745,19 @@ impl DeductiveRule {
         }
         DeductiveRule::new(concept.clone(), body).map(Some)
     }
+}
+
+/// The premises split into the descriptor's `when` and `unless`.
+fn split(premises: &[Premise]) -> (Vec<Proposition>, Vec<Proposition>) {
+    let mut when = Vec::new();
+    let mut unless = Vec::new();
+    for premise in premises {
+        match premise {
+            Premise::Assert(proposition) => when.push(proposition.clone()),
+            Premise::Unless(Negation(proposition)) => unless.push(proposition.clone()),
+        }
+    }
+    (when, unless)
 }
 
 /// Whether two fields are the same attribute: the same relation,

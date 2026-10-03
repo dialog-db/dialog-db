@@ -35,6 +35,7 @@ use crate::premise::Negation;
 use crate::proposition::Proposition;
 use crate::reduce::{ReduceEntry, ReduceSpec};
 use crate::rule::RuleKind;
+use crate::rule::canonical::Identity;
 use crate::rule::types::TypeEnv;
 use crate::type_system::unifier::Context;
 use crate::type_system::{Primitive, Type as Kind};
@@ -206,6 +207,10 @@ pub struct AnalyzedRule {
     /// canonical spelling: what the rule encodes to for storage and
     /// display, so an author reads back their own names.
     pub authored: Option<Arc<Authored>>,
+    /// The rule's canonical spelling (see
+    /// [`canonical`](crate::rule::canonical)), which its identity
+    /// hashes; `None` for a body the notation cannot express.
+    pub canonical: Option<Arc<Identity>>,
 }
 
 /// A rule body as its author spelled it.
@@ -230,6 +235,7 @@ impl AnalyzedRule {
             graph: DependencyGraph::default(),
             reduce: Vec::new(),
             authored: None,
+            canonical: None,
         }
     }
 
@@ -479,6 +485,7 @@ pub fn analyze_with(
         graph,
         reduce: entries,
         authored: None,
+        canonical: None,
     })
 }
 

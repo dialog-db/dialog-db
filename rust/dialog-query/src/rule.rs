@@ -22,13 +22,12 @@ use crate::premise::Premise;
 use crate::reduce::ReduceSpec;
 use crate::rule::analyzer::Authored;
 use crate::{Environment, Type};
-use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::sync::Arc;
 
 /// Rule analysis: inference and dependency graph over premises.
 pub mod analyzer;
-pub(crate) mod canonical;
+pub mod canonical;
 /// Deductive rule definitions for deriving new facts.
 pub mod deductive;
 /// Inductive rule definitions (a.k.a. effects).
@@ -279,9 +278,8 @@ pub(crate) fn compile_rule<T: Compile>(
     // premises are canonicalised and analysed again, which is the
     // same analysis under other names; the authored spelling is kept
     // for storage and display.
-    let fixed: BTreeSet<String> = conclusion.operands().collect();
     let analysis = match canonical::canonicalize(
-        &fixed,
+        &conclusion,
         &analysis.premises,
         &authored_reduce
             .iter()
@@ -296,7 +294,7 @@ pub(crate) fn compile_rule<T: Compile>(
             .collect::<Vec<_>>(),
     )? {
         Some(canonical) => {
-            let respelled = !canonical.rename.is_empty() || canonical.premises != analysis.premises;
+            let respelled = canonical.premises != analysis.premises;
             let authored = Authored {
                 premises: analysis.premises,
                 reduce: analysis.reduce,
@@ -313,6 +311,7 @@ pub(crate) fn compile_rule<T: Compile>(
             if respelled {
                 analysis.authored = Some(Arc::new(authored));
             }
+            analysis.canonical = Some(Arc::new(canonical.identity));
             analysis
         }
         None => analysis,
