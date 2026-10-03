@@ -494,7 +494,7 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
             // An optional field reads the attribute concept set-widened:
             // its value term admits `Nothing`, which the concept query
             // honours by yielding one `Absent` row where no row matched.
-            let kind = match (field.content_type().map(Kind::from), field.conforms()) {
+            let kind = match (field.descriptor().read_type().map(Kind::from), field.conforms()) {
                 (Some(kind), Some(target)) => Some(
                     kind.with_conformance(ConceptRef(target.this().to_string()))
                         .expect("a conforming field is entity-valued by construction"),
@@ -1519,7 +1519,7 @@ mod tests {
                 the!("team/member"),
                 "",
                 Cardinality::Many,
-                Some(Type::UnsignedInt),
+                Some(Type::Entity),
             )
             .with_select(Select::Count, Vec::new()),
         )])

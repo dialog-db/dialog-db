@@ -131,9 +131,11 @@ The policy belongs to the read, not to the relation. A concept field
 names a relation by its attribute and says how it reads it, so two
 fields over one attribute may read it differently: `members` as the
 set and `member-count` as how many. Rules only ever add candidates to
-the relation; the field's `as` types what its policy yields. That is
-also how `count`, `count-distinct` and `avg` fit, which change the
-attribute's carrier: candidates are members, the value is a number.
+the relation. That is also how `count`, `count-distinct` and `avg` fit,
+which change the attribute's carrier: candidates are members, the
+value is a number. `as` always declares the carrier, being part of
+the attribute's identity; what a carrier-changing policy yields
+follows from the policy.
 
 What keeps every rule set composable is one check local to a rule,
 never a pass over the program. A deductive rule may conclude through,

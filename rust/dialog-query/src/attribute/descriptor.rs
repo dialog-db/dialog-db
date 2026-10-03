@@ -351,12 +351,23 @@ impl AttributeDescriptor {
         self
     }
 
+    /// The type a field over this attribute reads: the carrier, or what
+    /// a carrier-changing policy yields from it, an unsigned integer
+    /// for `count` and `count-distinct` and a float for `avg`. `as`
+    /// always declares the carrier, being part of the attribute's
+    /// identity.
+    pub fn read_type(&self) -> Option<Type> {
+        match self.select() {
+            Select::Count | Select::CountDistinct => Some(Type::UnsignedInt),
+            Select::Avg => Some(Type::Float),
+            _ => self.content_type,
+        }
+    }
+
     /// Why the declared policy does not fit this attribute, if it does
-    /// not: `top` needs a listed domain and nothing else takes one;
-    /// `sum` and `avg` need a numeric carrier, `max` and `min` a
-    /// comparable one; `count` and `count-distinct` produce an
-    /// unsigned integer and `avg` a float, so the carrier must be
-    /// that.
+    /// not: `top` ranks among listed values and nothing else takes
+    /// them; `sum` and `avg` fold a numeric carrier, `max` and `min`
+    /// order a comparable one.
     pub fn select_error(&self) -> Option<String> {
         let select = self.select?;
         let content = self.content_type;
@@ -371,22 +382,13 @@ impl AttributeDescriptor {
             _ if !self.among.is_empty() => {
                 Some(format!("listed values rank a `top` read, not `{select}`"))
             }
-            Select::Sum => match content {
+            Select::Sum | Select::Avg => match content {
                 Some(kind) if !numeric(kind) => {
-                    Some(format!("`sum` folds a numeric carrier, not {kind:?}"))
+                    Some(format!("`{select}` folds a numeric carrier, not {kind:?}"))
                 }
                 _ => None,
             },
-            Select::Avg => match content {
-                Some(Type::Float) | None => None,
-                Some(kind) => Some(format!("`avg` produces a float, not {kind:?}")),
-            },
-            Select::Count | Select::CountDistinct => match content {
-                Some(Type::UnsignedInt) | None => None,
-                Some(kind) => Some(format!(
-                    "`{select}` produces an unsigned integer, not {kind:?}"
-                )),
-            },
+            Select::Count | Select::CountDistinct => None,
             Select::Max | Select::Min => match content {
                 Some(Type::Bytes) | Some(Type::Boolean) => Some(format!(
                     "`{select}` orders a comparable carrier, not {:?}",
@@ -702,10 +704,13 @@ mod tests {
         assert!(status(Select::Last, vec![Value::Boolean(true)], Type::Entity).is_some());
         assert!(status(Select::Sum, Vec::new(), Type::String).is_some());
         assert!(status(Select::Sum, Vec::new(), Type::UnsignedInt).is_none());
-        assert!(status(Select::Count, Vec::new(), Type::Entity).is_some());
-        assert!(status(Select::Count, Vec::new(), Type::UnsignedInt).is_none());
-        assert!(status(Select::Avg, Vec::new(), Type::UnsignedInt).is_some());
-        assert!(status(Select::Avg, Vec::new(), Type::Float).is_none());
+        assert!(status(Select::Count, Vec::new(), Type::Entity).is_none());
+        assert!(status(Select::Avg, Vec::new(), Type::String).is_some());
+        assert!(status(Select::Avg, Vec::new(), Type::UnsignedInt).is_none());
+        let counted = AttributeDescriptor::new(the!("team/member"), "", Cardinality::Many, Some(Type::Entity))
+            .with_select(Select::Count, Vec::new());
+        assert_eq!(counted.content_type(), Some(Type::Entity), "`as` is the carrier");
+        assert_eq!(counted.read_type(), Some(Type::UnsignedInt), "a count reads a number");
         assert!(status(Select::Max, Vec::new(), Type::Boolean).is_some());
         assert!(status(Select::Max, Vec::new(), Type::String).is_none());
     }

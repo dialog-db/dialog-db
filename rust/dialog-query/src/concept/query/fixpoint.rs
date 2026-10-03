@@ -1620,7 +1620,7 @@ mod tests {
         // The closure's relation read as a count: a query is a closed
         // place, so it may read what a deductive rule may not.
         let count: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "total": { "the": "family.derived/ancestor", "as": "UnsignedInteger", "cardinality": "many", "select": "count" }
+            "total": { "the": "family/ancestor", "as": "Entity", "cardinality": "many", "select": "count" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::var("who"));
