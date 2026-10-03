@@ -1544,10 +1544,12 @@ mod tests {
         );
     }
 
-    /// A rule that negates its own conclusion concept is a negative
-    /// self-loop: rejected at analysis.
+    /// A deductive rule is open, so it is monotone: an `unless` premise
+    /// is refused at compile time, before any other analysis, whatever
+    /// else the rule does. Negation belongs to the closed places (a
+    /// query, a subscription, an inductive rule).
     #[dialog_common::test]
-    fn it_rejects_self_negating_rule() {
+    fn it_refuses_negation_in_a_deductive_rule() {
         use crate::concept::query::ConceptQuery;
         use crate::negation::Negation;
 
@@ -1561,9 +1563,20 @@ mod tests {
             ),
         )])
         .unwrap();
+        let blocked = ConceptDescriptor::try_from(vec![(
+            "blocked",
+            AttributeDescriptor::new(
+                the!("contact/blocked"),
+                "",
+                Cardinality::One,
+                Some(Type::Boolean),
+            ),
+        )])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Entity>::var("this").into());
+        terms.insert("blocked".to_string(), Term::blank());
         let premises = vec![
             AttributeQuery::new(
                 Term::from(the!("user/email")),
@@ -1575,16 +1588,132 @@ mod tests {
             .into(),
             Premise::Unless(Negation(Proposition::Concept(ConceptQuery {
                 terms,
-                predicate: conclusion.clone(),
+                predicate: blocked,
             }))),
         ];
+        let result = DeductiveRule::new(conclusion, premises);
+        assert!(
+            matches!(result, Err(TypeError::NegationInOpenRule { .. })),
+            "a deductive rule admits no unless, got {result:?}"
+        );
+    }
 
-        match DeductiveRule::new(conclusion, premises) {
-            Err(TypeError::SelfNegation { concept, .. }) => {
-                assert!(concept.starts_with("concept:"));
-            }
-            other => panic!("expected SelfNegation, got {other:?}"),
-        }
+    /// A `reduce` block is refused in a deductive rule for the same
+    /// reason: a fold withdraws its previous result when a fact
+    /// arrives. The attribute's `select` policy folds instead.
+    #[dialog_common::test]
+    fn it_refuses_reduce_in_a_deductive_rule() {
+        use crate::reduce::{Aggregator, ReduceSpec};
+
+        let conclusion = ConceptDescriptor::try_from(vec![(
+            "total",
+            AttributeDescriptor::new(
+                the!("org/total"),
+                "",
+                Cardinality::One,
+                Some(Type::UnsignedInt),
+            ),
+        )])
+        .unwrap();
+        let premises = vec![
+            AttributeQuery::new(
+                Term::from(the!("org/salary")),
+                Term::<Entity>::var("this"),
+                Term::var("salary"),
+                Term::blank(),
+                Some(Cardinality::Many),
+            )
+            .into(),
+        ];
+        let reduce = std::collections::BTreeMap::from([(
+            "total".to_string(),
+            ReduceSpec {
+                apply: Aggregator::Sum,
+                of: Term::var("salary"),
+            },
+        )]);
+        let result = DeductiveRule::with_reduce(conclusion, premises, reduce);
+        assert!(
+            matches!(result, Err(TypeError::ReduceInOpenRule { .. })),
+            "a deductive rule admits no reduce, got {result:?}"
+        );
+    }
+
+    /// A deductive rule neither concludes through nor reads a field
+    /// whose policy changes the attribute's carrier: inside a recursive
+    /// component such a field would read entities as a number, and the
+    /// refusal is local to the rule so no merge of rule sets is ever
+    /// rejected.
+    #[dialog_common::test]
+    fn it_refuses_a_carrier_changing_field_in_a_deductive_rule() {
+        use crate::concept::query::ConceptQuery;
+        use crate::schema::Select;
+
+        let counted = ConceptDescriptor::try_from(vec![(
+            "members",
+            AttributeDescriptor::new(
+                the!("team/member"),
+                "",
+                Cardinality::Many,
+                Some(Type::UnsignedInt),
+            )
+            .with_select(Select::Count, Vec::new()),
+        )])
+        .unwrap();
+        let size = ConceptDescriptor::try_from(vec![(
+            "size",
+            AttributeDescriptor::new(
+                the!("team/size"),
+                "",
+                Cardinality::One,
+                Some(Type::UnsignedInt),
+            ),
+        )])
+        .unwrap();
+
+        // Concluding through a count.
+        let result = DeductiveRule::new(
+            counted.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("team/size")),
+                    Term::<Entity>::var("this"),
+                    Term::var("members"),
+                    Term::blank(),
+                    Some(Cardinality::One),
+                )
+                .into(),
+            ],
+        );
+        assert!(
+            matches!(
+                result,
+                Err(TypeError::PolicyInOpenRule {
+                    role: "concludes",
+                    ..
+                })
+            ),
+            "a deductive rule concludes carrier-closed fields only, got {result:?}"
+        );
+
+        // Reading a count.
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Entity>::var("this").into());
+        terms.insert("members".to_string(), Term::var("size"));
+        let result = DeductiveRule::new(
+            size,
+            vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+                terms,
+                predicate: counted,
+            }))],
+        );
+        assert!(
+            matches!(
+                result,
+                Err(TypeError::PolicyInOpenRule { role: "reads", .. })
+            ),
+            "a deductive rule reads carrier-closed fields only, got {result:?}"
+        );
     }
 
     /// Negation over *another* concept is a negative IDB edge,

@@ -1362,8 +1362,13 @@ where
                 }
                 rules.push(rule);
             }
+            // A field whose policy is not the plain stored read is read
+            // through its attribute concept whether or not a rule
+            // derives it, so its candidates are gathered and elected.
+            if !rules.is_empty() || field.descriptor().reads_elected() {
+                derived.insert(entity.clone());
+            }
             if !rules.is_empty() {
-                derived.insert(entity);
                 let candidate = match (&sole, field.the().attribute()) {
                     (Some(None), _) | (_, None) => None,
                     _ if !builtins.is_empty() => None,

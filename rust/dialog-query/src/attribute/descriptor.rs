@@ -3,7 +3,7 @@ use crate::artifact::{ArtifactsAttribute, Entity, Value};
 use crate::attribute::The;
 use crate::attribute::query::AttributeQuery;
 use crate::error::{FieldTypeError, TypeError};
-use crate::schema::Cardinality;
+use crate::schema::{Cardinality, Select};
 use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
@@ -262,6 +262,13 @@ pub struct AttributeDescriptor {
     cardinality: Cardinality,
     #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
     content_type: Option<Type>,
+    /// How a field over this attribute reads its relation (see
+    /// [`Select`]); absent, the cardinality decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    select: Option<Select>,
+    /// The listed values a `top` read ranks by, best first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    among: Vec<Value>,
 }
 
 impl AttributeDescriptor {
@@ -293,6 +300,99 @@ impl AttributeDescriptor {
             description: description.into(),
             cardinality,
             content_type,
+            select: None,
+            among: Vec::new(),
+        }
+    }
+
+    /// This descriptor read under `select`, ranking by `among` when
+    /// the policy is `top`. The policy is checked against the
+    /// descriptor by [`select_error`](Self::select_error) wherever a
+    /// concept is built.
+    pub fn with_select(mut self, select: Select, among: Vec<Value>) -> Self {
+        self.select = Some(select);
+        self.among = among;
+        self
+    }
+
+    /// The policy a field over this attribute reads under: the one
+    /// declared, else the cardinality's.
+    pub fn select(&self) -> Select {
+        self.select.unwrap_or_else(|| Select::of(self.cardinality))
+    }
+
+    /// Whether a policy was declared, rather than implied by the
+    /// cardinality.
+    pub fn declares_select(&self) -> bool {
+        self.select.is_some()
+    }
+
+    /// Whether a field over this attribute must read through the
+    /// attribute concept to be read as declared: its policy is not the
+    /// plain stored read of its cardinality, so the candidates have to
+    /// be gathered and elected even where nothing derives them.
+    pub fn reads_elected(&self) -> bool {
+        self.select
+            .is_some_and(|select| select != Select::of(self.cardinality))
+    }
+
+    /// The listed values a `top` read ranks by, best first.
+    pub fn among(&self) -> &[Value] {
+        &self.among
+    }
+
+    /// This descriptor read under the cardinality's own policy: the
+    /// relation itself, which is what rules derive into.
+    pub fn without_select(mut self) -> Self {
+        self.select = None;
+        self.among = Vec::new();
+        self
+    }
+
+    /// Why the declared policy does not fit this attribute, if it does
+    /// not: `top` needs a listed domain and nothing else takes one;
+    /// `sum` and `avg` need a numeric carrier, `max` and `min` a
+    /// comparable one; `count` and `count-distinct` produce an
+    /// unsigned integer and `avg` a float, so the carrier must be
+    /// that.
+    pub fn select_error(&self) -> Option<String> {
+        let select = self.select?;
+        let content = self.content_type;
+        let numeric = |kind: Type| {
+            matches!(kind, Type::UnsignedInt | Type::SignedInt | Type::Float)
+        };
+        match select {
+            Select::Top if self.among.is_empty() => {
+                Some("`top` ranks among listed values, and none are listed".to_string())
+            }
+            Select::Top => None,
+            _ if !self.among.is_empty() => {
+                Some(format!("listed values rank a `top` read, not `{select}`"))
+            }
+            Select::Sum => match content {
+                Some(kind) if !numeric(kind) => {
+                    Some(format!("`sum` folds a numeric carrier, not {kind:?}"))
+                }
+                _ => None,
+            },
+            Select::Avg => match content {
+                Some(Type::Float) | None => None,
+                Some(kind) => Some(format!("`avg` produces a float, not {kind:?}")),
+            },
+            Select::Count | Select::CountDistinct => match content {
+                Some(Type::UnsignedInt) | None => None,
+                Some(kind) => Some(format!(
+                    "`{select}` produces an unsigned integer, not {kind:?}"
+                )),
+            },
+            Select::Max | Select::Min => match content {
+                Some(Type::Bytes) | Some(Type::Boolean) => Some(format!(
+                    "`{select}` orders a comparable carrier, not {:?}",
+                    content.expect("checked")
+                )),
+                _ => None,
+            },
+            Select::Last | Select::All => None,
         }
     }
 
@@ -317,9 +417,14 @@ impl AttributeDescriptor {
         &self.description
     }
 
-    /// Returns the cardinality.
+    /// Returns the cardinality a field over this attribute presents:
+    /// the declared policy's when one is declared, else the declared
+    /// cardinality.
     pub fn cardinality(&self) -> Cardinality {
-        self.cardinality
+        match self.select {
+            Some(select) => select.cardinality(),
+            None => self.cardinality,
+        }
     }
 
     /// Returns the expected value type, or `None` if any type is accepted.
@@ -548,6 +653,63 @@ impl From<AttributeDescriptor> for ArtifactsAttribute {
 mod tests {
     use super::*;
     use crate::the;
+
+    /// A declared policy and its listed values ride the descriptor on
+    /// the wire under `select` and `among`, and are omitted when
+    /// absent, so a descriptor without them encodes as before.
+    #[dialog_common::test]
+    fn it_round_trips_the_select_policy() {
+        let json = serde_json::json!({
+            "the": "job/status",
+            "as": "Entity",
+            "cardinality": "one",
+            "select": "top",
+            "among": ["case:suspended", "case:active"]
+        });
+        let descriptor: AttributeDescriptor =
+            serde_json::from_value(json.clone()).expect("descriptor parses");
+        assert_eq!(descriptor.select(), Select::Top);
+        assert_eq!(descriptor.among().len(), 2);
+        assert!(descriptor.reads_elected());
+        assert_eq!(
+            serde_json::to_value(&descriptor).expect("serializes"),
+            json
+        );
+
+        let plain: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": "job/status",
+            "as": "Entity",
+            "cardinality": "many"
+        }))
+        .expect("descriptor parses");
+        assert_eq!(plain.select(), Select::All, "the cardinality decides");
+        assert!(!plain.reads_elected());
+        let encoded = serde_json::to_value(&plain).expect("serializes");
+        assert!(encoded.get("select").is_none() && encoded.get("among").is_none());
+    }
+
+    /// A policy that does not fit its attribute is named: `top` without
+    /// listed values, listed values under another policy, a fold over
+    /// the wrong carrier.
+    #[dialog_common::test]
+    fn it_names_a_policy_its_attribute_cannot_read_under() {
+        let status = |select: Select, among: Vec<Value>, kind: Type| {
+            AttributeDescriptor::new(the!("job/status"), "", Cardinality::One, Some(kind))
+                .with_select(select, among)
+                .select_error()
+        };
+        assert!(status(Select::Top, Vec::new(), Type::Entity).is_some());
+        assert!(status(Select::Top, vec![Value::Boolean(true)], Type::Entity).is_none());
+        assert!(status(Select::Last, vec![Value::Boolean(true)], Type::Entity).is_some());
+        assert!(status(Select::Sum, Vec::new(), Type::String).is_some());
+        assert!(status(Select::Sum, Vec::new(), Type::UnsignedInt).is_none());
+        assert!(status(Select::Count, Vec::new(), Type::Entity).is_some());
+        assert!(status(Select::Count, Vec::new(), Type::UnsignedInt).is_none());
+        assert!(status(Select::Avg, Vec::new(), Type::UnsignedInt).is_some());
+        assert!(status(Select::Avg, Vec::new(), Type::Float).is_none());
+        assert!(status(Select::Max, Vec::new(), Type::Boolean).is_some());
+        assert!(status(Select::Max, Vec::new(), Type::String).is_none());
+    }
 
     #[dialog_common::test]
     fn it_serializes_all_fields() {

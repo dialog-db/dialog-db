@@ -437,6 +437,35 @@ fn fault(entry: &ReduceEntry, reason: impl Into<String>) -> EvaluationError {
     }
 }
 
+/// Fold an entity's candidates under a field's `select` policy: the
+/// read-side counterpart of a `reduce` entry, over the values every
+/// rule and the store offer for one attribute of one entity. `None`
+/// means the field has no value: an identity-less fold over nothing.
+pub fn fold(
+    select: crate::schema::Select,
+    field: &str,
+    values: Vec<Value>,
+) -> Result<Option<Value>, EvaluationError> {
+    use crate::schema::Select;
+    let aggregator = match select {
+        Select::Sum => Aggregator::Sum,
+        Select::Count => Aggregator::Count,
+        Select::CountDistinct => Aggregator::CountDistinct,
+        Select::Avg => Aggregator::Avg,
+        Select::Max => Aggregator::Max,
+        Select::Min => Aggregator::Min,
+        Select::Last | Select::All | Select::Top => {
+            return Err(EvaluationError::Reduce {
+                field: field.to_string(),
+                aggregator: select.to_string(),
+                reason: "chooses among candidates rather than folding them".to_string(),
+            });
+        }
+    };
+    let entry = ReduceEntry::new(field, aggregator, Term::blank());
+    fold_column(&entry, values)
+}
+
 /// Fold one group's column of present values. `None` means the
 /// output field binds Absent (identity-less fold, no present input).
 fn fold_column(entry: &ReduceEntry, values: Vec<Value>) -> Result<Option<Value>, EvaluationError> {
