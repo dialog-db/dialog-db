@@ -19,14 +19,15 @@ use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::pin::Pin;
 
+/// An election winner: the artifact and the standing it was stored with.
+type Winner = (Artifact, Option<(Edition, [u8; 32])>);
+
 /// Materializes an election winner, treating a corrupt stored row
 /// ([`DialogArtifactsError::CorruptEntry`]) as an ignorable non-result
 /// (`Ok(None)`, with a warning) rather than a query failure: a corrupt or
 /// foreign-written tree entry must not poison every query that ranges over
 /// it. All other errors propagate.
-fn materialize_winner(
-    winner: ArtifactView,
-) -> Result<Option<(Artifact, Option<(Edition, [u8; 32])>)>, DialogArtifactsError> {
+fn materialize_winner(winner: ArtifactView) -> Result<Option<Winner>, DialogArtifactsError> {
     let standing = winner.standing();
     match winner.to_owned() {
         Ok(artifact) => Ok(Some((artifact, standing))),

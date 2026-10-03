@@ -170,9 +170,12 @@ premise and is outside the component, which is where election runs.
 
 ### Election over the union
 
-`{ a }` for a cardinality-one `a` elects after its disjunction: rows
-are grouped by entity and folded through the attribute's election
-with the row's standing. A stored row's standing is its artifact's,
+`{ a }` for a cardinality-one `a` elects in one pass over every source
+at once: the stored scan, each attribute-headed rule evaluated in
+scope, each head split from a source rule (through the rows the body
+was remembered to yield, below) and each fold. The candidates are
+grouped by entity and folded through the attribute's election with
+the row's standing. A stored row's standing is its artifact's,
 the revision version then the cause, exactly what the stored election
 compares. A derived row's is the maximum standing among the facts its
 `Match` cites, which is every fact a premise bound on the way to the
@@ -188,10 +191,56 @@ value term admitting `Nothing`. The concept query honours that as the
 left join an optional scan is: every input row leaves at least once,
 with the value `Absent` where no row, stored or derived, matched.
 
+### One body, many heads
+
+A rule concluding several attributes is one rule per attribute with
+the same body. A concept selecting several of them would run that body
+once per attribute, the first time in full and every later time as a
+probe per entity. Three things make it run once.
+
+Every head split from a source rule carries its origin: the source
+rule, and the body operands its attribute's value (and key) come from.
+A head with an origin plans as one `Recall` step over the source body,
+not as the re-spelled rule: the body is planned once under the source
+rule's identity, bound on `this` iff the caller binds it, and shared
+through the plan cache by every head of that source.
+
+Evaluating a `Recall` consults the query's memo, keyed by the source
+rule and the bound entity, before it evaluates anything. The first
+head to run the body remembers its rows; every later head projects
+its own attribute out of the remembered rows. A bound lookup after a
+free run is answered from the free rows, indexed by entity once, so a
+head evaluated with `this` bound after another head scanned the whole
+relation never touches storage. The memo lives on the query
+environment and dies with it, so it never outlives the facts it was
+computed from.
+
+When exactly one source rule derives every derived attribute of a
+concept, no attribute-headed rule stands beside it, none of its heads
+folds and nothing is stored under those attributes, the concept's
+answer is that rule re-headed onto the concept: the covering rule,
+whose body is the source body with the concept's underived fields
+read as stored scans. The concept evaluates the covering rule once
+through the usual pipeline instead of selecting attribute by
+attribute. Whether anything is stored is checked per query across
+every layer the environment reads, since a range estimate sees the
+committed tree alone; the moment a fact lands under one of those
+attributes the exact path is off and the election decides.
+
+An attribute concept read with its entity free leaves its rows sorted
+on the entity, stored and derived alike, so it is an input to the
+conjunction's N-way merge beside the stored scans of the same entity.
+A set-widened read is not an input: it extends the other inputs' rows
+where nothing matched, which an intersection cannot express, so it
+stays a probe after the merge.
+
 ### Built-in concepts
 
-The version-control concepts are resolved exactly as written: nothing
-stores or derives their attributes besides the engine, so a query over
+The version-control concepts are closed views and resolve exactly as
+written. Their rows are tuples over other entities: an upstream's
+name, subject and peer flattened onto the branch tracking it, which
+per-attribute selection would pair across upstreams. Nothing stores
+or derives their attributes besides the engine, so a query over
 `Revision` evaluates the projection rule once rather than once per
 attribute. A query over one of their attributes goes through `{ a }`
 and sees the built-in's head for it like any rule's.
@@ -253,18 +302,32 @@ rule are compile errors that name the closed forms to use instead.
 
 ## Costs
 
-A query over `Employee` when one rule derives both fields evaluates
-that rule's body twice, once under `{ name }` and once under `{ role }`,
-where the old concept-keyed path evaluated it once. A per-query memo
-keyed by rule body and bound inputs would recover that; it is not part
-of this change, and the benchmark in `benches/query_rules.rs` measures
-the gap so the decision is made on numbers.
+`benches/query_rules.rs` measures four queries over one thousand
+entities with a rule concluding `member/of` and `member/title` from a
+`stuff` join: the rule-free join (`stuff`), the exact head (`member`),
+a subset of the head (`titled`) and a point query by entity
+(`member-of`). Wall-clock, in-memory, same machine, before and after:
+
+| query     | main    | this change |
+|-----------|---------|-------------|
+| stuff     | 5.1-5.9 ms | 6.2 ms   |
+| member    | 5.9 ms  | 6.6 ms      |
+| titled    | no rows | 7.0 ms      |
+| member-of | 0.22 ms | 0.15 ms     |
+
+Without the shared body, the single-pass election and the covering
+rule, `member` was three times main and `titled` twice `member`. With
+them `member` is within about a tenth of main, `titled` costs a scan
+of `member/title` more than `member`, which it did not answer at all
+before, and the point query is faster because its attribute concept
+read is a bound lookup. The `stuff` range on main is run-to-run
+variation of the random entity layout, which also moves the block-read
+counts the bench prints by a block or two between runs.
 
 ## Not in this change
 
 - the `select` policy that replaces ordered choice; cardinality one
   still elects by recency alone;
-- the per-query body memo;
 - `reduce` on inductive rules, the materialised home for aggregates;
 - election at the exit of a recursive component: a recursive
   cardinality-one attribute concept yields its candidates as a set;
@@ -274,4 +337,7 @@ the gap so the decision is made on numbers.
   Rust API;
 - the stratification policy note, which this design withdraws once
   open rules are monotone; until `unless` is refused in deductive
-  rules the analysis and its errors stand.
+  rules the analysis and its errors stand;
+- flattening a concept premise's attribute reads into the enclosing
+  conjunction's merge, so two concept applications sharing an entity
+  join their attributes in one pass rather than probing.

@@ -53,6 +53,23 @@ pub struct DeductiveRule {
     /// The rule's content-addressed identity, computed on first use:
     /// plan-cache lookups ask for it on every query.
     identity: Memo<Option<Entity>>,
+    /// For a rule re-headed onto one attribute of a source rule's head:
+    /// the source rule and which of its operands this head projects, so
+    /// every head of the source shares one evaluation of its body.
+    origin: Option<Arc<Origin>>,
+}
+
+/// Where a re-headed rule's rows come from: the source rule whose body
+/// it shares, and the body operands its head attribute projects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Origin {
+    /// The rule this head was split from.
+    pub rule: DeductiveRule,
+    /// The source body's operand for the head attribute's value.
+    pub value: String,
+    /// The source body's operand for the head attribute's key, for a
+    /// keyed collection.
+    pub key: Option<String>,
 }
 impl Compile for DeductiveRule {
     const KIND: RuleKind = RuleKind::Deductive;
@@ -61,6 +78,7 @@ impl Compile for DeductiveRule {
         DeductiveRule {
             analysis: Arc::new(analysis),
             identity: Memo::default(),
+            origin: None,
         }
     }
 
@@ -68,6 +86,7 @@ impl Compile for DeductiveRule {
         DeductiveRule {
             analysis: Arc::new(AnalyzedRule::in_progress(conclusion, premises)),
             identity: Memo::default(),
+            origin: None,
         }
     }
 }
@@ -236,6 +255,31 @@ impl DeductiveRule {
             .clone()
     }
 
+    /// The source this head was split from, when it was.
+    pub fn origin(&self) -> Option<&Origin> {
+        self.origin.as_deref()
+    }
+
+    /// This rule marked as a head split from `origin`.
+    pub(crate) fn with_origin(mut self, origin: Origin) -> Self {
+        self.origin = Some(Arc::new(origin));
+        self
+    }
+
+    /// Bytes identifying this rule within one process: its content
+    /// address when it has one, else the address of its analysis,
+    /// which every clone shares. A memo keyed by this never confuses
+    /// two rules, and a built-in rule without an encodable body still
+    /// has a key.
+    pub fn memo_key(&self) -> Vec<u8> {
+        match self.try_this() {
+            Some(entity) => entity.to_string().into_bytes(),
+            None => (Arc::as_ptr(&self.analysis) as usize)
+                .to_le_bytes()
+                .to_vec(),
+        }
+    }
+
     /// Whether `other` is this rule: the same content address when both
     /// have one, else structural equality. Two hydrations of one stored
     /// body are not always equal, because analysis records its
@@ -362,6 +406,18 @@ fn selecting_premises(
     concept: &ConceptDescriptor,
     derived: &dyn Fn(&ConceptFieldDescriptor) -> bool,
 ) -> Vec<Premise> {
+    let mut premises = Vec::new();
+    for (name, field) in concept.with().iter() {
+        premises.extend(field_premises(name, field, derived(field)));
+    }
+    premises
+}
+
+/// The premises by which a concept's rule reads one field: through the
+/// attribute concept when `derived`, else from stored facts, plus the
+/// key projection of a collection and the conformance of a
+/// concept-typed field.
+fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> Vec<Premise> {
     use crate::concept::query::ConceptQuery;
     use crate::type_system::ConceptRef;
 
@@ -369,8 +425,8 @@ fn selecting_premises(
 
     let this = Term::<Entity>::var("this");
 
-    for (name, field) in concept.with().iter() {
-        if derived(field) {
+    {
+        if derived {
             // An optional field reads the attribute concept set-widened:
             // its value term admits `Nothing`, which the concept query
             // honours by yielding one `Absent` row where no row matched.
@@ -408,7 +464,7 @@ fn selecting_premises(
                     predicate: target.clone(),
                 })));
             }
-            continue;
+            return premises;
         }
         // The value term stays scalar in both cases; the
         // associative layer never carries optionality. A
@@ -513,6 +569,93 @@ impl DeductiveRule {
     ) -> Result<Self, TypeError> {
         DeductiveRule::new(concept.clone(), selecting_premises(concept, derived))
     }
+
+    /// This rule re-headed onto `concept`: its body, with the variables of
+    /// the head fields it shares with the concept renamed to the concept's
+    /// field names, joined with stored scans of the concept's other
+    /// fields. This is the concept's exact evaluation when the rule is
+    /// the only source of those attributes and nothing is stored under
+    /// them. `None` when the heads share no attribute, when a required
+    /// concept field would come from an optional head field, or when
+    /// the rule folds.
+    pub fn covering(&self, concept: &ConceptDescriptor) -> Result<Option<Self>, TypeError> {
+        use rename::{Rename, fresh_name, rename_premises, variables};
+        use std::collections::BTreeSet;
+
+        if !self.reduce().is_empty() {
+            return Ok(None);
+        }
+        let premises: Vec<Premise> = self.analysis().premises().cloned().collect();
+        let taken = variables(&premises);
+        let targets: BTreeSet<String> = concept.operands().collect();
+
+        let mut map = Rename::new();
+        let mut shared: Vec<&str> = Vec::new();
+        // The rule's own operands that stand for a concept field, under
+        // either name: these are never captured variables.
+        let mut kept: BTreeSet<String> = BTreeSet::from(["this".to_string()]);
+        for (name, field) in concept.with().iter() {
+            let Some((mine, head)) = self
+                .conclusion()
+                .with()
+                .iter()
+                .find(|(_, head)| same_attribute(head, field))
+            else {
+                continue;
+            };
+            if head.is_optional() && !field.is_optional() {
+                return Ok(None);
+            }
+            shared.push(name);
+            kept.insert(mine.to_string());
+            if let Relation::Collection { .. } = field.the() {
+                kept.insert(Relation::key_operand(mine));
+            }
+            if mine != name {
+                map.insert(mine.to_string(), name.to_string());
+                if let Relation::Collection { .. } = field.the() {
+                    map.insert(Relation::key_operand(mine), Relation::key_operand(name));
+                }
+            }
+        }
+        if shared.is_empty() {
+            return Ok(None);
+        }
+        // A body variable named like a concept operand it does not stand
+        // for would be captured: move it aside.
+        for variable in &taken {
+            if targets.contains(variable) && !kept.contains(variable) {
+                let fresh = fresh_name(variable, &taken, &map);
+                map.insert(variable.clone(), fresh);
+            }
+        }
+
+        let mut body = rename_premises(&premises, &map)?;
+        for (name, field) in concept.with().iter() {
+            if shared.contains(&name) {
+                if let Some(target) = field.conforms() {
+                    let mut terms = Parameters::new();
+                    terms.insert("this".to_string(), Term::<Any>::var(name));
+                    body.push(Premise::Assert(Proposition::Concept(
+                        crate::concept::query::ConceptQuery {
+                            terms,
+                            predicate: target.clone(),
+                        },
+                    )));
+                }
+            } else {
+                body.extend(field_premises(name, field, false));
+            }
+        }
+        DeductiveRule::new(concept.clone(), body).map(Some)
+    }
+}
+
+/// Whether two fields are the same attribute: the same relation,
+/// cardinality and content type, which is what an attribute's identity
+/// hashes.
+pub(crate) fn same_attribute(a: &ConceptFieldDescriptor, b: &ConceptFieldDescriptor) -> bool {
+    a.the() == b.the() && a.cardinality() == b.cardinality() && a.content_type() == b.content_type()
 }
 
 #[cfg(test)]

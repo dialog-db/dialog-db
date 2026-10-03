@@ -36,7 +36,7 @@ pub fn variables(premises: &[Premise]) -> BTreeSet<String> {
 
 /// A variable name derived from `base` that neither `taken` nor the
 /// targets of `map` use.
-pub fn fresh_name(base: &str, taken: &BTreeSet<String>, map: &Rename) -> String {
+pub(crate) fn fresh_name(base: &str, taken: &BTreeSet<String>, map: &Rename) -> String {
     let mut counter = 1usize;
     loop {
         let candidate = format!("{base}~{counter}");

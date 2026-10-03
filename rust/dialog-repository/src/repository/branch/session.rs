@@ -15,7 +15,7 @@ use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::fixpoint::Continuation;
-use dialog_query::concept::query::{ConceptRules, PlanCache};
+use dialog_query::concept::query::{ConceptRules, Exact, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use dialog_query::session::ProgramAnalysis;
@@ -383,6 +383,9 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// [`SourceRef::fetches`](crate::repository::source::SourceRef)):
     /// preload hints are refused when none can.
     fetches: bool,
+    /// The per-query memo rule heads share their source body's rows
+    /// through.
+    memo: dialog_query::recall::Memo,
     env: &'a Env,
 }
 
@@ -454,6 +457,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
             demand: None,
             fixpoint: None,
             fetches,
+            memo: dialog_query::recall::Memo::default(),
             env,
         }
     }
@@ -568,6 +572,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
             demand: self.demand.clone(),
             fixpoint: self.fixpoint.clone(),
             fetches: self.fetches,
+            memo: dialog_query::recall::Memo::default(),
             env: self.env,
         }
     }
@@ -1132,6 +1137,12 @@ where
     }
 }
 
+impl<Env> dialog_query::recall::BodyMemo for QueryEnv<'_, Env> {
+    fn memo(&self) -> Option<&dialog_query::recall::Memo> {
+        Some(&self.memo)
+    }
+}
+
 impl<Env> QueryEnv<'_, Env> {
     /// `bundle` carrying this query's retained fixpoint, when a polling
     /// subscription is evaluating `concept` recursively. Attached per
@@ -1233,10 +1244,24 @@ where
                 bundle.install(head);
             }
             let mut found: Vec<Entity> = Vec::new();
+            // The one source rule every head comes from, if it is one
+            // and none of them folds: while nothing is stored under the
+            // attribute, that rule re-headed onto the concept is its
+            // whole answer and needs no election.
+            let mut sole: Option<Option<DeductiveRule>> = None;
+            let mut note = |head: &DeductiveRule| {
+                sole = Some(match (sole.take().flatten(), head.origin()) {
+                    (_, None) => None,
+                    (None, Some(origin)) => Some(origin.rule.clone()),
+                    (Some(known), Some(origin)) if known.same(&origin.rule) => Some(known),
+                    (Some(_), Some(_)) => None,
+                });
+            };
             if let Some(on) = derives_key(&canonical) {
                 for rule in self.resolve_rules(Index::Deriving, &on).await? {
                     found.extend(rule.try_this());
                     if let Some(head) = self.head_for(&rule, &concept)? {
+                        note(&head);
                         bundle.install(head);
                     }
                 }
@@ -1249,12 +1274,30 @@ where
                     continue;
                 }
                 if let Some(head) = self.head_for(&rule, &concept)? {
+                    note(&head);
                     bundle.install(head);
                 }
+            }
+            if builtin_deriving(&concept).is_empty()
+                && let Some(Some(source)) = sole
+                && let Some(attribute) = field.the().attribute()
+                && let Some(covering) = source
+                    .covering(&canonical)
+                    .map_err(|error| EvaluationError::Store(format!("covering rule: {error}")))?
+            {
+                return Ok(bundle.with_exact(Exact {
+                    rule: covering,
+                    attributes: vec![attribute],
+                }));
             }
             return Ok(bundle);
         }
 
+        // A built-in concept is a closed view: its rows are tuples over
+        // other entities (an upstream's name, subject and peer flattened
+        // onto the branch tracking it), which per-attribute selection
+        // would pair across upstreams. Nothing stores or derives its
+        // attributes besides the engine, so it evaluates as written.
         let builtins = builtin(&concept);
         if !builtins.is_empty() {
             return Ok(assemble(descriptor, builtins, plan_cache));
@@ -1262,23 +1305,80 @@ where
 
         let mut derived: HashSet<Entity> = HashSet::new();
         let mut deriving: HashSet<Entity> = HashSet::new();
+        // The one source rule deriving every derived attribute, if it is
+        // one: the concept's exact evaluation while nothing is stored
+        // under them. A built-in head, a reducing rule, a second source
+        // or a keyed collection rules it out.
+        let mut sole: Option<Option<(DeductiveRule, Vec<dialog_artifacts::Attribute>)>> = None;
         for (_, field) in descriptor.with().iter() {
             let attribute = ConceptDescriptor::of_attribute(field);
             let entity = attribute.this();
-            let mut rules = builtin_deriving(&entity);
+            let builtins = builtin_deriving(&entity);
+            let mut rules = builtins.clone();
             if let Some(on) = derives_key(&attribute) {
                 rules.extend(self.resolve_rules(Index::Deriving, &on).await?);
             }
             if !rules.is_empty() {
                 derived.insert(entity);
+                let candidate = match (&sole, field.the().attribute()) {
+                    (Some(None), _) | (_, None) => None,
+                    _ if !builtins.is_empty() => None,
+                    (current, Some(attribute)) => {
+                        let mut found: Option<(DeductiveRule, Vec<dialog_artifacts::Attribute>)> =
+                            current.clone().flatten();
+                        let mut ok = true;
+                        for rule in &rules {
+                            if !rule.reduce().is_empty() {
+                                ok = false;
+                                break;
+                            }
+                            match &mut found {
+                                None => found = Some((rule.clone(), Vec::new())),
+                                Some((known, _)) if known.same(rule) => {}
+                                Some(_) => {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if ok {
+                            if let Some((_, attributes)) = &mut found {
+                                attributes.push(attribute);
+                            }
+                            found
+                        } else {
+                            None
+                        }
+                    }
+                };
+                sole = Some(candidate);
             }
             deriving.extend(rules.iter().filter_map(DeductiveRule::try_this));
         }
-        let selecting = DeductiveRule::selecting(descriptor, &|field| {
-            derived.contains(&ConceptDescriptor::of_attribute(field).this())
-        })
-        .map_err(|error| EvaluationError::Store(format!("selecting rule: {error}")))?;
-        let mut bundle = ConceptRules::with_implicit(selecting, !derived.is_empty(), plan_cache);
+        // Nothing derived: the descriptor's own implicit rule, whose
+        // plans it memoizes, is the selecting rule.
+        let mut bundle = if derived.is_empty() {
+            ConceptRules::with_plan_cache(descriptor, plan_cache)
+        } else {
+            let selecting = DeductiveRule::selecting(descriptor, &|field| {
+                derived.contains(&ConceptDescriptor::of_attribute(field).this())
+            })
+            .map_err(|error| EvaluationError::Store(format!("selecting rule: {error}")))?;
+            let bundle = ConceptRules::with_implicit(selecting, true, plan_cache);
+            match sole.flatten() {
+                Some((rule, attributes)) => match rule
+                    .covering(descriptor)
+                    .map_err(|error| EvaluationError::Store(format!("covering rule: {error}")))?
+                {
+                    Some(covering) => bundle.with_exact(Exact {
+                        rule: covering,
+                        attributes,
+                    }),
+                    None => bundle,
+                },
+                None => bundle,
+            }
+        };
         for rule in self.resolve_rules(Index::Concluding, &concept).await? {
             if rule
                 .try_this()

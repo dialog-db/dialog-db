@@ -61,6 +61,8 @@ pub mod premise;
 
 /// Query trait and store abstractions for polymorphic querying.
 pub mod query;
+/// Sharing one evaluation of a rule body among its heads.
+pub mod recall;
 /// The group-by fold behind the `reduce` clause on deductive rules.
 pub mod reduce;
 /// Resolver premises resolved by idempotent effects.

@@ -20,7 +20,7 @@ use crate::error::TypeError;
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
-use crate::rule::deductive::DeductiveRule;
+use crate::rule::deductive::{DeductiveRule, Origin};
 use crate::term::Term;
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::Any;
@@ -142,10 +142,24 @@ impl DeductiveRule {
                 DeductiveRule::with_reduce(conclusion, body, reduce)
             };
             match rule {
-                Ok(rule) => heads.push(Head {
-                    field: field.clone(),
-                    rule,
-                }),
+                Ok(rule) => {
+                    // A plain head shares its source's body through the
+                    // memo; a reducing head folds its own.
+                    let rule = if self.reduce().is_empty() {
+                        rule.with_origin(Origin {
+                            rule: self.clone(),
+                            value: name.to_string(),
+                            key: matches!(field.the(), Relation::Collection { .. })
+                                .then(|| Relation::key_operand(name)),
+                        })
+                    } else {
+                        rule
+                    };
+                    heads.push(Head {
+                        field: field.clone(),
+                        rule,
+                    })
+                }
                 Err(TypeError::RequiredHeadFromOptional { .. }) if field.is_optional() => {}
                 Err(error) => return Err(error),
             }
