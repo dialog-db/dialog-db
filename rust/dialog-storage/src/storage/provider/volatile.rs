@@ -40,7 +40,7 @@ mod credential;
 mod memory;
 
 use dialog_capability::Did;
-use dialog_common::{Held, Holdings, Holds};
+use dialog_common::{Held, Holds};
 use dialog_credentials::credential::CredentialExport;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -88,19 +88,21 @@ pub struct Volatile {
     /// Prefix for scoping this provider to a location.
     mount: String,
     sessions: Arc<RwLock<HashMap<Did, Session>>>,
-    /// Handles kept for the code running against this provider, in memory
-    /// like everything else it keeps. Clones share them.
-    holdings: Holdings,
 }
 
+/// A storage provider keeps data, not handles: code running directly
+/// against it is handed nothing it held before. A branch opened on it
+/// starts with fresh caches every time; an environment built over it (a
+/// peer) is what keeps them.
+///
+/// Holding nothing also keeps the provider `Sync` on wasm, where a held
+/// handle need not be: it is placed in statics.
 impl Holds for Volatile {
-    fn held(&self, key: &str) -> Option<Held> {
-        self.holdings.held(key)
+    fn held(&self, _key: &str) -> Option<Held> {
+        None
     }
 
-    fn hold(&self, key: String, handle: Held) {
-        self.holdings.hold(key, handle)
-    }
+    fn hold(&self, _key: String, _handle: Held) {}
 }
 
 impl Default for Volatile {
@@ -108,7 +110,6 @@ impl Default for Volatile {
         Self {
             mount: String::new(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
-            holdings: Holdings::default(),
         }
     }
 }
@@ -155,7 +156,6 @@ impl Resource<Location> for Volatile {
         Ok(Self {
             mount: prefix,
             sessions: Arc::new(RwLock::new(HashMap::new())),
-            holdings: Holdings::default(),
         })
     }
 }
