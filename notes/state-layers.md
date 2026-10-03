@@ -645,12 +645,12 @@ ephemeral layer, as far as the transport allows.
   rather than echo. Retention is the lowest peer offset under the
   ring bound; a peer whose offset fell off the log gets a `Resync`
   carrying the fold, and a channel whose own observer gapped resyncs
-  every peer. `Sync` is serializable. Instants distinguish transient
+  every peer. `Catchup` is serializable. Instants distinguish transient
   witnesses from store mutations, and preserve insert, remove, tombstone,
   and tombstone-lift operations separately. `Channel::snapshot()` captures
   both held facts and tombstones with one sequence; resync replaces them
   atomically and does not echo superseded local writes back to its sender.
-- What remains is the transport binding: carrying a `Sync` between
+- What remains is the transport binding: carrying a `Catchup` between
   processes over the remote site, and a scope's `replicated` property
   resolving to a channel. In-process peers exercise the log and the
   offsets today.
@@ -703,7 +703,7 @@ decision (topology, not induction) stands.
 - Per-tab layers in tonk (`memory:tab`, one layer per connection
   linked above the state layer) and the inspector over the
   environment's ephemeral registry.
-- The channel transport: a `Sync` carried over the remote site, and
+- The channel transport: a `Catchup` carried over the remote site, and
   a scope's `replicated` property resolving to a channel.
 - In tonk, a commit made through the branch handle rather than the
   stack (the evaluate route) routes `memory:state` facts to the
