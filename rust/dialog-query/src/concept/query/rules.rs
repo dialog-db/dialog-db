@@ -174,6 +174,14 @@ impl ConceptRules {
     /// ([`DeductiveRule::same`]). Clears the plan cache when a genuinely
     /// new rule is added.
     pub fn install(&mut self, rule: DeductiveRule) {
+        // A caller binds the head by this concept's field names, and
+        // a rule concluding the same attributes under other names is
+        // re-headed onto them first. A rule whose fields do not pair
+        // up is installed as it is, which is what happened before.
+        let rule = match rule.respelled(self.implicit.conclusion()) {
+            Ok(Some(respelled)) => respelled,
+            _ => rule,
+        };
         if !self.installed.iter().any(|known| known.same(&rule)) {
             self.installed.push(rule);
             self.plans.write().unwrap().clear();

@@ -194,14 +194,26 @@ impl InductiveRule {
     pub fn descriptor(&self) -> InductiveRuleDescriptor {
         match &self.analysis.authored {
             Some(authored) => self.describe(&authored.premises),
-            None => self.canonical_descriptor(),
+            None => self.describe(&self.analysis.premises),
         }
     }
 
     /// This rule in its canonical spelling, whose encoding its
     /// identity hashes.
     pub fn canonical_descriptor(&self) -> InductiveRuleDescriptor {
-        self.describe(&self.analysis.premises)
+        match &self.analysis.canonical {
+            Some(identity) => {
+                let mut descriptor = self.describe(&identity.premises);
+                let (assert, retract) = match self.polarity {
+                    Polarity::Assert => (Some(identity.conclusion.clone()), None),
+                    Polarity::Retract => (None, Some(identity.conclusion.clone())),
+                };
+                descriptor.assert = assert;
+                descriptor.retract = retract;
+                descriptor
+            }
+            None => self.describe(&self.analysis.premises),
+        }
     }
 
     fn describe(&self, premises: &[Premise]) -> InductiveRuleDescriptor {
