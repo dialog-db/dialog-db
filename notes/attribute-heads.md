@@ -373,21 +373,26 @@ against the released dialog tonk pins and once against this branch
 
 | load                                   | released | this branch |
 |----------------------------------------|----------|-------------|
-| account/status, 1,500 rows             | 76 ms    | 75 ms       |
+| account/status, 1,500 rows             | 76 ms    | 38 ms       |
 | account/status, one account            | 0.13 ms  | 0.12 ms     |
-| space/presence, 500 rows               | 1.28 s   | 0.93 s      |
-| block/position, 40 blocks              | 194 ms   | 7.5 ms      |
-| block/position, 454 blocks             | 21.4 s   | 75 ms       |
-| seeding 454 blocks (induction)         | 24.8 s   | 0.75 s      |
-| account/status subscription, first poll| 499 ms   | 248 ms      |
-| space/presence subscription, first poll| 17.3 s   | 5.6 s       |
-| re-poll after suspending 10 accounts   | 49 ms    | 32 ms       |
-| re-poll of an unrelated subscription   | 30 ms    | 11 ms       |
-| re-poll after 10 replicas finish       | 30.8 s   | 7.0 s       |
+| space/presence, 500 rows               | 1.28 s   | 38 ms       |
+| block/position, 40 blocks              | 194 ms   | 8 ms        |
+| block/position, 454 blocks             | 21.4 s   | 80 ms       |
+| seeding 454 blocks (induction)         | 24.8 s   | 0.76 s      |
+| account/status subscription, first poll| 499 ms   | 56 ms       |
+| space/presence subscription, first poll| 17.3 s   | 58 ms       |
+| re-poll after suspending 10 accounts   | 49 ms    | 27 ms       |
+| re-poll of an unrelated subscription   | 30 ms    | 11-30 ms    |
+| re-poll after 10 replicas finish       | 30.8 s   | 0.29 s      |
 
-Row counts and deltas are identical on both. Three things made the
-difference, none of them specific to attribute heads, all of them
-found by running this load:
+Row counts and deltas are identical on both. With the peer's blocks
+on the filesystem (`STORAGE=disk`) instead of in memory the numbers
+move by a few milliseconds either way: the node cache absorbs the
+reads once a tree is warm, so the engine, not block I/O, is what
+these loads measure. Neither build replicates between peers here.
+
+Five things made the difference, none of them specific to attribute
+heads, all of them found by running this load:
 
 - A concept premise reads the fields it binds and the required ones.
   Tonk fills a premise's unmentioned fields with blanks, and `space`
@@ -404,11 +409,23 @@ found by running this load:
   set assembled once is reused by subscriptions, which replay the
   rule-discovery reads it was built from as their demand, where before
   every poll and every per-entity re-derivation assembled it again.
+- A negated premise is an anti-join. It was a probe per candidate row,
+  each setting the inner pipeline up again, rules and all. Now the
+  candidates are buffered; with sixteen or more, the negated relation
+  is read once with nothing bound and the candidates are hashed
+  against it on the variables both bind, and with fewer they all go
+  through the inner plan in one pass. `space/presence` pays this for
+  two negated premises on every space, which is where its second went.
+- A subscription's demand cover was a vector of ranges merged by a
+  linear pass per record, quadratic in what an evaluation reads; a
+  poll spent four fifths of its time there. It is an ordered map now.
+  Separately, a conjunction decided merge against fold per distinct
+  set of bound values, estimating every scan's range per row, which
+  walked the tree about as much as the scan did; it decides once.
 
-What remains slow is the engine's cost per concept premise evaluated
-per row (`space/presence` pays it for two negated premises on every
-space) and the subscription's per-entity re-derivation, both older
-than this change and both halved or better by it.
+What remains is the re-poll after a change, where each affected
+entity is re-derived by a query of its own at about thirty
+milliseconds each.
 
 Without the shared body, the single-pass election and the covering
 rule, `member` was three times main and `titled` twice `member`. With
