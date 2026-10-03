@@ -3,7 +3,7 @@ pub mod descriptor;
 /// A rule's heads, one per attribute.
 pub mod head;
 /// Renaming a body's variables.
-mod rename;
+pub(crate) mod rename;
 
 pub use head::Head;
 
@@ -192,10 +192,26 @@ impl DeductiveRule {
     ///
     /// Reconstructs the `when`/`unless` split from the analyzed premises.
     pub fn descriptor(&self) -> DeductiveRuleDescriptor {
+        match &self.analysis.authored {
+            Some(authored) => self.describe(&authored.premises, &authored.reduce),
+            None => self.canonical_descriptor(),
+        }
+    }
+
+    /// This rule in its canonical spelling (see
+    /// [`canonical`](crate::rule::canonical)): locals renamed by the
+    /// body's structure and premises sorted, the same for every way
+    /// of writing the body. Its encoding is what the rule's identity
+    /// hashes.
+    pub fn canonical_descriptor(&self) -> DeductiveRuleDescriptor {
+        self.describe(&self.analysis.premises, &self.analysis.reduce)
+    }
+
+    fn describe(&self, premises: &[Premise], reduce: &[ReduceEntry]) -> DeductiveRuleDescriptor {
         let mut when = Vec::new();
         let mut unless = Vec::new();
 
-        for premise in &self.analysis.premises {
+        for premise in premises {
             match premise {
                 Premise::Assert(proposition) => when.push(proposition.clone()),
                 Premise::Unless(Negation(proposition)) => unless.push(proposition.clone()),
@@ -207,9 +223,7 @@ impl DeductiveRule {
             deduce: self.conclusion().clone(),
             when,
             unless,
-            reduce: self
-                .analysis
-                .reduce
+            reduce: reduce
                 .iter()
                 .map(|entry| (entry.field.clone(), ReduceSpec::from(entry)))
                 .collect(),
@@ -236,19 +250,21 @@ impl DeductiveRule {
         serde_ipld_dagcbor::to_vec(&self.descriptor()).ok()
     }
 
-    /// This rule's content-addressed identity, if it has a canonical
-    /// encoding: `rule:<base58(blake3(dag-cbor(descriptor)))>`.
+    /// This rule's content-addressed identity, if it has an encodable
+    /// body: `rule:<base58(blake3(dag-cbor(canonical descriptor)))>`.
     ///
     /// `None` for rules with no encodable body (implicit / attribute-query
     /// rules — see [`try_encode`](Self::try_encode)). A pure function of
-    /// the rule body, stable across compilations, so it is a
-    /// collision-free key for plan caching and the entity a rule's facts
-    /// are stored under.
+    /// the rule's canonical spelling, so two bodies that differ only in
+    /// what their locals are called or in the order of their premises
+    /// are one rule: one entity its facts are stored under, one plan
+    /// cache entry, one body memo.
     pub fn try_this(&self) -> Option<Entity> {
         self.identity
             .get_or_init(|| {
                 use base58::ToBase58;
-                let hash = blake3::hash(&self.try_encode()?);
+                let canonical = serde_ipld_dagcbor::to_vec(&self.canonical_descriptor()).ok()?;
+                let hash = blake3::hash(&canonical);
                 let encoded = hash.as_bytes().as_ref().to_base58();
                 format!("rule:{encoded}").parse().ok()
             })

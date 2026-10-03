@@ -255,7 +255,10 @@ mod tests {
 
     #[dialog_common::test]
     fn it_moves_a_body_variable_named_is_aside() -> anyhow::Result<()> {
-        let labelled = concept(&[("label", "thing/label")]);
+        // A source head with a field named `is` beside the one being
+        // split: in the `label` head that field is a body variable
+        // named `is`, which the head's own value operand would capture.
+        let labelled = concept(&[("label", "thing/label"), ("is", "thing/is")]);
         let named = concept(&[("name", "person/name"), ("is", "person/is")]);
         let rule = DeductiveRule::new(
             labelled,
@@ -266,13 +269,18 @@ mod tests {
         )?;
 
         let heads = rule.heads()?;
-        assert_eq!(heads.len(), 1);
-        let body: Vec<_> = heads[0].rule.analysis().premises().collect();
+        assert_eq!(heads.len(), 2);
+        let label = heads
+            .iter()
+            .find(|head| head.field.the().to_string().contains("thing/label"))
+            .expect("the label head");
+        let body: Vec<_> = label.rule.analysis().premises().collect();
         let Premise::Assert(Proposition::Concept(query)) = body[0] else {
             panic!("expected the concept premise");
         };
         assert_eq!(query.terms.get("name").unwrap().name(), Some("is"));
-        assert_eq!(query.terms.get("is").unwrap().name(), Some("is~1"));
+        let aside = query.terms.get("is").unwrap().name().expect("named");
+        assert_ne!(aside, "is", "the body variable moved out of the way");
         Ok(())
     }
 

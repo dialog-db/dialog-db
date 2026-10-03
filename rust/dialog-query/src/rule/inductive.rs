@@ -148,13 +148,16 @@ impl InductiveRule {
         serde_ipld_dagcbor::to_vec(&self.descriptor()).ok()
     }
 
-    /// This rule's content-addressed identity, if it has a canonical
-    /// encoding: `rule:<base58(blake3(dag-cbor(descriptor)))>`. The
-    /// `assert!` head field is part of the encoding, so an inductive
-    /// rule never collides with the deductive rule of the same body.
+    /// This rule's content-addressed identity, if it has an encodable
+    /// body: `rule:<base58(blake3(dag-cbor(canonical descriptor)))>`,
+    /// the same for every spelling of the body (see
+    /// [`canonical`](crate::rule::canonical)). The `assert!` head field
+    /// is part of the encoding, so an inductive rule never collides
+    /// with the deductive rule of the same body.
     pub fn try_this(&self) -> Option<Entity> {
         use base58::ToBase58;
-        let hash = blake3::hash(&self.try_encode()?);
+        let canonical = serde_ipld_dagcbor::to_vec(&self.canonical_descriptor()).ok()?;
+        let hash = blake3::hash(&canonical);
         let encoded = hash.as_bytes().as_ref().to_base58();
         format!("rule:{encoded}").parse().ok()
     }
@@ -189,10 +192,23 @@ impl InductiveRule {
     /// lands in the `assert!` or `retract!` field per this rule's
     /// polarity.
     pub fn descriptor(&self) -> InductiveRuleDescriptor {
+        match &self.analysis.authored {
+            Some(authored) => self.describe(&authored.premises),
+            None => self.canonical_descriptor(),
+        }
+    }
+
+    /// This rule in its canonical spelling, whose encoding its
+    /// identity hashes.
+    pub fn canonical_descriptor(&self) -> InductiveRuleDescriptor {
+        self.describe(&self.analysis.premises)
+    }
+
+    fn describe(&self, premises: &[Premise]) -> InductiveRuleDescriptor {
         let mut when = Vec::new();
         let mut unless = Vec::new();
 
-        for premise in &self.analysis.premises {
+        for premise in premises {
             match premise {
                 Premise::Assert(proposition) => when.push(proposition.clone()),
                 Premise::Unless(Negation(proposition)) => unless.push(proposition.clone()),
