@@ -671,10 +671,9 @@ mod tests {
         assert_eq!(descriptor.select(), Select::Top);
         assert_eq!(descriptor.among().len(), 2);
         assert!(descriptor.reads_elected());
-        assert_eq!(
-            serde_json::to_value(&descriptor).expect("serializes"),
-            json
-        );
+        let mut encoded = serde_json::to_value(&descriptor).expect("serializes");
+        encoded.as_object_mut().expect("an object").remove("description");
+        assert_eq!(encoded, json);
 
         let plain: AttributeDescriptor = serde_json::from_value(serde_json::json!({
             "the": "job/status",

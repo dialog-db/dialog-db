@@ -144,10 +144,11 @@ either way a rule installed later can only add candidates. It may
 neither conclude through nor read a carrier-changing field, since
 inside a component that would be entities read as a number. Views,
 queries, subscriptions and inductive rules read any policy: those
-are the closed places, and a view is where a count lives. A fold
-counts a candidate once per value and the facts it cites, so two
-employees on one salary are two and two rules deriving one claim
-from one fact are one.
+are the closed places, and a view is where a count lives. A
+candidate is a fact: a fold sees each distinct value of the relation
+once, however many rules derive it, or each distinct entry of a keyed
+collection, so a count per contributor reads a collection keyed by
+the contributor.
 
 The engine part of this is the policy beside cardinality on the
 attribute descriptor a field carries, `select` with `among` for the

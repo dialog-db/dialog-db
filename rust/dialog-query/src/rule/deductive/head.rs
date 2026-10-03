@@ -140,7 +140,7 @@ impl DeductiveRule {
                 .collect();
 
             let rule = if reduce.is_empty() {
-                DeductiveRule::new(conclusion, body)
+                crate::rule::compile_internal::<DeductiveRule>(conclusion, body)
             } else {
                 DeductiveRule::with_reduce(conclusion, body, reduce)
             };
