@@ -137,7 +137,7 @@ fn selecting_edges(
     }
     for (_, field) in descriptor.with().iter() {
         let attribute = ConceptDescriptor::of_attribute(field);
-        if derived.contains(&attribute.this()) {
+        if derived.contains(&ProgramAnalysis::node(&attribute)) {
             edges.push((attribute, Polarity::Positive));
         }
     }
@@ -163,8 +163,13 @@ fn structural_edges(descriptor: &ConceptDescriptor) -> Vec<(ConceptDescriptor, P
 /// cached until the next install.
 #[derive(Clone, Debug, Default)]
 pub struct ProgramAnalysis {
-    /// Adjacency: concept -> the concepts its rules reference.
+    /// Adjacency: node -> the nodes its rules reference. An attribute
+    /// concept's node is its relation (see [`ProgramAnalysis::node`]).
     edges: HashMap<Entity, Vec<(Entity, Polarity)>>,
+    /// The node of every concept the analysis saw, by the concept's
+    /// own entity, so a question asked by concept entity reaches the
+    /// relation's node.
+    aliases: HashMap<Entity, Entity>,
     /// Concepts whose strongly connected component is non-trivial
     /// (more than one member, or a self-edge).
     recursive: HashSet<Entity>,
@@ -211,13 +216,17 @@ impl ProgramAnalysis {
         derived: HashSet<Entity>,
     ) -> Self {
         let mut edges: HashMap<Entity, Vec<(Entity, Polarity)>> = HashMap::new();
+        let mut aliases: HashMap<Entity, Entity> = HashMap::new();
         let mut pending: VecDeque<ConceptDescriptor> = VecDeque::new();
 
         for (entity, rules) in entries {
             let mut out = Vec::new();
             for rule in rules.rules() {
+                aliases.insert(rule.conclusion().this(), Self::node(rule.conclusion()));
                 for (target, polarity) in rule_edges(rule) {
-                    out.push((target.this(), polarity));
+                    let node = Self::node(&target);
+                    aliases.insert(target.this(), node.clone());
+                    out.push((node, polarity));
                     pending.push_back(target);
                 }
             }
@@ -227,13 +236,15 @@ impl ProgramAnalysis {
         // Concepts referenced by premises but never registered still
         // constrain the graph through their embedded descriptors.
         while let Some(descriptor) = pending.pop_front() {
-            let entity = descriptor.this();
+            let entity = Self::node(&descriptor);
             if edges.contains_key(&entity) {
                 continue;
             }
             let mut out = Vec::new();
             for (target, polarity) in selecting_edges(&descriptor, &derived) {
-                out.push((target.this(), polarity));
+                let node = Self::node(&target);
+                aliases.insert(target.this(), node.clone());
+                out.push((node, polarity));
                 pending.push_back(target);
             }
             edges.insert(entity, out);
@@ -311,6 +322,7 @@ impl ProgramAnalysis {
 
         ProgramAnalysis {
             edges,
+            aliases,
             recursive,
             component,
             violations,
@@ -324,9 +336,28 @@ impl ProgramAnalysis {
         &self.violations
     }
 
+    /// The node a concept is analysed as: an attribute concept is its
+    /// relation, `on:<domain>/<name>`, whatever type or policy it reads
+    /// the relation under, since every rule deriving the relation and
+    /// every read of it meet there; any other concept is itself.
+    pub fn node(concept: &ConceptDescriptor) -> Entity {
+        match concept.attribute_field() {
+            Some((_, field)) => crate::rule::statement::Reach::of(field.the())
+                .on_entity()
+                .unwrap_or_else(|| concept.this()),
+            None => concept.this(),
+        }
+    }
+
+    /// The node a question about `concept` is asked of: the concept's
+    /// node when the analysis saw it, else the entity itself.
+    fn key<'a>(&'a self, concept: &'a Entity) -> &'a Entity {
+        self.aliases.get(concept).unwrap_or(concept)
+    }
+
     /// Whether the concept participates in a dependency cycle.
     pub fn is_recursive(&self, concept: &Entity) -> bool {
-        self.recursive.contains(concept)
+        self.recursive.contains(self.key(concept))
     }
 
     /// Whether the two concepts sit on the *same* dependency cycle:
@@ -335,6 +366,7 @@ impl ProgramAnalysis {
     /// tell recursive occurrences (evaluated from the answer table)
     /// from base premises (evaluated top-down).
     pub fn in_same_cycle(&self, a: &Entity, b: &Entity) -> bool {
+        let (a, b) = (self.key(a), self.key(b));
         self.recursive.contains(a)
             && self.recursive.contains(b)
             && match (self.component.get(a), self.component.get(b)) {
@@ -361,7 +393,7 @@ impl ProgramAnalysis {
         let mut seen = HashSet::new();
         let mut structural = VecDeque::from([descriptor.clone()]);
         while let Some(descriptor) = structural.pop_front() {
-            let entity = descriptor.this();
+            let entity = Self::node(&descriptor);
             if !seen.insert(entity.clone()) {
                 continue;
             }

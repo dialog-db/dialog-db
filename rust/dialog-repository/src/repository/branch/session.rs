@@ -1148,7 +1148,7 @@ where
         let bundle = self.resolve_bundle(&input, plan_cache).await?;
         let analysis = self.program_analysis(&input, &bundle).await?;
         analysis.check(&input)?;
-        let bundle = if analysis.is_recursive(&concept) {
+        let bundle = if analysis.is_recursive(&ProgramAnalysis::node(&input)) {
             bundle.with_recursion(analysis)
         } else {
             bundle
@@ -1518,9 +1518,9 @@ where
         let mut seen = HashSet::new();
         let mut queue = Vec::new();
 
-        seen.insert(root.this());
+        seen.insert(ProgramAnalysis::node(root));
         referenced(root_bundle, &mut queue);
-        entries.push((root.this(), root.clone(), root_bundle.clone()));
+        entries.push((ProgramAnalysis::node(root), root.clone(), root_bundle.clone()));
 
         // Level by level: everything a frontier references is known
         // needed, so each level's concepts resolve their rules
@@ -1530,7 +1530,7 @@ where
         while !queue.is_empty() {
             let mut frontier = Vec::new();
             while let Some(descriptor) = queue.pop() {
-                let entity = descriptor.this();
+                let entity = ProgramAnalysis::node(&descriptor);
                 if seen.insert(entity.clone()) {
                     frontier.push((entity, descriptor));
                 }

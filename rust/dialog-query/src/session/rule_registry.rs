@@ -207,7 +207,7 @@ impl RuleRegistry {
         let analysis = self.analysis()?;
         analysis.check(predicate)?;
         let rules = self.bundle(predicate)?;
-        Ok(if analysis.is_recursive(&predicate.this()) {
+        Ok(if analysis.is_recursive(&ProgramAnalysis::node(predicate)) {
             rules.with_recursion(analysis)
         } else {
             rules
