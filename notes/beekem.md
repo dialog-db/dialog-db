@@ -261,8 +261,8 @@ content-addressed persistence costs for a structure that is derived state,
 rebuilt from the op log on every structural merge anyway.
 
 What *is* reusable from the storage side is everything below the tree: the
-blob store, `ContentAddressedStorage`, blob replication, and the branch
-machinery that will carry the op log.
+blob store, the archive's content-addressed blocks, blob replication, and the
+branch machinery that will carry the op log.
 
 ## The part we have to build: content encryption
 
@@ -273,8 +273,8 @@ and it is where a database differs sharply from a messenger.
 
 ### Content addressing forces deterministic encryption
 
-`ContentAddressedStorage::store(bytes, hash)` verifies `hash == blake3(bytes)`,
-and `Link { node: Blake3Hash, .. }` addresses children by that hash. If we
+Loading a block checks `hash == blake3(bytes)` (`LoadBlock::perform`), and
+`Link { node: Blake3Hash, .. }` addresses children by that hash. If we
 encrypt node buffers with a random nonce, two replicas that independently
 compute the *same logical node* produce *different* ciphertexts, hence
 different hashes, hence different links all the way up. Structural sharing
@@ -794,33 +794,44 @@ one runs on both targets:
 
 ## Wired into the tree
 
-`ContentAddressedStorage` now takes an optional [`NodeCipher`]. With one
-attached it seals what it writes, opens what it reads, and files each node
-under a blinded address. **The tree above it is untouched** — same identities,
-same call sites, same code path — which is what makes the integration a few
-dozen lines rather than a rewrite of `differential.rs`.
+The tree loads every node through a `LoadBlock` command it defines, by the
+node's content identity, and stages what it writes in a `Delta` that is
+written to storage afterwards. Sealing sits entirely outside it.
+`dialog-keyring`'s `SealedBlocks` is a sealed block store: it seals each block
+it is given and files it under a blinded address, and it provides `LoadBlock`
+by blinding the identity asked for and opening what it finds there.
+`LoadBlock::perform` still checks the opened bytes against the identity, so a
+block that opens to anything else is refused. **The tree is untouched** — same
+identities, same call sites, same code path.
 
-`dialog-keyring`'s `NodeSealer` is the implementation: a keyring resolved to
-concrete keys once, up front.
+`NodeSealer` is the keys behind it: a keyring resolved to concrete keys once,
+up front.
 
 ```rust
 let sealer = Arc::new(NodeSealer::resolve(&keyring).await?);
-let storage = ContentAddressedStorage::with_cipher(backend, sealer);
+let blocks = SealedBlocks::new(sealer);
+blocks.flush(&mut delta)?;          // seal what a persist staged
+tree.get(&key, &blocks).await?;     // read through the sealed store
 ```
+
+`SealedBlocks` holds its ciphertext in memory, the counterpart of the tree's
+`MemoryBlocks`. Pointing it at a repository's archive is the remaining step,
+and the shape is the one every repository provider already has: `LoadBlock`
+over the archive's `Get`, and a commit's staged blocks sealed before they are
+`Put`.
 
 Two things fell out of doing it that the design had not accounted for.
 
-### Sealing cannot use WebCrypto
+### Sealing no longer has to be synchronous
 
-`TransientTree::persist` is synchronous. Nodes are sealed inside it, so the
-cipher cannot await, so in the browser it cannot be `WebCrypto` — it has to be
-a software cipher on both targets. `dialog-credentials`' careful routing of
-AES through `SubtleCrypto` applies to sealing *to an identity*, and cannot
-apply to sealing content.
-
-This is not fatal and it is not even expensive (see below), but it is a
-constraint the design should have named. Both paths use the same algorithm, so
-a blob sealed by one opens under the other — pinned by a test.
+When nodes were sealed inside `TransientTree::persist`, which does not await,
+the cipher could not await either, so in the browser it could not be
+`WebCrypto`. Since the tree stopped writing through a storage backend, a
+persist only stages blocks in a `Delta`, and they are sealed when the delta is
+written out, which is async. `NodeSealer` still seals with software AES on
+both targets, because it is simple and fast and the bytes are identical to the
+platform path's — pinned by a test — but a `WebCrypto` path is now possible if
+there is a reason for one.
 
 ### Addresses need a key that never rotates
 
@@ -842,7 +853,9 @@ nothing written since.
 ## What it costs
 
 Measured on native against an in-memory backend — 16-byte keys, 32-byte
-values, nodes averaging ~13 KB. `cargo bench -p dialog-keyring`.
+values, nodes averaging ~13 KB. `cargo bench -p dialog-keyring`. Measured
+before the tree moved to `LoadBlock` and the tagged node format; the sealing
+work per node is unchanged by either.
 
 | Workload | Plain | Sealed | Delta |
 | --- | ---: | ---: | ---: |
@@ -869,7 +882,7 @@ flush, and batch flushes. A write path that persists per-entry pays for
 sealing per-entry.
 
 **Cold reads roughly double, and warm reads do not change.** The node cache
-holds decrypted buffers, so sealing charges the miss and nothing else. The
+holds decrypted, checked nodes, so sealing charges the miss and nothing else. The
 +82% is measured against an in-memory backend, which is the worst possible
 case for *relative* overhead: a ~12 µs decrypt of a 13 KB node next to a
 memcpy looks enormous, and next to a disk seek or a network round trip it
