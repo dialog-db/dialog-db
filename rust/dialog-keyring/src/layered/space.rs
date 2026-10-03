@@ -187,7 +187,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`KeyringError::ReadOnly`] if this party holds no writer,
+    /// Returns [`KeyringError::ReadOnly`] if this party holds no writer and
+    /// the tree is not sealed already,
     /// [`KeyringError::UnknownNode`] for a node neither staged nor located,
     /// [`KeyringError::UnknownValue`] for a value neither staged nor
     /// located, and [`KeyringError::Node`] if a staged block is not a node.
@@ -197,6 +198,10 @@ where
         values: Option<&Delta<Blake3Hash, Buffer>>,
         root: &Blake3Hash,
     ) -> Result<Sealing, KeyringError> {
+        // A tree already sealed needs no writer: nothing new is sealed.
+        if let Some(sealing) = self.party.already(root) {
+            return Ok(sealing);
+        }
         let writer = self.writer.as_ref().ok_or(KeyringError::ReadOnly)?;
         self.party
             .seal::<K, V, A>(writer, &Staged { blocks, values }, root)

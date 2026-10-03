@@ -86,6 +86,27 @@ where
             .map(Buffer::from))
     }
 
+    /// Where the archive holds the node `identity`: under its identity on
+    /// a plain line, under its envelope's address on a sealed one. `None`
+    /// when a sealed line has not located it.
+    pub(crate) fn node_address(&self, identity: &Blake3Hash) -> Option<Blake3Hash> {
+        match &self.sealing {
+            None => Some(identity.clone()),
+            Some(space) => space.locate(identity).map(|at| at.address),
+        }
+    }
+
+    /// Where the archive holds the spilled value hashing to `reference`:
+    /// under the reference on a plain line, under its sealed copy's
+    /// address on a sealed one. `None` when a sealed line has not located
+    /// it.
+    pub(crate) fn value_address(&self, reference: &Blake3Hash) -> Option<Blake3Hash> {
+        match &self.sealing {
+            None => Some(reference.clone()),
+            Some(space) => space.locate_value(reference),
+        }
+    }
+
     /// The node `identity` names, opened on a sealed line: the envelope
     /// this line's space locates it at, opened. On a plain line, the block
     /// stored under `identity`. A node a sealed line has not located is

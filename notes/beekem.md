@@ -1055,26 +1055,119 @@ filesystem one:
 - The volatile archive, the filesystem archive and the in-memory store hold
   byte-identical envelopes at identical addresses.
 
+### In the repository
+
+A branch opened with `.sealed(space)` is a sealed line
+(`dialog_repository::sealing`). The space is a `layered::Space` over the
+repository's tree types: the keys a party holds, and where each node and
+spilled value it has reached lives. Its commits persist envelopes, and its
+reads open them.
+
+**The revision keeps its plaintext root.** `Revision::tree` is still the
+root the node cache, the live spine, diffs and every reader key by. A
+sealed line's head also carries `sealed`: the root envelope's address and
+structure key, covered by the head signature, so a relay cannot point a
+head at other envelopes. That one choice is what kept the change small.
+Nothing above the archive learned a second kind of root. The few places
+that turn a head into a tree first tell the line's space where that root
+lives (`admit`):
+
+- reading a branch's or snapshot's head;
+- the base, mine and theirs of a merge;
+- an upstream head a pull has verified;
+- the sync points in the tracking cell, which now record their sealed root
+  beside their tree, so the next sync can read its base after a restart.
+
+From any of those roots a reader reaches the rest as each parent opens.
+
+**Writes seal at `persist`.** The commit, merge and three pull persists go
+through `persist_line`. It seals every node the tree reaches and every value
+those nodes spill, then writes the sealed values to the blob store and the
+envelopes to the catalog. Sealing refuses before anything is written. A
+handle with a reader's space is refused a commit with `ReadOnly`, unless
+the root is already sealed and there is nothing to seal: a pull that only
+adopts a head needs no writer.
+
+**Spilled values are attachments.** A value too large for its key spills
+into the blob store under its plaintext hash. A sealed line seals it on its
+own, under `keyed_hash(content_secret, reference)` (`layered/value.rs`),
+and stores it under the hash of the sealed bytes. The leaf's envelope lists
+that address in its structure region, after its children. A replicator
+therefore copies values along with nodes. A member pairs each address with
+the reference it finds in the leaf, so a value is found from the node that
+names it, as a child is.
+
+**Reads open through the index.** `LocalIndex` and `NetworkedIndex` take
+the line's space (`.sealed(...)`). They locate a node's envelope, fetch it,
+and open it. A local miss hydrates the envelope by its own address, so a
+remote serves sealed blocks exactly as it serves plain ones.
+
+**Push, export and download move sealed bytes.**
+- Push diffs through the sealed index, then uploads each novel node's
+  envelope, never the node.
+- A spilled value crosses as its sealed copy.
+- A forwarded subtree is probed and copied by envelope address, and each
+  envelope is opened only to find its children and values.
+- Snapshot export yields envelopes and sealed values on a sealed line, and
+  download carries the branch's space into its walk.
+
+**Assets are refused.** An asset streams whole into the blob store under
+its plaintext hash. Sealing does not cover it, so a sealed line refuses it
+with `SealedAsset` rather than store it in the clear.
+
+**What a head reveals.** Its plaintext root lets whoever reads it confirm an
+exact guess of the root node, and nothing more. Its structure key lets them
+walk the tree's shape: how many nodes there are, how they link, and how
+large each envelope is. That is the replicator level, and it is what a
+remote needs in order to copy the tree.
+
+`dialog-repository`'s `sealing/tests.rs` pins, on the volatile store and
+on the filesystem one:
+
+- A sealed commit reads back, inline and spilled. So does a handle that has
+  learned nothing, from the head alone, and it commits on top.
+- Structure-only and range-only parties are refused the root with
+  `MissingGeneration`, naming the generation they lack.
+- A reader is refused a commit with `ReadOnly`, and the head stays put.
+- A handle without the space finds nothing under the plaintext root.
+- An asset import and an asset assertion are both refused with
+  `SealedAsset`. Nothing reaches the blob store, and the head stays put.
+- On disk (native), a sealed commit's values appear nowhere, while the same
+  values on a plain branch of the same repository do.
+
+`sealing/remote_tests.rs` (integration tests, against S3):
+
+- A sealed branch pushed to a remote and pulled by another replica reads
+  back whole. Walked as a replicator walks it, the remote holds only
+  envelopes and sealed values, none carrying the values, and nothing under
+  the plaintext root.
+- Two replicas edit concurrently through the remote. Pushes diff against
+  sealed sync points, and the pull mints a real merge (its tree is neither
+  side's) and seals it. Both sides converge, and the remote still holds no
+  plaintext.
+
 ### What it is not
 
-- **Not in the repository yet.** `LayeredArchive` is a store, not a branch.
-  A commit still persists plain nodes through `persist`. Switching it means
-  three things. The revision names a `LayeredRoot` (envelope address and
-  structure key) instead of a plaintext root. The branch holds a `Writer` and
-  an `Access` from the keyring. And every `LoadBlock` site reads through
-  the party that opened the root. The root's structure key travelling with the
-  revision is what makes a remote a replicator: it can walk and check the tree
-  but not read it.
-- **Generations are handed out, not agreed.** Level secrets are plain values
-  here; delivering them, and rotating them on removal, is what a CGKA is for.
+- **Generations are handed out, not agreed.** A space's level secrets are
+  plain values passed in by the caller; delivering them, and rotating them
+  on removal, is what a CGKA is for. Nothing in the repository mints or
+  stores them yet.
 - **What a party has learned lives in memory.** A member's map from identity
-  to envelope is rebuilt from the root on every session.
+  to envelope is rebuilt from the heads it reads on every session.
+- **Sealing is per handle.** Whether a line is sealed is how the handle was
+  opened, not a property recorded with the branch. A handle opened without
+  the space reads a sealed line's heads and none of its tree. One opened with
+  a space on a plain line locates none of the plain tree, so it reads
+  nothing, and nothing converts a plain line into a sealed one. Recording
+  sealing with the branch, and a migration that seals an existing tree, are
+  the next steps.
 - **Routing ignores pending ops.** The search tree buffers ops in index nodes,
   and a range holder routes to the leaf a key belongs in without seeing them.
   That is the claim; anything stronger would mean putting buffered keys in
   the range region.
-- **Not run in a browser.** The archive tests compile for wasm (OPFS on the
-  filesystem arm); they have only run natively here.
+- **Not run in a browser.** Everything compiles for wasm. The tests have run
+  natively only: `wbg-pool`, which runs them in a browser, is not installed
+  here.
 
 ## Suggested sequence
 
@@ -1129,7 +1222,7 @@ The revised order:
 6. **Capability binding.** UCAN proof carried on membership ops; `/ucan/revoke`
    on a read delegation drives `Remove` + `Update`. Where the two planes meet,
    and where the design is most ours.
-7. **L1/L2/L3 layering.** *(prototyped in `dialog-keyring::layered`)* A refinement of a working single envelope, not a
+7. **L1/L2/L3 layering.** *(prototyped in `dialog-keyring::layered`, wired into the repository as sealed lines)* A refinement of a working single envelope, not a
    prerequisite for one. Folding the keyring into a tag-6 region falls out of
    this.
 
