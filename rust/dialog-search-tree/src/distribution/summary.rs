@@ -6,10 +6,11 @@
 //! and the last entry's weight (boundary seams and their coin verdicts are
 //! formed against these), the piece-local coin outcomes, the trailing
 //! bank, the heaviest interior vetoed stretch, and the best interior
-//! election candidate of each backstop kind. Summaries are memoized per
-//! node hash, so a piece is streamed once per content change instead of
-//! once per quiet check — the difference between the check costing
-//! O(run entries) and O(run pieces) on the hot path.
+//! election candidate of each backstop kind. A stored piece keeps its
+//! summary with its own bytes (see `PersistentNode::summary`), so a piece is
+//! streamed once per content change instead of once per quiet check — the
+//! difference between the check costing O(run entries) and O(run pieces) on
+//! the hot path.
 //!
 //! Piece-local coin evaluation is exact in the regimes the compressed
 //! check accepts: the weight bank resets at every accepted seam, so when a
@@ -17,21 +18,27 @@
 //! bank entering the piece is zero, and when every seam is vetoed (the
 //! stretch regime) there are no coin verdicts at all.
 //!
-//! The memo is thread-local and bounded like the key-hash memo: entries
-//! are keyed by `(node hash, max_separator, anchor_selector)` — the only
-//! manifest knobs the summarized quantities read (coin verdicts also read
+//! A summary is read back only under the manifest knobs it was built with
+//! ([`Knobs`]): `max_separator` and `anchor_selector` are the only ones the
+//! summarized quantities read directly (coin verdicts also read
 //! `max_segment`, but through `D::leaf_cut`, whose manifest is the same
-//! one; a manifest change changes the key) — and the map is cleared
-//! wholesale at capacity.
-
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::sync::Arc;
+//! one).
 
 use dialog_common::Blake3Hash;
 
 use super::cap;
-use crate::{Distribution, Manifest};
+use crate::{Distribution, Hashed, Manifest};
+
+/// The manifest knobs a summary depends on: `max_separator` and
+/// `anchor_selector`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Knobs(u32, u32);
+
+impl From<&Manifest> for Knobs {
+    fn from(manifest: &Manifest) -> Self {
+        Self(manifest.max_separator, manifest.anchor_selector)
+    }
+}
 
 /// Everything the compressed quiet check needs from one run piece.
 #[derive(Debug, Clone)]
@@ -42,8 +49,14 @@ pub(crate) struct PieceSummary {
     pub weight: usize,
     /// The first entry's key bytes.
     pub first_key: Vec<u8>,
+    /// The hash of the first entry's key: the anchor identity of the seam
+    /// at the piece's left edge, which the run-wide election orders by.
+    pub first_hash: Blake3Hash,
     /// The last entry's key bytes.
     pub last_key: Vec<u8>,
+    /// The hash of the last entry's key: what the coin at the seam closing
+    /// the piece draws from.
+    pub last_hash: Blake3Hash,
     /// The last entry's weight — the boundary seam's own coin charge reads
     /// it together with `trailing_bank`.
     pub last_weight: usize,
@@ -76,14 +89,20 @@ impl PieceSummary {
     /// weights, mirroring `cut_plan`'s seam walk at piece scope: vetoes
     /// and banks left to right, coin verdicts at accepted seams, stretch
     /// extents and both backstops' candidate minima.
-    pub(crate) fn build<D>(keys: &[&[u8]], weights: &[usize], manifest: &Manifest) -> Self
+    pub(crate) fn build<D>(keys: &[Hashed<'_>], weights: &[usize], manifest: &Manifest) -> Self
     where
         D: Distribution,
     {
         let count = keys.len();
         let weight = weights.iter().sum();
-        let first_key = keys.first().map(|key| key.to_vec()).unwrap_or_default();
-        let last_key = keys.last().map(|key| key.to_vec()).unwrap_or_default();
+        // The edge hashes are taken through the keys' own cells, so a piece
+        // built from live entries leaves them there for the next ask.
+        let edge = |key: Option<&Hashed<'_>>| match key {
+            Some(key) => (key.to_vec(), key.hash()),
+            None => (Vec::new(), Blake3Hash::hash(&[])),
+        };
+        let (first_key, first_hash) = edge(keys.first());
+        let (last_key, last_hash) = edge(keys.last());
         let last_weight = weights.last().copied().unwrap_or_default();
         let selector = cap::AnchorSelector::from_manifest(manifest);
 
@@ -115,8 +134,8 @@ impl PieceSummary {
         };
 
         for at in 1..count {
-            let left = keys[at - 1];
-            let right = keys[at];
+            let left = keys[at - 1].bytes();
+            let right = keys[at].bytes();
             if D::vetoes(left, right, manifest) {
                 bank += weights[at - 1];
                 stretch_weight = Some(match stretch_weight {
@@ -128,7 +147,7 @@ impl PieceSummary {
                         &mut stretch_interior,
                         (
                             cap::shortest_separator_len(left, right),
-                            super::hash_memo::hash(right),
+                            keys[at].hash(),
                             at,
                         ),
                     );
@@ -138,7 +157,7 @@ impl PieceSummary {
                 if let Some(sum) = stretch_weight.take() {
                     max_stretch_weight = max_stretch_weight.max(sum);
                 }
-                if D::leaf_cut(left, bank + weights[at - 1], manifest) {
+                if D::leaf_cut(keys[at - 1], bank + weights[at - 1], manifest) {
                     interior_coin_cut = true;
                 }
                 bank = 0;
@@ -147,7 +166,7 @@ impl PieceSummary {
                         &mut frame_interior,
                         (
                             cap::shortest_separator_len(left, right),
-                            super::hash_memo::hash(right),
+                            keys[at].hash(),
                             at,
                         ),
                     );
@@ -162,7 +181,9 @@ impl PieceSummary {
             count,
             weight,
             first_key,
+            first_hash,
             last_key,
+            last_hash,
             last_weight,
             all_vetoed,
             interior_coin_cut,
@@ -172,49 +193,4 @@ impl PieceSummary {
             frame_interior,
         }
     }
-}
-
-/// Entries retained before the memo resets. Summaries are small (two edge
-/// keys plus a handful of scalars), so this bounds the memo well under the
-/// node cache's footprint.
-const CAPACITY: usize = 1 << 14;
-
-type MemoKey = (Blake3Hash, u32, u32);
-
-thread_local! {
-    /// The per-thread summary memo, keyed by node hash plus the manifest
-    /// knobs the summary reads.
-    static MEMO: RefCell<HashMap<MemoKey, Arc<PieceSummary>>> = RefCell::new(HashMap::new());
-}
-
-/// The memo key for `hash` under `manifest`.
-fn key(hash: &Blake3Hash, manifest: &Manifest) -> MemoKey {
-    (
-        hash.clone(),
-        manifest.max_separator,
-        manifest.anchor_selector,
-    )
-}
-
-/// The memoized summary for the piece stored under `hash`, if present.
-pub(crate) fn memoized(hash: &Blake3Hash, manifest: &Manifest) -> Option<Arc<PieceSummary>> {
-    MEMO.with(|memo| memo.borrow().get(&key(hash, manifest)).cloned())
-}
-
-/// Memoizes `summary` for the piece stored under `hash`, returning the
-/// shared handle.
-pub(crate) fn memoize(
-    hash: &Blake3Hash,
-    manifest: &Manifest,
-    summary: PieceSummary,
-) -> Arc<PieceSummary> {
-    MEMO.with(|memo| {
-        let mut memo = memo.borrow_mut();
-        if memo.len() >= CAPACITY {
-            memo.clear();
-        }
-        let summary = Arc::new(summary);
-        memo.insert(key(hash, manifest), summary.clone());
-        summary
-    })
 }

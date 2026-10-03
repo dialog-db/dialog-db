@@ -32,7 +32,7 @@
 
 #[cfg(doc)]
 use dialog_search_tree::LoadBlock;
-use dialog_search_tree::{Buffer, Distribution, Geometric, Manifest, PersistentNode, Rank};
+use dialog_search_tree::{Buffer, Distribution, Geometric, Hashed, Manifest, PersistentNode, Rank};
 use dialog_storage::Blake3Hash;
 use rkyv::deserialize;
 use rkyv::rancor::Error as RkyvError;
@@ -240,7 +240,7 @@ pub fn inspect_spans(bytes: Vec<u8>) -> Result<Vec<SpanSummary>, DialogArtifacts
         let rank = if separator.is_empty() {
             0
         } else {
-            Geometric::seam_rank(&separator, &manifest)
+            Geometric::seam_rank(Hashed::from(&separator), &manifest)
         };
         spans.push(SpanSummary {
             at: at as u64,
@@ -272,7 +272,7 @@ pub fn inspect_keys(bytes: Vec<u8>) -> Result<Vec<KeySummary>, DialogArtifactsEr
     let mut cursor = segment.keys::<Key>()?;
     while let Some((_, key)) = cursor.next_key()? {
         let key = key.to_vec();
-        let rank = Geometric::rank(&key, &manifest);
+        let rank = Geometric::rank(Hashed::from(&key), &manifest);
         keys.push(KeySummary { key, rank });
     }
     Ok(keys)
@@ -620,12 +620,12 @@ mod tests {
 
         let links = vec![
             Link {
-                separator: Vec::new(),
+                separator: Vec::new().into(),
                 node: NodeHash::hash(b"left"),
                 scale: Scale::EMPTY,
             },
             Link {
-                separator: high.clone(),
+                separator: high.clone().into(),
                 node: NodeHash::hash(b"right"),
                 scale: Scale::EMPTY,
             },
@@ -708,10 +708,7 @@ mod tests {
             supersedes: Vec::new(),
             retraction: false,
         };
-        let entries = vec![Entry {
-            key,
-            value: State::Added(datum),
-        }];
+        let entries = vec![Entry::new(key, State::Added(datum))];
         let body = PersistentNodeBody::<State<Datum>>::segment_from_entries::<Key>(
             entries,
             Manifest::default(),
