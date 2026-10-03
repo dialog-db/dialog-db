@@ -27,7 +27,7 @@
 //! # use dialog_capability::{Fork, Provider};
 //! # use dialog_effects::archive::{Get, Import, Put};
 //! # use dialog_effects::authority::{Attest, Identify};
-//! # use dialog_effects::blob::Write as BlobWrite;
+//! # use dialog_effects::blob::{Import as BlobImport, Read as BlobRead, Write as BlobWrite};
 //! # use dialog_effects::memory::{Publish, Resolve};
 //! # use dialog_repository::{Branch, CommitError, RemoteSite};
 //! # use dialog_ucan::UcanDelegation;
@@ -45,7 +45,9 @@
 //! #         + Provider<Identify>
 //! #         + Provider<Attest>
 //! #         + Provider<BlobWrite>
-//! #         + Provider<crate::Hydrate>
+//! #         + Provider<BlobImport>
+//! #         + Provider<BlobRead>
+//! #         + Provider<dialog_repository::Hydrate>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + dialog_common::ConditionalSync
 //! #         + 'static,
