@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let mut store = DialogFacts::open(DialogMode::Memory).await?;
+        let store = DialogFacts::open(DialogMode::Memory).await?;
         let start = std::time::Instant::now();
         if per_row {
             store.insert_per_row_transactions(&rows).await?;

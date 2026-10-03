@@ -16,9 +16,9 @@
 //!   `facts` table whose primary key is the EAV ordering, plus secondary
 //!   AEV and VAE indexes — the exact three orderings `dialog-artifacts`
 //!   maintains in its prolly tree.
-//! - **dialog-db** through the public [`Artifacts`] fact-store API
-//!   (`commit` / `select`), over both the in-memory and the native
-//!   filesystem storage backends.
+//! - **dialog-db** through a repository branch ([`repo::DialogRepo`]):
+//!   `commit` and `select`, over both volatile (in-memory) and native
+//!   on-disk storage.
 //!
 //! The workload shape mirrors the existing `dialog-query` benches
 //! (`seed_stuff`: each entity carries a `stuff/name` and a `stuff/role`)
@@ -31,6 +31,8 @@
 //! production SQLite deployment would actually run, and is the number to
 //! beat once dialog has an explicit durability story.
 
+pub mod metered;
+pub mod nodes;
 pub mod repo;
 pub mod se;
 
@@ -38,12 +40,10 @@ use std::str::FromStr;
 
 use anyhow::Result;
 use base58::ToBase58;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStoreMut, ArtifactView, ArtifactViewStream as _, Artifacts,
-    Attribute, Entity, Instruction, Value,
-};
-use dialog_storage::{Blake3Hash, FileSystemStorageBackend, MemoryStorageBackend};
-use futures_util::{StreamExt, TryStreamExt, stream};
+use dialog_artifacts::{Artifact, Attribute, Changes, Entity, Instruction, Update as _, Value};
+use dialog_peer::{Peer, Session};
+use dialog_storage::NativeTempSpace;
+use dialog_storage::provider::storage::VolatileSpace;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rusqlite::Connection;
@@ -74,7 +74,7 @@ pub struct FactRow {
 }
 
 /// Deterministically generate `count` entities with a name and a role each,
-/// seeded the same way `dialog-operator`'s `generate_data` seeds its
+/// seeded the same way `dialog-peer`'s `generate_data` seeds its
 /// entities so runs are reproducible.
 pub fn generate_rows(count: usize) -> Vec<FactRow> {
     let mut rng = ChaCha8Rng::from_seed([7u8; 32]);
@@ -231,166 +231,133 @@ impl SqliteFacts {
     }
 }
 
-/// Where a dialog [`Artifacts`] store keeps its blocks.
+/// Where a dialog branch keeps its blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialogMode {
-    /// In-memory storage backend — CPU-isolation signal.
+    /// Volatile (in-memory) storage: the CPU-isolation signal.
     Memory,
-    /// Native filesystem backend in a fresh temp directory.
+    /// Native storage in the platform temp directory: the real-latency
+    /// signal.
     Disk,
 }
 
-/// A dialog fact store over either storage backend, exposed through one
-/// enum so benches treat both uniformly.
+/// A dialog branch over either storage, exposed through one enum so
+/// benches and examples treat both uniformly.
 pub enum DialogFacts {
-    /// Backed by [`MemoryStorageBackend`].
-    Memory(Artifacts<MemoryStorageBackend<Blake3Hash, Vec<u8>>>),
-    /// Backed by [`FileSystemStorageBackend`]; the temp dir lives as long
-    /// as the store.
-    Disk(
-        Artifacts<FileSystemStorageBackend<Blake3Hash, Vec<u8>>>,
-        TempDir,
-    ),
+    /// Over volatile storage.
+    Memory(repo::DialogRepo<Peer<VolatileSpace, Session>>),
+    /// Over native storage in the platform temp directory.
+    Disk(repo::DialogRepo<Peer<NativeTempSpace, Session>>),
+}
+
+/// Runs `$body` with `$repo` bound to whichever branch `$facts` holds.
+macro_rules! with_repo {
+    ($facts:expr, $repo:ident => $body:expr) => {
+        match $facts {
+            DialogFacts::Memory($repo) => $body,
+            DialogFacts::Disk($repo) => $body,
+        }
+    };
 }
 
 impl DialogFacts {
-    /// Open a fresh store in the given mode.
+    /// Open a fresh branch in the given mode.
     pub async fn open(mode: DialogMode) -> Result<Self> {
-        match mode {
-            DialogMode::Memory => {
-                let backend = MemoryStorageBackend::default();
-                Ok(Self::Memory(Artifacts::anonymous(backend).await?))
-            }
-            DialogMode::Disk => {
-                let dir = TempDir::new()?;
-                let backend = FileSystemStorageBackend::new(dir.path()).await?;
-                Ok(Self::Disk(Artifacts::anonymous(backend).await?, dir))
-            }
-        }
-    }
-
-    pub(crate) fn artifacts_for(row: &FactRow) -> Result<[Artifact; 2]> {
-        let entity = Entity::from_str(&row.entity)?;
-        Ok([
-            Artifact {
-                the: Attribute::from_str(NAME_ATTRIBUTE)?,
-                of: entity.clone(),
-                is: Value::String(row.name.clone()),
-                cause: None,
-            },
-            Artifact {
-                the: Attribute::from_str(ROLE_ATTRIBUTE)?,
-                of: entity,
-                is: Value::String(row.role.clone()),
-                cause: None,
-            },
-        ])
-    }
-
-    /// Commit each row as its own transaction (the small-commit shape).
-    pub async fn insert_per_row_transactions(&mut self, rows: &[FactRow]) -> Result<()> {
-        for row in rows {
-            let instructions = stream::iter(Self::artifacts_for(row)?.map(Instruction::Assert));
-            match self {
-                Self::Memory(artifacts) => artifacts.commit(instructions).await?,
-                Self::Disk(artifacts, _) => artifacts.commit(instructions).await?,
-            };
-        }
-        Ok(())
-    }
-
-    /// Commit every row in one transaction (the bulk-load shape).
-    pub async fn insert_one_transaction(&mut self, rows: &[FactRow]) -> Result<()> {
-        let mut instructions = Vec::with_capacity(rows.len() * 2);
-        for row in rows {
-            instructions.extend(Self::artifacts_for(row)?.map(Instruction::Assert));
-        }
-        match self {
-            Self::Memory(artifacts) => artifacts.commit(stream::iter(instructions)).await?,
-            Self::Disk(artifacts, _) => artifacts.commit(stream::iter(instructions)).await?,
-        };
-        Ok(())
-    }
-
-    pub(crate) async fn collect(
-        &self,
-        selector: ArtifactSelector<dialog_artifacts::selector::Constrained>,
-    ) -> Result<Vec<Artifact>> {
-        Ok(match self {
-            Self::Memory(artifacts) => artifacts.select(selector).owned().try_collect().await?,
-            Self::Disk(artifacts, _) => artifacts.select(selector).owned().try_collect().await?,
+        Ok(match mode {
+            DialogMode::Memory => Self::Memory(repo::DialogRepo::volatile().await?),
+            DialogMode::Disk => Self::Disk(repo::DialogRepo::temp().await?),
         })
     }
 
-    /// The `(entity, value)` pairs a scan yields, materialized per row to
-    /// exactly the degree the SQLite arms materialize theirs (a `String`
-    /// per column read off the statement row): entity bytes to a `String`,
-    /// value decoded to an owned [`Value`] — no entity URI parse, no
-    /// per-row [`Artifact`].
-    async fn scan_pairs(
-        stream: impl futures_util::Stream<
-            Item = std::result::Result<ArtifactView, dialog_artifacts::DialogArtifactsError>,
-        >,
-    ) -> Result<Vec<(String, Value)>> {
-        let mut pairs = Vec::new();
-        futures_util::pin_mut!(stream);
-        while let Some(row) = stream.next().await {
-            let row = row?;
-            let parts = row.parts()?;
-            let entity = String::from_utf8(parts.entity.to_vec())?;
-            pairs.push((entity, row.value()?));
-        }
-        Ok(pairs)
+    /// Commit each row as its own commit (the small-commit shape).
+    pub async fn insert_per_row_transactions(&self, rows: &[FactRow]) -> Result<()> {
+        with_repo!(self, repo => repo.insert_per_row_transactions(rows).await)
+    }
+
+    /// Commit every row in one commit (the bulk-load shape).
+    pub async fn insert_one_transaction(&self, rows: &[FactRow]) -> Result<()> {
+        with_repo!(self, repo => repo.insert_one_transaction(rows).await)
+    }
+
+    /// Replay the Stack Exchange log, one commit per transaction.
+    pub async fn replay_se(&self, log: &se::SeLog) -> Result<()> {
+        with_repo!(self, repo => repo.replay_se(log).await)
     }
 
     /// Point lookup: the value of `(entity, stuff/name)`.
     pub async fn point_get(&self, entity: &str) -> Result<Option<Value>> {
-        let selector = ArtifactSelector::new()
-            .the(Attribute::from_str(NAME_ATTRIBUTE)?)
-            .of(Entity::from_str(entity)?);
-        let mut pairs = match self {
-            Self::Memory(artifacts) => Self::scan_pairs(artifacts.select(selector)).await?,
-            Self::Disk(artifacts, _) => Self::scan_pairs(artifacts.select(selector)).await?,
-        };
-        Ok(pairs.pop().map(|(_, value)| value))
+        with_repo!(self, repo => repo.point_get(entity).await)
     }
 
     /// Attribute scan: every `stuff/name` fact.
     pub async fn attribute_scan(&self) -> Result<usize> {
-        let selector = ArtifactSelector::new().the(Attribute::from_str(NAME_ATTRIBUTE)?);
-        let pairs = match self {
-            Self::Memory(artifacts) => Self::scan_pairs(artifacts.select(selector)).await?,
-            Self::Disk(artifacts, _) => Self::scan_pairs(artifacts.select(selector)).await?,
-        };
-        Ok(pairs.len())
+        with_repo!(self, repo => repo.attribute_scan().await)
     }
 
-    /// Two-attribute hash join on the shared entity, at the fact-store
-    /// layer: one AEV scan per attribute, joined in memory. This is the
-    /// storage-layer ceiling for the `query_join` engine benchmark — the
-    /// gap between this number and `query_join` is engine overhead.
+    /// Two-attribute hash join on the shared entity.
     pub async fn join(&self) -> Result<usize> {
-        let names_selector = ArtifactSelector::new().the(Attribute::from_str(NAME_ATTRIBUTE)?);
-        let roles_selector = ArtifactSelector::new().the(Attribute::from_str(ROLE_ATTRIBUTE)?);
-        let (names, roles) = match self {
-            Self::Memory(artifacts) => (
-                Self::scan_pairs(artifacts.select(names_selector)).await?,
-                Self::scan_pairs(artifacts.select(roles_selector)).await?,
-            ),
-            Self::Disk(artifacts, _) => (
-                Self::scan_pairs(artifacts.select(names_selector)).await?,
-                Self::scan_pairs(artifacts.select(roles_selector)).await?,
-            ),
-        };
-        let names_by_entity: std::collections::HashMap<String, Value> = names.into_iter().collect();
-        let mut count = 0;
-        for (entity, _role_value) in roles {
-            if names_by_entity.contains_key(&entity) {
-                count += 1;
-            }
-        }
-        Ok(count)
+        with_repo!(self, repo => repo.join().await)
     }
+
+    /// The current title of a post.
+    pub async fn se_title(&self, post: &str) -> Result<Option<Value>> {
+        with_repo!(self, repo => repo.se_title(post).await)
+    }
+
+    /// All entities whose `se.post/kind` is `kind`.
+    pub async fn se_by_kind(&self, kind: &str) -> Result<usize> {
+        with_repo!(self, repo => repo.se_by_kind(kind).await)
+    }
+
+    /// Every fact matching `selector`, materialized.
+    pub async fn collect(
+        &self,
+        selector: dialog_artifacts::ArtifactSelector<dialog_artifacts::selector::Constrained>,
+    ) -> Result<Vec<Artifact>> {
+        with_repo!(self, repo => repo.collect(selector).await)
+    }
+}
+
+/// The two facts a row stands for: its entity's name and role.
+pub(crate) fn artifacts_for(row: &FactRow) -> Result<[Artifact; 2]> {
+    let entity = Entity::from_str(&row.entity)?;
+    Ok([
+        Artifact {
+            the: Attribute::from_str(NAME_ATTRIBUTE)?,
+            of: entity.clone(),
+            is: Value::String(row.name.clone()),
+            cause: None,
+        },
+        Artifact {
+            the: Attribute::from_str(ROLE_ATTRIBUTE)?,
+            of: entity,
+            is: Value::String(row.role.clone()),
+            cause: None,
+        },
+    ])
+}
+
+/// The instructions asserting every row's facts, in row order.
+pub(crate) fn instructions_for(rows: &[FactRow]) -> Result<Vec<Instruction>> {
+    let mut instructions = Vec::with_capacity(rows.len() * 2);
+    for row in rows {
+        instructions.extend(artifacts_for(row)?.map(Instruction::Assert));
+    }
+    Ok(instructions)
+}
+
+/// The changes `instructions` make, as a transaction integrates them: the
+/// form a staged commit (and its amends) takes its writes in.
+pub fn changes_of(instructions: impl IntoIterator<Item = Instruction>) -> Changes {
+    let mut changes = Changes::new();
+    for instruction in instructions {
+        match instruction {
+            Instruction::Assert(fact) => changes.associate(fact.the, fact.of, fact.is),
+            Instruction::Replace(fact) => changes.associate_unique(fact.the, fact.of, fact.is),
+            Instruction::Retract(fact) => changes.dissociate(fact.the, fact.of, fact.is),
+        }
+    }
+    changes
 }
 
 #[cfg(test)]
@@ -414,7 +381,7 @@ mod tests {
     #[tokio::test]
     async fn dialog_roundtrip() -> Result<()> {
         let rows = generate_rows(10);
-        let mut store = DialogFacts::open(DialogMode::Memory).await?;
+        let store = DialogFacts::open(DialogMode::Memory).await?;
         store.insert_one_transaction(&rows).await?;
         assert_eq!(
             store.point_get(&rows[3].entity).await?,
@@ -430,7 +397,7 @@ mod tests {
         let rows = generate_rows(25);
         let mut sqlite = SqliteFacts::open(SqliteMode::Memory)?;
         sqlite.insert_per_row_transactions(&rows)?;
-        let mut dialog = DialogFacts::open(DialogMode::Memory).await?;
+        let dialog = DialogFacts::open(DialogMode::Memory).await?;
         dialog.insert_per_row_transactions(&rows).await?;
         assert_eq!(sqlite.attribute_scan()?, dialog.attribute_scan().await?);
         assert_eq!(sqlite.join()?, dialog.join().await?);

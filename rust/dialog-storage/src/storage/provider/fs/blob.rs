@@ -15,9 +15,9 @@ use base58::ToBase58;
 use blake3::Hasher;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
+use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _, BlobSizeExt as _};
 use dialog_effects::blob::{
-    BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Import, Read, Write,
+    BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Import, Read, Size, Write,
 };
 use futures_util::StreamExt;
 
@@ -145,6 +145,17 @@ impl Provider<Read> for FileSystem {
         };
         let reader = handle.reader_range(offset, length).await?;
         Ok(Box::new(FileBlobSource(reader)))
+    }
+}
+
+/// The blob file's length, from its metadata (natively) or its `File`
+/// (on the web); its bytes are not read.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Size> for FileSystem {
+    async fn execute(&self, effect: Capability<Size>) -> Result<Option<u64>, BlobError> {
+        let handle = self.blob()?.resolve(&blob_key(effect.digest()))?;
+        Ok(handle.size().await?)
     }
 }
 

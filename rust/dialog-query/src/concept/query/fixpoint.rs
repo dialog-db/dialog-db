@@ -1296,7 +1296,7 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use futures_util::TryStreamExt;
 
     /// The `ancestor` concept: `this` plus one entity-valued
@@ -1401,7 +1401,7 @@ mod tests {
     /// derives all three ancestor pairs.
     #[dialog_common::test]
     async fn it_derives_transitive_closure_over_a_chain() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1440,7 +1440,7 @@ mod tests {
     /// the two derivations of (d, a) deduplicated to one row.
     #[dialog_common::test]
     async fn it_deduplicates_diamond_derivations() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1489,7 +1489,7 @@ mod tests {
     /// — not just the direct-parent facts.
     #[dialog_common::test]
     async fn it_counts_ancestors_over_the_completed_fixpoint() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1596,7 +1596,7 @@ mod tests {
     /// folded rows, and the recursive rule propagates them.
     #[dialog_common::test]
     async fn it_folds_reducing_seed_rules_in_the_fixpoint() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1724,7 +1724,7 @@ mod tests {
     /// the bound entity's ancestors come back.
     #[dialog_common::test]
     async fn it_joins_caller_bindings_against_the_fixpoint() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1781,7 +1781,7 @@ mod tests {
     /// all fifteen ancestor pairs.
     #[dialog_common::test]
     async fn it_derives_all_pairs_over_a_deep_chain() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1830,7 +1830,7 @@ mod tests {
     /// to one row.
     #[dialog_common::test]
     async fn it_derives_the_multi_path_family_tree() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1909,7 +1909,7 @@ mod tests {
     /// boundary.
     #[dialog_common::test]
     async fn it_consumes_a_recursive_concept_from_a_plain_rule() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2091,7 +2091,7 @@ mod tests {
     /// rows.
     #[dialog_common::test]
     async fn it_converges_when_the_recursive_rule_adds_nothing() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2183,7 +2183,7 @@ mod tests {
     /// are none.
     #[dialog_common::test]
     async fn it_derives_nothing_for_a_tautology() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2259,7 +2259,7 @@ mod tests {
     /// and the ancestor closure has exactly five pairs.
     #[dialog_common::test]
     async fn it_derives_the_simpsons_program() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2465,7 +2465,7 @@ mod derived_edge_tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use futures_util::TryStreamExt;
 
     /// A derived edge concept: concluded by a rule over the raw
@@ -2549,7 +2549,7 @@ mod derived_edge_tests {
 
     #[dialog_common::test]
     async fn it_derives_transitive_closure_over_a_derived_edge_concept() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

@@ -63,8 +63,10 @@ pub trait SpaceProvider:
     + Provider<memory::Resolve>
     + Provider<memory::Publish>
     + Provider<memory::Retract>
+    + Provider<memory::List>
     + Provider<credential::Load<Credential>>
     + Provider<credential::Save<Credential>>
+    + Provider<credential::Retract<Credential>>
     + Provider<credential::Load<Secret>>
     + Provider<credential::Save<Secret>>
     + Provider<credential::Retract<Secret>>
@@ -82,8 +84,10 @@ impl<T> SpaceProvider for T where
         + Provider<memory::Resolve>
         + Provider<memory::Publish>
         + Provider<memory::Retract>
+        + Provider<memory::List>
         + Provider<credential::Load<Credential>>
         + Provider<credential::Save<Credential>>
+        + Provider<credential::Retract<Credential>>
         + Provider<credential::Load<Secret>>
         + Provider<credential::Save<Secret>>
         + Provider<credential::Retract<Secret>>
@@ -102,13 +106,14 @@ pub struct Space<A, M, C, D, B> {
     pub archive: A,
 
     /// Memory provider.
-    #[provide(memory::Resolve, memory::Publish, memory::Retract)]
+    #[provide(memory::Resolve, memory::Publish, memory::Retract, memory::List)]
     pub memory: M,
 
     /// Credential provider.
     #[provide(
         credential::Load<Credential>,
         credential::Save<Credential>,
+        credential::Retract<Credential>,
         credential::Load<Secret>,
         credential::Save<Secret>,
         credential::Retract<Secret>
@@ -126,7 +131,7 @@ pub struct Space<A, M, C, D, B> {
     /// an OPFS-backed `FileSystem` for streaming throughput. The generated
     /// impls are bound-conditional, so a provider without blob support still
     /// composes as long as nothing performs a blob effect on it.
-    #[provide(blob::Read, blob::Write, blob::Import)]
+    #[provide(blob::Read, blob::Size, blob::Write, blob::Import)]
     pub blob: B,
 }
 

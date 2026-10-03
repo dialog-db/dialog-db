@@ -1,3 +1,4 @@
+use crate::identity::Entity;
 use std::cmp::Ordering;
 use std::fmt::{self, Display};
 
@@ -124,5 +125,17 @@ impl PartialOrd for Version {
 impl Display for Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}@{}", self.edition, self.origin)
+    }
+}
+
+impl Version {
+    /// The content-derived entity naming the revision this version
+    /// identifies. Any replica that knows the version derives the same
+    /// entity, so metadata can be attached to (or queried from) a
+    /// revision without holding it.
+    pub fn entity(&self) -> Entity {
+        self.entity_did()
+            .parse()
+            .expect("a did:key URI formed from a 32-byte hash is always a valid entity")
     }
 }

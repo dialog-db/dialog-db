@@ -7,8 +7,8 @@ use std::{
 };
 
 use async_stream::try_stream;
-use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync, NULL_BLAKE3_HASH};
-use dialog_storage::{DialogStorageError, StorageBackend};
+use dialog_capability::Provider;
+use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
 use futures_core::Stream;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use nonempty::NonEmpty;
@@ -23,7 +23,7 @@ use rkyv::{
 use std::sync::Arc;
 
 use crate::{
-    Accessor, ArchivedNodeBody, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, NoveltyOp,
+    Accessor, DecodedKeys, DialogSearchTreeError, Entry, Key, Link, LoadBlock, NodeBody, NoveltyOp,
     PersistentNode, Value, into_owned,
 };
 
@@ -213,7 +213,7 @@ where
 {
     let mut winners: Vec<PendingWinner> = Vec::new();
     for (level, (node, descended)) in path.iter().enumerate() {
-        let ArchivedNodeBody::Index(index) = node.body() else {
+        let NodeBody::Index(index) = node.body() else {
             continue;
         };
         let Some(at) = *descended else { continue };
@@ -327,7 +327,7 @@ where
         + ConditionalSync,
 {
     for layer in path {
-        let ArchivedNodeBody::Index(index) = layer.host.body() else {
+        let NodeBody::Index(index) = layer.host.body() else {
             continue;
         };
         let Some(buffer) = index.buffer_for(layer.index) else {
@@ -355,7 +355,10 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         > + ConditionalSync,
 {
-    root: Blake3Hash,
+    /// The root node to walk from, or `None` for a tree with no stored
+    /// root (an empty tree that was never persisted): every walk over it
+    /// yields nothing without touching storage.
+    root: Option<Blake3Hash>,
 
     key: PhantomData<Key>,
     value: PhantomData<Value>,
@@ -370,8 +373,9 @@ where
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
 {
-    /// Creates a new [`TreeWalker`] with the given root hash and node fetcher.
-    pub fn new(root: Blake3Hash) -> Self {
+    /// Creates a new [`TreeWalker`] over the given stored root — `None`
+    /// walks the empty tree.
+    pub fn new(root: Option<Blake3Hash>) -> Self {
         Self {
             root,
 
@@ -381,21 +385,20 @@ where
     }
 
     /// Returns a stream of entries within the specified key range.
-    pub fn stream<R, Backend>(
+    pub fn stream<R, Env>(
         self,
         range: R,
-        accessor: Accessor<Backend>,
+        accessor: Accessor<'_, Key, Value, Env>,
     ) -> impl Stream<Item = Result<Entry<Key, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
         // A thin adapter, not another generator: wrapping the walk in a
         // second `try_stream!` layer measurably bloats every future that
         // embeds a walk (clippy's `large_futures` catches it downstream).
         futures_util::TryStreamExt::map_ok(
-            self.stream_scan::<R, Backend, TypedKey<Key>>(range, accessor),
+            self.stream_scan::<R, Env, TypedKey<Key>>(range, accessor),
             |entry| Entry {
                 key: entry.key.0,
                 value: entry.value,
@@ -408,31 +411,29 @@ where
     /// borrow the memoized decoded-keys arena with NO per-entry copy, and
     /// only novelty ops and cold streaming decodes copy. For consumers that
     /// work on the raw key bytes.
-    pub fn stream_handles<R, Backend>(
+    pub fn stream_handles<R, Env>(
         self,
         range: R,
-        accessor: Accessor<Backend>,
+        accessor: Accessor<'_, Key, Value, Env>,
     ) -> impl Stream<Item = Result<Entry<KeyHandle, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
-        self.stream_scan::<R, Backend, KeyHandle>(range, accessor)
+        self.stream_scan::<R, Env, KeyHandle>(range, accessor)
     }
 
     /// The walk shared by [`stream`](Self::stream) and
     /// [`stream_handles`](Self::stream_handles); `Out` decides how yielded
     /// keys materialize (see [`ScanKey`]).
-    fn stream_scan<R, Backend, Out>(
+    fn stream_scan<R, Env, Out>(
         self,
         range: R,
-        accessor: Accessor<Backend>,
+        accessor: Accessor<'_, Key, Value, Env>,
     ) -> impl Stream<Item = Result<Entry<Out, Value>, DialogSearchTreeError>> + ConditionalSend
     where
         R: RangeBounds<Key> + ConditionalSend,
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
         Out: ScanKey + 'static,
     {
         try_stream! {
@@ -459,9 +460,9 @@ where
 
             'walk: while let Some((node, maybe_index)) = search_path.pop() {
                 let body = node.body();
-                let is_segment = matches!(body, ArchivedNodeBody::Segment(_));
+                let is_segment = matches!(body, NodeBody::Segment(_));
                 if !is_segment {
-                    let ArchivedNodeBody::Index(index) = body else {
+                    let NodeBody::Index(index) = body else {
                         unreachable!("checked above")
                     };
                     let child_index = if let Some(index) = maybe_index {
@@ -606,7 +607,7 @@ where
                             let segment = match &segment {
                                 Some(segment) => segment,
                                 None => {
-                                    let ArchivedNodeBody::Segment(resolved) = node.body() else {
+                                    let NodeBody::Segment(resolved) = node.body() else {
                                         unreachable!("segment checked above")
                                     };
                                     segment.insert(resolved)
@@ -629,7 +630,7 @@ where
                         }
                     }
                 } else {
-                    let ArchivedNodeBody::Segment(segment) = node.body() else {
+                    let NodeBody::Segment(segment) = node.body() else {
                         unreachable!("segment checked above")
                     };
                     let mut keys = segment.keys::<Key>()?;
@@ -698,25 +699,24 @@ where
     }
 
     /// Searches for the leaf segment that would contain the given key.
-    pub async fn search<Backend>(
+    pub async fn search<Env>(
         &self,
         key: &Key,
-        accessor: Accessor<Backend>,
+        accessor: Accessor<'_, Key, Value, Env>,
         options: SearchOptions,
     ) -> Result<Option<SearchResult<Key, Value>>, DialogSearchTreeError>
     where
-        Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + ConditionalSync,
+        Env: Provider<LoadBlock> + ConditionalSync,
     {
-        if &self.root == NULL_BLAKE3_HASH {
+        let Some(root) = &self.root else {
             return Ok(None);
-        }
+        };
 
         // Depth scales logarithmically with number of entries, so 32 is truly
         // overkill here
         const MAXIMUM_TREE_DEPTH: usize = 32;
 
-        let mut next_node = self.root.clone();
+        let mut next_node = root.clone();
         let mut path = vec![];
 
         loop {
@@ -729,7 +729,10 @@ where
             let node = accessor.get_node(&next_node).await?;
 
             match node.body() {
-                ArchivedNodeBody::Index(index) => {
+                // The empty tree's root: an index with no children, nothing
+                // to descend into.
+                NodeBody::Index(index) if index.is_empty() => return Ok(None),
+                NodeBody::Index(index) => {
                     // Descend into the last child whose separator is at or
                     // below the key (a probe equal to a separator belongs to
                     // the seam's right side), clamping to the leftmost child
@@ -743,7 +746,7 @@ where
                         index: child_index,
                     });
                 }
-                ArchivedNodeBody::Segment(_) => {
+                NodeBody::Segment(_) => {
                     let right_neighbor = if options.prefetch_right_neighbor {
                         prefetch_right_neighbor(key, &node, &path, accessor).await?
                     } else {
@@ -826,11 +829,11 @@ async fn until_warmed<Warm>(
 /// Returns `None` when either the key is not the leaf's last entry or the leaf
 /// has no right-adjacent neighbor (the leaf is the rightmost segment in the
 /// tree).
-async fn prefetch_right_neighbor<Key, Value, Backend>(
+async fn prefetch_right_neighbor<Key, Value, Env>(
     key: &Key,
     leaf: &PersistentNode<Key, Value>,
     path: &[TreeLayer<Key, Value>],
-    accessor: Accessor<Backend>,
+    accessor: Accessor<'_, Key, Value, Env>,
 ) -> Result<Option<RightNeighbor<Key, Value>>, DialogSearchTreeError>
 where
     Key: self::Key + ConditionalSync + 'static,
@@ -839,8 +842,7 @@ where
             Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
         > + Deserialize<Value, Strategy<Pool, rkyv::rancor::Error>>
         + ConditionalSync,
-    Backend: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     // Only prefetch when the caller's key matches the leaf's last entry;
     // boundary-delete overflow can't happen otherwise.
@@ -867,7 +869,7 @@ where
     let right_leaf = loop {
         let node: PersistentNode<Key, Value> = accessor.get_node(&next_hash).await?;
         match node.body() {
-            ArchivedNodeBody::Index(index) => {
+            NodeBody::Index(index) => {
                 if index.is_empty() {
                     return Err(DialogSearchTreeError::Node(
                         "Empty index node during right-neighbor descent".into(),
@@ -882,7 +884,7 @@ where
                 });
                 next_hash = child_hash;
             }
-            ArchivedNodeBody::Segment(_) => break node,
+            NodeBody::Segment(_) => break node,
         }
     };
 
@@ -1048,24 +1050,22 @@ impl<Key, Value> SearchResult<Key, Value> {
 mod walker_novelty_tests {
     #![allow(unexpected_cfgs)]
 
+    use crate::MemoryBlocks;
     use anyhow::Result;
     use dialog_common::Blake3Hash;
-    use dialog_storage::MemoryStorageBackend;
     use futures_util::StreamExt as _;
 
-    use crate::{Buffer, ContentAddressedStorage, Delta, HitchhikerTree, PersistentTree};
+    use crate::{Buffer, Delta, HitchhikerTree, PersistentTree};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    type Store = ContentAddressedStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>;
+    type Store = MemoryBlocks;
     type Tree = PersistentTree<[u8; 4], Vec<u8>>;
 
     async fn settle(delta: &mut Delta<Blake3Hash, Buffer>, storage: &mut Store) -> Result<()> {
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
         Ok(())
     }
@@ -1076,7 +1076,7 @@ mod walker_novelty_tests {
     /// commit path produces.
     #[dialog_common::test]
     async fn it_accumulates_across_successive_buffered_writes() -> Result<()> {
-        let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+        let mut storage: Store = MemoryBlocks::new();
 
         let mut tree = Tree::empty();
         let mut expected: Vec<([u8; 4], Vec<u8>)> = Vec::new();
@@ -1144,7 +1144,7 @@ mod walker_novelty_tests {
                 (rng >> 32) as u32
             };
 
-            let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+            let mut storage: Store = MemoryBlocks::new();
             let mut tree = Tree::empty();
             let mut expected: std::collections::BTreeMap<[u8; 4], Vec<u8>> = Default::default();
 
@@ -1201,7 +1201,7 @@ mod walker_novelty_tests {
                 (rng >> 32) as u32
             };
 
-            let mut storage: Store = ContentAddressedStorage::new(MemoryStorageBackend::default());
+            let mut storage: Store = MemoryBlocks::new();
 
             // Random base, random keys (big-endian so byte order is key order).
             let base_keys: Vec<u32> = (0..300).map(|_| next() % 4000).collect();
@@ -1295,16 +1295,13 @@ mod prefetch_tests {
     use dialog_common::Blake3Hash;
     use futures_util::TryStreamExt as _;
 
-    use crate::{
-        ArchivedNodeBody, Buffer, ContentAddressedStorage, Delta, PersistentNode, PersistentTree,
-        helpers::ObservingBackend,
-    };
+    use crate::{Delta, NodeBody, PersistentNode, PersistentTree, helpers::ObservingBlocks};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     type Tree = PersistentTree<[u8; 4], Vec<u8>>;
-    type Storage = ContentAddressedStorage<ObservingBackend>;
+    type Storage = ObservingBlocks;
 
     /// Enough entries that the leaf-seam coin (one seam expected every
     /// `2^fanout_n = 256` keys) reliably cuts the run into many sibling
@@ -1331,9 +1328,7 @@ mod prefetch_tests {
 
         let tree = edit.persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await?;
+            storage.store(buffer);
         }
 
         Ok(Tree::from_hash(tree.root().clone()))
@@ -1344,11 +1339,10 @@ mod prefetch_tests {
         hash: &Blake3Hash,
     ) -> Result<PersistentNode<[u8; 4], Vec<u8>>> {
         let bytes = storage
-            .retrieve(hash)
-            .await?
+            .get(hash)
             .ok_or_else(|| anyhow::anyhow!("Node not stored"))?;
 
-        Ok(PersistentNode::try_from(Buffer::from(bytes))?)
+        Ok(PersistentNode::try_from(bytes)?)
     }
 
     /// A reader that needs a node a read-ahead has claimed must not depend
@@ -1363,13 +1357,13 @@ mod prefetch_tests {
     async fn it_serves_a_claimed_node_to_a_reader_the_read_ahead_cannot_reach() -> Result<()> {
         use std::task::{Context, Poll};
 
-        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let mut storage = ObservingBlocks::new();
         let tree = built_tree(&mut storage).await?;
-        let accessor = crate::Accessor::new(tree.node_cache(), storage.clone());
+        let accessor = crate::Accessor::new(tree.node_cache(), &storage);
 
         // The root's second child, and a key from its leftmost leaf.
         let root = load(&storage, tree.root()).await?;
-        let ArchivedNodeBody::Index(index) = root.body() else {
+        let NodeBody::Index(index) = root.body() else {
             anyhow::bail!("the built tree has a single leaf; nothing to warm")
         };
         let sibling = index.hash_at(1)?.clone();
@@ -1377,8 +1371,8 @@ mod prefetch_tests {
         let key: [u8; 4] = loop {
             let node = load(&storage, &hash).await?;
             match node.body() {
-                ArchivedNodeBody::Index(index) => hash = index.hash_at(0)?.clone(),
-                ArchivedNodeBody::Segment(segment) => {
+                NodeBody::Index(index) => hash = index.hash_at(0)?.clone(),
+                NodeBody::Segment(segment) => {
                     break segment.first_key::<[u8; 4]>()?.as_slice().try_into()?;
                 }
             }
@@ -1400,9 +1394,9 @@ mod prefetch_tests {
 
     #[dialog_common::test]
     async fn it_warms_sibling_nodes_during_a_range_scan() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let mut storage = ObservingBlocks::new();
         let tree = built_tree(&mut storage).await?;
-        let backend = storage.backend().clone();
+        let backend = storage.clone();
         backend.reset();
 
         let entries: Vec<_> = tree.stream(&storage).try_collect().await?;
@@ -1439,9 +1433,9 @@ mod prefetch_tests {
     /// re-fetched by the next probe.
     #[dialog_common::test]
     async fn it_does_not_warm_siblings_past_the_range_bound() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let mut storage = ObservingBlocks::new();
         let tree = built_tree(&mut storage).await?;
-        let backend = storage.backend().clone();
+        let backend = storage.clone();
 
         backend.reset();
         let found = tree.get(&100u32.to_be_bytes(), &storage).await?;
@@ -1469,9 +1463,9 @@ mod prefetch_tests {
 
     #[dialog_common::test]
     async fn it_does_not_prefetch_on_point_lookups() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let mut storage = ObservingBlocks::new();
         let tree = built_tree(&mut storage).await?;
-        let backend = storage.backend().clone();
+        let backend = storage.clone();
         backend.reset();
 
         let found = tree.get(&257u32.to_be_bytes(), &storage).await?;
@@ -1489,16 +1483,16 @@ mod prefetch_tests {
         for step in path.windows(2) {
             let node = load(&storage, &step[0]).await?;
             match node.body() {
-                ArchivedNodeBody::Index(index) => assert!(
+                NodeBody::Index(index) => assert!(
                     index.contains_hash(&step[1]),
                     "a read that is not a child of the read before it"
                 ),
-                ArchivedNodeBody::Segment(_) => panic!("a segment cannot hold a further read"),
+                NodeBody::Segment(_) => panic!("a segment cannot hold a further read"),
             }
         }
 
         let leaf = load(&storage, path.last().expect("a read")).await?;
-        assert!(matches!(leaf.body(), ArchivedNodeBody::Segment(_)));
+        assert!(matches!(leaf.body(), NodeBody::Segment(_)));
 
         Ok(())
     }
@@ -1508,8 +1502,8 @@ mod prefetch_tests {
         loop {
             let node = load(storage, &hash).await?;
             match node.body() {
-                ArchivedNodeBody::Index(index) => hash = index.hash_at(0)?.clone(),
-                ArchivedNodeBody::Segment(segment) => {
+                NodeBody::Index(index) => hash = index.hash_at(0)?.clone(),
+                NodeBody::Segment(segment) => {
                     return Ok(segment.first_key::<[u8; 4]>()?.as_slice().try_into()?);
                 }
             }
@@ -1527,11 +1521,11 @@ mod prefetch_tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
     async fn it_serves_one_scans_read_ahead_to_another_scan() -> Result<()> {
-        let mut storage = ContentAddressedStorage::new(ObservingBackend::new());
+        let mut storage = ObservingBlocks::new();
         let tree = built_tree(&mut storage).await?;
 
         let root = load(&storage, tree.root()).await?;
-        let ArchivedNodeBody::Index(index) = root.body() else {
+        let NodeBody::Index(index) = root.body() else {
             anyhow::bail!("the built tree has a single leaf; nothing to read ahead")
         };
         if index.len() < 3 {
@@ -1550,7 +1544,7 @@ mod prefetch_tests {
             }
         }
         assert!(
-            storage.backend().reads_in_flight() > 0,
+            storage.reads_in_flight() > 0,
             "scan A holds read-aheads in flight while parked"
         );
 

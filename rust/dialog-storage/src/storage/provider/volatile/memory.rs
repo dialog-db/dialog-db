@@ -7,8 +7,8 @@ use super::{MemoryKey, Volatile};
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
-use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
+use dialog_effects::memory::prelude::{ListExt, PublishExt, ResolveExt, RetractExt};
+use dialog_effects::memory::{Edition, List, MemoryError, Publish, Resolve, Retract, Version};
 
 /// Format edition bytes for error messages.
 fn format_edition(edition: Option<&[u8]>) -> Option<Version> {
@@ -139,6 +139,33 @@ impl Provider<Retract> for Volatile {
         session.memory.remove(&key);
 
         Ok(())
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<List> for Volatile {
+    async fn execute(&self, effect: Capability<List>) -> Result<Vec<String>, MemoryError> {
+        let subject = effect.subject().into();
+        let prefix = format!("{}/", effect.space());
+
+        let sessions = self.sessions.read();
+        let mut paths: Vec<String> = sessions
+            .get(&subject)
+            .map(|session| {
+                session
+                    .memory
+                    .keys()
+                    .filter_map(|(space, cell)| {
+                        format!("{space}/{cell}")
+                            .strip_prefix(&prefix)
+                            .map(str::to_string)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        paths.sort();
+        Ok(paths)
     }
 }
 
@@ -628,6 +655,46 @@ mod tests {
         let publication = resolved.expect("should have content");
         assert_eq!(publication.content, content);
 
+        Ok(())
+    }
+
+    /// Listing a space names every cell under it, nested spaces
+    /// included, by path relative to it -- and nothing from a space that
+    /// only shares its name as a prefix.
+    #[dialog_common::test]
+    async fn it_lists_the_cells_under_a_space() -> anyhow::Result<()> {
+        let provider = Volatile::new();
+        let subject = unique_subject("memory-list");
+
+        for (space, cell) in [
+            ("remote/origin", "address"),
+            ("remote/origin", "branch/main/revision"),
+            ("remote", "top"),
+            ("remotes", "elsewhere"),
+            ("branch/main", "revision"),
+        ] {
+            subject
+                .clone()
+                .writer()
+                .memory()
+                .space(space)
+                .cell(cell)
+                .publish(b"x".to_vec(), None)
+                .perform(&provider)
+                .await?;
+        }
+
+        let listed = subject
+            .reader()
+            .memory()
+            .space("remote")
+            .list()
+            .perform(&provider)
+            .await?;
+        assert_eq!(
+            listed,
+            vec!["origin/address", "origin/branch/main/revision", "top"]
+        );
         Ok(())
     }
 }

@@ -8,9 +8,6 @@ use std::str::FromStr as _;
 
 use crate::{Attribute, Entity, Name, NameShape, Symbol, Value};
 
-#[cfg(doc)]
-use crate::ArtifactStore;
-
 /// A marker type that represents a totally open-ended [`ArtifactSelector`]
 #[derive(Clone)]
 pub struct Unconstrained;
@@ -36,7 +33,7 @@ pub struct ValueBound {
     pub inclusive: bool,
 }
 
-/// The basic query system for selecting [`Artifact`]s from a [`ArtifactStore`]
+/// The basic query system for selecting [`Artifact`]s from an artifact index.
 /// You can assign its fields directly, but for convenience and ergonomics it is
 /// also possible to construct it incrementally with the `the`, `of` and `is`
 /// methods.
@@ -45,7 +42,7 @@ pub struct ValueBound {
 /// the same field value.
 ///
 /// Note that when all fields of the [`ArtifactSelector`] are `None`, it implies
-/// that all [`Artifact`]s in the [`ArtifactStore`] should be selected (this can
+/// that all [`Artifact`]s in the index should be selected (this can
 /// be very slow and is often not what you want). To avoid this, always be sure
 /// to specify at least one field of the [`ArtifactSelector`] before submitting
 /// a query!

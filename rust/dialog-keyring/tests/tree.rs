@@ -8,14 +8,14 @@
 //!
 //! What is deliberately *not* done here is threading the sealed address back
 //! into each `Link`, so that a parent points at its children's ciphertext
-//! rather than their plaintext. That is the invasive half of the change and it
-//! belongs in the search tree itself. These tests establish that the layer
-//! underneath it behaves, which is what has to be true first.
+//! rather than their plaintext. These tests establish that the layer
+//! underneath behaves, which is what has to be true first.
+
+use std::collections::HashMap;
 
 use dialog_common::Blake3Hash;
 use dialog_keyring::{KeyringExt, LocalKeyring, Sealed};
-use dialog_search_tree::{ContentAddressedStorage, Delta, PersistentTree};
-use dialog_storage::{MemoryStorageBackend, StorageBackend};
+use dialog_search_tree::{Delta, MemoryBlocks, PersistentTree};
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -30,7 +30,7 @@ const ENTRIES: u32 = 512;
 /// Nothing here knows about encryption: this is the tree behaving exactly as
 /// it does today, and it is the input the sealing layer has to preserve.
 async fn node_buffers() -> Vec<(Blake3Hash, Vec<u8>)> {
-    let storage = ContentAddressedStorage::new(MemoryStorageBackend::default());
+    let storage = MemoryBlocks::new();
     let mut delta = Delta::zero();
     let mut transient = PersistentTree::<[u8; 4], Vec<u8>>::empty().edit();
 
@@ -63,21 +63,18 @@ async fn node_buffers_survive_a_round_trip_through_storage() {
     // Seal every node and store it under the address of its ciphertext. The
     // store never sees a plaintext hash: addressing by one would let anyone
     // who could guess a node's contents confirm the guess against the store.
-    let mut store = MemoryStorageBackend::default();
+    let mut store = HashMap::new();
     let mut addresses = Vec::new();
     for (_, plain) in &buffers {
         let sealed = keyring.seal(plain).await.expect("seal");
         let address = sealed.address();
-        store
-            .set(address.clone(), sealed.to_bytes())
-            .await
-            .expect("store");
+        store.insert(address.clone(), sealed.to_bytes());
         addresses.push(address);
     }
 
     for (address, (_, plain)) in addresses.iter().zip(&buffers) {
-        let bytes = store.get(address).await.expect("read").expect("present");
-        let sealed = Sealed::from_bytes(&bytes).expect("decode");
+        let bytes = store.get(address).expect("present");
+        let sealed = Sealed::from_bytes(bytes).expect("decode");
         assert_eq!(&keyring.open(&sealed).await.expect("open"), plain);
     }
 }

@@ -46,10 +46,49 @@ impl From<SignerCredential> for Did {
     }
 }
 
+/// The domain-separation label derived credentials come from.
+///
+/// Versioned: `v2` is the key-agreement derivation that replaced signing
+/// a fixed message. It is the label the operator derivation used, so a
+/// credential derived here is the operator the same context derived
+/// before. Bumping it re-derives every derived key, which forks each
+/// peer's replica lineage, so it changes only when the derivation does.
+const DERIVATION_CONTEXT: crate::secret::Context =
+    crate::secret::Context::new("dialog-db/operator/v2");
+
 impl SignerCredential {
     /// Get a reference to the underlying signer.
     pub fn signer(&self) -> &Signer {
         &self.0
+    }
+
+    /// A credential derived from this one and `context`, deterministic
+    /// per `(credential, context)`.
+    ///
+    /// One derivation for every platform, and the same one: the signer
+    /// runs a key agreement against its own agreement key and imports the
+    /// result, so the derived key arrives as a signer and the derived
+    /// material is never a value this code holds. It is NOT a signature:
+    /// ed25519 signatures need not be deterministic (WebKit hedges the
+    /// nonce), and a derivation built on one produced a different key on
+    /// every page load in Safari. Key agreement has no nonce to hedge.
+    ///
+    /// Requires an ed25519 credential: the agreement it derives through
+    /// and the `did:key` identity of the result are ed25519-specific, so
+    /// another algorithm is refused rather than deriving a wrong key.
+    pub async fn derive(
+        &self,
+        context: impl AsRef<[u8]>,
+    ) -> Result<Self, crate::secret::SecretError> {
+        let signer = self
+            .0
+            .as_ed25519()
+            .ok_or(crate::secret::SecretError::AgreementKeyUnavailable)?;
+        let derived = signer
+            .secret(DERIVATION_CONTEXT)
+            .derive(context.as_ref())
+            .await?;
+        Ok(Self::from(derived))
     }
 
     /// Consume and return the underlying signer.

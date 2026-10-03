@@ -10,26 +10,30 @@
 //! differential and names exactly the spilled value blocks newly referenced
 //! between two tree versions, so push can ship them alongside the novel nodes.
 
+use crate::ArchiveReader;
 use std::collections::HashSet;
+use std::str::from_utf8;
 
 use async_stream::try_stream;
-use dialog_common::{Blake3Hash as NodeHash, ConditionalSend, ConditionalSync};
-use dialog_search_tree::{Change, ContentAddressedStorage, TreeDifference};
-use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
+use dialog_capability::Provider;
+use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_search_tree::{Change, LoadBlock, TreeDifference};
+use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
+use crate::key::varkey::{ValueRef, parse_key_ref};
 use crate::{
-    BLOB_KEY_TAG, BlobKey, BlobRecord, COVERAGE_KEY_TAG, Datum, DialogArtifactsError, Key, State,
-    tree::{ArtifactTree, TreeStorageBridge},
+    ASSET_SIZE, BLOB_KEY_TAG, BlobKey, BlobRecord, COVERAGE_KEY_TAG, Datum, DialogArtifactsError,
+    ENTITY_KEY_TAG, Entity, Key, State, Value, ValueDataType, decode_value, tree::ArtifactTree,
 };
 
 /// One content-addressed block a push must ship to the remote before
 /// publishing: a blob-index change or a spilled value block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShipmentRef {
-    /// A blob newly referenced in the target tree; `size` is its index
-    /// record's byte count, carried here so shipping needs no re-read of
-    /// the record — the entry that named the blob already held it.
+    /// A blob newly referenced in the target tree, by a blob-index entry or
+    /// by an asset's `dialog.asset/size` fact; `size` is the byte count that
+    /// entry carries, so shipping needs no re-read of it.
     BlobAdded {
         /// The blob's content hash.
         hash: Blake3Hash,
@@ -81,6 +85,17 @@ pub fn shipment_ref(
         });
     }
 
+    // An asset's fact names bytes the blob store holds, exactly as a
+    // blob-index entry does. Only its entity-ordered entry is classified, so
+    // the three orderings of one fact surface the asset once.
+    if tag == ENTITY_KEY_TAG
+        && !removed
+        && matches!(value, State::Added(_))
+        && let Some(asset) = asset_ref(key)
+    {
+        return Ok(Some(asset));
+    }
+
     // Every ordering that embeds a value in its key can spill it, and each
     // spilling key names the same content-addressed block. Duplicates are
     // dropped by the `seen` set in `shipment_refs` rather than by counting
@@ -113,26 +128,49 @@ pub fn shipment_ref(
     Ok(Some(ShipmentRef::SpilledValue(reference)))
 }
 
+/// The asset an entity-ordered key records, when it is an asset's
+/// `dialog.asset/size` fact on an `asset:` entity with an integer size.
+/// Anything else, a malformed asset fact included, names no asset.
+fn asset_ref(key: &Key) -> Option<ShipmentRef> {
+    let parts = parse_key_ref(key.as_ref())?;
+    if parts.attribute.as_ref() != ASSET_SIZE.as_bytes()
+        || parts.value_type != ValueDataType::UnsignedInt
+    {
+        return None;
+    }
+    let ValueRef::Inline(payload) = parts.value else {
+        return None;
+    };
+    let (Value::UnsignedInt(size), _) = decode_value(ValueDataType::UnsignedInt, payload)? else {
+        return None;
+    };
+    let entity: Entity = from_utf8(&parts.entity).ok()?.parse().ok()?;
+    Some(ShipmentRef::BlobAdded {
+        hash: entity.blob_hash()?,
+        size: u64::try_from(size).ok()?,
+    })
+}
+
 /// Stream everything a push must ship from ONE walk of an already-computed
-/// tree differential: blob-index changes (`BLOB` tag) and newly-referenced
-/// spilled value blocks (any addition whose key carries a reference,
-/// deduplicated). Push runs the node-level differential anyway
+/// tree differential: blob-index changes (`BLOB` tag), assets' facts, and
+/// newly-referenced spilled value blocks (any addition whose key carries a
+/// reference, deduplicated). Push runs the node-level differential anyway
 /// to upload novel nodes; draining this from the same [`TreeDifference`]
 /// means the changed paths are read once instead of once per concern.
 ///
 /// Classification of each entry is [`shipment_ref`]; this adds the walk
 /// and the deduplication.
-pub fn shipment_refs<'a, Backend>(
-    difference: &'a TreeDifference<'a, Key, State<Datum>, Backend>,
+pub fn shipment_refs<'a, Env>(
+    difference: &'a TreeDifference<'a, Key, State<Datum>, Env>,
 ) -> impl Stream<Item = Result<ShipmentRef, DialogArtifactsError>> + 'a + ConditionalSend
 where
-    Backend: StorageBackend<Key = NodeHash, Value = Vec<u8>, Error = DialogStorageError>
-        + ConditionalSync,
+    Env: Provider<LoadBlock> + ConditionalSync,
 {
     try_stream! {
         let changes = difference.changes();
         tokio::pin!(changes);
         let mut seen: HashSet<Blake3Hash> = HashSet::new();
+        let mut blobs: HashSet<Blake3Hash> = HashSet::new();
         for await change in changes {
             let (entry, removed) = match change? {
                 Change::Add(entry) => (entry, false),
@@ -141,10 +179,14 @@ where
             let Some(reference) = shipment_ref(&entry.key, &entry.value, removed)? else {
                 continue;
             };
-            // A block shared by many facts surfaces once.
-            if let ShipmentRef::SpilledValue(spilled) = &reference
-                && !seen.insert(*spilled)
-            {
+            // A block shared by many facts surfaces once, and so does a blob
+            // that both a blob-index entry and an asset's fact name.
+            let first = match &reference {
+                ShipmentRef::SpilledValue(spilled) => seen.insert(*spilled),
+                ShipmentRef::BlobAdded { hash, .. } => blobs.insert(*hash),
+                ShipmentRef::BlobRemoved(_) => true,
+            };
+            if !first {
                 continue;
             }
             yield reference;
@@ -165,12 +207,9 @@ pub fn spilled_refs<'s, S>(
     store: S,
 ) -> impl Stream<Item = Result<Blake3Hash, DialogArtifactsError>> + 's + ConditionalSend
 where
-    S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-        + Clone
-        + ConditionalSync
-        + 's,
+    S: ArchiveReader + Clone + 's,
 {
-    let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+    let storage = store;
     try_stream! {
         let difference = TreeDifference::compute(&base, &current, &storage, &storage).await?;
         let refs = shipment_refs(&difference);
@@ -189,23 +228,11 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::ArchiveDelta;
     use crate::tree::ArtifactTreeExt;
     use crate::{Artifact, Instruction, Value};
-    use dialog_search_tree::{Buffer, Delta};
-    use dialog_storage::MemoryStorageBackend;
+    use dialog_search_tree::MemoryBlocks;
     use futures_util::{TryStreamExt, stream};
-
-    async fn flush(
-        store: &mut MemoryStorageBackend<Blake3Hash, Vec<u8>>,
-        delta: &mut Delta<dialog_common::Blake3Hash, Buffer>,
-    ) -> Result<(), DialogArtifactsError> {
-        for (_, buffer) in delta.flush() {
-            store
-                .set(*buffer.blake3_hash().as_bytes(), buffer.as_ref().to_vec())
-                .await?;
-        }
-        Ok(())
-    }
 
     #[dialog_common::test]
     async fn it_surfaces_each_spilled_value_once() -> Result<(), DialogArtifactsError> {
@@ -213,8 +240,8 @@ mod tests {
         let value = Value::String("z".repeat(inline_n + 1));
         let reference = value.to_reference();
 
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
 
         // Base: empty.
         let base = ArtifactTree::empty();
@@ -223,7 +250,7 @@ mod tests {
         let mut current = base.clone();
         current
             .apply(
-                &mut store,
+                &store,
                 &mut delta,
                 stream::iter(vec![Instruction::Assert(Artifact {
                     the: "doc/body".parse().unwrap(),
@@ -233,7 +260,7 @@ mod tests {
                 })]),
             )
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         let refs: Vec<_> = spilled_refs(base, current, store).try_collect().await?;
         assert_eq!(
@@ -260,29 +287,29 @@ mod tests {
             cause: None,
         };
 
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
 
         // Base: the spilled fact is asserted.
         let mut base = ArtifactTree::empty();
         base.apply(
-            &mut store,
+            &store,
             &mut delta,
             stream::iter(vec![Instruction::Assert(artifact.clone())]),
         )
         .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         // Current: the fact is retracted (tombstones at the spilled keys).
         let mut current = base.clone();
         current
             .apply(
-                &mut store,
+                &store,
                 &mut delta,
                 stream::iter(vec![Instruction::Retract(artifact)]),
             )
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         let refs: Vec<_> = spilled_refs(base, current, store).try_collect().await?;
         assert!(
@@ -316,8 +343,8 @@ mod tests {
         };
         let reference = artifact.is.to_reference();
 
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
 
         // Base: what the remote already has — nothing.
         let base = ArtifactTree::empty();
@@ -327,22 +354,22 @@ mod tests {
         let mut current = base.clone();
         current
             .apply_versioned(
-                &mut store,
+                &store,
                 &mut delta,
                 Some(Version::new(Origin::from([1u8; 32]), Edition::new(0))),
                 stream::iter(vec![Instruction::Assert(artifact.clone())]),
             )
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
         current
             .apply_versioned(
-                &mut store,
+                &store,
                 &mut delta,
                 Some(Version::new(Origin::from([1u8; 32]), Edition::new(1))),
                 stream::iter(vec![Instruction::Retract(artifact)]),
             )
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         let refs: Vec<_> = spilled_refs(base, current, store).try_collect().await?;
         assert!(
@@ -374,30 +401,30 @@ mod tests {
             cause: None,
         };
 
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
 
         let base = ArtifactTree::empty();
         let mut current = base.clone();
         current
             .apply_versioned(
-                &mut store,
+                &store,
                 &mut delta,
                 Some(Version::new(Origin::from([2u8; 32]), Edition::new(0))),
                 stream::iter(vec![Instruction::Assert(artifact.clone())]),
             )
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
         // A retraction mints the coverage entry that mirrors it.
         current
             .apply_versioned(
-                &mut store,
+                &store,
                 &mut delta,
                 Some(Version::new(Origin::from([2u8; 32]), Edition::new(1))),
                 stream::iter(vec![Instruction::Retract(artifact)]),
             )
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         let refs: Vec<_> = spilled_refs(base, current, store).try_collect().await?;
         assert!(
@@ -409,14 +436,14 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_ignores_inline_values() -> Result<(), DialogArtifactsError> {
-        let mut store = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut delta = Delta::zero();
+        let store = MemoryBlocks::new();
+        let mut delta = ArchiveDelta::zero();
 
         let base = ArtifactTree::empty();
         let mut current = base.clone();
         current
             .apply(
-                &mut store,
+                &store,
                 &mut delta,
                 stream::iter(vec![Instruction::Assert(Artifact {
                     the: "user/name".parse().unwrap(),
@@ -426,7 +453,7 @@ mod tests {
                 })]),
             )
             .await?;
-        flush(&mut store, &mut delta).await?;
+        delta.flush_into(&store);
 
         let refs: Vec<_> = spilled_refs(base, current, store).try_collect().await?;
         assert!(refs.is_empty(), "inline values surface no spilled refs");

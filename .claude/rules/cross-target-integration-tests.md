@@ -164,7 +164,7 @@ cargo clippy -p <crate> --all-targets --all-features -- -D warnings
   instead; the test *body* should import only the address type and the client.
 
 - The test body itself takes the address as a parameter and drives the client;
-  it must be wasm-clean. Mirror `dialog-remote-s3` / `dialog-operator` tests,
+  it must be wasm-clean. Mirror `dialog-remote-s3` / `dialog-peer` tests,
   whose bodies touch only the `*Address` type.
 
 ## Reference implementations

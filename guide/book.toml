@@ -1,0 +1,17 @@
+[book]
+title = "How Dialog Works"
+authors = ["Dialog Contributors"]
+description = "A guided tour of Dialog, a database for local-first software: facts, keys, the search tree, nodes, history, identity, sync and queries."
+language = "en"
+src = "src"
+
+[output.html]
+site-url = "/guide/"
+git-repository-url = "https://github.com/dialog-db/dialog-db"
+edit-url-template = "https://github.com/dialog-db/dialog-db/edit/main/guide/{path}"
+additional-css = ["theme/guide.css"]
+default-theme = "light"
+preferred-dark-theme = "navy"
+
+[output.html.playground]
+runnable = false

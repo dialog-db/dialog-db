@@ -1,0 +1,71 @@
+name: 'Site'
+
+# Builds the website on every pull request that touches it, so a broken
+# guide build fails before merge, and publishes it to GitHub Pages when it
+# changes on main. The landing page (site/) is served at the root and the
+# guide (guide/, an mdBook) under /guide/.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'site/**'
+      - 'guide/**'
+      - '.github/workflows/site.yml'
+  pull_request:
+    paths:
+      - 'site/**'
+      - 'guide/**'
+      - '.github/workflows/site.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 'Build Site'
+    runs-on: 'ubuntu-latest'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 'Set up mdBook'
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: '0.5.4'
+
+      - name: 'Build the guide'
+        run: mdbook build guide
+
+      - name: 'Assemble the site'
+        run: |
+          mkdir -p _site
+          cp -R site/. _site/
+          cp -R guide/book _site/guide
+
+      - name: 'Upload Pages artifact'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+  deploy:
+    name: 'Deploy Site'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: ['build']
+    runs-on: 'ubuntu-latest'
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 'Deploy to GitHub Pages'
+        id: deployment
+        uses: actions/deploy-pages@v5

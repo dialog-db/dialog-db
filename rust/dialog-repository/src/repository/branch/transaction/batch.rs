@@ -20,8 +20,9 @@
 //! versions; nothing staged is ever rewritten.
 
 use super::induce::induce;
-use super::{Transaction, TransactionCommit, carry_footprint, touches_rules, transaction_view};
-use crate::repository::branch::commit::{Mint, Minted, Outcome};
+use super::{Transaction, TransactionCommit, carry_footprint, touches_rules};
+use crate::repository::branch::asset::store_assets;
+use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
@@ -35,6 +36,9 @@ use dialog_capability::{Did, Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
+use dialog_effects::blob::Import as BlobImport;
+use dialog_effects::blob::Read as BlobRead;
+use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{Publish, Resolve, Version as MemoryVersion};
 use dialog_query::query::Application;
 use dialog_search_tree::Cache;
@@ -91,6 +95,10 @@ pub struct TransactionBatch {
     /// The branch's shared memos, seeded at publish.
     records: Cache<Version, RevisionRecord>,
     contexts: ContextCache,
+    /// The transients rule heads emitted while inducing the staged
+    /// links, across every round of every link. See
+    /// [`induced`](Self::induced).
+    induced: Changes,
 }
 
 impl TransactionBatch {
@@ -112,6 +120,21 @@ impl TransactionBatch {
     /// head to.
     pub fn revision(&self) -> Revision {
         self.snapshot.revision()
+    }
+
+    /// The transient facts inductive rules concluded while this chain
+    /// was staged: every transient head emitted in any induction round
+    /// of any staged link. The transients the transactions dispatched
+    /// themselves are not included; the caller already holds those.
+    ///
+    /// Induction reads these as the next round's stimulus and then drops
+    /// them, so nothing is ever committed for them. A host that runs its
+    /// own handlers for a command (outside the rule system) reads them
+    /// here, before [`publish`](Self::publish) consumes the batch, and
+    /// runs them after the publish lands. Without that, a rule whose
+    /// head is such a command commits cleanly and nothing happens.
+    pub fn induced(&self) -> &Changes {
+        &self.induced
     }
 
     /// Start the next transaction on this chain. Its commit extends the
@@ -195,6 +218,7 @@ impl BatchPublish {
             context,
             records,
             contexts,
+            induced: _,
         } = self.batch;
         let tip = snapshot.revision();
 
@@ -260,6 +284,20 @@ impl<'a> TransactionCommit<&'a Branch> {
 }
 
 impl TransactionCommit<TransactionBatch> {
+    /// Fold this link into the chain's tip instead of staging a new
+    /// commit after it: the tip keeps its version, and its tree grows to
+    /// include this link's changes. Committing a chain as one commit or as
+    /// a commit followed by amends records the same history, and after
+    /// canonicalizing the same tree.
+    ///
+    /// Only a staged revision is amended, one this batch minted and nobody
+    /// has seen: a published revision never changes under a version
+    /// others may hold. A batch with nothing staged commits as usual.
+    pub fn amend(mut self) -> Self {
+        self.amend = true;
+        self
+    }
+
     /// Commit this link and publish the whole staged chain in one step.
     pub fn publish(self) -> TransactionPublish<TransactionBatch> {
         TransactionPublish { commit: self }
@@ -272,7 +310,10 @@ impl TransactionPublish<&Branch> {
     /// settled batch is a no-op).
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -296,7 +337,10 @@ impl TransactionPublish<TransactionBatch> {
     /// the newly-published [`Revision`].
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -319,10 +363,7 @@ impl Transaction<TransactionBatch> {
     /// Run queries against this transaction's "as-if committed" view of
     /// the staged chain. See [`Transaction::<&Branch>::query`].
     pub fn query(&self) -> TransactionQuery<'_> {
-        TransactionQuery::new(
-            SourceRef::Snapshot(&self.line.snapshot),
-            &transaction_view(&self.changes, &self.transients),
-        )
+        TransactionQuery::new(SourceRef::Snapshot(&self.line.snapshot), self.layers())
     }
 }
 
@@ -337,7 +378,10 @@ impl TransactionCommit<&Branch> {
     /// [`TransactionBatch::publish`] does.
     pub async fn perform<Env>(self, env: &Env) -> Result<TransactionBatch, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -367,7 +411,7 @@ impl TransactionCommit<&Branch> {
         let authority = Identify.perform(env).await?;
         let (line, _) = branch.commit_identity(authority.profile(), &authority.did());
 
-        let outcome = Box::pin(mint_link(
+        let (outcome, induced) = Box::pin(mint_link(
             SourceRef::Branch(branch),
             base,
             |profile, issuer| branch.commit_identity(profile, issuer),
@@ -375,6 +419,7 @@ impl TransactionCommit<&Branch> {
             self.transients,
             self.allow_empty,
             self.canonicalize,
+            None,
             env,
         ))
         .await?;
@@ -400,6 +445,7 @@ impl TransactionCommit<&Branch> {
                 context: None,
                 records: branch.records(),
                 contexts: branch.contexts(),
+                induced,
             },
             Outcome::Minted(minted) => {
                 let Minted {
@@ -421,6 +467,7 @@ impl TransactionCommit<&Branch> {
                     context: Some(context),
                     records: branch.records(),
                     contexts: branch.contexts(),
+                    induced,
                 }
             }
         })
@@ -433,7 +480,10 @@ impl TransactionCommit<TransactionBatch> {
     /// [`TransactionCommit::<&Branch>::perform`].
     pub async fn perform<Env>(self, env: &Env) -> Result<TransactionBatch, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
             + Provider<Put>
             + Provider<Import>
             + Provider<Resolve>
@@ -450,7 +500,19 @@ impl TransactionCommit<TransactionBatch> {
         let (base, lineage) = batch.snapshot.head();
         let line = lineage.expect("a transaction batch's line is seeded at construction");
 
-        let outcome = Box::pin(mint_link(
+        // Amend only a staged revision: the chain's tip, which nobody has
+        // seen. A batch with nothing staged sits on the published head,
+        // which is never amended; its amend is an ordinary commit.
+        let amend = match (self.amend, batch.chain.last(), &batch.context) {
+            (true, Some((_, record)), Some(context)) => Some(Amended {
+                record: record.clone(),
+                context: context.clone(),
+            }),
+            _ => None,
+        };
+        let amending = amend.is_some();
+
+        let (outcome, induced) = Box::pin(mint_link(
             SourceRef::Snapshot(&batch.snapshot),
             Some(base.clone()),
             |_, issuer| (line.clone(), origin_of(&line, issuer)),
@@ -458,9 +520,11 @@ impl TransactionCommit<TransactionBatch> {
             self.transients,
             self.allow_empty,
             self.canonicalize,
+            amend,
             env,
         ))
         .await?;
+        induced.assert(&mut batch.induced);
 
         if let Outcome::Minted(minted) = outcome {
             let Minted {
@@ -480,6 +544,11 @@ impl TransactionCommit<TransactionBatch> {
                 .caches()
                 .contexts
                 .insert(version, context.clone());
+            if amending {
+                // The amended tip keeps its version and record; the chain
+                // holds it once, as it would a single commit.
+                batch.chain.pop();
+            }
             batch.chain.push((version, record));
             batch.context = Some(context);
         }
@@ -490,7 +559,8 @@ impl TransactionCommit<TransactionBatch> {
 /// Mint one staged link: run commit-time induction over the batch, then
 /// [`Mint`] the settled changes on the line `line` names, carrying the
 /// trigger footprint forward. Nothing is published or adopted — the
-/// caller owns what happens to the [`Outcome`].
+/// caller owns what happens to the [`Outcome`] and to the transients
+/// induction emitted, returned alongside it.
 #[allow(clippy::too_many_arguments)]
 async fn mint_link<Env>(
     source: SourceRef<'_>,
@@ -500,10 +570,14 @@ async fn mint_link<Env>(
     transients: Changes,
     allow_empty: bool,
     canonicalize: bool,
+    amend: Option<Amended>,
     env: &Env,
-) -> Result<Outcome, CommitError>
+) -> Result<(Outcome, Changes), CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobSize>
+        + Provider<BlobImport>
+        + Provider<Get>
+        + Provider<BlobRead>
         + Provider<Put>
         + Provider<Import>
         + Provider<Resolve>
@@ -516,17 +590,20 @@ where
         + ConditionalSync
         + 'static,
 {
-    induce(source, &mut changes, transients, env).await?;
+    let induced = induce(source, &mut changes, transients, env).await?;
     let touches = touches_rules(&changes);
     let previous = base.clone();
+    let machinery = store_assets(source, changes.take_assets(), env).await?;
     let outcome = Mint {
         source,
         base,
         changes: changes.into_stream(),
         entries: Vec::new(),
+        machinery,
         scope: WriteScope::Application,
         allow_empty,
         canonicalize,
+        amend,
     }
     .perform(env, line)
     .await?;
@@ -535,7 +612,7 @@ where
     {
         carry_footprint(&source.rule_cache(), previous.as_ref(), &minted.revision);
     }
-    Ok(outcome)
+    Ok((outcome, induced))
 }
 
 #[cfg(test)]
@@ -548,8 +625,8 @@ mod tests {
     use crate::{Branch, CommitError, PublishError};
     use anyhow::Result;
     use dialog_artifacts::history::Edition;
-    use dialog_operator::Operator;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::Peer;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::query::Output;
     use dialog_query::{Concept, Entity, Query, Term};
     use dialog_storage::provider::storage::VolatileSpace;
@@ -572,7 +649,10 @@ mod tests {
         })
     }
 
-    async fn bodies(branch: &Branch, operator: &Operator<VolatileSpace>) -> Result<Vec<String>> {
+    async fn bodies(
+        branch: &Branch,
+        operator: &Peer<VolatileSpace, dialog_peer::Session>,
+    ) -> Result<Vec<String>> {
         let mut bodies: Vec<String> = branch
             .query()
             .select(Query::<Note> {
@@ -593,7 +673,7 @@ mod tests {
     /// every link lands atomically at exactly the versions minted.
     #[dialog_common::test]
     async fn it_stages_privately_and_publishes_atomically() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -652,7 +732,7 @@ mod tests {
     /// history reports for the commit carrying the claims.
     #[dialog_common::test]
     async fn it_captures_the_version_a_commit_minted() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -691,7 +771,7 @@ mod tests {
     /// re-run against the fresh head reconciles.
     #[dialog_common::test]
     async fn it_fails_publish_after_the_head_moved_then_recovers() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -748,7 +828,7 @@ mod tests {
     /// branch until the batch publishes its first-ever head.
     #[dialog_common::test]
     async fn it_stages_a_genesis_chain() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
         assert_eq!(branch.revision(), None);
@@ -777,7 +857,7 @@ mod tests {
     /// success from a stale view either.
     #[dialog_common::test]
     async fn it_treats_an_empty_batch_as_a_noop_only_at_the_current_head() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -814,6 +894,197 @@ mod tests {
             "an empty batch from a stale view must not silently succeed; got {raced:?}"
         );
 
+        Ok(())
+    }
+
+    /// An amend folds into the staged tip: the tip keeps its version, and
+    /// publishing makes both links visible at that one version.
+    #[dialog_common::test]
+    async fn it_amends_the_staged_tip_in_place() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let seed = branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let batch = branch
+            .transaction()
+            .assert(note("first")?)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let staged = batch.version();
+
+        let batch = batch
+            .assert(note("second")?)
+            .commit()
+            .amend()
+            .perform(&operator)
+            .await?;
+        assert_eq!(batch.version(), staged, "the amend keeps the tip's version");
+        assert_eq!(batch.version().edition, seed.version().edition.successor());
+        assert_eq!(branch.revision(), Some(seed), "nothing is published yet");
+
+        let head = batch.publish().perform(&operator).await?;
+        assert_eq!(head.version(), staged, "one version is published");
+        assert_eq!(
+            bodies(&branch, &operator).await?,
+            vec!["first", "second", "seed"]
+        );
+        Ok(())
+    }
+
+    /// Committing and then amending records what one commit of the same
+    /// changes records: canonicalized, the two trees are the same tree.
+    #[dialog_common::test]
+    async fn it_amends_to_the_tree_one_commit_would_have() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let (first, second) = (note("first")?, note("second")?);
+        let whole = branch
+            .transaction()
+            .assert(first.clone())
+            .assert(second.clone())
+            .commit()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+        let amended = branch
+            .transaction()
+            .assert(first)
+            .commit()
+            .perform(&operator)
+            .await?
+            .assert(second)
+            .commit()
+            .amend()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(whole.version(), amended.version());
+        assert_eq!(
+            whole.revision().tree,
+            amended.revision().tree,
+            "one commit and a commit plus an amend make the same tree"
+        );
+        Ok(())
+    }
+
+    /// History recorded by an amend folds into what the amended commit
+    /// already recorded at the same history key, exactly as two writes of
+    /// one commit fold.
+    ///
+    /// Replacing a published value records a claim citing the version that
+    /// published it; retracting the replacement in an amend writes the same
+    /// history key and must keep that citation, as retracting it in the
+    /// same commit does, rather than overwrite it with a record citing
+    /// nothing.
+    #[dialog_common::test]
+    async fn it_folds_history_across_amends() -> Result<()> {
+        use dialog_artifacts::{Attribute, Changes, Update as _, Value};
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let the: Attribute = "note/body".parse()?;
+        let of = dialog_artifacts::Entity::new()?;
+        let replace = |value: &str| {
+            let mut changes = Changes::new();
+            changes.associate_unique(the.clone(), of.clone(), Value::String(value.into()));
+            changes
+        };
+        let retract = |value: &str| {
+            let mut changes = Changes::new();
+            changes.dissociate(the.clone(), of.clone(), Value::String(value.into()));
+            changes
+        };
+
+        branch
+            .transaction()
+            .integrate(replace("a"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let mut both = replace("b");
+        both.dissociate(the.clone(), of.clone(), Value::String("b".into()));
+        let whole = branch
+            .transaction()
+            .integrate(both)
+            .commit()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+        let amended = branch
+            .transaction()
+            .integrate(replace("b"))
+            .commit()
+            .perform(&operator)
+            .await?
+            .transaction()
+            .integrate(retract("b"))
+            .commit()
+            .amend()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(whole.version(), amended.version());
+        assert_eq!(
+            whole.revision().tree,
+            amended.revision().tree,
+            "history folds across amends as it folds within a commit"
+        );
+        Ok(())
+    }
+
+    /// A batch with nothing staged sits on the published head, which is
+    /// never amended: its amend commits a new revision instead.
+    #[dialog_common::test]
+    async fn it_commits_an_amend_with_nothing_staged() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let seed = branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let empty = branch.transaction().commit().perform(&operator).await?;
+        assert_eq!(empty.revision(), seed, "an empty commit stages nothing");
+
+        let batch = empty
+            .assert(note("next")?)
+            .commit()
+            .amend()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            batch.version().edition,
+            seed.version().edition.successor(),
+            "the published head is not amended; the amend commits"
+        );
         Ok(())
     }
 }

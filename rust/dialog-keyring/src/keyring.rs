@@ -23,9 +23,8 @@ pub trait Keyring: ConditionalSync {
 
     /// Every epoch this keyring can resolve.
     ///
-    /// Used to build a synchronous [`NodeSealer`](crate::NodeSealer): sealing
-    /// runs inside the tree's persist, which does not await, so the keys have
-    /// to be resolved before it starts.
+    /// Used to build a [`NodeSealer`](crate::NodeSealer), which resolves
+    /// every epoch up front so that sealing a block never waits on a key.
     fn epochs(&self) -> Vec<EpochId>;
 
     /// The key that blinds storage addresses, which never rotates.

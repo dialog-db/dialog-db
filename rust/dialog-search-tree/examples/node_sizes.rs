@@ -13,10 +13,7 @@ use std::collections::BTreeMap;
 
 use dialog_common::Blake3Hash;
 use dialog_common::helpers::BenchData;
-use dialog_search_tree::{
-    Buffer, ContentAddressedStorage, Delta, Distribution, PersistentNode, PersistentTree, Rank,
-};
-use dialog_storage::MemoryStorageBackend;
+use dialog_search_tree::{Delta, Distribution, MemoryBlocks, PersistentNode, PersistentTree, Rank};
 
 const BENCH_SEED: u64 = 42;
 const SIZES: [usize; 2] = [10_000, 50_000];
@@ -38,18 +35,13 @@ impl<const M: u64> Distribution for Threshold<M> {
     }
 }
 
-type Backend = MemoryStorageBackend<Blake3Hash, Vec<u8>>;
-
 async fn build<D: Distribution>(
     size: usize,
-) -> (
-    PersistentTree<[u8; 16], Vec<u8>, D>,
-    ContentAddressedStorage<Backend>,
-) {
+) -> (PersistentTree<[u8; 16], Vec<u8>, D>, MemoryBlocks) {
     let mut data = BenchData::new(BENCH_SEED);
     let keys = data.random_buffers::<16>(size);
     let values = data.random_buffers::<32>(size);
-    let mut storage = ContentAddressedStorage::new(Backend::default());
+    let storage = MemoryBlocks::new();
     let mut tree = PersistentTree::<[u8; 16], Vec<u8>, D>::empty();
     let mut delta = Delta::zero();
     for (k, v) in keys.iter().zip(values.iter()) {
@@ -62,10 +54,7 @@ async fn build<D: Distribution>(
             .unwrap();
         // Flush after each persist so the next edit can load the nodes this persist created.
         for (_, buffer) in delta.flush() {
-            storage
-                .store(buffer.as_ref().to_vec(), buffer.blake3_hash())
-                .await
-                .unwrap();
+            storage.store(buffer);
         }
     }
     (tree, storage)
@@ -85,9 +74,12 @@ async fn report<const M: u64>(size: usize) {
     loop {
         let mut next = Vec::new();
         for hash in &frontier {
-            let bytes = storage.retrieve(hash).await.unwrap().unwrap();
-            sizes_by_depth.entry(depth).or_default().push(bytes.len());
-            let node = PersistentNode::<[u8; 16], Vec<u8>>::try_from(Buffer::from(bytes)).unwrap();
+            let bytes = storage.get(hash).unwrap();
+            sizes_by_depth
+                .entry(depth)
+                .or_default()
+                .push(bytes.as_ref().len());
+            let node = PersistentNode::<[u8; 16], Vec<u8>>::try_from(bytes).unwrap();
             if let Ok(index) = node.as_index() {
                 if depth == 0 {
                     root_fanout = index.len();

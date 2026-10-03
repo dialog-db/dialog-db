@@ -33,7 +33,7 @@ dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-network = { workspace = true }
-dialog-operator = { workspace = true, features = ["helpers"] }
+dialog-peer = { workspace = true, features = ["helpers"] }
 dialog-repository = { workspace = true }
 dialog-search-tree = { workspace = true }
 dialog-storage = { workspace = true, features = ["helpers"] }

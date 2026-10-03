@@ -62,15 +62,21 @@ pub trait CredentialKeyExt {
     type Load;
     /// The resulting save chain type.
     type Save;
+    /// The resulting retract chain type.
+    type Retract;
     /// Load a key credential from this address.
     fn load(self) -> Self::Load;
     /// Save a key credential to this address.
     fn save(self, credential: KeyCredential) -> Self::Save;
+    /// Remove the key credential at this address, destroying the key where
+    /// it is the only copy.
+    fn retract(self) -> Self::Retract;
 }
 
 impl CredentialKeyExt for Capability<Key> {
     type Load = Capability<Load<KeyCredential>>;
     type Save = Capability<Save<KeyCredential>>;
+    type Retract = Capability<Retract<KeyCredential>>;
 
     fn load(self) -> Capability<Load<KeyCredential>> {
         self.invoke(Load::new())
@@ -78,6 +84,10 @@ impl CredentialKeyExt for Capability<Key> {
 
     fn save(self, credential: KeyCredential) -> Capability<Save<KeyCredential>> {
         self.invoke(Save::new(credential))
+    }
+
+    fn retract(self) -> Capability<Retract<KeyCredential>> {
+        self.invoke(Retract::new())
     }
 }
 
@@ -184,5 +194,17 @@ pub trait RetractSecretExt {
 impl RetractSecretExt for Capability<Retract<Secret>> {
     fn address(&self) -> &SiteId {
         &Site::of(self).address
+    }
+}
+
+/// Field accessors on `Capability<Retract<Credential>>`.
+pub trait RetractCredentialExt {
+    /// Get the key address from the capability chain.
+    fn address(&self) -> &str;
+}
+
+impl RetractCredentialExt for Capability<Retract<KeyCredential>> {
+    fn address(&self) -> &str {
+        &Key::of(self).address
     }
 }

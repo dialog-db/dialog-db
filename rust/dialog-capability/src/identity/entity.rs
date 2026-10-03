@@ -1,0 +1,262 @@
+//! Entity types for semantic triple subjects.
+//!
+//! This module defines the [`Entity`] type which represents the subject part of
+//! semantic triples. Entities are based on URIs and provide unique identification
+//! for objects in the triple store.
+
+use std::{
+    fmt::{Debug, Display, Formatter, Result as FmtResult},
+    ops::Deref,
+    str::FromStr,
+    sync::Arc,
+};
+
+use base58::{FromBase58, ToBase58};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+
+use super::{ENTITY_LENGTH, IdentityError, Uri};
+
+/// An [`Entity`] is the subject part of a semantic triple. An [`Entity`] can
+/// be embodied by any valid [`Uri`].
+///
+/// An entity is immutable, and is cloned into every row, claim and key
+/// that names it, so its URI and key bytes are shared rather than copied
+/// by each clone.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(into = "String", try_from = "String")]
+pub struct Entity(Arc<EntityParts>);
+
+/// What an [`Entity`] shares between its clones: its URI and the bytes it
+/// takes in an index key. Ordered and hashed URI first, then key bytes.
+#[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct EntityParts {
+    uri: Uri,
+    key: [u8; ENTITY_LENGTH],
+}
+
+/// Serializes an entity to UTF-8 format for CSV export.
+pub fn to_utf8<S>(entity: &Entity, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    entity.0.uri.serialize(serializer)
+}
+
+/// Deserializes an entity from UTF-8 format for CSV import.
+pub fn from_utf8<'de, D>(deserializer: D) -> Result<Entity, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer)?
+        .parse::<Entity>()
+        .map_err(|error| de::Error::custom(format!("{error:?}")))
+}
+
+impl AsRef<Entity> for Entity {
+    fn as_ref(&self) -> &Entity {
+        self
+    }
+}
+
+impl Deref for Entity {
+    type Target = Uri;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0.uri
+    }
+}
+
+impl TryFrom<Uri> for Entity {
+    type Error = IdentityError;
+
+    fn try_from(value: Uri) -> Result<Self, Self::Error> {
+        let key = value.key_bytes()?;
+        Ok(Self(Arc::new(EntityParts { uri: value, key })))
+    }
+}
+
+impl FromStr for Entity {
+    type Err = IdentityError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(Uri::from_str(s)?)
+    }
+}
+
+impl TryFrom<String> for Entity {
+    type Error = IdentityError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl TryFrom<Vec<u8>> for Entity {
+    type Error = IdentityError;
+
+    fn try_from(value: Vec<u8>) -> Result<Self, Self::Error> {
+        Entity::try_from(
+            String::from_utf8(value)
+                .map_err(|error| IdentityError::InvalidEntity(format!("{error}")))?,
+        )
+    }
+}
+
+impl From<Entity> for String {
+    fn from(value: Entity) -> Self {
+        value.to_string()
+    }
+}
+
+impl Display for Entity {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{}", **self)
+    }
+}
+
+/// Scheme prefix for content entities: `asset:<base58(hash)>`.
+const ASSET_SCHEME: &str = "asset:";
+
+/// Scheme prefix content entities were minted with before `asset:`. Still
+/// read, never written: trees replicated before the switch hold facts on
+/// entities of this form.
+const LEGACY_BLOB_SCHEME: &str = "blob:";
+
+impl Entity {
+    /// Initialize a new [`Entity`] with a randomly generated, globally unique
+    /// URI. The URI is formatted as an ed25519 DID Key.
+    pub fn new() -> Result<Entity, IdentityError> {
+        Self::try_from(Uri::unique()?)
+    }
+
+    /// Get the [`Entity`] as a string reference
+    pub fn as_str(&self) -> &str {
+        (**self).as_str()
+    }
+
+    /// Reconstructs an [`Entity`] from a string read back out of the index,
+    /// verifying it is a canonical URI rendering (see [`Uri::from_stored`]).
+    /// A string that fails the check is a corrupt or foreign-written entry
+    /// and errors as [`CorruptEntry`](IdentityError::CorruptEntry),
+    /// which scan paths treat as an ignorable row. The key bytes are still
+    /// derived (they are not stored alongside the string).
+    pub fn from_stored(s: &str) -> Result<Self, IdentityError> {
+        Self::try_from(Uri::from_stored(s)?)
+    }
+
+    /// Get the raw byte representation of the [`Entity`] as it should be
+    /// formatted for use in an index key.
+    pub fn key_bytes(&self) -> &[u8; ENTITY_LENGTH] {
+        &self.0.key
+    }
+
+    /// The canonical entity naming stored content by its hash:
+    /// `asset:<base58(hash)>`.
+    pub fn from_blob(hash: &[u8; 32]) -> Result<Entity, IdentityError> {
+        format!("{}{}", ASSET_SCHEME, hash.to_base58()).parse()
+    }
+
+    /// The entity content was named with before the `asset:` scheme:
+    /// `blob:<base58(hash)>`.
+    ///
+    /// Only for reaching facts written before the switch, such as retracting
+    /// a delegation retained under the old name. New facts name content with
+    /// [`from_blob`](Self::from_blob).
+    pub fn from_legacy_blob(hash: &[u8; 32]) -> Result<Entity, IdentityError> {
+        format!("{}{}", LEGACY_BLOB_SCHEME, hash.to_base58()).parse()
+    }
+
+    /// The content hash an `asset:` entity names, if this entity is one and
+    /// its payload decodes to 32 base58 bytes. A legacy `blob:` entity names
+    /// the same hash.
+    pub fn blob_hash(&self) -> Option<[u8; 32]> {
+        let payload = self
+            .as_str()
+            .strip_prefix(ASSET_SCHEME)
+            .or_else(|| self.as_str().strip_prefix(LEGACY_BLOB_SCHEME))?;
+        let bytes = payload.from_base58().ok()?;
+        <[u8; 32]>::try_from(bytes).ok()
+    }
+}
+
+impl Debug for Entity {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(&self.0.uri.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+
+    #[dialog_common::test]
+    fn it_round_trips_a_blob_entity() {
+        let hash: [u8; 32] = [7u8; 32];
+        let entity = Entity::from_blob(&hash).expect("constructs");
+        assert!(entity.as_str().starts_with("asset:"));
+        assert_eq!(entity.blob_hash(), Some(hash));
+        // String round-trip: parse the display form back.
+        let reparsed: Entity = entity.as_str().parse().expect("parses");
+        assert_eq!(reparsed.blob_hash(), Some(hash));
+    }
+
+    #[dialog_common::test]
+    fn it_returns_none_for_non_blob_entities() {
+        let entity: Entity = "user:alice".parse().expect("parses");
+        assert_eq!(entity.blob_hash(), None);
+        // Garbage after the scheme is not a hash.
+        let bogus: Entity = "asset:notbase58!!!".parse().expect("still a valid uri");
+        assert_eq!(bogus.blob_hash(), None);
+    }
+
+    /// Facts replicated before the switch name content `blob:<hash>`; that
+    /// form still reads as the same hash, so lookups by hash keep reaching
+    /// them.
+    #[dialog_common::test]
+    fn it_reads_the_hash_of_a_legacy_blob_entity() {
+        let hash = [9u8; 32];
+        let legacy = Entity::from_legacy_blob(&hash).expect("constructs");
+        assert!(legacy.as_str().starts_with("blob:"));
+        assert_eq!(legacy.blob_hash(), Some(hash));
+        assert_ne!(legacy, Entity::from_blob(&hash).expect("constructs"));
+    }
+}
+
+/// Conversions to and from JavaScript values.
+///
+/// These live beside [`Entity`] rather than with the artifact web
+/// bindings because both `Entity` and `JsValue` are foreign to that
+/// crate now, and the orphan rule forbids the impls there.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod web {
+    use std::str::FromStr as _;
+
+    use wasm_bindgen::{JsCast as _, JsError, JsValue};
+    use wasm_bindgen_futures::js_sys::Uint8Array;
+
+    use super::{Entity, IdentityError};
+
+    impl From<Entity> for JsValue {
+        fn from(value: Entity) -> Self {
+            // TODO: Change this to pass a string when the query
+            // engine supports URI entities
+            JsValue::from(value.to_string().as_bytes().to_owned())
+        }
+    }
+
+    impl TryFrom<JsValue> for Entity {
+        type Error = JsError;
+
+        fn try_from(entity: JsValue) -> Result<Self, Self::Error> {
+            let bytes = entity
+                .dyn_into::<Uint8Array>()
+                .map_err(|_| JsError::new("entity is not a byte array"))?;
+            let string = String::from_utf8(bytes.to_vec())
+                .map_err(|error| IdentityError::InvalidEntity(format!("{error}")))?;
+            Ok(Entity::from_str(&string)?)
+        }
+    }
+}

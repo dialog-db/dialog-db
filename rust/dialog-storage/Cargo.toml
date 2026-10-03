@@ -9,7 +9,6 @@ license.workspace = true
 helpers = [
   "tempfile",
   "anyhow",
-  "rand",
   "dialog-common/helpers",
   "dep:s3s",
   "dep:hyper",
@@ -38,22 +37,19 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 base58 = { workspace = true }
 blake3 = { workspace = true }
-brotli = { workspace = true }
 futures-util = { workspace = true }
 hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, features = ["server", "tokio", "service"], optional = true }
 parking_lot = { workspace = true }
+percent-encoding = { workspace = true }
 s3s = { workspace = true, optional = true }
-sieve-cache = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_ipld_dagcbor = { workspace = true }
-rand = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 url = { workspace = true }
-percent-encoding = { workspace = true }
 pidlock = { workspace = true }
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net", "io-util"] }
@@ -84,6 +80,7 @@ web-sys = { workspace = true, features = [
   "FileSystemGetDirectoryOptions",
   "FileSystemGetFileOptions",
   "FileSystemHandle",
+  "FileSystemHandleKind",
   "FileSystemReadWriteOptions",
   "FileSystemRemoveOptions",
   "FileSystemSyncAccessHandle",

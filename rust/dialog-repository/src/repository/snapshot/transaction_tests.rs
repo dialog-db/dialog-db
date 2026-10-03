@@ -11,8 +11,9 @@ use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
-use dialog_operator::helpers::test_operator_with_profile;
+use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::The;
 use dialog_query::query::Output;
 use dialog_query::{Query, Term, the};
@@ -29,7 +30,8 @@ use crate::{
 /// Every `user/name` value on a line, sorted.
 async fn names<'a, Env>(source: impl Into<SourceRef<'a>>, env: &Env) -> Result<Vec<String>>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -59,7 +61,8 @@ async fn values<'a, Env>(
     of: Option<&Entity>,
 ) -> Result<Vec<Value>>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -88,7 +91,8 @@ where
 /// and metadata path, as opposed to the raw index `names` reads.
 async fn queried_names<Env>(layer: crate::QueryLayer<'_>, env: &Env) -> Result<Vec<String>>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Identify>
@@ -137,13 +141,13 @@ fn fact(of: &str, is: &str) -> Artifact {
 
 /// A branch with one committed fact and a snapshot of it.
 async fn staged() -> Result<(
-    dialog_operator::Operator<VolatileSpace>,
-    dialog_identity::Profile,
+    dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
+    dialog_peer::Peer<VolatileSpace>,
     Repository,
     Branch,
     Snapshot,
 )> {
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     branch
@@ -191,7 +195,6 @@ async fn it_advances_the_snapshot_and_not_the_branch() -> Result<()> {
     // The minted record's parent is the base revision.
     let record = snapshot
         .history(&operator)
-        .await
         .revision_record(&minted.version())
         .await?
         .expect("the minted record is in the tree");
@@ -377,7 +380,6 @@ async fn it_gives_a_clone_its_own_line() -> Result<()> {
     for (side, minted) in [(&snapshot, &left), (&fork, &right)] {
         let record = side
             .history(&operator)
-            .await
             .revision_record(&minted.version())
             .await?
             .expect("record");
@@ -422,7 +424,6 @@ async fn it_keeps_the_revision_for_a_noop() -> Result<()> {
     assert_eq!(snapshot.revision(), empty);
     let record = snapshot
         .history(&operator)
-        .await
         .revision_record(&empty.version())
         .await?
         .expect("record");
@@ -532,7 +533,6 @@ async fn it_signs_the_minted_revision() -> Result<()> {
 
     let record = snapshot
         .history(&operator)
-        .await
         .revision_record(&revision.version())
         .await?
         .expect("record");
@@ -605,7 +605,7 @@ async fn it_refuses_a_commit_built_on_a_stale_head() -> Result<()> {
 async fn it_induces_on_commit() -> Result<()> {
     use dialog_query::InductiveRule;
 
-    let (operator, profile) = test_operator_with_profile().await;
+    let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -776,7 +776,7 @@ async fn it_integrates_external_changes() -> Result<()> {
 #[dialog_common::test]
 async fn it_keeps_the_overlay_across_commits() -> Result<()> {
     let (operator, _, _, _, snapshot) = staged().await?;
-    snapshot.overlay().assert(name("user:ghost", "Ghost"));
+    snapshot.overlay().assert(name("user:ghost", "Ghost"))?;
     snapshot
         .transaction()
         .assert(name("user:bob", "Bob"))

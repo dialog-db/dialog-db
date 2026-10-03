@@ -720,6 +720,17 @@ impl From<BlobError> for Failure {
             BlobError::DigestMismatch { expected, actual } => {
                 Self::digest_mismatch(expected, actual)
             }
+            BlobError::SizeMismatch {
+                digest,
+                expected,
+                held,
+            } => Self::Answered(Response::json(
+                400,
+                &serde_json::json!({
+                    "kind": "SizeMismatch",
+                    "detail": format!("blob {digest} was named at {expected} bytes, {held} are held"),
+                }),
+            )),
             BlobError::Authorization(reason) => Self::Refused(Refusal(reason)),
             BlobError::Rejected(rejection) => Self::Answered(Response::rejected(503, rejection)),
             BlobError::Storage(detail) => Self::storage(detail),

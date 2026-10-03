@@ -20,7 +20,7 @@
 //! ```
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use dialog_baseline::repo::DialogRepo;
+use dialog_baseline::repo::clean_temp_storage;
 use dialog_baseline::se::SeLog;
 use dialog_baseline::{DialogFacts, DialogMode, SqliteFacts, SqliteMode};
 
@@ -31,8 +31,8 @@ const SQLITE_MODES: &[(&str, SqliteMode)] = &[
 ];
 
 const DIALOG_MODES: &[(&str, DialogMode)] = &[
-    ("dialog_mem", DialogMode::Memory),
-    ("dialog_disk", DialogMode::Disk),
+    ("repo_mem", DialogMode::Memory),
+    ("repo_disk", DialogMode::Disk),
 ];
 
 /// A fresh multi-threaded tokio runtime for driving the async dialog side.
@@ -80,8 +80,13 @@ fn bench_replay_write(c: &mut Criterion) {
     for (label, mode) in DIALOG_MODES {
         group.bench_with_input(BenchmarkId::new(*label, size), &log, |b, log| {
             b.iter_batched(
-                || rt.block_on(async { DialogFacts::open(*mode).await.expect("open dialog") }),
-                |mut store| {
+                || {
+                    if *mode == DialogMode::Disk {
+                        clean_temp_storage();
+                    }
+                    rt.block_on(async { DialogFacts::open(*mode).await.expect("open dialog") })
+                },
+                |store| {
                     rt.block_on(async { store.replay_se(log).await.expect("replay") });
                     store
                 },
@@ -90,31 +95,6 @@ fn bench_replay_write(c: &mut Criterion) {
         });
     }
 
-    // The repository layer: the same replay through `Branch::commit`, the
-    // surface applications actually write through.
-    group.bench_with_input(BenchmarkId::new("repo_mem", size), &log, |b, log| {
-        b.iter_batched(
-            || rt.block_on(async { DialogRepo::volatile().await.expect("open repo") }),
-            |repo| {
-                rt.block_on(async { repo.replay_se(log).await.expect("replay") });
-                repo
-            },
-            BatchSize::PerIteration,
-        );
-    });
-    group.bench_with_input(BenchmarkId::new("repo_disk", size), &log, |b, log| {
-        b.iter_batched(
-            || {
-                dialog_baseline::repo::clean_temp_storage();
-                rt.block_on(async { DialogRepo::temp().await.expect("open repo") })
-            },
-            |repo| {
-                rt.block_on(async { repo.replay_se(log).await.expect("replay") });
-                repo
-            },
-            BatchSize::PerIteration,
-        );
-    });
     group.finish();
 }
 
@@ -144,7 +124,7 @@ fn bench_replay_reads(c: &mut Criterion) {
         .iter()
         .map(|(label, mode)| {
             let store = rt.block_on(async {
-                let mut store = DialogFacts::open(*mode).await.expect("open dialog");
+                let store = DialogFacts::open(*mode).await.expect("open dialog");
                 store.replay_se(&log).await.expect("seed dialog");
                 store
             });

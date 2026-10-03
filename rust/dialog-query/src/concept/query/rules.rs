@@ -59,6 +59,12 @@ impl ConceptRules {
         Self::with_plan_cache(descriptor, PlanCache::default())
     }
 
+    /// The plan cache this bundle plans through, to share with another
+    /// assembled for the same query.
+    pub fn plan_cache(&self) -> &PlanCache {
+        &self.plan_cache
+    }
+
     /// Create a new `ConceptRules` sharing `plan_cache` with its owner.
     ///
     /// The repository assembles a fresh `ConceptRules` per query from its
@@ -66,7 +72,7 @@ impl ConceptRules {
     /// plans the previous one computed (see [`PlanCache`]).
     pub fn with_plan_cache(descriptor: &ConceptDescriptor, plan_cache: PlanCache) -> Self {
         Self {
-            implicit: DeductiveRule::from(descriptor),
+            implicit: descriptor.implicit_rule(),
             installed: Vec::new(),
             plans: Arc::new(RwLock::new(HashMap::new())),
             plan_cache,
@@ -159,22 +165,27 @@ impl ConceptRules {
     /// adornment, so a repeated identical call on the *same*
     /// `ConceptRules` skips even the (cheap) re-assembly.
     pub fn plan(&self, terms: &Parameters, matched: &Match) -> Arc<Disjunction> {
-        let adornment = Adornment::derive(terms, matched);
+        let operands = self.implicit.conclusion().sorted_operands();
+        let adornment = Adornment::derive(&operands, terms, matched);
 
         if let Some(plan) = self.plans.read().unwrap().get(&adornment) {
             return plan.clone();
         }
 
-        let scope = adornment.into_environment(terms);
-        // The implicit rule is planned directly: its body is raw
-        // attribute queries that have no serializable (content-addressed)
-        // identity, so it can't key the global cache. It's also a pure
-        // function of this concept's descriptor and cheap to plan. Only
-        // *installed* rules — which have concept/formula bodies and thus
-        // a `this()` — are memoized globally by `(rule, adornment)`.
-        // Reducing rules never join the disjunction: their folded
-        // rows are computed separately (see [`Self::reducing`]).
-        let plan: Disjunction = iter::once(self.implicit.plan(&scope))
+        let scope = adornment.into_environment(&operands);
+        // The implicit rule has no content-addressed identity to key the
+        // shared cache by, so its plans are kept on its concept's
+        // descriptor, which every query shares. Installed rules -- with
+        // concept/formula bodies and a `this()` -- are cached by
+        // `(rule, adornment)`. Planning is most of what a warm query over
+        // a small branch costs, so neither is planned twice. Reducing
+        // rules never join the disjunction: their folded rows are
+        // computed separately (see [`Self::reducing`]).
+        let implicit = self
+            .implicit
+            .conclusion()
+            .implicit_plan(adornment, || self.implicit.plan(&scope));
+        let plan: Disjunction = iter::once(implicit)
             .chain(
                 self.installed
                     .iter()
@@ -213,6 +224,30 @@ mod tests {
                 Some(Type::String),
             ),
         )])
+        .unwrap()
+    }
+
+    fn aged_person_concept() -> ConceptDescriptor {
+        ConceptDescriptor::try_from([
+            (
+                "age",
+                AttributeDescriptor::new(
+                    the!("person/age"),
+                    "person age",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
+                ),
+            ),
+            (
+                "name",
+                AttributeDescriptor::new(
+                    the!("person/name"),
+                    "person name",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            ),
+        ])
         .unwrap()
     }
 
@@ -332,11 +367,9 @@ mod tests {
     /// does `DeductiveRule::plan` depend only on the binding *pattern*
     /// (the adornment), or also on the caller's variable *names*?
     ///
-    /// `Adornment::into_environment` binds the caller's term names into
-    /// the scope, so this is not obvious. If the two `Conjunction`s
-    /// below are equal, `(rule, adornment)` is a sound cache key. If
-    /// not, the key must also capture the name mapping (or the scope
-    /// must be normalized to slot indices first).
+    /// `Adornment::into_environment` names the concept's bound fields,
+    /// never the caller's variables, so the two `Conjunction`s below
+    /// must be equal and `(rule, adornment)` is a sound cache key.
     #[dialog_common::test]
     fn it_plans_independently_of_caller_variable_names() {
         let descriptor = person_concept();
@@ -353,13 +386,14 @@ mod tests {
         terms_b.insert("this".into(), Term::var("e2"));
         terms_b.insert("name".into(), Term::var("n2"));
 
+        let operands = descriptor.sorted_operands();
         let matched = Match::new();
-        let adorn_a = Adornment::derive(&terms_a, &matched);
-        let adorn_b = Adornment::derive(&terms_b, &matched);
+        let adorn_a = Adornment::derive(&operands, &terms_a, &matched);
+        let adorn_b = Adornment::derive(&operands, &terms_b, &matched);
         assert_eq!(adorn_a, adorn_b, "same binding pattern ⇒ same adornment");
 
-        let plan_a = rule.plan(&adorn_a.into_environment(&terms_a));
-        let plan_b = rule.plan(&adorn_b.into_environment(&terms_b));
+        let plan_a = rule.plan(&adorn_a.into_environment(&operands));
+        let plan_b = rule.plan(&adorn_b.into_environment(&operands));
 
         assert_eq!(
             plan_a, plan_b,
@@ -374,10 +408,48 @@ mod tests {
         bound
             .bind(&Term::var("n1"), Value::from("x".to_string()))
             .unwrap();
-        let adorn_bound = Adornment::derive(&terms_a, &bound);
+        let adorn_bound = Adornment::derive(&operands, &terms_a, &bound);
         assert_ne!(
             adorn_a, adorn_bound,
             "binding a slot must change the adornment"
+        );
+    }
+
+    /// A plan is chosen by which of the concept's fields are bound, so two
+    /// calls binding different fields must not share one. Numbering the
+    /// fields by the call's own terms made `{name, this}` with `this`
+    /// bound and `{age, name, this}` with `name` bound the same pattern,
+    /// and the second call ran the plan made for the first.
+    #[dialog_common::test]
+    fn it_plans_calls_binding_different_fields_apart() {
+        let descriptor = aged_person_concept();
+        let rules = ConceptRules::new(&descriptor);
+
+        let mut by_entity = Parameters::new();
+        by_entity.insert("this".into(), Term::var("e"));
+        by_entity.insert("name".into(), Term::var("n"));
+        let mut entity_bound = Match::new();
+        entity_bound
+            .bind(
+                &Term::var("e"),
+                Value::from("person:alice".parse::<crate::Entity>().unwrap()),
+            )
+            .unwrap();
+
+        let mut by_name = Parameters::new();
+        by_name.insert("this".into(), Term::var("e"));
+        by_name.insert("name".into(), Term::var("n"));
+        by_name.insert("age".into(), Term::var("a"));
+        let mut name_bound = Match::new();
+        name_bound
+            .bind(&Term::var("n"), Value::from("Alice".to_string()))
+            .unwrap();
+
+        let entity_plan = rules.plan(&by_entity, &entity_bound);
+        let name_plan = rules.plan(&by_name, &name_bound);
+        assert!(
+            !Arc::ptr_eq(&entity_plan, &name_plan),
+            "a call binding `name` must not reuse the plan for one binding `this`"
         );
     }
 }

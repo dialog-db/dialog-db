@@ -30,12 +30,13 @@
 //! keep hot-attribute fan-out flat, delta-restricted body evaluation,
 //! and the `retract!` head polarity.
 
+use dialog_effects::blob::Read as BlobRead;
 use std::collections::{BTreeSet, HashMap};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Change, Changes, Entity, Instruction, Select, Statement,
-    Value,
+    Artifact, ArtifactSelector, Attribute, Change, Changes, DialogArtifactsError, Entity,
+    Instruction, Select, Statement, Value,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -54,7 +55,7 @@ use crate::repository::source::SourceRef;
 use crate::rules::{
     TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
 };
-use crate::{CommitError, RemoteSite, Revision};
+use crate::{CommitError, RemoteSite, Revision, Staged};
 
 /// Round bound for the induction loop: a cascade still emitting
 /// transients or novelty after this many rounds fails the commit
@@ -65,14 +66,18 @@ pub(crate) const MAX_ROUNDS: u32 = 16;
 /// Run commit-time induction over `changes` + `transients`, folding
 /// durable novelty into `changes`. Transients never enter `changes`;
 /// they are visible to rule bodies for exactly one round.
+///
+/// Returns every transient a rule head emitted, across all rounds. The
+/// dispatched `transients` are not part of it.
 pub(crate) async fn induce<Env>(
     source: SourceRef<'_>,
     changes: &mut Changes,
     transients: Changes,
     env: &Env,
-) -> Result<(), CommitError>
+) -> Result<Changes, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Identify>
@@ -83,6 +88,14 @@ where
         + ConditionalSync
         + 'static,
 {
+    // Transients never commit, so an asset among them would be dropped:
+    // refuse the commit before anything is written instead.
+    if transients.has_assets() {
+        return Err(
+            DialogArtifactsError::AssetsUnsupported("a dispatched transient".into()).into(),
+        );
+    }
+
     // Round 1 stimulus: everything the commit changes, plus the
     // watermark lag — facts that entered the branch since the last
     // inducing instant (a pull, a raw commit, a crash between publish
@@ -91,8 +104,9 @@ where
     let mut stimulus: Vec<Instruction> = changes.clone().into_instructions();
     stimulus.extend(transients.clone().into_instructions());
     stimulus.extend(lag_delta(source, env).await?);
+    let mut induced = Changes::new();
     if stimulus.is_empty() {
-        return Ok(());
+        return Ok(induced);
     }
 
     // Committed trigger structures, resolved once per induction: the
@@ -197,13 +211,17 @@ where
         // The frozen round view: branch ⊕ durable changes ⊕ this
         // round's transients, through the same layered QueryEnv a
         // transaction query uses, so rule bodies read exactly what a
-        // mid-transaction query would.
-        let mut view_changes = changes.clone();
-        transient_overlay.clone().assert(&mut view_changes);
-        let layered = QueryLayer::from(source)
-            .with(view_changes)
-            .overlay(&operator);
-        let view = QueryEnv::new(vec![source.to_source()], layered, env);
+        // mid-transaction query would: the writes as staged layers
+        // beside the shared metadata.
+        let view = QueryEnv::new(
+            vec![source.to_source()],
+            QueryLayer::from(source).overlay(&operator),
+            env,
+        )
+        .with_layers(vec![
+            Staged::from(changes.clone()),
+            Staged::from(transient_overlay.clone()),
+        ]);
 
         // Close the touched set over derivation: a base-fact write
         // reaches inductive rules premised on the derived concepts it
@@ -285,10 +303,11 @@ where
         stimulus = novelty.clone().into_instructions();
         stimulus.extend(emitted_transients.clone().into_instructions());
         novelty.assert(changes);
+        emitted_transients.clone().assert(&mut induced);
         transient_overlay = emitted_transients;
     }
 
-    Ok(())
+    Ok(induced)
 }
 
 /// The committed side of trigger dispatch for one induction run: the
@@ -384,7 +403,8 @@ impl<'a> Dispatch<'a> {
     /// each of `dialog.rule/on` and `dialog.rule/reads` on a miss).
     async fn resolve<Env>(source: SourceRef<'a>, env: &Env) -> Result<Dispatch<'a>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -442,7 +462,8 @@ impl<'a> Dispatch<'a> {
         env: &Env,
     ) -> Result<Vec<Entity>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -496,7 +517,8 @@ impl<'a> Dispatch<'a> {
         env: &Env,
     ) -> Result<(), CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -563,7 +585,8 @@ impl<'a> Dispatch<'a> {
         env: &Env,
     ) -> Result<Option<dialog_query::DeductiveRule>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -602,7 +625,8 @@ impl<'a> Dispatch<'a> {
         env: &Env,
     ) -> Result<Option<InductiveRule>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -649,7 +673,8 @@ impl<'a> Dispatch<'a> {
         env: &Env,
     ) -> Result<bool, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -687,7 +712,8 @@ impl<'a> Dispatch<'a> {
         env: &Env,
     ) -> Result<Option<Vec<u8>>, CommitError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -731,7 +757,8 @@ impl<'a> Dispatch<'a> {
 /// commits changed, not their bookkeeping.
 async fn lag_delta<Env>(source: SourceRef<'_>, env: &Env) -> Result<Vec<Instruction>, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -741,10 +768,10 @@ where
         + ConditionalSync
         + 'static,
 {
-    use dialog_artifacts::tree::{TreeStorageBridge, fetch_spilled};
+    use dialog_artifacts::tree::fetch_spilled;
     use dialog_artifacts::{EntityKey, Key, KeyViewConstruct, State};
     use dialog_common::Blake3Hash as NodeHash;
-    use dialog_search_tree::{Change as TreeChange, ContentAddressedStorage};
+    use dialog_search_tree::Change as TreeChange;
 
     let SourceRef::Branch(branch) = source else {
         return Ok(Vec::new());
@@ -766,10 +793,10 @@ where
     // surfaces once. Reads go through the networked store exactly as a
     // select does: a pulled head's changed paths may reference
     // remote-only blocks.
-    let remote = source.fallback(env).await;
+    let remote = source.fallback();
     let store = crate::NetworkedIndex::new(env, branch.archive().index(), remote);
     let raw_store = store.clone();
-    let storage = ContentAddressedStorage::new(TreeStorageBridge(store));
+    let storage = store;
     let previous = crate::Index::from_hash_with_cache(
         NodeHash::from(*watermark.tree.hash()),
         branch.node_cache(),
@@ -839,7 +866,8 @@ async fn committed<Env>(
     env: &Env,
 ) -> Result<Vec<Artifact>, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -866,7 +894,8 @@ async fn select<'a, Env>(
     selector: ArtifactSelector<Constrained>,
 ) -> Result<Vec<Artifact>, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -897,7 +926,8 @@ async fn fire<'a, Env>(
     transients: &mut Changes,
 ) -> Result<(), CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -957,7 +987,8 @@ async fn fire_seeded<'a, Env>(
     transients: &mut Changes,
 ) -> Result<(), CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -1056,7 +1087,7 @@ fn bind_seed(
             if matched.bind(term, value).is_err() {
                 return false;
             }
-            scope.add(name);
+            scope.add(name.as_ref());
             true
         }
         Some(Term::Constant(expected)) => *expected == value,
@@ -1076,7 +1107,8 @@ async fn emit_matches<'a, Env>(
     transients: &mut Changes,
 ) -> Result<(), CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -1179,7 +1211,8 @@ async fn is_novel<'a, Env>(
     instruction: &Instruction,
 ) -> Result<bool, CommitError>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -1212,12 +1245,13 @@ mod tests {
     use crate::rules::Transient;
     use crate::{Branch, CommitError, RemoteSite};
     use anyhow::Result;
-    use dialog_artifacts::{ArtifactSelector, Entity, Value};
+    use dialog_artifacts::{ArtifactSelector, Changes, Entity, Instruction, Value};
     use dialog_capability::{Fork, Provider};
     use dialog_common::ConditionalSync;
     use dialog_effects::archive::{Get, Put};
+    use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::rule::statement::on_entities;
     use dialog_query::{ConceptDescriptor, InductiveRule};
     use futures_util::StreamExt as _;
@@ -1226,7 +1260,8 @@ mod tests {
     /// Collect the values a `(the, of)` pair holds on the branch.
     async fn values<Env>(branch: &Branch, env: &Env, the: &str, of: &Entity) -> Result<Vec<Value>>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -1317,7 +1352,7 @@ mod tests {
     /// never reaches the branch.
     #[dialog_common::test]
     async fn it_induces_counter_increment_from_a_dispatched_command() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1372,7 +1407,7 @@ mod tests {
     /// trigger, reached through the `unless` premise's index entry.
     #[dialog_common::test]
     async fn it_triggers_on_durable_change_and_on_retraction_via_unless() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1468,7 +1503,7 @@ mod tests {
     /// neither command leaves a trace.
     #[dialog_common::test]
     async fn it_cascades_through_a_transient_intermediate() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1566,11 +1601,184 @@ mod tests {
         Ok(())
     }
 
+    /// A rule that relays a transient into another transient concept:
+    /// `assert! {to} when {from}`, both `this`-keyed on the command.
+    fn relay(from: &str, to: &str) -> Result<InductiveRule> {
+        Ok(serde_json::from_value(json!({
+            "assert!": {
+                "with": {
+                    "target": { "the": to, "as": "Entity" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "target": { "the": from, "as": "Entity" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "target": { "?": { "name": "target" } }
+                    }
+                }
+            ]
+        }))?)
+    }
+
+    /// Mark the `{target}` concept over `the` as transient.
+    fn transient_target(the: &str) -> Result<Transient> {
+        let concept: ConceptDescriptor = serde_json::from_value(json!({
+            "with": {
+                "target": { "the": the, "as": "Entity" }
+            }
+        }))?;
+        Ok(Transient(concept.this()))
+    }
+
+    /// The `(attribute, entity, value)` triples a [`Changes`] asserts.
+    fn asserted(changes: &Changes) -> Vec<(String, Entity, Value)> {
+        let mut triples: Vec<_> = changes
+            .clone()
+            .into_instructions()
+            .into_iter()
+            .filter_map(|instruction| match instruction {
+                Instruction::Assert(a) | Instruction::Replace(a) => {
+                    Some((a.the.to_string(), a.of, a.is))
+                }
+                Instruction::Retract(_) => None,
+            })
+            .collect();
+        triples.sort_by_key(|(the, of, _)| (the.clone(), of.to_string()));
+        triples
+    }
+
+    /// Transients a rule concludes are reported on the staged batch, from
+    /// every round of the cascade, so a host whose handlers live outside
+    /// the rule system can run them. The transient the transaction
+    /// dispatched itself is not reported back.
+    #[dialog_common::test]
+    async fn it_reports_the_transients_induction_emitted() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(transient_target("cmd.stage/target")?)
+            .assert(transient_target("cmd.finish/target")?)
+            .assert(relay("cmd.start/target", "cmd.stage/target")?)
+            .assert(relay("cmd.stage/target", "cmd.finish/target")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:start".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        let batch = branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.start/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            asserted(batch.induced()),
+            vec![
+                (
+                    "cmd.finish/target".to_string(),
+                    command.clone(),
+                    Value::Entity(target.clone())
+                ),
+                (
+                    "cmd.stage/target".to_string(),
+                    command.clone(),
+                    Value::Entity(target.clone())
+                ),
+            ],
+            "both rounds' transient heads are reported, the dispatched command is not"
+        );
+
+        batch.publish().perform(&operator).await?;
+        assert!(
+            values(&branch, &operator, "cmd.finish/target", &command)
+                .await?
+                .is_empty(),
+            "a reported transient still never reaches the branch"
+        );
+        Ok(())
+    }
+
+    /// Every link of a staged chain adds the transients its own induction
+    /// emitted: publishing the chain runs all of them, so none may drop
+    /// out when the next link is committed.
+    #[dialog_common::test]
+    async fn it_accumulates_induced_transients_across_staged_links() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(transient_target("cmd.stage/target")?)
+            .assert(relay("cmd.start/target", "cmd.stage/target")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let first: Entity = "cmd:first".parse()?;
+        let second: Entity = "cmd:second".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        let batch = branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.start/target")
+                    .of(first.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?
+            .dispatch(
+                dialog_query::the!("cmd.start/target")
+                    .of(second.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            asserted(batch.induced()),
+            vec![
+                (
+                    "cmd.stage/target".to_string(),
+                    first,
+                    Value::Entity(target.clone())
+                ),
+                (
+                    "cmd.stage/target".to_string(),
+                    second,
+                    Value::Entity(target)
+                ),
+            ]
+        );
+        Ok(())
+    }
+
     /// Two transient-headed rules feeding each other exhaust the round
     /// bound and fail the commit instead of diverging.
     #[dialog_common::test]
     async fn it_errors_on_a_runaway_cascade() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1645,7 +1853,7 @@ mod tests {
     /// installed rule contributes nothing.
     #[dialog_common::test]
     async fn it_fires_only_rules_watching_touched_attributes() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1713,7 +1921,7 @@ mod tests {
     /// never lands.
     #[dialog_common::test]
     async fn it_consumes_a_message_via_a_retract_rule() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1809,7 +2017,7 @@ mod tests {
     async fn it_triggers_through_a_deductive_premise() -> Result<()> {
         use dialog_query::DeductiveRule;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1927,7 +2135,7 @@ mod tests {
     /// cached discovery and the re-scan picks the new rule up.
     #[dialog_common::test]
     async fn it_rescans_triggers_after_a_head_advance() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2017,7 +2225,7 @@ mod tests {
     /// membership).
     #[dialog_common::test]
     async fn it_stops_firing_a_retracted_rule() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2090,7 +2298,7 @@ mod tests {
     /// committed slice within the very commit.
     #[dialog_common::test]
     async fn it_suppresses_a_rule_retracted_in_the_triggering_commit() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2132,7 +2340,7 @@ mod tests {
     /// integrity that makes the reserved-namespace carve-out safe.
     #[dialog_common::test]
     async fn it_ignores_forged_rule_facts() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2183,7 +2391,7 @@ mod tests {
     /// circumstance "rule exists ∧ premises hold" completes there.
     #[dialog_common::test]
     async fn it_applies_an_installed_rule_to_current_state() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2223,7 +2431,7 @@ mod tests {
     /// facts matching the body are retracted at the install commit.
     #[dialog_common::test]
     async fn it_drains_a_backlog_when_a_consumption_rule_installs() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2280,7 +2488,7 @@ mod tests {
     async fn it_reevaluates_when_a_deductive_rule_installs() -> Result<()> {
         use dialog_query::DeductiveRule;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2384,7 +2592,7 @@ mod tests {
         use dialog_artifacts::{Artifact, Instruction};
         use futures_util::stream;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2441,7 +2649,7 @@ mod tests {
         use dialog_artifacts::{Artifact, Instruction};
         use futures_util::stream;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2523,7 +2731,7 @@ mod tests {
         use dialog_artifacts::{Artifact, Instruction};
         use futures_util::stream;
 
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2594,7 +2802,7 @@ mod tests {
     /// head keeps its revision and the command leaves no trace.
     #[dialog_common::test]
     async fn it_commits_nothing_for_an_unconsumed_command() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2635,7 +2843,7 @@ mod tests {
     /// installs a rule must NOT carry it (the next dispatch rescans).
     #[dialog_common::test]
     async fn it_carries_the_footprint_across_rule_free_commits() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2723,7 +2931,8 @@ mod tests {
     /// The entries of `list`, in key order.
     async fn members<Env>(branch: &Branch, env: &Env, list: &Entity) -> Result<Vec<(String, Value)>>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -2755,7 +2964,7 @@ mod tests {
     /// the member.
     #[dialog_common::test]
     async fn it_induces_an_entry_into_a_sequence() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2826,7 +3035,7 @@ mod tests {
     /// records the key it saw.
     #[dialog_common::test]
     async fn it_fires_a_rule_reading_a_collection() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -2889,7 +3098,7 @@ mod tests {
     /// sequence member.
     #[dialog_common::test]
     async fn it_refuses_a_key_of_the_wrong_shape() -> Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

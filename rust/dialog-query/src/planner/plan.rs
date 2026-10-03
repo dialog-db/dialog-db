@@ -188,6 +188,37 @@ impl Plan {
     }
 }
 
+impl Plan {
+    /// Evaluate this plan into a boxed stream sized to its own variant.
+    ///
+    /// [`evaluate`](Self::evaluate) returns one enum spanning every
+    /// variant, as large as the largest of them. A nested-loop fold
+    /// boxes every step, so boxing that enum allocated and copied the
+    /// largest variant's state for each step, a single attribute scan
+    /// included. Boxing per arm sizes each allocation to what the step
+    /// actually runs.
+    pub fn evaluate_boxed<'a, Env, M: Selection + 'a>(
+        self,
+        selection: M,
+        env: &'a Env,
+    ) -> Pin<Box<dyn Selection + 'a>>
+    where
+        Env: crate::Scope<'a>,
+    {
+        match self {
+            // A scan boxes its own stream; boxing it again would only add
+            // an allocation.
+            Plan::Scan(_, query) => query.evaluate(env, selection),
+            Plan::OptionalScan(_, query) => Box::pin(Application::evaluate(*query, selection, env)),
+            Plan::Concept(_, query) => Box::pin(query.evaluate(selection, env)),
+            Plan::Formula(_, query) => Box::pin(query.evaluate(selection)),
+            Plan::Constraint(_, constraint) => Box::pin(constraint.evaluate(selection)),
+            Plan::Resolver(_, query) => Box::pin(query.evaluate(env, selection)),
+            Plan::Negate(_, inner) => Box::pin(negate(*inner, selection, env)),
+        }
+    }
+}
+
 /// Filter a selection by a negated plan: keep each incoming match only
 /// when evaluating `inner` against it yields no rows.
 fn negate<'a, Env, M: Selection + 'a>(

@@ -9,24 +9,43 @@
 //! index nodes carry novelty buffers ON TOP of the entry weight the
 //! ceiling paces), and the canonical tree after an explicit
 //! canonicalize (where the ceiling's 3x bound is the actual claim).
-//! The whole-backend graveyard is reported once for contrast.
+//! Every block the branch ever wrote, the graveyard, is reported once for
+//! contrast.
 //!
 //! ```sh
 //! DIALOG_TREE_MAX_SEGMENT=65536 cargo run --release -p dialog-baseline \
 //!   --example live_census -- 10000
 //! ```
 
-use dialog_artifacts::{ArtifactStoreMut as _, Artifacts, Datum, IndexRoot, Key, State};
-use dialog_baseline::se::{SeLog, se_instructions};
-use dialog_search_tree::{
-    ArchivedNodeBody, Buffer as TreeBuffer, PersistentNode, Value as TreeValue, into_owned,
-};
-use dialog_storage::{
-    Blake3Hash, CborEncoder, Encoder as _, MemoryStorageBackend, StorageBackend as _,
-};
-use futures_util::{StreamExt as _, TryStreamExt as _, stream};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-type TreeNode = PersistentNode<Key, State<Datum>>;
+use dialog_artifacts::{Datum, Key, State};
+use dialog_baseline::metered::Meter;
+use dialog_baseline::nodes::walk;
+use dialog_baseline::repo::DialogRepo;
+use dialog_baseline::se::SeLog;
+use dialog_capability::Provider;
+use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
+use dialog_search_tree::{LoadBlock, NodeBody, Value as TreeValue, into_owned};
+
+/// The size of every distinct block ever written, dead ones included.
+#[derive(Clone, Default)]
+struct Graveyard {
+    sizes: Arc<Mutex<HashMap<Blake3Hash, usize>>>,
+}
+
+impl Meter for Graveyard {
+    fn wrote(&self, block: &[u8]) {
+        let hash = Buffer::from(block.to_vec()).blake3_hash().clone();
+        self.sizes
+            .lock()
+            .expect("graveyard lock")
+            .insert(hash, block.len());
+    }
+
+    fn read(&self, _: &[u8]) {}
+}
 
 fn stats(label: &str, mut sizes: Vec<usize>, ceiling: usize) {
     sizes.sort_unstable();
@@ -56,13 +75,10 @@ fn stats(label: &str, mut sizes: Vec<usize>, ceiling: usize) {
 /// Walks the tree from `root`, splitting block sizes by node kind.
 /// Spilled value blocks hang off leaf keys and are not walked; this is a
 /// census of TREE nodes, the objects the size policy governs.
-async fn census(
-    inner: &MemoryStorageBackend<Blake3Hash, Vec<u8>>,
-    root: Blake3Hash,
-    label: &str,
-    ceiling: usize,
-) -> anyhow::Result<()> {
-    let mut stack = vec![root];
+async fn census<Env>(env: &Env, root: Blake3Hash, label: &str, ceiling: usize) -> anyhow::Result<()>
+where
+    Env: Provider<LoadBlock> + ConditionalSync,
+{
     let mut leaves = Vec::new();
     let mut quiet = Vec::new();
     let mut buffered = Vec::new();
@@ -70,25 +86,18 @@ async fn census(
     // weight) the ceiling actually meters, so enforcement (weight vs
     // ceiling) and drift (encoded bytes vs weight) separate cleanly.
     let mut weights: Vec<(usize, usize)> = Vec::new();
-    while let Some(hash) = stack.pop() {
-        let Some(bytes) = inner.get(&hash).await? else {
-            anyhow::bail!("reachable node missing from storage");
-        };
-        let size = bytes.len();
-        let node = TreeNode::try_from(TreeBuffer::from(bytes))?;
-        match node.body() {
-            ArchivedNodeBody::Index(index) => {
+    let dump = std::env::var("DIALOG_CENSUS_DUMP").is_ok();
+    walk(env, root, |visit| {
+        let size = visit.size;
+        match visit.node.body() {
+            NodeBody::Index(index) => {
                 if index.novelty.is_empty() {
                     quiet.push(size);
                 } else {
                     buffered.push(size);
                 }
-                for at in 0..index.len() {
-                    stack.push(*index.hash_at(at)?.as_bytes());
-                }
             }
-            ArchivedNodeBody::Segment(segment) => {
-                let mut weight = 0usize;
+            NodeBody::Segment(segment) => {
                 let mut key_bytes = 0usize;
                 let mut payload = 0usize;
                 let mut entries = 0usize;
@@ -99,15 +108,17 @@ async fn census(
                     payload += value.payload_weight();
                     entries += 1;
                 }
-                weight += key_bytes + payload;
-                if std::env::var("DIALOG_CENSUS_DUMP").is_ok() {
+                let weight = key_bytes + payload;
+                if dump {
                     println!("LEAF {size} {weight} {entries} {key_bytes} {payload}");
                 }
                 weights.push((size, weight));
                 leaves.push(size);
             }
         }
-    }
+        Ok(())
+    })
+    .await?;
     println!("{label}:");
     stats("leaf segments", leaves, ceiling);
     stats("index (no novelty)", quiet, ceiling);
@@ -154,12 +165,10 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let inner = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let mut store = Artifacts::open("census".into(), inner.clone()).await?;
+        let graveyard = Graveyard::default();
+        let repo = DialogRepo::metered(graveyard.clone()).await?;
         let build_started = std::time::Instant::now();
-        for commit in &log.transactions {
-            store.commit(stream::iter(se_instructions(commit)?)).await?;
-        }
+        repo.replay_se(&log).await?;
         println!(
             "replay: {:.0} us/txn",
             build_started.elapsed().as_micros() as f64 / log.transactions.len() as f64
@@ -170,41 +179,33 @@ fn main() -> anyhow::Result<()> {
             log.fact_count()
         );
 
-        let tree_root = |revision_bytes: Vec<u8>| async move {
-            let root: IndexRoot = CborEncoder.decode(&revision_bytes).await?;
-            anyhow::Ok(*root.index())
-        };
-
-        let revision = store.revision().await?;
-        let bytes = inner
-            .get(&revision)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("revision block missing"))?;
+        let root = repo
+            .root()
+            .expect("the branch has commits, so it has a tree");
         census(
-            &inner,
-            tree_root(bytes).await?,
+            &repo.index(),
+            root,
             "buffered operational tree (after replay)",
             ceiling,
         )
         .await?;
 
-        store.canonicalize().await?;
-        let revision = store.revision().await?;
-        let bytes = inner
-            .get(&revision)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("revision block missing"))?;
-        census(&inner, tree_root(bytes).await?, "canonical tree", ceiling).await?;
+        repo.canonicalize().await?;
+        let root = repo
+            .root()
+            .expect("the branch has commits, so it has a tree");
+        census(&repo.index(), root, "canonical tree", ceiling).await?;
 
-        // The graveyard, for contrast with what the sweep measured: every
-        // block ever written, dead roots and all.
-        use dialog_storage::StorageSource as _;
-        let all: Vec<usize> = inner
-            .read()
-            .map(|entry| entry.map(|(_, bytes)| bytes.len()))
-            .try_collect()
-            .await?;
-        println!("whole backend (dead blocks included):");
+        // The graveyard, for contrast: every block ever written, dead
+        // roots and all.
+        let all: Vec<usize> = graveyard
+            .sizes
+            .lock()
+            .expect("graveyard lock")
+            .values()
+            .copied()
+            .collect();
+        println!("every block written (dead blocks included):");
         stats("all blocks", all, ceiling);
         Ok(())
     })

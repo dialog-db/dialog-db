@@ -1,5 +1,7 @@
 use dialog_common::ConditionalSend;
 use rkyv::Archive;
+use rkyv::api::low::LowValidator;
+use rkyv::bytecheck::CheckBytes;
 use std::fmt::Debug;
 
 use crate::{DialogSearchTreeError, Schema};
@@ -146,7 +148,19 @@ impl<const N: usize> Key for [u8; N] {
 // The `'static` admits keying a buffer's validation memo by the archived
 // type's `TypeId` (see `PersistentNode::body`); values are owned data, so
 // this constrains no implementor.
-pub trait Value: Clone + Debug + Sized + Archive + ConditionalSend + 'static {
+//
+// The archived form must also validate without a shared-pointer validator:
+// tagged nodes are read that way (see `check_tagged_body` in
+// `node/persistent.rs`), which skips building that validator for every node
+// read.
+pub trait Value:
+    Clone
+    + Debug
+    + Sized
+    + Archive<Archived: for<'a> CheckBytes<LowValidator<'a, rkyv::rancor::Error>>>
+    + ConditionalSend
+    + 'static
+{
     /// The weight this value's payload contributes to its entry for byte
     /// pacing (`Manifest::max_segment`): an estimate of the value's encoded
     /// footprint in a leaf, in bytes. A pure function of the value's

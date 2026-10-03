@@ -70,7 +70,7 @@ impl SortOrder {
 /// evaluation, so only a still-free named variable names a sort dimension.
 fn free_variable<T: Typed>(term: &Term<T>) -> Option<String> {
     match term {
-        Term::Variable { name, .. } => name.clone(),
+        Term::Variable { name, .. } => name.as_deref().map(String::from),
         Term::Constant(_) => None,
     }
 }

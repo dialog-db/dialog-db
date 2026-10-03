@@ -2,6 +2,9 @@
 
 use std::str::FromStr;
 
+mod counting;
+pub use counting::*;
+
 use crate::{Artifact, Attribute, Entity, Value};
 use anyhow::Result;
 use base58::ToBase58;

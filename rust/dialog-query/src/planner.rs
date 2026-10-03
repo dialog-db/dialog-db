@@ -184,7 +184,7 @@ mod tests {
     use crate::the;
     use crate::{Cardinality, Proposition, Term, Value};
     use dialog_artifacts::Entity;
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
 
     #[dialog_common::test]
     fn it_plans_two_fact_applications() {
@@ -258,7 +258,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_executes_planned_query() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 

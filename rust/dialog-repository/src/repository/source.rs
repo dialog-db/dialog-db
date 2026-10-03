@@ -11,35 +11,35 @@
 use dialog_artifacts::history::{
     CausalityCache, ContextCache, RevisionRecord, TreeHistory, Version, log,
 };
-use dialog_artifacts::tree::{SpillCache, spill_cache};
+use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache, spill_cache};
 use dialog_artifacts::{Changes, DialogArtifactsError, Entity, SpineSlot, Statement as _};
 use dialog_capability::{Capability, Provider, Subject};
-use dialog_common::{Blake3Hash as NodeHash, ConditionalSync};
+use dialog_common::ConditionalSync;
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
 use dialog_effects::authority::{Operator, OperatorExt as _};
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::concept::query::PlanCache;
-use dialog_search_tree::{Buffer, Cache};
+use dialog_search_tree::Cache;
 use dialog_storage::Blake3Hash;
 use std::sync::Arc;
 
 use crate::rules::{RuleCache, SharedRuleCache};
 use crate::schema::Replica;
-use crate::{
-    Branch, EMPTY_TREE_HASH, Ephemeral, NetworkedIndex, RemoteFallback, RepositoryMemoryExt as _,
-    Revision, Snapshot, Upstream,
-};
+use crate::{Branch, Ephemeral, NetworkedIndex, RemoteFallback, Revision, Snapshot};
 
-/// An owned line to read from: a branch or a snapshot, cheaply cloned
-/// (both share their caches by handle). Query environments hold these
-/// so the only lifetime they carry is the capability environment's.
+/// An owned line to read from: a branch or a snapshot. Query
+/// environments hold these so the only lifetime they carry is the
+/// capability environment's. The line sits behind an [`Arc`]: a query
+/// hands one to every scan it runs, and cloning the line itself copies
+/// its identifiers and cell handles each time.
 #[derive(Debug, Clone)]
 pub(crate) enum Source {
     /// A named line whose head lives in a memory cell.
-    Branch(Branch),
+    Branch(Arc<Branch>),
     /// A detached line whose head is held by value.
-    Snapshot(Snapshot),
+    Snapshot(Arc<Snapshot>),
 }
 
 impl Source {
@@ -54,13 +54,13 @@ impl Source {
 
 impl From<Branch> for Source {
     fn from(branch: Branch) -> Self {
-        Source::Branch(branch)
+        Source::Branch(Arc::new(branch))
     }
 }
 
 impl From<Snapshot> for Source {
     fn from(snapshot: Snapshot) -> Self {
-        Source::Snapshot(snapshot)
+        Source::Snapshot(Arc::new(snapshot))
     }
 }
 
@@ -96,8 +96,8 @@ impl<'a> SourceRef<'a> {
     /// An owned handle to the same line.
     pub(crate) fn to_source(self) -> Source {
         match self {
-            SourceRef::Branch(branch) => Source::Branch(branch.clone()),
-            SourceRef::Snapshot(snapshot) => Source::Snapshot(snapshot.clone()),
+            SourceRef::Branch(branch) => Source::Branch(Arc::new(branch.clone())),
+            SourceRef::Snapshot(snapshot) => Source::Snapshot(Arc::new(snapshot.clone())),
         }
     }
 
@@ -123,61 +123,38 @@ impl<'a> SourceRef<'a> {
         }
     }
 
-    /// The tree root to read: the revision's, or the empty tree's.
-    pub(crate) fn root(self) -> Blake3Hash {
-        match self {
-            SourceRef::Branch(branch) => branch
-                .revision()
-                .map(|revision| *revision.tree.hash())
-                .unwrap_or(EMPTY_TREE_HASH),
-            SourceRef::Snapshot(snapshot) => *snapshot.revision().tree.hash(),
-        }
+    /// The tree root to read: the revision's, or `None` for a branch with
+    /// no commits yet, which has no tree at all.
+    pub(crate) fn root(self) -> Option<Blake3Hash> {
+        self.revision().map(|revision| *revision.tree.hash())
     }
 
-    /// The default upstream: a branch's tracked one. A snapshot tracks
-    /// nothing, so blob reads through it are local (see
-    /// [`SnapshotExport::download`](crate::SnapshotExport::download)
-    /// for hydrating one ahead of time).
-    pub(crate) fn upstream(self) -> Option<Upstream> {
-        match self {
-            SourceRef::Branch(branch) => branch.upstream(),
-            SourceRef::Snapshot(_) => None,
-        }
+    /// Whether a read of this line can fetch what it lacks: whether it
+    /// has a remote to fall back to (see [`Self::fallback`]). Without one
+    /// every block it reads is local already, and warming ahead of
+    /// demand has nothing to do.
+    pub(crate) fn fetches(self) -> bool {
+        !matches!(self.fallback(), RemoteFallback::None)
     }
 
     /// The remote block reads fall back to on a local miss: the first
-    /// remote among a branch's tracked upstreams (a branch whose default
-    /// upstream is local but which tracks a remote must still hydrate
-    /// blocks it holds by reference); none for a snapshot.
+    /// peer among a branch's upstreams, as last resolved (a branch that
+    /// tracks a peer must hydrate blocks it holds by reference); none for
+    /// a snapshot.
     ///
-    /// A remote that fails to load is carried as
+    /// An upstream whose peer could not be resolved is carried as
     /// [`RemoteFallback::Unavailable`] rather than dropped: reads the
-    /// local archive serves still succeed, and a local miss surfaces the
-    /// load failure as its cause instead of a bare not-found.
-    pub(crate) async fn fallback<Env>(self, env: &Env) -> RemoteFallback
-    where
-        Env: Provider<Resolve> + ConditionalSync + 'static,
-    {
-        let SourceRef::Branch(branch) = self else {
-            return RemoteFallback::None;
-        };
-        let upstreams = branch.upstreams();
-        match upstreams.remote_name() {
-            Some(name) => {
-                let loaded = branch
-                    .subject()
-                    .remote(name.to_string())
-                    .load()
-                    .perform(env)
-                    .await;
-                RemoteFallback::from_load(name, loaded)
-            }
-            None => RemoteFallback::None,
+    /// local archive serves still succeed, and a local miss surfaces why
+    /// the peer is unreachable instead of a bare not-found.
+    pub(crate) fn fallback(self) -> RemoteFallback {
+        match self {
+            SourceRef::Branch(branch) => branch.fallback(),
+            SourceRef::Snapshot(_) => RemoteFallback::None,
         }
     }
 
     /// The shared node cache tree reads go through.
-    pub(crate) fn node_cache(self) -> Cache<NodeHash, Buffer> {
+    pub(crate) fn node_cache(self) -> ArtifactNodeCache {
         match self {
             SourceRef::Branch(branch) => branch.node_cache(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().nodes.clone(),
@@ -280,19 +257,24 @@ impl<'a> SourceRef<'a> {
     /// hydrates the history it turns out to need instead of failing with
     /// `IncompleteHistory`. A line tracking no remote reads purely
     /// locally, so an offline replica behaves as it always did.
-    pub(crate) async fn history<'e, Env>(self, env: &'e Env) -> TreeHistory<NetworkedIndex<'e, Env>>
+    pub(crate) fn history<'e, Env>(self, env: &'e Env) -> TreeHistory<NetworkedIndex<'e, Env>>
     where
-        Env: Provider<ArchiveGet>
+        Env: Provider<BlobRead>
+            + Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
             + ConditionalSync
             + 'static,
     {
-        let remote = self.fallback(env).await;
+        let remote = self.fallback();
         let store = NetworkedIndex::new(env, self.archive().index(), remote);
-        TreeHistory::from_root_with_cache(&self.root(), store, self.node_cache())
-            .with_record_cache(self.records())
+        let history = match self.root() {
+            Some(root) => TreeHistory::from_root_with_cache(&root, store, self.node_cache()),
+            // No revision, no tree, no records.
+            None => TreeHistory::empty_with_cache(store, self.node_cache()),
+        };
+        history.with_record_cache(self.records())
     }
 
     /// This line's committed history, newest first — at most `limit`
@@ -303,7 +285,8 @@ impl<'a> SourceRef<'a> {
         limit: usize,
     ) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError>
     where
-        Env: Provider<ArchiveGet>
+        Env: Provider<BlobRead>
+            + Provider<ArchiveGet>
             + Provider<ArchivePut>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -313,7 +296,7 @@ impl<'a> SourceRef<'a> {
         let Some(head) = self.revision() else {
             return Ok(Vec::new());
         };
-        log(&head.version(), &self.history(env).await, limit).await
+        log(&head.version(), &self.history(env), limit).await
     }
 }
 
@@ -325,7 +308,7 @@ impl<'a> SourceRef<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct Caches {
     /// Tree nodes by hash, so blocks one read fetched stay warm for the next.
-    pub(crate) nodes: Cache<NodeHash, Buffer>,
+    pub(crate) nodes: ArtifactNodeCache,
     /// Spilled value blocks by content reference.
     pub(crate) spills: SpillCache,
     /// Deductive-rule discovery (by head) and hydrated bodies (by entity).

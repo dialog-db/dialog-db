@@ -594,6 +594,49 @@ pub(super) async fn read_optional(
     Ok(Some(Uint8Array::new(&buffer).to_vec()))
 }
 
+pub(super) async fn files(handle: &FileSystemHandle) -> Result<Vec<String>, FileSystemError> {
+    let segments = handle.segments()?;
+    let Some(directory) = navigate_directory(&handle.root().handle, &segments, false).await? else {
+        return Ok(Vec::new());
+    };
+
+    let mut files = Vec::new();
+    let mut pending = vec![(directory, String::new())];
+    while let Some((directory, prefix)) = pending.pop() {
+        let entries = directory.values();
+        loop {
+            let next = entries
+                .next()
+                .map_err(|e| js_io_error("listing directory", e))?;
+            let next: js_sys::IteratorNext = JsFuture::from(next)
+                .await
+                .map_err(|e| js_io_error("listing directory", e))?
+                .unchecked_into();
+            if next.done() {
+                break;
+            }
+            let entry: web_sys::FileSystemHandle = next
+                .value()
+                .dyn_into()
+                .map_err(|_| FileSystemError::Io("expected FileSystemHandle".into()))?;
+            let name = entry.name();
+            let path = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            match entry.kind() {
+                web_sys::FileSystemHandleKind::Directory => {
+                    pending.push((entry.unchecked_into::<FileSystemDirectoryHandle>(), path));
+                }
+                _ => files.push(path),
+            }
+        }
+    }
+
+    Ok(files)
+}
+
 /// On the web, a plain `write` is already atomic: `createWritable().close()`
 /// stages the data and swaps it into place on close (and the sync-access path
 /// truncates+writes a single handle), so a reader never observes a partial
@@ -920,6 +963,21 @@ pub(super) async fn list(handle: &FileSystemHandle) -> Result<Vec<String>, FileS
         }
     }
     Ok(names)
+}
+
+pub(super) async fn size(handle: &FileSystemHandle) -> Result<Option<u64>, FileSystemError> {
+    let Some((parent, name)) = handle.navigate_parent(false).await? else {
+        return Ok(None);
+    };
+    let Some(file_handle) = get_file_handle(&parent, &name, false).await? else {
+        return Ok(None);
+    };
+    let file: web_sys::File = JsFuture::from(file_handle.get_file())
+        .await
+        .map_err(|e| js_io_error("getting file", e))?
+        .dyn_into()
+        .map_err(|_| FileSystemError::Io("expected File".into()))?;
+    Ok(Some(file.size() as u64))
 }
 
 pub(super) async fn exists(handle: &FileSystemHandle) -> bool {
@@ -1330,6 +1388,44 @@ mod tests {
         let second = b"short".to_vec();
         super::write_via_sync_access(&file_handle, &second).await?;
         assert_eq!(super::read_optional(&handle).await?, Some(second));
+        Ok(())
+    }
+
+    /// Listing walks OPFS directories: every cell under the space,
+    /// nested spaces included, and nothing from a sibling that only
+    /// shares its name as a prefix.
+    #[dialog_common::test]
+    async fn it_lists_the_cells_under_a_space() -> anyhow::Result<()> {
+        let provider = opfs_provider("web-memory-list").await;
+        let did = unique_did().await;
+
+        for (space, cell) in [
+            ("remote/origin", "address"),
+            ("remote/origin", "branch/main/revision"),
+            ("remote", "top"),
+            ("remotes", "elsewhere"),
+        ] {
+            did.clone()
+                .writer()
+                .memory()
+                .space(space)
+                .cell(cell)
+                .publish(b"x".to_vec(), None)
+                .perform(&provider)
+                .await?;
+        }
+
+        let listed = did
+            .reader()
+            .memory()
+            .space("remote")
+            .list()
+            .perform(&provider)
+            .await?;
+        assert_eq!(
+            listed,
+            vec!["origin/address", "origin/branch/main/revision", "top"]
+        );
         Ok(())
     }
 }

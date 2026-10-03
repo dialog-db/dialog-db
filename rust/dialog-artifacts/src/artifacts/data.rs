@@ -23,10 +23,11 @@ use crate::ValueType;
 use crate::{Artifact, Cause, history::Version};
 
 #[cfg(doc)]
-use crate::{Artifacts, Attribute, Entity, Value};
+use crate::{Attribute, Entity, Value, tree::ArtifactTree, tree::Stamp};
 
 /// A [`Datum`] is the per-entry payload stored against a key in the
-/// [`Artifacts`] indexes: the parts of a fact the key does not already carry.
+/// artifact indexes ([`ArtifactTree`]): the parts of a fact the key does not
+/// already carry.
 #[derive(
     Clone, Debug, PartialEq, Serialize, Deserialize, Archive, rkyv::Serialize, rkyv::Deserialize,
 )]
@@ -45,7 +46,7 @@ pub struct Datum {
     /// The [`Version`] of the revision that produced this [`Datum`], when it
     /// was committed through a version-tagged write (see
     /// [`ArtifactTreeExt::apply_versioned`](crate::tree::ArtifactTreeExt::apply_versioned)).
-    /// Data committed directly through [`Artifacts`] carries no version.
+    /// Data written unversioned ([`Stamp::Unversioned`]) carries no version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<Version>,
     /// Additional claim versions collapsed into this entry. The fact

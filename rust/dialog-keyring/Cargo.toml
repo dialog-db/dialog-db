@@ -12,7 +12,9 @@ license.workspace = true
 # it has to be software AES on both targets. Same algorithm either way, so the
 # two paths produce identical bytes -- asserted in `tests/sealing.rs`.
 aes-gcm = { workspace = true }
+async-trait = { workspace = true }
 blake3 = { workspace = true }
+dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-search-tree = { workspace = true }

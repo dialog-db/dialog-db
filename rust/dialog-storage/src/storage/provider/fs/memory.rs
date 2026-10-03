@@ -9,8 +9,8 @@
 use super::{FileSystem, FileSystemError, FileSystemHandle};
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
-use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
+use dialog_effects::memory::prelude::{ListExt, PublishExt, ResolveExt, RetractExt};
+use dialog_effects::memory::{Edition, List, MemoryError, Publish, Resolve, Retract, Version};
 
 const MEMORY: &str = "memory";
 
@@ -187,6 +187,25 @@ impl Provider<Retract> for FileSystem {
         // Delete the file
         cell_handle.remove().await?;
         Ok(())
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<List> for FileSystem {
+    async fn execute(&self, effect: Capability<List>) -> Result<Vec<String>, MemoryError> {
+        let mut paths: Vec<String> = self
+            .memory()?
+            .resolve(effect.space())?
+            .files()
+            .await?
+            .into_iter()
+            // The lock a CAS holds, and the staging file an atomic write
+            // renames into place, sit beside the cell; neither is one.
+            .filter(|path| !path.ends_with(".lock") && !path.ends_with(".tmp"))
+            .collect();
+        paths.sort();
+        Ok(paths)
     }
 }
 
@@ -806,6 +825,56 @@ mod tests {
             .await?;
 
         assert!(!v2.is_empty());
+        Ok(())
+    }
+
+    /// Listing a space names every cell under it, nested spaces
+    /// included, by path relative to it, and nothing from a space that
+    /// only shares its name as a prefix.
+    #[dialog_common::test]
+    async fn it_lists_the_cells_under_a_space() -> anyhow::Result<()> {
+        let location = StorageLocation::new(Directory::Temp, unique_name("fs-memory-list"));
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
+
+        for (space, cell) in [
+            ("remote/origin", "address"),
+            ("remote/origin", "branch/main/revision"),
+            ("remote", "top"),
+            ("remotes", "elsewhere"),
+            ("branch/main", "revision"),
+        ] {
+            did.clone()
+                .writer()
+                .memory()
+                .space(space)
+                .cell(cell)
+                .publish(b"x".to_vec(), None)
+                .perform(&provider)
+                .await?;
+        }
+
+        let listed = did
+            .clone()
+            .reader()
+            .memory()
+            .space("remote")
+            .list()
+            .perform(&provider)
+            .await?;
+        assert_eq!(
+            listed,
+            vec!["origin/address", "origin/branch/main/revision", "top"]
+        );
+
+        let missing = did
+            .reader()
+            .memory()
+            .space("nowhere")
+            .list()
+            .perform(&provider)
+            .await?;
+        assert!(missing.is_empty(), "{missing:?}");
         Ok(())
     }
 }

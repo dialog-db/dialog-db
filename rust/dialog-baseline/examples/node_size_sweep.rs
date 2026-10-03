@@ -11,8 +11,8 @@
 //! - the block-size distribution the setting actually produces
 //! - cold-read fetch profiles: block fetches + bytes for a point read
 //!   (EAV), an entity load (`of` scan), and a value-indexed lookup (VAE),
-//!   each against a freshly opened store with an empty node cache — the
-//!   partial-replication shape, with the store's own open cost reported
+//!   each against a freshly loaded branch with empty caches — the
+//!   partial-replication shape, with the branch's own load cost reported
 //!   separately
 //!
 //! Drive it across settings with a shell loop, e.g.:
@@ -24,38 +24,60 @@
 //! done
 //! ```
 
+use std::collections::HashMap;
 use std::str::FromStr as _;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStoreMut as _, ArtifactViewStream as _, Artifacts,
-    Attribute, Entity, Value,
-};
-use dialog_baseline::se::{SeLog, se_instructions};
-use dialog_storage::{Blake3Hash, MeasuredStorage, MemoryStorageBackend, StorageSource as _};
-use futures_util::{StreamExt as _, TryStreamExt as _, stream};
+use dialog_artifacts::selector::Constrained;
+use dialog_artifacts::{ArtifactSelector, Attribute, Entity, Value};
+use dialog_baseline::metered::{Meter, Tally};
+use dialog_baseline::repo::{DialogRepo, MeteredRepo};
+use dialog_baseline::se::SeLog;
+use dialog_common::{Blake3Hash, Buffer};
 
-const IDENTIFIER: &str = "node-size-sweep";
+/// Counts the branch's archive traffic and keeps the size of every
+/// distinct block it ever wrote.
+#[derive(Clone, Default)]
+struct Sweep {
+    tally: Tally,
+    written: Arc<Mutex<HashMap<Blake3Hash, usize>>>,
+}
 
-/// Runs each selector against a freshly opened store (empty node cache)
-/// and reports the average block fetches and bytes per query — the
+impl Meter for Sweep {
+    fn wrote(&self, block: &[u8]) {
+        self.tally.wrote(block);
+        let hash = Buffer::from(block.to_vec()).blake3_hash().clone();
+        self.written
+            .lock()
+            .expect("written lock")
+            .insert(hash, block.len());
+    }
+
+    fn read(&self, block: &[u8]) {
+        self.tally.read(block);
+    }
+}
+
+/// Runs each selector against a freshly loaded branch (empty caches) and
+/// reports the average block fetches and bytes per query — the
 /// partial-replication cold-read shape.
 async fn profile(
-    backend: &MeasuredStorage<MemoryStorageBackend<Blake3Hash, Vec<u8>>>,
+    repo: &MeteredRepo<Sweep>,
+    tally: &Tally,
     label: &str,
-    selectors: Vec<ArtifactSelector<dialog_artifacts::selector::Constrained>>,
+    selectors: Vec<ArtifactSelector<Constrained>>,
 ) -> anyhow::Result<()> {
     let mut fetches = 0usize;
     let mut bytes = 0usize;
     let mut rows = 0usize;
     let queries = selectors.len();
     for selector in selectors {
-        let cold: Artifacts<_> = Artifacts::open(IDENTIFIER.into(), backend.clone()).await?;
-        let before = (backend.reads(), backend.read_bytes());
-        let found: Vec<Artifact> = cold.select(selector).owned().try_collect().await?;
-        rows += found.len();
-        fetches += backend.reads() - before.0;
-        bytes += backend.read_bytes() - before.1;
+        let cold = repo.reopen().await?;
+        let before = (tally.reads(), tally.read_bytes());
+        rows += repo.collect_from(&cold, selector).await?.len();
+        fetches += tally.reads() - before.0;
+        bytes += tally.read_bytes() - before.1;
     }
     println!(
         "  {label}: {:.1} fetches, {:.0} bytes per query ({} queries, {} rows)",
@@ -100,27 +122,27 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let inner = MemoryStorageBackend::<Blake3Hash, Vec<u8>>::default();
-        let backend = MeasuredStorage::new(inner.clone());
-        let mut store = Artifacts::open(IDENTIFIER.into(), backend.clone()).await?;
+        let sweep = Sweep::default();
+        let tally = sweep.tally.clone();
+        let repo = DialogRepo::metered(sweep.clone()).await?;
 
         // Build: buffered replay, then canonicalize (the bulk-import shape;
         // a cold replica's dataset is dominated by canonical nodes).
         let replay_started = Instant::now();
-        for commit in &log.transactions {
-            store.commit(stream::iter(se_instructions(commit)?)).await?;
-        }
+        repo.replay_se(&log).await?;
         let replay = replay_started.elapsed();
         let canonicalize_started = Instant::now();
-        store.canonicalize().await?;
+        repo.canonicalize().await?;
         let canonicalize = canonicalize_started.elapsed();
 
-        // Block census over the raw backend.
-        let mut sizes: Vec<usize> = inner
-            .read()
-            .map(|entry| entry.map(|(_, bytes)| bytes.len()))
-            .try_collect()
-            .await?;
+        // Block census over every block the branch wrote.
+        let mut sizes: Vec<usize> = sweep
+            .written
+            .lock()
+            .expect("written lock")
+            .values()
+            .copied()
+            .collect();
         sizes.sort_unstable();
         let total: usize = sizes.iter().sum();
 
@@ -144,21 +166,21 @@ fn main() -> anyhow::Result<()> {
             sizes.last().copied().unwrap_or(0),
         );
 
-        // Cold-read profiles: each query runs on a freshly opened store
-        // (empty node cache), fetch counts and bytes read from the
-        // measured backend. The open itself (head + root resolution) is
+        // Cold-read profiles: each query runs on a freshly loaded branch
+        // (empty caches), fetch counts and bytes read from the metered
+        // archive traffic. The load itself (head + root resolution) is
         // reported once, separately.
         let (open_fetches, open_bytes) = {
-            let before = (backend.reads(), backend.read_bytes());
-            let cold: Artifacts<_> = Artifacts::open(IDENTIFIER.into(), backend.clone()).await?;
+            let before = (tally.reads(), tally.read_bytes());
+            let cold = repo.reopen().await?;
             // Force the root fetch that a first query would pay.
             let selector = ArtifactSelector::new()
                 .the(Attribute::from_str("se.post/kind")?)
                 .of(Entity::from_str(&titled[0])?);
-            let _: Vec<Artifact> = cold.select(selector).owned().try_collect().await?;
-            (backend.reads() - before.0, backend.read_bytes() - before.1)
+            repo.collect_from(&cold, selector).await?;
+            (tally.reads() - before.0, tally.read_bytes() - before.1)
         };
-        println!("  cold open + first point query: {open_fetches} fetches, {open_bytes} bytes");
+        println!("  cold load + first point query: {open_fetches} fetches, {open_bytes} bytes");
 
         let title_gets = titled
             .iter()
@@ -168,16 +190,17 @@ fn main() -> anyhow::Result<()> {
                     .of(Entity::from_str(post)?))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
-        profile(&backend, "point get (title)", title_gets).await?;
+        profile(&repo, &tally, "point get (title)", title_gets).await?;
 
         let entity_loads = titled
             .iter()
             .map(|post| Ok(ArtifactSelector::new().of(Entity::from_str(post)?)))
             .collect::<anyhow::Result<Vec<_>>>()?;
-        profile(&backend, "entity load (of scan)", entity_loads).await?;
+        profile(&repo, &tally, "entity load (of scan)", entity_loads).await?;
 
         profile(
-            &backend,
+            &repo,
+            &tally,
             "kind lookup (VAE)",
             vec![
                 ArtifactSelector::new()

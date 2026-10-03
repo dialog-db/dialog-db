@@ -1,20 +1,23 @@
 use base58::ToBase58;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::{Artifact, ArtifactSelector, ArtifactView, DialogArtifactsError};
+use dialog_artifacts::{
+    ArchiveReader, Artifact, ArtifactSelector, ArtifactStream, ArtifactView, DialogArtifactsError,
+};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
+use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
-use dialog_search_tree::{Buffer, DialogSearchTreeError};
-use dialog_storage::{Blake3Hash, DialogStorageError, StorageBackend};
+use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest, PersistentNode};
+use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
 use dialog_effects::archive::prelude::{ArchiveScope, CatalogScope};
 
 use crate::repository::source::SourceRef;
-use crate::{Branch, EMPTY_TREE_HASH, Index, NetworkedIndex, RemoteSite};
+use crate::{Branch, Index, NetworkedIndex, RemoteSite};
 
 /// Command struct for selecting artifacts from a branch or a snapshot.
 pub struct Select<'a> {
@@ -37,7 +40,7 @@ impl<'a> Select<'a> {
         Self { source, selector }
     }
 
-    fn tree_hash(&self) -> Blake3Hash {
+    fn tree_hash(&self) -> Option<Blake3Hash> {
         self.source.root()
     }
 
@@ -45,6 +48,35 @@ impl<'a> Select<'a> {
     pub fn catalog(&self) -> CatalogScope {
         ArchiveScope::new(self.source.subject()).index()
     }
+}
+
+/// The format [`Manifest`] of a line's tree: the manifest its root node
+/// carries, or, for a line with no tree yet, the one its empty tree holds
+/// (the format its first commit creates the tree under). Rows scanned from
+/// the line are keyed under it, so anything compared against them — an
+/// overlay row, a retracted fact, a demanded range — is keyed under it too.
+pub(crate) async fn line_manifest<Env>(
+    source: SourceRef<'_>,
+    env: &Env,
+) -> Result<Manifest, DialogArtifactsError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<crate::Hydrate>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    let node_cache = source.node_cache();
+    let tree = match source.root() {
+        Some(root) => Index::from_hash_with_cache(NodeHash::from(root), node_cache),
+        None => Index::empty_with_cache(node_cache),
+    };
+    let remote = source.fallback();
+    let store = NetworkedIndex::new(env, ArchiveScope::new(source.subject()).index(), remote);
+    let storage = store;
+    Ok(tree.manifest(&storage).await?)
 }
 
 impl<'a> Select<'a> {
@@ -78,7 +110,8 @@ impl Select<'_> {
         env: &Env,
     ) -> Result<impl Stream<Item = Result<ArtifactView, DialogArtifactsError>>, DialogSearchTreeError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -92,28 +125,15 @@ impl Select<'_> {
         // than swallowed: the local archive alone may still satisfy the
         // query, but a read that misses fails with the load failure as
         // its cause instead of a bare not-found.
-        let remote = self.source.fallback(env).await;
+        let remote = self.source.fallback();
         let store = NetworkedIndex::new(env, self.catalog(), remote);
         self.execute(store).await
     }
 
-    /// Execute the select against the given content-addressed store.
-    ///
-    /// Unlike [`perform`](Self::perform) this does not pick a store for
-    /// you — useful when callers (e.g. query sessions) want to supply a
-    /// custom one such as a pre-configured [`NetworkedIndex`].
-    pub async fn execute<'s, S>(
-        self,
-        store: S,
-    ) -> Result<
-        impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's,
-        DialogSearchTreeError,
-    >
+    /// The tree this select scans, with its root block probed eagerly.
+    async fn probed_tree<S>(&self, store: &S) -> Result<Index, DialogSearchTreeError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync
-            + 's,
+        S: ArchiveReader + ConditionalSync,
     {
         // Tree hydration is lazy (nodes load on demand during the scan),
         // but unreachable branches should fail here rather than midway
@@ -129,27 +149,48 @@ impl Select<'_> {
         // makes the first select warm the cache and the rest hit it, while
         // still fetching (and, through `NetworkedIndex`, replicating) on a
         // genuine miss and failing fast when the root is truly absent.
-        let tree_hash = self.tree_hash();
         let node_cache = self.source.node_cache();
-        if tree_hash != EMPTY_TREE_HASH {
-            node_cache
-                .get_or_fetch(&NodeHash::from(tree_hash), async |hash| {
-                    store
-                        .get(hash.as_bytes())
-                        .await
-                        .map(|maybe| maybe.map(Buffer::from))
-                })
-                .await?
-                .ok_or_else(|| {
-                    DialogSearchTreeError::Node(format!(
-                        "Block not found in storage: {}",
-                        tree_hash.to_base58(),
-                    ))
-                })?;
-        }
+        Ok(match self.tree_hash() {
+            Some(tree_hash) => {
+                node_cache
+                    .get_or_fetch(&NodeHash::from(tree_hash), async |hash| {
+                        LoadBlock::new(hash.clone())
+                            .perform(store)
+                            .await?
+                            .map(PersistentNode::try_from)
+                            .transpose()
+                    })
+                    .await?
+                    .ok_or_else(|| {
+                        DialogSearchTreeError::Node(format!(
+                            "Block not found in storage: {}",
+                            tree_hash.to_base58(),
+                        ))
+                    })?;
+                Index::from_hash_with_cache(NodeHash::from(tree_hash), node_cache)
+            }
+            // No revision means no tree to probe or scan: the select runs
+            // over the empty index and yields nothing.
+            None => Index::empty_with_cache(node_cache),
+        })
+    }
 
-        let tree = Index::from_hash_with_cache(NodeHash::from(tree_hash), node_cache);
-
+    /// Execute the select against the given content-addressed store.
+    ///
+    /// Unlike [`perform`](Self::perform) this does not pick a store for
+    /// you — useful when callers (e.g. query sessions) want to supply a
+    /// custom one such as a pre-configured [`NetworkedIndex`].
+    pub async fn execute<'s, S>(
+        self,
+        store: S,
+    ) -> Result<
+        impl Stream<Item = Result<ArtifactView, DialogArtifactsError>> + 's + use<'s, S>,
+        DialogSearchTreeError,
+    >
+    where
+        S: ArchiveReader + Clone + ConditionalSync + 's,
+    {
+        let tree = self.probed_tree(&store).await?;
         // EAV/AEV/VAE dispatch + per-entry filtering lives in the shared
         // `ArtifactTreeExt::scan` so branch scans and Changes-overlay
         // scans agree on key order — that adjacency invariant is what
@@ -157,11 +198,31 @@ impl Select<'_> {
         Ok(tree.scan(store, self.source.spill_cache(), self.selector))
     }
 
+    /// [`execute`](Self::execute), with the scan stream built directly in
+    /// its box. The stream is several KiB of state; returned by value it
+    /// was copied through each future and result it passed on the way to
+    /// the box a query environment keeps it in.
+    pub(crate) async fn execute_boxed<'s, S>(
+        self,
+        store: S,
+    ) -> Result<ArtifactStream<'s>, DialogSearchTreeError>
+    where
+        S: ArchiveReader + Clone + ConditionalSync + 's,
+    {
+        let tree = self.probed_tree(&store).await?;
+        Ok(Box::pin(tree.scan(
+            store,
+            self.source.spill_cache(),
+            self.selector,
+        )))
+    }
+
     /// Estimate this selector's range size, picking a store the same way
     /// [`perform`](Self::perform) does. See [`estimate`](Self::estimate).
     pub async fn estimate_perform<Env>(self, env: &Env) -> Result<Option<u64>, DialogArtifactsError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -169,7 +230,7 @@ impl Select<'_> {
             + ConditionalSync
             + 'static,
     {
-        let remote = self.source.fallback(env).await;
+        let remote = self.source.fallback();
         let store = NetworkedIndex::new(env, self.catalog(), remote);
         self.estimate(store).await
     }
@@ -186,14 +247,11 @@ impl Select<'_> {
     /// needs. Returns `None` for an empty tree.
     pub async fn estimate<S>(self, store: S) -> Result<Option<u64>, DialogArtifactsError>
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync,
+        S: ArchiveReader + Clone + ConditionalSync,
     {
-        let tree_hash = self.tree_hash();
-        if tree_hash == EMPTY_TREE_HASH {
+        let Some(tree_hash) = self.tree_hash() else {
             return Ok(None);
-        }
+        };
         let tree = Index::from_hash_with_cache(NodeHash::from(tree_hash), self.source.node_cache());
         tree.estimate(store, self.selector).await
     }
@@ -210,32 +268,9 @@ impl Select<'_> {
         DialogSearchTreeError,
     >
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync
-            + 's,
+        S: ArchiveReader + Clone + ConditionalSync + 's,
     {
-        // The same eager root probe as `execute`; see the comment there.
-        let tree_hash = self.tree_hash();
-        let node_cache = self.source.node_cache();
-        if tree_hash != EMPTY_TREE_HASH {
-            node_cache
-                .get_or_fetch(&NodeHash::from(tree_hash), async |hash| {
-                    store
-                        .get(hash.as_bytes())
-                        .await
-                        .map(|maybe| maybe.map(Buffer::from))
-                })
-                .await?
-                .ok_or_else(|| {
-                    DialogSearchTreeError::Node(format!(
-                        "Block not found in storage: {}",
-                        tree_hash.to_base58(),
-                    ))
-                })?;
-        }
-
-        let tree = Index::from_hash_with_cache(NodeHash::from(tree_hash), node_cache);
+        let tree = self.probed_tree(&store).await?;
         Ok(tree.scan_owned(store, self.source.spill_cache(), self.selector))
     }
 }
@@ -264,7 +299,8 @@ impl SelectOwned<'_> {
         env: &Env,
     ) -> Result<impl Stream<Item = Result<Artifact, DialogArtifactsError>>, DialogSearchTreeError>
     where
-        Env: Provider<Get>
+        Env: Provider<BlobRead>
+            + Provider<Get>
             + Provider<Put>
             + Provider<Resolve>
             + Provider<crate::Hydrate>
@@ -274,7 +310,7 @@ impl SelectOwned<'_> {
     {
         // The same remote fallback as `Select::perform`; see the comment
         // there.
-        let remote = self.0.source.fallback(env).await;
+        let remote = self.0.source.fallback();
         let store = NetworkedIndex::new(env, self.catalog(), remote);
         self.execute(store).await
     }
@@ -289,11 +325,11 @@ impl SelectOwned<'_> {
         DialogSearchTreeError,
     >
     where
-        S: StorageBackend<Key = Blake3Hash, Value = Vec<u8>, Error = DialogStorageError>
-            + Clone
-            + ConditionalSync
-            + 's,
+        S: ArchiveReader + Clone + ConditionalSync + 's,
     {
         self.0.execute_owned(store).await
     }
 }
+
+#[cfg(test)]
+mod tests;

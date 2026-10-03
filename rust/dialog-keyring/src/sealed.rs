@@ -89,8 +89,8 @@ impl Sealed {
 
     /// Seal `plain` without awaiting.
     ///
-    /// The tree persists nodes in a synchronous call, so the write path needs
-    /// this rather than [`seal`](Self::seal). Same algorithm, same derived
+    /// What [`NodeSealer`](crate::NodeSealer) seals blocks with, once its
+    /// keys are resolved, rather than [`seal`](Self::seal). Same algorithm, same derived
     /// nonce, same additional data — the bytes are identical, which
     /// `sync_and_async_sealing_agree` pins.
     ///

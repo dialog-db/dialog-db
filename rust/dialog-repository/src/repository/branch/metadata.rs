@@ -14,7 +14,7 @@
 
 use base58::ToBase58;
 use dialog_artifacts::{Statement, Update};
-use dialog_capability::Capability;
+use dialog_capability::{Capability, Did};
 use dialog_effects::authority::{Operator, OperatorExt as _};
 
 use crate::Branch;
@@ -70,7 +70,26 @@ impl Branch {
     /// [`Identify`](dialog_effects::authority::Identify)) carries both
     /// the profile and operator DIDs.
     pub fn metadata(&self, operator: &Capability<Operator>) -> BranchMetadata {
-        let replica = Replica::new(operator.profile().clone(), self.of().clone());
+        let profile = operator.profile();
+        let revision = self.revision();
+        let mut cache = self
+            .metadata_cache
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some((cached_profile, cached_revision, metadata)) = cache.as_ref()
+            && cached_profile == profile
+            && *cached_revision == revision
+        {
+            return metadata.clone();
+        }
+        let metadata = self.derive_metadata(profile);
+        *cache = Some((profile.clone(), revision, metadata.clone()));
+        metadata
+    }
+
+    /// Derive the metadata [`metadata`](Self::metadata) memoizes.
+    fn derive_metadata(&self, profile: &Did) -> BranchMetadata {
+        let replica = Replica::new(profile.clone(), self.of().clone());
         let branch = BranchConcept::new(&replica, self.name());
         let revision = self.revision().map(|revision| {
             let tree_bytes: &[u8] = revision.tree.hash();

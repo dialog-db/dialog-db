@@ -1,7 +1,8 @@
-//! Tree-node inspection: the [`Load`] effect and pure node decoders.
+//! Tree-node inspection: pure decoders over node blocks the tree's
+//! [`LoadBlock`] command fetches.
 //!
 //! Together these back the query engine's tree procedures (`tree/node`,
-//! `tree/span`, `tree/key`, `tree/manifest`): [`Load`] fetches a raw
+//! `tree/span`, `tree/key`, `tree/manifest`): [`LoadBlock`] fetches a raw
 //! node block by content hash through the evaluation environment, and
 //! the `inspect_*` functions project the node's *logical model* out of
 //! the fetched bytes without touching storage:
@@ -17,19 +18,20 @@
 //!
 //! # Why this is sound under differential subscriptions
 //!
-//! [`Load`] is *idempotent*: a node block is content-addressed, so the
+//! [`LoadBlock`] is *idempotent*: a node block is content-addressed, so the
 //! bytes behind a hash — and therefore every row projected from them —
 //! can never change. A different tree is a different hash. This includes
 //! buffered novelty: a node's hash covers the ops riding on it. Rows
-//! derived through `Load` are permanent; they can become unnecessary,
+//! derived through `LoadBlock` are permanent; they can become unnecessary,
 //! never wrong, so no invalidation machinery is required for them. The
 //! only mutable fact in the domain is "what is the current root?", which
 //! reaches queries as an ordinary tracked fact (`dialog.branch/tree`),
-//! never through this effect. Contrast a locality probe ("is this block
+//! never through this command. Contrast a locality probe ("is this block
 //! cached here?"): that answer changes without a commit, is *not*
 //! idempotent, and must not be served through this module.
 
-use dialog_capability::Command;
+#[cfg(doc)]
+use dialog_search_tree::LoadBlock;
 use dialog_search_tree::{Buffer, Distribution, Geometric, Manifest, PersistentNode, Rank};
 use dialog_storage::Blake3Hash;
 use rkyv::deserialize;
@@ -42,23 +44,9 @@ use crate::{
     VALUE_KEY_TAG, Value, ValueKey, decode_value,
 };
 
-/// The raw content hash a [`Load`] resolves: the same 32 bytes a
+/// The raw content hash a [`LoadBlock`] resolves: the same 32 bytes a
 /// revision's tree reference and an index span's child hash carry.
 pub type NodeReference = Blake3Hash;
-
-/// Command for loading a raw tree node block by its content hash.
-///
-/// The counterpart of [`Select`](crate::Select) for the tree procedures:
-/// where `Select` scans key ranges and yields artifacts, `Load` fetches
-/// one content-addressed block for structural inspection. `Ok(None)`
-/// means the block is not available anywhere the provider can reach —
-/// the unreplicated-contributes-nothing convention.
-pub struct Load;
-
-impl Command for Load {
-    type Input = Blake3Hash;
-    type Output = Result<Option<Vec<u8>>, DialogArtifactsError>;
-}
 
 /// The node type the artifact tree persists, instantiated for inspection.
 type ArtifactNode = PersistentNode<Key, State<Datum>>;
@@ -175,7 +163,8 @@ pub struct BlobEntrySummary {
 /// self-describing root and mixed-format trees are visible per node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestSummary {
-    /// Format version; pins how the rest of the node is interpreted.
+    /// Node layout version; pins how the rest of the node is interpreted
+    /// (1 for the legacy untagged layout, 2 for the tagged layout).
     pub version: u64,
     /// Branching parameter `n`; expected fanout is `2^n`.
     pub fanout_n: u64,
@@ -193,6 +182,12 @@ pub struct ManifestSummary {
     /// Which candidate seam a forced cut anchors at (0 = rendezvous,
     /// 1 = hybrid).
     pub anchor_selector: u64,
+    /// Weight charged per leaf entry beyond its key and value bytes.
+    pub entry_overhead: u64,
+    /// Weight the per-key cut floor charges beyond a key's bytes.
+    pub key_overhead: u64,
+    /// Weight charged per index link beyond its separator and child hash.
+    pub link_overhead: u64,
 }
 
 /// Decode the node behind `bytes` into its [`NodeSummary`].
@@ -383,7 +378,7 @@ pub fn inspect_manifest(bytes: Vec<u8>) -> Result<ManifestSummary, DialogArtifac
     let node = ArtifactNode::try_from(Buffer::from(bytes))?;
     let manifest: Manifest = node.manifest()?;
     Ok(ManifestSummary {
-        version: manifest.version as u64,
+        version: node.layout_version(),
         fanout_n: manifest.fanout_n as u64,
         max_separator: manifest.max_separator as u64,
         inline_n: manifest.inline_n as u64,
@@ -391,6 +386,9 @@ pub fn inspect_manifest(bytes: Vec<u8>) -> Result<ManifestSummary, DialogArtifac
         max_segment: manifest.max_segment as u64,
         frame_ceiling_factor: manifest.frame_ceiling_factor as u64,
         anchor_selector: manifest.anchor_selector as u64,
+        entry_overhead: manifest.entry_overhead as u64,
+        key_overhead: manifest.key_overhead as u64,
+        link_overhead: manifest.link_overhead as u64,
     })
 }
 
@@ -667,7 +665,7 @@ mod tests {
         assert!(spans[1].until.is_empty(), "last span is +∞");
 
         let manifest = inspect_manifest(bytes)?;
-        assert_eq!(manifest.version, Manifest::default().version as u64);
+        assert_eq!(manifest.version, dialog_search_tree::TAGGED_LAYOUT);
         assert_eq!(manifest.fanout_n, Manifest::default().fanout_n as u64);
         Ok(())
     }

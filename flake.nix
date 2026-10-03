@@ -81,7 +81,6 @@
         );
 
         inherit (rustHelpers)
-          buildWasmCrate
           buildTestArchive
           cargoChecks
           rustToolchain
@@ -121,110 +120,6 @@
           }
           // lib.optionalAttrs stdenv.isDarwin {
             "WASM_BINDGEN_TEST_WEBDRIVER_JSON" = webdriverConfig;
-          };
-
-        dialog-artifacts-web = buildWasmCrate {
-          pname = "dialog-artifacts";
-
-          buildPhase = ''
-            # NOTE: wasm-pack currently requires a writable $HOME
-            # directory to be set
-            # SEE: https://github.com/rustwasm/wasm-pack/issues/1318#issuecomment-1713377536
-            export HOME=`pwd`
-
-            wasm-pack build --release --scope dialog-db --target web --weak-refs -m no-install ./rust/dialog-artifacts
-          '';
-
-          installPhase = ''
-            mkdir -p $out/@dialog-db
-            cp -r ./rust/dialog-artifacts/pkg $out/@dialog-db/dialog-artifacts
-            rm $out/@dialog-db/dialog-artifacts/.gitignore
-          '';
-        };
-
-        dialog-experimental =
-          with pkgs;
-          buildNpmPackage {
-            pname = "@dialog-db/experimental";
-            version = "0.1.0";
-
-            src = ./typescript/dialog-experimental/.;
-            npmDepsHash = "sha256-qcnrYVltgUUXWQRFT9TzYfHOcdUswfEI/j6WkZ41HmU=";
-
-            nativeBuildInputs = developmentBuildInputs;
-            env = {
-              npm_config_loglevel = "verbose";
-            };
-
-            buildPhase = ''
-              mkdir -p src/artifacts
-              cp -r ${dialog-artifacts-web}/@dialog-db/dialog-artifacts/* src/artifacts/
-              npm run build
-            '';
-
-            installPhase = ''
-              mkdir -p $out/@dialog-db/experimental
-              cp -r ./src \
-                ./dist \
-                ./tsconfig.json \
-                ./package.json \
-                ./package-lock.json \
-                ./web-test-runner.config.mjs \
-                ./test $out/@dialog-db/experimental
-            '';
-
-            doCheck = false;
-          };
-
-        dialog-artifacts-web-tests =
-          with pkgs;
-          buildNpmPackage {
-            pname = "dialog-artifacts-web-tests";
-            version = "0.1.0";
-            src = ./typescript/dialog-artifacts-web-tests/.;
-            npmDepsHash = "sha256-sMaPwgasaObNZPeGGKynj8DL/V5AXNWU82AOBOp530g=";
-
-            buildInputs = [
-              dialog-artifacts-web
-              dialog-experimental
-            ];
-
-            nativeBuildInputs = developmentBuildInputs;
-
-            # Skip Puppeteer's Chrome download during npm ci in the Nix sandbox.
-            # At test runtime, CHROME_PATH is provided by developmentEnvVars.
-            env = {
-              "PUPPETEER_SKIP_DOWNLOAD" = "true";
-            };
-
-            buildPhase = ''
-              cp -r ${dialog-artifacts-web}/@dialog-db/dialog-artifacts ./dialog-artifacts
-            '';
-
-            installPhase = ''
-              mkdir -p "$out/"
-              cp -r ./* "$out/"
-            '';
-
-            doCheck = false;
-          };
-
-        dialog-npm-packages =
-          with pkgs;
-          stdenv.mkDerivation {
-            pname = "dialog_npm_packages";
-            version = "0.1.0";
-            buildInputs = [
-              dialog-artifacts-web
-              dialog-experimental
-            ];
-            src = ./.;
-            buildPhase = "";
-            installPhase = ''
-              mkdir -p $out/@dialog-db
-              cp -r ${dialog-artifacts-web}/@dialog-db/dialog-artifacts $out/@dialog-db
-              cp -r ${dialog-experimental}/@dialog-db/experimental $out/@dialog-db
-            '';
           };
 
         # Import menu helpers (e.g., colorful shell commands)
@@ -308,7 +203,6 @@
               test:web:debug
               test:web:release
               test:cross:integration
-              test:npm
             '';
 
           };
@@ -338,24 +232,6 @@
             package = "tests-cross-integration";
           };
 
-          "test:npm" = {
-            description = "JavaScript unit tests for NPM packages";
-            command = ''
-              # Skip Puppeteer's Chrome download during npm ci; tests use
-              # the browser specified by CHROME_PATH instead.
-              export PUPPETEER_SKIP_DOWNLOAD=true
-
-              nix build .#dialog-artifacts-web-tests
-              TEST_DIR=$(mktemp -d);
-
-              cp -r ./result/* "$TEST_DIR"
-              chmod -R 755 "$TEST_DIR"
-              pushd "$TEST_DIR"
-
-              npm ci
-              npm test
-            '';
-          };
         };
 
         menu = makeMenu commands;
@@ -364,13 +240,6 @@
         test = commonBuildInputs;
 
         packages = {
-          inherit
-            dialog-artifacts-web
-            dialog-artifacts-web-tests
-            dialog-experimental
-            dialog-npm-packages
-            ;
-
           tests-native-debug = buildTestArchive {
             name = "native-debug";
             args = "--features integration-tests";

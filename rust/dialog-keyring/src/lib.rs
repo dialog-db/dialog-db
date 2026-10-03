@@ -61,4 +61,4 @@ mod sealed;
 pub use sealed::Sealed;
 
 mod sealer;
-pub use sealer::NodeSealer;
+pub use sealer::{NodeSealer, SealedBlocks};

@@ -16,6 +16,7 @@ use dialog_artifacts::{Artifact, ArtifactView, Cause, DialogArtifactsError, Sele
 use dialog_capability::Provider;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
+use std::pin::Pin;
 
 /// Materializes an election winner, treating a corrupt stored row
 /// ([`DialogArtifactsError::CorruptEntry`]) as an ignorable non-result
@@ -199,7 +200,7 @@ impl AttributeQueryOnly {
         self,
         env: &'a Env,
         selection: M,
-    ) -> impl Selection + 'a
+    ) -> Pin<Box<dyn Selection + 'a>>
     where
         Env: crate::Scope<'a>,
     {
@@ -211,7 +212,7 @@ impl AttributeQueryOnly {
         // mirrors the sliding-window path's blanked scan exactly; the
         // challenge path's secondary lookups are not hinted.
         let hinted = selector.clone();
-        let selection = pipelined(selection, env, move |base| {
+        let selection = Box::pin(pipelined(selection, env, move |base| {
             if hinted.absent_blocked(base) {
                 return None;
             }
@@ -220,7 +221,7 @@ impl AttributeQueryOnly {
             let attribute_known = resolved.the().is_constant();
             let value_known = resolved.is().is_constant();
             if entity_known || (attribute_known && !value_known) {
-                let scan = AttributeQueryAll::new(
+                let scan = AttributeQueryAll::lookup(
                     resolved.the().clone(),
                     resolved.of().clone(),
                     Term::blank(),
@@ -230,10 +231,17 @@ impl AttributeQueryOnly {
             } else {
                 None
             }
-        });
-        try_stream! {
+        }));
+        // The stream is boxed where it is built, and so is its input:
+        // the generator holds its input and the pinned copy it iterates,
+        // so an unboxed input sat in its state twice, and returning the
+        // generator unboxed copied the whole state again at every layer
+        // that wrapped or boxed it (several KiB per scan step, per row).
+        Box::pin(try_stream! {
             for await each in selection {
-                let base = each?;
+                let mut base = each?;
+                // Every row this one extends into shares its bindings.
+                base.share();
 
                 // An Absent-bound parameter matches nothing at the
                 // scalar layer: filter the row without scanning.
@@ -253,7 +261,7 @@ impl AttributeQueryOnly {
                     // Sliding window path.
                     let value_constraint = resolved.is().as_constant().cloned();
 
-                    let scan = AttributeQueryAll::new(
+                    let scan = AttributeQueryAll::lookup(
                         resolved.the().clone(),
                         resolved.of().clone(),
                         Term::blank(),
@@ -290,7 +298,7 @@ impl AttributeQueryOnly {
                                                 && selector.admits(&winner) =>
                                         {
                                             let mut extension = base.clone();
-                                            selector.merge(&mut extension, &winner)?;
+                                            selector.merge(&mut extension, winner)?;
                                             yield extension;
                                         }
                                         _ => {}
@@ -312,7 +320,7 @@ impl AttributeQueryOnly {
                                     && selector.admits(&winner) =>
                             {
                                 let mut extension = base.clone();
-                                selector.merge(&mut extension, &winner)?;
+                                selector.merge(&mut extension, winner)?;
                                 yield extension;
                             }
                             _ => {}
@@ -330,7 +338,7 @@ impl AttributeQueryOnly {
                     }
                 }
             }
-        }
+        })
     }
 
     /// Execute this query, returning a stream of claims.
@@ -382,7 +390,7 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::{Value, the};
-    use dialog_operator::helpers::{test_operator_with_profile, test_repo};
+    use dialog_peer::helpers::{test_repo, test_session_with_peer};
 
     macro_rules! assert_relation {
         ($branch:expr, $operator:expr, $the:expr, $of:expr, $is:expr) => {{
@@ -399,7 +407,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_with_constant_entity() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -436,7 +444,7 @@ mod tests {
     /// not which branch pulled.
     #[dialog_common::test]
     async fn it_follows_one_revision_for_every_name_after_a_merge() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let main = repo.branch("main").open().perform(&operator).await?;
         let feature = repo.branch("feature").open().perform(&operator).await?;
@@ -601,7 +609,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_with_constant_attribute() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -641,7 +649,7 @@ mod tests {
 
     #[dialog_common::test]
     async fn it_selects_winner_via_vae_path() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -691,7 +699,7 @@ mod tests {
     /// out non-winners.
     #[dialog_common::test]
     async fn it_verifies_winner_for_attribute_and_value_known() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -778,7 +786,7 @@ mod tests {
     /// The challenge path must reject the loser and accept the winner.
     #[dialog_common::test]
     async fn it_verifies_winner_for_entity_and_value_known() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -866,7 +874,7 @@ mod tests {
     /// The challenge path must reject the loser and accept the winner.
     #[dialog_common::test]
     async fn it_verifies_winner_for_value_only_known() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -966,7 +974,7 @@ mod tests {
     /// stream.
     #[dialog_common::test]
     async fn it_does_not_emit_absent_on_optional_value_mismatch() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
@@ -1011,7 +1019,7 @@ mod tests {
     /// sliding window path rather than the challenge path.
     #[dialog_common::test]
     async fn it_uses_sliding_window_when_entity_bound_at_eval_time() -> anyhow::Result<()> {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
