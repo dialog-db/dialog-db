@@ -2256,6 +2256,67 @@ mod rule_tests {
         Ok(())
     }
 
+    /// A rule stored before the `derives` index existed is found by the
+    /// concept it concludes: a concept selecting that attribute beside
+    /// others counts it as derived and reads it through the attribute
+    /// concept, where the rule is found the same way.
+    #[dialog_common::test]
+    async fn it_derives_a_field_from_a_rule_stored_without_a_derives_index() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // status := nick, concluded on the attribute concept alone.
+        let rule: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": {
+                "status": { "the": "org/status", "as": "Entity" }
+            }},
+            "when": [{
+                "assert": { "with": {
+                    "nick": { "the": "org/nick", "as": "Entity" }
+                }},
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "nick": { "?": { "name": "status" } }
+                }
+            }]
+        }))?;
+        let rule = rule.compile()?;
+        let alice: Entity = "id:alice".parse()?;
+        let nick: Entity = "id:nick-a".parse()?;
+        let name: Entity = "id:name-a".parse()?;
+        // Stored by hand as a pre-index writer did: its source and the
+        // concept it concludes, and no `derives` entry.
+        branch
+            .transaction()
+            .assert(the!("dialog.rule/source").of(rule.this()).is(rule.encode()))
+            .assert(
+                the!("dialog.rule/conclusion")
+                    .of(rule.this())
+                    .is(rule.conclusion().this()),
+            )
+            .assert(the!("org/nick").of(alice.clone()).is(nick.clone()))
+            .assert(the!("org/name").of(alice.clone()).is(name.clone()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let rows = entities_of(
+            &branch,
+            &operator,
+            &[("name", "org/name"), ("status", "org/status")],
+        )
+        .await?;
+        assert_eq!(
+            rows,
+            vec![(alice, vec![name.to_string(), nick.to_string()])],
+            "the legacy rule derives the status read beside the name"
+        );
+        Ok(())
+    }
+
     // ----- (7) no rules => implicit-only, empty -----------------------
 
     #[dialog_common::test]

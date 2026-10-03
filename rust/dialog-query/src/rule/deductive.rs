@@ -782,8 +782,12 @@ pub(crate) fn same_attribute(a: &ConceptFieldDescriptor, b: &ConceptFieldDescrip
 }
 
 /// The identity a stored body had before identities were canonical:
-/// `rule:<base58(blake3(bytes))>` over its encoding as stored.
-pub(crate) fn legacy_identity(encoded: Option<Vec<u8>>) -> Option<Entity> {
+/// `rule:<base58(blake3(bytes))>` over its encoding as stored. What
+/// [`DeductiveRule::stored_as`] and [`InductiveRule::stored_as`] accept
+/// beside the canonical identity.
+///
+/// [`InductiveRule::stored_as`]: crate::rule::inductive::InductiveRule::stored_as
+pub fn legacy_identity(encoded: Option<Vec<u8>>) -> Option<Entity> {
     use base58::ToBase58;
     let hash = blake3::hash(&encoded?);
     let encoded = hash.as_bytes().as_ref().to_base58();
@@ -921,6 +925,39 @@ mod tests {
             DependencyGraph::from_premises(&analysis.premises),
             "retained graph must match the premises' dependency graph"
         );
+    }
+
+    /// A body stored before identities were canonical sits under the
+    /// hash of its bytes: the rule is stored as that entity and as its
+    /// canonical identity, and as nothing else.
+    #[dialog_common::test]
+    fn it_is_stored_as_its_legacy_identity_too() {
+        use serde_json::json;
+        let json = json!({
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+            "when": [
+                {
+                    "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } }
+                    }
+                }
+            ]
+        });
+        let descriptor: DeductiveRuleDescriptor =
+            serde_json::from_value(json).expect("descriptor parses");
+        let rule = descriptor.compile().expect("rule compiles");
+        let legacy = legacy_identity(rule.try_encode()).expect("an encodable body");
+        assert_ne!(
+            legacy,
+            rule.this(),
+            "the legacy identity hashes the stored bytes"
+        );
+        assert!(rule.stored_as(&rule.this()));
+        assert!(rule.stored_as(&legacy));
+        let other: Entity = "rule:forged".parse().expect("an entity");
+        assert!(!rule.stored_as(&other));
     }
 
     /// A concept-bodied rule (the storable kind) has a deterministic,

@@ -328,6 +328,40 @@ mod tests {
         ]
     }
 
+    /// A body stored before identities were canonical sits under the
+    /// hash of its bytes: the rule is stored as that entity and as its
+    /// canonical identity, and as nothing else.
+    #[dialog_common::test]
+    fn it_is_stored_as_its_legacy_identity_too() {
+        let descriptor: InductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "tag": { "the": "derived/tag", "as": "Text" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "title": { "the": "doc/title", "as": "Text" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "title": { "?": { "name": "tag" } }
+                }
+            }]
+        }))
+        .expect("descriptor parses");
+        let rule = descriptor.compile().expect("rule compiles");
+        let legacy =
+            crate::rule::deductive::legacy_identity(rule.try_encode()).expect("an encodable body");
+        assert_ne!(
+            legacy,
+            rule.this(),
+            "the legacy identity hashes the stored bytes"
+        );
+        assert!(rule.stored_as(&rule.this()));
+        assert!(rule.stored_as(&legacy));
+        let other: Entity = "rule:forged".parse().expect("an entity");
+        assert!(!rule.stored_as(&other));
+    }
+
     #[dialog_common::test]
     fn it_compiles_with_valid_premises() {
         let result = InductiveRule::new(counter_head(), increment_body());
