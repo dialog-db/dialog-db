@@ -6,6 +6,7 @@ use crate::negation::Negation;
 use crate::optional::OptionalAttributeQuery;
 use crate::proposition::Proposition;
 use crate::query::Application;
+use crate::recall::Recall;
 use crate::resolver::ResolverQuery;
 use crate::rule::types::TypeEnv;
 use crate::selection::Selection;
@@ -75,6 +76,10 @@ pub enum Plan {
     /// Negation as a filter: a match passes only if evaluating the
     /// inner plan against it produces no rows.
     Negate(Header, Box<Plan>),
+    /// A rule head evaluated by recalling its source rule's body: the
+    /// body runs once per query and binding of `this`, and every head
+    /// of the rule projects its attribute out of the remembered rows.
+    Recall(Header, Recall),
 }
 
 impl Plan {
@@ -88,10 +93,15 @@ impl Plan {
             Plan::Concept(header, _) => header,
             Plan::Resolver(header, _) => header,
             Plan::Negate(header, _) => header,
+            Plan::Recall(header, _) => header,
         }
     }
 
     /// Reconstruct the syntactic premise this step was lowered from.
+    ///
+    /// A [`Recall`](Plan::Recall) step was never lowered from a premise;
+    /// it reconstructs as a read of the attribute concept it derives,
+    /// which is what the step contributes rows to.
     ///
     /// The payload is the lowered, already type-narrowed form of the
     /// query, so this is a faithful inverse of [`lower`](Plan::lower).
@@ -117,6 +127,7 @@ impl Plan {
                 // negation.
                 Premise::Unless(negation) => Premise::Unless(negation),
             },
+            Plan::Recall(_, recall) => Premise::Assert(Proposition::Concept(recall.premise())),
         }
     }
 
@@ -184,6 +195,7 @@ impl Plan {
             Plan::Constraint(_, constraint) => constraint.evaluate(selection),
             Plan::Resolver(_, query) => query.evaluate(env, selection),
             Plan::Negate(_, inner) => negate(*inner, selection, env),
+            Plan::Recall(_, recall) => recall.evaluate(selection, env),
         }
     }
 }
@@ -215,6 +227,7 @@ impl Plan {
             Plan::Constraint(_, constraint) => Box::pin(constraint.evaluate(selection)),
             Plan::Resolver(_, query) => Box::pin(query.evaluate(env, selection)),
             Plan::Negate(_, inner) => Box::pin(negate(*inner, selection, env)),
+            Plan::Recall(_, recall) => Box::pin(recall.evaluate(selection, env)),
         }
     }
 }

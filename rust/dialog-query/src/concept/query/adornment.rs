@@ -37,6 +37,19 @@ use crate::term::Term;
 pub struct Adornment(u64);
 
 impl Adornment {
+    /// The adornment of a call binding exactly the operands `scope`
+    /// names.
+    pub fn binding(operands: &[String], scope: &crate::environment::Environment) -> Self {
+        let mut bits: u64 = 0;
+        for (i, operand) in operands.iter().enumerate() {
+            debug_assert!(i < 64, "Adornment supports at most 64 operands");
+            if scope.contains(operand) {
+                bits |= 1 << i;
+            }
+        }
+        Adornment(bits)
+    }
+
     /// Derive an adornment for a call of a concept whose operands are
     /// `operands`, from the call's terms and the current match.
     ///

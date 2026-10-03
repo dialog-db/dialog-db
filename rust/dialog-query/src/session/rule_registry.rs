@@ -2,7 +2,7 @@ use super::dependencies::{ProgramAnalysis, Violation};
 use crate::Entity;
 use crate::EvaluationError;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
-use crate::concept::query::ConceptRules;
+use crate::concept::query::{ConceptRules, Exact, PlanCache};
 use crate::rule::deductive::DeductiveRule;
 use crate::source::SelectRules;
 use dialog_capability::Provider;
@@ -111,24 +111,69 @@ impl RuleRegistry {
                     bundle.install(rule.clone());
                 }
             }
-            bundle
+            match self.exact(&canonical)? {
+                Some(exact) => bundle.with_exact(exact),
+                None => bundle,
+            }
         } else {
             let derived = self.derived()?;
-            let selecting = DeductiveRule::selecting(predicate, &|field| {
-                derived.contains(&ConceptDescriptor::of_attribute(field).this())
-            })
-            .map_err(|error| EvaluationError::Store(error.to_string()))?;
             let reads_derived = predicate
                 .with()
                 .iter()
                 .any(|(_, field)| derived.contains(&ConceptDescriptor::of_attribute(field).this()));
-            ConceptRules::with_implicit(selecting, reads_derived, Default::default())
+            if reads_derived {
+                let selecting = DeductiveRule::selecting(predicate, &|field| {
+                    derived.contains(&ConceptDescriptor::of_attribute(field).this())
+                })
+                .map_err(|error| EvaluationError::Store(error.to_string()))?;
+                let bundle = ConceptRules::with_implicit(selecting, true, PlanCache::default());
+                match self.exact(predicate)? {
+                    Some(exact) => bundle.with_exact(exact),
+                    None => bundle,
+                }
+            } else {
+                ConceptRules::new(predicate)
+            }
         };
         self.bundles
             .write()
             .map_err(poisoned)?
             .insert(entity, bundle.clone());
         Ok(bundle)
+    }
+
+    /// The covering rule for `predicate`, when exactly one source rule
+    /// derives every derived attribute of it, no attribute-headed rule
+    /// stands beside it, and none of them is a keyed collection.
+    fn exact(&self, predicate: &ConceptDescriptor) -> Result<Option<Exact>, EvaluationError> {
+        let index = self.heads.read().map_err(poisoned)?;
+        let mut source: Option<DeductiveRule> = None;
+        let mut attributes = Vec::new();
+        for (_, field) in predicate.with().iter() {
+            let key = ConceptDescriptor::of_attribute(field).this();
+            let Some(heads) = index.get(&key) else {
+                continue;
+            };
+            let Some(attribute) = field.the().attribute() else {
+                return Ok(None);
+            };
+            attributes.push(attribute);
+            for head in heads {
+                let Some(origin) = head.origin() else {
+                    return Ok(None);
+                };
+                match &source {
+                    None => source = Some(origin.rule.clone()),
+                    Some(known) if known.same(&origin.rule) => {}
+                    Some(_) => return Ok(None),
+                }
+            }
+        }
+        let Some(rule) = source else { return Ok(None) };
+        let covering = rule
+            .covering(predicate)
+            .map_err(|error| EvaluationError::Store(error.to_string()))?;
+        Ok(covering.map(|rule| Exact { rule, attributes }))
     }
 
     /// Acquire rules for the given concept. Always returns a

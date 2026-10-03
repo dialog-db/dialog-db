@@ -107,5 +107,10 @@ name = "query_disk"
 harness = false
 required-features = ["helpers"]
 
+[[bench]]
+name = "query_rules"
+harness = false
+required-features = ["helpers"]
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("web-integration-tests"))'] }

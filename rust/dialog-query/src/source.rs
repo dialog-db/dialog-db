@@ -37,6 +37,7 @@ pub(crate) mod test {
         branch: &'b Branch,
         operator: &'b Operator,
         rules: RuleRegistry,
+        memo: crate::recall::Memo,
     }
 
     impl<'b> TestEnv<'b> {
@@ -45,7 +46,14 @@ pub(crate) mod test {
                 branch,
                 operator,
                 rules,
+                memo: crate::recall::Memo::default(),
             }
+        }
+    }
+
+    impl crate::recall::BodyMemo for TestEnv<'_> {
+        fn memo(&self) -> Option<&crate::recall::Memo> {
+            Some(&self.memo)
         }
     }
 
