@@ -3,7 +3,7 @@
 //! A local ephemeral layer fans instants out to in-process observers and
 //! keeps no log. A channel is the same layer with the one thing peers
 //! need added: a bounded **log** of its instants with a per-peer
-//! **offset** into it. Sync is "the instants past my offset"; retention
+//! **offset** into it. A catch-up is "the instants past my offset"; retention
 //! is the lowest peer offset, under a ring bound; a peer whose offset
 //! fell off the ring resyncs from the fold. That is the shape presence
 //! and awareness protocols already have, with the sequence standing in
@@ -11,9 +11,9 @@
 //! meaningful without a tree: there is nothing to push but the log.
 //!
 //! What lands here is the log and its offsets, exercised with peers in
-//! one process: a channel on each side and the [`Sync`] carried between
+//! one process: a channel on each side and the [`Catchup`] carried between
 //! them by the test. Carrying it over the remote transport is the part
-//! that remains; the [`Sync`] is serializable so that binding is a
+//! that remains; the [`Catchup`] is serializable so that binding is a
 //! transport concern, not a change to this shape.
 //!
 //! Echo is prevented by origin: an instant a channel applied on a
@@ -42,9 +42,10 @@ struct Entry {
     origin: Option<Entity>,
 }
 
-/// What a peer receives when it syncs.
+/// What a peer receives when it catches up: the instants past its
+/// offset, or the whole fold when the offset fell off the log.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum Sync {
+pub enum Catchup {
     /// The instants past the peer's offset that did not originate with
     /// it, oldest first; empty when the peer is current. `sequence` is
     /// the channel's sequence after the last of them, the peer's new
@@ -67,11 +68,11 @@ pub enum Sync {
     },
 }
 
-impl Sync {
+impl Catchup {
     /// The offset a peer stands at after applying this.
     pub fn sequence(&self) -> u64 {
         match self {
-            Sync::Instants { sequence, .. } | Sync::Resync { sequence, .. } => *sequence,
+            Catchup::Instants { sequence, .. } | Catchup::Resync { sequence, .. } => *sequence,
         }
     }
 }
@@ -175,9 +176,9 @@ impl Channel {
 
     /// A complete replication snapshot: held facts, tombstones, and a
     /// sequence captured together. Use this to initialize a peer.
-    pub fn snapshot(&self) -> Sync {
+    pub fn snapshot(&self) -> Catchup {
         let (facts, shadowed, sequence) = self.layer.snapshot();
-        Sync::Resync {
+        Catchup::Resync {
             facts,
             shadowed,
             sequence,
@@ -188,7 +189,7 @@ impl Channel {
     /// that it did not itself send, or the fold if its offset fell off
     /// the log. Moves the peer's offset to the sequence the sync
     /// reaches; a peer not admitted is admitted by this.
-    pub fn since(&self, peer: &Entity) -> Sync {
+    pub fn since(&self, peer: &Entity) -> Catchup {
         let mut log = self.log.lock();
         let current = self.absorb(&mut log);
         let offset = log.offsets.get(peer).copied().unwrap_or(0);
@@ -208,7 +209,7 @@ impl Channel {
                 .filter(|entry| entry.origin.as_ref() != Some(peer))
                 .map(|entry| entry.instant.clone())
                 .collect();
-            Sync::Instants {
+            Catchup::Instants {
                 instants,
                 sequence: current,
             }
@@ -225,9 +226,9 @@ impl Channel {
     /// its facts, and are logged as the peer's so they are not sent
     /// back to it; a resync replaces the layer's facts with the fold.
     /// Returns how many instants changed what readers see.
-    pub fn receive(&self, peer: &Entity, sync: Sync) -> usize {
+    pub fn receive(&self, peer: &Entity, sync: Catchup) -> usize {
         match sync {
-            Sync::Instants { instants, .. } => {
+            Catchup::Instants { instants, .. } => {
                 let mut applied = 0;
                 for instant in instants {
                     let mut log = self.log.lock();
@@ -268,7 +269,7 @@ impl Channel {
                 self.absorb(&mut self.log.lock());
                 applied
             }
-            Sync::Resync {
+            Catchup::Resync {
                 facts, shadowed, ..
             } => {
                 self.resync(peer, facts, shadowed);
@@ -440,7 +441,7 @@ mod tests {
         write(&a, vec![fact("doc:2", "doc/title", "Plans")]);
 
         let sync = a.since(&pb);
-        let Sync::Instants { instants, sequence } = &sync else {
+        let Catchup::Instants { instants, sequence } = &sync else {
             panic!("a covers b: {sync:?}");
         };
         assert_eq!(instants.len(), 2);
@@ -453,14 +454,14 @@ mod tests {
         let back = b.since(&pa);
         assert_eq!(
             back,
-            Sync::Instants {
+            Catchup::Instants {
                 instants: Vec::new(),
                 sequence: 2
             }
         );
         assert_eq!(a.receive(&pb, back), 0);
         assert_eq!(a.since(&pb).sequence(), 2);
-        assert!(matches!(a.since(&pb), Sync::Instants { instants, .. } if instants.is_empty()));
+        assert!(matches!(a.since(&pb), Catchup::Instants { instants, .. } if instants.is_empty()));
     }
 
     /// A write on each side converges both ways: each sync carries only
@@ -481,8 +482,8 @@ mod tests {
 
         // Another round carries nothing: both are current.
         let (ab, ba) = (a.since(&pb), b.since(&pa));
-        assert!(matches!(&ab, Sync::Instants { instants, .. } if instants.is_empty()));
-        assert!(matches!(&ba, Sync::Instants { instants, .. } if instants.is_empty()));
+        assert!(matches!(&ab, Catchup::Instants { instants, .. } if instants.is_empty()));
+        assert!(matches!(&ba, Catchup::Instants { instants, .. } if instants.is_empty()));
     }
 
     /// A retract replicates as a retract: the fact leaves the peer too.
@@ -524,7 +525,7 @@ mod tests {
             );
         }
         let sync = a.since(&pb);
-        let Sync::Resync {
+        let Catchup::Resync {
             facts, sequence, ..
         } = &sync
         else {
@@ -538,7 +539,7 @@ mod tests {
         assert_eq!(a.offset(&pb), Some(13));
 
         // b is current now: the next sync is an empty instants list.
-        assert!(matches!(a.since(&pb), Sync::Instants { instants, .. } if instants.is_empty()));
+        assert!(matches!(a.since(&pb), Catchup::Instants { instants, .. } if instants.is_empty()));
     }
 
     /// Tombstone maintenance is distinct from storing or retracting a
@@ -639,13 +640,13 @@ mod tests {
         a.join_at(early.clone(), 0);
         write(&a, vec![fact("doc:2", "doc/title", "After")]);
 
-        let Sync::Instants { instants, .. } = a.since(&late) else {
+        let Catchup::Instants { instants, .. } = a.since(&late) else {
             panic!("late is covered");
         };
         assert_eq!(instants.len(), 1);
         assert_eq!(instants[0].asserted[0].of.to_string(), "doc:2");
 
-        let Sync::Instants { instants, .. } = a.since(&early) else {
+        let Catchup::Instants { instants, .. } = a.since(&early) else {
             panic!("early is covered by the log");
         };
         assert_eq!(instants.len(), 2);
@@ -678,7 +679,7 @@ mod tests {
         assert!(instants[0].transient);
         assert_eq!(instants[0].asserted, vec![command.clone()]);
         assert_eq!(instants[0].retracted, vec![command]);
-        assert!(matches!(b.since(&pa), Sync::Instants { instants, .. } if instants.is_empty()));
+        assert!(matches!(b.since(&pa), Catchup::Instants { instants, .. } if instants.is_empty()));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -719,7 +720,7 @@ mod tests {
         write(&a, vec![fact("doc:1", "doc/title", "Notes")]);
         let sync = a.since(&pb);
         let encoded = serde_json::to_vec(&sync).expect("sync encodes");
-        let decoded: Sync = serde_json::from_slice(&encoded).expect("sync decodes");
+        let decoded: Catchup = serde_json::from_slice(&encoded).expect("sync decodes");
         assert_eq!(decoded, sync);
     }
 }
