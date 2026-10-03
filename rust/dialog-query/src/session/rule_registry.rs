@@ -9,8 +9,8 @@ use dialog_capability::Provider;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
-/// Thread-safe registry of *deductive* rules, keyed by the attribute
-/// each rule derives. Inductive rules
+/// Thread-safe registry of *deductive* rules, keyed by the relation
+/// each rule derives into. Inductive rules
 /// ([`InductiveRule`](crate::rule::InductiveRule)) have a
 /// different lifecycle: they participate in transactions rather
 /// than queries, and will be installed via a separate path in the
@@ -30,8 +30,10 @@ use std::sync::{Arc, RwLock};
 /// `Arc<RwLock<…>>` so all clones share the same rule set and caches.
 #[derive(Debug, Clone, Default)]
 pub struct RuleRegistry {
-    /// The rules deriving each attribute, keyed by the attribute
-    /// concept's entity. Every rule here is attribute-headed.
+    /// The rules deriving each relation, keyed by the relation's
+    /// `on:` entity: a rule derives into `(domain, name)`, and a read
+    /// declares its own type, cardinality and policy over it. Every
+    /// rule here is attribute-headed.
     heads: Arc<RwLock<HashMap<Entity, Vec<DeductiveRule>>>>,
     /// Bundles assembled per queried concept, keyed by the concept's
     /// entity and cleared whenever the rule set changes.
@@ -40,6 +42,14 @@ pub struct RuleRegistry {
     /// and stratification), shared across clones and invalidated by
     /// [`register`](Self::register) / [`extend`](Self::extend).
     analysis: Arc<RwLock<Option<Arc<ProgramAnalysis>>>>,
+}
+
+/// The entity a field's relation is indexed under: the `derives`
+/// index's key, shared by every attribute over that relation.
+fn relation_key(field: &ConceptFieldDescriptor) -> Entity {
+    crate::rule::statement::Reach::of(field.the())
+        .on_entity()
+        .expect("a relation names an entity")
 }
 
 fn poisoned<E: std::fmt::Display>(error: E) -> EvaluationError {
@@ -67,7 +77,7 @@ impl RuleRegistry {
             .map_err(|error| EvaluationError::Store(error.to_string()))?;
         let mut index = self.heads.write().map_err(poisoned)?;
         for head in heads {
-            let key = ConceptDescriptor::of_attribute(&head.field).this();
+            let key = relation_key(&head.field);
             let rules = index.entry(key).or_default();
             if !rules.iter().any(|existing| existing.same(&head.rule)) {
                 rules.push(head.rule);
@@ -79,11 +89,11 @@ impl RuleRegistry {
 
     /// Whether some registered rule derives the attribute of `field`.
     pub fn derives(&self, field: &ConceptFieldDescriptor) -> Result<bool, EvaluationError> {
-        let key = ConceptDescriptor::of_attribute(field).this();
+        let key = relation_key(field);
         Ok(self.heads.read().map_err(poisoned)?.contains_key(&key))
     }
 
-    /// The attribute concepts some registered rule derives, by entity.
+    /// The relations some registered rule derives into, by `on:` entity.
     fn derived(&self) -> Result<HashSet<Entity>, EvaluationError> {
         Ok(self
             .heads
@@ -103,10 +113,12 @@ impl RuleRegistry {
         let bundle = if let Some((_, field)) = predicate.attribute_field() {
             // An attribute concept, under whatever field name the
             // caller spelled it: the bundle is built over the canonical
-            // spelling every rule deriving it concludes.
+            // spelling every rule deriving it concludes, and the rules
+            // are those deriving the field's relation, whatever type,
+            // cardinality or policy the field reads it under.
             let canonical = ConceptDescriptor::of_attribute(field);
             let mut bundle = ConceptRules::new(&canonical);
-            if let Some(rules) = self.heads.read().map_err(poisoned)?.get(&entity) {
+            if let Some(rules) = self.heads.read().map_err(poisoned)?.get(&relation_key(field)) {
                 for rule in rules {
                     bundle.install(rule.clone());
                 }
@@ -122,7 +134,7 @@ impl RuleRegistry {
             // read: either way its candidates are gathered and elected.
             let through = |field: &ConceptFieldDescriptor| {
                 field.descriptor().reads_elected()
-                    || derived.contains(&ConceptDescriptor::of_attribute(field).this())
+                    || derived.contains(&relation_key(field))
             };
             let reads_derived = predicate.with().iter().any(|(_, field)| through(field));
             if reads_derived {
@@ -152,7 +164,7 @@ impl RuleRegistry {
         let mut source: Option<DeductiveRule> = None;
         let mut attributes = Vec::new();
         for (_, field) in predicate.with().iter() {
-            let key = ConceptDescriptor::of_attribute(field).this();
+            let key = relation_key(field);
             let Some(heads) = index.get(&key) else {
                 continue;
             };
