@@ -482,11 +482,9 @@ mod tests {
     use super::*;
     use crate::attribute::{AttributeDescriptor, Cardinality, Type};
     use crate::concept::query::ConceptQuery;
-    use crate::reduce::{Aggregator, ReduceSpec};
     use crate::session::RuleRegistry;
     use crate::types::Any;
     use crate::{ConceptFieldDescriptor, Parameters, Term};
-    use std::collections::BTreeMap;
 
     /// A one-field concept in the given domain: `{domain}/name` as
     /// text. Distinct domains produce distinct concept identities.
@@ -640,18 +638,6 @@ mod tests {
                 .is_some(),
             "the cycle is visible from both ends"
         );
-    }
-
-    /// A positive premise over `target` binding `this` and the
-    /// given field to the named variable.
-    fn premise(target: &ConceptDescriptor, field: &str, var: &str) -> Premise {
-        let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Term::<Entity>::var("this").into());
-        terms.insert(field.to_string(), Term::<Any>::var(var));
-        Premise::Assert(Proposition::Concept(ConceptQuery {
-            terms,
-            predicate: target.clone(),
-        }))
     }
 
 }

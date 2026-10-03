@@ -494,10 +494,10 @@ impl ConceptQuery {
                 // at the exit. `last` is not: a fixpoint row has no
                 // standing, so it reads the set as before.
                 let table: Vec<fixpoint::Row> = match app.predicate.attribute_field() {
-                    Some((_, field)) => {
+                    Some((name, field)) => {
                         let election = Election::of(field);
                         if election.select.elects() && election.select != Select::Last {
-                            election.elect_rows(table.iter().cloned().collect())?
+                            election.elect_rows(table.iter().cloned().collect(), name)?
                         } else {
                             table.iter().cloned().collect()
                         }
@@ -1285,13 +1285,18 @@ fn agrees(
 impl Election {
     /// The rows a recursive component yields, elected per entity under
     /// this policy at the component's exit: the chosen rows, or one
-    /// folded row per entity.
-    fn elect_rows(&self, rows: Vec<fixpoint::Row>) -> Result<Vec<fixpoint::Row>, EvaluationError> {
-        let key_operand = Relation::key_operand(ConceptDescriptor::VALUE);
+    /// folded row per entity. The rows are keyed by the query's field
+    /// name, `field`, as the fixpoint projects them.
+    fn elect_rows(
+        &self,
+        rows: Vec<fixpoint::Row>,
+        field: &str,
+    ) -> Result<Vec<fixpoint::Row>, EvaluationError> {
+        let key_operand = Relation::key_operand(field);
         let mut order: Vec<Vec<u8>> = Vec::new();
         let mut groups: HashMap<Vec<u8>, Vec<Entry<fixpoint::Row>>> = HashMap::new();
         for row in rows {
-            let (Some(this), Some(value)) = (row.get("this"), row.get(ConceptDescriptor::VALUE)) else {
+            let (Some(this), Some(value)) = (row.get("this"), row.get(field)) else {
                 continue;
             };
             let key = entity_key(this)?;
@@ -1321,7 +1326,7 @@ impl Election {
                 } => {
                     let mut row = fixpoint::Row::new();
                     row.insert("this".to_string(), this);
-                    row.insert(ConceptDescriptor::VALUE.to_string(), value);
+                    row.insert(field.to_string(), value);
                     elected.push(row);
                 }
                 Resolved::Folded { value: None, .. } => {}
