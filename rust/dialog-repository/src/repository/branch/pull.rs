@@ -18,7 +18,8 @@ use futures_util::future::{Either, join_all};
 use super::fetch::fetch_one;
 use super::resolve::resolve;
 use crate::ResolveEnv;
-use crate::repository::archive::persist;
+use crate::repository::archive::persist_line;
+use crate::sealing::admit;
 use crate::{
     Branch, Checkpoint, Index, NetworkedIndex, PublishError, PullError, Revision, TreeReference,
     Upstream, UpstreamBranch,
@@ -285,6 +286,9 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         upstream_revision
             .verify()
             .map_err(dialog_artifacts::DialogArtifactsError::from)?;
+        // A sealed line reaches the upstream's tree from where its signed
+        // head says the root lives.
+        admit(branch.sealing(), &upstream_revision);
 
         // `base` is the upstream tree at our last sync point with this
         // particular upstream (the divergence marker), `None` before any
@@ -312,7 +316,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // when the upstream is remote, falls back to the remote
         // archive for blocks that haven't been replicated. With
         // `remote: None` it degrades to a plain local index.
-        let store = NetworkedIndex::new(env, branch.archive().index(), remote);
+        let store = NetworkedIndex::new(env, branch.archive().index(), remote)
+            .sealed(branch.sealing().cloned());
 
         // The three trees: last-sync base, the upstream revision we're
         // merging in, and the local tree the merge integrates onto — an
@@ -678,6 +683,14 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 merged
                     .record(&store, &mut delta, record.entries(&manifest)?)
                     .await?;
+                revision.sealed = persist_line::<_, PullError>(
+                    &branch.archive().index(),
+                    &mut delta,
+                    branch.sealing(),
+                    merged.root(),
+                    env,
+                )
+                .await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 let mut context = local_context.clone();
                 context.merge(theirs);
@@ -685,8 +698,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 revision.context = Some(context.clone());
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
-
-                persist(&branch.archive().index(), &mut delta, env).await?;
 
                 return Ok(PreparedPull::Merged(Box::new(Merged {
                     branch,
@@ -844,6 +855,14 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 merged
                     .record(&store, &mut delta, record.entries(&manifest)?)
                     .await?;
+                revision.sealed = persist_line::<_, PullError>(
+                    &branch.archive().index(),
+                    &mut delta,
+                    branch.sealing(),
+                    merged.root(),
+                    env,
+                )
+                .await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 let mut context = local_context.clone();
                 context.merge(theirs);
@@ -851,8 +870,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 revision.context = Some(context.clone());
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
-
-                persist(&branch.archive().index(), &mut delta, env).await?;
 
                 return Ok(PreparedPull::Merged(Box::new(Merged {
                     branch,
@@ -1012,6 +1029,14 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 merged
                     .record(&store, &mut delta, record.entries(&manifest)?)
                     .await?;
+                revision.sealed = persist_line::<_, PullError>(
+                    &branch.archive().index(),
+                    &mut delta,
+                    branch.sealing(),
+                    merged.root(),
+                    env,
+                )
+                .await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 // The minted head publishes its watermark: the merged
                 // context plus its own version, signed with the rest of
@@ -1046,8 +1071,16 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // travels as one `Import` invocation: block buffers are
         // reference-counted (nothing is copied on the way in) and
         // providers with native batching persist it in a single round
-        // trip.
-        persist(&branch.archive().index(), &mut delta, env).await?;
+        // trip. A minted merge persisted already, to name its sealed root;
+        // what is left is what an adopted head staged.
+        persist_line::<_, PullError>(
+            &branch.archive().index(),
+            &mut delta,
+            branch.sealing(),
+            merged.root(),
+            env,
+        )
+        .await?;
 
         Ok(PreparedPull::Merged(Box::new(Merged {
             branch,
@@ -1192,7 +1225,8 @@ impl PreparedPull<'_> {
         let target = sync.target();
         let marker = branch.tracking().checkpoint();
         let mut tracking = branch.tracked();
-        tracking.record(&sync);
+        let sealed = sync.tree().and_then(|tree| branch.sealed_at(tree));
+        tracking.record_sealed(&sync, sealed.clone());
         let mut publish = marker.publish(tracking, env).await;
         while let Err(PublishError::VersionMismatch { .. }) = publish {
             branch.tracking().resolve().perform(env).await?;
@@ -1204,7 +1238,7 @@ impl PreparedPull<'_> {
             if !ours_untouched {
                 return Ok(branch.revision());
             }
-            tracking.record(&sync);
+            tracking.record_sealed(&sync, sealed.clone());
             publish = marker.publish(tracking, env).await;
         }
         publish?;
@@ -2508,6 +2542,7 @@ mod history_tests {
             tree: TreeReference::from([9u8; 32]),
             edition: Edition::GENESIS,
             context: None,
+            sealed: None,
             signature: Vec::new(),
         };
         evil.reset(forged).perform(&operator).await?;

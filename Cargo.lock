@@ -1614,6 +1614,7 @@ dependencies = [
  "dialog-credentials",
  "dialog-effects",
  "dialog-identity",
+ "dialog-keyring",
  "dialog-network",
  "dialog-peer",
  "dialog-query",

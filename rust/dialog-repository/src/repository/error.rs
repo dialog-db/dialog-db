@@ -513,6 +513,12 @@ pub enum CommitError {
     /// [`Snapshot::commit`](crate::Snapshot::commit).
     #[error("A snapshot cannot be advanced through a reference; transact it instead")]
     Detached,
+
+    /// Sealing the line's tree refused: this handle holds no writer for
+    /// its space, or a node or spilled value was neither staged nor
+    /// reached.
+    #[error("Sealing failed: {0}")]
+    Sealing(#[from] dialog_keyring::KeyringError),
 }
 
 /// Errors specific to a pull operation.
@@ -595,6 +601,12 @@ pub enum PullError {
     /// The branch's upstreams could not be resolved.
     #[error(transparent)]
     Upstreams(#[from] ResolveUpstreamsError),
+
+    /// Sealing the line's tree refused: this handle holds no writer for
+    /// its space, or a node or spilled value was neither staged nor
+    /// reached.
+    #[error("Sealing failed: {0}")]
+    Sealing(#[from] dialog_keyring::KeyringError),
 }
 
 /// Errors specific to a push operation.
@@ -704,6 +716,12 @@ pub enum PushError {
     /// The branch's upstreams could not be resolved.
     #[error(transparent)]
     Upstreams(#[from] ResolveUpstreamsError),
+
+    /// Sealing the line's tree refused: this handle holds no writer for
+    /// its space, or a node or spilled value was neither staged nor
+    /// reached.
+    #[error("Sealing failed: {0}")]
+    Sealing(#[from] dialog_keyring::KeyringError),
 }
 
 /// Errors returned by cell resolve operations.

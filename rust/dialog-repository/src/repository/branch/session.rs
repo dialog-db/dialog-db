@@ -602,7 +602,7 @@ where
     // Concurrent reads of one digest share fetch-and-hydrate through
     // the env's own `Hydrate` flight (see `crate::Hydrate`), with
     // every other evaluation in the process.
-    let store = NetworkedIndex::new(env, select.catalog(), remote);
+    let store = NetworkedIndex::new(env, select.catalog(), remote).sealed(source.sealing());
     Ok(select.execute_boxed(store).await?)
 }
 
@@ -733,7 +733,8 @@ where
         for source in &self.sources {
             let select = crate::Select::from_source(source.as_ref(), input.clone());
             let remote = source.as_ref().fallback();
-            let store = NetworkedIndex::new(self.env, select.catalog(), remote);
+            let store = NetworkedIndex::new(self.env, select.catalog(), remote)
+                .sealed(source.as_ref().sealing());
             if let Some(estimate) = select.estimate(store).await? {
                 total = Some(total.unwrap_or(0).saturating_add(estimate));
             }
@@ -794,7 +795,8 @@ where
     ) -> Result<Option<Buffer>, DialogArtifactsError> {
         for source in &self.sources {
             let source = source.as_ref();
-            let store = NetworkedIndex::new(self.env, source.archive().index(), source.fallback());
+            let store = NetworkedIndex::new(self.env, source.archive().index(), source.fallback())
+                .sealed(source.sealing());
             if let Some(bytes) = store.load_blob(&hash).await? {
                 return Ok(Some(bytes));
             }
@@ -832,7 +834,8 @@ where
         for source in &self.sources {
             let source = source.as_ref();
             let remote = source.fallback();
-            let store = NetworkedIndex::new(self.env, source.archive().index(), remote);
+            let store = NetworkedIndex::new(self.env, source.archive().index(), remote)
+                .sealed(source.sealing());
             let cache = source.node_cache();
             if let Some(node) = cache.get_cached(&load.hash) {
                 return Ok(Some(node.buffer().clone()));

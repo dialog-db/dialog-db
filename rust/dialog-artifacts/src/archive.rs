@@ -113,6 +113,17 @@ impl ArchiveDelta {
         hash
     }
 
+    /// The blocks lane, read without taking anything: what sealing reads
+    /// before the blocks are written.
+    pub fn staged_blocks(&self) -> &Delta<Blake3Hash, Buffer> {
+        &self.blocks
+    }
+
+    /// The blobs lane, read without taking anything.
+    pub fn staged_blobs(&self) -> &Delta<Blake3Hash, Buffer> {
+        &self.blobs
+    }
+
     /// The staged node under `hash`, if any.
     pub fn block(&self, hash: &Blake3Hash) -> Option<Buffer> {
         self.blocks.get(hash)

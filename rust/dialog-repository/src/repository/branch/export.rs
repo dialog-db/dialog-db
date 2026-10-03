@@ -44,7 +44,7 @@ impl<E: Exporter> Export<'_, E> {
         let remote = branch.fallback();
 
         let catalog = ArchiveScope::new(branch.subject()).index();
-        let store = NetworkedIndex::new(env, catalog, remote);
+        let store = NetworkedIndex::new(env, catalog, remote).sealed(branch.sealing().cloned());
 
         let tree = match branch.revision() {
             Some(revision) => Index::from_hash(NodeHash::from(*revision.tree.hash())),

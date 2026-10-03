@@ -7,6 +7,12 @@
 //!   ‖ content region
 //! ```
 //!
+//! The structure region holds each child's address and structure key, then
+//! the address of each attachment: a sealed value the node refers to but that
+//! is not a node (a spilled value, in the repository's trees). Both lists are
+//! what a replicator needs to copy everything a tree reaches, so both sit at
+//! the structure level.
+//!
 //! The header (version and generations) is plaintext: a reader has to know
 //! which generation's secret to use before it can open anything. Every region
 //! authenticates it, so relabelling a node with another generation fails to
@@ -51,6 +57,10 @@ const STRUCTURE: u8 = 1;
 const RANGE: u8 = 2;
 const CONTENT: u8 = 3;
 
+/// A structure region, opened: each child's address and structure key, and
+/// each attachment's address.
+pub(crate) type Structure = (Vec<(Blake3Hash, StructureKey)>, Vec<Blake3Hash>);
+
 /// One layered node: a plaintext header and three sealed regions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Envelope {
@@ -60,7 +70,8 @@ pub struct Envelope {
     content_generation: EpochId,
     /// The structure region's synthetic nonce.
     structure_nonce: [u8; 12],
-    /// Each child's address and structure key, under the node's structure key.
+    /// Each child's address and structure key, then each attachment's
+    /// address, under the node's structure key.
     structure: Vec<u8>,
     /// Each child's separator, under the node's range key.
     range: Vec<u8>,
@@ -73,7 +84,9 @@ impl Envelope {
     ///
     /// `children` are each child's address and structure key, and
     /// `separators` each child's separator, both in child order; a leaf has
-    /// neither. `plain` is the node's own bytes.
+    /// neither. `attachments` are the addresses of the sealed values the
+    /// node refers to, in the order the node names them. `plain` is the
+    /// node's own bytes.
     ///
     /// # Errors
     ///
@@ -82,6 +95,7 @@ impl Envelope {
         writer: &Writer,
         structure_key: &StructureKey,
         children: &[(Blake3Hash, StructureKey)],
+        attachments: &[Blake3Hash],
         separators: &[Vec<u8>],
         plain: &[u8],
     ) -> Result<Self, KeyringError> {
@@ -89,11 +103,15 @@ impl Envelope {
         let content_generation = writer.content_generation().clone();
         let header = header(&range_generation, &content_generation);
 
-        let mut structure = Vec::with_capacity(4 + children.len() * 64);
+        let mut structure = Vec::with_capacity(8 + children.len() * 64 + attachments.len() * 32);
         structure.extend_from_slice(&count(children.len())?);
         for (address, key) in children {
             structure.extend_from_slice(address.as_bytes());
             structure.extend_from_slice(key.as_bytes());
+        }
+        structure.extend_from_slice(&count(attachments.len())?);
+        for address in attachments {
+            structure.extend_from_slice(address.as_bytes());
         }
 
         let mut range = Vec::new();
@@ -204,6 +222,21 @@ impl Envelope {
         &self,
         key: &StructureKey,
     ) -> Result<Vec<(Blake3Hash, StructureKey)>, KeyringError> {
+        self.structure(key).map(|(children, _)| children)
+    }
+
+    /// The address of each sealed value the node refers to, in the order
+    /// the node names them. Needs only the node's own structure key.
+    ///
+    /// # Errors
+    ///
+    /// As for [`children`](Self::children).
+    pub fn attachments(&self, key: &StructureKey) -> Result<Vec<Blake3Hash>, KeyringError> {
+        self.structure(key).map(|(_, attachments)| attachments)
+    }
+
+    /// The structure region, opened: children, then attachments.
+    pub(crate) fn structure(&self, key: &StructureKey) -> Result<Structure, KeyringError> {
         let plain = open(
             key.as_bytes(),
             &self.structure_nonce,
@@ -219,7 +252,17 @@ impl Envelope {
             parsed.push((Blake3Hash::from(address), StructureKey::from_bytes(child)));
             rest = after;
         }
-        Ok(parsed)
+        let (count, mut rest) = read_count(rest)?;
+        let mut attachments = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (address, after) = take::<32>(rest)?;
+            attachments.push(Blake3Hash::from(address));
+            rest = after;
+        }
+        if !rest.is_empty() {
+            return Err(KeyringError::Malformed);
+        }
+        Ok((parsed, attachments))
     }
 
     /// Each child's separator, in child order. Needs the range generation.
@@ -392,8 +435,8 @@ mod tests {
             ),
         ];
 
-        let first = Envelope::seal(&writer, &key, &before, &separators, plain).expect("seal");
-        let second = Envelope::seal(&writer, &key, &after, &separators, plain).expect("seal");
+        let first = Envelope::seal(&writer, &key, &before, &[], &separators, plain).expect("seal");
+        let second = Envelope::seal(&writer, &key, &after, &[], &separators, plain).expect("seal");
 
         assert_ne!(first.structure_nonce, second.structure_nonce);
         assert_eq!(first.children(&key).expect("open"), before);
@@ -407,8 +450,8 @@ mod tests {
         let writer = writer();
         let plain = b"a leaf";
         let key = writer.structure_key(plain);
-        let one = Envelope::seal(&writer, &key, &[], &[], plain).expect("seal");
-        let two = Envelope::seal(&writer, &key, &[], &[], plain).expect("seal");
+        let one = Envelope::seal(&writer, &key, &[], &[], &[], plain).expect("seal");
+        let two = Envelope::seal(&writer, &key, &[], &[], &[], plain).expect("seal");
         assert_eq!(one.to_bytes(), two.to_bytes());
     }
 }

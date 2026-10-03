@@ -1,8 +1,9 @@
 use super::memory::Cell;
 use crate::rules::SharedRuleCache;
-use crate::{Ephemeral, RemoteFallback, ResolveError, Revision};
+use crate::sealing::{TreeSpace, admit, admit_root, sealed_tree};
+use crate::{Ephemeral, RemoteFallback, ResolveError, Revision, SealedTree, TreeReference};
 use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
+use dialog_common::{Blake3Hash, ConditionalSync};
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
@@ -220,6 +221,10 @@ pub struct Branch {
     /// writer: the lock the head moves under, and the head the writer's
     /// last pull adopted. See [`Writer`].
     writer: Arc<Writer>,
+    /// The keys this branch's tree is sealed under, when it is sealed: its
+    /// commits persist envelopes rather than nodes, and its reads open
+    /// them. `None` for a plain branch. See [`crate::sealing`].
+    sealing: Option<TreeSpace>,
 }
 
 /// Which address answered last, per peer: the record each of the host's
@@ -352,7 +357,17 @@ impl Branch {
     /// Returns the current revision of this branch, or `None` if the branch
     /// has no commits yet (equivalent to an orphan branch in git).
     pub fn revision(&self) -> Option<Revision> {
-        self.revision.content()
+        let revision = self.revision.content();
+        if let Some(revision) = &revision {
+            admit(self.sealing.as_ref(), revision);
+        }
+        revision
+    }
+
+    /// The keys this branch's tree is sealed under, or `None` for a plain
+    /// branch.
+    pub fn sealing(&self) -> Option<&TreeSpace> {
+        self.sealing.as_ref()
     }
 
     /// The upstreams this branch pulls from, as last resolved: a bare
@@ -446,7 +461,23 @@ impl Branch {
 
     /// What this branch's tracking cell holds.
     pub(crate) fn tracked(&self) -> Tracking {
-        self.tracking.content().unwrap_or_default()
+        let tracking = self.tracking.content().unwrap_or_default();
+        if let Some(space) = &self.sealing {
+            for (tree, sealed) in tracking.sealed_roots() {
+                admit_root(space, tree, sealed);
+            }
+        }
+        tracking
+    }
+
+    /// Where the tree `tree` starts on this sealed line, if this handle has
+    /// reached it; `None` on a plain line. What a sync records beside the
+    /// tree it synced at, so the next sync can read it as its base.
+    pub(crate) fn sealed_at(&self, tree: &TreeReference) -> Option<SealedTree> {
+        let space = self.sealing.as_ref()?;
+        space
+            .locate(&Blake3Hash::from(*tree.hash()))
+            .map(|root| sealed_tree(&root))
     }
 
     /// This branch's tracking cell.
@@ -571,6 +602,7 @@ impl Branch {
             contexts: self.context_cache.clone(),
             records: self.record_cache.clone(),
             spine: self.spine.clone(),
+            sealing: self.sealing.clone(),
         }
     }
 

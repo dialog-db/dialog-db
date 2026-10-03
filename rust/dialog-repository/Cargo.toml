@@ -25,6 +25,7 @@ dialog-identity = { workspace = true }
 dialog-query = { workspace = true }
 dialog-credentials = { workspace = true }
 dialog-effects = { workspace = true }
+dialog-keyring = { workspace = true }
 dialog-network = { workspace = true }
 dialog-remote-s3 = { workspace = true }
 dialog-remote-ucan-s3 = { workspace = true }

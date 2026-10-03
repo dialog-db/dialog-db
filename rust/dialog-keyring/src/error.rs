@@ -50,6 +50,15 @@ pub enum KeyringError {
     #[error("no block for node {0}")]
     UnknownNode(dialog_common::Blake3Hash),
 
+    /// No sealed value is known for a reference a node makes: it was neither
+    /// staged with the write nor learned from a node already read.
+    #[error("no sealed value for reference {0}")]
+    UnknownValue(dialog_common::Blake3Hash),
+
+    /// This party holds no writer, so it cannot seal.
+    #[error("this party can read but not seal")]
+    ReadOnly,
+
     /// A node's plaintext could not be read as a search-tree node.
     #[error("not a search-tree node: {0}")]
     Node(String),

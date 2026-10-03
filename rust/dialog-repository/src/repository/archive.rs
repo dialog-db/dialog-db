@@ -13,4 +13,4 @@ pub mod networked;
 pub use networked::*;
 
 mod persist;
-pub(crate) use persist::persist;
+pub(crate) use persist::persist_line;

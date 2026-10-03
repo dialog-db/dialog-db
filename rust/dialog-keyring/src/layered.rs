@@ -61,7 +61,15 @@ pub mod keys;
 pub use keys::{Access, Level, LevelSecret, StructureKey, Writer};
 
 mod party;
+pub use party::Sealing;
+
 mod projection;
+pub use projection::{Attach, NoAttachments};
+
+mod space;
+pub use space::Space;
 
 mod store;
 pub use store::{LayeredBlocks, LayeredRoot};
+
+mod value;

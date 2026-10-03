@@ -8,7 +8,9 @@
 //! branch's `sync` cell.
 
 use crate::RemoteFallback;
-use crate::{Branch, ConnectedBranch, ConnectedReplica, Revision, SiteAddress, TreeReference};
+use crate::{
+    Branch, ConnectedBranch, ConnectedReplica, Revision, SealedTree, SiteAddress, TreeReference,
+};
 use dialog_artifacts::Entity;
 use dialog_capability::{Did, Subject};
 use serde::{Deserialize, Serialize};
@@ -313,6 +315,11 @@ pub struct Synced {
     /// once, without tracking it: pushing that content on needs to know
     /// which peers can serve it.
     pub route: Route,
+    /// Where the tree at the last sync starts, when the line is sealed:
+    /// the next sync reads that tree as its base, and a sealed line can
+    /// only reach a tree from where its root lives. `None` on a plain line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<SealedTree>,
 }
 
 impl Tracking {
@@ -334,6 +341,12 @@ impl Tracking {
     /// never synced has nothing to record, and a record it had is
     /// forgotten.
     pub fn record(&mut self, upstream: &Upstream) {
+        self.record_sealed(upstream, None);
+    }
+
+    /// Record that `upstream` was last in sync at its tree, which starts at
+    /// `sealed` on a sealed line.
+    pub fn record_sealed(&mut self, upstream: &Upstream, sealed: Option<SealedTree>) {
         let target = upstream.target();
         let Some(tree) = upstream.tree().cloned() else {
             self.synced.retain(|synced| synced.target != target);
@@ -348,13 +361,22 @@ impl Tracking {
             Some(synced) => {
                 synced.tree = tree;
                 synced.route = route;
+                synced.sealed = sealed;
             }
             None => self.synced.push(Synced {
                 target,
                 tree,
                 route,
+                sealed,
             }),
         }
+    }
+
+    /// Each sync point of a sealed line, and where its tree starts.
+    pub(crate) fn sealed_roots(&self) -> impl Iterator<Item = (&TreeReference, &SealedTree)> {
+        self.synced
+            .iter()
+            .filter_map(|synced| Some((&synced.tree, synced.sealed.as_ref()?)))
     }
 
     /// Every branch this one has synced with, tracked or not: where the
