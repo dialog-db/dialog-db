@@ -243,15 +243,86 @@ mod tests {
 
     use anyhow::Result;
     use dialog_artifacts::{Artifact, Instruction, Value};
+    use dialog_capability::{Command, Fork, Provider};
     use dialog_common::Blake3Hash as NodeHash;
+    use dialog_common::{ConditionalSync, Held, Holds};
     use dialog_credentials::Credential;
+    use dialog_effects::archive::{ArchiveError, Get, Import, Put};
+    use dialog_effects::authority::{Attest, Identify};
+    use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
+    use dialog_effects::memory::{Publish, Resolve};
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_peer::{Peer, PeerSpace, Session};
     use futures_util::stream;
 
     use super::HeldCaches;
     use crate::helpers::test_repo;
-    use crate::{Branch, Repository};
+    use crate::{Branch, CommitError, RemoteSite, Repository};
+
+    /// A provider that passes every effect a commit needs through to the
+    /// environment it wraps, except the archive import, which it refuses:
+    /// a stand-in for a flush that dies at the store (a quota, a lost
+    /// connection) after the commit has sealed its nodes.
+    struct RefusingImport<P> {
+        inner: P,
+    }
+
+    impl<P: Holds> Holds for RefusingImport<P> {
+        fn held(&self, key: &str) -> Option<Held> {
+            self.inner.held(key)
+        }
+
+        fn hold(&self, key: String, handle: Held) {
+            self.inner.hold(key, handle)
+        }
+
+        fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+            self.inner.held_or(key, make)
+        }
+    }
+
+    macro_rules! delegate_provider {
+        ($($command:ty),+ $(,)?) => {
+            $(
+                #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+                #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+                impl<P> Provider<$command> for RefusingImport<P>
+                where
+                    P: Provider<$command> + ConditionalSync,
+                {
+                    async fn execute(
+                        &self,
+                        input: <$command as Command>::Input,
+                    ) -> <$command as Command>::Output {
+                        self.inner.execute(input).await
+                    }
+                }
+            )+
+        };
+    }
+
+    delegate_provider!(
+        Get,
+        Put,
+        Identify,
+        Attest,
+        Resolve,
+        Publish,
+        BlobRead,
+        BlobImport,
+        crate::Hydrate,
+        Fork<RemoteSite, Resolve>,
+    );
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl<P: ConditionalSync> Provider<Import> for RefusingImport<P> {
+        async fn execute(&self, _input: <Import as Command>::Input) -> <Import as Command>::Output {
+            Err(ArchiveError::Storage(
+                "rigged: the store refuses every import".into(),
+            ))
+        }
+    }
 
     /// Opens `main` of `repository`, commits one fact to it, and answers
     /// with the root the commit landed on.
@@ -355,6 +426,56 @@ mod tests {
         assert!(caches.repositories().is_empty());
         let cold = repository.branch("main").open().perform(&operator).await?;
         assert!(cold.node_cache().get_cached(&root).is_none());
+        Ok(())
+    }
+
+    /// A commit whose flush to the store fails leaves nothing of itself
+    /// in the caches the environment holds. The nodes it sealed went into
+    /// the cache ahead of the flush, and the cache outlives the handle, so
+    /// they must be forgotten: a scope holds only what its archive has,
+    /// or a later read would be answered with a block the store never
+    /// received and never fetch it.
+    #[dialog_common::test]
+    async fn it_forgets_the_nodes_a_failed_flush_sealed() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repository = test_repo(&operator, &profile).await;
+        let (main, landed) = commit(&repository, &operator).await?;
+        let caches = HeldCaches::of(&operator);
+        let (held, bytes) = (main.node_cache().len(), caches.bytes());
+
+        let refusing = RefusingImport {
+            inner: operator.clone(),
+        };
+        let failed = main
+            .commit(stream::iter(vec![Instruction::Assert(Artifact {
+                the: "user/name".parse()?,
+                of: "user:2".parse()?,
+                is: Value::String("Bob".into()),
+                cause: None,
+            })]))
+            .perform(&refusing)
+            .await;
+
+        assert!(
+            matches!(failed, Err(CommitError::Artifact(_))),
+            "the commit fails at the flush: {failed:?}"
+        );
+        assert_eq!(
+            main.node_cache().len(),
+            held,
+            "a node the failed flush sealed must not stay in the cache"
+        );
+        assert_eq!(caches.bytes(), bytes);
+        assert!(
+            main.node_cache().get_cached(&landed).is_some(),
+            "what landed before stays held"
+        );
+        assert_eq!(
+            main.revision()
+                .map(|revision| NodeHash::from(*revision.tree.hash())),
+            Some(landed),
+            "the head did not move"
+        );
         Ok(())
     }
 
