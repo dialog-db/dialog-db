@@ -166,7 +166,7 @@ pub(crate) fn canonicalize(
                 of: rename_term(&spec.of, &holes),
             },
         ))?;
-        let terms = vec![
+        let terms = [
             ("of".to_string(), spec.of.clone()),
             ("field".to_string(), Term::<Any>::var(field)),
         ];

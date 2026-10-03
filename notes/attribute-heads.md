@@ -358,6 +358,58 @@ a subset of the head (`titled`) and a point query by entity
 | titled    | no rows | 7.0 ms      |
 | member-of | 0.22 ms | 0.15 ms     |
 
+### Tonk's library
+
+Tonk's own rules are the real load: `account/status` (four rules
+electing one case, three of them negated), `space/presence` (four
+rules over a device's replica facts) and the notebook's
+`block/position` (a keyed collection read through a recursive rule
+pair). A harness in tonk (`rust/tonk-evaluator/examples/rule_load.rs`)
+seeds the profile and notebook libraries the way the worker does,
+asserts 2,000 accounts, 500 spaces and a notebook, and times the
+queries the UI subscribes to and the subscriptions' re-polls, once
+against the released dialog tonk pins and once against this branch
+(dev profile, dependencies optimised, same machine):
+
+| load                                   | released | this branch |
+|----------------------------------------|----------|-------------|
+| account/status, 1,500 rows             | 76 ms    | 75 ms       |
+| account/status, one account            | 0.13 ms  | 0.12 ms     |
+| space/presence, 500 rows               | 1.28 s   | 0.93 s      |
+| block/position, 40 blocks              | 194 ms   | 7.5 ms      |
+| block/position, 454 blocks             | 21.4 s   | 75 ms       |
+| seeding 454 blocks (induction)         | 24.8 s   | 0.75 s      |
+| account/status subscription, first poll| 499 ms   | 248 ms      |
+| space/presence subscription, first poll| 17.3 s   | 5.6 s       |
+| re-poll after suspending 10 accounts   | 49 ms    | 32 ms       |
+| re-poll of an unrelated subscription   | 30 ms    | 11 ms       |
+| re-poll after 10 replicas finish       | 30.8 s   | 7.0 s       |
+
+Row counts and deltas are identical on both. Three things made the
+difference, none of them specific to attribute heads, all of them
+found by running this load:
+
+- A concept premise reads the fields it binds and the required ones.
+  Tonk fills a premise's unmentioned fields with blanks, and `space`
+  carries an optional `presence` the `space/presence` rules derive, so
+  every rule reading `space` read `presence` back through those rules:
+  a cycle the fixpoint answered with nothing. Dropping unbound
+  optional fields is also simply less work.
+- The fixpoint's delta rounds paired every row of one recursive
+  occurrence with every row of the next and planned the body per pair.
+  They now bind the delta row and join the rest through the base
+  premises, planning once per stage, which is what turns the
+  notebook's quadratic second into a linear millisecond.
+- The selecting and covering rules are cached per concept, and a rule
+  set assembled once is reused by subscriptions, which replay the
+  rule-discovery reads it was built from as their demand, where before
+  every poll and every per-entity re-derivation assembled it again.
+
+What remains slow is the engine's cost per concept premise evaluated
+per row (`space/presence` pays it for two negated premises on every
+space) and the subscription's per-entity re-derivation, both older
+than this change and both halved or better by it.
+
 Without the shared body, the single-pass election and the covering
 rule, `member` was three times main and `titled` twice `member`. With
 them `member` is within about a tenth of main, `titled` costs a scan

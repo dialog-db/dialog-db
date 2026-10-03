@@ -24,7 +24,7 @@ use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
 use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest, PersistentNode};
 use futures_util::future::try_join_all;
 use futures_util::{TryStreamExt as _, stream};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
 
 use crate::REGISTRY;
@@ -374,6 +374,10 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// demanded range here. Subscriptions use the recorded cover to
     /// gate re-evaluation.
     demand: Option<crate::Demand>,
+    /// Every rule-discovery read this environment made, in order: what
+    /// a rule set assembled here is recorded with, so a subscription
+    /// reusing the set still records the reads as demand.
+    reads: Arc<Mutex<Vec<crate::rules::RuleRead>>>,
     /// A polling subscription's retained fixpoint for one concept:
     /// attached to that concept's resolved rules so a recursive
     /// evaluation continues (or rebuilds into) the retained answer
@@ -455,6 +459,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
             demand: None,
+            reads: Arc::new(Mutex::new(Vec::new())),
             fixpoint: None,
             fetches,
             memo: dialog_query::recall::Memo::default(),
@@ -491,6 +496,19 @@ impl<'a, Env> QueryEnv<'a, Env> {
         if let Some(demand) = &self.demand {
             demand.record(selector, manifest);
         }
+    }
+
+    /// Note a rule-discovery read: recorded as rule demand when
+    /// recording is on, and kept so a rule set assembled from it can
+    /// replay it for a later subscription.
+    fn read_rules(&self, selector: &ArtifactSelector<Constrained>, manifest: &Manifest) {
+        if let Some(demand) = &self.demand {
+            demand.record_rules(selector, manifest);
+        }
+        self.reads
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push((selector.clone(), manifest.clone()));
     }
 }
 
@@ -570,6 +588,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
             layers: self.layers.clone(),
             format: self.format.clone(),
             demand: self.demand.clone(),
+            reads: self.reads.clone(),
             fixpoint: self.fixpoint.clone(),
             fetches: self.fetches,
             memo: dialog_query::recall::Memo::default(),
@@ -919,9 +938,8 @@ where
         // must re-trigger the subscription. Recorded as *rule*
         // demand: a hit here invalidates the whole result, not one
         // entity's slice.
-        if let Some(demand) = &self.demand {
-            demand.record_rules(&selector, &self.format().await?.manifest);
-        }
+        let manifest = &self.format().await?.manifest;
+        self.read_rules(&selector, manifest);
         // Rule bodies are hydrated from the full artifact, so this read
         // genuinely needs owned rows; it is head-cached, not per-query hot.
         select_from_source(source.as_ref(), self.env, selector)
@@ -945,16 +963,12 @@ where
     ) -> Result<Vec<DeductiveRule>, EvaluationError> {
         let overlay = source.as_ref().overlay();
         let conclusions = index.selector(key);
-        if let Some(demand) = &self.demand {
-            demand.record_rules(&conclusions, manifest);
-        }
+        self.read_rules(&conclusions, manifest);
         let entities = rule_entities(overlay.scan(&conclusions));
         let mut rules = Vec::with_capacity(entities.len());
         for rule_entity in entities {
             let sources = source_selector(&rule_entity);
-            if let Some(demand) = &self.demand {
-                demand.record_rules(&sources, manifest);
-            }
+            self.read_rules(&sources, manifest);
             let Some(bytes) = source_bytes(overlay.scan(&sources)) else {
                 continue;
             };
@@ -1086,8 +1100,8 @@ where
         // resolved from, so while none has moved the last one assembled
         // stands. Not when rules are read fresh: from the query's overlay,
         // or from a line's session overlay, which moves without moving its
-        // root. Nor when the query records what it reads, since reading
-        // the rules is what records a subscription's demand on them.
+        // root. A query recording what it reads reuses the set as well,
+        // and records the rule reads that assembled it as its own.
         let roots: Vec<_> = self
             .sources
             .iter()
@@ -1098,20 +1112,29 @@ where
             .first()
             .map(|source| source.as_ref().rule_cache())
             .filter(|_| {
-                self.demand.is_none()
-                    && !has_overlay_rules(&self.changes)
+                !has_overlay_rules(&self.changes)
                     && !self.layers.iter().any(Staged::holds_rules)
                     && !self
                         .sources
                         .iter()
                         .any(|source| holds_rules(source.as_ref().overlay()))
             });
-        if let Some(bundle) = cache
+        if let Some((bundle, reads)) = cache
             .as_ref()
             .and_then(|cache| cache.bundle(&input, &roots))
         {
+            if let Some(demand) = &self.demand {
+                for (selector, manifest) in &reads {
+                    demand.record_rules(selector, manifest);
+                }
+            }
             return Ok(self.continuing(&concept, bundle));
         }
+        let first_read = self
+            .reads
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .len();
 
         // Plan cache rides a line (peers share content-addressed plans;
         // any line's cache is correct). The overlay-only query has no
@@ -1131,7 +1154,14 @@ where
             bundle
         };
         if let Some(cache) = cache {
-            cache.record_bundle(input.clone(), roots, bundle.clone());
+            let reads = self
+                .reads
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .get(first_read..)
+                .map(<[_]>::to_vec)
+                .unwrap_or_default();
+            cache.record_bundle(input.clone(), roots, bundle.clone(), reads);
         }
         Ok(self.continuing(&concept, bundle))
     }
@@ -1360,22 +1390,50 @@ where
         let mut bundle = if derived.is_empty() {
             ConceptRules::with_plan_cache(descriptor, plan_cache)
         } else {
-            let selecting = DeductiveRule::selecting(descriptor, &|field| {
-                derived.contains(&ConceptDescriptor::of_attribute(field).this())
-            })
-            .map_err(|error| EvaluationError::Store(format!("selecting rule: {error}")))?;
-            let bundle = ConceptRules::with_implicit(selecting, true, plan_cache);
-            match sole.flatten() {
-                Some((rule, attributes)) => match rule
-                    .covering(descriptor)
-                    .map_err(|error| EvaluationError::Store(format!("covering rule: {error}")))?
-                {
-                    Some(covering) => bundle.with_exact(Exact {
-                        rule: covering,
-                        attributes,
-                    }),
-                    None => bundle,
-                },
+            // The selecting rule and the covering rule are functions of
+            // the concept, the derived attributes and the sole source:
+            // built once per branch and kept.
+            let cache = self
+                .sources
+                .first()
+                .map(|source| source.as_ref().rule_cache());
+            let mut derived_key: Vec<Entity> = derived.iter().cloned().collect();
+            derived_key.sort();
+            let sole = sole.flatten();
+            let sole_key = sole.as_ref().and_then(|(rule, _)| rule.try_this());
+            let selecting = match cache
+                .as_ref()
+                .and_then(|cache| cache.selecting(descriptor, &derived_key, &sole_key))
+            {
+                Some(selecting) => selecting,
+                None => {
+                    let rule = DeductiveRule::selecting(descriptor, &|field| {
+                        derived.contains(&ConceptDescriptor::of_attribute(field).this())
+                    })
+                    .map_err(|error| EvaluationError::Store(format!("selecting rule: {error}")))?;
+                    let exact = match sole {
+                        Some((source, attributes)) => source
+                            .covering(descriptor)
+                            .map_err(|error| {
+                                EvaluationError::Store(format!("covering rule: {error}"))
+                            })?
+                            .map(|rule| Exact { rule, attributes }),
+                        None => None,
+                    };
+                    let selecting = crate::rules::Selecting {
+                        descriptor: descriptor.clone(),
+                        rule,
+                        exact,
+                    };
+                    if let Some(cache) = cache {
+                        cache.record_selecting(derived_key, sole_key, selecting.clone());
+                    }
+                    selecting
+                }
+            };
+            let bundle = ConceptRules::with_implicit(selecting.rule, true, plan_cache);
+            match selecting.exact {
+                Some(exact) => bundle.with_exact(exact),
                 None => bundle,
             }
         };
@@ -2812,6 +2870,169 @@ mod rule_tests {
             "v2 resolves its agent input via its own body, not v1's cached one"
         );
         Ok(())
+    }
+
+    /// Tonk's `space/presence` shape: a concept whose optional field
+    /// is derived by rules whose bodies read the concept itself for a
+    /// required field, with a negated premise over a concept outside
+    /// the loop. A space with no replica is `case:remote`.
+    #[dialog_common::test]
+    async fn it_derives_an_optional_field_from_a_rule_reading_the_concept() -> anyhow::Result<()> {
+        use dialog_query::rule::deductive::descriptor::DeductiveRuleDescriptor;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let space = serde_json::json!({ "with": {
+            "subject": { "the": "load.space/subject", "as": "Entity" },
+            "presence": { "the": "load.space/presence", "as": "Entity", "optional": true }
+        } });
+        let replica = serde_json::json!({ "with": {
+            "subject": { "the": "load.replica/subject", "as": "Entity" },
+            "profile": { "the": "load.replica/profile", "as": "Entity" }
+        } });
+        let presence = serde_json::json!({ "with": {
+            "presence": { "the": "load.space/presence", "as": "Entity" }
+        } });
+        let rule: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": presence,
+            "when": [
+                { "assert": space, "where": {
+                    "this": { "?": { "name": "this" } },
+                    "subject": { "?": { "name": "subject" } } } },
+                { "assert": "==", "where": {
+                    "this": { "?": { "name": "presence" } },
+                    "is": "case:remote" } }
+            ],
+            "unless": [
+                { "assert": replica, "where": {
+                    "subject": { "?": { "name": "subject" } } } }
+            ]
+        }))?;
+        let rule = rule.compile()?;
+
+        let here: Entity = "id:space-here".parse()?;
+        let away: Entity = "id:space-away".parse()?;
+        let device: Entity = "id:device".parse()?;
+        branch
+            .transaction()
+            .assert(&rule)
+            .assert(
+                the!("load.space/subject")
+                    .of(here.clone())
+                    .is("id:subject-here".parse::<Entity>()?),
+            )
+            .assert(
+                the!("load.space/subject")
+                    .of(away.clone())
+                    .is("id:subject-away".parse::<Entity>()?),
+            )
+            .assert(
+                the!("load.replica/subject")
+                    .of("id:replica".parse::<Entity>()?)
+                    .is("id:subject-here".parse::<Entity>()?),
+            )
+            .assert(
+                the!("load.replica/profile")
+                    .of("id:replica".parse::<Entity>()?)
+                    .is(device),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let presences =
+            entities_of(&branch, &operator, &[("presence", "load.space/presence")]).await?;
+        assert_eq!(
+            presences,
+            vec![(away.clone(), vec!["case:remote".to_string()])]
+        );
+
+        // Read through the concept itself: the space with a replica
+        // carries no presence, the other its derived one.
+        let predicate: ConceptDescriptor = serde_json::from_value(space.clone())?;
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("subject".into(), Term::var("subject"));
+        terms.insert("presence".into(), Term::var("presence"));
+        let mut rows: Vec<(Entity, Option<String>)> = branch
+            .select(ConceptQuery { predicate, terms })
+            .perform(&operator)
+            .try_vec()
+            .await?
+            .into_iter()
+            .map(|row| {
+                let presence = row
+                    .get::<Entity>("presence")
+                    .ok()
+                    .map(|value| value.to_string());
+                (row.entity().clone(), presence)
+            })
+            .collect();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![(away, Some("case:remote".to_string())), (here, None)]
+        );
+        Ok(())
+    }
+
+    /// `rows_of` for entity-valued fields.
+    async fn entities_of<Env>(
+        branch: &Branch,
+        operator: &Env,
+        fields: &[(&str, &str)],
+    ) -> anyhow::Result<Vec<(Entity, Vec<String>)>>
+    where
+        Env: Provider<BlobRead>
+            + dialog_capability::Provider<Get>
+            + dialog_capability::Provider<Put>
+            + dialog_capability::Provider<Resolve>
+            + dialog_capability::Provider<Identify>
+            + dialog_capability::Provider<crate::Hydrate>
+            + dialog_capability::Provider<dialog_artifacts::Preload>
+            + dialog_capability::Provider<dialog_artifacts::Speculation>
+            + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let with: serde_json::Map<String, serde_json::Value> = fields
+            .iter()
+            .map(|(field, the)| {
+                (
+                    field.to_string(),
+                    serde_json::json!({ "the": the, "as": "Entity" }),
+                )
+            })
+            .collect();
+        let predicate: ConceptDescriptor =
+            serde_json::from_value(serde_json::json!({ "with": with }))?;
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        for (field, _) in fields {
+            terms.insert(field.to_string(), Term::var(*field));
+        }
+        let rows: Vec<ConceptConclusion> = branch
+            .select(ConceptQuery { predicate, terms })
+            .perform(operator)
+            .try_vec()
+            .await?;
+        let mut out: Vec<(Entity, Vec<String>)> = rows
+            .iter()
+            .map(|row| {
+                let values = fields
+                    .iter()
+                    .filter_map(|(field, _)| {
+                        row.get::<Entity>(field).ok().map(|value| value.to_string())
+                    })
+                    .collect();
+                (row.entity().clone(), values)
+            })
+            .collect();
+        out.sort();
+        Ok(out)
     }
 }
 

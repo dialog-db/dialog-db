@@ -42,7 +42,7 @@ use dialog_artifacts::{
     Artifact, ArtifactSelector, Attribute, Changes, Entity, Statement, Update, Value,
 };
 use dialog_query::concept::descriptor::ConceptDescriptor;
-use dialog_query::concept::query::{ConceptRules, PlanCache};
+use dialog_query::concept::query::{ConceptRules, Exact, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::formula::revision::{RevisionParentQuery, RevisionQuery};
 use dialog_query::type_system::Type as Kind;
@@ -51,6 +51,7 @@ use dialog_query::{
     AttributeQuery, Cardinality, ConceptQuery, DeductiveRule, Descriptor, FormulaQuery,
     InductiveRule, Parameters, Premise, Proposition, Term, the,
 };
+use dialog_search_tree::Manifest;
 use parking_lot::RwLock;
 
 use crate::{Revision, schema};
@@ -471,6 +472,12 @@ struct RuleCacheInner {
     /// that descriptor's implicit rule, which binds its field names, and
     /// descriptors differing only in field names share an identity.
     bundles: HashMap<Entity, Bundle>,
+    /// A selecting concept's rule and covering rule, keyed by the
+    /// concept, the attributes it reads as derived and the one source
+    /// rule deriving them (if one). Pure functions of their key, so
+    /// never stale; kept with the descriptor, whose field names the
+    /// rule binds.
+    selecting: HashMap<SelectingKey, Selecting>,
 }
 
 /// A rule set assembled for one descriptor, as of the roots of the
@@ -480,6 +487,27 @@ struct Bundle {
     roots: LayerRoots,
     descriptor: ConceptDescriptor,
     rules: ConceptRules,
+    /// The rule-discovery reads assembling it made, replayed as rule
+    /// demand for a subscription that reuses it.
+    reads: Vec<RuleRead>,
+}
+
+/// One rule-discovery read: the selector and the manifest it was keyed
+/// under.
+pub(crate) type RuleRead = (ArtifactSelector<Constrained>, Manifest);
+
+/// What a selecting rule is a function of: the concept, the attribute
+/// concepts it reads as derived (sorted) and the sole source rule
+/// deriving them, when there is one.
+type SelectingKey = (Entity, Vec<Entity>, Option<Entity>);
+
+/// A selecting concept's rules, with the descriptor they were built
+/// for.
+#[derive(Clone, Debug)]
+pub(crate) struct Selecting {
+    pub(crate) descriptor: ConceptDescriptor,
+    pub(crate) rule: DeductiveRule,
+    pub(crate) exact: Option<Exact>,
 }
 
 impl RuleCache {
@@ -542,25 +570,27 @@ impl RuleCache {
         &self,
         descriptor: &ConceptDescriptor,
         roots: &[Option<[u8; 32]>],
-    ) -> Option<ConceptRules> {
+    ) -> Option<(ConceptRules, Vec<RuleRead>)> {
         let inner = self.inner.read();
         match inner.bundles.get(&descriptor.this()) {
             Some(bundle)
                 if bundle.roots.as_slice() == roots && bundle.descriptor == *descriptor =>
             {
-                Some(bundle.rules.clone())
+                Some((bundle.rules.clone(), bundle.reads.clone()))
             }
             _ => None,
         }
     }
 
     /// Record the rule set assembled for `descriptor` over layers at
-    /// `roots`, replacing one recorded for its concept before.
+    /// `roots`, with the rule-discovery reads assembling it made,
+    /// replacing one recorded for its concept before.
     pub(crate) fn record_bundle(
         &self,
         descriptor: ConceptDescriptor,
         roots: LayerRoots,
         rules: ConceptRules,
+        reads: Vec<RuleRead>,
     ) {
         self.inner.write().bundles.insert(
             descriptor.this(),
@@ -568,8 +598,38 @@ impl RuleCache {
                 roots,
                 descriptor,
                 rules,
+                reads,
             },
         );
+    }
+
+    /// The selecting rules built for `descriptor` reading `derived`
+    /// through attribute concepts with `sole` as their one source, if
+    /// built before for a descriptor spelled the same.
+    pub(crate) fn selecting(
+        &self,
+        descriptor: &ConceptDescriptor,
+        derived: &[Entity],
+        sole: &Option<Entity>,
+    ) -> Option<Selecting> {
+        let inner = self.inner.read();
+        let key = (descriptor.this(), derived.to_vec(), sole.clone());
+        inner
+            .selecting
+            .get(&key)
+            .filter(|found| found.descriptor == *descriptor)
+            .cloned()
+    }
+
+    /// Record the selecting rules built for `descriptor`.
+    pub(crate) fn record_selecting(
+        &self,
+        derived: Vec<Entity>,
+        sole: Option<Entity>,
+        selecting: Selecting,
+    ) {
+        let key = (selecting.descriptor.this(), derived, sole);
+        self.inner.write().selecting.insert(key, selecting);
     }
 
     /// A cached hydrated body by rule entity, if present.

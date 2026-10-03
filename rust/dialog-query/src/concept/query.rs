@@ -526,7 +526,7 @@ impl ConceptQuery {
                 && let Some(plan) = rules.plan_exact(&app.terms, &first)
             {
                 let rows = stream::once(async { Ok(first) }).chain(selection);
-                for await merged in app.through(&plan, rows, env, false, false) {
+                for await merged in app.through(&plan, rows, env, false, widen) {
                     yield merged?;
                 }
                 return;
@@ -863,6 +863,50 @@ impl ConceptQuery {
         }
     }
 
+    /// This query over the concept narrowed to the fields it binds:
+    /// an optional field the terms leave out, or bind to an anonymous
+    /// variable, is dropped from the predicate. A set-widened read of
+    /// a field nobody binds yields every row once whatever the field
+    /// holds, so it decides nothing; and when the field is derived by
+    /// rules whose bodies read this concept, selecting it would put
+    /// the concept on a cycle with those rules through a read the
+    /// caller never asked for. Required fields stay: an entity
+    /// without one is not an instance. An attribute concept is left
+    /// as it is.
+    pub fn narrowed(self) -> Self {
+        if self.predicate.attribute_field().is_some() {
+            return self;
+        }
+        let unbound = |name: &str| match self.terms.get(name) {
+            None | Some(Term::Variable { name: None, .. }) => true,
+            Some(_) => false,
+        };
+        let dropped: Vec<&str> = self
+            .predicate
+            .with()
+            .iter()
+            .filter(|(name, field)| field.is_optional() && unbound(name))
+            .map(|(name, _)| name)
+            .collect();
+        if dropped.is_empty() {
+            return self;
+        }
+        let kept: Vec<(String, ConceptFieldDescriptor)> = self
+            .predicate
+            .with()
+            .iter()
+            .filter(|(name, _)| !dropped.contains(name))
+            .map(|(name, field)| (name.to_string(), field.clone()))
+            .collect();
+        match ConceptDescriptor::try_from(kept) {
+            Ok(predicate) => ConceptQuery {
+                predicate,
+                terms: self.terms,
+            },
+            Err(_) => self,
+        }
+    }
+
     /// This query over the canonical spelling of its concept: an
     /// attribute concept under a field name of the caller's choosing
     /// is the attribute concept, and its rules bind the attribute's
@@ -1169,6 +1213,66 @@ mod tests {
     use dialog_artifacts::Entity;
     use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use futures_util::TryStreamExt;
+
+    /// A premise reads the fields it binds and the required ones: an
+    /// optional field left out, or bound to a blank, is dropped from
+    /// the concept it reads; one bound to a variable stays, and so
+    /// does every required field, named or not.
+    #[dialog_common::test]
+    fn it_narrows_a_premise_to_the_fields_it_binds() {
+        let descriptor: ConceptDescriptor = serde_json::from_value(serde_json::json!({
+            "with": {
+                "name": { "the": "narrow/name", "as": "Text" },
+                "nick": { "the": "narrow/nick", "as": "Text", "optional": true },
+                "mood": { "the": "narrow/mood", "as": "Text", "optional": true }
+            }
+        }))
+        .unwrap();
+        let fields = |query: &ConceptQuery| -> Vec<String> {
+            query.predicate.with().keys().map(String::from).collect()
+        };
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        let bare = ConceptQuery {
+            predicate: descriptor.clone(),
+            terms,
+        }
+        .narrowed();
+        assert_eq!(
+            fields(&bare),
+            vec!["name"],
+            "unnamed optionals go, required stays"
+        );
+
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("nick".into(), Term::var("nick"));
+        terms.insert("mood".into(), Term::<Any>::blank());
+        let bound = ConceptQuery {
+            predicate: descriptor.clone(),
+            terms,
+        }
+        .narrowed();
+        assert_eq!(
+            fields(&bound),
+            vec!["name", "nick"],
+            "a variable keeps its field, a blank does not"
+        );
+
+        let mut terms = Parameters::new();
+        terms.insert("nick".into(), Term::var("nick"));
+        terms.insert("mood".into(), Term::var("mood"));
+        let full = ConceptQuery {
+            predicate: descriptor.clone(),
+            terms,
+        }
+        .narrowed();
+        assert_eq!(
+            full.predicate, descriptor,
+            "nothing to drop leaves it as it is"
+        );
+    }
 
     // Note: Async tests are commented out due to Rust recursion limit issues in test compilation
     // with deeply nested async streams. The functionality is tested indirectly through integration
