@@ -160,7 +160,9 @@ facts are stored under, read under a type and a policy, and two
 reads of one relation under different policies are two attributes.
 Cardinality is the policy's arity, `all` being many and every other
 policy one; `cardinality: one` and `many` are the older spellings of
-`last` and `all` and name the same attributes they always did. Rules
+`last` and `all` and name the same attributes they always did, and
+tonk's notation no longer writes them: `select: all` where it said
+`many`, nothing where it said `one`. Rules
 derive into the relation and are found by it, whatever type or
 policy a reader declares over it.
 
