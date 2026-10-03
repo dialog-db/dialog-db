@@ -730,7 +730,8 @@ where
             env,
             ArchiveScope::new(self.branch.subject()).index(),
             remote,
-        );
+        )
+        .sealed(self.branch.sealing().cloned());
         // Keep the raw backend to fetch spilled value blocks by reference.
         let raw_store = store.clone();
         let storage = store;

@@ -143,6 +143,7 @@ impl Download<'_> {
         // already hold by the time they are yielded, so draining the
         // stream is the whole job.
         let export = Snapshot::new(branch.subject(), revision)
+            .sealed(branch.sealing().cloned())
             .export()
             .download(remote);
         let export = match self.scope {

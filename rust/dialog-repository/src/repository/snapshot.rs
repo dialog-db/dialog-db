@@ -57,8 +57,8 @@ use dialog_artifacts::history::{
 };
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    ArtifactSelector, BlobIndexExt as _, Datum, DialogArtifactsError, Entity, Key, LoadBlob,
-    ShipmentRef, State, Statement, shipment_ref,
+    ArtifactSelector, BlobIndexExt as _, DialogArtifactsError, Entity, LoadBlob, ShipmentRef,
+    Statement, shipment_ref,
 };
 use dialog_capability::{Did, Fork, Provider, Subject};
 use dialog_common::{Blake3Hash as NodeHash, Buffer, ConditionalSync};
@@ -69,15 +69,17 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory;
 use dialog_query::query::Application;
-use dialog_search_tree::{NodeBody, NoveltyOp, Traversable as _, Visit, into_owned};
+use dialog_search_tree::{Traversable as _, Visit};
 use futures_util::future::Either;
 use futures_util::{Stream, StreamExt as _, stream};
 use parking_lot::RwLock;
 
 use dialog_varsig::Principal;
 
+use crate::repository::archive::node_entries;
 use crate::repository::remote::Step;
 use crate::repository::source::{Caches, SourceRef};
+use crate::sealing::{TreeSpace, admit};
 use crate::{
     BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, NetworkedIndex, PublishError,
     RemoteSite, Repository, Revision, Select, SelectQuery, SnapshotError,
@@ -254,6 +256,14 @@ impl Snapshot {
         }
     }
 
+    /// This view reading and writing a sealed line through `space`, or a
+    /// plain one with `None`. See [`crate::sealing`].
+    #[must_use]
+    pub fn sealed(mut self, space: Option<TreeSpace>) -> Self {
+        self.caches.sealing = space;
+        self
+    }
+
     /// The staged view inside a [`TransactionBatch`](crate::TransactionBatch):
     /// reads like any snapshot of `revision`, but its line is pre-seeded
     /// with the branch entity, so commits through it mint on the branch's
@@ -280,7 +290,9 @@ impl Snapshot {
 
     /// The revision this snapshot names.
     pub fn revision(&self) -> Revision {
-        self.head.read().revision.clone()
+        let revision = self.head.read().revision.clone();
+        admit(self.caches.sealing.as_ref(), &revision);
+        revision
     }
 
     /// The subject (repository) this snapshot is a view of.
@@ -646,18 +658,21 @@ impl SnapshotExport {
         let hydrate = upstream.clone();
         let sparse = matches!(self.reach, Reach::Sparse);
         let root = NodeHash::from(*self.snapshot.revision().tree.hash());
+        let sealing = self.snapshot.caches().sealing.clone();
         let scope = self.scope.clone();
 
         try_stream! {
             // With an upstream a read-miss falls through to the remote and
             // is cached; without one the index is exactly what this store
             // holds.
-            let index = NetworkedIndex::new(env, catalog, upstream);
+            let index = NetworkedIndex::new(env, catalog, upstream).sealed(sealing.clone());
             let storage = index.clone();
             let tree = Index::from_hash(root);
 
             let mut spills: HashSet<[u8; 32]> = HashSet::new();
-            let mut blobs: Vec<NodeHash> = Vec::new();
+            // Each blob's digest, and for a sealed asset's copy, the asset
+            // it is a copy of.
+            let mut blobs: Vec<(NodeHash, Option<[u8; 32]>)> = Vec::new();
             // A key may surface twice — its stored leaf entry plus a
             // buffered op riding an ancestor index node — naming the same
             // content; ship each blob once.
@@ -701,23 +716,7 @@ impl SnapshotExport {
                 // references nothing of its own). The closure only
                 // collects: classification returns artifact errors,
                 // which do not belong in a tree-walk callback.
-                let mut entries: Vec<(Key, State<Datum>)> = Vec::new();
-                match node.body() {
-                    NodeBody::Segment(segment) => {
-                        segment.for_each_entry::<Key, _>(|key, value| {
-                            entries.push((Key::from(key.to_vec()), into_owned(value)?));
-                            Ok(())
-                        })?;
-                    }
-                    NodeBody::Index(index) => {
-                        for entry in index.all_novelty::<Key>()? {
-                            if let NoveltyOp::Assert(value) = entry.op {
-                                entries.push((Key::from(entry.key), value));
-                            }
-                        }
-                    }
-                }
-                for (key, value) in entries {
+                for (key, value) in node_entries(&node)? {
                     match shipment_ref(&key, &value, false)? {
                         Some(ShipmentRef::SpilledValue(reference)) => {
                             spills.insert(reference);
@@ -725,14 +724,39 @@ impl SnapshotExport {
                         Some(ShipmentRef::BlobAdded { hash, .. }) => {
                             let hash = NodeHash::from(hash);
                             if blob_seen.insert(hash.clone()) {
-                                blobs.push(hash);
+                                blobs.push((hash, None));
+                            }
+                        }
+                        // A sealed asset travels as its sealed copy, an
+                        // ordinary blob under its own address.
+                        Some(ShipmentRef::SealedAdded { hash, address, .. }) => {
+                            let address = NodeHash::from(address);
+                            if blob_seen.insert(address.clone()) {
+                                blobs.push((address, Some(hash)));
                             }
                         }
                         _ => {}
                     }
                 }
 
-                yield Item::Block(Block::new(node.buffer().clone()));
+                // A sealed line exports what its archive holds: the
+                // envelope, under its own address, never the node it
+                // opens to.
+                let block = match &sealing {
+                    None => node.buffer().clone(),
+                    Some(_) => {
+                        let address = index.node_address(node.hash()).ok_or_else(|| {
+                            SnapshotError::MissingBlock {
+                                digest: node.hash().clone(),
+                            }
+                        })?;
+                        index
+                            .load(&address)
+                            .await?
+                            .ok_or(SnapshotError::MissingBlock { digest: address })?
+                    }
+                };
+                yield Item::Block(Block::new(block));
             }
 
             // Spilled values, discovered above. Their reads are
@@ -743,9 +767,22 @@ impl SnapshotExport {
             let mut spill_reads = stream::iter(spills.into_iter().map(
                 |reference| {
                     let storage = &storage;
+                    let sealed = sealing.is_some();
                     async move {
-                        let digest = NodeHash::from(reference);
-                        let bytes = LoadBlob::new(digest.clone()).perform(storage).await;
+                        let reference = NodeHash::from(reference);
+                        if !sealed {
+                            let bytes = LoadBlob::new(reference.clone()).perform(storage).await;
+                            return (reference, bytes);
+                        }
+                        // A sealed line's value travels sealed, under its
+                        // sealed copy's address.
+                        let Some(digest) = storage.value_address(&reference) else {
+                            return (reference, Ok(None));
+                        };
+                        let bytes = storage
+                            .load_stored_blob(&digest)
+                            .await
+                            .map_err(DialogArtifactsError::from);
                         (digest, bytes)
                     }
                 },
@@ -779,7 +816,7 @@ impl SnapshotExport {
             // is skipped; one it references with no bytes anywhere the
             // reach extends is unavailable, which sparse tolerates and
             // complete refuses.
-            let mut blob_reads = stream::iter(blobs.into_iter().map(|digest| {
+            let mut blob_reads = stream::iter(blobs.into_iter().map(|(digest, sealed_of)| {
                 let tree = &tree;
                 let index = &index;
                 let hydrate = &hydrate;
@@ -790,7 +827,16 @@ impl SnapshotExport {
                     // the tree supersedes. What the tree records for the
                     // content says whether the blob is still referenced; one it no longer
                     // names is not this export's to carry.
-                    let Some(size) = tree.content_size(index, digest.as_bytes()).await? else {
+                    let size = match sealed_of {
+                        None => tree.content_size(index, digest.as_bytes()).await?,
+                        Some(hash) => match tree.sealed_asset(index, &hash).await? {
+                            Some((copy, _)) if &copy.address == digest.as_bytes() => {
+                                Some(copy.length)
+                            }
+                            _ => None,
+                        },
+                    };
+                    let Some(size) = size else {
                         return Ok((digest, Found::Unreferenced));
                     };
                     let reader = subject
@@ -1010,7 +1056,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use anyhow::Result;
-    use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+    use dialog_artifacts::{Artifact, ArtifactSelector, Datum, Instruction, Key, State, Value};
     use dialog_credentials::Credential;
     use dialog_effects::archive::prelude::GetBlockExt as _;
     use dialog_effects::blob::BlobSource;

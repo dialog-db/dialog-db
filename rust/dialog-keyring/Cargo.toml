@@ -1,0 +1,59 @@
+[package]
+name = "dialog-keyring"
+description = "Epoch-keyed sealing for content-addressed data"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# The synchronous cipher. The tree's persist path does not await, so content
+# sealing cannot route through `WebCrypto` the way `dialog-credentials` does;
+# it has to be software AES on both targets. Same algorithm either way, so the
+# two paths produce identical bytes -- asserted in `tests/sealing.rs`.
+aes-gcm = { workspace = true }
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-common = { workspace = true }
+dialog-credentials = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-search-tree = { workspace = true }
+dialog-storage = { workspace = true }
+getrandom = { workspace = true }
+# Only for the archive-validation bound on `PersistentNode`, which the layered
+# projection needs in order to read a node's links.
+rkyv = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+# The cross-target test macro's wasm inner-test expansion references
+# `wasm_bindgen`, so it must be a real dependency on wasm, not just a dev-dep.
+wasm-bindgen = { workspace = true }
+
+[dev-dependencies]
+dialog-common = { workspace = true, features = ["helpers"] }
+anyhow = { workspace = true }
+futures-util = { workspace = true }
+dialog-varsig = { workspace = true }
+wasm-bindgen-test = { workspace = true }
+
+[[bench]]
+name = "sealing"
+harness = false
+
+# tokio and criterion for the test process are native-only: the wasm tests run
+# on wasm-bindgen-test and the browser event loop, and tokio's `net` pulls
+# `mio`, which does not build for wasm.
+[target.'cfg(not(all(target_arch = "wasm32", target_os = "unknown")))'.dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[lints.rust]
+# These cfgs are used by the dialog_common::test proc macro.
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(dialog_test_wasm_integration)",
+    "cfg(feature, values(\"web-integration-tests\"))",
+] }

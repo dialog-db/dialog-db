@@ -19,6 +19,11 @@ use native as backend;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use web as backend;
 
+// The raw AEAD and KDF, re-exported for `crate::symmetric`. Sealing content
+// under a key the caller already holds needs these without the ECDH and DID
+// binding that `conceal` / `reveal` add on top.
+pub(crate) use backend::{decrypt, derive_key, encrypt};
+
 /// The `info` tag for a sealed secret.
 const SEAL: u8 = 0x00;
 

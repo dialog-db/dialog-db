@@ -11,9 +11,7 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_search_tree::{
-    MissingBlocks, MissingPolicy, NodeBody, NoveltyOp, PersistentNode, TreeDifference, into_owned,
-};
+use dialog_search_tree::{MissingBlocks, MissingPolicy, NodeBody, PersistentNode, TreeDifference};
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::collections::HashSet;
 
@@ -21,11 +19,15 @@ use super::resolve::resolve;
 use crate::ResolveEnv;
 use crate::repository::archive::local::read_all;
 use crate::repository::archive::networked::fill_import;
+use crate::repository::archive::node_entries;
 use crate::repository::remote::Step;
+use crate::sealing::open_node;
 use crate::{
     Branch, ConnectedReplica, Index, LocalIndex, PublishError, PushError, RemoteSite,
     RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
 };
+use dialog_keyring::KeyringError;
+use dialog_search_tree::DialogSearchTreeError;
 use futures_util::future::join_all;
 
 /// Command struct for pushing local changes to an upstream branch.
@@ -338,8 +340,12 @@ where
                     target: MissingBlocks::Boundary,
                 };
 
+                // A sealed line diffs through its space, so the walk opens
+                // envelopes; everything it then ships is the sealed bytes
+                // the archive holds, never what they open to.
                 let index = branch.archive().index();
-                let store = LocalIndex::new(env, index.clone());
+                let sealing = branch.sealing().cloned();
+                let store = LocalIndex::new(env, index.clone()).sealed(sealing.clone());
                 let base_tree = match &base {
                     Some(base) => Index::from_hash(NodeHash::from(*base.hash())),
                     None => Index::empty(),
@@ -409,7 +415,7 @@ where
                 // the sign-in path this loop awaited each shipment in turn
                 // and measured as the single largest cost of the push (one
                 // round trip per spilled value, one after another).
-                let blob_store = LocalIndex::new(env, index.clone());
+                let blob_store = LocalIndex::new(env, index.clone()).sealed(sealing.clone());
                 let shipments = shipment_refs(&difference)
                     .map(|shipment| {
                         ship(
@@ -444,6 +450,7 @@ where
                         forward_subtree(
                             link.node.clone(),
                             branch,
+                            &blob_store,
                             remote,
                             &sources,
                             target_may_have,
@@ -499,12 +506,22 @@ where
                     for node in &wave {
                         durable.insert(node.hash().clone());
                     }
-                    let upload = remote_index
-                        .upload(stream::iter(wave.into_iter().map(Ok)))
-                        .perform(env);
-                    // Boxed because the upload future carries the full
-                    // stream type and produces large futures.
-                    Box::pin(upload).await?;
+                    if sealing.is_some() {
+                        // Each node crosses as the envelope the archive
+                        // holds it in, under that envelope's own address.
+                        let upload = stream::iter(wave)
+                            .map(|node| upload_envelope(node, &tree_store, &remote_index, env))
+                            .buffer_unordered(SHIPMENT_CONCURRENCY)
+                            .try_collect::<()>();
+                        Box::pin(upload).await?;
+                    } else {
+                        let upload = remote_index
+                            .upload(stream::iter(wave.into_iter().map(Ok)))
+                            .perform(env);
+                        // Boxed because the upload future carries the full
+                        // stream type and produces large futures.
+                        Box::pin(upload).await?;
+                    }
                     pending = rest;
                 }
 
@@ -531,7 +548,8 @@ where
         let marker = branch.tracking().checkpoint();
         let mut tracking = branch.tracked();
         let advanced = upstream_state.clone().with_tree(revision.tree.clone());
-        tracking.record(&advanced);
+        let sealed = revision.sealed.clone();
+        tracking.record_sealed(&advanced, sealed.clone());
         // The record is written until it lands. A mismatch means another
         // write to the cell came first: each is some sync recording its
         // own upstream, so there are only ever as many as syncs in flight,
@@ -551,7 +569,7 @@ where
             if !ours_untouched {
                 return Ok(Some(revision));
             }
-            tracking.record(&advanced);
+            tracking.record_sealed(&advanced, sealed.clone());
             publish = marker.publish(tracking, env).await;
         }
         publish?;
@@ -571,6 +589,34 @@ fn node_children(
         }
         NodeBody::Segment(_) => Ok(Vec::new()),
     }
+}
+
+/// Upload the envelope a sealed line holds `node` in, under the
+/// envelope's own address.
+async fn upload_envelope<Env>(
+    node: PersistentNode<ArtifactKey, State<Datum>>,
+    store: &LocalIndex<'_, Env>,
+    remote_index: &crate::RemoteArchiveIndex<'_>,
+    env: &Env,
+) -> Result<(), PushError>
+where
+    Env: Provider<Get> + Provider<Fork<RemoteSite, Put>> + ConditionalSync + 'static,
+{
+    let identity = node.hash();
+    let address = store
+        .node_address(identity)
+        .ok_or_else(|| KeyringError::UnknownNode(identity.clone()))?;
+    let envelope = store
+        .load(&address)
+        .await
+        .map_err(|error| DialogSearchTreeError::Storage(error.into()))?
+        .ok_or_else(|| KeyringError::UnknownNode(identity.clone()))?;
+    remote_index
+        .put(envelope)
+        .perform(env)
+        .await
+        .map_err(crate::UploadError::RemoteWrite)?;
+    Ok(())
 }
 
 /// Every remote reachable from the branch's upstreams, resolved
@@ -696,7 +742,14 @@ where
         // differential already read), so shipping needs no point read of
         // the current tree — such a read would descend by-reference
         // regions the novelty walk is careful never to require.
-        ShipmentRef::BlobAdded { hash, size } => {
+        // A sealed asset's copy is an ordinary blob under its own address;
+        // its plaintext is stored nowhere and does not ship.
+        ShipmentRef::BlobAdded { hash, size }
+        | ShipmentRef::SealedAdded {
+            address: hash,
+            size,
+            ..
+        } => {
             let digest = dialog_common::Blake3Hash::from(hash);
             // Local bytes -> remote import sink. Mirrors the remote `Read`
             // fork in `branch/blob.rs` and `RemotePut`'s `Put` fork in
@@ -768,8 +821,26 @@ where
         // moved to blobs, as a block beside the tree's nodes). Local bytes
         // -> remote blob import, verified against that reference.
         ShipmentRef::SpilledValue(reference) => {
-            let digest = NodeHash::from(reference);
-            let bytes = match LoadBlob::new(digest.clone()).perform(blob_store).await? {
+            let reference = NodeHash::from(reference);
+            // On a sealed line the value crosses as its sealed copy, under
+            // that copy's address, read as the archive holds it.
+            let (digest, local) = match blob_store.sealing() {
+                None => {
+                    let local = LoadBlob::new(reference.clone()).perform(blob_store).await?;
+                    (reference, local)
+                }
+                Some(_) => {
+                    let digest = blob_store
+                        .value_address(&reference)
+                        .ok_or_else(|| KeyringError::UnknownValue(reference.clone()))?;
+                    let local = blob_store
+                        .load_blob(&digest)
+                        .await
+                        .map_err(|error| DialogSearchTreeError::Storage(error.into()))?;
+                    (digest, local)
+                }
+            };
+            let bytes = match local {
                 Some(bytes) => bytes,
                 // Held by reference: not this replica's to ship. Sole
                 // remote -> the target has it by attribution; otherwise
@@ -1141,9 +1212,11 @@ where
 /// the blobs and spilled values its entries name, and upload the node
 /// itself only after its children — all streamed through without ever
 /// persisting a byte locally.
+#[allow(clippy::too_many_arguments)]
 async fn forward_subtree<Env>(
     root: NodeHash,
     branch: &Branch,
+    store: &LocalIndex<'_, Env>,
     target: &ConnectedReplica,
     sources: &[ConnectedReplica],
     target_may_have: bool,
@@ -1174,42 +1247,34 @@ where
                 if !visited.insert(hash.clone()) {
                     continue;
                 }
-                if target_may_have && remote_has_block(&hash, target, env).await? {
+                // Probed and copied where the archive holds it: on a
+                // sealed line, the envelope's address, located when its
+                // parent opened.
+                let address = store
+                    .node_address(&hash)
+                    .ok_or_else(|| KeyringError::UnknownNode(hash.clone()))?;
+                if target_may_have && remote_has_block(&address, target, env).await? {
                     continue;
                 }
-                let Some(bytes) = block_from_anywhere(&hash, branch, sources, env).await? else {
+                let Some(bytes) = block_from_anywhere(&address, branch, sources, env).await? else {
                     return Err(dialog_search_tree::DialogSearchTreeError::Node(format!(
                         "node {hash} is referenced by the head but reachable from no store: \
                          not local, not on the push target, not on any tracked remote"
                     ))
                     .into());
                 };
-                let node = PersistentNode::<ArtifactKey, State<Datum>>::try_from(Buffer::from(
-                    bytes.clone(),
-                ))?;
+                let plain = match store.sealing() {
+                    None => Buffer::from(bytes.clone()),
+                    Some(space) => open_node(space, &hash, &bytes)?,
+                };
+                let node = PersistentNode::<ArtifactKey, State<Datum>>::try_from(plain)?;
 
                 // The entries this node carries (stored in a segment,
                 // buffered in an index) may name blob bytes and spilled
                 // value blocks the target also lacks; ship those before
                 // the node lands, mirroring the top-level shipment loop.
-                let mut entries: Vec<(ArtifactKey, State<Datum>)> = Vec::new();
-                match node.body() {
-                    NodeBody::Segment(segment) => {
-                        segment.for_each_entry::<ArtifactKey, _>(|key, value| {
-                            entries.push((ArtifactKey::from(key.to_vec()), into_owned(value)?));
-                            Ok(())
-                        })?;
-                    }
-                    NodeBody::Index(index) => {
-                        for entry in index.all_novelty::<ArtifactKey>()? {
-                            if let NoveltyOp::Assert(value) = entry.op {
-                                entries.push((ArtifactKey::from(entry.key), value));
-                            }
-                        }
-                    }
-                }
                 let mut references = Vec::new();
-                for (key, value) in entries {
+                for (key, value) in node_entries(&node)? {
                     if let Some(reference) = shipment_ref(&key, &value, false)? {
                         references.push(reference);
                     }
@@ -1217,14 +1282,23 @@ where
                 stream::iter(references)
                     .map(|reference| async move {
                         match reference {
-                            ShipmentRef::BlobAdded { hash, size } => {
+                            ShipmentRef::BlobAdded { hash, size }
+                            | ShipmentRef::SealedAdded {
+                                address: hash,
+                                size,
+                                ..
+                            } => {
                                 let digest = dialog_common::Blake3Hash::from(hash);
                                 ensure_blob_on_target(digest, size, branch, target, sources, env)
                                     .await
                             }
                             ShipmentRef::SpilledValue(reference) => {
+                                let reference = NodeHash::from(reference);
+                                let digest = store
+                                    .value_address(&reference)
+                                    .ok_or(KeyringError::UnknownValue(reference))?;
                                 ensure_spill_on_target(
-                                    NodeHash::from(reference),
+                                    digest,
                                     LocalCopy::Unprobed,
                                     branch,
                                     target,

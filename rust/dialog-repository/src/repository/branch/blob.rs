@@ -66,13 +66,15 @@
 //! # }
 //! ```
 
-use crate::repository::branch::asset::recorded_size;
+use crate::repository::branch::asset::{asset_fact, recorded_facts, recorded_sealed};
 use crate::repository::remote::Step;
 use crate::repository::source::SourceRef;
+use crate::sealing::TreeSpace;
+use crate::sealing::asset::open_copy;
 use crate::{
     Branch, CommitError, Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite, Snapshot,
 };
-use dialog_artifacts::{Asset, BlobIndexExt as _, BlobRecord, Entity, Instruction};
+use dialog_artifacts::{AssetSealing, BlobIndexExt as _, BlobRecord, Entity, SealedCopy};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{Blake3Hash, ConditionalSend, ConditionalSync};
@@ -160,7 +162,10 @@ impl Blob {
     /// Ingest a blob from a stream of byte chunks. The content hash is
     /// discovered as the bytes are written.
     pub fn import<S>(chunks: S) -> BlobImportBuilder<S> {
-        BlobImportBuilder { chunks }
+        BlobImportBuilder {
+            chunks,
+            plaintext: false,
+        }
     }
 
     /// Narrow a read to a byte range (`length` bytes from `offset`, or to the
@@ -201,14 +206,25 @@ impl Blob {
 /// [`write`](BlobImportBuilder::write).
 pub struct BlobImportBuilder<S> {
     chunks: S,
+    plaintext: bool,
 }
 
 impl<S> BlobImportBuilder<S> {
+    /// Keep the bytes in the clear, even on a sealed line. See
+    /// [`Asset::plaintext`](dialog_artifacts::Asset::plaintext) for what
+    /// that gives away.
+    #[must_use]
+    pub fn plaintext(mut self) -> Self {
+        self.plaintext = true;
+        self
+    }
+
     /// Bind the ingest to a target blob store.
     pub fn write<'a>(self, archive: BlobArchive<'a>) -> WriteBlob<'a, S> {
         WriteBlob {
             archive,
             chunks: self.chunks,
+            plaintext: self.plaintext,
         }
     }
 }
@@ -237,7 +253,7 @@ where
 {
     let source = source.into();
     let remote = source.fallback();
-    NetworkedIndex::new(env, source.archive().index(), remote)
+    NetworkedIndex::new(env, source.archive().index(), remote).sealed(source.sealing())
 }
 
 /// The size of the content the line's current tree vouches for under `hash`,
@@ -309,7 +325,12 @@ impl BlobSize<'_> {
             + 'static,
     {
         let hash = blob_hash(&self.entity)?;
-        index_size(self.archive.source, &hash, env).await
+        if let Some(size) = index_size(self.archive.source, &hash, env).await? {
+            return Ok(Some(size));
+        }
+        Ok(recorded_sealed(self.archive.source, hash.as_bytes(), env)
+            .await?
+            .map(|(_, size)| size))
     }
 }
 
@@ -345,86 +366,141 @@ impl ReadBlob<'_> {
         let hash = blob_hash(&self.entity)?;
         let range = self.range;
 
-        let local = line
-            .archive()
-            .blob()
-            .invoke(BlobRead {
-                digest: hash.clone(),
-                range,
-            })
-            .perform(env)
-            .await;
+        // A sealed line's asset is read through its sealed copy, wherever
+        // the tree says that lives; one kept in the clear reads as below.
+        if let Some(space) = line.sealing()
+            && let Some((copy, size)) = recorded_sealed(line, hash.as_bytes(), env).await?
+        {
+            return read_sealed(line, &space, &hash, copy, size, range, env).await;
+        }
 
-        let miss_key = match local {
+        let miss_key = match read_local(line, &hash, range, env).await {
             Ok(reader) => return Ok(reader),
             Err(BlobError::NotFound(key)) => key,
             Err(other) => return Err(other.into()),
         };
-
-        // Local miss. Hydrate from the upstream peer, if any (a snapshot
-        // has none: its reads are local).
-        let remote = match line.fallback() {
-            RemoteFallback::Remote(remote) => remote,
-            RemoteFallback::None => return Err(BlobError::NotFound(miss_key).into()),
-            RemoteFallback::Unavailable { remote, reason } => {
-                return Err(CommitError::Blob(BlobError::Storage(format!(
-                    "upstream {remote} is unreachable: {reason}"
-                ))));
-            }
-        };
-
-        // The tree must already vouch for the blob for us to import it; without
-        // a size we have no import to issue and the miss is genuine.
+        let remote = fallback_for_miss(line, miss_key.clone())?;
         let Some(size) = index_size(line, &hash, env).await? else {
             return Err(BlobError::NotFound(miss_key).into());
         };
-
-        // Full-blob read from the remote, forked to its site, written
-        // through a local digest-verified import sink. An attempt is the
-        // whole transfer, since the read can fail at any point.
-        let hash = &hash;
-        // Only the peer's side fails over: the local import would fail the
-        // same at every address.
-        remote
-            .reach(|address| async move {
-                let mut source = address
-                    .subject
-                    .clone()
-                    .reader()
-                    .archive()
-                    .blob()
-                    .read(hash.clone())
-                    .fork(address.site())
-                    .perform(env)
-                    .await
-                    .map_err(Step::Remote)?;
-                let mut sink = line
-                    .archive()
-                    .blob()
-                    .import(hash.clone(), size)
-                    .perform(env)
-                    .await
-                    .map_err(Step::Local)?;
-                while let Some(chunk) = source.next().await.map_err(Step::Remote)? {
-                    sink.write_all(&chunk).await.map_err(Step::Local)?;
-                }
-                sink.finish().await.map_err(Step::Local)?;
-                Ok::<_, Step<BlobError>>(())
-            })
-            .await
-            .map_err(Step::into_inner)?;
-
-        // Serve the requested read from the now-local copy.
-        line.archive()
-            .blob()
-            .invoke(BlobRead {
-                digest: hash.clone(),
-                range,
-            })
-            .perform(env)
+        hydrate(line, &remote, &hash, size, env).await?;
+        read_local(line, &hash, range, env)
             .await
             .map_err(Into::into)
     }
+}
+
+/// Read `range` of the asset `hash`, of `size` bytes, through its sealed
+/// `copy`, opened with `space` ([`open_copy`]). A copy this replica does not
+/// hold hydrates whole from the remote first, as a plaintext blob does.
+async fn read_sealed<Env>(
+    line: SourceRef<'_>,
+    space: &TreeSpace,
+    hash: &Blake3Hash,
+    copy: SealedCopy,
+    size: u64,
+    range: Option<ByteRange>,
+    env: &Env,
+) -> Result<BlobReader, CommitError>
+where
+    Env: Provider<Get>
+        + Provider<Put>
+        + Provider<BlobRead>
+        + Provider<BlobImport>
+        + Provider<Resolve>
+        + Provider<crate::Hydrate>
+        + Provider<Fork<RemoteSite, BlobRead>>
+        + ConditionalSync
+        + 'static,
+{
+    match open_copy(line, space, hash, &copy, size, range, env).await {
+        Err(CommitError::Blob(BlobError::NotFound(key))) => {
+            let remote = fallback_for_miss(line, key)?;
+            let address = Blake3Hash::from(copy.address);
+            hydrate(line, &remote, &address, copy.length, env).await?;
+            open_copy(line, space, hash, &copy, size, range, env).await
+        }
+        opened => opened,
+    }
+}
+
+/// Read `range` of the blob `digest` from the line's own blob store.
+async fn read_local<Env>(
+    line: SourceRef<'_>,
+    digest: &Blake3Hash,
+    range: Option<ByteRange>,
+    env: &Env,
+) -> Result<BlobReader, BlobError>
+where
+    Env: Provider<BlobRead> + ConditionalSync + 'static,
+{
+    line.archive()
+        .blob()
+        .invoke(BlobRead {
+            digest: digest.clone(),
+            range,
+        })
+        .perform(env)
+        .await
+}
+
+/// The remote a local miss on `miss_key` may hydrate from, or the error the
+/// miss stands as when there is none.
+fn fallback_for_miss(
+    line: SourceRef<'_>,
+    miss_key: String,
+) -> Result<crate::ConnectedReplica, CommitError> {
+    match line.fallback() {
+        RemoteFallback::Remote(remote) => Ok(remote),
+        RemoteFallback::None => Err(BlobError::NotFound(miss_key).into()),
+        RemoteFallback::Unavailable { remote, reason } => Err(CommitError::Blob(
+            BlobError::Storage(format!("upstream {remote} is unreachable: {reason}")),
+        )),
+    }
+}
+
+/// Fetch the blob `digest` of `size` bytes whole from `remote` into the
+/// line's blob store, through a digest-verified import, so a lying remote
+/// surfaces as `DigestMismatch` at `finish`.
+async fn hydrate<Env>(
+    line: SourceRef<'_>,
+    remote: &crate::ConnectedReplica,
+    digest: &Blake3Hash,
+    size: u64,
+    env: &Env,
+) -> Result<(), CommitError>
+where
+    Env: Provider<BlobImport> + Provider<Fork<RemoteSite, BlobRead>> + ConditionalSync + 'static,
+{
+    remote
+        .reach(|address| async move {
+            let mut source = address
+                .subject
+                .clone()
+                .reader()
+                .archive()
+                .blob()
+                .read(digest.clone())
+                .fork(address.site())
+                .perform(env)
+                .await
+                .map_err(Step::Remote)?;
+            let mut sink = line
+                .archive()
+                .blob()
+                .import(digest.clone(), size)
+                .perform(env)
+                .await
+                .map_err(Step::Local)?;
+            while let Some(chunk) = source.next().await.map_err(Step::Remote)? {
+                sink.write_all(&chunk).await.map_err(Step::Local)?;
+            }
+            sink.finish().await.map_err(Step::Local)?;
+            Ok::<_, Step<BlobError>>(())
+        })
+        .await
+        .map_err(Step::into_inner)?;
+    Ok(())
 }
 
 /// Ingest a blob and record it as an asset in one new revision. Created by
@@ -432,6 +508,7 @@ impl ReadBlob<'_> {
 pub struct WriteBlob<'a, S> {
     archive: BlobArchive<'a>,
     chunks: S,
+    plaintext: bool,
 }
 
 impl<S> WriteBlob<'_, S>
@@ -462,13 +539,21 @@ where
             + 'static,
     {
         let branch = self.archive.branch()?;
-        let asset = branch.asset(self.chunks).import().perform(env).await?;
+        let stream = branch.asset(self.chunks);
+        let stream = if self.plaintext {
+            stream.plaintext()
+        } else {
+            stream
+        };
+        let asset = stream.import().perform(env).await?;
         let entity = asset.entity()?;
-        // A replace, as a transaction's import records it: an asset has one
-        // size, and replacing a fact with the value it holds is a no-op.
+        let sealed = match asset.sealing() {
+            AssetSealing::Sealed(copy) => Some(*copy),
+            AssetSealing::Line | AssetSealing::Plaintext => None,
+        };
         Box::pin(
             branch
-                .commit(stream::iter(vec![Instruction::Replace(asset.fact()?)]))
+                .commit(stream::iter(vec![asset_fact(&asset, sealed.as_ref())?]))
                 .machinery()
                 .perform(env),
         )
@@ -519,12 +604,7 @@ impl RetractBlob<'_> {
         let branch = self.archive.branch()?;
         let hash = blob_hash(&self.entity)?;
         let source = SourceRef::from(branch);
-        let mut retractions = Vec::new();
-        if let Some(size) = recorded_size(source, hash.as_bytes(), env).await? {
-            retractions.push(Instruction::Retract(
-                Asset::stored(*hash.as_bytes(), size).fact()?,
-            ));
-        }
+        let retractions = recorded_facts(source, hash.as_bytes(), env).await?;
         let mut entries = Vec::new();
         if index_references(source, &hash, env).await? {
             entries.push(BlobRecord::retract_entry(hash.as_bytes()));

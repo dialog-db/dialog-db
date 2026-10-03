@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use crate::rules::{RuleCache, SharedRuleCache};
 use crate::schema::Replica;
+use crate::sealing::TreeSpace;
 use crate::{Branch, Ephemeral, NetworkedIndex, RemoteFallback, Revision, Snapshot};
 
 /// An owned line to read from: a branch or a snapshot. Query
@@ -120,6 +121,15 @@ impl<'a> SourceRef<'a> {
         match self {
             SourceRef::Branch(branch) => branch.revision(),
             SourceRef::Snapshot(snapshot) => Some(snapshot.revision()),
+        }
+    }
+
+    /// The keys this line's tree is sealed under, or `None` for a plain
+    /// line.
+    pub(crate) fn sealing(self) -> Option<TreeSpace> {
+        match self {
+            SourceRef::Branch(branch) => branch.sealing().cloned(),
+            SourceRef::Snapshot(snapshot) => snapshot.caches().sealing.clone(),
         }
     }
 
@@ -268,7 +278,7 @@ impl<'a> SourceRef<'a> {
             + 'static,
     {
         let remote = self.fallback();
-        let store = NetworkedIndex::new(env, self.archive().index(), remote);
+        let store = NetworkedIndex::new(env, self.archive().index(), remote).sealed(self.sealing());
         let history = match self.root() {
             Some(root) => TreeHistory::from_root_with_cache(&root, store, self.node_cache()),
             // No revision, no tree, no records.
@@ -324,6 +334,11 @@ pub(crate) struct Caches {
     /// The live buffered spine between commits, keyed by the root it was
     /// persisted as.
     pub(crate) spine: SpineSlot,
+    /// The keys the line's tree is sealed under, when it is sealed. Not a
+    /// cache, but carried with them for the same reason: what it has
+    /// learned about where nodes live is shared with every line the caches
+    /// are shared with.
+    pub(crate) sealing: Option<TreeSpace>,
 }
 
 impl Caches {
@@ -338,6 +353,7 @@ impl Caches {
             contexts: ContextCache::new(),
             records: Cache::new(),
             spine: SpineSlot::new(),
+            sealing: None,
         }
     }
 }

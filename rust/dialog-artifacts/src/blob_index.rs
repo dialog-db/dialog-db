@@ -26,7 +26,8 @@ use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
 use crate::{
-    ASSET_SIZE, Attribute, BlobKey, Datum, DialogArtifactsError, Entity, State, Value,
+    ASSET_SEALED, ASSET_SIZE, Attribute, BlobKey, Datum, DialogArtifactsError, Entity, SealedCopy,
+    State, Value,
     spill::{ShipmentRef, shipment_refs},
     tree::{ArtifactTree, ArtifactTreeExt},
 };
@@ -168,6 +169,8 @@ where
         for await item in refs {
             match item? {
                 ShipmentRef::BlobAdded { hash, .. } => yield BlobChange::Added(hash),
+                // The blob the store holds for a sealed asset is its copy.
+                ShipmentRef::SealedAdded { address, .. } => yield BlobChange::Added(address),
                 ShipmentRef::BlobRemoved(hash) => yield BlobChange::Removed(hash),
                 ShipmentRef::SpilledValue(_) => {}
             }
@@ -193,13 +196,16 @@ pub trait BlobIndexExt {
     where
         S: ArchiveReader + Clone;
 
-    /// The size of the content this tree vouches for under `hash`, by an
+    /// The size of the plaintext this tree vouches for under `hash`, by an
     /// asset's `dialog.asset/size` fact or, in a tree written before the
     /// index was retired, by a blob-index entry, or `None` when it vouches
     /// for no such content.
     ///
     /// This is the question a blob read asks before hydrating bytes it does
-    /// not hold, and the size it declares when it does.
+    /// not hold, and the size it declares when it does. A sealed asset's
+    /// fact is not counted: its plaintext is stored nowhere, so nothing
+    /// should fetch or ship bytes under `hash` on its say
+    /// (see [`sealed_asset`](BlobIndexExt::sealed_asset)).
     async fn content_size<S>(
         &self,
         store: &S,
@@ -217,6 +223,17 @@ pub trait BlobIndexExt {
         store: &S,
         hash: &Blake3Hash,
     ) -> Result<Option<u64>, DialogArtifactsError>
+    where
+        S: ArchiveReader + Clone;
+
+    /// The sealed copy a sealed line keeps of the asset `hash`, and the
+    /// asset's size, by its `dialog.asset/sealed` fact, or `None` when this
+    /// tree records no sealed copy of it.
+    async fn sealed_asset<S>(
+        &self,
+        store: &S,
+        hash: &Blake3Hash,
+    ) -> Result<Option<(SealedCopy, u64)>, DialogArtifactsError>
     where
         S: ArchiveReader + Clone;
 
@@ -290,6 +307,27 @@ impl BlobIndexExt for ArtifactTree {
         {
             if let Value::UnsignedInt(size) = fact.is {
                 return Ok(u64::try_from(size).ok());
+            }
+        }
+        Ok(None)
+    }
+
+    async fn sealed_asset<S>(
+        &self,
+        store: &S,
+        hash: &Blake3Hash,
+    ) -> Result<Option<(SealedCopy, u64)>, DialogArtifactsError>
+    where
+        S: ArchiveReader + Clone,
+    {
+        let entity = Entity::from_blob(hash)?;
+        let attribute: Attribute = ASSET_SEALED.parse()?;
+        for fact in self
+            .select_record(store.clone(), &entity, &attribute)
+            .await?
+        {
+            if let Some(recorded) = SealedCopy::from_value(&fact.is) {
+                return Ok(Some(recorded));
             }
         }
         Ok(None)

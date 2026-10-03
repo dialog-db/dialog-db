@@ -7,15 +7,22 @@ use dialog_effects::archive::{ArchiveError, Get};
 use dialog_effects::blob::{BlobError, BlobReader, Read as BlobRead};
 use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
 
+use crate::sealing::{SealedReadError, TreeSpace, open_node};
+
 /// Local content-addressed index backed by archive capabilities.
 ///
 /// Loads a branch's tree nodes ([`LoadBlock`]) and spilled values ([`LoadBlob`])
 /// from one catalog of the local archive, performing `Get` against the
 /// environment it borrows. It never writes: a commit writes what its batch
 /// staged.
+///
+/// On a sealed line ([`sealed`](Self::sealed)) the catalog holds envelopes
+/// and sealed values, not nodes and values: a load finds where the node or
+/// value lives through the line's [`TreeSpace`], fetches that, and opens it.
 pub struct LocalIndex<'a, Env> {
     env: &'a Env,
     catalog: CatalogScope,
+    sealing: Option<TreeSpace>,
 }
 
 impl<Env> Clone for LocalIndex<'_, Env> {
@@ -23,6 +30,7 @@ impl<Env> Clone for LocalIndex<'_, Env> {
         Self {
             env: self.env,
             catalog: self.catalog.clone(),
+            sealing: self.sealing.clone(),
         }
     }
 }
@@ -30,7 +38,23 @@ impl<Env> Clone for LocalIndex<'_, Env> {
 impl<'a, Env> LocalIndex<'a, Env> {
     /// Create a local index for the given catalog capability.
     pub fn new(env: &'a Env, catalog: CatalogScope) -> Self {
-        Self { env, catalog }
+        Self {
+            env,
+            catalog,
+            sealing: None,
+        }
+    }
+
+    /// Read a sealed line through `sealing`, or a plain one with `None`.
+    #[must_use]
+    pub fn sealed(mut self, sealing: Option<TreeSpace>) -> Self {
+        self.sealing = sealing;
+        self
+    }
+
+    /// The keys this index opens what it loads with, on a sealed line.
+    pub fn sealing(&self) -> Option<&TreeSpace> {
+        self.sealing.as_ref()
     }
 
     /// The catalog capability this index operates on.
@@ -42,6 +66,27 @@ impl<'a, Env> LocalIndex<'a, Env> {
     pub fn env(&self) -> &'a Env {
         self.env
     }
+
+    /// Where the archive holds the node `identity`: under its identity on
+    /// a plain line, under its envelope's address on a sealed one. `None`
+    /// when a sealed line has not located it.
+    pub(crate) fn node_address(&self, identity: &Blake3Hash) -> Option<Blake3Hash> {
+        match &self.sealing {
+            None => Some(identity.clone()),
+            Some(space) => space.locate(identity).map(|at| at.address),
+        }
+    }
+
+    /// Where the archive holds the spilled value hashing to `reference`:
+    /// under the reference on a plain line, under its sealed copy's
+    /// address on a sealed one. `None` when a sealed line has not located
+    /// it.
+    pub(crate) fn value_address(&self, reference: &Blake3Hash) -> Option<Blake3Hash> {
+        match &self.sealing {
+            None => Some(reference.clone()),
+            Some(space) => space.locate_value(reference),
+        }
+    }
 }
 
 impl<Env> LocalIndex<'_, Env>
@@ -49,8 +94,9 @@ where
     Env: Provider<Get> + ConditionalSync + 'static,
 {
     /// The block stored under `hash` in the local archive, if any, as the
-    /// archive holds it: unverified. Readers outside the crate load through
-    /// [`LoadBlock`] or [`LoadBlob`], which check it.
+    /// archive holds it: unverified, and sealed on a sealed line. Readers
+    /// outside the crate load through [`LoadBlock`] or [`LoadBlob`], which
+    /// open and check it.
     pub(crate) async fn load(&self, hash: &Blake3Hash) -> Result<Option<Buffer>, ArchiveError> {
         Ok(self
             .catalog
@@ -60,13 +106,61 @@ where
             .await?
             .map(Buffer::from))
     }
+
+    /// The node `identity` names, opened on a sealed line: the envelope
+    /// this line's space locates it at, opened. On a plain line, the block
+    /// stored under `identity`. A node a sealed line has not located is
+    /// absent: the line has not reached it from any head it read.
+    ///
+    /// # Errors
+    ///
+    /// [`SealedReadError::Keyring`] when an envelope does not open for this
+    /// line's keys, and [`SealedReadError::Archive`] when the archive fails.
+    pub async fn load_node(
+        &self,
+        identity: &Blake3Hash,
+    ) -> Result<Option<Buffer>, SealedReadError> {
+        let Some(space) = &self.sealing else {
+            return Ok(self.load(identity).await?);
+        };
+        let Some(at) = space.locate(identity) else {
+            return Ok(None);
+        };
+        let Some(bytes) = self.load(&at.address).await? else {
+            return Ok(None);
+        };
+        Ok(Some(open_node(space, identity, bytes.as_ref())?))
+    }
 }
 
 impl<Env> LocalIndex<'_, Env>
 where
     Env: Provider<Get> + Provider<BlobRead> + ConditionalSync + 'static,
 {
-    /// The spilled value stored under `hash` locally, if any.
+    /// The spilled value hashing to `reference`, opened on a sealed line;
+    /// on a plain one, the value stored under `reference`.
+    ///
+    /// # Errors
+    ///
+    /// As for [`load_node`](Self::load_node).
+    pub async fn load_value(
+        &self,
+        reference: &Blake3Hash,
+    ) -> Result<Option<Buffer>, SealedReadError> {
+        let Some(space) = &self.sealing else {
+            return Ok(self.load_blob(reference).await?);
+        };
+        let Some(address) = space.locate_value(reference) else {
+            return Ok(None);
+        };
+        let Some(bytes) = self.load_blob(&address).await? else {
+            return Ok(None);
+        };
+        Ok(Some(space.open_value(reference, bytes.as_ref())?))
+    }
+
+    /// The blob stored under `hash` locally, if any, as the archive holds
+    /// it: a spilled value on a plain line, a sealed one on a sealed line.
     ///
     /// Spilled values live in the archive's blob store. Values spilled before
     /// they moved there are still blocks in this catalog, so a blob-store
@@ -119,9 +213,9 @@ where
         &self,
         LoadBlock { hash }: LoadBlock,
     ) -> Result<Option<Buffer>, DialogSearchTreeError> {
-        self.load(&hash)
+        self.load_node(&hash)
             .await
-            .map_err(|error| DialogSearchTreeError::Storage(error.into()))
+            .map_err(|error| DialogSearchTreeError::Storage(ArchiveError::from(error).into()))
     }
 }
 
@@ -137,7 +231,7 @@ where
         &self,
         LoadBlob { hash }: LoadBlob,
     ) -> Result<Option<Buffer>, DialogArtifactsError> {
-        Ok(self.load_blob(&hash).await?)
+        Ok(self.load_value(&hash).await.map_err(ArchiveError::from)?)
     }
 }
 

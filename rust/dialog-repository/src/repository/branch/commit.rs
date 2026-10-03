@@ -1,6 +1,7 @@
 use super::merge::merge_with_winner;
-use crate::repository::archive::persist;
+use crate::repository::archive::persist_line;
 use crate::repository::source::SourceRef;
+use crate::sealing::admit;
 use crate::{
     Branch, CommitError, Index, NetworkedIndex, PublishError, RemoteSite, RepositoryMemoryExt as _,
     Revision, Snapshot, TreeReference, origin_of,
@@ -504,7 +505,12 @@ where
         // — with its cause — on the first read that needed it, while a
         // commit every block of which is local proceeds untouched.
         let remote = source.fallback();
-        let store = NetworkedIndex::new(env, source.archive().index(), remote);
+        let sealing = source.sealing();
+        if let Some(base) = base_revision.as_ref() {
+            admit(sealing.as_ref(), base);
+        }
+        let store =
+            NetworkedIndex::new(env, source.archive().index(), remote).sealed(sealing.clone());
 
         // Discover who we are up front: the revision is attributed to the
         // profile / operator, and the commit's `Version` — the identifier
@@ -650,7 +656,14 @@ where
             };
             let batch = batch.record(&store, self.entries).await?;
             tree = batch.seal(&store, &mut delta, self.canonicalize).await?;
-            persist(&source.archive().index(), &mut delta, env).await?;
+            revision.sealed = persist_line::<_, CommitError>(
+                &source.archive().index(),
+                &mut delta,
+                sealing.as_ref(),
+                tree.root(),
+                env,
+            )
+            .await?;
             revision.tree = TreeReference::from(*tree.root().as_bytes());
             revision.signature = Attest::new(revision.payload()).perform(env).await?;
             return Ok(Outcome::Minted(Box::new(Minted {
@@ -764,7 +777,14 @@ where
         // reference-counted, so nothing is copied on the way in, and
         // providers with native batching persist it in a single round trip
         // (one IndexedDB transaction).
-        persist(&source.archive().index(), &mut delta, env).await?;
+        revision.sealed = persist_line::<_, CommitError>(
+            &source.archive().index(),
+            &mut delta,
+            sealing.as_ref(),
+            tree.root(),
+            env,
+        )
+        .await?;
 
         revision.tree = TreeReference::from(*tree.root().as_bytes());
         revision.context = Some(context.clone());

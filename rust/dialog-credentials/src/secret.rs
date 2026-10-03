@@ -40,7 +40,7 @@ use std::future::Future;
 
 mod error;
 mod message;
-mod platform;
+pub(crate) mod platform;
 
 pub use error::SecretError;
 pub use message::SealedSecret;

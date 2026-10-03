@@ -1323,6 +1323,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-keyring"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "async-trait",
+ "blake3",
+ "criterion",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-effects",
+ "dialog-search-tree",
+ "dialog-storage",
+ "dialog-varsig",
+ "futures-util",
+ "getrandom 0.2.16",
+ "rkyv",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "dialog-macros"
 version = "0.1.0"
 dependencies = [
@@ -1581,6 +1607,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "base58",
+ "blake3",
  "criterion",
  "dialog-artifacts",
  "dialog-capability",
@@ -1588,6 +1615,7 @@ dependencies = [
  "dialog-credentials",
  "dialog-effects",
  "dialog-identity",
+ "dialog-keyring",
  "dialog-network",
  "dialog-peer",
  "dialog-query",
