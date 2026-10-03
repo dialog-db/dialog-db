@@ -115,7 +115,7 @@ fn rename_parameters(parameters: &Parameters, map: &Rename) -> Parameters {
     renamed
 }
 
-fn rename_term<T>(term: &Term<T>, map: &Rename) -> Term<T>
+pub(crate) fn rename_term<T>(term: &Term<T>, map: &Rename) -> Term<T>
 where
     T: Typed,
     <T as Typed>::Descriptor: Clone,

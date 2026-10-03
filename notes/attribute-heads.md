@@ -213,7 +213,13 @@ free run is answered from the free rows, indexed by entity once, so a
 head evaluated with `this` bound after another head scanned the whole
 relation never touches storage. The memo lives on the query
 environment and dies with it, so it never outlives the facts it was
-computed from.
+computed from. It is not one of the branch's held caches: its rows
+are facts as of one query's snapshot, staged writes included, and a
+cache that outlived the query would need invalidating on every
+commit and would hold whole relations. What the environment holds
+across queries stays the plan cache and the rule cache; the memo is
+reached through the query environment, which is where the in-flight
+work on environment-held caches puts a query's handles too.
 
 When exactly one source rule derives every derived attribute of a
 concept, no attribute-headed rule stands beside it, none of its heads
@@ -271,6 +277,27 @@ concept they were written against; it is no longer consulted on the
 query path, except for rules that predate the `derives` index, which
 resolve by `conclusion` and are re-spelled per head attribute on
 hydration.
+
+### Identity
+
+A rule's identity is the hash of its canonical spelling, not of the
+bytes its author wrote. The head's operands (`this` and the field
+names) are fixed; every other variable is a local, and locals are
+renamed by a labeling that depends only on the body's structure:
+colour refinement over where each local occurs (which premise shape,
+under which parameter, beside which other locals), then
+individualisation of any locals refinement leaves tied, keeping the
+spelling with the smallest encoding. Premises are sorted by their
+encoding under that labeling. So two authors writing one body with
+different names and in a different order install one rule: one
+entity its facts are stored under, one plan cache entry, one body
+memo. The authored spelling is kept beside the canonical one and is
+what the rule stores and shows, so a rule reads back as written; the
+content-address check on hydration compares identities, which the
+canonical spelling makes a pure function of the body. A body the
+notation cannot express (a raw attribute scan, as in a concept's
+implicit rule) has no encoding, hence no identity, and keeps the
+spelling it was given.
 
 ### Caches
 

@@ -20,11 +20,15 @@ use crate::error::{AnalysisError, TypeError};
 use crate::planner::Planner;
 use crate::premise::Premise;
 use crate::reduce::ReduceSpec;
+use crate::rule::analyzer::Authored;
 use crate::{Environment, Type};
+use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::sync::Arc;
 
 /// Rule analysis: inference and dependency graph over premises.
 pub mod analyzer;
+pub(crate) mod canonical;
 /// Deductive rule definitions for deriving new facts.
 pub mod deductive;
 /// Inductive rule definitions (a.k.a. effects).
@@ -181,6 +185,7 @@ pub(crate) fn compile_rule<T: Compile>(
     // premises, before any execution order is chosen. The original
     // premises are kept for the error-path display rule.
     let display_premises = premises.clone();
+    let authored_reduce = reduce.clone();
     let analysis = match analyzer::analyze_with(conclusion.clone(), premises, T::KIND, reduce) {
         Ok(analysis) => analysis,
         Err(err) => {
@@ -266,6 +271,52 @@ pub(crate) fn compile_rule<T: Compile>(
             variable,
         });
     }
+
+    // The rule's canonical spelling: locals renamed by the body's
+    // structure and premises sorted, so one body spelled two ways is
+    // one rule to everything keyed by its identity. The head's operands
+    // (`this`, each field and each keyed field's key) are fixed names. The narrowed
+    // premises are canonicalised and analysed again, which is the
+    // same analysis under other names; the authored spelling is kept
+    // for storage and display.
+    let fixed: BTreeSet<String> = conclusion.operands().collect();
+    let analysis = match canonical::canonicalize(
+        &fixed,
+        &analysis.premises,
+        &authored_reduce
+            .iter()
+            .map(|(field, _)| {
+                let entry = analysis
+                    .reduce
+                    .iter()
+                    .find(|entry| entry.field == *field)
+                    .expect("an analysed reduce clause keeps every field");
+                (field.clone(), ReduceSpec::from(entry))
+            })
+            .collect::<Vec<_>>(),
+    )? {
+        Some(canonical) => {
+            let respelled = !canonical.rename.is_empty() || canonical.premises != analysis.premises;
+            let authored = Authored {
+                premises: analysis.premises,
+                reduce: analysis.reduce,
+            };
+            let mut analysis = analyzer::analyze_with(
+                conclusion.clone(),
+                canonical.premises,
+                T::KIND,
+                canonical.reduce,
+            )
+            .map_err(|error| TypeError::TypeInference {
+                reason: format!("canonical spelling fails analysis: {error:?}"),
+            })?;
+            if respelled {
+                analysis.authored = Some(Arc::new(authored));
+            }
+            analysis
+        }
+        None => analysis,
+    };
 
     Ok(T::from_analysis(analysis))
 }
