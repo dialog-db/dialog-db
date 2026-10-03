@@ -98,8 +98,8 @@ use std::{mem, slice};
 use base58::ToBase58 as _;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Changes, DialogArtifactsError, Entity, Instruction, Statement,
-    Update as _, Value,
+    Artifact, ArtifactSelector, AssetChange, Changes, DialogArtifactsError, Entity, Instruction,
+    Statement, Update as _, Value,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::{Blake3Hash, ConditionalSync};
@@ -1951,6 +1951,10 @@ impl<'a> StackCommit<'a> {
             bottom: primary.overlay(),
         };
         let mut changes = self.changes;
+        // Assets ride apart from the facts: induction and routing rebuild
+        // the batch fact by fact, and only a tree can store an asset, so
+        // they land on the bottom with the rest of its share below.
+        let assets = changes.take_assets();
         induce(
             source,
             &composite,
@@ -1990,6 +1994,15 @@ impl<'a> StackCommit<'a> {
             };
             for target in targets {
                 apply(batches.entry(target).or_default(), op, artifact.clone());
+            }
+        }
+        if !assets.is_empty() {
+            let bottom = batches.entry(0).or_default();
+            for change in assets {
+                match change {
+                    AssetChange::Import(asset) => bottom.import(asset),
+                    AssetChange::Discard(asset) => bottom.discard(asset),
+                }
             }
         }
 
@@ -3713,6 +3726,80 @@ mod tests {
         assert_eq!(stack.layers().len(), 2);
         let reopened = Stack::open(top.clone()).perform(&operator).await?;
         assert_eq!(reopened.identities(), stack.identities());
+        Ok(())
+    }
+
+    /// An asset asserted through a stack is stored by the bottom tree
+    /// layer, whatever layer the facts referencing it route to: the
+    /// bottom records its size fact and serves its bytes, and the
+    /// ephemeral layer above holds no trace of it.
+    #[dialog_common::test]
+    async fn it_stores_assets_on_the_bottom() -> Result<()> {
+        use crate::Blob;
+        use dialog_artifacts::Asset;
+
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+
+        let payload: Vec<u8> = (0..20_000u32).map(|i| (i % 241) as u8).collect();
+        let photo = Asset::from(payload.clone());
+        let content = photo.entity()?;
+        let doc: Entity = "doc:1".parse()?;
+        // The referencing fact lands on the ephemeral layer; the asset
+        // cannot, and goes to the bottom.
+        stack
+            .transaction()
+            .assert(Placement::new("doc/cover".parse()?, name("state")))
+            .assert(photo.clone())
+            .assert(
+                dialog_query::the!("doc/cover")
+                    .of(doc.clone())
+                    .is(content.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            values::<Entity>(&stack, &operator, "doc/cover", &doc).await?,
+            vec![Value::Entity(content.clone())],
+            "the referencing fact reads through the stack"
+        );
+        assert!(
+            committed(&shared, &operator, "doc/cover", &doc)
+                .await?
+                .is_empty(),
+            "and lives on the ephemeral layer, not the tree"
+        );
+        assert_eq!(
+            committed(&shared, &operator, "dialog.asset/size", &content).await?,
+            vec![Value::UnsignedInt(payload.len() as u128)],
+            "the bottom records the asset"
+        );
+        assert!(
+            state
+                .scan(&ArtifactSelector::new().of(content.clone()))
+                .is_empty(),
+            "the ephemeral layer holds nothing about it"
+        );
+        let mut reader = Blob::from(content)
+            .read((&shared).into())
+            .perform(&operator)
+            .await?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = reader.next().await? {
+            bytes.extend(chunk);
+        }
+        assert_eq!(bytes, payload, "the bottom serves the bytes");
         Ok(())
     }
 
