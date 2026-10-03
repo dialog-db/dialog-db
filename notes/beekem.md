@@ -986,11 +986,85 @@ deterministic, so replicas converge.
 - Relabelling a node's generation fails to open.
 - The same node linking different children never reuses a structure nonce.
 
+### What it costs
+
+Same harness as above (`cargo bench -p dialog-keyring --bench sealing`), with
+a third arm. Measured after the move to `LoadBlock`, so the plain and flat
+columns are fresh numbers, not the ones in the table above.
+
+| Workload | Plain | Flat | Layered | Layered vs flat |
+| --- | ---: | ---: | ---: | ---: |
+| Commit 1,000 entries | 870 µs | 920 µs | 956 µs | +3.9% |
+| Commit 10,000 entries | 164 ms | 161 ms | 166 ms | +3.3% |
+| Insert 100, flushing after each | 1.00 ms | 2.43 ms | 3.57 ms | +47% |
+| Insert 1,000, flushing after each | 39.8 ms | 92.9 ms | 114 ms | +23% |
+| 64 cold point reads over 10,000 entries | 58.5 µs | 1.19 ms | 1.40 ms | +18% |
+| Cold full scan of 10,000 entries | 426 µs | 1.30 ms | 1.53 ms | +17% |
+| Stored bytes per node | — | +61 B | +501 B | +1.8% |
+
+**Batched commits barely notice.** As with flat sealing, the tree's own work
+dominates a real commit.
+
+**Each node read pays twice for its links.** A member opens two regions, not
+one: the content, and the structure region that says where the children
+live. It then reads the node's links from the plaintext to pair each child's
+identity with its address. That projection validates the node as an rkyv
+archive, and the tree validates it again when it reads the node. The extra
+region and that second validation are the whole difference from flat sealing
+on a read. Handing the tree the already-validated node would remove the
+duplicate. That has not been measured separately.
+
+**Unbatched writes pay most.** Every flush re-projects and reseals the path,
+three regions per node. The rule from flat sealing holds more strongly:
+batch flushes.
+
+**Stored bytes grow with fan-out.** An index node's envelope carries 64 bytes
+per child (address and structure key) plus each separator, on top of the
+node. That is a few percent for the nodes this tree builds.
+
+The comparison that decides between the two is not in the table. The archive
+files a block under the hash of its bytes: `Import` derives each digest from
+the content, and a `Put` whose digest does not match is rejected. Flat
+sealing addresses a block by a keyed hash of its plaintext identity. Its
+blocks cannot go into an archive catalog without a keyed put the archive
+does not have. Layered envelopes are addressed by their own hash, so they go
+in as they are. Every path that moves blocks between archives (pull, push,
+fetch, import) then moves envelopes unchanged and checks them with no key.
+
+### In the archive
+
+`LayeredArchive` keeps envelopes in an archive catalog. It reads through
+`Get` and writes a commit's staged blocks as one `Import` of envelopes. It
+provides `LoadBlock` to a member, like `LayeredBlocks`, and both share
+sealing and opening (`layered/party.rs`). A write seals every envelope
+before it imports any, and empties the delta only once the import succeeds.
+A refused write imports nothing and keeps what was staged.
+
+`tests/layered_archive.rs` pins, on the volatile provider and on the
+filesystem one:
+
+- A member reads a tree back from the archive.
+- The archive holds no plaintext, and nothing is filed under the root's
+  plaintext identity.
+- A replicator walks the tree in the archive and is refused the root with
+  `MissingGeneration` for the range generation. A range holder is refused
+  with `MissingGeneration` for the content generation.
+- A write missing a staged node is refused with `UnknownNode`. Nothing it
+  would have imported is in the archive afterwards, and the delta is intact.
+- An edit made reading through the archive reseals only its path.
+- The volatile archive, the filesystem archive and the in-memory store hold
+  byte-identical envelopes at identical addresses.
+
 ### What it is not
 
-- **In memory only.** `LayeredBlocks` holds envelopes in a map, like
-  `SealedBlocks`. Pointing it at a repository archive is the same step as for
-  flat sealing.
+- **Not in the repository yet.** `LayeredArchive` is a store, not a branch.
+  A commit still persists plain nodes through `persist`. Switching it means
+  three things. The revision names a `LayeredRoot` (envelope address and
+  structure key) instead of a plaintext root. The branch holds a `Writer` and
+  an `Access` from the keyring. And every `LoadBlock` site reads through
+  the party that opened the root. The root's structure key travelling with the
+  revision is what makes a remote a replicator: it can walk and check the tree
+  but not read it.
 - **Generations are handed out, not agreed.** Level secrets are plain values
   here; delivering them, and rotating them on removal, is what a CGKA is for.
 - **What a party has learned lives in memory.** A member's map from identity
@@ -999,8 +1073,8 @@ deterministic, so replicas converge.
   and a range holder routes to the leaf a key belongs in without seeing them.
   That is the claim; anything stronger would mean putting buffered keys in
   the range region.
-- **Not measured.** Each node now seals three regions and reads two, where
-  flat sealing sealed one; the cost needs the same treatment as above.
+- **Not run in a browser.** The archive tests compile for wasm (OPFS on the
+  filesystem arm); they have only run natively here.
 
 ## Suggested sequence
 
