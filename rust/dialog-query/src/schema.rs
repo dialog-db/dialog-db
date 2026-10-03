@@ -187,15 +187,6 @@ impl Select {
             Cardinality::Many => Select::All,
         }
     }
-
-    /// The cardinality a field under this policy presents: a set for
-    /// `all`, one value for the rest.
-    pub fn cardinality(self) -> Cardinality {
-        match self {
-            Select::All => Cardinality::Many,
-            _ => Cardinality::One,
-        }
-    }
 }
 
 impl std::fmt::Display for Select {

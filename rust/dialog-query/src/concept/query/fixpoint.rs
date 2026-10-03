@@ -1393,7 +1393,6 @@ mod tests {
     use super::*;
     use crate::attribute::query::AttributeQuery;
     use crate::attribute::{AttributeDescriptor, Cardinality, Type};
-    use crate::reduce::{Aggregator, ReduceSpec};
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
@@ -1621,7 +1620,7 @@ mod tests {
         // The closure's relation read as a count: a query is a closed
         // place, so it may read what a deductive rule may not.
         let count: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "total": { "the": "family.derived/ancestor", "as": "UnsignedInteger", "select": "count" }
+            "total": { "the": "family.derived/ancestor", "as": "UnsignedInteger", "cardinality": "many", "select": "count" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::var("who"));

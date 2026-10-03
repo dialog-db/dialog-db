@@ -152,7 +152,11 @@ the contributor.
 
 The engine part of this is the policy beside cardinality on the
 attribute descriptor a field carries, `select` with `among` for the
-listed values; the notation is tonk's.
+listed values; the notation is tonk's. The cardinality stays the
+relation's and stays in the attribute's identity, as it always was:
+a `count` over a many-valued attribute declares `many` and reads one
+number, and a read declaring the wrong cardinality names a different
+attribute, as it did before policies existed.
 
 ## Mechanism
 

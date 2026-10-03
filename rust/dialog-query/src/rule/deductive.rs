@@ -1406,28 +1406,6 @@ mod tests {
                 .is_entity_local(),
             "a concept premise reads another entity's facts"
         );
-
-        let conclusion = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(
-                the!("contact/handle"),
-                "",
-                Cardinality::One,
-                Some(Type::String),
-            ),
-        )])
-        .unwrap();
-        let email = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(the!("user/email"), "", Cardinality::One, Some(Type::String)),
-        )])
-        .unwrap();
-        let phone = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(the!("user/phone"), "", Cardinality::One, Some(Type::String)),
-        )])
-        .unwrap();
-
     }
 
     /// A deductive rule is open, so it is monotone: an `unless` premise
