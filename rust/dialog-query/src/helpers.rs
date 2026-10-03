@@ -51,9 +51,8 @@ use dialog_repository::{
 use dialog_search_tree::audit as tree_audit;
 use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
 use dialog_storage::Blake3Hash;
+use dialog_storage::dup_audit;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
-use dialog_storage::{DUPLICATE_SETS, TOTAL_SETS, dup_audit};
-use std::sync::atomic::Ordering;
 // The platform temp filesystem (and the on-disk `BenchEnv::temp` variant
 // built on it) only exists off wasm — there is no native temp directory in
 // the browser, so the whole on-disk path is gated to non-wasm targets.
@@ -1785,11 +1784,10 @@ mod test {
         let elapsed = start.elapsed();
 
         if env::var("DIALOG_TXN_AUDIT").is_ok() {
+            let (dup_sets, total_sets) = dup_audit::drain_sets();
             eprintln!(
-                "TXNAUDIT {} dup_sets={} total_sets={}{}",
+                "TXNAUDIT {} dup_sets={dup_sets} total_sets={total_sets}{}",
                 tree_audit::report(),
-                DUPLICATE_SETS.swap(0, Ordering::Relaxed),
-                TOTAL_SETS.swap(0, Ordering::Relaxed),
                 dup_audit::report(),
             );
         }
