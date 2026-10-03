@@ -908,6 +908,100 @@ Two obvious inefficiencies, neither addressed:
 Neither is worth doing before there is a reason to care, but both mean the
 +82% is not a floor.
 
+## Layered sealing
+
+`dialog-keyring::layered` prototypes step 7 below: a tree whose nodes open in
+nested levels, `notes/privacy.md`'s L1–L3, rather than whole or not at all.
+
+| Level | Holds | Can |
+| --- | --- | --- |
+| Structure | a root's structure key | walk the tree, check and copy every block, read nothing |
+| Range | plus the range secret | route a key to the leaf that would hold it, read no entry |
+| Content | plus the content secret | read the tree |
+
+Each node is sealed as an `Envelope` with three regions:
+
+- **Structure**, under the node's own structure key: each child's envelope
+  address and structure key. Holding a root's structure key opens the shape
+  of the whole tree.
+- **Range**, under the range key: each child's separator.
+- **Content**, under the content key: the node itself.
+
+The keys nest, so the levels cannot be held out of order:
+
+```text
+structure  S = keyed_hash(content_secret, plaintext)
+range      R = keyed_hash(range_secret,   S)
+content    C = keyed_hash(content_secret, R)
+```
+
+A plaintext header names the range and content generations; every region
+authenticates it.
+
+### Addresses are ciphertext hashes, so the blinding key goes
+
+An envelope's address is `blake3` of its bytes, and a parent records its
+children by those addresses. Anyone, at any level or none, can check a block
+against its address, so a replicator refuses corrupt data it cannot read. The
+plaintext identity the tree links by is never stored: it lives only inside
+content regions. Flat sealing needed a never-rotating blinding key to keep the
+store from being addressed by plaintext identity; layered sealing does not.
+
+The tree itself is still untouched. `LayeredBlocks` provides `LoadBlock` to a
+member. It maps each identity it reaches to an envelope address and structure
+key, learned from the parent's structure region as each node opens, starting
+from the root.
+
+### A fixed nonce is wrong for the structure region
+
+The first sketch of the key schedule argued that every region can use a fixed
+nonce, because each derived key encrypts exactly one message. That holds for
+the range and content regions, whose keys derive from the node's own bytes.
+It fails for the structure region. That region records the children's
+addresses, and a child's address depends on which generation the child was
+sealed under. The same node, under the same structure key, can link children
+at different addresses: after a rotation, one edit reseals a child and another
+does not. With AES-GCM, two messages under one key and nonce leak their XOR
+and the authentication key. So the structure region takes a synthetic nonce,
+a keyed hash of what it encrypts, stored in the envelope. It is still
+deterministic, so replicas converge.
+
+### What the tests establish
+
+`tests/layered.rs` and the envelope's unit tests, on native:
+
+- A member who did not write the tree reads all of it, from the root alone.
+- The store never holds plaintext.
+- A replicator walks, checks and copies the whole tree, and a member reads it
+  from the copy. The replicator opens no separator and no node.
+- A range holder's route matches the one a member computes from each index's
+  plaintext separators. The range holder opens no content.
+- Content access without range access opens nothing.
+- Two replicas seal byte-identical stores.
+- Flipping one byte of any envelope is caught by a walk with no key.
+- One insert into a 12-envelope tree reseals 2 (root and leaf) and shares 10.
+- After the content generation rotates, a member holding both generations
+  reads the whole edited tree, old nodes and new. A party holding only the
+  old one still reads the old tree and nothing written since.
+- Relabelling a node's generation fails to open.
+- The same node linking different children never reuses a structure nonce.
+
+### What it is not
+
+- **In memory only.** `LayeredBlocks` holds envelopes in a map, like
+  `SealedBlocks`. Pointing it at a repository archive is the same step as for
+  flat sealing.
+- **Generations are handed out, not agreed.** Level secrets are plain values
+  here; delivering them, and rotating them on removal, is what a CGKA is for.
+- **What a party has learned lives in memory.** A member's map from identity
+  to envelope is rebuilt from the root on every session.
+- **Routing ignores pending ops.** The search tree buffers ops in index nodes,
+  and a range holder routes to the leaf a key belongs in without seeing them.
+  That is the claim; anything stronger would mean putting buffered keys in
+  the range region.
+- **Not measured.** Each node now seals three regions and reads two, where
+  flat sealing sealed one; the cost needs the same treatment as above.
+
 ## Suggested sequence
 
 **Encryption first.** The original ordering here put the CGKA first and the
@@ -961,7 +1055,7 @@ The revised order:
 6. **Capability binding.** UCAN proof carried on membership ops; `/ucan/revoke`
    on a read delegation drives `Remove` + `Update`. Where the two planes meet,
    and where the design is most ours.
-7. **L1/L2/L3 layering.** A refinement of a working single envelope, not a
+7. **L1/L2/L3 layering.** *(prototyped in `dialog-keyring::layered`)* A refinement of a working single envelope, not a
    prerequisite for one. Folding the keyring into a tag-6 region falls out of
    this.
 

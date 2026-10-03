@@ -20,6 +20,9 @@ dialog-credentials = { workspace = true }
 dialog-search-tree = { workspace = true }
 dialog-storage = { workspace = true }
 getrandom = { workspace = true }
+# Only for the archive-validation bound on `PersistentNode`, which the layered
+# projection needs in order to read a node's links.
+rkyv = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 
