@@ -154,11 +154,15 @@ the contributor.
 
 The engine part of this is the policy beside cardinality on the
 attribute descriptor a field carries, `select` with `among` for the
-listed values; the notation is tonk's. The cardinality stays the
-relation's and stays in the attribute's identity, as it always was:
-a `count` over a many-valued attribute declares `many` and reads one
-number, and a read declaring the wrong cardinality names a different
-attribute, as it did before policies existed.
+listed values; the notation is tonk's. The policy is part of the
+attribute: an attribute is a relation, the `(domain, name)` pair
+facts are stored under, read under a type and a policy, and two
+reads of one relation under different policies are two attributes.
+Cardinality is the policy's arity, `all` being many and every other
+policy one; `cardinality: one` and `many` are the older spellings of
+`last` and `all` and name the same attributes they always did. Rules
+derive into the relation and are found by it, whatever type or
+policy a reader declares over it.
 
 ## Mechanism
 

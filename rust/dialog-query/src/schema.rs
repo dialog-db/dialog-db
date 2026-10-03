@@ -180,6 +180,15 @@ impl Select {
         !matches!(self, Select::All)
     }
 
+    /// The arity of this policy: a set for `all`, one value for the
+    /// rest. `cardinality` is the older spelling of `last` and `all`.
+    pub fn cardinality(self) -> Cardinality {
+        match self {
+            Select::All => Cardinality::Many,
+            _ => Cardinality::One,
+        }
+    }
+
     /// The policy a cardinality reads under when none is declared.
     pub fn of(cardinality: Cardinality) -> Self {
         match cardinality {
