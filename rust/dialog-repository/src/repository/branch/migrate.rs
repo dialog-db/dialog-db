@@ -179,7 +179,13 @@ impl RekeyStorage<'_> {
         // names them is minted: a revision points only at durable blocks.
         let mut delta = ArchiveDelta::zero();
         let rewritten = rekey_tree(&tree, &store, &mut delta, target, branch.node_cache()).await?;
-        persist(&branch.archive().index(), &mut delta, env).await?;
+        persist(
+            &branch.archive().index(),
+            &branch.node_cache(),
+            &mut delta,
+            env,
+        )
+        .await?;
         // Boxed: the commit is a large future, and this one runs once.
         let revision = Box::pin(
             branch
@@ -273,7 +279,13 @@ where
     };
     let mut delta = ArchiveDelta::zero();
     let rewritten = rekey_tree(&tree, store, &mut delta, target, branch.node_cache()).await?;
-    persist(&branch.archive().index(), &mut delta, env).await?;
+    persist(
+        &branch.archive().index(),
+        &branch.node_cache(),
+        &mut delta,
+        env,
+    )
+    .await?;
     branch.rewrites().insert(root, rewritten.root().clone());
     Ok(rewritten)
 }

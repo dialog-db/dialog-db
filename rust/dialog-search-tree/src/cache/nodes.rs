@@ -420,6 +420,23 @@ impl<Key, Value> NodeCache<Key, Value> {
             .map(|node| self.keep(hash.clone(), node).0))
     }
 
+    /// Forgets that this handle's scope holds the node at `hash`, if it
+    /// did. A node no other scope holds is dropped.
+    ///
+    /// What a scope holds is what its own archive has produced or what it
+    /// has sealed and flushed, so a node sealed into the cache ahead of a
+    /// flush that then fails is forgotten: a read must not be answered
+    /// with a block the archive never received.
+    pub fn forget(&self, hash: &Blake3Hash) {
+        let mut shard = self.store.shard(hash).lock();
+        let Some(at) = shard.find(hash) else {
+            return;
+        };
+        if !shard.slot_mut(at).holders.remove(self.scope) {
+            shard.take(at);
+        }
+    }
+
     /// Forgets that this handle's scope holds anything. A node no other
     /// scope holds is dropped.
     pub fn release(&self) {
