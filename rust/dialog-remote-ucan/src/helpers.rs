@@ -22,4 +22,6 @@ pub use server::*;
 pub struct UcanServiceAddress {
     /// The service's endpoint URL.
     pub endpoint: String,
+    /// The URL of the service's socket.
+    pub socket: String,
 }

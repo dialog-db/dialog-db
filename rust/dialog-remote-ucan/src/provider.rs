@@ -3,24 +3,33 @@
 //!
 //! An address names the exchange to speak. The direct exchange runs
 //! [`direct::invoke`] and reads the answer the way the object route's
-//! client would have: the statuses, the `ETag`, the body. The permit
+//! client would have: the statuses, the `ETag`, the body. A cell's
+//! invocation goes over the service's socket instead when the address
+//! names one, answered with the same status, version and body. The permit
 //! exchange hands the fork to the permit-based site, which redeems and
 //! performs it the way it always has.
 
 use base58::ToBase58;
 use dialog_capability::{Constraint, Effect, ForkInvocation, Provider};
 use dialog_common::Blake3Hash;
+use dialog_effects::Rejection;
 use dialog_effects::archive::prelude::PutExt;
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, BlobSink, BlobWriter, Import, Read};
 use dialog_effects::memory::prelude::{PublishExt, RetractExt};
-use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
+use dialog_effects::memory::{
+    Edition, Editions, MemoryError, Publish, Resolve, Retract, Version, Watch,
+};
+use dialog_remote_s3::S3Error;
+use dialog_remote_ucan_s3::UcanAuthorization;
 use dialog_remote_ucan_s3::UcanSite as PermitSite;
+use dialog_ucan_core::Container;
 
-use crate::address::Exchange;
+use crate::address::{Exchange, UcanAddress};
 use crate::direct;
 use crate::site::UcanSite;
+use crate::socket::Reply;
 
 /// Hand a fork to the permit-based site, which redeems and performs it
 /// the way it always has.
@@ -105,7 +114,7 @@ impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
-        let answer = direct::invoke(&invocation.address, &invocation.authorization, None).await?;
+        let answer = exchange(self, &invocation.address, &invocation.authorization, None).await?;
         match answer {
             answer if answer.is_success() => {
                 let version = Version::from(answer.version()?);
@@ -135,7 +144,8 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
             return through_permits(self, invocation).await;
         }
         let payload = invocation.capability.content().to_vec();
-        let answer = direct::invoke(
+        let answer = exchange(
+            self,
             &invocation.address,
             &invocation.authorization,
             Some(payload),
@@ -166,7 +176,7 @@ impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
-        let answer = direct::invoke(&invocation.address, &invocation.authorization, None).await?;
+        let answer = exchange(self, &invocation.address, &invocation.authorization, None).await?;
         match answer {
             answer if answer.is_success() => Ok(()),
             answer if answer.status == 412 => Err(MemoryError::VersionMismatch {
@@ -265,4 +275,83 @@ impl BlobSink for Upload {
             ))),
         }
     }
+}
+
+/// A watch rides the service's socket, the one connection to it shared by
+/// every watch of a cell in the same space: a service that names no
+/// socket cannot follow a cell, and a watch there is refused, so the cell
+/// is read by resolving it again.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<ForkInvocation<UcanSite, Watch>> for UcanSite {
+    async fn execute(
+        &self,
+        invocation: ForkInvocation<UcanSite, Watch>,
+    ) -> Result<Editions, MemoryError> {
+        let Some(socket) = invocation.address.socket() else {
+            return Err(Rejection::Unsupported {
+                reason: "the access service names no socket".into(),
+            }
+            .into());
+        };
+        let url = per_space(socket, invocation.capability.subject().as_ref());
+        let chain = invocation.authorization.invocation().chain();
+        let container = Container::from(chain)
+            .to_bytes()
+            .map_err(|error| MemoryError::Storage(error.to_string()))?;
+        let name = chain.invocation.to_cid().to_string();
+        let connection = self.sockets().connect(&url).await?;
+        Ok(Box::new(connection.watch(name, container)?))
+    }
+}
+
+/// Carry a cell's invocation to the service: over its socket when the
+/// address names one, as a request otherwise.
+///
+/// A socket that cannot be reached is passed over for a request. One that
+/// fails once the frame is sent is not: the operation may have been
+/// carried out, and the same invocation sent again would be refused as
+/// presented before, so the failure is answered as it is.
+async fn exchange(
+    site: &UcanSite,
+    address: &UcanAddress,
+    authorization: &UcanAuthorization,
+    payload: Option<Vec<u8>>,
+) -> Result<direct::Answer, S3Error> {
+    let Some(socket) = address.socket() else {
+        return direct::invoke(address, authorization, payload).await;
+    };
+    let chain = authorization.invocation().chain();
+    let Ok(connection) = site
+        .sockets()
+        .connect(&per_space(socket, chain.subject().as_str()))
+        .await
+    else {
+        return direct::invoke(address, authorization, payload).await;
+    };
+    let container = Container::from(chain)
+        .to_bytes()
+        .map_err(|error| S3Error::Serialization(error.to_string()))?;
+    let name = chain.invocation.to_cid().to_string();
+    match connection.invoke(name, container, payload).await {
+        Ok(Reply::Answer {
+            status,
+            version,
+            body,
+            ..
+        }) => Ok(direct::Answer::framed(status, version, body)),
+        Ok(other) => Err(S3Error::Rejected(Rejection::Unclassified {
+            detail: format!("the service answered an invocation with {other:?}"),
+        })),
+        Err(error) => Err(S3Error::Rejected(Rejection::Unclassified {
+            detail: error.to_string(),
+        })),
+    }
+}
+
+/// The socket of the space `subject` names: a service answers each space
+/// on a connection of its own.
+fn per_space(socket: &str, subject: &str) -> String {
+    let separator = if socket.contains('?') { '&' } else { '?' };
+    format!("{socket}{separator}sub={subject}")
 }

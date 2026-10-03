@@ -24,7 +24,7 @@
 
 use dialog_capability::{Capability, Constraint, Policy};
 
-use super::{Cell, List, Memory, Publish, Resolve, Retract, Space, Version};
+use super::{Cell, List, Memory, Publish, Resolve, Retract, Space, Version, Watch};
 use crate::{Method, MethodExt as _, UseExt as _, method};
 
 /// Scope a method to the memory namespace.
@@ -130,6 +130,18 @@ impl ResolveCellExt for Capability<Cell<method::Get>> {
     }
 }
 
+/// Follow a cell as it changes.
+pub trait WatchCellExt {
+    /// Watch the cell: what it holds now, then each change.
+    fn watch(self) -> Capability<Watch>;
+}
+
+impl WatchCellExt for Capability<Cell<method::Get>> {
+    fn watch(self) -> Capability<Watch> {
+        self.invoke(Watch)
+    }
+}
+
 /// Write a cell.
 pub trait PublishCellExt {
     /// Publish content to the cell. Pass `Some(version)` as `when` to
@@ -165,6 +177,24 @@ pub trait ResolveExt {
 }
 
 impl ResolveExt for Capability<Resolve> {
+    fn space(&self) -> &str {
+        &Space::of(self).space
+    }
+
+    fn cell(&self) -> &str {
+        &Cell::of(self).cell
+    }
+}
+
+/// Field accessors on `Capability<Watch>`.
+pub trait WatchExt {
+    /// Get the space name from the capability chain.
+    fn space(&self) -> &str;
+    /// Get the cell name from the capability chain.
+    fn cell(&self) -> &str;
+}
+
+impl WatchExt for Capability<Watch> {
     fn space(&self) -> &str {
         &Space::of(self).space
     }
@@ -308,6 +338,11 @@ impl CellScope {
     /// Read the cell's current content and version.
     pub fn resolve(&self) -> Capability<Resolve> {
         self.read().resolve()
+    }
+
+    /// Watch the cell: what it holds now, then each change.
+    pub fn watch(&self) -> Capability<Watch> {
+        self.read().watch()
     }
 
     /// Publish content to the cell. `when` is the version the write

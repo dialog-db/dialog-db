@@ -7,8 +7,10 @@
 use super::{Precondition, RequestMethod, S3Request};
 use dialog_capability::{Capability, Policy};
 use dialog_common::Hasher;
-use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt};
-use dialog_effects::memory::{Cell, Publish, PublishAttenuation, Resolve, Retract, Space, Version};
+use dialog_effects::memory::prelude::{PublishExt, ResolveExt, RetractExt, WatchExt};
+use dialog_effects::memory::{
+    Cell, Publish, PublishAttenuation, Resolve, Retract, Space, Version, Watch,
+};
 
 impl From<Option<&Version>> for Precondition {
     fn from(version: Option<&Version>) -> Self {
@@ -41,6 +43,28 @@ impl From<&Capability<Resolve>> for S3Request {
 }
 
 impl RequestMethod for Capability<Resolve> {
+    const METHOD: &'static str = "GET";
+}
+
+/// A watch is authorized as the read it stands for: an S3 bucket cannot
+/// follow an object, so the site refuses the watch itself, but what it
+/// would have read is the object a resolve reads.
+impl From<&Capability<Watch>> for S3Request {
+    fn from(capability: &Capability<Watch>) -> Self {
+        S3Request {
+            method: "GET".to_string(),
+            path: format!(
+                "{}/{}/{}",
+                capability.subject(),
+                capability.space(),
+                capability.cell()
+            ),
+            ..S3Request::default()
+        }
+    }
+}
+
+impl RequestMethod for Capability<Watch> {
     const METHOD: &'static str = "GET";
 }
 

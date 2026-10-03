@@ -34,11 +34,16 @@ pub(crate) const SMALL_DIVERGENCE: u64 = 8;
 pub struct Pull<'a> {
     branch: &'a Branch,
     from: Option<Upstream>,
+    confirm_upstream: bool,
 }
 
 impl<'a> Pull<'a> {
     fn new(branch: &'a Branch) -> Self {
-        Self { branch, from: None }
+        Self {
+            branch,
+            from: None,
+            confirm_upstream: true,
+        }
     }
 
     /// The branch this pull targets.
@@ -61,6 +66,23 @@ impl<'a> Pull<'a> {
     /// target an upstream: that is [`Branch::pull_from`]'s to record.
     pub fn from(mut self, source: impl Into<UpstreamBranch>) -> Self {
         self.from = Some(Upstream::from(source.into()));
+        self
+    }
+
+    /// Pull without first asking a remote upstream where it stands:
+    /// merge the head last known for it instead.
+    ///
+    /// A pull reads each remote upstream's head, a round trip. A caller
+    /// that learns of heads as they move (a subscription delivering them,
+    /// recorded through [`ConnectedBranch::observe`](crate::ConnectedBranch::observe))
+    /// already holds the answer, and the head it recorded is never older
+    /// than one it recorded before. A local upstream is read as always,
+    /// since reading it costs no round trip.
+    ///
+    /// Nothing is risked but staleness: the head merged is one the remote
+    /// had, and a newer one is merged by a later pull.
+    pub fn assuming_upstream(mut self) -> Self {
+        self.confirm_upstream = false;
         self
     }
 }
@@ -110,11 +132,19 @@ impl<'a> Pull<'a> {
     {
         if self.from.is_some() {
             let upstream = self.upstream(env).await?;
-            let prepared = Box::pin(prepare_upstream(self.branch, upstream.clone(), env)).await?;
-            return land(self.branch, upstream, prepared, false, env).await;
+            let confirm = self.confirm_upstream;
+            let prepared = Box::pin(prepare_upstream(
+                self.branch,
+                upstream.clone(),
+                confirm,
+                env,
+            ))
+            .await?;
+            return land(self.branch, upstream, prepared, false, confirm, env).await;
         }
 
         let branch = self.branch;
+        let confirm = self.confirm_upstream;
         resolve(branch, env).await?;
         let upstreams: Vec<Upstream> = branch.pulls().iter().cloned().collect();
         if upstreams.is_empty() {
@@ -133,12 +163,11 @@ impl<'a> Pull<'a> {
         // whose merge cannot land does not keep the others from landing,
         // nor hide what landed before it: the pull lands what it can and
         // reports the rest, with the head the landed ones left.
-        let prepared = join_all(
-            upstreams
-                .iter()
-                .map(|upstream| Box::pin(prepare_upstream(branch, upstream.clone(), env))),
-        )
-        .await;
+        let prepared =
+            join_all(upstreams.iter().map(|upstream| {
+                Box::pin(prepare_upstream(branch, upstream.clone(), confirm, env))
+            }))
+            .await;
         let total = upstreams.len();
         let mut unreached = Vec::new();
         // Like a single pull, answer the merged head, or `None` when no
@@ -153,7 +182,7 @@ impl<'a> Pull<'a> {
                 }
             };
             let target = upstream.target();
-            match land(branch, upstream, prepared, landed.is_some(), env).await {
+            match land(branch, upstream, prepared, landed.is_some(), confirm, env).await {
                 Ok(Some(revision)) => landed = Some(revision),
                 Ok(None) => {}
                 Err(error) => unreached.push((target, error)),
@@ -184,7 +213,13 @@ impl<'a> Pull<'a> {
     {
         let branch = self.branch;
         let upstream = self.upstream(env).await?;
-        Box::pin(prepare_upstream(branch, upstream, env)).await
+        Box::pin(prepare_upstream(
+            branch,
+            upstream,
+            self.confirm_upstream,
+            env,
+        ))
+        .await
     }
 
     /// The upstream this pull takes from: the one given, or else the
@@ -239,6 +274,7 @@ async fn land<'a, Env: ResolveEnv>(
     upstream: Upstream,
     prepared: PreparedPull<'a>,
     moved: bool,
+    confirm_upstream: bool,
     env: &Env,
 ) -> Result<Option<Revision>, PullError> {
     let writer = branch.writer();
@@ -246,10 +282,15 @@ async fn land<'a, Env: ResolveEnv>(
     match prepared.advance(env).await {
         Err(PullError::Publish(PublishError::VersionMismatch { .. })) if moved => {
             let tree = branch.tracked().tree(&upstream.target());
-            Box::pin(prepare_upstream(branch, upstream.with_tree(tree), env))
-                .await?
-                .advance(env)
-                .await
+            Box::pin(prepare_upstream(
+                branch,
+                upstream.with_tree(tree),
+                confirm_upstream,
+                env,
+            ))
+            .await?
+            .advance(env)
+            .await
         }
         result => result,
     }
@@ -257,16 +298,20 @@ async fn land<'a, Env: ResolveEnv>(
 
 /// Phase one for one upstream: fetch it, rebase local changes onto it,
 /// and persist the merged tree's blocks, without writing any cell.
+///
+/// Unless `confirm_upstream`, a remote upstream is not asked for its head:
+/// the one last known for it is merged (see [`Pull::assuming_upstream`]).
 pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
     branch: &'a Branch,
     upstream: Upstream,
+    confirm_upstream: bool,
     env: &Env,
 ) -> Result<PreparedPull<'a>, PullError> {
     {
         // Resolve the upstream's current revision and, when the
         // upstream is at a peer, keep it so the merge can fall back to
         // the peer's archive for blocks that aren't local.
-        let upstream_revision = fetch_one(branch, &upstream, env).await?;
+        let upstream_revision = fetch_one(branch, &upstream, confirm_upstream, env).await?;
         let remote = upstream.fallback();
 
         // Upstream has never received a revision yet — nothing to

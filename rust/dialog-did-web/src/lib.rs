@@ -26,6 +26,7 @@
 pub mod helpers;
 
 mod cache;
+mod discover;
 mod document;
 mod error;
 mod fetch;
@@ -39,7 +40,8 @@ mod verifier;
 mod tests;
 
 pub use cache::{CachingResolver, DEFAULT_NEGATIVE_TTL, DEFAULT_TTL, MAX_ENTRIES};
-pub use document::{DidDocument, Jwk, VerificationMethod};
+pub use discover::Discover;
+pub use document::{DidDocument, Jwk, Service, VerificationMethod};
 pub use error::ResolveError;
 pub use fetch::{Fetch, MAX_DOCUMENT_BYTES, ReqwestFetch};
 pub use provider::{DidKeyProvider, DidPlcProvider, DidWebProvider, MethodResolver, WebResolver};

@@ -9,6 +9,7 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_credentials::{Ed25519Signer, Es256Signer, Signer};
 use dialog_varsig::{Did, Principal, Signer as VarsigSigner, Verifier as VarsigVerifier};
 
+use crate::discover::Discover;
 use crate::document::DidDocument;
 use crate::fetch::MapFetch;
 use crate::provider::{DidKeyProvider, DidPlcProvider, DidWebProvider, MethodResolver};
@@ -1076,4 +1077,82 @@ fn jwk_p256_document(did_web: &str, x: &[u8], y: &[u8]) -> String {
         x = encode(x),
         y = encode(y)
     )
+}
+
+/// A `did:web` document's service entries, a kind named alone or among
+/// several, as tonk's access service publishes them.
+fn did_document_with_services(id: &str) -> String {
+    format!(
+        r#"{{
+          "@context": ["https://www.w3.org/ns/did/v1"],
+          "id": "{id}",
+          "verificationMethod": [],
+          "service": [
+            {{ "id": "{id}#ucan", "type": "UcanAccessService", "serviceEndpoint": "https://access.example/ucan/" }},
+            {{ "id": "{id}#socket", "type": ["UcanAccessSocket", "Other"], "serviceEndpoint": "wss://access.example/ucan/" }},
+            {{ "id": "{id}#map", "type": "Mapped", "serviceEndpoint": {{ "origin": "https://access.example" }} }}
+          ]
+        }}"#
+    )
+}
+
+/// Discovering a `did:web` answers the services its document names: each
+/// entry's kinds, and its URL where the endpoint is one.
+#[dialog_common::test]
+async fn it_discovers_the_services_a_document_names() {
+    let fetch = MapFetch::new().with(
+        "https://access.example/.well-known/did.json",
+        did_document_with_services("did:web:access.example").into_bytes(),
+    );
+    let did: Did = "did:web:access.example".parse().unwrap();
+    let services = Discover::new(did)
+        .perform(&DidWebProvider::with_fetch(fetch))
+        .await
+        .unwrap();
+
+    assert_eq!(services.len(), 3);
+    let access = services.iter().find(|s| s.is("UcanAccessService")).unwrap();
+    assert_eq!(access.url(), Some("https://access.example/ucan/"));
+    let socket = services.iter().find(|s| s.is("UcanAccessSocket")).unwrap();
+    assert!(socket.is("Other"), "a kind named among several is kept");
+    assert_eq!(socket.url(), Some("wss://access.example/ucan/"));
+    let mapped = services.iter().find(|s| s.is("Mapped")).unwrap();
+    assert_eq!(mapped.url(), None, "an endpoint that is a map is no URL");
+}
+
+/// A document served at a DID's URL but naming another DID does not get to
+/// point the DID at its services.
+#[dialog_common::test]
+async fn it_refuses_the_services_of_a_document_naming_another_did() {
+    let fetch = MapFetch::new().with(
+        "https://access.example/.well-known/did.json",
+        did_document_with_services("did:web:attacker.example").into_bytes(),
+    );
+    let did: Did = "did:web:access.example".parse().unwrap();
+    let discovered = Discover::new(did)
+        .perform(&DidWebProvider::with_fetch(fetch))
+        .await;
+    assert!(
+        matches!(discovered, Err(ResolveError::MalformedDocument(_))),
+        "{discovered:?}"
+    );
+}
+
+/// A `did:key` has no document, so it names no services; the method
+/// resolver routes it there without a fetch.
+#[dialog_common::test]
+async fn it_discovers_no_services_for_a_did_key() {
+    let signer = Ed25519Signer::generate().await.unwrap();
+    let fetch = MapFetch::new();
+    let resolver = MethodResolver::with_providers(
+        DidKeyProvider,
+        DidWebProvider::with_fetch(fetch.clone()),
+        DidPlcProvider::with_fetch(fetch.clone()),
+    );
+    let services = Discover::new(signer.did())
+        .perform(&resolver)
+        .await
+        .unwrap();
+    assert!(services.is_empty());
+    assert_eq!(fetch.calls(), 0, "nothing was fetched");
 }

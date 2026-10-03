@@ -19,8 +19,11 @@ use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
 use dialog_capability::Subject;
 use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
 use dialog_effects::MethodExt as _;
+use dialog_effects::Rejection;
 use dialog_effects::archive::prelude::*;
 use dialog_effects::credential::prelude::*;
+use dialog_effects::memory::MemoryError;
+use dialog_effects::memory::prelude::*;
 use dialog_effects::storage::Location;
 use dialog_peer::Peer;
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
@@ -360,6 +363,55 @@ async fn it_allows_read_but_denies_write_with_read_only_delegation() -> Result<(
     assert!(
         write.is_err(),
         "read-only delegation must deny Put: {write:?}"
+    );
+    Ok(())
+}
+
+/// A grant to read a cell covers watching it, so a watch on a cell the
+/// operator may read reaches the directory, which cannot follow a cell and
+/// says so: the watch is refused as unsupported, not as unauthorized.
+#[dialog_common::test]
+async fn it_refuses_a_watch_as_unsupported_under_a_read_grant() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let (owner_operator, owner) = test_session_with_peer().await;
+    let repo = owner
+        .space(unique_name("fs-mem-watch"))
+        .create()
+        .perform(&owner_operator)
+        .await?;
+    let (_location, address) = seed_vault(&repo).await?;
+
+    let chain = repo
+        .access()
+        .claim(
+            Subject::from(repo.did())
+                .reader()
+                .memory()
+                .space("local")
+                .cell("head")
+                .resolve(),
+        )
+        .delegate(profile.did())
+        .perform(&operator)
+        .await?;
+    profile.access().save(chain).perform(&operator).await?;
+
+    let watched = Subject::from(repo.did())
+        .reader()
+        .memory()
+        .space("local")
+        .cell("head")
+        .watch()
+        .fork(&SiteAddress::Fs(address))
+        .perform(&operator)
+        .await;
+    assert!(
+        matches!(
+            watched,
+            Err(MemoryError::Rejected(Rejection::Unsupported { .. }))
+        ),
+        "a watch under a read grant must reach the site and be unsupported: {:?}",
+        watched.err()
     );
     Ok(())
 }
