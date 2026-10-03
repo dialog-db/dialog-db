@@ -34,7 +34,8 @@ use dialog_capability::{Capability, Provider, Subject};
 use dialog_capability::{Constraint, Policy};
 use dialog_common::ConditionalSync;
 use dialog_did_web::{PerformingResolver, Resolve};
-use dialog_effects::{Chain, Method, archive, blob, memory, method, peer};
+use dialog_effects::prelude::*;
+use dialog_effects::{Chain, Method, archive, blob, memory, peer};
 use dialog_ucan_core::container::bundle::InvocationBundle;
 use dialog_ucan_core::{
     Environment, InvocationChain, VerificationContext, revocation::RevocationChecker,
@@ -202,20 +203,16 @@ where
         match command.as_slice() {
             // A unit effect is constructed, never read: there is
             // nothing in the arguments to deserialize it from.
-            ["use", "get", "peer"] => {
-                let capability = Chain::<method::Get>::under(Subject::from(subject.clone()))
-                    .attenuate(peer::Peer)
-                    .attenuate(peer::Hello);
+            ["use", "get", "dialog", "peer", "hello"] => {
+                let capability = Subject::from(subject.clone()).reader().peers().hello();
                 Ok(Answer::Value(performed(
                     Provider::<peer::Hello>::execute(&self.store, capability).await,
                 )))
             }
             // Also a unit effect, and for the same reason: what a peer
             // holds is not something the caller narrows.
-            ["use", "get", "peer", "space"] => {
-                let capability = Chain::<method::Get>::under(Subject::from(subject.clone()))
-                    .attenuate(peer::Peer)
-                    .attenuate(peer::Spaces);
+            ["use", "get", "dialog", "peer", "spaces"] => {
+                let capability = Subject::from(subject.clone()).reader().peers().spaces();
                 Ok(Answer::Value(performed(
                     Provider::<peer::Spaces>::execute(&self.store, capability).await,
                 )))

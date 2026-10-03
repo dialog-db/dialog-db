@@ -187,7 +187,6 @@ pub fn decode<T: serde::de::DeserializeOwned>(
 mod tests {
     use super::*;
     use dialog_capability::{Subject, did};
-    use dialog_effects::peer::{Hello, Peer, Spaces};
     use dialog_effects::prelude::*;
 
     /// The command a peer dispatches on is the chain's own ability,
@@ -207,17 +206,12 @@ mod tests {
             "/use/get/archive/block"
         );
         assert_eq!(
-            subject
-                .clone()
-                .reader()
-                .attenuate(Peer)
-                .attenuate(Hello)
-                .ability(),
-            "/use/get/peer"
+            subject.clone().reader().peers().hello().ability(),
+            "/use/get/dialog/peer/hello"
         );
         assert_eq!(
-            subject.reader().attenuate(Peer).attenuate(Spaces).ability(),
-            "/use/get/peer/space"
+            subject.reader().peers().spaces().ability(),
+            "/use/get/dialog/peer/spaces"
         );
     }
 

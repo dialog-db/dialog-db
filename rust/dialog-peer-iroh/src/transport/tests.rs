@@ -16,7 +16,7 @@ use dialog_did_web::{CachingResolver, WebResolver};
 use dialog_effects::archive::{self, ArchiveError};
 use dialog_effects::blob::{self, BlobError};
 use dialog_effects::prelude::*;
-use dialog_operator::helpers::test_operator_with_profile;
+use dialog_peer::helpers::test_session_with_peer;
 use iroh::Endpoint;
 use iroh::endpoint::presets;
 use iroh_base::{EndpointAddr, SecretKey};
@@ -67,8 +67,8 @@ async fn a_block_crosses_a_real_stream_and_reads_back() {
     let (dialing, channel) = dialer().await;
     let site = Iroh::new(channel);
 
-    let (operator, profile) = test_operator_with_profile().await;
-    let subject = profile.did();
+    let (session, host) = test_session_with_peer().await;
+    let subject = host.did();
     let bytes = b"over QUIC, signed and verified".to_vec();
     let digest = Buffer::from(bytes.clone()).blake3_hash().clone();
 
@@ -78,7 +78,7 @@ async fn a_block_crosses_a_real_stream_and_reads_back() {
         .catalog("blocks")
         .put(Buffer::from(bytes.clone()));
     let fork: IrohFork<archive::Put> = Fork::<Iroh, _>::new(put, address.clone()).into();
-    let invocation = fork.authorize(&operator).await.expect("authorized");
+    let invocation = fork.authorize(&session).await.expect("authorized");
     let stored: Result<(), ArchiveError> =
         Provider::<ForkInvocation<Iroh, archive::Put>>::execute(&site, invocation).await;
     stored.expect("the peer performs the put");
@@ -99,7 +99,7 @@ async fn a_block_crosses_a_real_stream_and_reads_back() {
         .catalog("blocks")
         .get(digest);
     let fork: IrohFork<archive::Get> = Fork::<Iroh, _>::new(read, address).into();
-    let invocation = fork.authorize(&operator).await.expect("authorized");
+    let invocation = fork.authorize(&session).await.expect("authorized");
     let found: Result<Option<Vec<u8>>, ArchiveError> =
         Provider::<ForkInvocation<Iroh, archive::Get>>::execute(&site, invocation).await;
 
@@ -149,8 +149,8 @@ async fn a_blob_streams_both_ways() {
     let (dialing, channel) = dialer().await;
     let site = Iroh::new(channel);
 
-    let (operator, profile) = test_operator_with_profile().await;
-    let subject = profile.did();
+    let (session, host) = test_session_with_peer().await;
+    let subject = host.did();
 
     // Bigger than one QUIC datagram, so the transfer is genuinely
     // chunked and a reader that assumed one chunk would fail here.
@@ -162,7 +162,7 @@ async fn a_blob_streams_both_ways() {
         .blob()
         .write();
     let fork: IrohFork<blob::Write> = Fork::<Iroh, _>::new(write, address.clone()).into();
-    let invocation = fork.authorize(&operator).await.expect("authorized");
+    let invocation = fork.authorize(&session).await.expect("authorized");
     let mut writer = Provider::<ForkInvocation<Iroh, blob::Write>>::execute(&site, invocation)
         .await
         .expect("the peer accepts a blob");
@@ -184,7 +184,7 @@ async fn a_blob_streams_both_ways() {
         .blob()
         .read(digest);
     let fork: IrohFork<blob::Read> = Fork::<Iroh, _>::new(read, address).into();
-    let invocation = fork.authorize(&operator).await.expect("authorized");
+    let invocation = fork.authorize(&session).await.expect("authorized");
     let mut reader = Provider::<ForkInvocation<Iroh, blob::Read>>::execute(&site, invocation)
         .await
         .expect("the peer has the blob");
@@ -207,17 +207,17 @@ async fn an_import_that_lies_about_its_digest_is_refused() {
     let (dialing, channel) = dialer().await;
     let site = Iroh::new(channel);
 
-    let (operator, profile) = test_operator_with_profile().await;
+    let (session, host) = test_session_with_peer().await;
     let honest = b"the bytes that were promised".to_vec();
     let declared = Blake3Hash::from(*blake3::hash(&honest).as_bytes());
 
-    let import = Subject::from(profile.did())
+    let import = Subject::from(host.did())
         .writer()
         .archive()
         .blob()
         .import(declared.clone(), honest.len() as u64);
     let fork: IrohFork<blob::Import> = Fork::<Iroh, _>::new(import, address).into();
-    let invocation = fork.authorize(&operator).await.expect("authorized");
+    let invocation = fork.authorize(&session).await.expect("authorized");
     let mut writer = Provider::<ForkInvocation<Iroh, blob::Import>>::execute(&site, invocation)
         .await
         .expect("the peer accepts the import");

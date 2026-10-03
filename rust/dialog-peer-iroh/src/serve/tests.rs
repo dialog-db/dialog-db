@@ -12,7 +12,6 @@ use dialog_common::{Buffer, Checksum};
 use dialog_credentials::Ed25519Signer;
 use dialog_did_web::{CachingResolver, WebResolver};
 use dialog_effects::archive::{ArchiveError, Blake3Hash};
-use dialog_effects::prelude::*;
 use dialog_ucan::Scope;
 use dialog_ucan_core::subject::Subject as DelegatedSubject;
 use dialog_ucan_core::{DelegationBuilder, InvocationBuilder};
@@ -127,7 +126,7 @@ impl Provider<dialog_effects::peer::Hello> for Recording {
     ) -> Result<dialog_effects::peer::Greeting, dialog_effects::peer::PeerError> {
         Ok(dialog_effects::peer::Greeting {
             subject: input.subject().clone(),
-            profile: dialog_capability::did!("key:zTestProfile"),
+            peer: dialog_capability::did!("key:zTestPeer"),
             operator: dialog_capability::did!("key:zTestOperator"),
         })
     }

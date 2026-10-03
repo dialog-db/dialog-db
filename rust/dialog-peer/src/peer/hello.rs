@@ -62,3 +62,57 @@ where
         Ok(offers)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use crate::helpers::{test_repo, test_session_with_peer};
+    use dialog_capability::Subject;
+    use dialog_effects::MethodExt as _;
+    use dialog_effects::peer::prelude::*;
+
+    /// A peer acting as itself is its own operator; a session of it
+    /// answers for the same peer with its own key.
+    #[dialog_common::test]
+    async fn it_says_who_answers_and_with_which_key() -> anyhow::Result<()> {
+        let (session, peer) = test_session_with_peer().await;
+        let ask = || Subject::from(peer.did()).reader().peers().hello();
+
+        let own = ask().perform(&peer).await?;
+        assert_eq!(own.subject, peer.did());
+        assert_eq!(own.peer, peer.did());
+        assert_eq!(own.operator, peer.did());
+
+        let through = ask().perform(&session).await?;
+        assert_eq!(through.subject, peer.did());
+        assert_eq!(through.peer, peer.did());
+        assert_eq!(through.operator, session.did());
+        assert_ne!(through.operator, through.peer);
+        Ok(())
+    }
+
+    /// The spaces a peer offers are the repositories it has recorded,
+    /// each under the name it knows it by.
+    #[dialog_common::test]
+    async fn it_offers_the_spaces_it_keeps() -> anyhow::Result<()> {
+        let (session, peer) = test_session_with_peer().await;
+        let ask = || Subject::from(peer.did()).reader().peers().spaces();
+
+        assert!(ask().perform(&peer).await?.is_empty());
+
+        let repository = test_repo(&session, &peer).await;
+        let offers = ask().perform(&peer).await?;
+        assert_eq!(offers.len(), 1);
+        assert_eq!(offers[0].subject, repository.did());
+        assert!(
+            offers[0]
+                .name
+                .as_deref()
+                .is_some_and(|name| name.starts_with("repo"))
+        );
+        assert_eq!(ask().perform(&session).await?, offers);
+        Ok(())
+    }
+}

@@ -22,8 +22,8 @@ mod hydrate;
 pub use hydrate::{Hydrate, HydrationLane, HydrationRequest, HydrationScheduler};
 
 use dialog_capability::Site;
-use dialog_iroh_remote::channel::{Channel, Connect};
-use dialog_iroh_remote::site::Iroh;
+use dialog_peer_iroh::channel::{Channel, Connect};
+use dialog_peer_iroh::site::Iroh;
 use dialog_remote_fs::Fs;
 use dialog_remote_s3::S3;
 use dialog_remote_ucan::UcanSite;
@@ -53,7 +53,7 @@ impl Network {
     /// configured; a peer is dialed, so the [`Iroh`] variant of this
     /// table can only answer once something has been given a way to
     /// dial. Until then it refuses by name — see
-    /// [`Unconfigured`](dialog_iroh_remote::channel::Unconfigured).
+    /// [`Unconfigured`](dialog_peer_iroh::channel::Unconfigured).
     pub fn with_iroh(mut self, channel: impl Channel + 'static) -> Self {
         self.iroh = Iroh::new(channel);
         self
@@ -98,12 +98,12 @@ mod tests {
     use dialog_effects::archive;
     use dialog_effects::prelude::*;
     use dialog_effects::storage::Location;
-    use dialog_iroh_remote::channel::{Channel, ChannelError};
-    use dialog_iroh_remote::helpers::Volatile;
-    use dialog_iroh_remote::serve::Responder;
-    use dialog_iroh_remote::site::IrohAddress;
-    use dialog_iroh_remote::wire::encode;
-    use dialog_operator::helpers::test_operator_with_profile;
+    use dialog_peer::helpers::test_session_with_peer;
+    use dialog_peer_iroh::channel::{Channel, ChannelError};
+    use dialog_peer_iroh::helpers::Volatile;
+    use dialog_peer_iroh::serve::Responder;
+    use dialog_peer_iroh::site::IrohAddress;
+    use dialog_peer_iroh::wire::encode;
     use dialog_remote_fs::FsAddress;
     use dialog_remote_s3::Address as S3Address;
     use dialog_remote_ucan::UcanAddress;
@@ -191,7 +191,7 @@ mod tests {
     /// this — each site's own tests only ever see their own variant.
     #[dialog_common::test]
     async fn an_iroh_address_dispatches_to_the_peer() {
-        let (operator, profile) = test_operator_with_profile().await;
+        let (session, host) = test_session_with_peer().await;
         let responder = Arc::new(Responder::new(
             Volatile::default(),
             CachingResolver::new(WebResolver::new()),
@@ -199,7 +199,7 @@ mod tests {
         let network = Network::default().with_iroh(Loopback(responder.clone()));
 
         let bytes = b"routed by address alone".to_vec();
-        let put = Subject::from(profile.did())
+        let put = Subject::from(host.did())
             .writer()
             .archive()
             .catalog("blocks")
@@ -207,7 +207,7 @@ mod tests {
 
         let fork: NetworkFork<archive::Put> =
             Fork::<Network, _>::new(put, NetworkAddress::Iroh(iroh_address())).into();
-        let invocation = fork.authorize(&operator).await.expect("authorized");
+        let invocation = fork.authorize(&session).await.expect("authorized");
         let outcome: Result<(), archive::ArchiveError> =
             Provider::execute(&network, invocation).await;
 
@@ -226,8 +226,8 @@ mod tests {
     /// reporting the peer down, which are different bugs.
     #[dialog_common::test]
     async fn an_unconfigured_table_says_so() {
-        let (operator, profile) = test_operator_with_profile().await;
-        let put = Subject::from(profile.did())
+        let (session, host) = test_session_with_peer().await;
+        let put = Subject::from(host.did())
             .writer()
             .archive()
             .catalog("blocks")
@@ -235,7 +235,7 @@ mod tests {
 
         let fork: NetworkFork<archive::Put> =
             Fork::<Network, _>::new(put, NetworkAddress::Iroh(iroh_address())).into();
-        let invocation = fork.authorize(&operator).await.expect("authorized");
+        let invocation = fork.authorize(&session).await.expect("authorized");
         let outcome: Result<(), archive::ArchiveError> =
             Provider::execute(&Network::default(), invocation).await;
 

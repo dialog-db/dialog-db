@@ -1,4 +1,4 @@
-//! The [`Iroh`] site: a dialog remote that is another dialog process.
+//! The [`Iroh`] site: a peer that is another dialog process.
 //!
 //! Mirrors [`UcanSite`] in shape — mint a signed invocation, send it,
 //! read the answer — and differs in what is at the far end. A UCAN site
@@ -39,7 +39,7 @@ use crate::channel::{Channel, ChannelError, Connect, Ready, Unconfigured};
 /// exist at construction: it rides a carrier a page opens later, and the
 /// worker's environment is built at startup. A site that insisted on the
 /// channel up front could only be given [`Unconfigured`], and would
-/// refuse every remote for the life of the process no matter what
+/// refuse every peer for the life of the process no matter what
 /// arrived afterwards.
 ///
 /// Built once and shared, the way `dialog-remote-s3` shares one
