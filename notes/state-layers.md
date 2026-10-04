@@ -779,6 +779,18 @@ and not accidents:
   whatever layer the facts referencing the asset route to. Only a tree
   can store an asset (an ephemeral layer refuses one), and the bottom
   is the tree every layer of the stack reads.
+- **A placement held in a layer's session store is this process's own
+  declaration.** `Placements::resolve` reads `dialog.attribute/scope`
+  and `dialog.attribute/transient` facts from the bottom layer's
+  session store as well as its tree. A writer that knows where its
+  facts belong (tonk's reactor placing session concepts on
+  `memory:state`) asserts the placement into `branch.overlay()`: it
+  routes commits through the branch and through any stack whose
+  bottom the branch is, it outranks the committed declaration and
+  yields to one the batch itself carries, and the tree never holds
+  it, so no peer learns of it and no commit touches a tree chain for
+  it. Pinned by `it_routes_by_a_placement_held_in_the_session_store`
+  and `it_routes_by_a_placement_held_in_the_bottoms_session_store`.
 - **`Target` is not a root export.** `placement::Target` (`Tree` |
   `Session`) stays under its module, since main's `upstream::Target`
   already holds the root name.
