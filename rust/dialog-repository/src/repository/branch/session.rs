@@ -369,6 +369,10 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// selector is a range read (see [`Staged`]) and shared, never
     /// copied, per query.
     layers: Vec<Staged>,
+    /// The layers as reads see them: each layer holding a succession is
+    /// settled against the lines on the first read, so a transaction
+    /// reads what its commit will leave. Shared by clones.
+    settled: Arc<OnceCell<Vec<Staged>>>,
     /// The lines' format and the tombstones keyed under it, resolved on
     /// the first read (it needs the lines' tree roots) and shared by clones.
     format: Arc<OnceCell<Format>>,
@@ -460,6 +464,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
             sources,
             changes,
             layers: Vec::new(),
+            settled: Arc::new(OnceCell::new()),
             format: Arc::new(OnceCell::new()),
             demand: None,
             reads: Arc::new(Mutex::new(Vec::new())),
@@ -474,6 +479,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
     /// so reading them costs a range read however many there are.
     pub(crate) fn with_layers(mut self, layers: Vec<Staged>) -> Self {
         self.layers = layers;
+        self.settled = Arc::new(OnceCell::new());
         self
     }
 
@@ -527,19 +533,53 @@ impl<'a, Env> QueryEnv<'a, Env> {
 
 impl<Env> QueryEnv<'_, Env>
 where
-    Env: Provider<Get>
+    Env: Provider<BlobRead>
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
+        + Provider<Preload>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
 {
+    /// The layers as a read sees them. A layer holding a succession is
+    /// settled against the lines once, the way the commit settles it
+    /// (see [`succession`](super::transaction)), so the claim a write
+    /// succeeds is gone from the transaction's own view.
+    async fn layers(&self) -> Result<&Vec<Staged>, DialogArtifactsError> {
+        self.settled
+            .get_or_try_init(|| async {
+                if !self.layers.iter().any(Staged::has_successions) {
+                    return Ok(self.layers.clone());
+                }
+                let mut settled = Vec::with_capacity(self.layers.len());
+                for layer in &self.layers {
+                    if !layer.has_successions() {
+                        settled.push(layer.clone());
+                        continue;
+                    }
+                    let changes = Box::pin(super::transaction::settle(
+                        self.sources.clone(),
+                        self.changes.clone(),
+                        layer,
+                        self.env,
+                    ))
+                    .await
+                    .map_err(|error| DialogArtifactsError::Storage(error.to_string()))?;
+                    settled.push(Staged::from(changes));
+                }
+                Ok(settled)
+            })
+            .await
+    }
+
     /// The lines' formats and the tombstones keyed under them, resolved
     /// from the lines' tree roots on first use (see [`Format`]).
     async fn format(&self) -> Result<&Format, DialogArtifactsError> {
         self.format
             .get_or_try_init(|| async {
+                let layers = self.layers().await?;
                 let mut lines = Vec::with_capacity(self.sources.len());
                 for source in &self.sources {
                     lines.push(line_manifest(source.as_ref(), self.env).await?);
@@ -567,13 +607,13 @@ where
                         // nothing per query however much the layers or the
                         // session hold.
                         let mut staged = Hidden::default().facts(changes);
-                        for layer in &self.layers {
+                        for layer in layers {
                             staged = staged.facts(layer.tombstones(&line));
                         }
                         let mut tombstones = staged
                             .clone()
                             .facts(source.as_ref().overlay().tombstones(&line));
-                        for layer in &self.layers {
+                        for layer in layers {
                             tombstones = tombstones.cells(layer.cells());
                         }
                         LineFormat {
@@ -599,6 +639,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
             sources: self.sources.clone(),
             changes: self.changes.clone(),
             layers: self.layers.clone(),
+            settled: self.settled.clone(),
             format: self.format.clone(),
             demand: self.demand.clone(),
             reads: self.reads.clone(),
@@ -667,6 +708,7 @@ where
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
+        + Provider<Preload>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -736,7 +778,7 @@ where
         // elects it over the line's rows, as a read after the commit
         // will.
         let pending = self.pending_edition();
-        for layer in &self.layers {
+        for layer in self.layers().await? {
             let rows = layer.select_sequenced(&input, &manifest);
             if !rows.is_empty() {
                 streams.push(Box::pin(stream::iter(rows.into_iter().map(

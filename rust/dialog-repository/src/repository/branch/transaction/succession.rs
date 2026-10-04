@@ -1,24 +1,29 @@
-//! Succession of a claim under a choosing policy, settled at commit.
+//! Succession of a claim under a choosing policy, settled at commit and
+//! in a transaction's own reads.
 //!
 //! A write through an attribute read under `last`, `max`, `min` or
 //! `top` succeeds the claim the attribute stands for: the candidate a
-//! read under the policy returns over what the write observed. What a
-//! write observes is the line and the writes before it in its own
-//! transaction, in order; an inductive rule's head observes the round
-//! view it fired on. Which candidate that is depends on the line and
-//! on the rules deriving the relation, so the statement records a
-//! [`Succession`] and the commit settles it here, cell by cell: the
-//! cell's writes are replayed in order over the claims the line holds,
-//! each succession electing among the live claims and the derived
-//! candidates and retracting the claim it elects when that claim is a
-//! stored one. A derived candidate is not a claim: when the read elects
+//! read under the policy would return, over what the write observed.
+//! That is a transactional guarantee: a write observes the line and
+//! the writes before it in its own transaction, in order, and succeeds
+//! whatever a reader at that point would have observed. A write under
+//! `all` asserts and succeeds nothing. An inductive rule's head
+//! observes the round view it fired on.
+//!
+//! What a read returns depends on the line and on the rules deriving
+//! the relation, so the statement records a [`Succession`] and the
+//! settlement runs here, over the transaction's ordered log: each write
+//! is replayed in order over the claims the line holds for its cell;
+//! a succession elects among the live claims and the candidates rules
+//! derive at that point, retracts the stored claim it elects, and adds
+//! its value. A derived candidate is not a claim: when the read elects
 //! a derived value nothing is retracted, and the write stands beside it
 //! as one more candidate. Writing a value the cell already holds writes
-//! nothing. A write under `all` appends and succeeds nothing.
+//! nothing. The same settlement runs for a transaction's own reads, so
+//! a read over the transaction sees what the commit will leave.
 
-use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
-use crate::repository::source::SourceRef;
+use crate::repository::source::Source;
 use crate::{CommitError, RemoteSite, Staged};
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::{
@@ -28,67 +33,92 @@ use dialog_artifacts::{
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
-use dialog_effects::authority::Identify;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::attribute::{AttributeDescriptor, Relation, The};
 use dialog_query::concept::query::Election;
 use dialog_query::query::Output as _;
+use dialog_query::source::SelectRules;
 use dialog_query::types::Any;
 use dialog_query::{
     Binding, Cardinality, Claim, ConceptDescriptor, ConceptFieldDescriptor, ConceptQuery, Match,
     Parameters, Standing, Term,
 };
 use futures_util::TryStreamExt;
+use std::collections::HashMap;
 use std::fmt::Display;
+use std::sync::Arc;
 
-/// Settle every succession `changes` holds against `source`: each cell
-/// with one is replayed over the claims the line holds, with the
-/// derived candidates read through the whole batch, and its changes are
-/// put back settled: the retraction of each claim succeeded and the
-/// assertion of each value written.
-pub(crate) async fn resolve<Env>(
-    source: SourceRef<'_>,
-    changes: &mut Changes,
+/// Settle a transaction's writes against `sources`, read with `overlay`:
+/// the batch a commit applies, every succession replaced by the
+/// retraction of the claim it succeeds, if any, and the assertion of
+/// its value. Each write is settled over the line and the writes before
+/// it, in the order the transaction made them.
+pub(crate) async fn settle<Env>(
+    sources: Vec<Source>,
+    overlay: Arc<Changes>,
+    staged: &Staged,
     env: &Env,
-) -> Result<(), CommitError>
+) -> Result<Changes, CommitError>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
-        + Provider<Identify>
         + Provider<crate::Hydrate>
         + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
 {
-    let cells = changes.cells_with_successions();
-    if cells.is_empty() {
-        return Ok(());
+    let mut settled = staged.assets().clone();
+    if !staged.has_successions() {
+        for (the, of, change) in staged.log() {
+            settled.put_cell(the.clone(), of.clone(), vec![change.clone()]);
+        }
+        return Ok(settled);
     }
-    let operator = Identify.perform(env).await?;
-    // What a write observed of the line: its claims, none of the
-    // transaction's own, which the cell's own change list replays.
-    let line = QueryEnv::new(
-        vec![source.to_source()],
-        QueryLayer::from(source).overlay(&operator),
-        env,
-    );
-    // What rules derive, read through the whole batch.
-    let batch = QueryEnv::new(
-        vec![source.to_source()],
-        QueryLayer::from(source).overlay(&operator),
-        env,
-    )
-    .with_layers(vec![Staged::from(changes.clone())]);
+
+    // What every write observed of the line: its claims, read once per
+    // cell a succession writes.
+    let line = QueryEnv::new(sources.clone(), overlay.clone(), env);
     let edition = line.pending_edition();
-    for (the, of) in cells {
-        Box::pin(settle_cell(&line, &batch, edition, changes, the, of)).await?;
+    let mut cells: HashMap<(Attribute, Entity), Cell> = HashMap::new();
+    // The writes settled so far, as the view a later write reads the
+    // derived candidates through.
+    let mut prefix = Staged::default();
+
+    for (sequence, (the, of, change)) in staged.log().iter().enumerate() {
+        let key = (the.clone(), of.clone());
+        if !cells.contains_key(&key) {
+            let observed = if matches!(change, Change::Succeed(..))
+                || staged.log()[sequence..]
+                    .iter()
+                    .any(|(t, o, c)| t == the && o == of && matches!(c, Change::Succeed(..)))
+            {
+                claims_of(&line, the, of).await?
+            } else {
+                Vec::new()
+            };
+            cells.insert(key.clone(), Cell { live: observed });
+        }
+        let cell = cells.get_mut(&key).expect("cell loaded above");
+        let derived = match change {
+            Change::Succeed(..) => {
+                let view = QueryEnv::new(sources.clone(), overlay.clone(), env)
+                    .with_layers(vec![prefix.clone()]);
+                let candidates = derived_candidates(&view, the, of).await?;
+                drop(view);
+                candidates
+            }
+            _ => Vec::new(),
+        };
+        for written in cell.write(change, sequence, &derived, edition, the, of)? {
+            prefix.apply_change(the, of, &written);
+            settled.put_cell(the.clone(), of.clone(), vec![written]);
+        }
     }
-    Ok(())
+    Ok(settled)
 }
 
 /// Settle every succession `head` holds against `view`, the round view
@@ -106,7 +136,6 @@ where
         + Provider<Resolve>
         + Provider<crate::Hydrate>
         + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
@@ -117,31 +146,34 @@ where
     }
     let edition = view.pending_edition();
     for (the, of) in cells {
-        Box::pin(settle_cell(view, view, edition, head, the, of)).await?;
+        let list = head.take_cell(&the, &of);
+        let mut cell = Cell {
+            live: claims_of(view, &the, &of).await?,
+        };
+        let derived = derived_candidates(view, &the, &of).await?;
+        let mut settled = Vec::with_capacity(list.len());
+        for (sequence, change) in list.iter().enumerate() {
+            settled.extend(cell.write(change, sequence, &derived, edition, &the, &of)?);
+        }
+        head.put_cell(the, of, settled);
     }
     Ok(())
 }
 
 /// A claim or candidate a succession may elect: its value and its
-/// standing, and whether it is a stored claim the write can succeed.
+/// standing, and whether it is a stored claim a write can succeed.
 struct Candidate {
     value: Value,
     standing: Option<Standing>,
     claim: bool,
 }
 
-/// Settle one cell: its changes, taken from `changes`, are replayed
-/// over the claims `observed` holds for it, each succession electing
-/// among the live claims and the candidates `derived` yields, and put
-/// back settled.
-async fn settle_cell<Env>(
-    observed: &QueryEnv<'_, Env>,
-    derived: &QueryEnv<'_, Env>,
-    edition: Edition,
-    changes: &mut Changes,
-    the: Attribute,
-    of: Entity,
-) -> Result<(), CommitError>
+/// The claims a cell holds as `view` reads them.
+async fn claims_of<Env>(
+    view: &QueryEnv<'_, Env>,
+    the: &Attribute,
+    of: &Entity,
+) -> Result<Vec<Candidate>, CommitError>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
@@ -149,26 +181,22 @@ where
         + Provider<Resolve>
         + Provider<crate::Hydrate>
         + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
         + ConditionalSync
         + 'static,
 {
     let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
-    let list = changes.take_cell(&the, &of);
-
-    // The claims the cell holds, as observed.
     let selector = ArtifactSelector::new().the(the.clone()).of(of.clone());
-    let rows = Provider::<Select<'_>>::execute(observed, selector)
+    let rows = Provider::<Select<'_>>::execute(view, selector)
         .await
         .map_err(|error| failed(&error))?
         .try_collect::<Vec<_>>()
         .await
         .map_err(|error| failed(&error))?;
-    let mut live: Vec<Candidate> = Vec::new();
+    let mut claims = Vec::with_capacity(rows.len());
     for row in rows {
         let artifact = row.to_owned().map_err(|error| failed(&error))?;
-        live.push(Candidate {
+        claims.push(Candidate {
             standing: Some(Standing {
                 version: row.standing(),
                 cause: Claim::from(artifact.clone()).cause().clone(),
@@ -177,110 +205,130 @@ where
             claim: true,
         });
     }
-
-    // Every candidate a read of the relation sees for the entity: a
-    // derived one is what the read offers beyond the claims.
-    let mut candidates: Vec<Candidate> = Vec::new();
-    {
-        let attribute = AttributeDescriptor::over(
-            Relation::Attribute(The::from(the.clone())),
-            "",
-            Cardinality::Many,
-            None,
-        );
-        let predicate =
-            ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(attribute));
-        let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Term::<Any>::constant(of.clone()));
-        terms.insert(
-            ConceptDescriptor::VALUE.to_string(),
-            Term::<Any>::var(ConceptDescriptor::VALUE),
-        );
-        let rows: Vec<Match> = Box::pin(
-            ConceptQuery { terms, predicate }
-                .evaluate(Match::new().seed(), derived)
-                .try_vec(),
-        )
-        .await
-        .map_err(|error| failed(&error))?;
-        for row in rows {
-            if let Some(Binding::Present(value)) = row.get(ConceptDescriptor::VALUE) {
-                let standing = row
-                    .standing_of(ConceptDescriptor::VALUE)
-                    .or_else(|| row.standing());
-                candidates.push(Candidate {
-                    value: value.clone(),
-                    standing,
-                    claim: false,
-                });
-            }
-        }
-    }
-
-    let settled = settle(live, candidates, list, &the, &of, edition)?;
-    changes.put_cell(the, of, settled);
-    Ok(())
+    Ok(claims)
 }
 
-/// Replay one cell's writes over the claims it holds. A plain assertion
-/// adds a claim, standing at the commit's edition and its place in the
-/// list; a retraction removes one; a replace keeps its value alone; a
-/// succession elects among the live claims and the derived candidates
-/// that are not claims, retracts the elected claim when it is one and
-/// adds its value, or adds nothing when the cell holds the value
-/// already. The settled list is the original with each succession
-/// replaced by what it resolved to.
-fn settle(
-    mut live: Vec<Candidate>,
-    derived: Vec<Candidate>,
-    list: Vec<Change>,
+/// Every candidate a read of the relation sees for the entity through
+/// `view`, when some rule derives the relation; nothing otherwise, as
+/// the claims are then all there is. A derived one is what the read
+/// offers beyond the claims.
+async fn derived_candidates<Env>(
+    view: &QueryEnv<'_, Env>,
     the: &Attribute,
     of: &Entity,
-    edition: Edition,
-) -> Result<Vec<Change>, CommitError> {
-    let staged = |value: &Value, sequence: usize| Standing {
-        version: Some((edition, pending_version(sequence as u64))),
-        cause: Cause::from(&Artifact {
-            the: the.clone(),
-            of: of.clone(),
-            is: value.clone(),
-            cause: None,
-        }),
-    };
-    let mut settled = Vec::with_capacity(list.len());
-    for (sequence, change) in list.into_iter().enumerate() {
-        match change {
+) -> Result<Vec<Candidate>, CommitError>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
+    let attribute = AttributeDescriptor::over(
+        Relation::Attribute(The::from(the.clone())),
+        "",
+        Cardinality::Many,
+        None,
+    );
+    let predicate = ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(attribute));
+    let rules = Provider::<SelectRules>::execute(view, predicate.clone())
+        .await
+        .map_err(|error| failed(&error))?;
+    if rules.installed().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut terms = Parameters::new();
+    terms.insert("this".to_string(), Term::<Any>::constant(of.clone()));
+    terms.insert(
+        ConceptDescriptor::VALUE.to_string(),
+        Term::<Any>::var(ConceptDescriptor::VALUE),
+    );
+    let rows: Vec<Match> = Box::pin(
+        ConceptQuery { terms, predicate }
+            .evaluate(Match::new().seed(), view)
+            .try_vec(),
+    )
+    .await
+    .map_err(|error| failed(&error))?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| match row.get(ConceptDescriptor::VALUE) {
+            Some(Binding::Present(value)) => Some(Candidate {
+                value: value.clone(),
+                standing: row
+                    .standing_of(ConceptDescriptor::VALUE)
+                    .or_else(|| row.standing()),
+                claim: false,
+            }),
+            _ => None,
+        })
+        .collect())
+}
+
+/// One cell's live claims as the writes replayed so far leave them.
+struct Cell {
+    live: Vec<Candidate>,
+}
+
+impl Cell {
+    /// Replay one write: a plain assertion adds a claim, standing at
+    /// the commit's edition and its place among the writes; a
+    /// retraction removes one; a replace keeps its value alone; a
+    /// succession elects among the live claims and the derived
+    /// candidates that are not claims, retracts the elected claim when
+    /// it is one and adds its value, or adds nothing when the cell holds
+    /// the value already. Returns what the write settles to.
+    fn write(
+        &mut self,
+        change: &Change,
+        sequence: usize,
+        derived: &[Candidate],
+        edition: Edition,
+        the: &Attribute,
+        of: &Entity,
+    ) -> Result<Vec<Change>, CommitError> {
+        let staged = |value: &Value| Candidate {
+            standing: Some(Standing {
+                version: Some((edition, pending_version(sequence as u64))),
+                cause: Cause::from(&Artifact {
+                    the: the.clone(),
+                    of: of.clone(),
+                    is: value.clone(),
+                    cause: None,
+                }),
+            }),
+            value: value.clone(),
+            claim: true,
+        };
+        Ok(match change {
             Change::Assert(value) => {
-                live.retain(|claim| claim.value != value);
-                live.push(Candidate {
-                    standing: Some(staged(&value, sequence)),
-                    value: value.clone(),
-                    claim: true,
-                });
-                settled.push(Change::Assert(value));
+                self.live.retain(|claim| claim.value != *value);
+                self.live.push(staged(value));
+                vec![change.clone()]
             }
             Change::Replace(value) => {
-                live.clear();
-                live.push(Candidate {
-                    standing: Some(staged(&value, sequence)),
-                    value: value.clone(),
-                    claim: true,
-                });
-                settled.push(Change::Replace(value));
+                self.live.clear();
+                self.live.push(staged(value));
+                vec![change.clone()]
             }
             Change::Retract(value) => {
-                live.retain(|claim| claim.value != value);
-                settled.push(Change::Retract(value));
+                self.live.retain(|claim| claim.value != *value);
+                vec![change.clone()]
             }
             Change::Succeed(value, succession) => {
-                if live.iter().any(|claim| claim.value == value) {
-                    continue;
+                if self.live.iter().any(|claim| claim.value == *value) {
+                    return Ok(Vec::new());
                 }
-                let election = Election::from(&succession);
-                let pool: Vec<(Value, Option<Standing>, (Value, bool))> = live
+                let pool: Vec<(Value, Option<Standing>, (Value, bool))> = self
+                    .live
                     .iter()
                     .chain(derived.iter().filter(|candidate| {
-                        !live.iter().any(|claim| claim.value == candidate.value)
+                        !self.live.iter().any(|claim| claim.value == candidate.value)
                     }))
                     .map(|candidate| {
                         (
@@ -290,23 +338,20 @@ fn settle(
                         )
                     })
                     .collect();
-                let elected = election
+                let elected = Election::from(succession)
                     .elect_claims(pool)
                     .map_err(|error| CommitError::Succession(error.to_string()))?;
+                let mut settled = Vec::with_capacity(2);
                 if let Some((elected, true)) = elected {
-                    live.retain(|claim| claim.value != elected);
+                    self.live.retain(|claim| claim.value != elected);
                     settled.push(Change::Retract(elected));
                 }
-                live.push(Candidate {
-                    standing: Some(staged(&value, sequence)),
-                    value: value.clone(),
-                    claim: true,
-                });
-                settled.push(Change::Assert(value));
+                self.live.push(staged(value));
+                settled.push(Change::Assert(value.clone()));
+                settled
             }
-        }
+        })
     }
-    Ok(settled)
 }
 
 #[cfg(test)]
@@ -671,6 +716,52 @@ mod tests {
             vec![150, 200, 300],
             "the staged claim the policy elected is gone, the others stand"
         );
+        Ok(())
+    }
+
+    /// A transaction reads what its commit will leave: a `max` write
+    /// below the committed claim succeeds it, and a read over the
+    /// transaction already returns the write alone.
+    #[dialog_common::test]
+    async fn it_reads_a_write_as_the_commit_will_settle_it() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(salary(&alice, 200))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let transaction = branch.transaction().assert(salary(&alice, 150));
+        let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": "all" }
+        }}))?;
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));
+        terms.insert("salary".to_string(), Term::<Any>::var("salary"));
+        let rows: Vec<ConceptConclusion> = transaction
+            .query()
+            .select(ConceptQuery { predicate, terms })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let mut claims: Vec<u64> = rows
+            .iter()
+            .map(|row| row.get::<u64>("salary"))
+            .collect::<Result<_, _>>()?;
+        claims.sort();
+        assert_eq!(
+            claims,
+            vec![150],
+            "the claim the write succeeds is gone from the transaction's own view"
+        );
+
+        transaction.commit().publish().perform(&operator).await?;
+        assert_eq!(stored(&branch, &operator, &alice).await?, vec![150]);
         Ok(())
     }
 
