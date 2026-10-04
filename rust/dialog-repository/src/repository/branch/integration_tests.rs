@@ -4447,9 +4447,19 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
     let (alice_repo, alice) =
         setup_repo_with_s3_remote(&operator, &profile, &s3, "operational-a").await?;
 
-    // Several commits, so the history region holds many records rather
-    // than one: history grows per edit, the data regions per live fact.
-    for round in 0..6 {
+    // Many commits, so the history region spans many leaves rather than
+    // a few: history grows per edit, the data regions per live fact.
+    //
+    // The size is load-bearing. History keys lead with the writer's
+    // origin, which is derived from a keypair minted per run, so where
+    // the region's content-defined leaf boundaries fall differs every
+    // run. A region of a few hundred records lands in anywhere from one
+    // leaf to six, and in the one-leaf draw it shares both of its
+    // boundary nodes with the data regions, leaving a conservative
+    // pruner nothing to skip: the scoped download then reads exactly as
+    // many blocks as the full one. A few thousand records span enough
+    // leaves that some always lie wholly inside the region.
+    for round in 0..24 {
         let facts: Vec<_> = (0..120)
             .map(|i| {
                 Instruction::Assert(Artifact {
@@ -4526,7 +4536,7 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
         .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(
         facts.len(),
-        720,
+        24 * 120,
         "every live fact survives an operational download"
     );
     assert_eq!(
