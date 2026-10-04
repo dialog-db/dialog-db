@@ -201,25 +201,26 @@ impl Staged {
             .any(|(_, _, change)| matches!(change, Change::Succeed(..)))
     }
 
-    /// The writes as the batch a commit applies: every write in the
-    /// order the transaction made it, a succession as the succession it
-    /// was written as, for the transactor to settle. Applying it to a
-    /// line leaves what this store reads as over it.
+    /// The writes as the batch a commit applies: each cell's writes in
+    /// the order the transaction made them, squashed as one commit's
+    /// are ([`squash`]), a succession as the succession it was written
+    /// as, for the transactor to settle. Applying it to a line leaves
+    /// what this store reads as over it.
     pub(crate) fn export(&self) -> Changes {
         let mut changes = self.0.assets.clone();
+        let mut cells: Vec<(Attribute, Entity)> = Vec::new();
+        let mut writes: HashMap<(Attribute, Entity), Vec<Change>> = HashMap::new();
         for (the, of, change) in &self.0.log {
-            match change {
-                Change::Assert(value) => changes.associate(the.clone(), of.clone(), value.clone()),
-                Change::Replace(value) => {
-                    changes.associate_unique(the.clone(), of.clone(), value.clone())
-                }
-                Change::Succeed(value, succession) => {
-                    changes.succeed(the.clone(), of.clone(), value.clone(), succession.clone())
-                }
-                Change::Retract(value) => {
-                    changes.dissociate(the.clone(), of.clone(), value.clone())
-                }
+            let key = (the.clone(), of.clone());
+            if !writes.contains_key(&key) {
+                cells.push(key.clone());
             }
+            writes.entry(key).or_default().push(change.clone());
+        }
+        for key in cells {
+            let cell = writes.remove(&key).unwrap_or_default();
+            let (the, of) = key;
+            changes.put_cell(the, of, squash(cell, &|_| true));
         }
         changes
     }
@@ -276,6 +277,45 @@ impl Staged {
     }
 }
 
+/// One cell's writes squashed as the writes of one commit are: a
+/// transaction is a commit that has not been flushed. An assertion a
+/// later retraction of the same value cancels is dropped; the
+/// retraction stays when `held` says the line holds the value, and is
+/// dropped too when it does not, as the value then never reached the
+/// line. A write repeating the cell's standing change for its value is
+/// dropped. A retraction followed by an assertion of the same value
+/// keeps both: the commit retracts the line's claim and asserts afresh.
+/// A replace resets the cell, as it does at commit, and a succession is
+/// kept as written for the transactor to settle.
+pub(crate) fn squash(cell: Vec<Change>, held: &dyn Fn(&Value) -> bool) -> Vec<Change> {
+    let mut out: Vec<Change> = Vec::with_capacity(cell.len());
+    for change in cell {
+        let last = out
+            .iter()
+            .rposition(|prior| prior.value() == change.value());
+        match (&change, last.map(|at| &out[at])) {
+            (Change::Replace(_), _) => {
+                out.clear();
+                out.push(change);
+            }
+            (Change::Assert(_), Some(Change::Assert(_)))
+            | (Change::Retract(_), Some(Change::Retract(_))) => {}
+            (Change::Retract(value), Some(Change::Assert(_))) => {
+                out.remove(last.expect("a prior write"));
+                let before = out
+                    .iter()
+                    .rposition(|prior| prior.value() == change.value());
+                let retracted = matches!(before.map(|at| &out[at]), Some(Change::Retract(_)));
+                if !retracted && held(value) {
+                    out.push(change);
+                }
+            }
+            _ => out.push(change),
+        }
+    }
+    out
+}
+
 impl From<Changes> for Staged {
     fn from(changes: Changes) -> Self {
         let mut staged = Staged::default();
@@ -290,7 +330,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use dialog_artifacts::{Asset, Change, Value};
+    use dialog_artifacts::{Asset, Change, Succession, Value};
 
     fn fact(of: &str, the: &str, is: &str) -> Artifact {
         Artifact {
@@ -348,6 +388,76 @@ mod tests {
                 "id:a person/name".into(),
                 Change::Retract(Value::String("A".into()))
             )]
+        );
+    }
+
+    #[dialog_common::test]
+    fn it_squashes_a_cell_as_one_commit() {
+        let a = || Value::String("A".into());
+        let b = || Value::String("B".into());
+        let unknown = |_: &Value| true;
+        // A later retraction cancels the assertion; the retraction stays
+        // for the line's claim, unless the line is known not to hold it.
+        assert_eq!(
+            squash(vec![Change::Assert(a()), Change::Retract(a())], &unknown),
+            vec![Change::Retract(a())]
+        );
+        assert_eq!(
+            squash(vec![Change::Assert(a()), Change::Retract(a())], &|_| false),
+            Vec::<Change>::new()
+        );
+        // Retract then assert keeps both: the commit retracts the
+        // line's claim and asserts afresh.
+        assert_eq!(
+            squash(vec![Change::Retract(a()), Change::Assert(a())], &unknown),
+            vec![Change::Retract(a()), Change::Assert(a())]
+        );
+        // Retract, assert, retract: the second retraction cancels the
+        // assertion and repeats the first.
+        assert_eq!(
+            squash(
+                vec![
+                    Change::Retract(a()),
+                    Change::Assert(a()),
+                    Change::Retract(a())
+                ],
+                &unknown
+            ),
+            vec![Change::Retract(a())]
+        );
+        // Repeating a write is dropped; other values are untouched.
+        assert_eq!(
+            squash(
+                vec![
+                    Change::Assert(a()),
+                    Change::Assert(b()),
+                    Change::Assert(a()),
+                    Change::Retract(b()),
+                    Change::Retract(b())
+                ],
+                &unknown
+            ),
+            vec![Change::Assert(a()), Change::Retract(b())]
+        );
+        // A replace resets the cell.
+        assert_eq!(
+            squash(
+                vec![
+                    Change::Assert(a()),
+                    Change::Replace(b()),
+                    Change::Retract(b())
+                ],
+                &unknown
+            ),
+            vec![Change::Replace(b()), Change::Retract(b())]
+        );
+        // A succession is kept for the transactor, retraction or not.
+        assert_eq!(
+            squash(
+                vec![Change::Succeed(a(), Succession::Last), Change::Retract(a())],
+                &unknown
+            ),
+            vec![Change::Succeed(a(), Succession::Last), Change::Retract(a())]
         );
     }
 

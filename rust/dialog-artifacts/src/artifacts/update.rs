@@ -31,11 +31,22 @@ pub enum Change {
     Retract(Value),
     /// Assert a value and retract the one live claim of the cell the
     /// succession elects: the claim a read under the attribute's policy
-    /// returns. The election reads the line, so it is resolved by the
-    /// transactor before the batch commits (see
-    /// [`Changes::take_successions`]); an unresolved succession commits
-    /// as a plain assertion.
+    /// returns. The election reads the line, so the transactor settles
+    /// it before the batch commits; [`Changes::into_stream`] refuses a
+    /// batch still holding one.
     Succeed(Value, Succession),
+}
+
+impl Change {
+    /// The value the change writes or retracts.
+    pub fn value(&self) -> &Value {
+        match self {
+            Change::Assert(value)
+            | Change::Replace(value)
+            | Change::Retract(value)
+            | Change::Succeed(value, _) => value,
+        }
+    }
 }
 
 /// How a write under a choosing policy elects the claim it succeeds:

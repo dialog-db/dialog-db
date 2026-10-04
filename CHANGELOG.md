@@ -59,6 +59,10 @@ What this changes for you:
 - A transaction reads what its commit will leave. Its own reads settle
   its writes the same way the commit does, on the first read, so the
   claim a write succeeds is already gone from `transaction.query()`.
+  Two `last` writes of one cell in one transaction leave the later one
+  alone, never both and never a hash-decided one, and a staged claim a
+  later write retires or retracts leaves no tombstone: it never
+  reached the line.
   A staged write stands at the edition the commit will mint, equal to
   every other write of the transaction, as the claims of one commit
   are; what order the transaction wrote them in is settlement's

@@ -196,10 +196,13 @@ point in the transaction would have observed, and `all` is the one
 policy that asserts without succeeding anything. The transaction's
 own reads settle its writes the same way on the first read, so what
 a transaction reads is what its commit will leave: a transaction is a
-commit not yet flushed, and every write on top squashes into it. A
-staged write stands at the edition the commit will mint, equal to
-every other write of the transaction as one commit's claims are;
-their order matters to settlement and to nothing else. A candidate a rule derives is not a claim:
+commit not yet flushed, and every write on top squashes into it: two
+`last` writes of one cell leave the later one alone, and a claim a
+later retraction cancels leaves no tombstone, since it never reached
+the line. A staged write stands at the edition the commit will mint,
+equal to every other write of the transaction as one commit's claims
+are; their order matters to settlement and to nothing else. A
+candidate a rule derives is not a claim:
 when the read elects a derived value nothing is retracted, and the
 write stands beside it as one more candidate. Two writers succeeding
 the same claim concurrently each retract it and assert their own; the
