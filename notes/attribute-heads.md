@@ -195,9 +195,11 @@ is transactional: an assertion succeeds whatever a reader at that
 point in the transaction would have observed, and `all` is the one
 policy that asserts without succeeding anything. The transaction's
 own reads settle its writes the same way on the first read, so what
-a transaction reads is what its commit will leave; a staged write
-stands at the edition the commit will mint, ordered by its place
-among the transaction's writes. A candidate a rule derives is not a claim:
+a transaction reads is what its commit will leave: a transaction is a
+commit not yet flushed, and every write on top squashes into it. A
+staged write stands at the edition the commit will mint, equal to
+every other write of the transaction as one commit's claims are;
+their order matters to settlement and to nothing else. A candidate a rule derives is not a claim:
 when the read elects a derived value nothing is retracted, and the
 write stands beside it as one more candidate. Two writers succeeding
 the same claim concurrently each retract it and assert their own; the

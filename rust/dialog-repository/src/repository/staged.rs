@@ -66,10 +66,6 @@ struct State {
     /// what the commit applies, so a write that succeeds a claim is
     /// settled against the line and the writes before it, in order.
     log: Vec<(Attribute, Entity, Change)>,
-    /// The sequence of each held fact's write in the transaction: a
-    /// later write stands newer than an earlier one in a read over the
-    /// transaction, where none has a committed version yet.
-    sequences: HashMap<(Attribute, Entity, Value), u64>,
 }
 
 impl State {
@@ -86,22 +82,15 @@ impl State {
             is: value.clone(),
             cause: None,
         };
-        let sequence = self.log.len() as u64;
         match change {
             Change::Assert(value) | Change::Succeed(value, _) => {
                 self.apply(Instruction::Assert(fact(value)));
-                self.sequences
-                    .insert((the.clone(), of.clone(), value.clone()), sequence);
             }
             Change::Replace(value) => {
                 self.apply(Instruction::Replace(fact(value)));
-                self.sequences
-                    .insert((the.clone(), of.clone(), value.clone()), sequence);
             }
             Change::Retract(value) => {
                 self.apply(Instruction::Retract(fact(value)));
-                self.sequences
-                    .remove(&(the.clone(), of.clone(), value.clone()));
             }
         }
         self.log.push((the.clone(), of.clone(), change.clone()));
@@ -246,28 +235,14 @@ impl Staged {
     }
 
     /// The held facts a selector matches, in the order a scan of a tree
-    /// written under `manifest` would produce them, each with the
-    /// sequence of the write that held it: what a query merges with that
-    /// tree's rows, the sequence ordering the transaction's own writes.
-    pub(crate) fn select_sequenced(
+    /// written under `manifest` would produce them: what a query merges
+    /// with that tree's rows.
+    pub(crate) fn select(
         &self,
         selector: &ArtifactSelector<Constrained>,
         manifest: &Manifest,
-    ) -> Vec<(Artifact, u64)> {
-        self.0
-            .facts
-            .select(selector, manifest)
-            .into_iter()
-            .map(|fact| {
-                let sequence = self
-                    .0
-                    .sequences
-                    .get(&(fact.the.clone(), fact.of.clone(), fact.is.clone()))
-                    .copied()
-                    .unwrap_or(0);
-                (fact, sequence)
-            })
-            .collect()
+    ) -> Vec<Artifact> {
+        self.0.facts.select(selector, manifest)
     }
 
     /// Sort keys of every fact this store hides beneath it, keyed under

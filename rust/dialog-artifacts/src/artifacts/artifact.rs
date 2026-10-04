@@ -234,15 +234,6 @@ enum Backing {
     },
 }
 
-/// The version hash a pending write stands under: its sequence in the
-/// transaction, big-endian in the leading bytes, so later writes read
-/// as newer and no committed hash is ever this small.
-pub fn pending_version(sequence: u64) -> [u8; 32] {
-    let mut version = [0; 32];
-    version[24..].copy_from_slice(&sequence.to_be_bytes());
-    version
-}
-
 impl From<Artifact> for ArtifactView {
     fn from(artifact: Artifact) -> Self {
         Self {
@@ -270,14 +261,16 @@ impl ArtifactView {
     /// A view over a write the transaction holding it will commit: it
     /// stands at `edition`, the edition that commit mints, so a read over
     /// the transaction elects it as the commit will, over every row the
-    /// line holds. The version's hash is not known yet; in its place the
-    /// write's `sequence` in the transaction orders the transaction's
-    /// own writes, a later one newer.
-    pub fn pending(artifact: Artifact, edition: Edition, sequence: u64) -> Self {
+    /// line holds. Every write of one transaction lands in one commit
+    /// and shares its version, so they stand equal here too, with the
+    /// version's hash, not known yet, read as zero; what the commit
+    /// orders among them by cause and value, a read over the
+    /// transaction orders the same way.
+    pub fn pending(artifact: Artifact, edition: Edition) -> Self {
         Self {
             backing: Backing::Owned {
                 artifact: Box::new(artifact),
-                standing: Some((edition, pending_version(sequence))),
+                standing: Some((edition, [0; 32])),
             },
         }
     }

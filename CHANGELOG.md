@@ -19,9 +19,12 @@ being written, and retracts the stored claim holding what the read
 elected, beside asserting the new value. Every other claim in the cell
 stays. A write under `all` appends, as before.
 
-The guarantee this gives is transactional: an assertion succeeds
-whatever a reader at that point in the transaction would have observed,
-with `all` the one policy that asserts without succeeding anything.
+The guarantee this gives is transactional. A transaction is a commit
+that has not been flushed: querying it returns what querying the
+committed result would, every write on top is squashed into that one
+commit, and an assertion succeeds whatever a reader at that point
+would have observed. `all` is the one policy that asserts without
+succeeding anything.
 
 What this changes for you:
 
@@ -55,9 +58,14 @@ What this changes for you:
   view it fired on.
 - A transaction reads what its commit will leave. Its own reads settle
   its writes the same way the commit does, on the first read, so the
-  claim a write succeeds is already gone from `transaction.query()`,
-  and a staged write stands at the edition the commit will mint,
-  ordered among the transaction's writes by when it was made.
+  claim a write succeeds is already gone from `transaction.query()`.
+  A staged write stands at the edition the commit will mint, equal to
+  every other write of the transaction, as the claims of one commit
+  are; what order the transaction wrote them in is settlement's
+  business alone, never a reader's.
+- One departure remains: commit-time induction runs at commit, so what
+  an inductive rule would derive from the transaction's writes is not
+  in `transaction.query()` yet. That was true before this change.
 
 Why: `Replace` encoded one policy, last-writer-wins, in the write path,
 while reads had grown four. A write is a claim that succeeds what the
