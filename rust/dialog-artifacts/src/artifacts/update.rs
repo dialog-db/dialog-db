@@ -594,6 +594,9 @@ pub fn sort_key(artifact: &Artifact, manifest: &Manifest) -> SortKey {
 /// Retracting a batch inverts its asset changes as it inverts its facts:
 /// an import becomes a discard and a discard an import.
 impl Statement for Changes {
+    /// Replay every change into `update` as it was recorded, a
+    /// succession as a succession, so a batch asserted into another
+    /// keeps what its writes meant.
     fn assert(mut self, update: &mut impl Update) {
         for change in self.take_assets() {
             match change {
@@ -601,11 +604,24 @@ impl Statement for Changes {
                 AssetChange::Discard(asset) => update.discard(asset),
             }
         }
-        for instruction in self.into_instructions() {
-            match instruction {
-                Instruction::Assert(a) => update.associate(a.the, a.of, a.is),
-                Instruction::Replace(a) => update.associate_unique(a.the, a.of, a.is),
-                Instruction::Retract(a) => update.dissociate(a.the, a.of, a.is),
+        for (entity, attributes) in self.facts {
+            for (attribute, changes) in attributes {
+                for change in changes {
+                    match change {
+                        Change::Assert(value) => {
+                            update.associate(attribute.clone(), entity.clone(), value)
+                        }
+                        Change::Replace(value) => {
+                            update.associate_unique(attribute.clone(), entity.clone(), value)
+                        }
+                        Change::Succeed(value, succession) => {
+                            update.succeed(attribute.clone(), entity.clone(), value, succession)
+                        }
+                        Change::Retract(value) => {
+                            update.dissociate(attribute.clone(), entity.clone(), value)
+                        }
+                    }
+                }
             }
         }
     }

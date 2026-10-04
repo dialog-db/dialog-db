@@ -68,6 +68,61 @@ where
         env,
     )
     .with_layers(vec![Staged::from(changes.clone())]);
+    resolve_in(&view, successions, changes).await
+}
+
+/// Resolve every succession `changes` holds against `view`, which must
+/// not hold the successions' own values: what an inductive rule's head
+/// writes resolves against the round view the rule fired on.
+pub(crate) async fn resolve_against<Env>(
+    view: &QueryEnv<'_, Env>,
+    changes: &mut Changes,
+) -> Result<(), CommitError>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    let successions = changes.take_successions();
+    if successions.is_empty() {
+        return Ok(());
+    }
+    resolve_in(view, successions, changes).await
+}
+
+/// The resolution itself: each succession becomes the retraction of
+/// the stored claim holding the value `view` elects for its cell, if
+/// one does, and the assertion of its own value, both written to
+/// `changes`.
+async fn resolve_in<Env>(
+    view: &QueryEnv<'_, Env>,
+    successions: Vec<(
+        dialog_artifacts::Attribute,
+        dialog_artifacts::Entity,
+        Value,
+        Succession,
+    )>,
+    changes: &mut Changes,
+) -> Result<(), CommitError>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
     let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
 
     for (the, of, is, succession) in successions {
@@ -95,7 +150,7 @@ where
             Term::<Any>::var(ConceptDescriptor::VALUE),
         );
         let rows: Vec<Match> = ConceptQuery { terms, predicate }
-            .evaluate(Match::new().seed(), &view)
+            .evaluate(Match::new().seed(), view)
             .try_vec()
             .await
             .map_err(|error| failed(&error))?;
@@ -115,7 +170,7 @@ where
                 .the(the.clone())
                 .of(of.clone())
                 .is(elected.clone());
-            let held = Provider::<Select<'_>>::execute(&view, selector)
+            let held = Provider::<Select<'_>>::execute(view, selector)
                 .await
                 .map_err(|error| failed(&error))?
                 .try_next()
