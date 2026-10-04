@@ -2818,7 +2818,10 @@ mod tests {
     /// graph/odd(x) = n` sees the `graph/odd` a rule derives beside the
     /// one stored, and `graph/lonely(x) := t :- graph/tag(x) = t,
     /// unless graph/odd(x)` excludes an entity whose `graph/odd` is
-    /// derived, where a stored scan would have missed it.
+    /// derived, where a stored scan would have missed it. `graph/twice`
+    /// reads `graph/even`, under which nothing is stored, so its one
+    /// rule is its covering rule, and the covering rule reads the
+    /// derived relation the same way.
     #[dialog_common::test]
     async fn it_reads_derived_candidates_through_an_attribute_premise() -> anyhow::Result<()> {
         use crate::negation::Negation;
@@ -2867,6 +2870,7 @@ mod tests {
         };
         let odd = DeductiveRule::new(relation("graph/odd"), vec![scan("graph/node", "name")])?;
         let even = DeductiveRule::new(relation("graph/even"), vec![scan("graph/odd", "name")])?;
+        let twice = DeductiveRule::new(relation("graph/twice"), vec![scan("graph/even", "name")])?;
         let lonely = DeductiveRule::new(
             relation("graph/lonely"),
             vec![
@@ -2886,17 +2890,24 @@ mod tests {
         registry.register(odd)?;
         registry.register(even)?;
         registry.register(lonely)?;
+        registry.register(twice)?;
         let source = TestEnv::new(&branch, &operator, registry);
 
         let text = |value: &str| Value::String(value.into());
+        let all = vec![
+            (Value::Entity(a.clone()), text("a")),
+            (Value::Entity(b.clone()), text("b")),
+            (Value::Entity(c.clone()), text("c")),
+        ];
         assert_eq!(
             relation_rows(&source, "graph/even").await?,
-            vec![
-                (Value::Entity(a.clone()), text("a")),
-                (Value::Entity(b.clone()), text("b")),
-                (Value::Entity(c.clone()), text("c")),
-            ],
+            all,
             "the stored and the derived odd values are both even"
+        );
+        assert_eq!(
+            relation_rows(&source, "graph/twice").await?,
+            all,
+            "the covering rule reads the derived relation too"
         );
         assert_eq!(
             relation_rows(&source, "graph/lonely").await?,

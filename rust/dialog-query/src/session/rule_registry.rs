@@ -230,7 +230,12 @@ impl RuleRegistry {
                 }
             }
         }
+        drop(index);
         let Some(rule) = source else { return Ok(None) };
+        // The covering rule is the source's body as the bundle reads it:
+        // a derived relation it names through an attribute premise is
+        // read through the attribute concept here too.
+        let rule = reading_derived(&rule, &self.derived()?)?;
         let covering = rule
             .covering(predicate)
             .map_err(|error| EvaluationError::Store(error.to_string()))?;
