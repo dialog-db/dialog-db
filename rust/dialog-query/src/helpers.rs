@@ -65,7 +65,7 @@ use std::env;
 use std::fs::read_to_string;
 use std::mem::take;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::span::Attributes;
 use tracing::{Id, Subscriber};
@@ -608,6 +608,11 @@ pub struct BenchEnv<Env> {
     operator: Env,
     repo: Repository,
     branch: String,
+    /// The rules every rule benchmark reads under, registered once:
+    /// registering a rule is install-time work (the rule compiles once
+    /// per head), not part of a query, and the repository caches the
+    /// result the same way.
+    rules: RuleRegistry,
 }
 
 impl BenchEnv<Peer<VolatileSpace, Session>> {
@@ -1635,10 +1640,15 @@ where
             .open()
             .perform(&operator)
             .await?;
+        let mut rules = RuleRegistry::new();
+        rules
+            .register(member_rule())
+            .expect("the member rule registers");
         Ok(Self {
             operator,
             repo,
             branch: "main".to_string(),
+            rules,
         })
     }
 }
@@ -2422,26 +2432,13 @@ where
         + 'static,
 {
     async fn rule_env(&self) -> Result<(Branch, RuleRegistry)> {
-        // One registry for the whole bench: registering a rule is
-        // install-time work (the rule compiles once per head), not part
-        // of a query, and the repository caches the result the same way.
-        static RULES: OnceLock<RuleRegistry> = OnceLock::new();
         let branch = self
             .repo
             .branch(&self.branch)
             .load()
             .perform(&self.operator)
             .await?;
-        let rules = RULES
-            .get_or_init(|| {
-                let mut rules = RuleRegistry::new();
-                rules
-                    .register(member_rule())
-                    .expect("the member rule registers");
-                rules
-            })
-            .clone();
-        Ok((branch, rules))
+        Ok((branch, self.rules.clone()))
     }
 
     /// [`query_stuff`](Self::query_stuff) with [`member_rule`] registered:
