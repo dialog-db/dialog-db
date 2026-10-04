@@ -3278,7 +3278,7 @@ mod tests {
     }
 
     /// `payroll/salary(dept) := salary` for every member of the
-    /// department: the relation a query folds, one candidate per
+    /// department: the relation a query elects over, one candidate per
     /// distinct salary.
     fn dept_salary_rule() -> dialog_query::DeductiveRule {
         use concepts::Staffed;
@@ -3299,13 +3299,13 @@ mod tests {
         .expect("descriptor parses")
     }
 
-    /// `payroll/salary` read under `sum`: a department's total.
-    fn dept_total() -> ConceptQuery {
+    /// `payroll/salary` read under `max`: a department's highest salary.
+    fn dept_top() -> ConceptQuery {
         concept_query(
             serde_json::json!({ "with": {
-                "total": { "the": "payroll/salary", "as": "UnsignedInteger", "select": "sum" }
+                "top": { "the": "payroll/salary", "as": "UnsignedInteger", "select": "max" }
             }}),
-            &["total"],
+            &["top"],
         )
     }
 
@@ -3322,14 +3322,14 @@ mod tests {
         ConceptQuery { predicate, terms }
     }
 
-    /// Project folded rows to comparable `(department, total)` pairs.
-    fn totals(rows: &[dialog_query::ConceptConclusion]) -> Vec<(Entity, u64)> {
+    /// Project elected rows to comparable `(department, top)` pairs.
+    fn tops(rows: &[dialog_query::ConceptConclusion]) -> Vec<(Entity, u64)> {
         let mut pairs: Vec<(Entity, u64)> = rows
             .iter()
             .map(|row| {
                 (
                     row.entity().clone(),
-                    row.get::<u64>("total").expect("a total"),
+                    row.get::<u64>("top").expect("a top salary"),
                 )
             })
             .collect();
@@ -3337,14 +3337,14 @@ mod tests {
         pairs
     }
 
-    /// Aggregation lifecycle, assertion side: a subscription folding a
-    /// derived relation re-derives per poll. Asserting a contributing
-    /// fact retracts the group's old folded row and asserts the new
-    /// one; a fact for a fresh group asserts a new row. The fold is
-    /// the subscription's read, not a rule's: the rule derives one
-    /// candidate per member, and `sum` reads them.
+    /// Election lifecycle, assertion side: a subscription electing over
+    /// a derived relation re-derives per poll. Asserting a candidate
+    /// that wins retracts the group's old elected row and asserts the
+    /// new one; a fact for a fresh group asserts a new row. The
+    /// election is the subscription's read, not a rule's: the rule
+    /// derives one candidate per member, and `max` chooses among them.
     #[dialog_common::test]
-    async fn it_updates_a_folding_subscription_on_asserts() -> anyhow::Result<()> {
+    async fn it_updates_an_electing_subscription_on_asserts() -> anyhow::Result<()> {
         use concepts::{Dept, Salary, Staffed};
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3368,32 +3368,32 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let mut subscription = branch.subscribe(dept_total());
+        let mut subscription = branch.subscribe(dept_top());
         let initial = subscription.poll(&operator).await?.expect("initial");
-        assert_eq!(totals(&initial.asserted), vec![(dept_a.clone(), 100)]);
+        assert_eq!(tops(&initial.asserted), vec![(dept_a.clone(), 100)]);
         assert!(initial.retracted.is_empty());
         assert_eq!(subscription.recomputes(), 1);
 
-        // A second contributor: the old folded row is retracted and
-        // the new one asserted in the same delta.
+        // A second, higher candidate: the old elected row is retracted
+        // and the new one asserted in the same delta.
         branch
             .transaction()
             .assert(Staffed {
                 this: bob.clone(),
                 dept: Dept(dept_a.clone()),
-                salary: Salary(50),
+                salary: Salary(150),
             })
             .commit()
             .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("covered write");
-        assert_eq!(totals(&delta.retracted), vec![(dept_a.clone(), 100)]);
-        assert_eq!(totals(&delta.asserted), vec![(dept_a.clone(), 150)]);
+        assert_eq!(tops(&delta.retracted), vec![(dept_a.clone(), 100)]);
+        assert_eq!(tops(&delta.asserted), vec![(dept_a.clone(), 150)]);
         assert_eq!(
             (subscription.recomputes(), subscription.maintenances()),
             (2, 0),
-            "the folded delta comes from a recompute, never per-entity maintenance"
+            "the elected delta comes from a recompute, never per-entity maintenance"
         );
 
         // A fresh group appears without touching the existing one.
@@ -3409,22 +3409,22 @@ mod tests {
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("new group");
-        assert_eq!(totals(&delta.asserted), vec![(dept_b.clone(), 70)]);
+        assert_eq!(tops(&delta.asserted), vec![(dept_b.clone(), 70)]);
         assert!(delta.retracted.is_empty(), "dept-a's row is unchanged");
         assert!(
-            totals(subscription.results()).contains(&(dept_a.clone(), 150)),
+            tops(subscription.results()).contains(&(dept_a.clone(), 150)),
             "the retained result still carries dept-a's row"
         );
         assert_eq!(subscription.recomputes(), 3);
         Ok(())
     }
 
-    /// Aggregation lifecycle, retraction side: retracting a
-    /// contributor updates the group's fold; retracting a group's last
-    /// contributor makes the group's row disappear from the
-    /// subscription, since a fold over no candidates is no row.
+    /// Election lifecycle, retraction side: retracting the elected
+    /// candidate hands the group's row to the runner-up; retracting a
+    /// group's last candidate makes the group's row disappear from the
+    /// subscription, since an election over no candidates is no row.
     #[dialog_common::test]
-    async fn it_updates_a_folding_subscription_on_retractions() -> anyhow::Result<()> {
+    async fn it_updates_an_electing_subscription_on_retractions() -> anyhow::Result<()> {
         use concepts::{Dept, Salary, Staffed};
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3440,7 +3440,7 @@ mod tests {
         let bob_row = Staffed {
             this: bob.clone(),
             dept: Dept(dept_a.clone()),
-            salary: Salary(50),
+            salary: Salary(150),
         };
         let carol_row = Staffed {
             this: carol.clone(),
@@ -3460,14 +3460,14 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let mut subscription = branch.subscribe(dept_total());
+        let mut subscription = branch.subscribe(dept_top());
         let initial = subscription.poll(&operator).await?.expect("initial");
         assert_eq!(
-            totals(&initial.asserted),
+            tops(&initial.asserted),
             vec![(dept_a.clone(), 150), (dept_b.clone(), 70)]
         );
 
-        // Retracting one contributor updates the group's fold.
+        // Retracting the winner hands the row to the runner-up.
         branch
             .transaction()
             .retract(bob_row)
@@ -3479,11 +3479,11 @@ mod tests {
             .poll(&operator)
             .await?
             .expect("contributor gone");
-        assert_eq!(totals(&delta.retracted), vec![(dept_a.clone(), 150)]);
-        assert_eq!(totals(&delta.asserted), vec![(dept_a.clone(), 100)]);
+        assert_eq!(tops(&delta.retracted), vec![(dept_a.clone(), 150)]);
+        assert_eq!(tops(&delta.asserted), vec![(dept_a.clone(), 100)]);
 
-        // Retracting the group's last contributor removes the
-        // group's row entirely: no empty groups.
+        // Retracting the group's last candidate removes the group's
+        // row entirely: no empty groups.
         branch
             .transaction()
             .retract(carol_row)
@@ -3492,9 +3492,9 @@ mod tests {
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("group emptied");
-        assert_eq!(totals(&delta.retracted), vec![(dept_b.clone(), 70)]);
+        assert_eq!(tops(&delta.retracted), vec![(dept_b.clone(), 70)]);
         assert!(delta.asserted.is_empty(), "an empty group yields no row");
-        assert_eq!(totals(subscription.results()), vec![(dept_a.clone(), 100)]);
+        assert_eq!(tops(subscription.results()), vec![(dept_a.clone(), 100)]);
         assert_eq!(subscription.maintenances(), 0, "recompute-per-poll");
         Ok(())
     }
@@ -3571,12 +3571,11 @@ mod tests {
         Ok(())
     }
 
-    /// Optional folds across polls: a department's `top` bonus is
+    /// Optional elections across polls: a department's `top` bonus is
     /// absent while no member has a bonus, present once the first
-    /// arrives, and absent again when it is retracted. The members
-    /// count, read over a relation every member contributes to, keeps
-    /// the department's row throughout; the bonus count, optional
-    /// like the maximum, is absent over nothing rather than zero.
+    /// arrives, and absent again when it is retracted. The member
+    /// read, over a relation every member contributes to, keeps the
+    /// department's row throughout.
     #[dialog_common::test]
     async fn it_transitions_optional_max_between_present_and_absent() -> anyhow::Result<()> {
         use concepts::{Bonus, Dept};
@@ -3627,37 +3626,33 @@ mod tests {
 
         let stats = concept_query(
             serde_json::json!({ "with": {
-                "members": { "the": "payroll/member", "as": "Entity", "select": "count" },
-                "headcount": {
-                    "the": "payroll/bonus", "as": "UnsignedInteger", "select": "count",
-                    "optional": true
-                },
+                "member": { "the": "payroll/member", "as": "Entity", "select": "all" },
                 "top": {
                     "the": "payroll/bonus", "as": "UnsignedInteger", "select": "max",
                     "optional": true
                 }
             }}),
-            &["members", "headcount", "top"],
+            &["member", "top"],
         );
-        let stats_of = |rows: &[dialog_query::ConceptConclusion]| -> Vec<(Entity, u64, Option<u64>, Option<u64>)> {
-            rows.iter()
-                .map(|row| {
-                    (
-                        row.entity().clone(),
-                        row.get::<u64>("members").expect("a count"),
-                        row.get::<u64>("headcount").ok(),
-                        row.get::<u64>("top").ok(),
-                    )
-                })
-                .collect()
-        };
+        let stats_of =
+            |rows: &[dialog_query::ConceptConclusion]| -> Vec<(Entity, Entity, Option<u64>)> {
+                rows.iter()
+                    .map(|row| {
+                        (
+                            row.entity().clone(),
+                            row.get::<Entity>("member").expect("a member"),
+                            row.get::<u64>("top").ok(),
+                        )
+                    })
+                    .collect()
+            };
 
         let mut subscription = branch.subscribe(stats);
         let initial = subscription.poll(&operator).await?.expect("initial");
         assert_eq!(
             stats_of(&initial.asserted),
-            vec![(dept_a.clone(), 1, None, None)],
-            "a department with no bonus has a row, its optional folds absent"
+            vec![(dept_a.clone(), alice.clone(), None)],
+            "a department with no bonus has a row, its optional election absent"
         );
 
         // The first bonus flips `top` to Present.
@@ -3671,11 +3666,11 @@ mod tests {
         let delta = subscription.poll(&operator).await?.expect("bonus arrived");
         assert_eq!(
             stats_of(&delta.retracted),
-            vec![(dept_a.clone(), 1, None, None)]
+            vec![(dept_a.clone(), alice.clone(), None)]
         );
         assert_eq!(
             stats_of(&delta.asserted),
-            vec![(dept_a.clone(), 1, Some(1), Some(25))]
+            vec![(dept_a.clone(), alice.clone(), Some(25))]
         );
 
         // Retracting it flips back to Absent.
@@ -3692,17 +3687,17 @@ mod tests {
             .expect("bonus retracted");
         assert_eq!(
             stats_of(&delta.asserted),
-            vec![(dept_a.clone(), 1, None, None)]
+            vec![(dept_a.clone(), alice.clone(), None)]
         );
         assert_eq!(delta.retracted.len(), 1);
         Ok(())
     }
 
-    /// Composition depth 2 under subscriptions: a deductive rule may
-    /// read a `sum` field, the fold being closed over its carrier, so
-    /// a consumer concept projects the department's total, and a
-    /// standing query over the consumer updates when the base facts
-    /// change, through both the fold and the projection.
+    /// Composition depth 2 under subscriptions: a deductive rule reads
+    /// a `max` attribute over a derived relation, so a consumer concept
+    /// projects the department's top salary, and a standing query over
+    /// the consumer updates when the base facts change, through both
+    /// the election and the projection.
     #[dialog_common::test]
     async fn it_updates_depth_two_consumer_subscriptions() -> anyhow::Result<()> {
         use concepts::{Dept, DeptReport, ReportTotal, Salary, Staffed};
@@ -3717,12 +3712,12 @@ mod tests {
         let bob = Entity::new()?;
 
         // The rule derives the members' salaries; the consumer reads
-        // their sum and projects it.
+        // their maximum and projects it.
         let consumer = concept_rule(
             DeptReport::descriptor(),
             vec![concept_premise(
-                &dept_total().predicate,
-                &[("this", "this"), ("total", "total")],
+                &dept_top().predicate,
+                &[("this", "this"), ("top", "total")],
             )],
         );
         let tx = with_rule(branch.transaction(), &dept_salary_rule());
@@ -3754,7 +3749,7 @@ mod tests {
             .assert(Staffed {
                 this: bob.clone(),
                 dept: Dept(dept_a.clone()),
-                salary: Salary(50),
+                salary: Salary(150),
             })
             .commit()
             .publish()
@@ -3778,16 +3773,15 @@ mod tests {
         Ok(())
     }
 
-    /// A subscription folding a recursive relation stays correct
+    /// A subscription electing over a recursive relation stays correct
     /// through change in both directions. A child department inherits
     /// its parent's salaries through a step rule reading the relation
     /// it derives into, so the component yields each department's
-    /// candidate set and the subscription's `sum` folds it at the
-    /// exit: a new contributor replaces both departments' folded rows,
-    /// and a retraction shrinks them. Candidates are facts, so a
-    /// salary the parent and the child share is one candidate.
+    /// candidate set and the subscription's `max` chooses at the exit:
+    /// a new winner replaces both departments' elected rows, and
+    /// retracting it hands both back to the runner-up.
     #[dialog_common::test]
-    async fn it_folds_a_recursive_relation_at_its_exit() -> anyhow::Result<()> {
+    async fn it_elects_over_a_recursive_relation_at_its_exit() -> anyhow::Result<()> {
         use concepts::{Dept, HasParent, Parent, Salary, Staffed};
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3826,23 +3820,23 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let mut subscription = branch.subscribe(dept_total());
+        let mut subscription = branch.subscribe(dept_top());
         let initial = subscription.poll(&operator).await?.expect("initial");
         assert_eq!(
-            totals(&initial.asserted),
+            tops(&initial.asserted),
             vec![(dept_a.clone(), 100), (dept_b.clone(), 100)],
-            "the child inherits the parent's candidates and the exit folds them"
+            "the child inherits the parent's candidates and the exit elects among them"
         );
         assert_eq!(subscription.recomputes(), 1);
 
-        // Growth: a second contributor flows through the step and the
-        // fold.
+        // Growth: a higher candidate flows through the step and the
+        // election.
         branch
             .transaction()
             .assert(Staffed {
                 this: bob.clone(),
                 dept: Dept(dept_a.clone()),
-                salary: Salary(50),
+                salary: Salary(150),
             })
             .commit()
             .publish()
@@ -3850,21 +3844,22 @@ mod tests {
             .await?;
         let delta = subscription.poll(&operator).await?.expect("growth");
         assert_eq!(
-            totals(&delta.asserted),
+            tops(&delta.asserted),
             vec![(dept_a.clone(), 150), (dept_b.clone(), 150)]
         );
         assert_eq!(
-            totals(&delta.retracted),
+            tops(&delta.retracted),
             vec![(dept_a.clone(), 100), (dept_b.clone(), 100)]
         );
 
-        // Shrinkage: a retraction shrinks both folds.
+        // Shrinkage: retracting the winner hands both rows back to
+        // the runner-up.
         branch
             .transaction()
             .retract(Staffed {
-                this: alice.clone(),
+                this: bob.clone(),
                 dept: Dept(dept_a.clone()),
-                salary: Salary(100),
+                salary: Salary(150),
             })
             .commit()
             .publish()
@@ -3872,16 +3867,16 @@ mod tests {
             .await?;
         let delta = subscription.poll(&operator).await?.expect("shrinkage");
         assert_eq!(
-            totals(&delta.asserted),
-            vec![(dept_a.clone(), 50), (dept_b.clone(), 50)]
+            tops(&delta.asserted),
+            vec![(dept_a.clone(), 100), (dept_b.clone(), 100)]
         );
         assert_eq!(
-            totals(&delta.retracted),
+            tops(&delta.retracted),
             vec![(dept_a.clone(), 150), (dept_b.clone(), 150)]
         );
 
         assert!(
-            totals(subscription.results()).contains(&(dept_b.clone(), 50)),
+            tops(subscription.results()).contains(&(dept_b.clone(), 100)),
             "the retained table carries the recursively derived row"
         );
         Ok(())

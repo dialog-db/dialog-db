@@ -18,7 +18,6 @@ use crate::artifact::{ArtifactsAttribute, Value};
 use crate::attribute::Relation;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::planner::{Disjunction, Plan};
-use crate::reduce;
 use crate::rule::deductive::DeductiveRule;
 use crate::schema::{CONCEPT_OVERHEAD, Select};
 use crate::selection::{Selection, Standing};
@@ -29,7 +28,7 @@ use crate::{
     Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Requirement, Schema,
     Term, try_stream,
 };
-use dialog_artifacts::encode_value_owned;
+use dialog_artifacts::{Succession, encode_value_owned};
 use dialog_capability::Provider;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
@@ -667,8 +666,8 @@ impl ConceptQuery {
                     .map_err(|e| EvaluationError::Store(e.to_string()))
             }));
         }
-        // An attribute concept read under a choosing or folding policy:
-        // one value per entity and caller leaves here, elected from the
+        // An attribute concept read under a policy: what the policy
+        // keeps of an entity's candidates leaves here, elected from the
         // stored row and every derived candidate alike. The candidates
         // for an entity arrive in no particular order, so the election
         // buffers the results of the whole input.
@@ -704,7 +703,6 @@ impl ConceptQuery {
                 let key = (caller_id, entity_key(&this)?);
                 groups.entry(key).or_default().push(Entry {
                     standing: result.standing(),
-                    this,
                     value,
                     identity,
                     rank: 0,
@@ -713,31 +711,12 @@ impl ConceptQuery {
             }
             if let Some(election) = &elect {
                 for (_, entries) in groups {
-                    match election.resolve(entries)? {
-                        Resolved::Chosen(chosen) => {
-                            for (result, caller) in chosen {
-                                if !agrees(&result, &caller, &back, &[ConceptDescriptor::VALUE, &key_operand])? {
-                                    continue;
-                                }
-                                yield merge_parameters(&caller, &result, &back)
-                                    .map_err(|e| EvaluationError::Store(e.to_string()))?;
-                            }
+                    for (result, caller) in election.resolve(entries)?.0 {
+                        if !agrees(&result, &caller, &back, &[ConceptDescriptor::VALUE, &key_operand])? {
+                            continue;
                         }
-                        Resolved::Folded { this, value: Some(value), carrier: (_, caller) } => {
-                            let mut row = Match::new();
-                            row.bind(&Term::<Any>::var("this"), this)?;
-                            row.bind(&Term::<Any>::var(ConceptDescriptor::VALUE), value)?;
-                            if !agrees(&row, &caller, &back, &[ConceptDescriptor::VALUE])? {
-                                continue;
-                            }
-                            yield merge_parameters(&caller, &row, &back)
-                                .map_err(|e| EvaluationError::Store(e.to_string()))?;
-                        }
-                        Resolved::Folded { value: None, carrier: (_, caller), .. } => {
-                            // Nothing to fold into a value: the caller
-                            // matched nothing, which a widened read tells.
-                            matched.remove(&(Arc::as_ptr(&caller) as usize));
-                        }
+                        yield merge_parameters(&caller, &result, &back)
+                            .map_err(|e| EvaluationError::Store(e.to_string()))?;
                     }
                 }
             }
@@ -822,9 +801,25 @@ impl ConceptQuery {
                     _ => None,
                 };
 
+                // A `top` over listed relations with the entity bound
+                // reads the relations best first and stops at the first
+                // that offers a candidate: nothing a later relation
+                // offers can outrank it. Ranked by value, or with the
+                // entity free, every relation is read.
+                let conjunctions = plan.conjunctions();
+                let mut order: Vec<(usize, usize)> = (0..conjunctions.len())
+                    .map(|index| (ranks.get(index).copied().unwrap_or(0), index))
+                    .collect();
+                order.sort_unstable();
+                let settles = entity.is_some()
+                    && election.select == Select::Top
+                    && election.among.is_empty();
                 let mut candidates: Vec<Candidate> = Vec::new();
-                for (index, conjunction) in plan.conjunctions().into_iter().enumerate() {
-                    let rank = ranks.get(index).copied().unwrap_or(0);
+                for (rank, index) in order {
+                    if settles && candidates.iter().any(|candidate| candidate.rank < rank) {
+                        break;
+                    }
+                    let conjunction = conjunctions[index];
                     match conjunction.steps.as_slice() {
                         [Plan::Recall(_, recall)] => {
                             let shared = recall.rows_for(entity.as_ref(), env).await?;
@@ -929,19 +924,17 @@ impl ConceptQuery {
     }
 
     /// How this query's rows are elected on their way out, if they
-    /// are: the query reads an attribute concept under a policy that
-    /// chooses or folds, and either some rule contributes rows or the
-    /// policy is not the plain stored read, so several candidates per
-    /// entity may arrive and one value must leave. A `last` read of a
-    /// relation nothing derives is the stored value, and an `all` read
-    /// is the set, so neither elects here.
+    /// are: the query reads an attribute concept, and either some rule
+    /// contributes rows or the policy is not a plain stored read, so
+    /// several candidates per entity may arrive and the policy decides
+    /// what leaves: one value under a choosing policy, each distinct
+    /// value once under `all`. A `last` or `all` read of a relation
+    /// nothing derives is the stored rows as they are, so neither
+    /// elects here.
     fn election(&self, rules: &ConceptRules) -> Option<Election> {
         let (_, field) = self.predicate.attribute_field()?;
         let election = Election::of(field);
-        if !election.select.elects() {
-            return None;
-        }
-        if election.select == Select::Last && rules.installed().is_empty() {
+        if rules.installed().is_empty() && matches!(election.select, Select::Last | Select::All) {
             return None;
         }
         Some(election)
@@ -1113,46 +1106,47 @@ enum Source {
 /// How an attribute concept read elects: the field's policy and, for
 /// `top`, the values it ranks among, best first. A `top` over listed
 /// relations ranks each candidate by the relation it came from
-/// instead, which the candidate carries.
+/// instead, which the candidate carries. A write under a choosing
+/// policy runs the same election over the live claims of its cell to
+/// find the one it succeeds ([`Election::elect_claims`]).
 #[derive(Clone, Debug)]
-pub(crate) struct Election {
+pub struct Election {
     select: Select,
     among: Vec<Value>,
-    /// What the field reads, for a fold's error.
-    field: String,
+}
+
+impl From<&Succession> for Election {
+    fn from(succession: &Succession) -> Self {
+        match succession {
+            Succession::Max => Election::plain(Select::Max),
+            Succession::Min => Election::plain(Select::Min),
+            Succession::Top(among) => Election {
+                select: Select::Top,
+                among: among.clone(),
+            },
+        }
+    }
 }
 
 /// The candidates of `through`, grouped by caller and entity: each
 /// group's entries carry the result and the caller it answers.
 type Groups = BTreeMap<(usize, Vec<u8>), Vec<Entry<(Match, Arc<Match>)>>>;
 
-/// One candidate under election: its standing, its entity and value,
-/// the key that makes it a distinct fact when the relation is a keyed
-/// collection, where its relation stands among the field's, and
-/// whatever the caller keeps of it.
+/// One candidate under election: its standing and value, the key that
+/// makes it a distinct fact when the relation is a keyed collection,
+/// where its relation stands among the field's, and whatever the
+/// caller keeps of it.
 struct Entry<T> {
     standing: Option<Standing>,
-    this: Value,
     value: Value,
     identity: Vec<u8>,
     rank: usize,
     carrier: T,
 }
 
-/// What an election leaves of one entity's candidates.
-enum Resolved<T> {
-    /// The candidates chosen: one for a choosing policy, every distinct
-    /// value for `all`.
-    Chosen(Vec<T>),
-    /// The candidates folded into one value, `None` where an
-    /// identity-less fold had nothing to fold; the first candidate's
-    /// carrier stands for the entity.
-    Folded {
-        this: Value,
-        value: Option<Value>,
-        carrier: T,
-    },
-}
+/// What an election leaves of one entity's candidates: one for a
+/// choosing policy, every distinct value for `all`.
+struct Resolved<T>(Vec<T>);
 
 impl Election {
     /// The election a concept field declares.
@@ -1160,7 +1154,6 @@ impl Election {
         Election {
             select: field.descriptor().select(),
             among: field.descriptor().among().to_vec(),
-            field: field.the().to_string(),
         }
     }
 
@@ -1169,7 +1162,6 @@ impl Election {
         Election {
             select,
             among: Vec::new(),
-            field: String::new(),
         }
     }
 
@@ -1220,51 +1212,48 @@ impl Election {
                 Ok(ordering == wanted
                     || (ordering.is_eq() && candidate.standing > incumbent.standing))
             }
-            Select::All | Select::Sum | Select::Count | Select::CountDistinct | Select::Avg => {
-                Err(EvaluationError::Store(format!(
-                    "`{}` does not choose among candidates",
-                    self.select
-                )))
-            }
+            Select::All => Err(EvaluationError::Store(format!(
+                "`{}` does not choose among candidates",
+                self.select
+            ))),
         }
     }
 
-    /// Resolve one entity's candidates under the policy.
-    fn resolve<T>(&self, entries: Vec<Entry<T>>) -> Result<Resolved<T>, EvaluationError> {
-        if self.select.is_fold() {
-            let mut first: Option<(Value, T)> = None;
-            let mut seen: HashSet<(Vec<u8>, Vec<u8>)> = HashSet::new();
-            let mut values = Vec::with_capacity(entries.len());
-            for entry in entries {
-                // A candidate is a fact, however many rules derive it: a
-                // fold sees each distinct value once, or each distinct
-                // entry of a keyed collection.
-                if seen.insert((encode_value(&entry.value)?, entry.identity)) {
-                    values.push(entry.value);
-                }
-                if first.is_none() {
-                    first = Some((entry.this, entry.carrier));
-                }
-            }
-            let Some((this, carrier)) = first else {
-                return Ok(Resolved::Chosen(Vec::new()));
-            };
-            let value = reduce::fold(self.select, &self.field, values)?;
-            return Ok(Resolved::Folded {
-                this,
+    /// The claim a write under this election succeeds: of the live
+    /// claims of one cell, each as its value, its standing and whatever
+    /// the caller keeps of it, the one a read returns. `None` over no
+    /// claims.
+    pub fn elect_claims<T>(
+        &self,
+        claims: Vec<(Value, Option<Standing>, T)>,
+    ) -> Result<Option<T>, EvaluationError> {
+        let entries = claims
+            .into_iter()
+            .map(|(value, standing, carrier)| Entry {
+                standing,
                 value,
+                identity: Vec::new(),
+                rank: 0,
                 carrier,
-            });
-        }
+            })
+            .collect();
+        Ok(self.resolve(entries)?.0.into_iter().next())
+    }
+
+    /// Resolve one entity's candidates under the policy. `all` keeps
+    /// every distinct value, a keyed collection every distinct (value,
+    /// key) pair; a choosing policy keeps the one that beats the rest.
+    fn resolve<T>(&self, entries: Vec<Entry<T>>) -> Result<Resolved<T>, EvaluationError> {
         if self.select == Select::All {
             let mut seen: HashSet<Vec<u8>> = HashSet::new();
             let mut chosen = Vec::new();
             for entry in entries {
-                if seen.insert(encode_value(&entry.value)?) {
+                let distinct = [encode_value(&entry.value)?, entry.identity].concat();
+                if seen.insert(distinct) {
                     chosen.push(entry.carrier);
                 }
             }
-            return Ok(Resolved::Chosen(chosen));
+            return Ok(Resolved(chosen));
         }
         let mut best: Option<Entry<T>> = None;
         for entry in entries {
@@ -1273,7 +1262,7 @@ impl Election {
                 _ => entry,
             });
         }
-        Ok(Resolved::Chosen(
+        Ok(Resolved(
             best.into_iter().map(|entry| entry.carrier).collect(),
         ))
     }
@@ -1316,9 +1305,8 @@ fn agrees(
 
 impl Election {
     /// The rows a recursive component yields, elected per entity under
-    /// this policy at the component's exit: the chosen rows, or one
-    /// folded row per entity. The rows are keyed by the query's field
-    /// name, `field`, as the fixpoint projects them.
+    /// this policy at the component's exit. The rows are keyed by the
+    /// query's field name, `field`, as the fixpoint projects them.
     fn elect_rows(
         &self,
         rows: Vec<fixpoint::Row>,
@@ -1337,7 +1325,6 @@ impl Election {
             }
             groups.entry(key).or_default().push(Entry {
                 standing: None,
-                this: this.clone(),
                 value: value.clone(),
                 identity: match row.get(&key_operand) {
                     Some(key) => encode_value(key)?,
@@ -1350,20 +1337,7 @@ impl Election {
         let mut elected = Vec::new();
         for key in order {
             let entries = groups.remove(&key).unwrap_or_default();
-            match self.resolve(entries)? {
-                Resolved::Chosen(chosen) => elected.extend(chosen),
-                Resolved::Folded {
-                    this,
-                    value: Some(value),
-                    ..
-                } => {
-                    let mut row = fixpoint::Row::new();
-                    row.insert("this".to_string(), this);
-                    row.insert(field.to_string(), value);
-                    elected.push(row);
-                }
-                Resolved::Folded { value: None, .. } => {}
-            }
+            elected.extend(self.resolve(entries)?.0);
         }
         Ok(elected)
     }
@@ -1371,13 +1345,12 @@ impl Election {
 
 /// The candidates that survive the attribute's election under the
 /// field's policy: one per entity for a choosing policy, every
-/// distinct value per entity for `all`, and one folded value per
-/// entity for a folding policy, citing nothing.
+/// distinct value per entity for `all`.
 fn elect(
     candidates: Vec<Candidate>,
     election: &Election,
 ) -> Result<Vec<Candidate>, EvaluationError> {
-    if candidates.len() <= 1 && !election.select.is_fold() {
+    if candidates.len() <= 1 {
         return Ok(candidates);
     }
     let mut order: Vec<Vec<u8>> = Vec::new();
@@ -1393,7 +1366,6 @@ fn elect(
         }
         groups.entry(key).or_default().push(Entry {
             standing: candidate.standing.clone(),
-            this: candidate.this.clone(),
             value: candidate.value.clone(),
             identity,
             rank: candidate.rank,
@@ -1403,39 +1375,7 @@ fn elect(
     let mut survivors = Vec::new();
     for key in order {
         let entries = groups.remove(&key).unwrap_or_default();
-        // A keyed collection read as a set keeps every distinct
-        // (value, key) pair, as before.
-        if election.select == Select::All {
-            let mut seen: HashSet<Vec<u8>> = HashSet::new();
-            for entry in entries {
-                let candidate = entry.carrier;
-                let value = match &candidate.key {
-                    Some(key) => [encode_value(&candidate.value)?, encode_value(key)?].concat(),
-                    None => encode_value(&candidate.value)?,
-                };
-                if seen.insert(value) {
-                    survivors.push(candidate);
-                }
-            }
-            continue;
-        }
-        match election.resolve(entries)? {
-            Resolved::Chosen(chosen) => survivors.extend(chosen),
-            Resolved::Folded {
-                this,
-                value: Some(value),
-                carrier,
-            } => survivors.push(Candidate {
-                entity: carrier.entity,
-                this,
-                value,
-                key: None,
-                rank: 0,
-                standing: carrier.standing,
-                source: Source::Folded,
-            }),
-            Resolved::Folded { value: None, .. } => {}
-        }
+        survivors.extend(election.resolve(entries)?.0);
     }
     Ok(survivors)
 }
@@ -2830,6 +2770,130 @@ mod tests {
         );
     }
 
+    /// The `(this, value)` rows an attribute concept over `the` yields,
+    /// sorted, read with both free.
+    async fn relation_rows(source: &TestEnv<'_>, the: &str) -> anyhow::Result<Vec<(Value, Value)>> {
+        let predicate = ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
+            AttributeDescriptor::new(
+                the.parse().expect("a selector"),
+                "",
+                Cardinality::Many,
+                Some(Type::String),
+            ),
+        ));
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("who"));
+        terms.insert(ConceptDescriptor::VALUE.into(), Term::var("what"));
+        let rows = ConceptQuery { terms, predicate }
+            .evaluate(Match::new().seed(), source)
+            .try_vec()
+            .await?;
+        let mut pairs: Vec<(Value, Value)> = rows
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.lookup(&Term::var("who"))?.content()?,
+                    row.lookup(&Term::var("what"))?.content()?,
+                ))
+            })
+            .collect::<Result<_, EvaluationError>>()?;
+        pairs.sort_by_key(|pair| format!("{pair:?}"));
+        Ok(pairs)
+    }
+
+    /// A rule body naming a derived relation by an attribute premise
+    /// reads the derived candidates too: `graph/even(x) := n :-
+    /// graph/odd(x) = n` sees the `graph/odd` a rule derives beside the
+    /// one stored, and `graph/lonely(x) := t :- graph/tag(x) = t,
+    /// unless graph/odd(x)` excludes an entity whose `graph/odd` is
+    /// derived, where a stored scan would have missed it.
+    #[dialog_common::test]
+    async fn it_reads_derived_candidates_through_an_attribute_premise() -> anyhow::Result<()> {
+        use crate::negation::Negation;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let a: Entity = "id:a".parse()?;
+        let b: Entity = "id:b".parse()?;
+        let c: Entity = "id:c".parse()?;
+        let d: Entity = "id:d".parse()?;
+        branch
+            .transaction()
+            .assert(the!("graph/node").of(a.clone()).is("a".to_string()))
+            .assert(the!("graph/node").of(b.clone()).is("b".to_string()))
+            .assert(the!("graph/odd").of(c.clone()).is("c".to_string()))
+            .assert(the!("graph/tag").of(a.clone()).is("A".to_string()))
+            .assert(the!("graph/tag").of(d.clone()).is("D".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let relation = |the: &str| -> ConceptDescriptor {
+            ConceptDescriptor::try_from(vec![(
+                "name",
+                AttributeDescriptor::new(
+                    the.parse().expect("a selector"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            )])
+            .expect("a concept")
+        };
+        let scan = |the: &str, value: &str| -> Premise {
+            AttributeQuery::new(
+                Term::from(the.parse::<crate::The>().expect("a selector")),
+                Term::<Entity>::var("this"),
+                Term::var(value),
+                Term::blank(),
+                Some(Cardinality::One),
+            )
+            .into()
+        };
+        let odd = DeductiveRule::new(relation("graph/odd"), vec![scan("graph/node", "name")])?;
+        let even = DeductiveRule::new(relation("graph/even"), vec![scan("graph/odd", "name")])?;
+        let lonely = DeductiveRule::new(
+            relation("graph/lonely"),
+            vec![
+                scan("graph/tag", "name"),
+                Premise::Unless(Negation(Proposition::Attribute(Box::new(
+                    AttributeQuery::new(
+                        Term::from(the!("graph/odd")),
+                        Term::<Entity>::var("this"),
+                        Term::blank(),
+                        Term::blank(),
+                        None,
+                    ),
+                )))),
+            ],
+        )?;
+        let mut registry = RuleRegistry::new();
+        registry.register(odd)?;
+        registry.register(even)?;
+        registry.register(lonely)?;
+        let source = TestEnv::new(&branch, &operator, registry);
+
+        let text = |value: &str| Value::String(value.into());
+        assert_eq!(
+            relation_rows(&source, "graph/even").await?,
+            vec![
+                (Value::Entity(a.clone()), text("a")),
+                (Value::Entity(b.clone()), text("b")),
+                (Value::Entity(c.clone()), text("c")),
+            ],
+            "the stored and the derived odd values are both even"
+        );
+        assert_eq!(
+            relation_rows(&source, "graph/lonely").await?,
+            vec![(Value::Entity(d.clone()), text("D"))],
+            "a derived odd excludes its entity from the negation"
+        );
+        Ok(())
+    }
+
     /// Reducing-rule evaluation: the `reduce` clause end to end
     /// through `ConceptQuery::evaluate` (milestone A3,
     /// `notes/aggregation.md`).
@@ -2843,175 +2907,13 @@ mod tests {
             descriptor.compile().expect("rule compiles")
         }
 
-        /// `DeptSalary { salary }` per employee of the department: one
-        /// candidate under `org.dept/salary` for every salary the
-        /// department pays, binding the department as `?this`. What a
-        /// read folds, chooses among or lists.
-        fn dept_salaries_rule() -> DeductiveRule {
-            compile(serde_json::json!({
-                "deduce": { "with": {
-                    "salary": { "the": "org.dept/salary", "as": "UnsignedInteger", "cardinality": "many" }
-                }},
-                "when": [{
-                    "assert": { "with": {
-                        "dept": { "the": "org.employee/dept", "as": "Entity" },
-                        "salary": { "the": "org.employee/salary", "as": "UnsignedInteger" }
-                    }},
-                    "where": {
-                        "this": { "?": { "name": "employee" } },
-                        "dept": { "?": { "name": "this" } },
-                        "salary": { "?": { "name": "salary" } }
-                    }
-                }]
-            }))
-        }
-
-        /// A fold reads the whole relation whatever the caller binds: a
-        /// department bound as a constant sums the same salaries as the
-        /// open read, and a sum bound as a constant filters the folded
-        /// row rather than the candidates.
+        /// A rule offers one candidate per employee salary under the
+        /// department's `org.dept/salary`, and a field reading that
+        /// relation chooses among them: the greatest, the least, or
+        /// every distinct value. A candidate is a fact, so two employees
+        /// on one salary are one value of the relation.
         #[dialog_common::test]
-        async fn it_folds_the_full_group_under_caller_binding() -> anyhow::Result<()> {
-            let (operator, profile) = test_session_with_peer().await;
-            let repo = test_repo(&operator, &profile).await;
-            let branch = repo.branch("main").open().perform(&operator).await?;
-            let dept_a: Entity = "id:dept-a".parse()?;
-            let alice: Entity = "id:alice".parse()?;
-            let bob: Entity = "id:bob".parse()?;
-            branch
-                .transaction()
-                .assert(
-                    the!("org.employee/dept")
-                        .of(alice.clone())
-                        .is(dept_a.clone()),
-                )
-                .assert(the!("org.employee/salary").of(alice.clone()).is(100u32))
-                .assert(the!("org.employee/dept").of(bob.clone()).is(dept_a.clone()))
-                .assert(the!("org.employee/salary").of(bob.clone()).is(50u32))
-                .commit()
-                .publish()
-                .perform(&operator)
-                .await?;
-            let mut registry = RuleRegistry::new();
-            registry.register(dept_salaries_rule())?;
-            let source = TestEnv::new(&branch, &operator, registry);
-            let total: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-                "total": { "the": "org.dept/salary", "as": "UnsignedInteger", "cardinality": "many", "select": "sum" }
-            }}))?;
-            let read = |this: Term<Any>, total_term: Term<Any>| {
-                let mut terms = Parameters::new();
-                terms.insert("this".into(), this);
-                terms.insert("total".into(), total_term);
-                ConceptQuery {
-                    terms,
-                    predicate: total.clone(),
-                }
-            };
-            let open = read(Term::var("dept"), Term::var("total"))
-                .evaluate(Match::new().seed(), &source)
-                .try_vec()
-                .await?;
-            assert_eq!(open.len(), 1);
-            assert_eq!(
-                open[0].lookup(&Term::var("total"))?.content()?,
-                Value::UnsignedInt(150)
-            );
-            let bound = read(
-                Term::Constant(Value::Entity(dept_a.clone())),
-                Term::var("total"),
-            )
-            .evaluate(Match::new().seed(), &source)
-            .try_vec()
-            .await?;
-            assert_eq!(bound.len(), 1, "the bound department still folds");
-            assert_eq!(
-                bound[0].lookup(&Term::var("total"))?.content()?,
-                Value::UnsignedInt(150)
-            );
-            let filtered = read(Term::var("dept"), Term::Constant(Value::UnsignedInt(150)))
-                .evaluate(Match::new().seed(), &source)
-                .try_vec()
-                .await?;
-            assert_eq!(filtered.len(), 1, "a sum bound to its value keeps the row");
-            let excluded = read(Term::var("dept"), Term::Constant(Value::UnsignedInt(100)))
-                .evaluate(Match::new().seed(), &source)
-                .try_vec()
-                .await?;
-            assert!(
-                excluded.is_empty(),
-                "a sum bound to another value drops the row"
-            );
-            Ok(())
-        }
-
-        /// A rule may read a `sum` field, which is closed over the
-        /// carrier: a department's budget is its salaries' sum plus a
-        /// reserve, derived by a rule over the summed read.
-        #[dialog_common::test]
-        async fn it_reads_a_sum_field_from_a_rule() -> anyhow::Result<()> {
-            let (operator, profile) = test_session_with_peer().await;
-            let repo = test_repo(&operator, &profile).await;
-            let branch = repo.branch("main").open().perform(&operator).await?;
-            let dept_a: Entity = "id:dept-a".parse()?;
-            let alice: Entity = "id:alice".parse()?;
-            let bob: Entity = "id:bob".parse()?;
-            branch
-                .transaction()
-                .assert(
-                    the!("org.employee/dept")
-                        .of(alice.clone())
-                        .is(dept_a.clone()),
-                )
-                .assert(the!("org.employee/salary").of(alice.clone()).is(100u32))
-                .assert(the!("org.employee/dept").of(bob.clone()).is(dept_a.clone()))
-                .assert(the!("org.employee/salary").of(bob.clone()).is(50u32))
-                .commit()
-                .publish()
-                .perform(&operator)
-                .await?;
-            let budget = compile(serde_json::json!({
-                "deduce": { "with": {
-                    "budget": { "the": "org.dept/budget", "as": "UnsignedInteger" }
-                }},
-                "when": [
-                    { "assert": { "with": {
-                        "total": { "the": "org.dept/salary", "as": "UnsignedInteger", "cardinality": "many", "select": "sum" }
-                      }},
-                      "where": { "this": { "?": { "name": "this" } }, "total": { "?": { "name": "total" } } } },
-                    { "assert": "math/sum", "where": {
-                        "of": { "?": { "name": "total" } }, "with": 10, "is": { "?": { "name": "budget" } } } }
-                ]
-            }));
-            let mut registry = RuleRegistry::new();
-            registry.register(dept_salaries_rule())?;
-            registry.register(budget.clone())?;
-            let source = TestEnv::new(&branch, &operator, registry);
-            let mut terms = Parameters::new();
-            terms.insert("this".into(), Term::var("dept"));
-            terms.insert("budget".into(), Term::var("budget"));
-            let rows = ConceptQuery {
-                terms,
-                predicate: budget.conclusion().clone(),
-            }
-            .evaluate(Match::new().seed(), &source)
-            .try_vec()
-            .await?;
-            assert_eq!(rows.len(), 1);
-            assert_eq!(
-                rows[0].lookup(&Term::var("budget"))?.content()?,
-                Value::UnsignedInt(160)
-            );
-            Ok(())
-        }
-
-        /// A read-side `count`: a rule offers one candidate per employee
-        /// salary under the department's `org.dept/salary`, and a field
-        /// reading that relation as `count` sees how many distinct
-        /// values it holds. A candidate is a fact, so two employees on
-        /// one salary are one value of the relation; a per-employee
-        /// count reads a collection keyed by employee.
-        #[dialog_common::test]
-        async fn it_counts_the_candidates_a_rule_offers() -> anyhow::Result<()> {
+        async fn it_chooses_among_the_candidates_a_rule_offers() -> anyhow::Result<()> {
             let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
@@ -3060,7 +2962,11 @@ mod tests {
                 }}))
                 .expect("a concept over the relation")
             };
-            for (select, expected) in [("count", 2u128), ("sum", 300), ("max", 200), ("min", 100)] {
+            for (select, expected) in [
+                ("max", vec![200u128]),
+                ("min", vec![100]),
+                ("all", vec![100, 200]),
+            ] {
                 let mut terms = Parameters::new();
                 terms.insert("this".into(), Term::var("dept"));
                 terms.insert("n".into(), Term::var("n"));
@@ -3071,7 +2977,7 @@ mod tests {
                 .evaluate(Match::new().seed(), &source)
                 .try_vec()
                 .await?;
-                let values: Vec<(Value, Value)> = rows
+                let mut values: Vec<(Value, Value)> = rows
                     .iter()
                     .map(|row| {
                         Ok((
@@ -3080,9 +2986,13 @@ mod tests {
                         ))
                     })
                     .collect::<Result<_, EvaluationError>>()?;
+                values.sort_by_key(|pair| format!("{pair:?}"));
+                let expected: Vec<(Value, Value)> = expected
+                    .into_iter()
+                    .map(|n| (Value::Entity(dept.clone()), Value::UnsignedInt(n)))
+                    .collect();
                 assert_eq!(
-                    values,
-                    vec![(Value::Entity(dept.clone()), Value::UnsignedInt(expected))],
+                    values, expected,
                     "`{select}` over the department's candidates"
                 );
             }

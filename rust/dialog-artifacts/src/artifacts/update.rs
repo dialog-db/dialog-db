@@ -29,6 +29,29 @@ pub enum Change {
     Replace(Value),
     /// Retract a value from an entity-attribute pair.
     Retract(Value),
+    /// Assert a value and retract the one live claim of the cell the
+    /// succession elects. The election reads the line, so it is
+    /// resolved by the transactor before the batch commits (see
+    /// [`Changes::take_successions`]); an unresolved succession
+    /// commits as a plain assertion.
+    Succeed(Value, Succession),
+}
+
+/// How a write under a choosing policy elects the live claim of its
+/// cell it succeeds: the claim a read under the same policy returns.
+/// The newest claim (`last`) needs no succession, since a write is
+/// newer than every claim it observed and [`Change::Replace`]
+/// supersedes them all; a set (`all`) succeeds nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Succession {
+    /// The claim with the greatest value, the newest among equals.
+    Max,
+    /// The claim with the least value, the newest among equals.
+    Min,
+    /// The claim whose value is listed first, best first; an unlisted
+    /// value ranks last, and the newest wins among equals.
+    Top(Vec<Value>),
 }
 
 /// The write side of the triple store.
@@ -42,6 +65,16 @@ pub trait Update {
     /// Assert with cardinality-one semantics: replaces any previous
     /// value for the same `(attribute, entity)` pair in this batch.
     fn associate_unique(&mut self, the: Attribute, of: Entity, is: Value) {
+        self.associate(the, of, is);
+    }
+
+    /// Assert that the `attribute` of `entity` is `value`, succeeding
+    /// the one live claim of the cell `succession` elects: that claim
+    /// is retracted when the batch commits, and every other claim of
+    /// the cell stays. Falls back to a plain assertion for a target
+    /// that cannot resolve an election.
+    fn succeed(&mut self, the: Attribute, of: Entity, is: Value, succession: Succession) {
+        let _ = succession;
         self.associate(the, of, is);
     }
 
@@ -296,6 +329,9 @@ impl Changes {
                         Change::Replace(value) => {
                             self.associate_unique(attribute.clone(), entity.clone(), value)
                         }
+                        Change::Succeed(value, succession) => {
+                            self.succeed(attribute.clone(), entity.clone(), value, succession)
+                        }
                         Change::Retract(value) => {
                             self.dissociate(attribute.clone(), entity.clone(), value)
                         }
@@ -317,24 +353,54 @@ impl Changes {
         })
     }
 
+    /// The successions this batch holds, drained: each as the cell it
+    /// writes, the value it asserts and how it elects the claim it
+    /// succeeds. The transactor resolves them against the line into a
+    /// retraction and an assertion before the batch commits.
+    pub fn take_successions(&mut self) -> Vec<(Attribute, Entity, Value, Succession)> {
+        let mut successions = Vec::new();
+        for (entity, attributes) in self.facts.iter_mut() {
+            for (attribute, changes) in attributes.iter_mut() {
+                let (taken, kept): (Vec<Change>, Vec<Change>) = take(changes)
+                    .into_iter()
+                    .partition(|change| matches!(change, Change::Succeed(..)));
+                *changes = kept;
+                for change in taken {
+                    if let Change::Succeed(value, succession) = change {
+                        successions.push((attribute.clone(), entity.clone(), value, succession));
+                    }
+                }
+            }
+            attributes.retain(|_, changes| !changes.is_empty());
+        }
+        self.facts.retain(|_, attributes| !attributes.is_empty());
+        successions
+    }
+
     /// Convert the fact changes to a vec of instructions.
     ///
     /// Asset changes are not instructions and are left out: a caller that
     /// commits the batch drains them first with
     /// [`take_assets`](Self::take_assets), and any other caller refuses a
-    /// batch that [`has_assets`](Self::has_assets).
+    /// batch that [`has_assets`](Self::has_assets). A succession still
+    /// in the batch asserts its claim and retracts nothing; the
+    /// transactor drains successions with
+    /// [`take_successions`](Self::take_successions) and resolves them
+    /// before converting.
     pub fn into_instructions(self) -> Vec<Instruction> {
         let mut instructions = Vec::new();
         for (entity, attributes) in self.facts {
             for (attribute, operations) in attributes {
                 for operation in operations {
                     let instruction = match operation {
-                        Change::Assert(value) => Instruction::Assert(Artifact {
-                            the: attribute.clone(),
-                            of: entity.clone(),
-                            is: value,
-                            cause: None,
-                        }),
+                        Change::Assert(value) | Change::Succeed(value, _) => {
+                            Instruction::Assert(Artifact {
+                                the: attribute.clone(),
+                                of: entity.clone(),
+                                is: value,
+                                cause: None,
+                            })
+                        }
                         Change::Replace(value) => Instruction::Replace(Artifact {
                             the: attribute.clone(),
                             of: entity.clone(),
@@ -371,6 +437,15 @@ impl Update for Changes {
             .entry(of)
             .or_default()
             .insert(the, vec![Change::Replace(is)]);
+    }
+
+    fn succeed(&mut self, the: Attribute, of: Entity, is: Value, succession: Succession) {
+        self.facts
+            .entry(of)
+            .or_default()
+            .entry(the)
+            .or_default()
+            .push(Change::Succeed(is, succession));
     }
 
     fn dissociate(&mut self, the: Attribute, of: Entity, is: Value) {
@@ -618,7 +693,7 @@ impl Changes {
                 }
                 for change in changes {
                     let value = match change {
-                        Change::Assert(v) | Change::Replace(v) => v,
+                        Change::Assert(v) | Change::Replace(v) | Change::Succeed(v, _) => v,
                         // Retracts don't surface from a Changes-as-source
                         // view — see impl docs.
                         Change::Retract(_) => continue,

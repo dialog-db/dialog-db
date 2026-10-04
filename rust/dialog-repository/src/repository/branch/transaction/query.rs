@@ -707,13 +707,13 @@ mod tests {
     }
 
     /// An uncommitted rule staged on a transaction derives a relation
-    /// the transaction's query folds: the pending view reads the
-    /// pending candidates under `sum` without the rule or the data
-    /// being committed. The fold is the query's, read over the
+    /// the transaction's query elects over: the pending view reads the
+    /// pending candidates under `max` without the rule or the data
+    /// being committed. The choice is the query's, read over the
     /// relation the rule derives into, whatever policy the rule's own
     /// head declared.
     #[dialog_common::test]
-    async fn it_folds_a_derived_relation_pending_in_the_transaction() -> anyhow::Result<()> {
+    async fn it_elects_over_a_derived_relation_pending_in_the_transaction() -> anyhow::Result<()> {
         use dialog_query::rule::DeductiveRuleDescriptor;
         use dialog_query::{ConceptQuery, Parameters};
 
@@ -743,8 +743,8 @@ mod tests {
                 serde_json::from_value(json).expect("descriptor parses");
             descriptor.compile().expect("rule compiles")
         };
-        let dept_total: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "total": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "sum" }
+        let dept_top: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "top": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "max" }
         }}))?;
 
         let dept: Entity = "id:dept-a".parse()?;
@@ -760,11 +760,11 @@ mod tests {
 
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("dept"));
-        terms.insert("total".into(), Term::var("total"));
+        terms.insert("top".into(), Term::var("top"));
         let rows = tx
             .query()
             .select(ConceptQuery {
-                predicate: dept_total,
+                predicate: dept_top,
                 terms,
             })
             .perform(&operator)
@@ -773,10 +773,10 @@ mod tests {
         assert_eq!(
             rows.len(),
             1,
-            "the query folds the pending rule's candidates"
+            "the query elects among the pending rule's candidates"
         );
         assert_eq!(*rows[0].entity(), dept);
-        assert_eq!(rows[0].get::<u64>("total")?, 7);
+        assert_eq!(rows[0].get::<u64>("top")?, 4);
 
         Ok(())
     }

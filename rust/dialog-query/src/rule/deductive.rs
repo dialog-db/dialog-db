@@ -9,8 +9,8 @@ pub use head::Head;
 
 use crate::Formula;
 use crate::artifact::Entity;
-use crate::attribute::Relation;
 use crate::attribute::query::AttributeQuery;
+use crate::attribute::{AttributeDescriptor, Relation, The};
 pub use crate::concept::descriptor::ConceptDescriptor;
 use crate::concept::descriptor::ConceptFieldDescriptor;
 use crate::concept::query::ConceptQuery;
@@ -123,6 +123,102 @@ impl DeductiveRule {
             });
         }
         compile_rule::<Self>(conclusion, premises, reduce.into_iter().collect())
+    }
+
+    /// This rule reading every relation `derived` holds through the
+    /// attribute concept over it wherever the body names the relation
+    /// by an attribute premise with a constant attribute, so the
+    /// premise sees stored and derived candidates alike: under `last`
+    /// where the premise read one value, under `all` where it read
+    /// them all. A negated premise negates the concept, an optional one
+    /// reads it set-widened. A premise whose attribute is a variable
+    /// reads stored facts only. A head split from a source rewrites the
+    /// source and is split from it again, so its heads keep sharing
+    /// one body. `None` when the body reads no derived relation.
+    pub fn reading_derived(
+        &self,
+        derived: &dyn Fn(&Relation) -> bool,
+    ) -> Result<Option<Self>, TypeError> {
+        if let Some(origin) = self.origin() {
+            let Some(source) = origin.rule.reading_derived(derived)? else {
+                return Ok(None);
+            };
+            let mine = self
+                .conclusion()
+                .attribute_field()
+                .map(|(_, field)| field.the().clone());
+            return Ok(source
+                .heads()?
+                .into_iter()
+                .find(|head| Some(head.field.the().clone()) == mine)
+                .map(|head| head.rule));
+        }
+        let read = |query: &AttributeQuery, optional: bool| -> Option<Proposition> {
+            let Term::Constant(the) = query.the() else {
+                return None;
+            };
+            let relation = Relation::from(The::try_from(the.clone()).ok()?);
+            if !derived(&relation) {
+                return None;
+            }
+            let value = if optional {
+                let kind = query
+                    .is()
+                    .kind()
+                    .unwrap_or_else(|| Kind::from(Primitive::ALL))
+                    .optional();
+                match query.is().name() {
+                    Some(name) => Term::<Any>::typed_var(name, kind),
+                    None => Term::blank(),
+                }
+            } else {
+                query.is().clone()
+            };
+            let mut terms = Parameters::new();
+            terms.insert("this".to_string(), query.of().clone().into());
+            terms.insert(ConceptDescriptor::VALUE.to_string(), value);
+            let field = ConceptFieldDescriptor::required(AttributeDescriptor::over(
+                relation,
+                "",
+                query.cardinality(),
+                None,
+            ));
+            Some(Proposition::Concept(ConceptQuery {
+                terms,
+                predicate: ConceptDescriptor::of_attribute(&field),
+            }))
+        };
+        let mut rewritten = false;
+        let premises: Vec<Premise> = self
+            .analysis
+            .premises
+            .iter()
+            .map(|premise| {
+                let replacement = match premise {
+                    Premise::Assert(Proposition::Attribute(query)) => {
+                        read(query, false).map(Premise::Assert)
+                    }
+                    Premise::Assert(Proposition::OptionalAttribute(query)) => {
+                        read(query.query(), true).map(Premise::Assert)
+                    }
+                    Premise::Unless(Negation(Proposition::Attribute(query))) => {
+                        read(query, false).map(|concept| Premise::Unless(Negation(concept)))
+                    }
+                    _ => None,
+                };
+                match replacement {
+                    Some(replacement) => {
+                        rewritten = true;
+                        replacement
+                    }
+                    None => premise.clone(),
+                }
+            })
+            .collect();
+        if !rewritten {
+            return Ok(None);
+        }
+        compile_internal::<Self>(self.conclusion().clone(), premises).map(Some)
     }
 
     /// The checked `reduce` clause entries, in head-field order.
@@ -495,7 +591,7 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
             // its value term admits `Nothing`, which the concept query
             // honours by yielding one `Absent` row where no row matched.
             let kind = match (
-                field.descriptor().read_type().map(Kind::from),
+                field.descriptor().content_type().map(Kind::from),
                 field.conforms(),
             ) {
                 (Some(kind), Some(target)) => Some(
@@ -1408,12 +1504,12 @@ mod tests {
         );
     }
 
-    /// A deductive rule is open, so it is monotone: an `unless` premise
-    /// is refused at compile time, before any other analysis, whatever
-    /// else the rule does. Negation belongs to the closed places (a
-    /// query, a subscription, an inductive rule).
+    /// A deductive rule admits an `unless` premise: outside a
+    /// dependency cycle it is stratified, inside one the cycle policy
+    /// evaluates it, so the rule compiles whatever program it later
+    /// meets.
     #[dialog_common::test]
-    fn it_refuses_negation_in_a_deductive_rule() {
+    fn it_admits_negation_in_a_deductive_rule() {
         use crate::negation::Negation;
 
         let conclusion = ConceptDescriptor::try_from(vec![(
@@ -1456,14 +1552,15 @@ mod tests {
         ];
         let result = DeductiveRule::new(conclusion, premises);
         assert!(
-            matches!(result, Err(TypeError::NegationInOpenRule { .. })),
-            "a deductive rule admits no unless, got {result:?}"
+            result.is_ok(),
+            "a deductive rule admits an unless, got {result:?}"
         );
     }
 
-    /// A `reduce` block is refused in a deductive rule for the same
-    /// reason: a fold withdraws its previous result when a fact
-    /// arrives. The attribute's `select` policy folds instead.
+    /// A `reduce` block is refused in a deductive rule: a fold
+    /// withdraws its previous result when a fact arrives and has no
+    /// reading inside a dependency cycle. The attribute's `select`
+    /// policy chooses among the candidates instead.
     #[dialog_common::test]
     fn it_refuses_reduce_in_a_deductive_rule() {
         use crate::reduce::{Aggregator, ReduceSpec};
@@ -1499,82 +1596,6 @@ mod tests {
         assert!(
             matches!(result, Err(TypeError::ReduceInOpenRule { .. })),
             "a deductive rule admits no reduce, got {result:?}"
-        );
-    }
-
-    /// A deductive rule neither concludes through nor reads a field
-    /// whose policy changes the attribute's carrier: inside a recursive
-    /// component such a field would read entities as a number, and the
-    /// refusal is local to the rule so no merge of rule sets is ever
-    /// rejected.
-    #[dialog_common::test]
-    fn it_refuses_a_carrier_changing_field_in_a_deductive_rule() {
-        use crate::schema::Select;
-
-        let counted = ConceptDescriptor::try_from(vec![(
-            "members",
-            AttributeDescriptor::new(
-                the!("team/member"),
-                "",
-                Cardinality::Many,
-                Some(Type::Entity),
-            )
-            .with_select(Select::Count, Vec::new()),
-        )])
-        .unwrap();
-        let size = ConceptDescriptor::try_from(vec![(
-            "size",
-            AttributeDescriptor::new(
-                the!("team/size"),
-                "",
-                Cardinality::One,
-                Some(Type::UnsignedInt),
-            ),
-        )])
-        .unwrap();
-
-        // Concluding through a count.
-        let result = DeductiveRule::new(
-            counted.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("team/size")),
-                    Term::<Entity>::var("this"),
-                    Term::var("members"),
-                    Term::blank(),
-                    Some(Cardinality::One),
-                )
-                .into(),
-            ],
-        );
-        assert!(
-            matches!(
-                result,
-                Err(TypeError::PolicyInOpenRule {
-                    role: "concludes",
-                    ..
-                })
-            ),
-            "a deductive rule concludes carrier-closed fields only, got {result:?}"
-        );
-
-        // Reading a count.
-        let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Term::<Entity>::var("this").into());
-        terms.insert("members".to_string(), Term::var("size"));
-        let result = DeductiveRule::new(
-            size,
-            vec![Premise::Assert(Proposition::Concept(ConceptQuery {
-                terms,
-                predicate: counted,
-            }))],
-        );
-        assert!(
-            matches!(
-                result,
-                Err(TypeError::PolicyInOpenRule { role: "reads", .. })
-            ),
-            "a deductive rule reads carrier-closed fields only, got {result:?}"
         );
     }
 

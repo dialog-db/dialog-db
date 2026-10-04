@@ -494,6 +494,11 @@ pub enum CommitError {
     #[error("Commit-time induction failed: {0}")]
     Induction(String),
 
+    /// A write succeeding a claim under a choosing policy could not
+    /// read the claims of its cell to elect the one it succeeds.
+    #[error("Succession failed: {0}")]
+    Succession(String),
+
     /// Reading the registry for what a write replaces failed.
     #[error("Failed to read the registry: {0}")]
     Registry(String),

@@ -58,56 +58,80 @@ gives the same answer today. A relationship with more than two parts
 is an entity; a rule that wants `(group, role)` to stay paired derives
 a membership entity carrying both.
 
-**Cardinality is the attribute's.** A derived value for a
-cardinality-one attribute competes with stored and other derived values
-for the same entity under the attribute's election, exactly as two
-stored values do. A derived row's standing in that election is the
-standing of the newest claim its body consumed: the row exists because
-of those claims and is as recent as the latest of them. Rows of a
-cardinality-many attribute union as a set.
+**The policy is the attribute's.** A derived value competes with
+stored and other derived values for the same entity under the
+attribute's policy, exactly as two stored values do: `last` takes the
+newest, `max` the greatest, `all` keeps every distinct value. A derived
+row's standing is the standing of the newest claim its body consumed:
+the row exists because of those claims and is as recent as the latest
+of them.
 
 **Election happens at the boundary.** Inside a recursive component the
 attribute is read with set semantics: every candidate value is a row,
 and a rule in the component sees all of them. Election runs once, over
 the finished fixpoint, where the component's rows leave it. The reason
-is that election is a maximum, hence an aggregate, and an aggregate
-inside its own recursion has no least fixpoint. A reader outside the
-component sees one value; a rule inside sees the candidates. This is
-the same asymmetry aggregation already has, and it is the only place a
-derived attribute behaves differently from a stored one, because a
-stored cardinality-one attribute never has two live values that a rule
-could tell apart.
+is that a choice is a function of the whole set, and a function of a
+set still growing has no least fixpoint. A reader outside the component
+sees one value; a rule inside sees the candidates. It is the only place
+a derived attribute behaves differently from a stored one, because a
+stored attribute never has two live values a rule could tell apart.
 
-## Open rules are monotone
+## Facts are operation context
+
+A fact carries its cause and its standing: which revision wrote it,
+having seen what. That is the operation context a CRDT log keeps, and
+it is what makes every attribute a replicated register of a known
+kind: `last` is a last-writer-wins register, `top`, `max` and `min`
+are ranked registers, `all` is an add-wins set. Two writers that never
+saw each other both stand; a reader elects between them by standing,
+the same way on every replica; a writer that saw a claim and succeeded
+it retracted it. Nothing is ever refused at a merge, because the merge
+is a union of claims and the policy reads the union.
+
+## Open rules and the cycle policy
 
 A deductive rule is *open*: it is installed as replicated facts, any
 rule anyone installs later may read its head, and its body is resolved
-against whatever program exists when a query runs. A rule set like that
-has a unique meaning for every merge only when every rule is monotone.
-So a deductive rule body admits positive attribute and concept
-premises, optional (`maybe`) premises, row-local constraints and
-formulas, and recursion. It does not admit `unless`, `coalesce`, or
-`reduce`. Those remain available in the two *closed* places: a query or
-subscription, which is compiled once and never read by a rule, and an
-inductive rule, which reads a sealed state and writes facts.
+against whatever program exists when a query runs. A rule set like
+that has to mean one thing under every merge, and the thing it means
+has to be computable: nothing a merge can produce may make a query
+unanswerable. The first attempt at this refused `unless` in deductive
+rules, so that every rule would be monotone. That was too much: a
+negation whose target no cycle derives is stratified and perfectly
+answerable, and most negations are that.
 
-Two consequences:
+What is actually required is that the program never meets a premise
+it cannot evaluate. The one such premise is an absence test — an
+`unless` over a concept, or a set-widened read of one — whose target
+is derived in the same recursive component as the rule, so it would
+read a set the fixpoint is still deriving. The *cycle policy* gives
+that premise a reading instead of an error: inside its component a
+negation holds, and a set-widened read yields the absent row for every
+entity its rule otherwise derives, beside the present rows the table
+offers. Both keep the component positive, so it has a least fixpoint;
+both depend on the rule set alone, never on the order candidates
+arrive, so every replica derives the same rows however its rules were
+merged. Outside a component nothing changes: the negation holds when
+the fact is absent, the optional read sees absence, `coalesce` fills
+it. The dependency analysis reports every premise the policy governs
+(`ProgramAnalysis::absences`), because a rule rarely means it; tonk
+turns the report into a warning.
 
-- the program dependency analysis shrinks to recursion detection and
-  cannot fail. Stratification policy, quarantine, and the
-  `*ThroughRecursion` errors go with it;
-- a constraint whose operand is an absent optional is unknown and does
-  not pass. Today `==` passes when both operands are absent, which makes
-  a derivation disappear when a value arrives, the one non-monotone step
-  that was hiding in the positive fragment.
+So `unless` and optional premises stay in deductive rules. `reduce`
+does not: a fold has no reading over a set still growing, and unlike a
+choice it cannot be deferred to the component's exit without giving
+the rules inside a different relation than the readers outside. A
+fold belongs to the closed places, a query, a subscription, an
+inductive rule, and is refused in a deductive rule at compile time
+(`ReduceInOpenRule`), which the author sees at once and a merge never
+does.
 
 Ordered choice, which the old `variants` desugaring expressed by
-negating earlier alternatives, is expressed by election instead: give
-the cardinality-one attribute a listed value domain and select the
-first listed value present. Every alternative is then a positive rule,
-and the attribute picks. The notation this points at puts the policy
-beside the carrier type, with today's cardinalities as two of its
-values and recency as the default:
+negating earlier alternatives, is better expressed by election: give
+the attribute a listed value domain and select the first listed value
+present. Every alternative is then a positive rule, and the attribute
+picks. The notation puts the policy beside the carrier type, with
+today's cardinalities as two of its values and recency as the default:
 
 ```yaml
 attribute!: &status
@@ -122,47 +146,56 @@ attribute!: &status
 
 `last` is the newest write, today's cardinality one; `all` is the set,
 today's cardinality many; `top` is the first listed value present;
-`max` and `min` are the extremes of a naturally ordered carrier;
-`sum` their sum. Only `last` depends on history rather than on the
-values present, which is why it is the one policy under which a
-derived row needs a standing of its own.
+`max` and `min` are the extremes of a naturally ordered carrier. Every
+policy chooses *members* of the candidate set, which is what lets a
+rule inside a component read the set and a reader outside read the
+choice without disagreeing about what the relation holds. Folds
+(`sum`, `count`, `avg`) are not policies: they make a value no
+candidate is, and belong to `reduce` in the closed places. Only `last`
+depends on history rather than on the values present, which is why it
+is the one policy under which a derived row needs a standing of its
+own.
 
-The policy belongs to the read, not to the relation. A concept field
-names a relation by its attribute and says how it reads it, so two
-fields over one attribute may read it differently: `members` as the
-set and `member-count` as how many. Rules only ever add candidates to
-the relation. That is also how `count`, `count-distinct` and `avg` fit,
-which change the attribute's carrier: candidates are members, the
-value is a number. `as` always declares the carrier, being part of
-the attribute's identity; what a carrier-changing policy yields
-follows from the policy.
+Three words, used strictly. A **relation** is what `the` names: the
+`(domain, name)` pair facts are stored under, which rules derive into
+and are found by. An **attribute** is a relation read under a type and
+a selection policy; two reads of one relation under different policies
+are two attributes, with distinct identities, and `select` on the
+attribute descriptor is where the engine keeps the policy. A **field**
+is a slot of a concept that holds an attribute, and the slot can be
+optional. Cardinality is the policy's arity, `all` being many and
+every other policy one; `cardinality: one` and `many` are read as the
+older spellings of `last` and `all`, and tonk's notation no longer
+writes them: `select: all` where it said `many`, nothing where it said
+`one`.
 
-What keeps every rule set composable is one check local to a rule,
-never a pass over the program. A deductive rule may conclude through,
-and read, a field whose policy is closed over the carrier (`last`,
-`all`, `top`, `max`, `min`, `sum`): outside a recursive component the
-field reads elected, inside one it reads the candidate set, and
-either way a rule installed later can only add candidates. It may
-neither conclude through nor read a carrier-changing field, since
-inside a component that would be entities read as a number. Views,
-queries, subscriptions and inductive rules read any policy: those
-are the closed places, and a view is where a count lives. A
-candidate is a fact: a fold sees each distinct value of the relation
-once, however many rules derive it, or each distinct entry of a keyed
-collection, so a count per contributor reads a collection keyed by
-the contributor.
+A candidate is a fact: a set read sees each distinct value of the
+relation once, however many rules derive it, or each distinct entry of
+a keyed collection.
 
-The engine part of this is the policy on the attribute descriptor a
-field carries, `select`; the notation is tonk's. The policy is part
-of the attribute: an attribute is a relation, the `(domain, name)`
-pair facts are stored under, read under a type and a policy, and two
-reads of one relation under different policies are two attributes,
-with distinct identities. Cardinality is the policy's arity, `all`
-being many and every other policy one; `cardinality: one` and `many`
-are read as the older spellings of `last` and `all`, and tonk's
-notation no longer writes them: `select: all` where it said `many`,
-nothing where it said `one`. Rules derive into the relation and are
-found by it, whatever type or policy a reader declares over it.
+### Writing through an attribute
+
+The policy decides the write too, since a write is a claim that
+succeeds what the attribute stands for. A write under `last` is newer
+than every claim it observed and supersedes them all, which is the
+cardinality-one replacement there has always been. A write under `all`
+appends. A write under `max`, `min` or `top` succeeds the one live
+claim of its cell the policy elects, the claim a read returns: that
+claim is retracted beside the new value and every other claim stays,
+since the policy may elect it again once the new value is gone. The
+election runs in the transactor, over the cell's live claims as the
+commit's view reads them, with the same code a read elects by; the
+statement records only the succession (`Change::Succeed`), so the
+staged view shows the new value as one more candidate until the
+commit resolves it. Only stored claims can be succeeded: a candidate a
+rule derives is not a claim, and a write beside one adds a candidate
+the rule's still competes with. Two writers succeeding the same claim
+concurrently each retract it and assert their own; the merge keeps
+both, and the read elects.
+
+Nothing about the write is a second policy. A relation that should be
+read one way and written another is two attributes: read through one,
+write through the other.
 
 A list is a ranked choice. `as: [case:active, case:registered]`
 lists the values the attribute ranks among, best first, and `the:
@@ -172,9 +205,10 @@ several relations gathers candidates from every relation's facts and
 rules, and the first listed relation offering one wins, so a contact
 handle is the email where there is one, stored or derived, and the
 phone otherwise. Discovery and the dependency graph follow each
-listed relation. Carrier-changing policies read as what they yield:
-a field counting entities is an unsigned integer to the planner and
-to the type checker, and `as` always names the carrier.
+listed relation. With the entity bound, a `top` over listed relations
+reads them best first and stops at the first that offers a candidate,
+since nothing a later relation offers can outrank it; with the entity
+free every relation is read once.
 
 ## Mechanism
 
@@ -198,10 +232,15 @@ rules, and it is per attribute, so the byte-identical plan survives
 rules landing on unrelated attributes.
 
 A rule body naming an attribute directly, through an attribute premise
-with a constant `the`, is rewritten the same way at resolution: through
-`{ a }` when `a` is derived, raw otherwise. A premise whose attribute is
-a variable reads stored facts only; nothing can resolve rules for an
-attribute it does not know.
+with a constant `the`, is rewritten the same way when the registry
+assembles a bundle: through `{ a }` when `a` is derived, under the
+policy the premise's cardinality implies (`last` for one, `all` for
+many or none), raw otherwise; a negated premise negates `{ a }` and an
+optional one reads it set-widened, and the dependency graph sees the
+edge. A premise whose attribute is a variable reads stored facts only;
+nothing can resolve rules for an attribute it does not know. A stored
+rule always carries concept premises, the notation emitting nothing
+else, so this reaches the Rust API alone.
 
 The implicit rule of `{ a }` itself is the raw scan. That is what
 grounds the recursion.
@@ -217,19 +256,20 @@ premise and is outside the component, which is where election runs.
 
 ### Election over the union
 
-`{ a }` for a cardinality-one `a` elects in one pass over every source
+`{ a }` under a choosing policy elects in one pass over every source
 at once: the stored scan, each attribute-headed rule evaluated in
-scope, each head split from a source rule (through the rows the body
-was remembered to yield, below) and each fold. The candidates are
-grouped by entity and folded through the attribute's election with
-the row's standing. A stored row's standing is its artifact's,
-the revision version then the cause, exactly what the stored election
-compares. A derived row's is the maximum standing among the facts its
-`Match` cites, which is every fact a premise bound on the way to the
-head, carried across every concept boundary the row crossed. The fold
+scope, and each head split from a source rule (through the rows the
+body was remembered to yield, below). The candidates are grouped by
+entity and run through the attribute's election with the row's
+standing. A stored row's standing is its artifact's, the revision
+version then the cause, exactly what the stored election compares. A
+derived row's is the maximum standing among the facts its `Match`
+cites, which is every fact a premise bound on the way to the head,
+carried across every concept boundary the row crossed. The election
 is commutative, so the order rows arrive in does not matter. A tie
-falls to the value's bytes. Inside a recursive component the fold is
-skipped and the rows stay a set.
+falls to the value's bytes. Inside a recursive component the election
+is skipped and the rows stay a set; under `all` they stay a set
+everywhere, each distinct value once.
 
 ### Set-widened reads
 
@@ -300,13 +340,10 @@ and sees the built-in's head for it like any rule's.
 
 ### Reducing rules
 
-A reducing rule's heads are its reduced fields, each folded over the
-body grouped by the entity, and its other fields derived from the
-unfolded body. A fold grouped by anything finer than the entity is
-not expressible as an attribute of that entity, which is the EAV
-answer again: the group is an entity of its own. An identity-less
-fold whose group has no present input derives nothing for that
-entity, where the concept head bound the field `Absent`.
+A deductive rule refuses `reduce` (see the cycle policy above). The
+plumbing that split a reducing rule's heads and folded them stands in
+the code until inductive rules take `reduce`, where a fold has a
+sealed state to read and a fact to write.
 
 ### Storage: `dialog.rule/derives`
 
@@ -392,8 +429,11 @@ and the concept reading it share `this`.
 Nothing in how a rule is written. A concept head still works and
 means what it meant, with one visible difference: a subset concept
 now sees the derivation. The `dialog.rule/derives` facts appear beside
-the existing ones. `unless`, `coalesce` and `reduce` in a deductive
-rule are compile errors that name the closed forms to use instead.
+the existing ones. `reduce` in a deductive rule is a compile error
+that names the closed forms to use instead; `unless` and optional
+premises compile, and an absence test inside a recursive component is
+reported for the analyzer to warn about. A field that reads a relation
+under `max`, `min` or `top` writes by succeeding the claim it elects.
 
 ## Costs
 
@@ -491,9 +531,10 @@ What remains is the re-derivation itself: each affected entity
 evaluates every presence rule's body with `this` bound, and each
 body's negated premises evaluate a concept query of their own, with
 its rule resolution, its merge decision and its index probes, so
-forty bodies cost about a hundred negation pipelines. Refusing
-`unless` in deductive rules, which the monotone design does, removes
-that cost from these rules rather than optimising it.
+forty bodies cost about a hundred negation pipelines. Writing the
+presence and status rules positively, as ranked choices, removes that
+cost from these rules rather than optimising it; `unless` stays
+available for the rules that need it.
 
 Without the shared body, the single-pass election and the covering
 rule, `member` was three times main and `titled` twice `member`. With
@@ -506,16 +547,26 @@ counts the bench prints by a block or two between runs.
 
 ## Not in this change
 
-- `reduce` on inductive rules, the materialised home for aggregates;
-- a rule body naming a derived attribute through a raw attribute
-  premise, rather than a concept, reads stored facts only; the
-  notation always emits concept premises, so this reaches only the
-  Rust API;
-- the stratification analysis and its errors, unreachable now that
-  deductive rules refuse `unless` and `reduce`, which still stand in
-  the code until removed;
+- `reduce` on inductive rules, the materialised home for aggregates,
+  and with it the removal of the reducing-rule plumbing deductive
+  rules no longer reach;
+- the aggregation half of the stratification analysis, unreachable
+  now that deductive rules refuse `reduce`, which still stands in the
+  code until removed;
 - a `select` attribute on `#[derive(Attribute)]`, so a Rust-declared
-  concept reads a ranked or folded field as the notation does;
+  concept reads a ranked field as the notation does;
+- policies as rules: a `policy!:` form that lets an author define how
+  an attribute chooses among its candidates, beyond the five built
+  in;
+- variants, so a listed `as:` domain reads as a tagged type rather
+  than as values of one carrier;
+- a presence-narrowing operator, so a rule can state that an optional
+  it reads is present and have the type checker take it from there,
+  where today `coalesce` is the one way to use a `?T` where a `T` is
+  wanted;
+- the tonk analyzer's warning for an absence test inside a recursive
+  component, which needs the analyzer to run the dependency analysis
+  over the library it is checking against;
 - flattening a concept premise's attribute reads into the enclosing
   conjunction's merge, so two concept applications sharing an entity
   join their attributes in one pass rather than probing.

@@ -1,6 +1,7 @@
-use super::dependencies::{ProgramAnalysis, Violation};
+use super::dependencies::{AggregationViolation, ProgramAnalysis};
 use crate::Entity;
 use crate::EvaluationError;
+use crate::attribute::Relation;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::concept::query::{ConceptRules, Exact, PlanCache};
 use crate::rule::deductive::DeductiveRule;
@@ -66,6 +67,24 @@ fn relation_keys(field: &ConceptFieldDescriptor) -> Vec<Entity> {
 
 fn poisoned<E: Display>(error: E) -> EvaluationError {
     EvaluationError::Store(error.to_string())
+}
+
+/// `rule` reading every relation in `derived` through its attribute
+/// concept where its body names the relation by an attribute premise
+/// (see [`DeductiveRule::reading_derived`]), or the rule as it is.
+fn reading_derived(
+    rule: &DeductiveRule,
+    derived: &HashSet<Entity>,
+) -> Result<DeductiveRule, EvaluationError> {
+    let reads_derived = |relation: &Relation| {
+        Reach::of(relation)
+            .on_entity()
+            .is_some_and(|on| derived.contains(&on))
+    };
+    Ok(rule
+        .reading_derived(&reads_derived)
+        .map_err(poisoned)?
+        .unwrap_or_else(|| rule.clone()))
 }
 
 impl RuleRegistry {
@@ -135,11 +154,15 @@ impl RuleRegistry {
             for rule in ConceptRules::chain_scans(field) {
                 bundle.install(rule);
             }
+            // A rule's body reads a relation some rule derives through
+            // the attribute concept over it, so it sees the derived
+            // candidates too.
+            let derived = self.derived()?;
             let index = self.heads.read().map_err(poisoned)?;
             for key in relation_keys(field) {
                 if let Some(rules) = index.get(&key) {
                     for rule in rules {
-                        bundle.install(rule.clone());
+                        bundle.install(reading_derived(rule, &derived)?);
                     }
                 }
             }
@@ -219,14 +242,13 @@ impl RuleRegistry {
     /// concept's attributes.
     ///
     /// Runs the query-time dependency check over the concept's
-    /// closure first: an ill-stratified closure fails with
-    /// [`EvaluationError::NegationThroughRecursion`] or
-    /// [`EvaluationError::AggregationThroughRecursion`], so
-    /// ill-stratified regions of the program fail exactly the
-    /// queries that touch them. When the concept itself sits on a
-    /// (stratified) dependency cycle, the returned rules carry the
-    /// program analysis so evaluation switches to the semi-naive
-    /// fixpoint.
+    /// closure first: a closure folding inside a cycle fails with
+    /// [`EvaluationError::AggregationThroughRecursion`], so such
+    /// regions of the program fail exactly the queries that touch
+    /// them. When the concept itself sits on a dependency cycle, the
+    /// returned rules carry the program analysis so evaluation
+    /// switches to the semi-naive fixpoint, which evaluates any
+    /// absence test inside the cycle under the cycle policy.
     pub fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let analysis = self.analysis()?;
         analysis.check(predicate)?;
@@ -277,6 +299,7 @@ impl RuleRegistry {
             .keys()
             .cloned()
             .collect();
+        let derived = self.derived()?;
         let mut entries: Vec<(Entity, ConceptRules)> = Vec::with_capacity(keys.len());
         for key in keys {
             let index = self.heads.read().map_err(poisoned)?;
@@ -286,13 +309,13 @@ impl RuleRegistry {
             let Some(first) = rules.first() else { continue };
             let mut bundle = ConceptRules::new(first.conclusion());
             for rule in rules {
-                bundle.install(rule.clone());
+                bundle.install(reading_derived(rule, &derived)?);
             }
             entries.push((key, bundle));
         }
         let analysis = Arc::new(ProgramAnalysis::analyze_with(
             entries.iter().map(|(entity, bundle)| (entity, bundle)),
-            self.derived()?,
+            derived,
         ));
         *self.analysis.write().map_err(poisoned)? = Some(analysis.clone());
         Ok(analysis)
@@ -301,8 +324,10 @@ impl RuleRegistry {
     /// Every stratification violation in the current rule set.
     /// Callers decide what to do: surface as a warning after an
     /// install, refuse to proceed after a merge, or ignore and let
-    /// queries fail individually.
-    pub fn validate(&self) -> Result<Vec<Violation>, EvaluationError> {
+    /// queries fail individually. The absence tests the cycle
+    /// policy governs are listed by
+    /// [`ProgramAnalysis::absences`] on [`Self::analysis`].
+    pub fn validate(&self) -> Result<Vec<AggregationViolation>, EvaluationError> {
         Ok(self.analysis()?.violations().to_vec())
     }
 

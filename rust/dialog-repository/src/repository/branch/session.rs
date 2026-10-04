@@ -2138,13 +2138,13 @@ mod rule_tests {
         Ok(())
     }
 
-    /// A committed rule derives a relation a query folds: the rule
-    /// stores, discovers and hydrates through the `db.rule/*` rail, and
-    /// a read of its relation under `sum` folds the candidates it
-    /// derives over committed facts, found by the relation whatever
-    /// policy the read declares over it.
+    /// A committed rule derives a relation a query elects over: the
+    /// rule stores, discovers and hydrates through the `db.rule/*`
+    /// rail, and a read of its relation under `max` chooses among the
+    /// candidates it derives over committed facts, found by the
+    /// relation whatever policy the read declares over it.
     #[dialog_common::test]
-    async fn it_folds_a_relation_a_committed_rule_derives() -> anyhow::Result<()> {
+    async fn it_elects_over_a_relation_a_committed_rule_derives() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -2171,8 +2171,8 @@ mod rule_tests {
                 serde_json::from_value(json).expect("descriptor parses");
             descriptor.compile().expect("rule compiles")
         };
-        let dept_total: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "total": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "sum" }
+        let dept_top: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "top": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "max" }
         }}))?;
 
         let dept: Entity = "id:dept-a".parse()?;
@@ -2193,32 +2193,32 @@ mod rule_tests {
 
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("dept"));
-        terms.insert("total".into(), Term::var("total"));
+        terms.insert("top".into(), Term::var("top"));
         let rows: Vec<ConceptConclusion> = branch
             .query()
             .select(ConceptQuery {
-                predicate: dept_total,
+                predicate: dept_top,
                 terms,
             })
             .perform(&operator)
             .try_vec()
             .await?;
-        assert_eq!(rows.len(), 1, "one folded row for the department");
+        assert_eq!(rows.len(), 1, "one elected row for the department");
         assert_eq!(*rows[0].entity(), dept);
         assert_eq!(
-            rows[0].get::<u64>("total")?,
-            7,
-            "the query folded what the hydrated rule derives"
+            rows[0].get::<u64>("top")?,
+            4,
+            "the query chose among what the hydrated rule derives"
         );
         Ok(())
     }
 
-    /// A fold reads every rule's candidates: the committed rule is
-    /// found first and the query's overlay rule after it, and a `sum`
-    /// read over their relation folds what both derive per entity,
-    /// never taking either rule alone for the whole answer.
+    /// An election reads every rule's candidates: the committed rule is
+    /// found first and the query's overlay rule after it, and a `max`
+    /// read over their relation chooses among what both derive per
+    /// entity, never taking either rule alone for the whole answer.
     #[dialog_common::test]
-    async fn it_folds_a_committed_and_an_overlay_rule_together() -> anyhow::Result<()> {
+    async fn it_elects_over_a_committed_and_an_overlay_rule_together() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -2254,8 +2254,8 @@ mod rule_tests {
             }]
         }))?;
         let overlay = overlay.compile()?;
-        let dept_total: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "total": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "sum" }
+        let dept_top: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "top": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "max" }
         }}))?;
 
         let dept_a: Entity = "id:dept-a".parse()?;
@@ -2278,25 +2278,25 @@ mod rule_tests {
 
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("dept"));
-        terms.insert("total".into(), Term::var("total"));
+        terms.insert("top".into(), Term::var("top"));
         let rows: Vec<ConceptConclusion> = branch
             .query()
             .with(&overlay)
             .select(ConceptQuery {
-                predicate: dept_total,
+                predicate: dept_top,
                 terms,
             })
             .perform(&operator)
             .try_vec()
             .await?;
-        let mut totals: Vec<(Entity, u64)> = rows
+        let mut tops: Vec<(Entity, u64)> = rows
             .iter()
-            .map(|row| Ok((row.entity().clone(), row.get::<u64>("total")?)))
+            .map(|row| Ok((row.entity().clone(), row.get::<u64>("top")?)))
             .collect::<anyhow::Result<_>>()?;
-        totals.sort();
+        tops.sort();
         assert_eq!(
-            totals,
-            vec![(dept_a, 7), (dept_b, 9)],
+            tops,
+            vec![(dept_a, 4), (dept_b, 9)],
             "the committed and the overlay rule both contribute"
         );
         Ok(())
@@ -3897,6 +3897,7 @@ mod ordered_relation_tests {
             is: Value::Entity(member.clone()),
             cause: None,
             cardinality: None,
+            succession: None,
         }
     }
 
@@ -3946,6 +3947,7 @@ mod ordered_relation_tests {
                 is: Value::String("Groceries".into()),
                 cause: None,
                 cardinality: None,
+                succession: None,
             })
             .commit()
             .publish()

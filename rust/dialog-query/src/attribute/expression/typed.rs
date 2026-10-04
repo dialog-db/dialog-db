@@ -167,10 +167,12 @@ where
         let the = desc.the().attribute().expect(STATIC_ATTRIBUTE);
         let attr: A = is.into();
         let value = attr.value().clone().into();
-        if desc.cardinality() == Cardinality::One {
-            update.associate_unique(the, of, value);
-        } else {
-            update.associate(the, of, value);
+        match desc.succession() {
+            Some(succession) => update.succeed(the, of, value, succession),
+            None if desc.cardinality() == Cardinality::One => {
+                update.associate_unique(the, of, value)
+            }
+            None => update.associate(the, of, value),
         }
     }
 
@@ -205,6 +207,7 @@ where
             is: attr.value().clone().into(),
             cause,
             cardinality: Some(desc.cardinality()),
+            succession: desc.succession(),
         })
     }
 }
@@ -269,6 +272,7 @@ where
             is: attr.value().clone().into(),
             cause,
             cardinality: Some(desc.cardinality()),
+            succession: desc.succession(),
         }
     }
 }

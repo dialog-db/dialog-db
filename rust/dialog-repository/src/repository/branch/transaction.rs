@@ -1,6 +1,7 @@
 mod batch;
 mod induce;
 mod query;
+mod succession;
 pub use batch::*;
 pub use query::{TransactionQuery, TransactionSelectQuery};
 
@@ -239,6 +240,7 @@ impl TransactionCommit<&Snapshot> {
     {
         let snapshot = self.line;
         let mut changes = self.changes;
+        succession::resolve(SourceRef::Snapshot(snapshot), &mut changes, env).await?;
         // A snapshot commit reports only its revision: the transients
         // induction emitted surface on a staged
         // [`TransactionBatch::induced`] alone.

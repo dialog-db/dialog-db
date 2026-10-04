@@ -8,7 +8,7 @@ use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::types::Type;
-use dialog_artifacts::{NameShape, Symbol};
+use dialog_artifacts::{NameShape, Succession, Symbol};
 
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
@@ -483,6 +483,20 @@ impl AttributeDescriptor {
         &self.among
     }
 
+    /// How a write through this attribute succeeds a claim of its
+    /// cell, when its policy chooses one: the claim a read returns is
+    /// retracted beside the written value. `last` needs none, since a
+    /// write is newer than every claim it observed and replaces them
+    /// all; `all` appends.
+    pub fn succession(&self) -> Option<Succession> {
+        match self.select {
+            Select::Max => Some(Succession::Max),
+            Select::Min => Some(Succession::Min),
+            Select::Top => Some(Succession::Top(self.among.clone())),
+            Select::Last | Select::All => None,
+        }
+    }
+
     /// This descriptor's first relation read plainly, under its
     /// policy's arity alone: the relation itself, which is what rules
     /// derive into.
@@ -493,23 +507,9 @@ impl AttributeDescriptor {
         self
     }
 
-    /// The type a field over this attribute reads: the carrier, or what
-    /// a carrier-changing policy yields from it, an unsigned integer
-    /// for `count` and `count-distinct` and a float for `avg`. `as`
-    /// always declares the carrier, being part of the attribute's
-    /// identity.
-    pub fn read_type(&self) -> Option<Type> {
-        match self.select() {
-            Select::Count | Select::CountDistinct => Some(Type::UnsignedInt),
-            Select::Avg => Some(Type::Float),
-            _ => self.content_type,
-        }
-    }
-
     /// Why the declared policy does not fit this attribute, if it does
-    /// not: `top` ranks among listed values and nothing else takes
-    /// them; `sum` and `avg` fold a numeric carrier, `max` and `min`
-    /// order a comparable one.
+    /// not: `top` ranks among listed values or relations, and `max`
+    /// and `min` order a comparable carrier.
     pub fn select_error(&self) -> Option<String> {
         if self.is_chain() && self.select != Select::Top {
             return Some(
@@ -518,20 +518,11 @@ impl AttributeDescriptor {
         }
         let select = self.select;
         let content = self.content_type;
-        let numeric =
-            |kind: Type| matches!(kind, Type::UnsignedInt | Type::SignedInt | Type::Float);
         match select {
             Select::Top if self.among.is_empty() && !self.is_chain() => {
                 Some("`top` ranks listed values or relations, and none are listed".to_string())
             }
             Select::Top => None,
-            Select::Sum | Select::Avg => match content {
-                Some(kind) if !numeric(kind) => {
-                    Some(format!("`{select}` folds a numeric carrier, not {kind:?}"))
-                }
-                _ => None,
-            },
-            Select::Count | Select::CountDistinct => None,
             Select::Max | Select::Min => match content {
                 Some(Type::Bytes) | Some(Type::Boolean) => Some(format!(
                     "`{select}` orders a comparable carrier, not {:?}",
@@ -925,8 +916,7 @@ mod tests {
     }
 
     /// A policy that does not fit its attribute is named: `top` without
-    /// listed values, listed values under another policy, a fold over
-    /// the wrong carrier.
+    /// listed values or relations, `max` over an unordered carrier.
     #[dialog_common::test]
     fn it_names_a_policy_its_attribute_cannot_read_under() {
         let status = |select: Select, among: Vec<Value>, kind: Type| {
@@ -939,28 +929,6 @@ mod tests {
         assert!(
             status(Select::All, vec![Value::Boolean(true)], Type::Entity).is_none(),
             "a listed domain read as a set is an enum-typed set"
-        );
-        assert!(status(Select::Sum, Vec::new(), Type::String).is_some());
-        assert!(status(Select::Sum, Vec::new(), Type::UnsignedInt).is_none());
-        assert!(status(Select::Count, Vec::new(), Type::Entity).is_none());
-        assert!(status(Select::Avg, Vec::new(), Type::String).is_some());
-        assert!(status(Select::Avg, Vec::new(), Type::UnsignedInt).is_none());
-        let counted = AttributeDescriptor::new(
-            the!("team/member"),
-            "",
-            Cardinality::Many,
-            Some(Type::Entity),
-        )
-        .with_select(Select::Count, Vec::new());
-        assert_eq!(
-            counted.content_type(),
-            Some(Type::Entity),
-            "`as` is the carrier"
-        );
-        assert_eq!(
-            counted.read_type(),
-            Some(Type::UnsignedInt),
-            "a count reads a number"
         );
         assert!(status(Select::Max, Vec::new(), Type::Boolean).is_some());
         assert!(status(Select::Max, Vec::new(), Type::String).is_none());
