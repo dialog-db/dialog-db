@@ -774,16 +774,17 @@ where
         // Staged layers — a range read each, in the lines' format, and
         // pushed only when they have rows, for the same reason. A staged
         // row is a write the transaction will commit, so it stands at
-        // the edition that commit mints: a read over the transaction
-        // elects it over the line's rows, as a read after the commit
-        // will.
+        // the edition that commit mints, equal to every other write of
+        // the transaction: a read over the transaction elects as a read
+        // after the commit will.
         let pending = self.pending_edition();
         for layer in self.layers().await? {
-            let rows = layer.select_sequenced(&input, &manifest);
+            let rows = layer.select(&input, &manifest);
             if !rows.is_empty() {
-                streams.push(Box::pin(stream::iter(rows.into_iter().map(
-                    move |(fact, sequence)| Ok(ArtifactView::pending(fact, pending, sequence)),
-                ))));
+                streams.push(Box::pin(stream::iter(
+                    rows.into_iter()
+                        .map(move |fact| Ok(ArtifactView::pending(fact, pending))),
+                )));
             }
         }
 

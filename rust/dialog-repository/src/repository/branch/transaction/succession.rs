@@ -28,7 +28,6 @@ use crate::{CommitError, RemoteSite, Staged};
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Attribute, Cause, Change, Changes, Entity, Select, Value,
-    pending_version,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -88,11 +87,11 @@ where
     // derived candidates through.
     let mut prefix = Staged::default();
 
-    for (sequence, (the, of, change)) in staged.log().iter().enumerate() {
+    for (position, (the, of, change)) in staged.log().iter().enumerate() {
         let key = (the.clone(), of.clone());
         if !cells.contains_key(&key) {
             let observed = if matches!(change, Change::Succeed(..))
-                || staged.log()[sequence..]
+                || staged.log()[position..]
                     .iter()
                     .any(|(t, o, c)| t == the && o == of && matches!(c, Change::Succeed(..)))
             {
@@ -113,7 +112,7 @@ where
             }
             _ => Vec::new(),
         };
-        for written in cell.write(change, sequence, &derived, edition, the, of)? {
+        for written in cell.write(change, &derived, edition, the, of)? {
             prefix.apply_change(the, of, &written);
             settled.put_cell(the.clone(), of.clone(), vec![written]);
         }
@@ -152,8 +151,8 @@ where
         };
         let derived = derived_candidates(view, &the, &of).await?;
         let mut settled = Vec::with_capacity(list.len());
-        for (sequence, change) in list.iter().enumerate() {
-            settled.extend(cell.write(change, sequence, &derived, edition, &the, &of)?);
+        for change in &list {
+            settled.extend(cell.write(change, &derived, edition, &the, &of)?);
         }
         head.put_cell(the, of, settled);
     }
@@ -277,7 +276,7 @@ struct Cell {
 
 impl Cell {
     /// Replay one write: a plain assertion adds a claim, standing at
-    /// the commit's edition and its place among the writes; a
+    /// the commit's edition, as every write of the transaction does; a
     /// retraction removes one; a replace keeps its value alone; a
     /// succession elects among the live claims and the derived
     /// candidates that are not claims, retracts the elected claim when
@@ -286,7 +285,6 @@ impl Cell {
     fn write(
         &mut self,
         change: &Change,
-        sequence: usize,
         derived: &[Candidate],
         edition: Edition,
         the: &Attribute,
@@ -294,7 +292,7 @@ impl Cell {
     ) -> Result<Vec<Change>, CommitError> {
         let staged = |value: &Value| Candidate {
             standing: Some(Standing {
-                version: Some((edition, pending_version(sequence as u64))),
+                version: Some((edition, [0; 32])),
                 cause: Cause::from(&Artifact {
                     the: the.clone(),
                     of: of.clone(),
