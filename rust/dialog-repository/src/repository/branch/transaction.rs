@@ -4,8 +4,10 @@ mod query;
 mod succession;
 pub use batch::*;
 pub use query::{TransactionQuery, TransactionSelectQuery};
+pub(crate) use succession::settle;
 
 use crate::Commit;
+use crate::repository::branch::QueryLayer;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::source::SourceRef;
 use crate::rules::{SharedRuleCache, TriggerFootprint, on_attr, reads_attr};
@@ -111,7 +113,7 @@ impl<Line> Transaction<Line> {
     pub fn commit(self) -> TransactionCommit<Line> {
         TransactionCommit {
             line: self.line,
-            changes: self.changes.export(),
+            changes: self.changes.clone(),
             transients: self.transients.export(),
             allow_empty: false,
             canonicalize: false,
@@ -192,7 +194,7 @@ impl Snapshot {
 /// durable batch.
 pub struct TransactionCommit<Line> {
     pub(super) line: Line,
-    pub(super) changes: Changes,
+    pub(super) changes: Staged,
     pub(super) transients: Changes,
     pub(super) allow_empty: bool,
     pub(super) canonicalize: bool,
@@ -239,10 +241,12 @@ impl TransactionCommit<&Snapshot> {
             + 'static,
     {
         let snapshot = self.line;
-        let mut changes = self.changes;
-        Box::pin(succession::resolve(
-            SourceRef::Snapshot(snapshot),
-            &mut changes,
+        let source = SourceRef::Snapshot(snapshot);
+        let operator = Identify.perform(env).await?;
+        let mut changes = Box::pin(succession::settle(
+            vec![source.to_source()],
+            QueryLayer::from(source).overlay(&operator),
+            &self.changes,
             env,
         ))
         .await?;

@@ -73,6 +73,40 @@ struct State {
 }
 
 impl State {
+    /// Apply one recorded write: hold or drop its fact for reads, give
+    /// it its place among the transaction's writes, and log it. A
+    /// succession holds its value as one more candidate until the
+    /// commit settles which claim it succeeds; a read over the
+    /// transaction settles the same way (see
+    /// [`succession`](crate::repository::branch::transaction)).
+    fn apply_change(&mut self, the: &Attribute, of: &Entity, change: &Change) {
+        let fact = |value: &Value| Artifact {
+            the: the.clone(),
+            of: of.clone(),
+            is: value.clone(),
+            cause: None,
+        };
+        let sequence = self.log.len() as u64;
+        match change {
+            Change::Assert(value) | Change::Succeed(value, _) => {
+                self.apply(Instruction::Assert(fact(value)));
+                self.sequences
+                    .insert((the.clone(), of.clone(), value.clone()), sequence);
+            }
+            Change::Replace(value) => {
+                self.apply(Instruction::Replace(fact(value)));
+                self.sequences
+                    .insert((the.clone(), of.clone(), value.clone()), sequence);
+            }
+            Change::Retract(value) => {
+                self.apply(Instruction::Retract(fact(value)));
+                self.sequences
+                    .remove(&(the.clone(), of.clone(), value.clone()));
+            }
+        }
+        self.log.push((the.clone(), of.clone(), change.clone()));
+    }
+
     fn apply(&mut self, instruction: Instruction) {
         match instruction {
             Instruction::Assert(fact) => {
@@ -151,40 +185,31 @@ impl Staged {
             }
         }
         for (entity, attribute, change) in changes.iter() {
-            let fact = |value: &Value| Artifact {
-                the: attribute.clone(),
-                of: entity.clone(),
-                is: value.clone(),
-                cause: None,
-            };
-            let sequence = state.log.len() as u64;
-            match change {
-                // A succession holds its value as one more candidate
-                // until the commit settles which claim it succeeds; a
-                // read over the transaction elects among them.
-                Change::Assert(value) | Change::Succeed(value, _) => {
-                    state.apply(Instruction::Assert(fact(value)));
-                    state
-                        .sequences
-                        .insert((attribute.clone(), entity.clone(), value.clone()), sequence);
-                }
-                Change::Replace(value) => {
-                    state.apply(Instruction::Replace(fact(value)));
-                    state
-                        .sequences
-                        .insert((attribute.clone(), entity.clone(), value.clone()), sequence);
-                }
-                Change::Retract(value) => {
-                    state.apply(Instruction::Retract(fact(value)));
-                    state
-                        .sequences
-                        .remove(&(attribute.clone(), entity.clone(), value.clone()));
-                }
-            }
-            state
-                .log
-                .push((attribute.clone(), entity.clone(), change.clone()));
+            state.apply_change(attribute, entity, change);
         }
+    }
+
+    /// Apply one write, as [`apply`](Self::apply) does for a batch.
+    pub(crate) fn apply_change(&mut self, the: &Attribute, of: &Entity, change: &Change) {
+        Arc::make_mut(&mut self.0).apply_change(the, of, change);
+    }
+
+    /// Every write in the order the transaction made it.
+    pub(crate) fn log(&self) -> &[(Attribute, Entity, Change)] {
+        &self.0.log
+    }
+
+    /// The asset changes the transaction made, as a batch with no facts.
+    pub(crate) fn assets(&self) -> &Changes {
+        &self.0.assets
+    }
+
+    /// Whether any write succeeds a claim the commit has yet to settle.
+    pub(crate) fn has_successions(&self) -> bool {
+        self.0
+            .log
+            .iter()
+            .any(|(_, _, change)| matches!(change, Change::Succeed(..)))
     }
 
     /// The writes as the batch a commit applies: every write in the

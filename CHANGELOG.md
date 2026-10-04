@@ -19,6 +19,10 @@ being written, and retracts the stored claim holding what the read
 elected, beside asserting the new value. Every other claim in the cell
 stays. A write under `all` appends, as before.
 
+The guarantee this gives is transactional: an assertion succeeds
+whatever a reader at that point in the transaction would have observed,
+with `all` the one policy that asserts without succeeding anything.
+
 What this changes for you:
 
 - A cardinality-one write used to retract every prior claim of its
@@ -49,14 +53,11 @@ What this changes for you:
   beside it, and a write under `max` after an `all` write succeeds the
   staged claim it elects. An inductive rule's head observes the round
   view it fired on.
-- Within a transaction, a staged write stands at the edition the
-  commit will mint, ordered among the transaction's writes by when it
-  was made, so `transaction.query()` elects your own pending write
-  under `last` as the commit will. Under `max`, `min` or `top` a read
-  over the transaction still sees the committed claim the commit will
-  retire, beside the pending write: the view shows candidates and the
-  commit settles them. Closing that gap means settling on read; it is
-  open.
+- A transaction reads what its commit will leave. Its own reads settle
+  its writes the same way the commit does, on the first read, so the
+  claim a write succeeds is already gone from `transaction.query()`,
+  and a staged write stands at the edition the commit will mint,
+  ordered among the transaction's writes by when it was made.
 
 Why: `Replace` encoded one policy, last-writer-wins, in the write path,
 while reads had grown four. A write is a claim that succeeds what the

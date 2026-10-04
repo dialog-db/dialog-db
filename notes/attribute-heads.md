@@ -190,11 +190,14 @@ transaction, in order: the statement records only the succession
 (`Change::Succeed`), the transaction keeps its writes in order, and
 the commit replays each cell's writes over the claims the line holds,
 each succession electing among the live claims and the derived
-candidates and retracting the stored claim it elects. Within the
-transaction the written value is one more candidate, standing at the
-edition the commit will mint and ordered by its place among the
-transaction's writes, so the transaction's own view elects it under
-`last` as the commit will. A candidate a rule derives is not a claim:
+candidates and retracting the stored claim it elects. The guarantee
+is transactional: an assertion succeeds whatever a reader at that
+point in the transaction would have observed, and `all` is the one
+policy that asserts without succeeding anything. The transaction's
+own reads settle its writes the same way on the first read, so what
+a transaction reads is what its commit will leave; a staged write
+stands at the edition the commit will mint, ordered by its place
+among the transaction's writes. A candidate a rule derives is not a claim:
 when the read elects a derived value nothing is retracted, and the
 write stands beside it as one more candidate. Two writers succeeding
 the same claim concurrently each retract it and assert their own; the

@@ -27,7 +27,7 @@ use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
-    SelectQuery, Snapshot, SnapshotClaims, TransactionQuery, origin_of,
+    SelectQuery, Snapshot, SnapshotClaims, Staged, TransactionQuery, origin_of,
 };
 use dialog_artifacts::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
 use dialog_artifacts::tree::WriteScope;
@@ -567,7 +567,7 @@ async fn mint_link<Env>(
     source: SourceRef<'_>,
     base: Option<Revision>,
     line: impl FnOnce(&Did, &Did) -> (Entity, Origin),
-    mut changes: Changes,
+    changes: Staged,
     transients: Changes,
     allow_empty: bool,
     canonicalize: bool,
@@ -591,7 +591,14 @@ where
         + ConditionalSync
         + 'static,
 {
-    Box::pin(succession::resolve(source, &mut changes, env)).await?;
+    let operator = Identify.perform(env).await?;
+    let mut changes = Box::pin(succession::settle(
+        vec![source.to_source()],
+        QueryLayer::from(source).overlay(&operator),
+        &changes,
+        env,
+    ))
+    .await?;
     let induced = induce(source, &mut changes, transients, env).await?;
     let touches = touches_rules(&changes);
     let previous = base.clone();
