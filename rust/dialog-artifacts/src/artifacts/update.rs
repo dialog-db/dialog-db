@@ -296,8 +296,18 @@ impl Changes {
         self.assets.insert(hash, change);
     }
 
-    /// Convert to an instruction stream.
+    /// Convert to an instruction stream, the form a commit applies.
+    ///
+    /// A succession is resolved against the line before the batch
+    /// commits; a batch still holding one has not been through the
+    /// transactor, and committing it raw would land its value without
+    /// succeeding anything. Commit such a batch through a transaction
+    /// (`transaction().integrate(changes)`), which resolves it.
     pub fn into_stream(self) -> ChangeStream {
+        assert!(
+            !self.has_successions(),
+            "a batch holding successions commits through a transaction, which resolves them"
+        );
         ChangeStream::from(self)
     }
 
@@ -356,28 +366,54 @@ impl Changes {
         })
     }
 
-    /// The successions this batch holds, drained: each as the cell it
-    /// writes, the value it asserts and how it elects the claim it
-    /// succeeds. The transactor resolves them against the line into a
-    /// retraction and an assertion before the batch commits.
-    pub fn take_successions(&mut self) -> Vec<(Attribute, Entity, Value, Succession)> {
-        let mut successions = Vec::new();
-        for (entity, attributes) in self.facts.iter_mut() {
-            for (attribute, changes) in attributes.iter_mut() {
-                let (taken, kept): (Vec<Change>, Vec<Change>) = take(changes)
-                    .into_iter()
-                    .partition(|change| matches!(change, Change::Succeed(..)));
-                *changes = kept;
-                for change in taken {
-                    if let Change::Succeed(value, succession) = change {
-                        successions.push((attribute.clone(), entity.clone(), value, succession));
-                    }
+    /// Whether any cell of this batch holds a succession the transactor
+    /// has yet to resolve.
+    pub fn has_successions(&self) -> bool {
+        self.iter()
+            .any(|(_, _, change)| matches!(change, Change::Succeed(..)))
+    }
+
+    /// The cells holding a succession, each once.
+    pub fn cells_with_successions(&self) -> Vec<(Attribute, Entity)> {
+        let mut cells = Vec::new();
+        for (entity, attribute, change) in self.iter() {
+            if matches!(change, Change::Succeed(..)) {
+                let cell = (attribute.clone(), entity.clone());
+                if !cells.contains(&cell) {
+                    cells.push(cell);
                 }
             }
-            attributes.retain(|_, changes| !changes.is_empty());
         }
-        self.facts.retain(|_, attributes| !attributes.is_empty());
-        successions
+        cells
+    }
+
+    /// The changes recorded for one cell, in order, taken out of the
+    /// batch. The transactor settles a cell's successions by taking its
+    /// changes, deciding what each write succeeds, and putting the
+    /// settled changes back with [`put_cell`](Self::put_cell).
+    pub fn take_cell(&mut self, the: &Attribute, of: &Entity) -> Vec<Change> {
+        let Some(attributes) = self.facts.get_mut(of) else {
+            return Vec::new();
+        };
+        let changes = attributes.remove(the).unwrap_or_default();
+        if attributes.is_empty() {
+            self.facts.remove(of);
+        }
+        changes
+    }
+
+    /// Record `changes` for one cell, after whatever the cell holds, in
+    /// the order given.
+    pub fn put_cell(&mut self, the: Attribute, of: Entity, changes: Vec<Change>) {
+        if changes.is_empty() {
+            return;
+        }
+        self.facts
+            .entry(of)
+            .or_default()
+            .entry(the)
+            .or_default()
+            .extend(changes);
     }
 
     /// Convert the fact changes to a vec of instructions.
@@ -385,11 +421,11 @@ impl Changes {
     /// Asset changes are not instructions and are left out: a caller that
     /// commits the batch drains them first with
     /// [`take_assets`](Self::take_assets), and any other caller refuses a
-    /// batch that [`has_assets`](Self::has_assets). A succession still
-    /// in the batch asserts its claim and retracts nothing; the
-    /// transactor drains successions with
-    /// [`take_successions`](Self::take_successions) and resolves them
-    /// before converting.
+    /// batch that [`has_assets`](Self::has_assets). A succession reads as
+    /// the assertion of its value: what the batch claims, which is what a
+    /// caller inspecting the batch asks. The retraction it resolves to
+    /// exists only once the transactor has settled it against the line
+    /// ([`into_stream`](Self::into_stream) refuses a batch before that).
     pub fn into_instructions(self) -> Vec<Instruction> {
         let mut instructions = Vec::new();
         for (entity, attributes) in self.facts {

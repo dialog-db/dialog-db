@@ -37,19 +37,26 @@ What this changes for you:
   `succeed` key that older readers do not know. Batches are not stored
   or sent between replicas today, so this bites only code that encodes
   a batch itself.
-- A `Changes` batch holding successions must commit through a
-  transaction (`branch.transaction().integrate(changes).commit()`),
-  which resolves them. `branch.commit(changes)` applies the batch raw
-  and turns each succession into a plain assertion: the value lands,
-  nothing is retired.
-- Inductive rule heads follow the same rule: an `assert!:` head under
-  a choosing policy succeeds the claim it elects against the round
-  view the rule fired on.
-- Within a transaction, a staged write now stands at the edition the
-  commit will mint, so `transaction.query()` elects your own pending
-  write over committed claims, which is what the commit will do. A
-  later write to the same cell in one transaction succeeds the earlier
-  staged one, which was never committed and simply disappears.
+- A `Changes` batch holding successions commits through a transaction
+  (`branch.transaction().integrate(changes).commit()`), which settles
+  them. `Changes::into_stream`, the form a raw commit takes, refuses a
+  batch that still holds one rather than land its value without
+  succeeding anything. `into_instructions`, which code uses to inspect
+  a batch, reads a succession as the assertion of its value.
+- What a write observes is the line and the writes before it in its
+  own transaction, in order. A cell's writes are replayed in that order
+  at commit: a write under `all` after a write under `last` stands
+  beside it, and a write under `max` after an `all` write succeeds the
+  staged claim it elects. An inductive rule's head observes the round
+  view it fired on.
+- Within a transaction, a staged write stands at the edition the
+  commit will mint, ordered among the transaction's writes by when it
+  was made, so `transaction.query()` elects your own pending write
+  under `last` as the commit will. Under `max`, `min` or `top` a read
+  over the transaction still sees the committed claim the commit will
+  retire, beside the pending write: the view shows candidates and the
+  commit settles them. Closing that gap means settling on read; it is
+  open.
 
 Why: `Replace` encoded one policy, last-writer-wins, in the write path,
 while reads had grown four. A write is a claim that succeeds what the
