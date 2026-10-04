@@ -331,11 +331,31 @@ impl Match {
             name: Some(name), ..
         } = term
         {
-            match self.standings.iter_mut().find(|(held, _)| **held == **name) {
-                Some((_, slot)) => *slot = standing,
-                None => self.standings.push((name.clone(), standing)),
-            }
+            self.cite_variable_standing(name, standing);
         }
+    }
+
+    /// Record that `variable` was bound from a fact of `standing`, so
+    /// a value derived from it stands as that fact does.
+    pub(crate) fn cite_variable_standing(&mut self, variable: &str, standing: Standing) {
+        match self
+            .standings
+            .iter_mut()
+            .find(|(held, _)| **held == *variable)
+        {
+            Some((_, slot)) => *slot = standing,
+            None => self.standings.push((Arc::from(variable), standing)),
+        }
+    }
+
+    /// The standing of the fact that bound `variable`, when a scan did:
+    /// what a value derived from it stands as. `None` when nothing
+    /// cited a fact for it, as for a value a formula computed.
+    pub fn standing_of(&self, variable: &str) -> Option<Standing> {
+        self.all_standings()
+            .into_iter()
+            .find(|(name, _)| **name == *variable)
+            .map(|(_, standing)| standing.clone())
     }
 
     /// The binding for `name` along this row's ancestry.

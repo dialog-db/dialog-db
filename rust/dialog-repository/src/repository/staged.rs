@@ -37,6 +37,7 @@ use dialog_search_tree::Manifest;
 
 use super::ephemeral::Facts;
 use crate::rules::conclusion_attr;
+use dialog_query::concept::query::Election;
 
 /// Cells a replace claimed, by attribute then entity, in the byte form
 /// a [`SortKey`] carries them, so a row's key is checked without
@@ -62,10 +63,11 @@ struct State {
     cells: Arc<Cells>,
     /// The asset changes, held as a batch with no facts.
     assets: Changes,
-    /// The writes that succeed a claim of their cell under a choosing
-    /// policy. Which claim is elected against the line at commit; here
-    /// the written value is held as a fact, so a read over the
-    /// transaction sees it as one more candidate.
+    /// The writes that succeed the claim their attribute's policy
+    /// elects. Which committed claim that is is read against the line
+    /// at commit; here the written value is held as a fact, standing at
+    /// the edition the commit will mint, so a read over the transaction
+    /// elects it as the commit will.
     successions: Vec<(Attribute, Entity, Value, Succession)>,
 }
 
@@ -148,6 +150,37 @@ impl Staged {
             }
         }
         for (the, of, is, succession) in changes.take_successions() {
+            // A write succeeds what it observed, this transaction's own
+            // earlier writes to the cell included: under `last` every one
+            // of them, being older, under another policy the one the
+            // policy elects among them. A staged claim succeeded here was
+            // never committed, so it is dropped rather than retracted.
+            let earlier: Vec<Artifact> = state
+                .facts
+                .cell(&of, &the)
+                .into_iter()
+                .filter(|prior| prior.is != is)
+                .collect();
+            let dropped: Vec<Artifact> = match &succession {
+                Succession::Last => earlier,
+                _ => Election::from(&succession)
+                    .elect_claims(
+                        earlier
+                            .into_iter()
+                            .map(|prior| (prior.is.clone(), None, prior))
+                            .collect(),
+                    )
+                    .ok()
+                    .flatten()
+                    .into_iter()
+                    .collect(),
+            };
+            for prior in dropped {
+                state.facts.remove(&prior);
+                state.successions.retain(|(the, of, is, _)| {
+                    !(*the == prior.the && *of == prior.of && *is == prior.is)
+                });
+            }
             state.apply(Instruction::Assert(Artifact {
                 the: the.clone(),
                 of: of.clone(),
@@ -168,8 +201,16 @@ impl Staged {
     /// it.
     pub(crate) fn export(&self) -> Changes {
         let mut changes = self.0.assets.clone();
+        let succeeding = |fact: &Artifact| {
+            self.0
+                .successions
+                .iter()
+                .any(|(the, of, is, _)| *the == fact.the && *of == fact.of && *is == fact.is)
+        };
         for fact in self.0.replaced.values() {
-            changes.associate_unique(fact.the.clone(), fact.of.clone(), fact.is.clone());
+            if !succeeding(fact) {
+                changes.associate_unique(fact.the.clone(), fact.of.clone(), fact.is.clone());
+            }
         }
         for fact in self.0.retracted.values() {
             changes.dissociate(fact.the.clone(), fact.of.clone(), fact.is.clone());
@@ -183,12 +224,7 @@ impl Staged {
                 .replaced
                 .get(&(fact.the.clone(), fact.of.clone()))
                 .is_some_and(|replace| replace.is == fact.is);
-            let succeeding = self
-                .0
-                .successions
-                .iter()
-                .any(|(the, of, is, _)| *the == fact.the && *of == fact.of && *is == fact.is);
-            if !claimed && !succeeding {
+            if !claimed && !succeeding(fact) {
                 changes.associate(fact.the.clone(), fact.of.clone(), fact.is.clone());
             }
         }

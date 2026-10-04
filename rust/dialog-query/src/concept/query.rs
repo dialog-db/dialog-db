@@ -96,6 +96,11 @@ fn merge_parameters(
         match result.get(param_name) {
             Some(Binding::Present(value)) => {
                 merged.bind(user_param, value.clone())?;
+                if let Some(name) = user_param.name()
+                    && let Some(standing) = result.standing_of(param_name)
+                {
+                    merged.cite_variable_standing(name, standing);
+                }
             }
             Some(Binding::Absent) => {
                 merged.bind_absent(user_param)?;
@@ -702,7 +707,9 @@ impl ConceptQuery {
                 };
                 let key = (caller_id, entity_key(&this)?);
                 groups.entry(key).or_default().push(Entry {
-                    standing: result.standing(),
+                    standing: result
+                        .standing_of(ConceptDescriptor::VALUE)
+                        .or_else(|| result.standing()),
                     value,
                     identity,
                     rank: 0,
@@ -839,7 +846,9 @@ impl ConceptQuery {
                                     value,
                                     key,
                                     rank,
-                                    standing: row.standing(),
+                                    standing: row
+                                        .standing_of(&recall.value)
+                                        .or_else(|| row.standing()),
                                     source: Source::Shared(shared.clone(), index),
                                 });
                             }
@@ -870,7 +879,9 @@ impl ConceptQuery {
                                     value,
                                     key,
                                     rank,
-                                    standing: row.standing(),
+                                    standing: row
+                                        .standing_of(ConceptDescriptor::VALUE)
+                                        .or_else(|| row.standing()),
                                     source: Source::Owned(row),
                                 });
                             }
@@ -1118,6 +1129,7 @@ pub struct Election {
 impl From<&Succession> for Election {
     fn from(succession: &Succession) -> Self {
         match succession {
+            Succession::Last => Election::plain(Select::Last),
             Succession::Max => Election::plain(Select::Max),
             Succession::Min => Election::plain(Select::Min),
             Succession::Top(among) => Election {

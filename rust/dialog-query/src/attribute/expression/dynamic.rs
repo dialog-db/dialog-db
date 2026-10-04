@@ -161,8 +161,10 @@ impl<Is: Scalar> Statement for DynamicAttributeExpression<The, Entity, Is> {
             (Some(succession), _) => {
                 update.succeed(the.into(), self.of, value, succession);
             }
+            // A cardinality-one write with no policy spelled is a
+            // `last` write.
             (None, Some(Cardinality::One)) => {
-                update.associate_unique(the.into(), self.of, value);
+                update.succeed(the.into(), self.of, value, Succession::Last);
             }
             (None, _) => {
                 update.associate(the.into(), self.of, value);

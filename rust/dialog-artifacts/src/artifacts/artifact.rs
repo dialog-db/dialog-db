@@ -225,14 +225,22 @@ enum Backing {
     },
     /// A row synthesized without a stored key (e.g. an uncommitted overlay
     /// fact), carried as the owned [`Artifact`] it was made from. Boxed so
-    /// the common scanned row doesn't pay the owned form's footprint.
-    Owned(Box<Artifact>),
+    /// the common scanned row doesn't pay the owned form's footprint. A
+    /// pending write carries the standing the commit will give it (see
+    /// [`ArtifactView::pending`]); any other owned row has none.
+    Owned {
+        artifact: Box<Artifact>,
+        standing: Option<(Edition, [u8; 32])>,
+    },
 }
 
 impl From<Artifact> for ArtifactView {
     fn from(artifact: Artifact) -> Self {
         Self {
-            backing: Backing::Owned(Box::new(artifact)),
+            backing: Backing::Owned {
+                artifact: Box::new(artifact),
+                standing: None,
+            },
         }
     }
 }
@@ -250,12 +258,26 @@ impl ArtifactView {
         }
     }
 
+    /// A view over a write the transaction holding it will commit: it
+    /// stands at `edition`, the edition that commit mints, so a read over
+    /// the transaction elects it as the commit will, over every row the
+    /// line holds. The version's hash is not known yet and reads as
+    /// zero; the edition alone decides against committed rows.
+    pub fn pending(artifact: Artifact, edition: Edition) -> Self {
+        Self {
+            backing: Backing::Owned {
+                artifact: Box::new(artifact),
+                standing: Some((edition, [0; 32])),
+            },
+        }
+    }
+
     /// The raw bytes of the index key this row was scanned at, or `None`
     /// for a row backed by an owned [`Artifact`] (no stored key exists).
     pub fn key(&self) -> Option<&[u8]> {
         match &self.backing {
             Backing::Scanned { key, .. } => Some(key.as_ref()),
-            Backing::Owned(_) => None,
+            Backing::Owned { .. } => None,
         }
     }
 
@@ -264,7 +286,7 @@ impl ArtifactView {
     pub fn datum(&self) -> Option<&Datum> {
         match &self.backing {
             Backing::Scanned { datum, .. } => Some(datum),
-            Backing::Owned(_) => None,
+            Backing::Owned { .. } => None,
         }
     }
 
@@ -279,9 +301,12 @@ impl ArtifactView {
 
     /// The standing this row brings to the cardinality-one election: its
     /// deepest claim version, as the pair the election compares (the
-    /// edition, then the hash of the whole version). `None` for a row no
-    /// revision tagged.
+    /// edition, then the hash of the whole version), or the standing a
+    /// pending write will have. `None` for a row no revision tagged.
     pub fn standing(&self) -> Option<(Edition, [u8; 32])> {
+        if let Backing::Owned { standing, .. } = &self.backing {
+            return *standing;
+        }
         self.versions()
             .map(|version| (version.edition, make_reference(version.key_bytes())))
             .max()
@@ -291,7 +316,7 @@ impl ArtifactView {
     pub fn cause(&self) -> Option<&Cause> {
         match &self.backing {
             Backing::Scanned { datum, .. } => datum.cause.as_ref(),
-            Backing::Owned(artifact) => artifact.cause.as_ref(),
+            Backing::Owned { artifact, .. } => artifact.cause.as_ref(),
         }
     }
 
@@ -300,7 +325,7 @@ impl ArtifactView {
     pub fn spilled(&self) -> Option<&[u8]> {
         match &self.backing {
             Backing::Scanned { spilled, .. } => spilled.as_deref(),
-            Backing::Owned(_) => None,
+            Backing::Owned { .. } => None,
         }
     }
 
@@ -315,7 +340,7 @@ impl ArtifactView {
             Backing::Scanned { key, .. } => varkey::parse_key_ref(key.as_ref()).ok_or_else(|| {
                 DialogArtifactsError::InvalidKey("key did not parse into components".to_string())
             }),
-            Backing::Owned(_) => Err(DialogArtifactsError::InvalidKey(
+            Backing::Owned { .. } => Err(DialogArtifactsError::InvalidKey(
                 "owned-backed view has no index key to parse".to_string(),
             )),
         }
@@ -326,7 +351,7 @@ impl ArtifactView {
     pub fn the_bytes(&self) -> Result<Cow<'_, [u8]>, DialogArtifactsError> {
         match &self.backing {
             Backing::Scanned { .. } => Ok(self.parts()?.attribute),
-            Backing::Owned(artifact) => Ok(Cow::Borrowed(artifact.the.as_str().as_bytes())),
+            Backing::Owned { artifact, .. } => Ok(Cow::Borrowed(artifact.the.as_str().as_bytes())),
         }
     }
 
@@ -335,7 +360,7 @@ impl ArtifactView {
     pub fn of_bytes(&self) -> Result<Cow<'_, [u8]>, DialogArtifactsError> {
         match &self.backing {
             Backing::Scanned { .. } => Ok(self.parts()?.entity),
-            Backing::Owned(artifact) => Ok(Cow::Borrowed(artifact.of.as_str().as_bytes())),
+            Backing::Owned { artifact, .. } => Ok(Cow::Borrowed(artifact.of.as_str().as_bytes())),
         }
     }
 
@@ -344,7 +369,7 @@ impl ArtifactView {
     pub fn value(&self) -> Result<Value, DialogArtifactsError> {
         match &self.backing {
             Backing::Scanned { spilled, .. } => decode_value_parts(&self.parts()?, spilled.clone()),
-            Backing::Owned(artifact) => Ok(artifact.is.clone()),
+            Backing::Owned { artifact, .. } => Ok(artifact.is.clone()),
         }
     }
 
@@ -380,7 +405,7 @@ impl ArtifactView {
                     tail,
                 ))
             }
-            Backing::Owned(artifact) => Ok(crate::sort_key(artifact, manifest)),
+            Backing::Owned { artifact, .. } => Ok(crate::sort_key(artifact, manifest)),
         }
     }
 
@@ -392,7 +417,7 @@ impl ArtifactView {
             Backing::Scanned { datum, spilled, .. } => {
                 reconstruct(&self.parts()?, datum, spilled.clone())
             }
-            Backing::Owned(artifact) => Ok(artifact.as_ref().clone()),
+            Backing::Owned { artifact, .. } => Ok(artifact.as_ref().clone()),
         }
     }
 
@@ -751,7 +776,7 @@ mod tests {
         let mut shared = row(b"user:alice", "Alice", Some(version(1, 1)), None);
         match &mut shared.backing {
             Backing::Scanned { datum, .. } => datum.absorb_versions([&version(2, 5)]),
-            Backing::Owned(_) => unreachable!("scanned row"),
+            Backing::Owned { .. } => unreachable!("scanned row"),
         }
         let rival = row(b"user:alice", "Alicia", Some(version(3, 4)), None);
         assert_eq!(

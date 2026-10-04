@@ -30,21 +30,24 @@ pub enum Change {
     /// Retract a value from an entity-attribute pair.
     Retract(Value),
     /// Assert a value and retract the one live claim of the cell the
-    /// succession elects. The election reads the line, so it is
-    /// resolved by the transactor before the batch commits (see
-    /// [`Changes::take_successions`]); an unresolved succession
-    /// commits as a plain assertion.
+    /// succession elects: the claim a read under the attribute's policy
+    /// returns. The election reads the line, so it is resolved by the
+    /// transactor before the batch commits (see
+    /// [`Changes::take_successions`]); an unresolved succession commits
+    /// as a plain assertion.
     Succeed(Value, Succession),
 }
 
-/// How a write under a choosing policy elects the live claim of its
-/// cell it succeeds: the claim a read under the same policy returns.
-/// The newest claim (`last`) needs no succession, since a write is
-/// newer than every claim it observed and [`Change::Replace`]
-/// supersedes them all; a set (`all`) succeeds nothing.
+/// How a write under a choosing policy elects the claim it succeeds:
+/// the claim a read under the same policy returns. A set (`all`)
+/// succeeds nothing. [`Change::Replace`] is the older cardinality-one
+/// write, which supersedes every prior of the cell; the engine's
+/// machinery still writes it, a statement no longer does.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Succession {
+    /// The newest claim.
+    Last,
     /// The claim with the greatest value, the newest among equals.
     Max,
     /// The claim with the least value, the newest among equals.

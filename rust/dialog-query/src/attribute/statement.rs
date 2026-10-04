@@ -3,7 +3,7 @@ use crate::attribute::The;
 use crate::attribute::expression::dynamic::DynamicAttributeExpression;
 use crate::schema::Cardinality;
 use crate::statement::Statement;
-use dialog_artifacts::Update;
+use dialog_artifacts::{Succession, Update};
 
 /// A type-erased, attribute statement.
 ///
@@ -24,8 +24,10 @@ impl Statement for AttributeStatement {
             (Some(succession), _) => {
                 update.succeed(the.into(), self.of, value, succession);
             }
+            // A cardinality-one write with no policy spelled is a
+            // `last` write.
             (None, Some(Cardinality::One)) => {
-                update.associate_unique(the.into(), self.of, value);
+                update.succeed(the.into(), self.of, value, Succession::Last);
             }
             (None, _) => {
                 update.associate(the.into(), self.of, value);
