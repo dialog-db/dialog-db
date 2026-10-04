@@ -561,6 +561,18 @@ impl AttributeDescriptor {
         self.select.cardinality()
     }
 
+    /// The arity the stored scan of this attribute reads under. A
+    /// `last` read is the stored scan itself: one claim per entity, the
+    /// newest. Every other policy elects among the claims, so the scan
+    /// hands over every claim and the election chooses; a scan that
+    /// kept one would choose by `last` before the policy saw the rest.
+    pub fn scan_cardinality(&self) -> Cardinality {
+        match self.select {
+            Select::Last => Cardinality::One,
+            _ => Cardinality::Many,
+        }
+    }
+
     /// Returns the expected value type, or `None` if any type is accepted.
     pub fn content_type(&self) -> Option<Type> {
         self.content_type

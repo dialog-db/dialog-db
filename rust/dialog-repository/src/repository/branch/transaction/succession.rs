@@ -19,11 +19,16 @@
 //! its value. A derived candidate is not a claim: when the read elects
 //! a derived value nothing is retracted, and the write stands beside it
 //! as one more candidate. Writing a value the cell already holds writes
-//! nothing. The same settlement runs for a transaction's own reads, so
-//! a read over the transaction sees what the commit will leave.
+//! nothing. What a cell's writes settle to is squashed as one commit's
+//! writes are: an assertion a later retraction cancels leaves only the
+//! retraction, so a claim that lived only inside the transaction leaves
+//! no tombstone. The same settlement runs for a transaction's own
+//! reads, so a read over the transaction sees what the commit will
+//! leave.
 
 use crate::repository::branch::session::QueryEnv;
 use crate::repository::source::Source;
+use crate::repository::staged::squash;
 use crate::{CommitError, RemoteSite, Staged};
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::{
@@ -70,12 +75,8 @@ where
         + ConditionalSync
         + 'static,
 {
-    let mut settled = staged.assets().clone();
     if !staged.has_successions() {
-        for (the, of, change) in staged.log() {
-            settled.put_cell(the.clone(), of.clone(), vec![change.clone()]);
-        }
-        return Ok(settled);
+        return Ok(staged.export());
     }
 
     // What every write observed of the line: its claims, read once per
@@ -83,6 +84,7 @@ where
     let line = QueryEnv::new(sources.clone(), overlay.clone(), env);
     let edition = line.pending_edition();
     let mut cells: HashMap<(Attribute, Entity), Cell> = HashMap::new();
+    let mut order: Vec<(Attribute, Entity)> = Vec::new();
     // The writes settled so far, as the view a later write reads the
     // derived candidates through.
     let mut prefix = Staged::default();
@@ -99,7 +101,8 @@ where
             } else {
                 Vec::new()
             };
-            cells.insert(key.clone(), Cell { live: observed });
+            cells.insert(key.clone(), Cell::over(observed));
+            order.push(key.clone());
         }
         let cell = cells.get_mut(&key).expect("cell loaded above");
         let derived = match change {
@@ -114,8 +117,15 @@ where
         };
         for written in cell.write(change, &derived, edition, the, of)? {
             prefix.apply_change(the, of, &written);
-            settled.put_cell(the.clone(), of.clone(), vec![written]);
+            cell.settled.push(written);
         }
+    }
+    // What the commit applies: each cell's settled writes, squashed as
+    // one commit's are.
+    let mut settled = staged.assets().clone();
+    for key in order {
+        let cell = cells.remove(&key).expect("cell loaded above");
+        settled.put_cell(key.0, key.1, cell.squashed());
     }
     Ok(settled)
 }
@@ -146,15 +156,13 @@ where
     let edition = view.pending_edition();
     for (the, of) in cells {
         let list = head.take_cell(&the, &of);
-        let mut cell = Cell {
-            live: claims_of(view, &the, &of).await?,
-        };
+        let mut cell = Cell::over(claims_of(view, &the, &of).await?);
         let derived = derived_candidates(view, &the, &of).await?;
-        let mut settled = Vec::with_capacity(list.len());
         for change in &list {
-            settled.extend(cell.write(change, &derived, edition, &the, &of)?);
+            let written = cell.write(change, &derived, edition, &the, &of)?;
+            cell.settled.extend(written);
         }
-        head.put_cell(the, of, settled);
+        head.put_cell(the, of, cell.squashed());
     }
     Ok(())
 }
@@ -269,12 +277,33 @@ where
         .collect())
 }
 
-/// One cell's live claims as the writes replayed so far leave them.
+/// One cell's live claims as the writes replayed so far leave them,
+/// the values the line held before any of them, and what the writes
+/// settled to, in order.
 struct Cell {
     live: Vec<Candidate>,
+    line: Vec<Value>,
+    settled: Vec<Change>,
 }
 
 impl Cell {
+    /// A cell over the claims the line holds.
+    fn over(claims: Vec<Candidate>) -> Self {
+        Self {
+            line: claims.iter().map(|claim| claim.value.clone()).collect(),
+            live: claims,
+            settled: Vec::new(),
+        }
+    }
+
+    /// What the writes settled to, squashed as one commit's writes are:
+    /// a retraction of a value the line never held, cancelling a staged
+    /// assertion of it, leaves nothing.
+    fn squashed(self) -> Vec<Change> {
+        let line = self.line;
+        squash(self.settled, &|value| line.contains(value))
+    }
+
     /// Replay one write: a plain assertion adds a claim, standing at
     /// the commit's edition, as every write of the transaction does; a
     /// retraction removes one; a replace keeps its value alone; a
@@ -360,7 +389,8 @@ mod tests {
     use crate::Branch;
     use crate::helpers::test_repo;
     use anyhow::Result;
-    use dialog_artifacts::{ArtifactSelector, Attribute, Entity, Succession, Value};
+    use dialog_artifacts::history::Edition;
+    use dialog_artifacts::{ArtifactSelector, Attribute, Change, Entity, Succession, Value};
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::The;
     use dialog_query::query::Output as _;
@@ -372,6 +402,36 @@ mod tests {
     };
     use dialog_storage::provider::storage::VolatileSpace;
     use futures_util::StreamExt as _;
+
+    /// Two `last` writes of one cell in one transaction settle to the
+    /// later one alone: the second succeeds the first, and the squash
+    /// cancels the first's assertion against its retraction, so the
+    /// commit carries one assertion and no tombstone.
+    #[dialog_common::test]
+    fn it_settles_two_last_writes_to_the_later_one() -> Result<()> {
+        let the: Attribute = "org/salary".parse()?;
+        let of = Entity::new()?;
+        let edition = Edition::from(7u64);
+        let mut cell = super::Cell::over(Vec::new());
+        for value in [200u32, 300] {
+            let change = Change::Succeed(Value::UnsignedInt(value.into()), Succession::Last);
+            let written = cell.write(&change, &[], edition, &the, &of)?;
+            cell.settled.extend(written);
+        }
+        assert_eq!(
+            cell.settled,
+            vec![
+                Change::Assert(Value::UnsignedInt(200)),
+                Change::Retract(Value::UnsignedInt(200)),
+                Change::Assert(Value::UnsignedInt(300)),
+            ]
+        );
+        assert_eq!(
+            cell.squashed(),
+            vec![Change::Assert(Value::UnsignedInt(300))]
+        );
+        Ok(())
+    }
 
     /// A write of `org/salary` under `max`: the statement a field
     /// reading the relation under that policy writes.

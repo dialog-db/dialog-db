@@ -191,7 +191,7 @@ impl ConceptRules {
                 Term::<Entity>::var("this"),
                 Term::<Any>::var(ConceptDescriptor::VALUE),
                 Term::blank(),
-                Some(field.cardinality()),
+                Some(field.descriptor().scan_cardinality()),
             )
             .into();
             // The scan concludes the relation it reads, policy-free, as

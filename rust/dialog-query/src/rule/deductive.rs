@@ -654,13 +654,16 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
             None => Term::var(name),
         };
 
+        // The scan reads under the policy's scan arity: one claim for
+        // `last`, every claim for a policy that elects among them.
+        let scanned = Some(field.descriptor().scan_cardinality());
         let premise: Premise = if field.is_optional() {
             OptionalAttributeQuery::new(
                 field.the().term(name),
                 this.clone(),
                 value.clone(),
                 Term::blank(),
-                Some(field.cardinality()),
+                scanned,
             )
             .into()
         } else {
@@ -669,7 +672,7 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
                 this.clone(),
                 value.clone(),
                 Term::blank(),
-                Some(field.cardinality()),
+                scanned,
             )
             .into()
         };

@@ -2813,6 +2813,64 @@ mod tests {
         Ok(pairs)
     }
 
+    /// A policy elects among every stored claim of a cell, not among
+    /// what a `last` scan would keep: with `org/salary` holding 300 and
+    /// then 200, `max` reads 300 and `min` 200 whichever is newer, and
+    /// `last` reads the newer, 200. A scan that kept one claim per
+    /// entity before the election would hand `max` the newest alone.
+    #[dialog_common::test]
+    async fn it_elects_among_every_stored_claim() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice: Entity = "id:alice".parse()?;
+        for salary in [300u64, 200] {
+            branch
+                .transaction()
+                .assert(the!("org/salary").of(alice.clone()).is(salary))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let read = async |select: Select| -> anyhow::Result<Vec<u64>> {
+            let predicate = ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
+                AttributeDescriptor::new(
+                    "org/salary".parse().expect("a selector"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::UnsignedInt),
+                )
+                .with_select(select, Vec::new()),
+            ));
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::<Any>::constant(alice.clone()));
+            terms.insert(ConceptDescriptor::VALUE.into(), Term::var("salary"));
+            let rows = ConceptQuery { terms, predicate }
+                .evaluate(Match::new().seed(), &source)
+                .try_vec()
+                .await?;
+            let mut values: Vec<u64> = rows
+                .iter()
+                .map(|row| {
+                    Ok(match row.lookup(&Term::var("salary"))?.content()? {
+                        Value::UnsignedInt(value) => value as u64,
+                        other => anyhow::bail!("not a salary: {other:?}"),
+                    })
+                })
+                .collect::<anyhow::Result<_>>()?;
+            values.sort();
+            Ok(values)
+        };
+        assert_eq!(read(Select::Max).await?, vec![300]);
+        assert_eq!(read(Select::Min).await?, vec![200]);
+        assert_eq!(read(Select::Last).await?, vec![200]);
+        assert_eq!(read(Select::All).await?, vec![200, 300]);
+        Ok(())
+    }
+
     /// A rule body naming a derived relation by an attribute premise
     /// reads the derived candidates too: `graph/even(x) := n :-
     /// graph/odd(x) = n` sees the `graph/odd` a rule derives beside the
