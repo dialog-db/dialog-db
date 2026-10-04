@@ -68,7 +68,7 @@ where
         env,
     )
     .with_layers(vec![Staged::from(changes.clone())]);
-    resolve_in(&view, successions, changes).await
+    Box::pin(resolve_in(&view, successions, changes)).await
 }
 
 /// Resolve every succession `changes` holds against `view`, which must
@@ -94,7 +94,7 @@ where
     if successions.is_empty() {
         return Ok(());
     }
-    resolve_in(view, successions, changes).await
+    Box::pin(resolve_in(view, successions, changes)).await
 }
 
 /// The resolution itself: each succession becomes the retraction of
@@ -126,6 +126,28 @@ where
     let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
 
     for (the, of, is, succession) in successions {
+        // A claim the cell already holds is written again: nothing to
+        // succeed and nothing to add, so the commit stays as it was,
+        // as a replace of the value already held did.
+        let held = |value: Value| {
+            let selector = ArtifactSelector::new()
+                .the(the.clone())
+                .of(of.clone())
+                .is(value);
+            async move {
+                Provider::<Select<'_>>::execute(view, selector)
+                    .await
+                    .map_err(|error| failed(&error))?
+                    .try_next()
+                    .await
+                    .map_err(|error| failed(&error))
+                    .map(|row| row.is_some())
+            }
+        };
+        if Box::pin(held(is.clone())).await? {
+            continue;
+        }
+
         // The attribute read under the policy, for this entity: what a
         // read returns, stored or derived.
         let (select, among) = match &succession {
@@ -149,11 +171,13 @@ where
             ConceptDescriptor::VALUE.to_string(),
             Term::<Any>::var(ConceptDescriptor::VALUE),
         );
-        let rows: Vec<Match> = ConceptQuery { terms, predicate }
-            .evaluate(Match::new().seed(), view)
-            .try_vec()
-            .await
-            .map_err(|error| failed(&error))?;
+        let rows: Vec<Match> = Box::pin(
+            ConceptQuery { terms, predicate }
+                .evaluate(Match::new().seed(), view)
+                .try_vec(),
+        )
+        .await
+        .map_err(|error| failed(&error))?;
         let elected: Option<Value> =
             rows.into_iter()
                 .find_map(|row| match row.get(ConceptDescriptor::VALUE) {
@@ -165,21 +189,9 @@ where
         // a derived candidate is not a claim and stays.
         if let Some(elected) = elected
             && elected != is
+            && Box::pin(held(elected.clone())).await?
         {
-            let selector = ArtifactSelector::new()
-                .the(the.clone())
-                .of(of.clone())
-                .is(elected.clone());
-            let held = Provider::<Select<'_>>::execute(view, selector)
-                .await
-                .map_err(|error| failed(&error))?
-                .try_next()
-                .await
-                .map_err(|error| failed(&error))?
-                .is_some();
-            if held {
-                changes.dissociate(the.clone(), of.clone(), elected);
-            }
+            changes.dissociate(the.clone(), of.clone(), elected);
         }
         changes.associate(the, of, is);
     }

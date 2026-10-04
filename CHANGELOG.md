@@ -29,6 +29,8 @@ What this changes for you:
 - If the read elects a candidate a rule derives, nothing is retracted:
   a derived candidate is not a claim. The write lands beside it and
   competes under the policy.
+- Writing a value the cell already holds writes nothing, as replacing
+  with the value already held did: the revision's tree does not move.
 - Statements emit `Change::Succeed` (a new variant of
   `dialog_artifacts::Change`, with a `Succession` saying which policy)
   instead of `Replace`. A `Changes` batch holding one serializes with a

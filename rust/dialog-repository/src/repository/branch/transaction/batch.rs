@@ -591,7 +591,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    succession::resolve(source, &mut changes, env).await?;
+    Box::pin(succession::resolve(source, &mut changes, env)).await?;
     let induced = induce(source, &mut changes, transients, env).await?;
     let touches = touches_rules(&changes);
     let previous = base.clone();

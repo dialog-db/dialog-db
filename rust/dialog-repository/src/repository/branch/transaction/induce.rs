@@ -1187,7 +1187,7 @@ where
         // A head written by succession elects the claim it succeeds
         // against the round view, as a transaction's own writes do
         // against the line at commit.
-        super::succession::resolve_against(view, &mut head).await?;
+        Box::pin(super::succession::resolve_against(view, &mut head)).await?;
         for instruction in head.into_instructions() {
             if is_novel(view, &instruction).await? {
                 match instruction {
