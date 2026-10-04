@@ -477,6 +477,16 @@ impl<'a, Env> QueryEnv<'a, Env> {
         self
     }
 
+    /// The edition a commit on this environment's line would mint: what
+    /// a write the line has not committed yet stands at.
+    pub(crate) fn pending_edition(&self) -> Edition {
+        self.sources
+            .first()
+            .and_then(|source| source.as_ref().revision())
+            .map(|revision| revision.edition.successor())
+            .unwrap_or(Edition::GENESIS)
+    }
+
     /// Record every selector this environment executes into
     /// `demand`. Used by subscriptions to capture the evaluation's
     /// demand cover.
@@ -725,19 +735,13 @@ where
         // the edition that commit mints: a read over the transaction
         // elects it over the line's rows, as a read after the commit
         // will.
-        let pending = self
-            .sources
-            .first()
-            .and_then(|source| source.as_ref().revision())
-            .map(|revision| revision.edition.successor())
-            .unwrap_or(Edition::GENESIS);
+        let pending = self.pending_edition();
         for layer in &self.layers {
-            let rows = layer.select(&input, &manifest);
+            let rows = layer.select_sequenced(&input, &manifest);
             if !rows.is_empty() {
-                streams.push(Box::pin(stream::iter(
-                    rows.into_iter()
-                        .map(move |fact| Ok(ArtifactView::pending(fact, pending))),
-                )));
+                streams.push(Box::pin(stream::iter(rows.into_iter().map(
+                    move |(fact, sequence)| Ok(ArtifactView::pending(fact, pending, sequence)),
+                ))));
             }
         }
 

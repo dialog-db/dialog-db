@@ -1,23 +1,30 @@
-//! Succession of a claim under a choosing policy, resolved at commit.
+//! Succession of a claim under a choosing policy, settled at commit.
 //!
 //! A write through an attribute read under `last`, `max`, `min` or
 //! `top` succeeds the claim the attribute stands for: the candidate a
-//! read under the policy returns. Which candidate that is depends on
-//! the line and on the rules deriving the relation, so the statement
-//! records a [`Succession`] and the commit resolves it here, before
-//! induction sees the batch: the attribute is read for the entity
-//! through the same view a mid-transaction query has, under the policy,
-//! without the written value, and the stored claim holding the elected
-//! value, if one does, is retracted beside the assertion. A candidate a
-//! rule derives is not a claim: when the read elects a derived value
-//! nothing is retracted, and the write stands beside it as one more
-//! candidate. A write under `all` appends and succeeds nothing.
+//! read under the policy returns over what the write observed. What a
+//! write observes is the line and the writes before it in its own
+//! transaction, in order; an inductive rule's head observes the round
+//! view it fired on. Which candidate that is depends on the line and
+//! on the rules deriving the relation, so the statement records a
+//! [`Succession`] and the commit settles it here, cell by cell: the
+//! cell's writes are replayed in order over the claims the line holds,
+//! each succession electing among the live claims and the derived
+//! candidates and retracting the claim it elects when that claim is a
+//! stored one. A derived candidate is not a claim: when the read elects
+//! a derived value nothing is retracted, and the write stands beside it
+//! as one more candidate. Writing a value the cell already holds writes
+//! nothing. A write under `all` appends and succeeds nothing.
 
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
 use crate::repository::source::SourceRef;
 use crate::{CommitError, RemoteSite, Staged};
-use dialog_artifacts::{ArtifactSelector, Changes, Select, Succession, Update, Value};
+use dialog_artifacts::history::Edition;
+use dialog_artifacts::{
+    Artifact, ArtifactSelector, Attribute, Cause, Change, Changes, Entity, Select, Value,
+    pending_version,
+};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
@@ -25,18 +32,21 @@ use dialog_effects::authority::Identify;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::attribute::{AttributeDescriptor, Relation, The};
+use dialog_query::concept::query::Election;
 use dialog_query::query::Output as _;
 use dialog_query::types::Any;
 use dialog_query::{
-    Binding, Cardinality, ConceptDescriptor, ConceptFieldDescriptor, ConceptQuery, Match,
-    Parameters, Term,
+    Binding, Cardinality, Claim, ConceptDescriptor, ConceptFieldDescriptor, ConceptQuery, Match,
+    Parameters, Standing, Term,
 };
 use futures_util::TryStreamExt;
 use std::fmt::Display;
 
-/// Resolve every succession `changes` holds against `source`, read
-/// through the batch itself, into the retraction of the stored claim it
-/// succeeds, if any, and the assertion of its value.
+/// Settle every succession `changes` holds against `source`: each cell
+/// with one is replayed over the claims the line holds, with the
+/// derived candidates read through the whole batch, and its changes are
+/// put back settled: the retraction of each claim succeeded and the
+/// assertion of each value written.
 pub(crate) async fn resolve<Env>(
     source: SourceRef<'_>,
     changes: &mut Changes,
@@ -55,28 +65,39 @@ where
         + ConditionalSync
         + 'static,
 {
-    let successions = changes.take_successions();
-    if successions.is_empty() {
+    let cells = changes.cells_with_successions();
+    if cells.is_empty() {
         return Ok(());
     }
     let operator = Identify.perform(env).await?;
-    // The view reads the batch without its successions, so the election
-    // is over what the write observed, never over itself.
-    let view = QueryEnv::new(
+    // What a write observed of the line: its claims, none of the
+    // transaction's own, which the cell's own change list replays.
+    let line = QueryEnv::new(
+        vec![source.to_source()],
+        QueryLayer::from(source).overlay(&operator),
+        env,
+    );
+    // What rules derive, read through the whole batch.
+    let batch = QueryEnv::new(
         vec![source.to_source()],
         QueryLayer::from(source).overlay(&operator),
         env,
     )
     .with_layers(vec![Staged::from(changes.clone())]);
-    Box::pin(resolve_in(&view, successions, changes)).await
+    let edition = line.pending_edition();
+    for (the, of) in cells {
+        Box::pin(settle_cell(&line, &batch, edition, changes, the, of)).await?;
+    }
+    Ok(())
 }
 
-/// Resolve every succession `changes` holds against `view`, which must
-/// not hold the successions' own values: what an inductive rule's head
-/// writes resolves against the round view the rule fired on.
+/// Settle every succession `head` holds against `view`, the round view
+/// an inductive rule fired on, which is what its head observed: the
+/// claims the view holds, the writes before it in the round included,
+/// and the candidates rules derive through it.
 pub(crate) async fn resolve_against<Env>(
     view: &QueryEnv<'_, Env>,
-    changes: &mut Changes,
+    head: &mut Changes,
 ) -> Result<(), CommitError>
 where
     Env: Provider<BlobRead>
@@ -90,26 +111,36 @@ where
         + ConditionalSync
         + 'static,
 {
-    let successions = changes.take_successions();
-    if successions.is_empty() {
+    let cells = head.cells_with_successions();
+    if cells.is_empty() {
         return Ok(());
     }
-    Box::pin(resolve_in(view, successions, changes)).await
+    let edition = view.pending_edition();
+    for (the, of) in cells {
+        Box::pin(settle_cell(view, view, edition, head, the, of)).await?;
+    }
+    Ok(())
 }
 
-/// The resolution itself: each succession becomes the retraction of
-/// the stored claim holding the value `view` elects for its cell, if
-/// one does, and the assertion of its own value, both written to
-/// `changes`.
-async fn resolve_in<Env>(
-    view: &QueryEnv<'_, Env>,
-    successions: Vec<(
-        dialog_artifacts::Attribute,
-        dialog_artifacts::Entity,
-        Value,
-        Succession,
-    )>,
+/// A claim or candidate a succession may elect: its value and its
+/// standing, and whether it is a stored claim the write can succeed.
+struct Candidate {
+    value: Value,
+    standing: Option<Standing>,
+    claim: bool,
+}
+
+/// Settle one cell: its changes, taken from `changes`, are replayed
+/// over the claims `observed` holds for it, each succession electing
+/// among the live claims and the candidates `derived` yields, and put
+/// back settled.
+async fn settle_cell<Env>(
+    observed: &QueryEnv<'_, Env>,
+    derived: &QueryEnv<'_, Env>,
+    edition: Edition,
     changes: &mut Changes,
+    the: Attribute,
+    of: Entity,
 ) -> Result<(), CommitError>
 where
     Env: Provider<BlobRead>
@@ -124,45 +155,39 @@ where
         + 'static,
 {
     let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
+    let list = changes.take_cell(&the, &of);
 
-    for (the, of, is, succession) in successions {
-        // A claim the cell already holds is written again: nothing to
-        // succeed and nothing to add, so the commit stays as it was,
-        // as a replace of the value already held did.
-        let held = |value: Value| {
-            let selector = ArtifactSelector::new()
-                .the(the.clone())
-                .of(of.clone())
-                .is(value);
-            async move {
-                Provider::<Select<'_>>::execute(view, selector)
-                    .await
-                    .map_err(|error| failed(&error))?
-                    .try_next()
-                    .await
-                    .map_err(|error| failed(&error))
-                    .map(|row| row.is_some())
-            }
-        };
-        if Box::pin(held(is.clone())).await? {
-            continue;
-        }
+    // The claims the cell holds, as observed.
+    let selector = ArtifactSelector::new().the(the.clone()).of(of.clone());
+    let rows = Provider::<Select<'_>>::execute(observed, selector)
+        .await
+        .map_err(|error| failed(&error))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|error| failed(&error))?;
+    let mut live: Vec<Candidate> = Vec::new();
+    for row in rows {
+        let artifact = row.to_owned().map_err(|error| failed(&error))?;
+        live.push(Candidate {
+            standing: Some(Standing {
+                version: row.standing(),
+                cause: Claim::from(artifact.clone()).cause().clone(),
+            }),
+            value: artifact.is,
+            claim: true,
+        });
+    }
 
-        // The attribute read under the policy, for this entity: what a
-        // read returns, stored or derived.
-        let (select, among) = match &succession {
-            Succession::Last => (dialog_query::Select::Last, Vec::new()),
-            Succession::Max => (dialog_query::Select::Max, Vec::new()),
-            Succession::Min => (dialog_query::Select::Min, Vec::new()),
-            Succession::Top(among) => (dialog_query::Select::Top, among.clone()),
-        };
+    // Every candidate a read of the relation sees for the entity: a
+    // derived one is what the read offers beyond the claims.
+    let mut candidates: Vec<Candidate> = Vec::new();
+    {
         let attribute = AttributeDescriptor::over(
             Relation::Attribute(The::from(the.clone())),
             "",
-            Cardinality::One,
+            Cardinality::Many,
             None,
-        )
-        .with_select(select, among);
+        );
         let predicate =
             ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(attribute));
         let mut terms = Parameters::new();
@@ -173,29 +198,115 @@ where
         );
         let rows: Vec<Match> = Box::pin(
             ConceptQuery { terms, predicate }
-                .evaluate(Match::new().seed(), view)
+                .evaluate(Match::new().seed(), derived)
                 .try_vec(),
         )
         .await
         .map_err(|error| failed(&error))?;
-        let elected: Option<Value> =
-            rows.into_iter()
-                .find_map(|row| match row.get(ConceptDescriptor::VALUE) {
-                    Some(Binding::Present(value)) => Some(value.clone()),
-                    _ => None,
+        for row in rows {
+            if let Some(Binding::Present(value)) = row.get(ConceptDescriptor::VALUE) {
+                let standing = row
+                    .standing_of(ConceptDescriptor::VALUE)
+                    .or_else(|| row.standing());
+                candidates.push(Candidate {
+                    value: value.clone(),
+                    standing,
+                    claim: false,
                 });
-
-        // The elected value is succeeded where a stored claim holds it:
-        // a derived candidate is not a claim and stays.
-        if let Some(elected) = elected
-            && elected != is
-            && Box::pin(held(elected.clone())).await?
-        {
-            changes.dissociate(the.clone(), of.clone(), elected);
+            }
         }
-        changes.associate(the, of, is);
     }
+
+    let settled = settle(live, candidates, list, &the, &of, edition)?;
+    changes.put_cell(the, of, settled);
     Ok(())
+}
+
+/// Replay one cell's writes over the claims it holds. A plain assertion
+/// adds a claim, standing at the commit's edition and its place in the
+/// list; a retraction removes one; a replace keeps its value alone; a
+/// succession elects among the live claims and the derived candidates
+/// that are not claims, retracts the elected claim when it is one and
+/// adds its value, or adds nothing when the cell holds the value
+/// already. The settled list is the original with each succession
+/// replaced by what it resolved to.
+fn settle(
+    mut live: Vec<Candidate>,
+    derived: Vec<Candidate>,
+    list: Vec<Change>,
+    the: &Attribute,
+    of: &Entity,
+    edition: Edition,
+) -> Result<Vec<Change>, CommitError> {
+    let staged = |value: &Value, sequence: usize| Standing {
+        version: Some((edition, pending_version(sequence as u64))),
+        cause: Cause::from(&Artifact {
+            the: the.clone(),
+            of: of.clone(),
+            is: value.clone(),
+            cause: None,
+        }),
+    };
+    let mut settled = Vec::with_capacity(list.len());
+    for (sequence, change) in list.into_iter().enumerate() {
+        match change {
+            Change::Assert(value) => {
+                live.retain(|claim| claim.value != value);
+                live.push(Candidate {
+                    standing: Some(staged(&value, sequence)),
+                    value: value.clone(),
+                    claim: true,
+                });
+                settled.push(Change::Assert(value));
+            }
+            Change::Replace(value) => {
+                live.clear();
+                live.push(Candidate {
+                    standing: Some(staged(&value, sequence)),
+                    value: value.clone(),
+                    claim: true,
+                });
+                settled.push(Change::Replace(value));
+            }
+            Change::Retract(value) => {
+                live.retain(|claim| claim.value != value);
+                settled.push(Change::Retract(value));
+            }
+            Change::Succeed(value, succession) => {
+                if live.iter().any(|claim| claim.value == value) {
+                    continue;
+                }
+                let election = Election::from(&succession);
+                let pool: Vec<(Value, Option<Standing>, (Value, bool))> = live
+                    .iter()
+                    .chain(derived.iter().filter(|candidate| {
+                        !live.iter().any(|claim| claim.value == candidate.value)
+                    }))
+                    .map(|candidate| {
+                        (
+                            candidate.value.clone(),
+                            candidate.standing.clone(),
+                            (candidate.value.clone(), candidate.claim),
+                        )
+                    })
+                    .collect();
+                let elected = election
+                    .elect_claims(pool)
+                    .map_err(|error| CommitError::Succession(error.to_string()))?;
+                if let Some((elected, true)) = elected {
+                    live.retain(|claim| claim.value != elected);
+                    settled.push(Change::Retract(elected));
+                }
+                live.push(Candidate {
+                    standing: Some(staged(&value, sequence)),
+                    value: value.clone(),
+                    claim: true,
+                });
+                settled.push(Change::Assert(value));
+            }
+        }
+    }
+    Ok(settled)
 }
 
 #[cfg(test)]
@@ -500,6 +611,65 @@ mod tests {
             stored(&branch, &operator, &alice).await?,
             vec![300],
             "the committed claim is succeeded and the superseded staged write is gone"
+        );
+        Ok(())
+    }
+
+    /// A write observes the writes before it in its transaction and
+    /// none after: `all` written after `last` stands beside it, and
+    /// `max` written after `all` succeeds the staged claim it elects,
+    /// leaving the committed one the read never returned.
+    #[dialog_common::test]
+    async fn it_settles_a_cell_in_the_order_the_transaction_wrote_it() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice = Entity::new()?;
+        let last = |value: u32| AttributeStatement {
+            succession: Some(Succession::Last),
+            ..salary(&alice, value)
+        };
+        let all = |value: u32| AttributeStatement {
+            succession: None,
+            cardinality: Some(Cardinality::Many),
+            ..salary(&alice, value)
+        };
+
+        branch
+            .transaction()
+            .assert(last(50))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        // `last(200)` observes {50} and succeeds it; `all(300)` comes
+        // after and appends.
+        branch
+            .transaction()
+            .assert(last(200))
+            .assert(all(300))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(stored(&branch, &operator, &alice).await?, vec![200, 300]);
+
+        // `max(150)` observes {200, 300, 400}: 400 was written before it
+        // in this transaction and is the greatest, so it is what the
+        // write succeeds; 200 and 300 stay.
+        branch
+            .transaction()
+            .assert(all(400))
+            .assert(salary(&alice, 150))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            stored(&branch, &operator, &alice).await?,
+            vec![150, 200, 300],
+            "the staged claim the policy elected is gone, the others stand"
         );
         Ok(())
     }

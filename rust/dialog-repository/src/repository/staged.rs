@@ -30,14 +30,13 @@ use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, AssetChange, Attribute, Changes, Entity, Instruction, SortKey,
-    Statement, Succession, Update, Value, sort_key,
+    Artifact, ArtifactSelector, AssetChange, Attribute, Change, Changes, Entity, Instruction,
+    SortKey, Statement, Update, Value, sort_key,
 };
 use dialog_search_tree::Manifest;
 
 use super::ephemeral::Facts;
 use crate::rules::conclusion_attr;
-use dialog_query::concept::query::Election;
 
 /// Cells a replace claimed, by attribute then entity, in the byte form
 /// a [`SortKey`] carries them, so a row's key is checked without
@@ -63,12 +62,14 @@ struct State {
     cells: Arc<Cells>,
     /// The asset changes, held as a batch with no facts.
     assets: Changes,
-    /// The writes that succeed the claim their attribute's policy
-    /// elects. Which committed claim that is is read against the line
-    /// at commit; here the written value is held as a fact, standing at
-    /// the edition the commit will mint, so a read over the transaction
-    /// elects it as the commit will.
-    successions: Vec<(Attribute, Entity, Value, Succession)>,
+    /// Every write in the order the transaction made it, cell by cell:
+    /// what the commit applies, so a write that succeeds a claim is
+    /// settled against the line and the writes before it, in order.
+    log: Vec<(Attribute, Entity, Change)>,
+    /// The sequence of each held fact's write in the transaction: a
+    /// later write stands newer than an earlier one in a read over the
+    /// transaction, where none has a committed version yet.
+    sequences: HashMap<(Attribute, Entity, Value), u64>,
 }
 
 impl State {
@@ -149,83 +150,61 @@ impl Staged {
                 AssetChange::Discard(asset) => state.assets.discard(asset),
             }
         }
-        for (the, of, is, succession) in changes.take_successions() {
-            // A write succeeds what it observed, this transaction's own
-            // earlier writes to the cell included: under `last` every one
-            // of them, being older, under another policy the one the
-            // policy elects among them. A staged claim succeeded here was
-            // never committed, so it is dropped rather than retracted.
-            let earlier: Vec<Artifact> = state
-                .facts
-                .cell(&of, &the)
-                .into_iter()
-                .filter(|prior| prior.is != is)
-                .collect();
-            let dropped: Vec<Artifact> = match &succession {
-                Succession::Last => earlier,
-                _ => Election::from(&succession)
-                    .elect_claims(
-                        earlier
-                            .into_iter()
-                            .map(|prior| (prior.is.clone(), None, prior))
-                            .collect(),
-                    )
-                    .ok()
-                    .flatten()
-                    .into_iter()
-                    .collect(),
-            };
-            for prior in dropped {
-                state.facts.remove(&prior);
-                state.successions.retain(|(the, of, is, _)| {
-                    !(*the == prior.the && *of == prior.of && *is == prior.is)
-                });
-            }
-            state.apply(Instruction::Assert(Artifact {
-                the: the.clone(),
-                of: of.clone(),
-                is: is.clone(),
+        for (entity, attribute, change) in changes.iter() {
+            let fact = |value: &Value| Artifact {
+                the: attribute.clone(),
+                of: entity.clone(),
+                is: value.clone(),
                 cause: None,
-            }));
-            state.successions.push((the, of, is, succession));
-        }
-        for instruction in changes.into_instructions() {
-            state.apply(instruction);
+            };
+            let sequence = state.log.len() as u64;
+            match change {
+                // A succession holds its value as one more candidate
+                // until the commit settles which claim it succeeds; a
+                // read over the transaction elects among them.
+                Change::Assert(value) | Change::Succeed(value, _) => {
+                    state.apply(Instruction::Assert(fact(value)));
+                    state
+                        .sequences
+                        .insert((attribute.clone(), entity.clone(), value.clone()), sequence);
+                }
+                Change::Replace(value) => {
+                    state.apply(Instruction::Replace(fact(value)));
+                    state
+                        .sequences
+                        .insert((attribute.clone(), entity.clone(), value.clone()), sequence);
+                }
+                Change::Retract(value) => {
+                    state.apply(Instruction::Retract(fact(value)));
+                    state
+                        .sequences
+                        .remove(&(attribute.clone(), entity.clone(), value.clone()));
+                }
+            }
+            state
+                .log
+                .push((attribute.clone(), entity.clone(), change.clone()));
         }
     }
 
-    /// The writes as the batch a commit applies: each replace first, as
-    /// it resets its cell, then every retraction, then every held fact,
-    /// a fact that succeeds a claim as the succession it was written
-    /// as. Applying it to a line leaves what this store reads as over
-    /// it.
+    /// The writes as the batch a commit applies: every write in the
+    /// order the transaction made it, a succession as the succession it
+    /// was written as, for the transactor to settle. Applying it to a
+    /// line leaves what this store reads as over it.
     pub(crate) fn export(&self) -> Changes {
         let mut changes = self.0.assets.clone();
-        let succeeding = |fact: &Artifact| {
-            self.0
-                .successions
-                .iter()
-                .any(|(the, of, is, _)| *the == fact.the && *of == fact.of && *is == fact.is)
-        };
-        for fact in self.0.replaced.values() {
-            if !succeeding(fact) {
-                changes.associate_unique(fact.the.clone(), fact.of.clone(), fact.is.clone());
-            }
-        }
-        for fact in self.0.retracted.values() {
-            changes.dissociate(fact.the.clone(), fact.of.clone(), fact.is.clone());
-        }
-        for (the, of, is, succession) in &self.0.successions {
-            changes.succeed(the.clone(), of.clone(), is.clone(), succession.clone());
-        }
-        for fact in self.0.facts.iter() {
-            let claimed = self
-                .0
-                .replaced
-                .get(&(fact.the.clone(), fact.of.clone()))
-                .is_some_and(|replace| replace.is == fact.is);
-            if !claimed && !succeeding(fact) {
-                changes.associate(fact.the.clone(), fact.of.clone(), fact.is.clone());
+        for (the, of, change) in &self.0.log {
+            match change {
+                Change::Assert(value) => changes.associate(the.clone(), of.clone(), value.clone()),
+                Change::Replace(value) => {
+                    changes.associate_unique(the.clone(), of.clone(), value.clone())
+                }
+                Change::Succeed(value, succession) => {
+                    changes.succeed(the.clone(), of.clone(), value.clone(), succession.clone())
+                }
+                Change::Retract(value) => {
+                    changes.dissociate(the.clone(), of.clone(), value.clone())
+                }
             }
         }
         changes
@@ -233,7 +212,7 @@ impl Staged {
 
     /// Whether nothing was written.
     pub(crate) fn is_empty(&self) -> bool {
-        self.0.facts.is_empty() && self.0.retracted.is_empty() && !self.0.assets.has_assets()
+        self.0.log.is_empty() && !self.0.assets.has_assets()
     }
 
     /// The held facts a selector matches, in the store's own key order.
@@ -242,14 +221,28 @@ impl Staged {
     }
 
     /// The held facts a selector matches, in the order a scan of a tree
-    /// written under `manifest` would produce them: what a query merges
-    /// with that tree's rows.
-    pub(crate) fn select(
+    /// written under `manifest` would produce them, each with the
+    /// sequence of the write that held it: what a query merges with that
+    /// tree's rows, the sequence ordering the transaction's own writes.
+    pub(crate) fn select_sequenced(
         &self,
         selector: &ArtifactSelector<Constrained>,
         manifest: &Manifest,
-    ) -> Vec<Artifact> {
-        self.0.facts.select(selector, manifest)
+    ) -> Vec<(Artifact, u64)> {
+        self.0
+            .facts
+            .select(selector, manifest)
+            .into_iter()
+            .map(|fact| {
+                let sequence = self
+                    .0
+                    .sequences
+                    .get(&(fact.the.clone(), fact.of.clone(), fact.is.clone()))
+                    .copied()
+                    .unwrap_or(0);
+                (fact, sequence)
+            })
+            .collect()
     }
 
     /// Sort keys of every fact this store hides beneath it, keyed under

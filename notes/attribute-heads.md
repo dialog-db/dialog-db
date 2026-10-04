@@ -184,16 +184,20 @@ value, and the stored claim holding the elected value is retracted
 beside the new one. Every other claim stays, since the policy may
 elect it again once the new value is gone; under `last` that leaves
 an older concurrent claim live where the cardinality-one replacement
-retracted every prior, which no `last` read can tell apart. The
-statement records only the succession (`Change::Succeed`); within the
+retracted every prior, which no `last` read can tell apart. What a
+write observes is the line and the writes before it in its own
+transaction, in order: the statement records only the succession
+(`Change::Succeed`), the transaction keeps its writes in order, and
+the commit replays each cell's writes over the claims the line holds,
+each succession electing among the live claims and the derived
+candidates and retracting the stored claim it elects. Within the
 transaction the written value is one more candidate, standing at the
-edition the commit will mint, so the transaction's own view elects it
-as the commit will, and a later write in the same transaction
-succeeds an earlier staged one, which was never committed and is
-simply dropped. A candidate a rule derives is not a claim: when the
-read elects a derived value nothing is retracted, and the write
-stands beside it as one more candidate. Two writers succeeding the
-same claim concurrently each retract it and assert their own; the
+edition the commit will mint and ordered by its place among the
+transaction's writes, so the transaction's own view elects it under
+`last` as the commit will. A candidate a rule derives is not a claim:
+when the read elects a derived value nothing is retracted, and the
+write stands beside it as one more candidate. Two writers succeeding
+the same claim concurrently each retract it and assert their own; the
 merge keeps both, and the read elects.
 
 A derived candidate competes with a stored claim under `last` by its
