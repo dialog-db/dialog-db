@@ -354,6 +354,25 @@ impl Placements {
             committed,
             ..Placements::default()
         };
+        // A declaration held in the layer's session store is this
+        // process's own: a writer that knows where its facts belong
+        // declares the attribute there and the declaration never reaches
+        // the tree or a peer. It outranks the committed one and yields
+        // to one the batch itself carries.
+        let store = source.overlay();
+        for claim in store.scan(&declarations_selector()) {
+            if let Some(attribute) = entity_attribute(&claim.of) {
+                let target = scope_value(attribute.as_str(), &claim.is)?;
+                placements.declared.insert(attribute, target);
+            }
+        }
+        for claim in store.scan(&transients_selector()) {
+            if let (Some(attribute), Value::Boolean(true)) =
+                (entity_attribute(&claim.of), &claim.is)
+            {
+                placements.transient.insert(attribute);
+            }
+        }
         let scope = scope_attr();
         let default = default_attr();
         let transient = transient_placement_attr();
@@ -757,6 +776,50 @@ mod tests {
             committed(&branch, &operator, "ui/selected", &doc)
                 .await?
                 .is_empty()
+        );
+        Ok(())
+    }
+
+    /// A placement held in the branch's session store is this process's
+    /// own declaration: a commit routes by it like a committed one, the
+    /// tree never holds the placement, and a peer never learns of it.
+    #[dialog_common::test]
+    async fn it_routes_by_a_placement_held_in_the_session_store() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
+        branch
+            .overlay()
+            .assert(Placement::new("ui/selected".parse()?, session()))?;
+
+        let doc: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        assert_eq!(
+            values::<bool, _>(&branch, &operator, "ui/selected", &doc).await?,
+            vec![Value::Boolean(true)],
+            "the composite read sees the placed fact"
+        );
+        assert!(
+            committed(&branch, &operator, "ui/selected", &doc)
+                .await?
+                .is_empty(),
+            "the fact never reaches the tree"
+        );
+        let placement: Entity = attribute_entity(&"ui/selected".parse()?);
+        assert!(
+            committed(&branch, &operator, "dialog.attribute/scope", &placement)
+                .await?
+                .is_empty(),
+            "nor does the declaration"
         );
         Ok(())
     }

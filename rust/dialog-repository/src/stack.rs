@@ -3803,6 +3803,63 @@ mod tests {
         Ok(())
     }
 
+    /// A placement the bottom branch's session store holds routes a
+    /// stack commit like a committed one: the writer's own declaration
+    /// sends the fact to the layer under the scope, and the tree holds
+    /// neither the fact nor the declaration.
+    #[dialog_common::test]
+    async fn it_routes_by_a_placement_held_in_the_bottoms_session_store() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        shared
+            .overlay()
+            .assert(Placement::new("site/path".parse()?, name("state")))?;
+
+        let site: Entity = "site:1".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("site/path")
+                    .of(site.clone())
+                    .is("/a".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            values::<String>(&stack, &operator, "site/path", &site).await?,
+            vec![Value::String("/a".into())]
+        );
+        assert_eq!(
+            state.scan(&ArtifactSelector::new().of(site.clone())).len(),
+            1,
+            "the fact landed on the layer the scope names"
+        );
+        assert!(
+            committed(&shared, &operator, "site/path", &site)
+                .await?
+                .is_empty(),
+            "the tree never sees the fact"
+        );
+        let placement: Entity = crate::attribute_entity(&"site/path".parse()?);
+        assert!(
+            committed(&shared, &operator, "dialog.attribute/scope", &placement)
+                .await?
+                .is_empty(),
+            "nor the declaration"
+        );
+        Ok(())
+    }
+
     /// Placement says where a fact belongs: a declared attribute lands
     /// under its scope, `forget` drops an entity's facts from the
     /// scope's layer, `clear` empties it, and none of it touches the
