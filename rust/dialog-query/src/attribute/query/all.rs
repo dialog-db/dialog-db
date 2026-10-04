@@ -186,7 +186,7 @@ impl AttributeQueryAll {
         }
         if let Some(name) = self.is.shared_name() {
             candidate.bind_variable(name, self.is.kind(), claim.is().clone())?;
-            candidate.cite_variable_standing(name.as_ref(), standing.clone());
+            candidate.cite_variable_standing(name, standing.clone());
         }
         if let Some(name) = self.cause.shared_name() {
             candidate.bind_variable(

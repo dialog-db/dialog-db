@@ -96,7 +96,7 @@ fn merge_parameters(
         match result.get(param_name) {
             Some(Binding::Present(value)) => {
                 merged.bind(user_param, value.clone())?;
-                if let Some(name) = user_param.name()
+                if let Some(name) = user_param.shared_name()
                     && let Some(standing) = result.standing_of(param_name)
                 {
                     merged.cite_variable_standing(name, standing);

@@ -302,11 +302,24 @@ impl Match {
     /// consumed, which is how it competes in an attribute's election
     /// against stored rows. `None` for a row citing nothing.
     pub fn standing(&self) -> Option<Standing> {
-        self.all_standings()
-            .into_iter()
+        self.standings
+            .iter()
+            .chain(self.frames().flat_map(|frame| frame.standings.iter()))
             .map(|(_, standing)| standing)
             .max()
             .cloned()
+    }
+
+    /// The standings `other` cites for variables this row cites none
+    /// for, to adopt.
+    fn standings_to_adopt(&self, other: &Match) -> Vec<(Arc<str>, Standing)> {
+        let mine = self.all_standings();
+        other
+            .all_standings()
+            .into_iter()
+            .filter(|(name, _)| !mine.iter().any(|(held, _)| held == name))
+            .map(|(name, standing)| (name.clone(), standing.clone()))
+            .collect()
     }
 
     /// Adopt every claim and standing `other` cites that this row does
@@ -318,11 +331,8 @@ impl Match {
                 self.claims.push((name.clone(), claim.clone()));
             }
         }
-        for (name, standing) in other.all_standings() {
-            if !self.all_standings().iter().any(|(held, _)| held == name) {
-                self.standings.push((name.clone(), standing.clone()));
-            }
-        }
+        let adopted = self.standings_to_adopt(other);
+        self.standings.extend(adopted);
     }
 
     /// Record the standing of the fact cited for `term`.
@@ -337,14 +347,10 @@ impl Match {
 
     /// Record that `variable` was bound from a fact of `standing`, so
     /// a value derived from it stands as that fact does.
-    pub(crate) fn cite_variable_standing(&mut self, variable: &str, standing: Standing) {
-        match self
-            .standings
-            .iter_mut()
-            .find(|(held, _)| **held == *variable)
-        {
+    pub(crate) fn cite_variable_standing(&mut self, variable: &Arc<str>, standing: Standing) {
+        match self.standings.iter_mut().find(|(held, _)| held == variable) {
             Some((_, slot)) => *slot = standing,
-            None => self.standings.push((Arc::from(variable), standing)),
+            None => self.standings.push((variable.clone(), standing)),
         }
     }
 
@@ -462,11 +468,8 @@ impl Match {
                 self.claims.push((name.clone(), claim.clone()));
             }
         }
-        for (name, standing) in other.all_standings() {
-            if !self.all_standings().iter().any(|(held, _)| held == name) {
-                self.standings.push((name.clone(), standing.clone()));
-            }
-        }
+        let adopted = self.standings_to_adopt(other);
+        self.standings.extend(adopted);
         if self.caller.is_none() {
             self.caller = other.caller.clone();
         }
