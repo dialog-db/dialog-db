@@ -20,11 +20,14 @@ impl Statement for AttributeStatement {
     fn assert(self, update: &mut impl Update) {
         let the = self.the;
         let value = self.is;
-        match self.cardinality {
-            Some(Cardinality::One) => {
+        match (self.succession, self.cardinality) {
+            (Some(succession), _) => {
+                update.succeed(the.into(), self.of, value, succession);
+            }
+            (None, Some(Cardinality::One)) => {
                 update.associate_unique(the.into(), self.of, value);
             }
-            _ => {
+            (None, _) => {
                 update.associate(the.into(), self.of, value);
             }
         }

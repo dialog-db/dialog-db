@@ -384,7 +384,7 @@ impl OverlayTriggers {
                 }
             } else if *attribute == transient {
                 match change {
-                    Change::Assert(_) | Change::Replace(_) => {
+                    Change::Assert(_) | Change::Replace(_) | Change::Succeed(..) => {
                         slice.transient.insert(entity.clone());
                     }
                     Change::Retract(_) => {
@@ -1155,23 +1155,38 @@ where
                 Polarity::Retract => {
                     dialog_artifacts::Update::dissociate(&mut head, attribute, this.clone(), value);
                 }
-                Polarity::Assert => match field.descriptor().cardinality() {
-                    Cardinality::One => {
-                        dialog_artifacts::Update::associate_unique(
+                // An asserting head writes as the field's policy says:
+                // the newest claim supersedes every prior, a set
+                // appends, and a choosing policy succeeds the claim it
+                // elects (resolved against the view at commit).
+                Polarity::Assert => match field.descriptor().succession() {
+                    Some(succession) => {
+                        dialog_artifacts::Update::succeed(
                             &mut head,
                             attribute,
                             this.clone(),
                             value,
+                            succession,
                         );
                     }
-                    Cardinality::Many => {
-                        dialog_artifacts::Update::associate(
-                            &mut head,
-                            attribute,
-                            this.clone(),
-                            value,
-                        );
-                    }
+                    None => match field.descriptor().cardinality() {
+                        Cardinality::One => {
+                            dialog_artifacts::Update::associate_unique(
+                                &mut head,
+                                attribute,
+                                this.clone(),
+                                value,
+                            );
+                        }
+                        Cardinality::Many => {
+                            dialog_artifacts::Update::associate(
+                                &mut head,
+                                attribute,
+                                this.clone(),
+                                value,
+                            );
+                        }
+                    },
                 },
             }
         }

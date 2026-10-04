@@ -31,7 +31,7 @@ use std::sync::Arc;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, AssetChange, Attribute, Changes, Entity, Instruction, SortKey,
-    Statement, Update, sort_key,
+    Statement, Succession, Update, Value, sort_key,
 };
 use dialog_search_tree::Manifest;
 
@@ -62,6 +62,11 @@ struct State {
     cells: Arc<Cells>,
     /// The asset changes, held as a batch with no facts.
     assets: Changes,
+    /// The writes that succeed a claim of their cell under a choosing
+    /// policy. Which claim is elected against the line at commit; here
+    /// the written value is held as a fact, so a read over the
+    /// transaction sees it as one more candidate.
+    successions: Vec<(Attribute, Entity, Value, Succession)>,
 }
 
 impl State {
@@ -142,14 +147,25 @@ impl Staged {
                 AssetChange::Discard(asset) => state.assets.discard(asset),
             }
         }
+        for (the, of, is, succession) in changes.take_successions() {
+            state.apply(Instruction::Assert(Artifact {
+                the: the.clone(),
+                of: of.clone(),
+                is: is.clone(),
+                cause: None,
+            }));
+            state.successions.push((the, of, is, succession));
+        }
         for instruction in changes.into_instructions() {
             state.apply(instruction);
         }
     }
 
     /// The writes as the batch a commit applies: each replace first, as
-    /// it resets its cell, then every retraction, then every held fact.
-    /// Applying it to a line leaves what this store reads as over it.
+    /// it resets its cell, then every retraction, then every held fact,
+    /// a fact that succeeds a claim as the succession it was written
+    /// as. Applying it to a line leaves what this store reads as over
+    /// it.
     pub(crate) fn export(&self) -> Changes {
         let mut changes = self.0.assets.clone();
         for fact in self.0.replaced.values() {
@@ -158,13 +174,21 @@ impl Staged {
         for fact in self.0.retracted.values() {
             changes.dissociate(fact.the.clone(), fact.of.clone(), fact.is.clone());
         }
+        for (the, of, is, succession) in &self.0.successions {
+            changes.succeed(the.clone(), of.clone(), is.clone(), succession.clone());
+        }
         for fact in self.0.facts.iter() {
             let claimed = self
                 .0
                 .replaced
                 .get(&(fact.the.clone(), fact.of.clone()))
                 .is_some_and(|replace| replace.is == fact.is);
-            if !claimed {
+            let succeeding = self
+                .0
+                .successions
+                .iter()
+                .any(|(the, of, is, _)| *the == fact.the && *of == fact.of && *is == fact.is);
+            if !claimed && !succeeding {
                 changes.associate(fact.the.clone(), fact.of.clone(), fact.is.clone());
             }
         }

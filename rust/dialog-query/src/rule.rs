@@ -15,7 +15,7 @@
 //! [`AnalyzerError`](crate::AnalyzerError)) reference, so error
 //! reporting is uniform across both kinds.
 
-use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
+use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::{AnalysisError, TypeError};
 use crate::negation::Negation;
 use crate::planner::Planner;
@@ -171,60 +171,26 @@ pub trait Compile: Sized + Into<Rule> {
 /// optional `reduce` clause (`(field, spec)` pairs in head-field
 /// order; empty for a plain rule).
 /// Why `premises` and `reduce` cannot make a deductive rule, if they
-/// cannot: a deductive rule is open, so it is monotone. It admits no
-/// `unless` and no `reduce`, and it neither concludes through nor
-/// reads a field whose `select` policy changes the attribute's carrier
-/// (see [`Select`](crate::schema::Select)). Each check depends on the
-/// rule and the fields it names alone, never on the rest of the
-/// program, so no merge of rule sets is ever rejected.
+/// cannot: a deductive rule is open, installed as facts and read by
+/// whatever program exists when a query runs, so it admits no
+/// `reduce`: a fold withdraws its result when a fact arrives and has no
+/// reading inside a dependency cycle. An `unless` is admitted: outside
+/// a cycle it is stratified, inside one the cycle policy evaluates it
+/// (see the [fixpoint](crate::concept::query::fixpoint) module). The
+/// check depends on the rule alone, never on the rest of the program,
+/// so no merge of rule sets is ever rejected.
 fn open_rule_error<T: Compile>(
     conclusion: &ConceptDescriptor,
     premises: &[Premise],
     reduce: &[(String, ReduceSpec)],
 ) -> Option<TypeError> {
-    let rule = || Box::new(T::in_progress(conclusion.clone(), premises.to_vec()).into());
     // A negated attribute or concept premise asks that a fact be
-    // absent, which a fact arriving later withdraws. A negated
-    // constraint, formula or resolver tests the row's own values and
-    // is as monotone as the positive test.
-    if premises.iter().any(|premise| {
-        matches!(
-            premise,
-            Premise::Unless(Negation(
-                Proposition::Attribute(_)
-                    | Proposition::OptionalAttribute(_)
-                    | Proposition::Concept(_)
-            ))
-        )
-    }) {
-        return Some(TypeError::NegationInOpenRule { rule: rule() });
-    }
+    // absent. Outside a dependency cycle that is stratified; inside
+    // one the cycle policy evaluates it, so either way the rule
+    // evaluates. A fold has no such reading, so it stays out.
     if !reduce.is_empty() {
-        return Some(TypeError::ReduceInOpenRule { rule: rule() });
-    }
-    let open = |role: &'static str, name: &str, field: &ConceptFieldDescriptor| {
-        let select = field.descriptor().select();
-        (!select.is_carrier_closed()).then(|| TypeError::PolicyInOpenRule {
-            rule: rule(),
-            role,
-            field: name.to_string(),
-            select: select.to_string(),
-        })
-    };
-    for (name, field) in conclusion.with().iter() {
-        if let Some(error) = open("concludes", name, field) {
-            return Some(error);
-        }
-    }
-    for premise in premises {
-        let Premise::Assert(Proposition::Concept(query)) = premise else {
-            continue;
-        };
-        for (name, field) in query.predicate.with().iter() {
-            if let Some(error) = open("reads", name, field) {
-                return Some(error);
-            }
-        }
+        let rule = Box::new(T::in_progress(conclusion.clone(), premises.to_vec()).into());
+        return Some(TypeError::ReduceInOpenRule { rule });
     }
     None
 }

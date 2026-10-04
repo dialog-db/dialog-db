@@ -11,25 +11,42 @@
 //! The analysis builds the Apt-Blair-Walker dependency graph over
 //! concepts: one node per concept, an edge from a rule's conclusion
 //! to each concept its body references, tagged with the polarity of
-//! the reference (`unless` premises are negative; every positive
-//! premise of a *reducing* rule is aggregating — its fold reads the
-//! complete relation). Tarjan's algorithm computes the strongly
-//! connected components; a concept is *recursive* when its component
-//! is non-trivial, and a negative or aggregating edge inside a
-//! component is a stratification violation (the rule reads a set the
-//! cycle itself is still deriving, so no stratified semantics exists
-//! for the program).
+//! the reference (`unless` premises are negative, a set-widened read
+//! of an attribute concept or of an optional field is optional, and
+//! every positive premise of a *reducing* rule is aggregating — its
+//! fold reads the complete relation). Tarjan's algorithm computes the
+//! strongly connected components; a concept is *recursive* when its
+//! component is non-trivial.
 //!
-//! Callers consume the analysis two ways:
+//! Outside a component, negation and optional reads have stratified
+//! semantics: the premise reads a relation derived in full before the
+//! rule runs. Inside a component they read a set the cycle is still
+//! deriving, and the *cycle policy* decides what they mean: the
+//! negation holds and the optional read yields the absent row as well
+//! as the present ones (see the
+//! [fixpoint](crate::concept::query::fixpoint) module). The component
+//! stays positive and has a least fixpoint, so every program
+//! evaluates, and the same way on every replica however its rules
+//! were merged. The analysis reports each such absence test
+//! ([`ProgramAnalysis::absences`]) because a rule rarely means it; an
+//! authoring tool turns the report into a warning. An aggregating
+//! edge inside a component remains a violation: a fold has no
+//! deterministic reading over a set still growing. A deductive rule
+//! refuses `reduce` at compile time, so the violation is unreachable
+//! for authored rules and kept for the structure.
+//!
+//! Callers consume the analysis three ways:
 //!
 //! - [`RuleRegistry::validate`](super::rule_registry::RuleRegistry::validate)
-//!   returns every [`Violation`] in the program, for callers
-//!   that want immediate feedback after an install or a merge.
+//!   returns every [`AggregationViolation`] in the program, for
+//!   callers that want immediate feedback after an install or a merge.
+//! - [`ProgramAnalysis::absences`] lists the absence tests the cycle
+//!   policy governs, for the same callers.
 //! - [`RuleRegistry::acquire`](super::rule_registry::RuleRegistry::acquire)
 //!   runs the targeted [`ProgramAnalysis::check`] over the queried
-//!   concept's dependency closure, so an ill-stratified or recursive
-//!   region of the program fails the queries that touch it (and only
-//!   those) with a structured error.
+//!   concept's dependency closure, so a recursive region of the
+//!   program is evaluated by the fixpoint and an aggregating one
+//!   fails the queries that touch it (and only those).
 
 use crate::Entity;
 use crate::attribute::AttributeDescriptor;
@@ -45,40 +62,62 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter;
 
 /// Polarity of a dependency edge: whether the rule body references
-/// the concept positively (an ordinary premise), under `unless`, or
-/// from a *reducing* rule whose fold must read the complete
-/// relation. Negative and aggregating edges inside a dependency
-/// cycle are stratification violations.
+/// the concept positively (an ordinary premise), under `unless`,
+/// set-widened, or from a *reducing* rule whose fold must read the
+/// complete relation. A negative or optional edge inside a dependency
+/// cycle is an absence test the cycle policy governs; an aggregating
+/// one is a stratification violation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Polarity {
     /// The body asserts the concept.
     Positive,
     /// The body negates the concept (`unless`).
     Negative,
+    /// The body reads the concept set-widened: an attribute concept
+    /// whose value term admits `Nothing`, or a selecting rule's read
+    /// of an optional field, which yields the absent row where
+    /// nothing matched.
+    Optional,
     /// The body asserts the concept from a rule with a `reduce`
     /// clause: the rule's folds consume the premise's full
-    /// relation, so like negation the reference demands a complete
-    /// lower stratum.
+    /// relation, so the reference demands a complete lower stratum.
     Aggregating,
 }
 
-/// A stratification violation: some rule concluding `concept`
-/// negates `negated`, and both live in the same dependency cycle,
-/// so the negation reads a set the cycle itself is still deriving.
-/// No stratified semantics exists for such a program.
+/// How a rule tests for absence: by negating a concept or by reading
+/// it set-widened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Absence {
+    /// An `unless` premise.
+    Negated,
+    /// A set-widened (optional) read.
+    Optional,
+}
+
+/// An absence test inside a dependency cycle: some rule concluding
+/// `concept` negates, or reads set-widened, `target`, and both live
+/// in the same cycle, so the test reads a set the cycle is still
+/// deriving. The cycle policy evaluates it as satisfied (the negation
+/// holds; the optional read yields the absent row as well), which
+/// keeps the component positive and every program evaluable, and is
+/// rarely what the rule's author meant. Reported, never refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NegationViolation {
-    /// The concluding concept whose rule negates into its own cycle.
+pub struct AbsenceInCycle {
+    /// The concluding concept whose rule tests absence in its own
+    /// cycle.
     pub concept: Entity,
-    /// The negated concept inside the same cycle.
-    pub negated: Entity,
+    /// The concept tested, inside the same cycle.
+    pub target: Entity,
+    /// How the rule tests it.
+    pub absence: Absence,
 }
 
 /// A stratification violation: some *reducing* rule concluding
 /// `concept` folds over `aggregated`, and both live in the same
 /// dependency cycle, so the fold reads a relation the cycle itself
 /// is still deriving. No stratified semantics exists for such a
-/// program. Exact sibling of [`NegationViolation`].
+/// program, and no cycle policy gives a fold a deterministic reading
+/// over a set still growing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AggregationViolation {
     /// The concluding concept whose reducing rule folds into its
@@ -88,23 +127,13 @@ pub struct AggregationViolation {
     pub aggregated: Entity,
 }
 
-/// Any stratification violation in the program: an edge that
-/// demands a complete lower stratum (negative or aggregating)
-/// landing inside its own dependency cycle.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Violation {
-    /// A negative edge inside its own cycle.
-    Negation(NegationViolation),
-    /// An aggregating edge inside its own cycle.
-    Aggregation(AggregationViolation),
-}
-
 /// The dependency edges a rule's body contributes: one per concept
-/// premise — negative when the premise sits under `unless`,
-/// aggregating when the rule carries a `reduce` clause (its folds
-/// read each positive premise's complete relation). The target's
-/// full descriptor rides along so concepts that never got a
-/// registry entry still contribute their structural edges.
+/// premise — negative when the premise sits under `unless`, optional
+/// when it reads an attribute concept set-widened, aggregating when
+/// the rule carries a `reduce` clause (its folds read each positive
+/// premise's complete relation). The target's full descriptor rides
+/// along so concepts that never got a registry entry still
+/// contribute their structural edges.
 fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
     let positive = if rule.reduce().is_empty() {
         Polarity::Positive
@@ -114,6 +143,9 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
     rule.analysis()
         .premises()
         .filter_map(|premise| match premise {
+            Premise::Assert(Proposition::Concept(query)) if query.widens() => {
+                Some((query.predicate.clone(), Polarity::Optional))
+            }
             Premise::Assert(Proposition::Concept(query)) => {
                 Some((query.predicate.clone(), positive))
             }
@@ -126,9 +158,10 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
 }
 
 /// The dependency edges a concept contributes with no rules of its own:
-/// one positive edge to the attribute concept of every field whose
-/// attribute `derived` holds, since the concept's selecting rule reads
-/// it there, plus its structural edges.
+/// one edge to the attribute concept of every field whose attribute
+/// `derived` holds, since the concept's selecting rule reads it there,
+/// optional for an optional field and positive otherwise, plus its
+/// structural edges.
 fn selecting_edges(
     descriptor: &ConceptDescriptor,
     derived: &HashSet<Entity>,
@@ -155,7 +188,12 @@ fn selecting_edges(
     for (_, field) in descriptor.with().iter() {
         let attribute = ConceptDescriptor::of_attribute(field);
         if derived.contains(&ProgramAnalysis::node(&attribute)) {
-            edges.push((attribute, Polarity::Positive));
+            let polarity = if field.is_optional() {
+                Polarity::Optional
+            } else {
+                Polarity::Positive
+            };
+            edges.push((attribute, polarity));
         }
     }
     edges
@@ -174,8 +212,9 @@ fn structural_edges(descriptor: &ConceptDescriptor) -> Vec<(ConceptDescriptor, P
 }
 
 /// A snapshot of the program's dependency structure: edges,
-/// strongly connected components, the recursive concept set, and
-/// every stratification violation. Computed by
+/// strongly connected components, the recursive concept set, the
+/// absence tests the cycle policy governs, and every stratification
+/// violation. Computed by
 /// [`ProgramAnalysis::analyze`] from a registry's rule map and
 /// cached until the next install.
 #[derive(Clone, Debug, Default)]
@@ -193,9 +232,11 @@ pub struct ProgramAnalysis {
     /// Strongly connected component id per concept. Two recursive
     /// concepts with the same id are on the same cycle.
     component: HashMap<Entity, usize>,
-    /// Every negative or aggregating edge that lands inside its own
+    /// Every negative or optional edge that lands inside its own
     /// component.
-    violations: Vec<Violation>,
+    absences: Vec<AbsenceInCycle>,
+    /// Every aggregating edge that lands inside its own component.
+    violations: Vec<AggregationViolation>,
     /// The attribute concepts some rule derives, by entity: what an
     /// unregistered concept's selecting rule reads through.
     derived: HashSet<Entity>,
@@ -306,8 +347,9 @@ impl ProgramAnalysis {
             }
         }
 
-        // A negative or aggregating edge whose endpoints share a
-        // component reads a set the cycle is still deriving.
+        // A negative, optional or aggregating edge whose endpoints
+        // share a component reads a set the cycle is still deriving.
+        let mut absences = Vec::new();
         let mut violations = Vec::new();
         for node in &nodes {
             let Some(out) = edges.get(node) else { continue };
@@ -315,19 +357,23 @@ impl ProgramAnalysis {
                 if component[index_of[node]] != component[index_of[target]] {
                     continue;
                 }
-                match polarity {
-                    Polarity::Negative => violations.push(Violation::Negation(NegationViolation {
-                        concept: node.clone(),
-                        negated: target.clone(),
-                    })),
+                let absence = match polarity {
+                    Polarity::Negative => Absence::Negated,
+                    Polarity::Optional => Absence::Optional,
                     Polarity::Aggregating => {
-                        violations.push(Violation::Aggregation(AggregationViolation {
+                        violations.push(AggregationViolation {
                             concept: node.clone(),
                             aggregated: target.clone(),
-                        }))
+                        });
+                        continue;
                     }
-                    Polarity::Positive => {}
-                }
+                    Polarity::Positive => continue,
+                };
+                absences.push(AbsenceInCycle {
+                    concept: node.clone(),
+                    target: target.clone(),
+                    absence,
+                });
             }
         }
 
@@ -342,6 +388,7 @@ impl ProgramAnalysis {
             aliases,
             recursive,
             component,
+            absences,
             violations,
             derived,
         }
@@ -349,8 +396,15 @@ impl ProgramAnalysis {
 
     /// Every stratification violation in the program, in
     /// deterministic (concept-sorted) order.
-    pub fn violations(&self) -> &[Violation] {
+    pub fn violations(&self) -> &[AggregationViolation] {
         &self.violations
+    }
+
+    /// Every absence test inside its own dependency cycle, in
+    /// deterministic (concept-sorted) order: what the cycle policy
+    /// evaluates as satisfied, and what an authoring tool warns about.
+    pub fn absences(&self) -> &[AbsenceInCycle] {
+        &self.absences
     }
 
     /// The node a concept is analysed as: an attribute concept is its
@@ -394,13 +448,14 @@ impl ProgramAnalysis {
             }
     }
 
-    /// Check the queried concept's dependency closure: an
-    /// ill-stratified closure fails with
-    /// [`EvaluationError::NegationThroughRecursion`] or
+    /// Check the queried concept's dependency closure: a closure
+    /// that folds inside a cycle fails with
     /// [`EvaluationError::AggregationThroughRecursion`]; otherwise
     /// the closure is classified [`Closure::Recursive`] when it
     /// contains a cycle (the fixpoint evaluator's cue) or
-    /// [`Closure::Acyclic`] for ordinary top-down evaluation.
+    /// [`Closure::Acyclic`] for ordinary top-down evaluation. An
+    /// absence test inside a cycle is not a failure: the cycle policy
+    /// evaluates it (see [`Self::absences`]).
     ///
     /// Takes the descriptor rather than the entity because the
     /// queried concept may be unknown to the analysis (never
@@ -433,22 +488,15 @@ impl ProgramAnalysis {
             }
         }
 
-        for violation in &self.violations {
-            match violation {
-                Violation::Negation(negation) if seen.contains(&negation.concept) => {
-                    return Err(EvaluationError::NegationThroughRecursion {
-                        concept: negation.concept.to_string(),
-                        negated: negation.negated.to_string(),
-                    });
-                }
-                Violation::Aggregation(aggregation) if seen.contains(&aggregation.concept) => {
-                    return Err(EvaluationError::AggregationThroughRecursion {
-                        concept: aggregation.concept.to_string(),
-                        aggregated: aggregation.aggregated.to_string(),
-                    });
-                }
-                _ => {}
-            }
+        if let Some(aggregation) = self
+            .violations
+            .iter()
+            .find(|aggregation| seen.contains(&aggregation.concept))
+        {
+            return Err(EvaluationError::AggregationThroughRecursion {
+                concept: aggregation.concept.to_string(),
+                aggregated: aggregation.aggregated.to_string(),
+            });
         }
         if order.iter().any(|entity| self.recursive.contains(entity)) {
             Ok(Closure::Recursive)
@@ -633,6 +681,57 @@ mod tests {
             !analysis.in_same_cycle(&a.this(), &concept("ddd").this()),
             "concepts outside the cycle are not members"
         );
+    }
+
+    /// A negation inside a cycle is reported, not refused: the program
+    /// has no stratification violation, the closure is recursive so
+    /// the fixpoint evaluates it under the cycle policy, and the
+    /// absence test names the rule's concept and the concept it
+    /// negates.
+    #[dialog_common::test]
+    fn it_reports_an_absence_test_inside_a_cycle() {
+        let a = concept("aaa");
+        let b = concept("bbb");
+        let c = concept("ccc");
+        let mut registry = RuleRegistry::new();
+        registry.register(rule(&a, &[&b], &[])).unwrap();
+        registry.register(rule(&b, &[&c], &[&a])).unwrap();
+
+        assert!(registry.validate().unwrap().is_empty(), "no violation");
+        let analysis = registry.analysis().unwrap();
+        assert_eq!(
+            analysis.absences(),
+            &[AbsenceInCycle {
+                concept: ProgramAnalysis::node(&b),
+                target: ProgramAnalysis::node(&a),
+                absence: Absence::Negated,
+            }],
+            "an attribute concept is reported by its relation"
+        );
+        assert_eq!(
+            analysis.check(&a).unwrap(),
+            Closure::Recursive,
+            "the closure evaluates by fixpoint"
+        );
+        assert!(
+            registry.acquire(&b).unwrap().recursion().is_some(),
+            "the negating member is a component member like any other"
+        );
+    }
+
+    /// A negation between concepts on no common cycle is stratified
+    /// and reported as nothing.
+    #[dialog_common::test]
+    fn it_reports_nothing_for_a_stratified_negation() {
+        let a = concept("aaa");
+        let b = concept("bbb");
+        let mut registry = RuleRegistry::new();
+        registry.register(rule(&a, &[&a], &[])).unwrap();
+        registry.register(rule(&b, &[&b], &[&a])).unwrap();
+
+        let analysis = registry.analysis().unwrap();
+        assert!(analysis.absences().is_empty());
+        assert_eq!(analysis.check(&b).unwrap(), Closure::Recursive);
     }
 
     /// Concept-typed fields contribute structural edges: a concept

@@ -9,7 +9,7 @@ use crate::statement::Statement;
 use crate::term::Term;
 use crate::types::{Scalar, Typed};
 use crate::{Claim, Premise, Proposition};
-use dialog_artifacts::Update;
+use dialog_artifacts::{Succession, Update};
 use std::ops::Not;
 
 /// Converts a value into a [`Term`], resolving the type unambiguously
@@ -63,6 +63,7 @@ impl<T, Of> DynamicAttributeExpressionBuilder<T, Of> {
             is: value,
             cause: None,
             cardinality: None,
+            succession: None,
         }
     }
 }
@@ -90,6 +91,11 @@ pub struct DynamicAttributeExpression<The, Of, Is> {
     /// Optional cardinality override. When `Some(Cardinality::One)`,
     /// `assert` uses `associate_unique`.
     pub cardinality: Option<Cardinality>,
+    /// How `assert` succeeds a claim of the cell when the attribute is
+    /// read under a choosing policy (`max`, `min`, `top`): the claim the
+    /// policy elects is retracted beside the written value. `None`
+    /// writes by the cardinality alone.
+    pub succession: Option<Succession>,
 }
 
 impl<The, Of, Is> DynamicAttributeExpression<The, Of, Is> {
@@ -151,11 +157,14 @@ impl<Is: Scalar> Statement for DynamicAttributeExpression<The, Entity, Is> {
     fn assert(self, update: &mut impl Update) {
         let the = self.the;
         let value: Value = self.is.into();
-        match self.cardinality {
-            Some(Cardinality::One) => {
+        match (self.succession, self.cardinality) {
+            (Some(succession), _) => {
+                update.succeed(the.into(), self.of, value, succession);
+            }
+            (None, Some(Cardinality::One)) => {
                 update.associate_unique(the.into(), self.of, value);
             }
-            _ => {
+            (None, _) => {
                 update.associate(the.into(), self.of, value);
             }
         }
@@ -213,6 +222,7 @@ impl<Is: Scalar> From<DynamicAttributeExpression<The, Entity, Is>> for Attribute
             is: expression.is.into(),
             cause: expression.cause,
             cardinality: expression.cardinality,
+            succession: expression.succession,
         }
     }
 }

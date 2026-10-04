@@ -20,6 +20,7 @@
 //! versions; nothing staged is ever rewritten.
 
 use super::induce::induce;
+use super::succession;
 use super::{Transaction, TransactionCommit, carry_footprint, touches_rules};
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
@@ -590,6 +591,7 @@ where
         + ConditionalSync
         + 'static,
 {
+    succession::resolve(source, &mut changes, env).await?;
     let induced = induce(source, &mut changes, transients, env).await?;
     let touches = touches_rules(&changes);
     let previous = base.clone();

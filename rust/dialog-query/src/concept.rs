@@ -174,6 +174,7 @@ where
             ),
             cause: None,
             cardinality: Some(descriptor.cardinality()),
+            succession: descriptor.succession(),
         };
         buf.push(expr);
     }
@@ -251,6 +252,7 @@ where
                 ),
                 cause: None,
                 cardinality: Some(descriptor.cardinality()),
+                succession: descriptor.succession(),
             };
             buf.push(expr);
         }

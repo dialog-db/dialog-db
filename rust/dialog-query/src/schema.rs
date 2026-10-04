@@ -148,32 +148,9 @@ pub enum Select {
     Max,
     /// The least candidate under the values' own order.
     Min,
-    /// The sum of the candidates, in their numeric band.
-    Sum,
-    /// How many candidates there are.
-    Count,
-    /// How many distinct values the candidates hold.
-    CountDistinct,
-    /// The mean of the candidates, as a float.
-    Avg,
 }
 
 impl Select {
-    /// Whether the policy's result is a value of the attribute's own
-    /// carrier, or a set of them.
-    pub fn is_carrier_closed(self) -> bool {
-        !matches!(self, Select::Count | Select::CountDistinct | Select::Avg)
-    }
-
-    /// Whether the policy folds every candidate into one value rather
-    /// than choosing among them.
-    pub fn is_fold(self) -> bool {
-        matches!(
-            self,
-            Select::Sum | Select::Count | Select::CountDistinct | Select::Avg
-        )
-    }
-
     /// Whether the policy needs the whole candidate set before it can
     /// answer: everything but `last` over a relation nothing derives,
     /// where the stored value is the answer.
@@ -207,10 +184,6 @@ impl fmt::Display for Select {
             Select::Top => "top",
             Select::Max => "max",
             Select::Min => "min",
-            Select::Sum => "sum",
-            Select::Count => "count",
-            Select::CountDistinct => "count-distinct",
-            Select::Avg => "avg",
         };
         f.write_str(name)
     }
