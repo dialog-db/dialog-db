@@ -483,17 +483,16 @@ impl AttributeDescriptor {
         &self.among
     }
 
-    /// How a write through this attribute succeeds a claim of its
-    /// cell, when its policy chooses one: the claim a read returns is
-    /// retracted beside the written value. `last` needs none, since a
-    /// write is newer than every claim it observed and replaces them
-    /// all; `all` appends.
+    /// How a write through this attribute succeeds a claim, when its
+    /// policy chooses one: the claim a read returns is retracted beside
+    /// the written value. `all` appends and succeeds nothing.
     pub fn succession(&self) -> Option<Succession> {
         match self.select {
+            Select::Last => Some(Succession::Last),
             Select::Max => Some(Succession::Max),
             Select::Min => Some(Succession::Min),
             Select::Top => Some(Succession::Top(self.among.clone())),
-            Select::Last | Select::All => None,
+            Select::All => None,
         }
     }
 

@@ -46,7 +46,7 @@ use dialog_effects::memory::Resolve;
 use dialog_query::attribute::Relation;
 use dialog_query::rule::inductive::Polarity;
 use dialog_query::rule::statement::Reach;
-use dialog_query::{Any, Binding, Cardinality, Environment, InductiveRule, Match, Term};
+use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
 use crate::repository::branch::QueryLayer;
@@ -1155,10 +1155,9 @@ where
                 Polarity::Retract => {
                     dialog_artifacts::Update::dissociate(&mut head, attribute, this.clone(), value);
                 }
-                // An asserting head writes as the field's policy says:
-                // the newest claim supersedes every prior, a set
-                // appends, and a choosing policy succeeds the claim it
-                // elects (resolved against the view at commit).
+                // An asserting head writes as the field's policy says: a
+                // set appends, and a choosing policy succeeds the claim
+                // it elects, resolved against the view at commit.
                 Polarity::Assert => match field.descriptor().succession() {
                     Some(succession) => {
                         dialog_artifacts::Update::succeed(
@@ -1169,24 +1168,14 @@ where
                             succession,
                         );
                     }
-                    None => match field.descriptor().cardinality() {
-                        Cardinality::One => {
-                            dialog_artifacts::Update::associate_unique(
-                                &mut head,
-                                attribute,
-                                this.clone(),
-                                value,
-                            );
-                        }
-                        Cardinality::Many => {
-                            dialog_artifacts::Update::associate(
-                                &mut head,
-                                attribute,
-                                this.clone(),
-                                value,
-                            );
-                        }
-                    },
+                    None => {
+                        dialog_artifacts::Update::associate(
+                            &mut head,
+                            attribute,
+                            this.clone(),
+                            value,
+                        );
+                    }
                 },
             }
         }

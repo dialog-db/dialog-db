@@ -6,7 +6,7 @@ use crate::descriptor::Descriptor;
 use crate::negation::Negation;
 use crate::statement::Statement;
 use crate::types::Scalar;
-use crate::{Cardinality, Entity, Premise, Proposition, Term};
+use crate::{Entity, Premise, Proposition, Term};
 use dialog_artifacts::Update;
 use std::iter;
 use std::marker::PhantomData;
@@ -169,9 +169,6 @@ where
         let value = attr.value().clone().into();
         match desc.succession() {
             Some(succession) => update.succeed(the, of, value, succession),
-            None if desc.cardinality() == Cardinality::One => {
-                update.associate_unique(the, of, value)
-            }
             None => update.associate(the, of, value),
         }
     }
@@ -283,6 +280,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::Cardinality;
     use crate::Changes;
     use crate::Match;
     use crate::artifact::Value;

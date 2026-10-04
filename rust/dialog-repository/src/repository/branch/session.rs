@@ -2,9 +2,10 @@ use dialog_effects::blob::Read as BlobRead;
 use std::collections::HashSet;
 
 use dialog_artifacts::LoadBlob;
+use dialog_artifacts::history::Edition;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, ArtifactViewStream as _, Changes,
+    Artifact, ArtifactSelector, ArtifactStream, ArtifactView, ArtifactViewStream as _, Changes,
     DialogArtifactsError, Entity, Estimate, Likelihood, Preload, PreloadRequest, Select,
     Speculation, Statement,
 };
@@ -719,12 +720,23 @@ where
         }
 
         // Staged layers — a range read each, in the lines' format, and
-        // pushed only when they have rows, for the same reason.
+        // pushed only when they have rows, for the same reason. A staged
+        // row is a write the transaction will commit, so it stands at
+        // the edition that commit mints: a read over the transaction
+        // elects it over the line's rows, as a read after the commit
+        // will.
+        let pending = self
+            .sources
+            .first()
+            .and_then(|source| source.as_ref().revision())
+            .map(|revision| revision.edition.successor())
+            .unwrap_or(Edition::GENESIS);
         for layer in &self.layers {
             let rows = layer.select(&input, &manifest);
             if !rows.is_empty() {
                 streams.push(Box::pin(stream::iter(
-                    rows.into_iter().map(|fact| Ok(fact.into())),
+                    rows.into_iter()
+                        .map(move |fact| Ok(ArtifactView::pending(fact, pending))),
                 )));
             }
         }

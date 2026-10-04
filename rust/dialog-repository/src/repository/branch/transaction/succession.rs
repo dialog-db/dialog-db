@@ -1,42 +1,42 @@
 //! Succession of a claim under a choosing policy, resolved at commit.
 //!
-//! A write through an attribute read under `max`, `min` or `top`
-//! succeeds the claim the attribute stands for: the one live claim of
-//! its cell the policy elects, which is what a read returns. Which
-//! claim that is depends on the line, so the statement records a
-//! [`Succession`] and the commit resolves it here, before induction
-//! sees the batch: the cell's live claims are read through the same
-//! view a mid-transaction query has, elected under the policy by the
-//! election a read runs, and the elected claim is retracted beside the
-//! assertion. A write under `last` is newer than every claim it
-//! observed and supersedes them all ([`Instruction::Replace`]); a write
-//! under `all` appends. Only stored claims can be succeeded: a
-//! candidate a rule derives is not a claim, so a write beside one adds
-//! a candidate and the rule's stays.
-//!
-//! [`Instruction::Replace`]: dialog_artifacts::Instruction::Replace
+//! A write through an attribute read under `last`, `max`, `min` or
+//! `top` succeeds the claim the attribute stands for: the candidate a
+//! read under the policy returns. Which candidate that is depends on
+//! the line and on the rules deriving the relation, so the statement
+//! records a [`Succession`] and the commit resolves it here, before
+//! induction sees the batch: the attribute is read for the entity
+//! through the same view a mid-transaction query has, under the policy,
+//! without the written value, and the stored claim holding the elected
+//! value, if one does, is retracted beside the assertion. A candidate a
+//! rule derives is not a claim: when the read elects a derived value
+//! nothing is retracted, and the write stands beside it as one more
+//! candidate. A write under `all` appends and succeeds nothing.
 
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::QueryEnv;
 use crate::repository::source::SourceRef;
 use crate::{CommitError, RemoteSite, Staged};
-use dialog_artifacts::{ArtifactSelector, Changes, Select, Update};
+use dialog_artifacts::{ArtifactSelector, Changes, Select, Succession, Update, Value};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
-use dialog_query::concept::query::Election;
-use dialog_query::{Claim, Standing};
+use dialog_query::attribute::{AttributeDescriptor, Relation, The};
+use dialog_query::query::Output as _;
+use dialog_query::types::Any;
+use dialog_query::{
+    Binding, Cardinality, ConceptDescriptor, ConceptFieldDescriptor, ConceptQuery, Match,
+    Parameters, Term,
+};
 use futures_util::TryStreamExt;
 use std::fmt::Display;
 
 /// Resolve every succession `changes` holds against `source`, read
-/// through the batch itself, into the retraction of the claim it
-/// succeeds and the assertion of its value. A cell with no live claim
-/// but the written value, or whose elected claim is the written value,
-/// retracts nothing.
+/// through the batch itself, into the retraction of the stored claim it
+/// succeeds, if any, and the assertion of its value.
 pub(crate) async fn resolve<Env>(
     source: SourceRef<'_>,
     changes: &mut Changes,
@@ -60,6 +60,8 @@ where
         return Ok(());
     }
     let operator = Identify.perform(env).await?;
+    // The view reads the batch without its successions, so the election
+    // is over what the write observed, never over itself.
     let view = QueryEnv::new(
         vec![source.to_source()],
         QueryLayer::from(source).overlay(&operator),
@@ -69,30 +71,60 @@ where
     let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
 
     for (the, of, is, succession) in successions {
-        let selector = ArtifactSelector::new().the(the.clone()).of(of.clone());
-        let rows = Provider::<Select<'_>>::execute(&view, selector)
-            .await
-            .map_err(|error| failed(&error))?
-            .try_collect::<Vec<_>>()
+        // The attribute read under the policy, for this entity: what a
+        // read returns, stored or derived.
+        let (select, among) = match &succession {
+            Succession::Last => (dialog_query::Select::Last, Vec::new()),
+            Succession::Max => (dialog_query::Select::Max, Vec::new()),
+            Succession::Min => (dialog_query::Select::Min, Vec::new()),
+            Succession::Top(among) => (dialog_query::Select::Top, among.clone()),
+        };
+        let attribute = AttributeDescriptor::over(
+            Relation::Attribute(The::from(the.clone())),
+            "",
+            Cardinality::One,
+            None,
+        )
+        .with_select(select, among);
+        let predicate =
+            ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(attribute));
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::constant(of.clone()));
+        terms.insert(
+            ConceptDescriptor::VALUE.to_string(),
+            Term::<Any>::var(ConceptDescriptor::VALUE),
+        );
+        let rows: Vec<Match> = ConceptQuery { terms, predicate }
+            .evaluate(Match::new().seed(), &view)
+            .try_vec()
             .await
             .map_err(|error| failed(&error))?;
-        let mut claims = Vec::new();
-        for row in rows {
-            let artifact = row.to_owned().map_err(|error| failed(&error))?;
-            if artifact.is == is {
-                continue;
+        let elected: Option<Value> =
+            rows.into_iter()
+                .find_map(|row| match row.get(ConceptDescriptor::VALUE) {
+                    Some(Binding::Present(value)) => Some(value.clone()),
+                    _ => None,
+                });
+
+        // The elected value is succeeded where a stored claim holds it:
+        // a derived candidate is not a claim and stays.
+        if let Some(elected) = elected
+            && elected != is
+        {
+            let selector = ArtifactSelector::new()
+                .the(the.clone())
+                .of(of.clone())
+                .is(elected.clone());
+            let held = Provider::<Select<'_>>::execute(&view, selector)
+                .await
+                .map_err(|error| failed(&error))?
+                .try_next()
+                .await
+                .map_err(|error| failed(&error))?
+                .is_some();
+            if held {
+                changes.dissociate(the.clone(), of.clone(), elected);
             }
-            let standing = Standing {
-                version: row.standing(),
-                cause: Claim::from(artifact.clone()).cause().clone(),
-            };
-            claims.push((artifact.is.clone(), Some(standing), artifact));
-        }
-        let elected = Election::from(&succession)
-            .elect_claims(claims)
-            .map_err(|error| failed(&error))?;
-        if let Some(elected) = elected {
-            changes.dissociate(the.clone(), of.clone(), elected.is);
         }
         changes.associate(the, of, is);
     }
@@ -325,14 +357,143 @@ mod tests {
             .await?;
         assert_eq!(
             stored(&branch, &operator, &alice).await?,
-            vec![200],
-            "the stored claim the write could succeed is succeeded"
+            vec![100, 200],
+            "the read elected the derived candidate, so no stored claim is succeeded"
         );
         assert_eq!(
             read_max(&branch, &operator, &alice).await?,
             vec![500],
             "the derived candidate stands and still wins the read"
         );
+
+        // Once the derived candidate is gone, the greatest stored
+        // claim is what a read returns, and a write succeeds it.
+        branch
+            .transaction()
+            .retract(dialog_query::the!("org/bonus").of(alice.clone()).is(500u32))
+            .assert(salary(&alice, 150))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            stored(&branch, &operator, &alice).await?,
+            vec![100, 150],
+            "the write succeeds the stored claim the read now elects"
+        );
+        Ok(())
+    }
+
+    /// A transaction reads its own `last` write as the commit will: the
+    /// staged row stands at the edition the commit mints, so it is
+    /// elected over the committed claim, and a second write in the same
+    /// transaction succeeds the first, which was never committed and
+    /// leaves no trace.
+    #[dialog_common::test]
+    async fn it_reads_its_own_last_write_before_the_commit() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice = Entity::new()?;
+        let last = |value: u32| AttributeStatement {
+            succession: Some(Succession::Last),
+            ..salary(&alice, value)
+        };
+        branch
+            .transaction()
+            .assert(last(100))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+        }}))?;
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));
+        terms.insert("salary".to_string(), Term::<Any>::var("salary"));
+        let query = ConceptQuery { predicate, terms };
+
+        let transaction = branch.transaction().assert(last(200)).assert(last(300));
+        let rows: Vec<ConceptConclusion> = transaction
+            .query()
+            .select(query.clone())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let read: Vec<u64> = rows
+            .iter()
+            .map(|row| row.get::<u64>("salary"))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(read, vec![300], "the transaction reads its latest write");
+
+        transaction.commit().publish().perform(&operator).await?;
+        assert_eq!(
+            stored(&branch, &operator, &alice).await?,
+            vec![300],
+            "the committed claim is succeeded and the superseded staged write is gone"
+        );
+        Ok(())
+    }
+
+    /// A write under `last` succeeds the claim a `last` read returns:
+    /// of two live claims, the newer. The older stays, as under any
+    /// other policy; a `last` read returns the write afterwards, since
+    /// it is newer than both.
+    #[dialog_common::test]
+    async fn it_succeeds_the_newest_claim_under_last() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice = Entity::new()?;
+
+        // Two claims written without a policy, one revision apart, so
+        // the second is the newer.
+        for value in [100u32, 200] {
+            branch
+                .transaction()
+                .assert(dialog_query::the!("org/salary").of(alice.clone()).is(value))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        assert_eq!(stored(&branch, &operator, &alice).await?, vec![100, 200]);
+
+        let last = AttributeStatement {
+            succession: Some(Succession::Last),
+            ..salary(&alice, 150)
+        };
+        branch
+            .transaction()
+            .assert(last)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            stored(&branch, &operator, &alice).await?,
+            vec![100, 150],
+            "the newer claim is succeeded, the older stays"
+        );
+
+        let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+        }}))?;
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));
+        terms.insert("salary".to_string(), Term::<Any>::var("salary"));
+        let rows: Vec<ConceptConclusion> = branch
+            .select(ConceptQuery { predicate, terms })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let read: Vec<u64> = rows
+            .iter()
+            .map(|row| row.get::<u64>("salary"))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(read, vec![150], "a last read returns the write");
         Ok(())
     }
 }
