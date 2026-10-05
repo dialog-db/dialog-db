@@ -82,9 +82,18 @@ where
         .perform(&session)
         .await?;
     let branch = repository.branch("main").open().perform(&session).await?;
+    let changes = artifacts
+        .map(Instruction::Assert)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect();
     branch
-        .commit(artifacts.map(Instruction::Assert))
+        .transaction()
+        .integrate(changes)
+        .commit()
         .canonicalize()
+        .publish()
         .perform(&session)
         .await?;
 

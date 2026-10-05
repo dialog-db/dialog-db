@@ -60,7 +60,7 @@ use dialog_storage::provider::FileSystem;
 use dialog_storage::provider::storage::VolatileSpace;
 use dialog_storage::resource::Resource as _;
 use dialog_varsig::{Did, Principal};
-use futures_util::{StreamExt as _, stream};
+use futures_util::StreamExt as _;
 
 use crate::report::{PhaseReport, Report};
 
@@ -490,7 +490,10 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // Seed: metadata first, then the entities spread over the requested
     // number of commits (history depth shapes the head the client adopts).
     branch
-        .commit(stream::iter(meta_facts(scenario.members)?))
+        .transaction()
+        .integrate(meta_facts(scenario.members)?.into_iter().collect())
+        .commit()
+        .publish()
         .perform(&operator)
         .await?;
     // The derived-concept rule ships with the space: its facts live in
@@ -513,7 +516,10 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
             batch.extend(entity_facts(index)?);
         }
         branch
-            .commit(stream::iter(batch))
+            .transaction()
+            .integrate(batch.into_iter().collect())
+            .commit()
+            .publish()
             .perform(&operator)
             .await?;
         seeded = batch_end;
@@ -580,7 +586,10 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
 
     measured("claim", &mut phases, async {
         client
-            .commit(stream::iter(claim_facts()?))
+            .transaction()
+            .integrate(claim_facts()?.into_iter().collect())
+            .commit()
+            .publish()
             .perform(&operator)
             .await?;
         client
@@ -804,7 +813,13 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     for index in scenario.entities..scenario.entities + scenario.entities / 4 {
         seed.extend(entity_facts(index)?);
     }
-    seeded.commit(stream::iter(seed)).perform(&operator).await?;
+    seeded
+        .transaction()
+        .integrate(seed.into_iter().collect())
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
     measured("seeded", &mut phases, async {
         seeded.pull().perform(&operator).await?;
         Ok(())

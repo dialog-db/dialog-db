@@ -59,7 +59,7 @@ use std::sync::atomic::Ordering;
 // the browser, so the whole on-disk path is gated to non-wasm targets.
 #[cfg(not(target_arch = "wasm32"))]
 use dialog_storage::NativeTempSpace;
-use futures_util::{TryStreamExt as _, stream};
+use futures_util::TryStreamExt as _;
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs::read_to_string;
@@ -696,7 +696,10 @@ where
 
         let instructions: Vec<Instruction> = data.into_iter().map(Instruction::Assert).collect();
         branch
-            .commit(stream::iter(instructions))
+            .transaction()
+            .integrate(instructions.into_iter().collect())
+            .commit()
+            .publish()
             .perform(&self.operator)
             .await?;
         Ok(count)
@@ -1193,7 +1196,10 @@ where
         }
         let branch = held.as_ref().expect("branch handle");
         branch
-            .commit(stream::iter(instructions))
+            .transaction()
+            .integrate(instructions.into_iter().collect())
+            .commit()
+            .publish()
             .perform(&self.operator)
             .await?;
         Ok(())

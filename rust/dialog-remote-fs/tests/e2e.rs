@@ -30,7 +30,7 @@ use dialog_storage::provider::FileSystem;
 use dialog_storage::provider::storage::VolatileSpace;
 use dialog_storage::resource::Resource;
 use dialog_varsig::{Did, Principal};
-use futures_util::{StreamExt, stream};
+use futures_util::StreamExt;
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -114,9 +114,14 @@ async fn it_pushes_and_pulls_via_fs_remote() -> Result<()> {
         setup_repo_with_fs_remote(&operator, &profile, "fs-push").await?;
 
     branch
-        .commit(stream::iter(vec![Instruction::Assert(artifact(
-            "user:1", "Alice",
-        )?)]))
+        .transaction()
+        .integrate(
+            vec![Instruction::Assert(artifact("user:1", "Alice")?)]
+                .into_iter()
+                .collect(),
+        )
+        .commit()
+        .publish()
         .perform(&operator)
         .await?;
 
@@ -150,10 +155,14 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
         setup_repo_with_fs_remote(&operator, &profile, "fs-share-a").await?;
 
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(artifact(
-            "user:alice",
-            "Alice",
-        )?)]))
+        .transaction()
+        .integrate(
+            vec![Instruction::Assert(artifact("user:alice", "Alice")?)]
+                .into_iter()
+                .collect(),
+        )
+        .commit()
+        .publish()
         .perform(&operator)
         .await?;
     alice_branch.push().perform(&operator).await?;
@@ -247,10 +256,14 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
 
     // Alice commits and pushes first, advancing the remote head.
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(artifact(
-            "user:alice",
-            "Alice",
-        )?)]))
+        .transaction()
+        .integrate(
+            vec![Instruction::Assert(artifact("user:alice", "Alice")?)]
+                .into_iter()
+                .collect(),
+        )
+        .commit()
+        .publish()
         .perform(&operator)
         .await?;
     alice_branch.push().perform(&operator).await?;
@@ -258,9 +271,14 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
     // Bob commits independently (still sees the empty remote) and pushes. The
     // remote head moved under him, so his publish must fail the CAS.
     bob_branch
-        .commit(stream::iter(vec![Instruction::Assert(artifact(
-            "user:bob", "Bob",
-        )?)]))
+        .transaction()
+        .integrate(
+            vec![Instruction::Assert(artifact("user:bob", "Bob")?)]
+                .into_iter()
+                .collect(),
+        )
+        .commit()
+        .publish()
         .perform(&operator)
         .await?;
     let stale = bob_branch.push().perform(&operator).await;
