@@ -105,7 +105,11 @@ where
     // What every write observed of the line: its claims, read once per
     // cell a succession writes.
     let line = QueryEnv::new(sources.clone(), overlay.clone(), env);
-    if settlement == Settlement::Commit {
+    // A commit leaves a cell to the tree unless some rule derives its
+    // relation: one the line knows, or one this transaction installs,
+    // which the line cannot know yet and the settlement below reads
+    // through the writes before each succession.
+    if settlement == Settlement::Commit && !staged.holds_rules() {
         let mut relations: Vec<&Attribute> = Vec::new();
         for (the, _, change) in staged.log() {
             if matches!(change, Change::Succeed(..)) && !relations.contains(&the) {
@@ -728,6 +732,57 @@ mod tests {
             vec![100, 150],
             "the write succeeds the stored claim the read now elects"
         );
+        Ok(())
+    }
+
+    /// A rule installed in the transaction that writes counts: the
+    /// derived candidate it brings wins the read, so the write succeeds
+    /// nothing, where a settlement over the line alone would have
+    /// retired the greatest stored claim.
+    #[dialog_common::test]
+    async fn it_sees_a_rule_the_same_transaction_installs() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(salary(&alice, 100))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": {
+                "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+            }},
+            "when": [{
+                "assert": { "with": {
+                    "bonus": { "the": "org/bonus", "as": "UnsignedInteger" }
+                }},
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "bonus": { "?": { "name": "salary" } }
+                }
+            }]
+        }))?;
+        let rule: DeductiveRule = descriptor.compile()?;
+        branch
+            .transaction()
+            .assert(&rule)
+            .assert(dialog_query::the!("org/bonus").of(alice.clone()).is(500u32))
+            .assert(salary(&alice, 150))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            stored(&branch, &operator, &alice).await?,
+            vec![100, 150],
+            "the derived candidate the transaction brings wins, so nothing is retired"
+        );
+        assert_eq!(read_max(&branch, &operator, &alice).await?, vec![500]);
         Ok(())
     }
 
