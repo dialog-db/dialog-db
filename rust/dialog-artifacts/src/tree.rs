@@ -44,8 +44,8 @@ use crate::{
     ATTRIBUTE_KEY_TAG, ArchiveDelta, ArchiveReader, Artifact, ArtifactSelector, ArtifactView,
     ArtifactWriter, AttributeKey, AttributeKeyPart, Cause, Datum, DeltaOverlay,
     DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart, Instruction, Key, KeyView,
-    KeyViewConstruct, KeyViewMut, LoadBlob, SelectorMatch, Standing, State, VALUE_KEY_TAG, Value,
-    ValueDataType, ValueKey, decode_value_parts, encode_bytes, encode_value_owned,
+    KeyViewConstruct, KeyViewMut, LoadBlob, Policy, SelectorMatch, Standing, State, VALUE_KEY_TAG,
+    Value, ValueDataType, ValueKey, decode_value_parts, encode_bytes, encode_value_owned,
     key::varkey::{self, KeyRef, ValuePayload, ValueRef, parse_key_ref},
     key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
     make_reference, match_selector_and_key_ref,
@@ -526,11 +526,11 @@ pub trait ArtifactTreeExt {
     /// same key writes that a branch commit or `Artifacts::commit`
     /// would.
     ///
-    /// Each instruction touches all three EAV/AEV/VAE indexes;
-    /// `Replace` additionally scans the `(entity, attribute)` range to
-    /// supersede any different-valued priors (and skips inserting when
-    /// a same-valued prior is already in place — that's the
-    /// cardinality-one no-op).
+    /// Each instruction touches all three EAV/AEV/VAE indexes; an
+    /// assertion under a choosing policy additionally scans the
+    /// `(entity, attribute)` range to elect the prior it succeeds (and
+    /// skips inserting when a same-valued prior is already in place,
+    /// the no-op of writing a standing value).
     ///
     /// The batch's new nodes are written into `delta`, the caller-owned
     /// accumulator. Callers own everything else: building the change stream,
@@ -1314,9 +1314,9 @@ fn fold_record(earlier: &[Version], later: Record) -> Record {
 /// The supersession scans go through [`ArtifactWriter::scan`] and
 /// [`ArtifactWriter::read`], which see the batch's own pending writes on both
 /// targets. On the buffered target that means the node buffers are merged into
-/// the scan: a `Replace` blind to a buffered prior would leave it live at a
-/// cardinality-one slot, and a `Retract` blind to one would cite nothing and so
-/// cover nothing at merge time.
+/// the scan: an election blind to a buffered prior would leave it live where
+/// the policy would have retired it, and a `Retract` blind to one would cite
+/// nothing and so cover nothing at merge time.
 ///
 /// `storage` loads the tree's nodes and spilled values; a value above the
 /// manifest's inline threshold lives as a content-addressed blob, and its key
@@ -1385,10 +1385,7 @@ where
         // positional — rules are content-addressed, so a forged rule
         // fact fails the hydration check upstream and is inert.
         if scope == WriteScope::Application {
-            let (Instruction::Assert(artifact)
-            | Instruction::Replace(artifact)
-            | Instruction::Retract(artifact)
-            | Instruction::Succeed(artifact, _)) = &instruction;
+            let (Instruction::Assert(artifact, _) | Instruction::Retract(artifact)) = &instruction;
             let the = artifact.the.as_str();
             if the.starts_with("dialog.")
                 && !the.starts_with("dialog.rule/")
@@ -1400,7 +1397,7 @@ where
             }
         }
         match instruction {
-            Instruction::Assert(artifact) => {
+            Instruction::Assert(artifact, Policy::All) => {
                 changed = true;
                 // ONE value encode per instruction: the payload feeds all
                 // three index keys, and a spilling value's block bytes and
@@ -1463,143 +1460,12 @@ where
                     )
                     .await?;
             }
-            Instruction::Replace(artifact) => {
-                let entity_key = EntityKey::from_artifact(&artifact, manifest);
-
-                // Scan priors at this (entity, attribute) against the
-                // in-flight write target, so writes from earlier instructions
-                // in this batch are visible (on the buffered target that means
-                // the node buffers are merged into the scan). Same-valued
-                // priors already represent the desired state; only
-                // different-valued ones need superseding. The value lives in
-                // the key now, so each candidate's claim is reconstructed from
-                // its key rather than read out of the payload. The scan borrows
-                // `transient` immutably, so collect into owned vectors in a
-                // scope that ends before the subsequent mutating reassignments.
-                let mut superseded_keys: Vec<Key> = Vec::new();
-                let mut superseded_versions: Vec<Version> = Vec::new();
-                let mut found_same_value = false;
-                {
-                    let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
-                        .set_entity(entity_key.entity())
-                        .set_attribute(entity_key.attribute())
-                        .into_key();
-                    let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
-                        .set_entity(entity_key.entity())
-                        .set_attribute(entity_key.attribute())
-                        .into_key();
-                    let search_stream = transient.scan(search_start..=search_end, storage);
-                    tokio::pin!(search_stream);
-                    while let Some(candidate) = search_stream.next().await {
-                        let candidate = candidate?;
-                        if let State::Added(current_element) = &candidate.value {
-                            // A prior with a spilled value carries only a
-                            // reference in its key; fetch the block so the
-                            // value comparison below sees the real value.
-                            let spilled = fetch_spilled(storage, &candidate.key).await?;
-                            let current = Artifact::from_key_datum_with_value(
-                                &candidate.key,
-                                current_element,
-                                spilled,
-                            )?;
-                            // Supersession is scoped to this exact
-                            // (entity, attribute). The range should already
-                            // guarantee that, but deleting is destructive
-                            // and unconditional across all three indexes,
-                            // so verify rather than trust the bounds: a
-                            // range-construction bug once widened this
-                            // scan to unrelated entities and erased their
-                            // facts.
-                            if current.of != artifact.of || current.the != artifact.the {
-                                continue;
-                            }
-                            if current.is == artifact.is {
-                                found_same_value = true;
-                            } else {
-                                // The superseded claims' versions feed the
-                                // replacement record's cause, so a reader
-                                // can order the two without reading values.
-                                // ALL of the entry's claims: same-value
-                                // asserts collapse into one datum, and a
-                                // replacement its author issued having
-                                // observed the fact supersedes every claim
-                                // standing behind it.
-                                superseded_versions.extend(current_element.versions());
-                                superseded_keys.push(candidate.key);
-                            }
-                        }
-                    }
-                }
-
-                // Cardinality-one no-op: the identical claim already
-                // stands, at its original version, and there is nothing
-                // to supersede. Nothing changes in the indexes and no
-                // history is recorded — a fresh record would fork the
-                // claim's lineage away from the version the standing
-                // datum carries.
-                if found_same_value && superseded_keys.is_empty() {
-                    continue;
-                }
-                changed = true;
-
-                for key in superseded_keys {
-                    let (entity_key, attribute_key, value_key) = reproject_index_keys(&key)?;
-
-                    transient = transient.erase(&entity_key, storage).await?;
-                    transient = transient.erase(&value_key, storage).await?;
-                    transient = transient.erase(&attribute_key, storage).await?;
-                }
-
-                // A version-tagged replacement records its history: its
-                // cause lists the versions of the claims it superseded —
-                // exactly the data removed from the indexes above. The
-                // record is written even when the insert below is skipped
-                // because a same-valued prior survives; the supersession
-                // of the different-valued claims still happened and must
-                // be attributable.
-                if let Some(version) = &version {
-                    let record = Record::Assert(Claim {
-                        the: artifact.the.clone(),
-                        of: artifact.of.clone(),
-                        is: artifact.is.clone(),
-                        cause: HistoryCause::new(superseded_versions),
-                    });
-                    buffer_record(&mut history_records, record, version);
-                }
-
-                if found_same_value {
-                    continue;
-                }
-
-                // ONE value encode per instruction, exactly as in `Assert`.
-                let encoded = EncodedValue::new(&artifact.is, manifest);
-                let (entity_key, attribute_key, value_key) =
-                    artifact_index_keys_with(&artifact, encoded.payload);
-
-                // Persist a spilling value's bytes as a content-addressed
-                // block before recording the fact.
-                stage_spilled_value(staged, encoded.spill);
-
-                let mut datum = Datum::for_artifact(&artifact);
-                datum.version = version;
-                let added = State::Added(datum);
-                transient = transient
-                    .write_all(
-                        vec![
-                            (entity_key, added.clone()),
-                            (attribute_key, added.clone()),
-                            (value_key, added),
-                        ],
-                        storage,
-                    )
-                    .await?;
-            }
-            Instruction::Succeed(artifact, succession) => {
+            Instruction::Assert(artifact, policy) => {
                 let entity_key = EntityKey::from_artifact(&artifact, manifest);
 
                 // Scan the cell's claims against the in-flight write target,
-                // as `Replace` does, so writes from earlier instructions in
-                // this batch are candidates too. Each prior is kept with its
+                // so writes from earlier instructions in this batch are
+                // candidates too. Each prior is kept with its
                 // key, its versions and its standing: the deepest version it
                 // carries and its cause, which is how a read orders it.
                 let mut priors: Vec<(Key, Vec<Version>, Value, Standing)> = Vec::new();
@@ -1659,7 +1525,7 @@ where
                 // returns over these priors. It is retracted outright, as a
                 // retraction is, and its versions become the new claim's
                 // cause, as a replacement's superseded versions do.
-                let elected = succession.elect(
+                let elected = policy.elect(
                     priors
                         .iter()
                         .map(|(_, _, value, standing)| (value, Some(standing))),
@@ -1846,7 +1712,12 @@ mod spill_cache_tests {
         tree.apply(
             &store,
             &mut delta,
-            stream::iter(facts.iter().cloned().map(Instruction::Assert)),
+            stream::iter(
+                facts
+                    .iter()
+                    .cloned()
+                    .map(|artifact| Instruction::Assert(artifact, crate::Policy::All)),
+            ),
         )
         .await?;
         store.flush(&mut delta);
@@ -1931,7 +1802,10 @@ mod spill_cache_tests {
         tree.apply(
             &store,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(artifact.clone())]),
+            stream::iter(vec![Instruction::Assert(
+                artifact.clone(),
+                crate::Policy::All,
+            )]),
         )
         .await
         .unwrap();
@@ -1993,7 +1867,10 @@ mod spill_cache_tests {
         tree.apply(
             &store,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(artifact.clone())]),
+            stream::iter(vec![Instruction::Assert(
+                artifact.clone(),
+                crate::Policy::All,
+            )]),
         )
         .await?;
         let key = EntityKey::from_artifact(&artifact, &dialog_search_tree::Manifest::default())
@@ -2252,12 +2129,15 @@ mod corrupt_row_tests {
         let valid: Vec<Instruction> = ["user:alice", "user:bob", "user:carol"]
             .into_iter()
             .map(|of| {
-                Instruction::Assert(Artifact {
-                    the: "user/name".parse().expect("attribute"),
-                    of: of.parse().expect("entity"),
-                    is: Value::String(of.to_string()),
-                    cause: None,
-                })
+                Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse().expect("attribute"),
+                        of: of.parse().expect("entity"),
+                        is: Value::String(of.to_string()),
+                        cause: None,
+                    },
+                    crate::Policy::All,
+                )
             })
             .collect();
         tree.apply(&store, &mut delta, stream::iter(valid)).await?;

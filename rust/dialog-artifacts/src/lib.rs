@@ -43,7 +43,7 @@
 //!     cause: None,
 //! };
 //! index
-//!     .apply(&blocks, &mut delta, stream::iter(vec![Instruction::Assert(artifact)]))
+//!     .apply(&blocks, &mut delta, stream::iter(vec![Instruction::Assert(artifact, crate::Policy::All)]))
 //!     .await?;
 //! delta.flush_into(&blocks);
 //!

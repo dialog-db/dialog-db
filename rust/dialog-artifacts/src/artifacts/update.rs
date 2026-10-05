@@ -25,44 +25,45 @@ use std::vec::IntoIter;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Change {
-    /// Assert a value for an entity-attribute pair (cardinality-many).
-    Assert(Value),
-    /// Replace any prior value(s) at this `(entity, attribute)` with this one
-    /// (cardinality-one). Supersession of priors happens at commit time.
-    Replace(Value),
+    /// Assert a value for an entity-attribute pair under a policy: the
+    /// policy the attribute is read under, which says what the write
+    /// succeeds. Under [`Policy::All`] the value is appended. Under any
+    /// other policy the one live claim of the cell the policy elects,
+    /// the claim a read under it returns, is retracted beside the
+    /// value. Committed as [`Instruction::Assert`], which elects among
+    /// the cell's stored claims in the tree write itself; a transactor
+    /// settles it first against the candidates the tree cannot see.
+    Assert(Value, Policy),
     /// Retract a value from an entity-attribute pair.
     Retract(Value),
-    /// Assert a value and retract the one live claim of the cell the
-    /// succession elects: the claim a read under the attribute's policy
-    /// returns. Committed as [`Instruction::Succeed`], which elects
-    /// among the cell's stored claims in the tree write itself; a
-    /// transactor settles it against derived candidates first where a
-    /// rule derives the relation.
-    Succeed(Value, Succession),
 }
 
 impl Change {
     /// The value the change writes or retracts.
     pub fn value(&self) -> &Value {
         match self {
-            Change::Assert(value)
-            | Change::Replace(value)
-            | Change::Retract(value)
-            | Change::Succeed(value, _) => value,
+            Change::Assert(value, _) | Change::Retract(value) => value,
         }
+    }
+
+    /// Whether the change is an assertion under a policy that elects:
+    /// one the transactor or the tree has to settle.
+    pub fn elects(&self) -> bool {
+        matches!(self, Change::Assert(_, policy) if policy.elects())
     }
 }
 
-/// How a write under a choosing policy elects the claim it succeeds:
-/// the claim a read under the same policy returns. A set (`all`)
-/// succeeds nothing. [`Change::Replace`] is the older cardinality-one
-/// write, which supersedes every prior of the cell; the engine's
-/// machinery still writes it, a statement no longer does.
+/// The policy an attribute is read under, carried by every write
+/// through it. A write under a choosing policy succeeds the claim the
+/// policy elects: the claim a read under the same policy returns. A
+/// set (`all`) appends and succeeds nothing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Succession {
+pub enum Policy {
     /// The newest claim.
     Last,
+    /// Every claim: a write appends.
+    All,
     /// The claim with the greatest value, the newest among equals.
     Max,
     /// The claim with the least value, the newest among equals.
@@ -115,13 +116,13 @@ fn value_beats(candidate: &Value, incumbent: &Value) -> bool {
     }
 }
 
-impl Succession {
-    /// Where `value` ranks under this succession: its position among
+impl Policy {
+    /// Where `value` ranks under this policy: its position among
     /// the values a `top` lists, best first, an unlisted value last;
     /// zero under every other policy and under a `top` listing nothing.
     pub fn rank_of(&self, value: &Value) -> usize {
         match self {
-            Succession::Top(among) if !among.is_empty() => among
+            Policy::Top(among) if !among.is_empty() => among
                 .iter()
                 .position(|listed| listed == value)
                 .unwrap_or(usize::MAX),
@@ -137,7 +138,7 @@ impl Succession {
             || (candidate.1 == incumbent.1 && value_beats(candidate.0, incumbent.0))
     }
 
-    /// Whether `candidate` displaces `incumbent` under this succession:
+    /// Whether `candidate` displaces `incumbent` under this policy:
     /// the one a read under the policy returns of the two. `last` takes
     /// the newer; `top` the better rank, then the newer; `max` and `min`
     /// the greater or the lesser value, then the greater standing. This
@@ -146,17 +147,17 @@ impl Succession {
     /// derived candidates in a query.
     pub fn prefers(&self, candidate: Contender<'_>, incumbent: Contender<'_>) -> bool {
         match self {
-            Succession::Last => Self::newer(candidate, incumbent),
-            Succession::Top(_) => {
+            Policy::Last | Policy::All => Self::newer(candidate, incumbent),
+            Policy::Top(_) => {
                 let (mine, theirs) = (self.rank_of(candidate.0), self.rank_of(incumbent.0));
                 mine < theirs || (mine == theirs && Self::newer(candidate, incumbent))
             }
-            Succession::Max | Succession::Min => {
+            Policy::Max | Policy::Min => {
                 let ordering = candidate.0.partial_cmp(incumbent.0).unwrap_or_else(|| {
                     encode_value_owned(candidate.0).cmp(&encode_value_owned(incumbent.0))
                 });
                 let wanted = match self {
-                    Succession::Max => Ordering::Greater,
+                    Policy::Max => Ordering::Greater,
                     _ => Ordering::Less,
                 };
                 ordering == wanted || (ordering.is_eq() && candidate.1 > incumbent.1)
@@ -164,12 +165,22 @@ impl Succession {
         }
     }
 
-    /// The claim this succession elects among `claims`, by index: the
-    /// one a read under the policy returns. `None` over no claims.
+    /// Whether a write under this policy elects a claim to succeed:
+    /// every policy but `all`.
+    pub fn elects(&self) -> bool {
+        !matches!(self, Policy::All)
+    }
+
+    /// The claim this policy elects among `claims`, by index: the one
+    /// a read under it returns. `None` over no claims, and under `all`,
+    /// which elects nothing.
     pub fn elect<'a, I>(&self, claims: I) -> Option<usize>
     where
         I: IntoIterator<Item = Contender<'a>>,
     {
+        if !self.elects() {
+            return None;
+        }
         let mut best: Option<(usize, Contender<'a>)> = None;
         for (index, claim) in claims.into_iter().enumerate() {
             best = Some(match best {
@@ -186,24 +197,13 @@ impl Succession {
 /// Implementors accumulate fact changes (associations and dissociations)
 /// that can later be committed atomically.
 pub trait Update {
-    /// Assert that the `attribute` of `entity` is `value`.
-    fn associate(&mut self, the: Attribute, of: Entity, is: Value);
-
-    /// Assert with cardinality-one semantics: replaces any previous
-    /// value for the same `(attribute, entity)` pair in this batch.
-    fn associate_unique(&mut self, the: Attribute, of: Entity, is: Value) {
-        self.associate(the, of, is);
-    }
-
-    /// Assert that the `attribute` of `entity` is `value`, succeeding
-    /// the one live claim of the cell `succession` elects: that claim
-    /// is retracted when the batch commits, and every other claim of
-    /// the cell stays. Falls back to a plain assertion for a target
-    /// that cannot resolve an election.
-    fn succeed(&mut self, the: Attribute, of: Entity, is: Value, succession: Succession) {
-        let _ = succession;
-        self.associate(the, of, is);
-    }
+    /// Assert that the `attribute` of `entity` is `value`, under
+    /// `policy`: the policy the attribute is read under. Under
+    /// [`Policy::All`] the value is appended beside the cell's claims.
+    /// Under any other policy the one live claim of the cell the
+    /// policy elects is retracted when the batch commits, and every
+    /// other claim of the cell stays.
+    fn associate(&mut self, the: Attribute, of: Entity, is: Value, policy: Policy);
 
     /// Retract that the `attribute` of `entity` is `value`.
     fn dissociate(&mut self, the: Attribute, of: Entity, is: Value);
@@ -420,12 +420,12 @@ impl Changes {
         self.assets.insert(hash, change);
     }
 
-    /// Convert to an instruction stream, the form a commit applies. A
-    /// succession commits as [`Instruction::Succeed`]: the tree elects
-    /// among the cell's stored claims. A relation some rule derives has
-    /// derived candidates the tree cannot see, so a transaction settles
-    /// those successions against its view before it commits; a raw
-    /// commit of a batch elects among stored claims alone.
+    /// Convert to an instruction stream, the form a commit applies. An
+    /// assertion under a choosing policy commits as the instruction of
+    /// the same shape: the tree elects among the cell's stored claims.
+    /// A relation some rule derives has derived candidates the tree
+    /// cannot see, so a transaction settles those writes against its
+    /// view before it commits.
     pub fn into_stream(self) -> ChangeStream {
         ChangeStream::from(self)
     }
@@ -455,14 +455,8 @@ impl Changes {
             for (attribute, changes) in attributes {
                 for change in changes {
                     match change {
-                        Change::Assert(value) => {
-                            self.associate(attribute.clone(), entity.clone(), value)
-                        }
-                        Change::Replace(value) => {
-                            self.associate_unique(attribute.clone(), entity.clone(), value)
-                        }
-                        Change::Succeed(value, succession) => {
-                            self.succeed(attribute.clone(), entity.clone(), value, succession)
+                        Change::Assert(value, policy) => {
+                            self.associate(attribute.clone(), entity.clone(), value, policy)
                         }
                         Change::Retract(value) => {
                             self.dissociate(attribute.clone(), entity.clone(), value)
@@ -485,18 +479,17 @@ impl Changes {
         })
     }
 
-    /// Whether any cell of this batch holds a succession the transactor
-    /// has yet to resolve.
+    /// Whether any cell of this batch holds an assertion under a
+    /// choosing policy, which the transactor has yet to resolve.
     pub fn has_successions(&self) -> bool {
-        self.iter()
-            .any(|(_, _, change)| matches!(change, Change::Succeed(..)))
+        self.iter().any(|(_, _, change)| change.elects())
     }
 
-    /// The cells holding a succession, each once.
+    /// The cells holding an assertion under a choosing policy, each once.
     pub fn cells_with_successions(&self) -> Vec<(Attribute, Entity)> {
         let mut cells = Vec::new();
         for (entity, attribute, change) in self.iter() {
-            if matches!(change, Change::Succeed(..)) {
+            if change.elects() {
                 let cell = (attribute.clone(), entity.clone());
                 if !cells.contains(&cell) {
                     cells.push(cell);
@@ -507,8 +500,8 @@ impl Changes {
     }
 
     /// The changes recorded for one cell, in order, taken out of the
-    /// batch. The transactor settles a cell's successions by taking its
-    /// changes, deciding what each write succeeds, and putting the
+    /// batch. The transactor settles a cell's choosing writes by taking
+    /// its changes, deciding what each write succeeds, and putting the
     /// settled changes back with [`put_cell`](Self::put_cell).
     pub fn take_cell(&mut self, the: &Attribute, of: &Entity) -> Vec<Change> {
         let Some(attributes) = self.facts.get_mut(of) else {
@@ -540,36 +533,24 @@ impl Changes {
     /// Asset changes are not instructions and are left out: a caller that
     /// commits the batch drains them first with
     /// [`take_assets`](Self::take_assets), and any other caller refuses a
-    /// batch that [`has_assets`](Self::has_assets). A succession is the
-    /// instruction of the same name: the tree elects among the cell's
-    /// stored claims when it applies it.
+    /// batch that [`has_assets`](Self::has_assets). An assertion carries
+    /// its policy into the instruction: the tree elects among the cell's
+    /// stored claims when it applies one under a choosing policy.
     pub fn into_instructions(self) -> Vec<Instruction> {
         let mut instructions = Vec::new();
         for (entity, attributes) in self.facts {
             for (attribute, operations) in attributes {
                 for operation in operations {
                     let instruction = match operation {
-                        Change::Assert(value) => Instruction::Assert(Artifact {
-                            the: attribute.clone(),
-                            of: entity.clone(),
-                            is: value,
-                            cause: None,
-                        }),
-                        Change::Succeed(value, succession) => Instruction::Succeed(
+                        Change::Assert(value, policy) => Instruction::Assert(
                             Artifact {
                                 the: attribute.clone(),
                                 of: entity.clone(),
                                 is: value,
                                 cause: None,
                             },
-                            succession,
+                            policy,
                         ),
-                        Change::Replace(value) => Instruction::Replace(Artifact {
-                            the: attribute.clone(),
-                            of: entity.clone(),
-                            is: value,
-                            cause: None,
-                        }),
                         Change::Retract(value) => Instruction::Retract(Artifact {
                             the: attribute.clone(),
                             of: entity.clone(),
@@ -586,29 +567,13 @@ impl Changes {
 }
 
 impl Update for Changes {
-    fn associate(&mut self, the: Attribute, of: Entity, is: Value) {
+    fn associate(&mut self, the: Attribute, of: Entity, is: Value, policy: Policy) {
         self.facts
             .entry(of)
             .or_default()
             .entry(the)
             .or_default()
-            .push(Change::Assert(is));
-    }
-
-    fn associate_unique(&mut self, the: Attribute, of: Entity, is: Value) {
-        self.facts
-            .entry(of)
-            .or_default()
-            .insert(the, vec![Change::Replace(is)]);
-    }
-
-    fn succeed(&mut self, the: Attribute, of: Entity, is: Value, succession: Succession) {
-        self.facts
-            .entry(of)
-            .or_default()
-            .entry(the)
-            .or_default()
-            .push(Change::Succeed(is, succession));
+            .push(Change::Assert(is, policy));
     }
 
     fn dissociate(&mut self, the: Attribute, of: Entity, is: Value) {
@@ -650,11 +615,7 @@ impl FromIterator<Instruction> for Changes {
         let mut changes = Changes::new();
         for instruction in instructions {
             match instruction {
-                Instruction::Assert(a) => changes.associate(a.the, a.of, a.is),
-                Instruction::Replace(a) => changes.associate_unique(a.the, a.of, a.is),
-                Instruction::Succeed(a, succession) => {
-                    changes.succeed(a.the, a.of, a.is, succession)
-                }
+                Instruction::Assert(a, policy) => changes.associate(a.the, a.of, a.is, policy),
                 Instruction::Retract(a) => changes.dissociate(a.the, a.of, a.is),
             }
         }
@@ -766,15 +727,15 @@ pub fn sort_key(artifact: &Artifact, manifest: &Manifest) -> SortKey {
 ///
 /// Lets a `Changes` value act anywhere a single statement does: e.g.
 /// folding pre-built changes into another transaction, or asserting
-/// a changes-shaped overlay into a query session. `Assert` and
-/// `Replace` map to `associate` / `associate_unique` on the target;
-/// `Retract` maps to `dissociate`.
+/// a changes-shaped overlay into a query session. `Assert` maps to
+/// `associate` on the target, with its policy; `Retract` maps to
+/// `dissociate`.
 ///
 /// Retracting a batch inverts its asset changes as it inverts its facts:
 /// an import becomes a discard and a discard an import.
 impl Statement for Changes {
-    /// Replay every change into `update` as it was recorded, a
-    /// succession as a succession, so a batch asserted into another
+    /// Replay every change into `update` as it was recorded, each
+    /// assertion under its policy, so a batch asserted into another
     /// keeps what its writes meant.
     fn assert(mut self, update: &mut impl Update) {
         for change in self.take_assets() {
@@ -787,14 +748,8 @@ impl Statement for Changes {
             for (attribute, changes) in attributes {
                 for change in changes {
                     match change {
-                        Change::Assert(value) => {
-                            update.associate(attribute.clone(), entity.clone(), value)
-                        }
-                        Change::Replace(value) => {
-                            update.associate_unique(attribute.clone(), entity.clone(), value)
-                        }
-                        Change::Succeed(value, succession) => {
-                            update.succeed(attribute.clone(), entity.clone(), value, succession)
+                        Change::Assert(value, policy) => {
+                            update.associate(attribute.clone(), entity.clone(), value, policy)
                         }
                         Change::Retract(value) => {
                             update.dissociate(attribute.clone(), entity.clone(), value)
@@ -812,15 +767,13 @@ impl Statement for Changes {
                 AssetChange::Discard(asset) => update.import(asset),
             }
         }
-        // Inverse: asserts/replaces become retracts; existing
-        // retracts become asserts. Symmetric so `c.assert(t);
-        // c.retract(t);` round-trips when `t` is a fresh target.
+        // Inverse: asserts become retracts; existing retracts become
+        // appends. Symmetric so `c.assert(t); c.retract(t);` round-trips
+        // when `t` is a fresh target.
         for instruction in self.into_instructions() {
             match instruction {
-                Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Succeed(a, _) => {
-                    update.dissociate(a.the, a.of, a.is)
-                }
-                Instruction::Retract(a) => update.associate(a.the, a.of, a.is),
+                Instruction::Assert(a, _) => update.dissociate(a.the, a.of, a.is),
+                Instruction::Retract(a) => update.associate(a.the, a.of, a.is, Policy::All),
             }
         }
     }
@@ -828,8 +781,8 @@ impl Statement for Changes {
 
 /// `Provider<Select>` for an in-memory [`Changes`] batch.
 ///
-/// Treats `Changes` as a queryable source: `Assert` and `Replace`
-/// entries surface as [`Artifact`]s matching the [`ArtifactSelector`]'s
+/// Treats `Changes` as a queryable source: `Assert` entries surface as
+/// [`Artifact`]s matching the [`ArtifactSelector`]'s
 /// `the` / `of` / `is` constraints (whichever are present), sorted by
 /// [`sort_key`] so the result interleaves cleanly with branch / layer
 /// scans in a `merge_grouped`-style union.
@@ -891,7 +844,7 @@ impl Changes {
                 }
                 for change in changes {
                     let value = match change {
-                        Change::Assert(v) | Change::Replace(v) | Change::Succeed(v, _) => v,
+                        Change::Assert(v, _) => v,
                         // Retracts don't surface from a Changes-as-source
                         // view — see impl docs.
                         Change::Retract(_) => continue,
@@ -947,9 +900,24 @@ mod tests {
     #[dialog_common::test]
     fn it_round_trips_changes_through_dag_cbor() {
         let mut changes = Changes::new();
-        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
-        changes.associate(name_attr(), alice(), Value::String("Ally".into()));
-        changes.associate_unique(role_attr(), alice(), Value::String("admin".into()));
+        changes.associate(
+            name_attr(),
+            alice(),
+            Value::String("Alice".into()),
+            crate::Policy::All,
+        );
+        changes.associate(
+            name_attr(),
+            alice(),
+            Value::String("Ally".into()),
+            crate::Policy::All,
+        );
+        changes.associate(
+            role_attr(),
+            alice(),
+            Value::String("admin".into()),
+            crate::Policy::Last,
+        );
         changes.dissociate(name_attr(), bob(), Value::String("Bob".into()));
 
         let bytes = serde_ipld_dagcbor::to_vec(&changes).expect("encode changes");
@@ -962,7 +930,10 @@ mod tests {
             .map(|(_, _, change)| change.clone());
         assert_eq!(
             replaced,
-            Some(Change::Replace(Value::String("admin".into()))),
+            Some(Change::Assert(
+                Value::String("admin".into()),
+                crate::Policy::Last
+            )),
             "a replacement stays a replacement"
         );
     }
@@ -1011,7 +982,12 @@ mod tests {
     #[dialog_common::test]
     fn it_takes_asset_changes_and_keeps_the_facts() {
         let mut changes = Changes::new();
-        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
+        changes.associate(
+            name_attr(),
+            alice(),
+            Value::String("Alice".into()),
+            crate::Policy::All,
+        );
         changes.import(Asset::new(b"avatar".to_vec()));
 
         let assets = changes.take_assets();
@@ -1041,7 +1017,12 @@ mod tests {
     #[dialog_common::test]
     fn it_replays_asset_changes_and_inverts_them_on_retract() {
         let mut batch = Changes::new();
-        batch.associate(name_attr(), alice(), Value::String("Alice".into()));
+        batch.associate(
+            name_attr(),
+            alice(),
+            Value::String("Alice".into()),
+            crate::Policy::All,
+        );
         batch.import(Asset::new(b"avatar".to_vec()));
 
         let mut asserted = Changes::new();
@@ -1060,7 +1041,12 @@ mod tests {
     #[dialog_common::test]
     fn it_encodes_a_batch_without_assets_as_the_plain_fact_nesting() {
         let mut changes = Changes::new();
-        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
+        changes.associate(
+            name_attr(),
+            alice(),
+            Value::String("Alice".into()),
+            crate::Policy::All,
+        );
 
         let bytes = serde_ipld_dagcbor::to_vec(&changes).expect("encode changes");
         let facts: Facts = serde_ipld_dagcbor::from_slice(&bytes).expect("decode as fact nesting");
@@ -1075,7 +1061,12 @@ mod tests {
     #[dialog_common::test]
     fn it_round_trips_assets_through_dag_cbor_and_json() {
         let mut changes = Changes::new();
-        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
+        changes.associate(
+            name_attr(),
+            alice(),
+            Value::String("Alice".into()),
+            crate::Policy::All,
+        );
         changes.dissociate(name_attr(), bob(), Value::String("Bob".into()));
         changes.import(Asset::new(b"avatar".to_vec()));
         changes.import(Asset::stored([4u8; 32], 1 << 20));
@@ -1133,7 +1124,12 @@ mod tests {
     #[dialog_common::test]
     fn it_replays_changes_into_a_target_via_statement_assert() {
         let mut source = Changes::new();
-        source.associate(name_attr(), alice(), Value::String("Alice".into()));
+        source.associate(
+            name_attr(),
+            alice(),
+            Value::String("Alice".into()),
+            crate::Policy::All,
+        );
         source.dissociate(name_attr(), bob(), Value::String("Bob".into()));
 
         let mut target = Changes::new();
@@ -1145,7 +1141,7 @@ mod tests {
         assert!(
             instructions
                 .iter()
-                .any(|i| matches!(i, Instruction::Assert(_)))
+                .any(|i| matches!(i, Instruction::Assert(.., crate::Policy::All)))
         );
         assert!(
             instructions
@@ -1157,7 +1153,12 @@ mod tests {
     #[dialog_common::test]
     fn it_inverts_changes_under_statement_retract() {
         let mut source = Changes::new();
-        source.associate(name_attr(), alice(), Value::String("Alice".into()));
+        source.associate(
+            name_attr(),
+            alice(),
+            Value::String("Alice".into()),
+            crate::Policy::All,
+        );
 
         let mut target = Changes::new();
         source.retract(&mut target);
@@ -1186,7 +1187,12 @@ mod tests {
     #[dialog_common::test]
     async fn it_yields_asserts_as_artifacts() {
         let mut changes = Changes::new();
-        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
+        changes.associate(
+            name_attr(),
+            alice(),
+            Value::String("Alice".into()),
+            crate::Policy::All,
+        );
 
         let results = artifacts(&changes, ArtifactSelector::new().the(name_attr())).await;
         assert_eq!(results.len(), 1);
@@ -1197,7 +1203,12 @@ mod tests {
     #[dialog_common::test]
     async fn it_yields_replaces_as_artifacts() {
         let mut changes = Changes::new();
-        changes.associate_unique(name_attr(), alice(), Value::String("Alicia".into()));
+        changes.associate(
+            name_attr(),
+            alice(),
+            Value::String("Alicia".into()),
+            crate::Policy::Last,
+        );
 
         let results = artifacts(&changes, ArtifactSelector::new().of(alice())).await;
         assert_eq!(results.len(), 1);
@@ -1207,7 +1218,12 @@ mod tests {
     #[dialog_common::test]
     async fn it_omits_retracts_from_the_selection() {
         let mut changes = Changes::new();
-        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
+        changes.associate(
+            name_attr(),
+            alice(),
+            Value::String("Alice".into()),
+            crate::Policy::All,
+        );
         changes.dissociate(name_attr(), bob(), Value::String("Bob".into()));
 
         // Only the assert should surface. Retracts are deliberately
@@ -1221,9 +1237,24 @@ mod tests {
     #[dialog_common::test]
     async fn it_filters_by_the_of_and_is() {
         let mut changes = Changes::new();
-        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
-        changes.associate(name_attr(), bob(), Value::String("Bob".into()));
-        changes.associate(role_attr(), alice(), Value::String("Engineer".into()));
+        changes.associate(
+            name_attr(),
+            alice(),
+            Value::String("Alice".into()),
+            crate::Policy::All,
+        );
+        changes.associate(
+            name_attr(),
+            bob(),
+            Value::String("Bob".into()),
+            crate::Policy::All,
+        );
+        changes.associate(
+            role_attr(),
+            alice(),
+            Value::String("Engineer".into()),
+            crate::Policy::All,
+        );
 
         // Filter by `the` only
         let by_attr = artifacts(&changes, ArtifactSelector::new().the(name_attr())).await;
@@ -1256,8 +1287,18 @@ mod tests {
         // sort_key so cross-source merges interleave consistently.
         let mut changes = Changes::new();
         // Different attributes — sort by attribute key first.
-        changes.associate(role_attr(), alice(), Value::String("Engineer".into()));
-        changes.associate(name_attr(), alice(), Value::String("Alice".into()));
+        changes.associate(
+            role_attr(),
+            alice(),
+            Value::String("Engineer".into()),
+            crate::Policy::All,
+        );
+        changes.associate(
+            name_attr(),
+            alice(),
+            Value::String("Alice".into()),
+            crate::Policy::All,
+        );
 
         let results = artifacts(&changes, ArtifactSelector::new().of(alice())).await;
         assert_eq!(results.len(), 2);

@@ -1017,7 +1017,12 @@ mod tests {
         let of = dialog_artifacts::Entity::new()?;
         let replace = |value: &str| {
             let mut changes = Changes::new();
-            changes.associate_unique(the.clone(), of.clone(), Value::String(value.into()));
+            changes.associate(
+                the.clone(),
+                of.clone(),
+                Value::String(value.into()),
+                dialog_artifacts::Policy::Last,
+            );
             changes
         };
         let retract = |value: &str| {

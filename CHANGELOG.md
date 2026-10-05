@@ -31,7 +31,7 @@ succeeding anything.
 What this changes for you:
 
 - A cardinality-one write used to retract every prior claim of its
-  cell (`Instruction::Replace`). It now retracts the one a `last` read
+  cell (the former `Instruction::Replace`). It now retracts the one a `last` read
   would have returned. An older concurrent claim that lost the
   election stays live. No `last` read can tell the difference; an
   `all` read over the same relation can, and will now see it.
@@ -40,15 +40,21 @@ What this changes for you:
   competes under the policy.
 - Writing a value the cell already holds writes nothing, as replacing
   with the value already held did: the revision's tree does not move.
-- Statements emit `Change::Succeed` (a new variant of
-  `dialog_artifacts::Change`, with a `Succession` saying which policy)
-  instead of `Replace`. A `Changes` batch holding one serializes with a
-  `succeed` key that older readers do not know. Batches are not stored
-  or sent between replicas today, so this bites only code that encodes
-  a batch itself.
-- A succession commits as `Instruction::Succeed`, a new variant beside
-  `Assert`, `Replace` and `Retract`; code matching on `Instruction`
-  exhaustively gains an arm.
+- Every write carries its policy. `Change::Assert(Value, Policy)` and
+  `Instruction::Assert(Artifact, Policy)` are the one write form, beside
+  `Retract`; `Change::Replace`, `Instruction::Replace`, `Change::Succeed`
+  and `Instruction::Succeed` are gone. `dialog_artifacts::Policy` is the
+  policy an attribute is read under (`Last`, `All`, `Top(..)`, `Max`,
+  `Min`); `Update::associate` takes it as its fourth argument, and
+  `associate_unique` and `succeed` are gone with the variants they
+  wrote. A write under `All` appends; any other policy succeeds the
+  claim a read under it returns. A `Changes` batch serializes each
+  assertion with its policy, a shape older readers do not know. Batches
+  are not stored or sent between replicas today, so this bites only
+  code that encodes a batch itself.
+- The reset `Replace` performed, retracting every claim of the cell
+  whatever a reader observed, has no spelling any more. A caller that
+  wants it retracts what it observed under `all` and asserts.
 - `Branch::commit` and `Snapshot::commit`, which took a stream of
   instructions, are no longer public: they ran no induction and saw no
   derived candidate, so a write through them could land a value

@@ -430,13 +430,11 @@ struct LineFormat {
     manifest: Manifest,
     /// Every fact the per-query changes and the staged layers retract.
     /// The line's session overlay stream is filtered against these so a
-    /// staged retract suppresses a session fact. Cells a replace claimed
-    /// are not: the session's facts outlive the commit, so they show
-    /// over it.
+    /// staged retract suppresses a session fact.
     staged: Hidden,
-    /// `staged`, the cells the layers' replaces claimed, and the line's
-    /// session tombstones. The line's tree stream is filtered against
-    /// these, so a read sees the tree as the commit will leave it.
+    /// `staged` and the line's session tombstones. The line's tree
+    /// stream is filtered against these, so a read sees the tree as the
+    /// commit will leave it.
     tombstones: Hidden,
 }
 
@@ -611,12 +609,9 @@ where
                         for layer in layers {
                             staged = staged.facts(layer.tombstones(&line));
                         }
-                        let mut tombstones = staged
+                        let tombstones = staged
                             .clone()
                             .facts(source.as_ref().overlay().tombstones(&line));
-                        for layer in layers {
-                            tombstones = tombstones.cells(layer.cells());
-                        }
                         LineFormat {
                             manifest: line,
                             staged,
@@ -3965,7 +3960,7 @@ mod ordered_relation_tests {
             is: Value::Entity(member.clone()),
             cause: None,
             cardinality: None,
-            succession: None,
+            policy: None,
         }
     }
 
@@ -4015,7 +4010,7 @@ mod ordered_relation_tests {
                 is: Value::String("Groceries".into()),
                 cause: None,
                 cardinality: None,
-                succession: None,
+                policy: None,
             })
             .commit()
             .publish()

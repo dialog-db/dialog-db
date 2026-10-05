@@ -4030,10 +4030,11 @@ mod tests {
         let here = Entity::new()?;
         let status = |value: &str| {
             let mut changes = Changes::new();
-            changes.associate_unique(
+            changes.associate(
                 "person/name".parse().expect("attribute"),
                 here.clone(),
                 Value::String(value.into()),
+                dialog_artifacts::Policy::Last,
             );
             changes
         };
@@ -4287,10 +4288,11 @@ mod tests {
         let here = Entity::new()?;
         for status in ["pending", "settled", "pending", "settled"] {
             let mut changes = Changes::new();
-            changes.associate_unique(
+            changes.associate(
                 "sync/status".parse()?,
                 here.clone(),
                 Value::String(status.into()),
+                dialog_artifacts::Policy::Last,
             );
             branch.overlay().assert(changes)?;
             let site = Entity::new()?;
@@ -4366,10 +4368,11 @@ mod tests {
         let name = |of: &Entity, is: &str| the!("person/name").of(of.clone()).is(is.to_string());
         let rename = |of: &Entity, is: &str| {
             let mut changes = Changes::new();
-            changes.associate_unique(
+            changes.associate(
                 "person/name".parse().expect("attribute"),
                 of.clone(),
                 Value::String(is.into()),
+                dialog_artifacts::Policy::Last,
             );
             changes
         };

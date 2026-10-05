@@ -56,16 +56,19 @@ async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
 
     let mut instructions = Vec::new();
     for (at, value) in probe_values().into_iter().enumerate() {
-        instructions.push(Instruction::Assert(Artifact {
-            the: Attribute::from_str("hardening/value")?,
-            of: entity(at as u32),
-            is: value,
-            cause: if at % 2 == 0 {
-                Some(Cause([at as u8 + 1; 32]))
-            } else {
-                None
+        instructions.push(Instruction::Assert(
+            Artifact {
+                the: Attribute::from_str("hardening/value")?,
+                of: entity(at as u32),
+                is: value,
+                cause: if at % 2 == 0 {
+                    Some(Cause([at as u8 + 1; 32]))
+                } else {
+                    None
+                },
             },
-        }));
+            dialog_artifacts::Policy::All,
+        ));
     }
     index
         .apply(

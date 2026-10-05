@@ -319,12 +319,15 @@ mod tests {
         // A branch only materializes once it has a commit — open + no commits
         // leaves no revision for load to find.
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:1".parse()?,
-            is: Value::String("Alice".into()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:1".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -347,7 +350,10 @@ mod tests {
             cause: None,
         };
         let _hash = branch
-            .commit(stream::iter(vec![Instruction::Assert(artifact)]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                artifact,
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -453,24 +459,33 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let artifacts = vec![
-            Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:1".parse()?,
-                is: Value::String("Alice".into()),
-                cause: None,
-            }),
-            Instruction::Assert(Artifact {
-                the: "user/email".parse()?,
-                of: "user:1".parse()?,
-                is: Value::String("alice@example.com".into()),
-                cause: None,
-            }),
-            Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:2".parse()?,
-                is: Value::String("Bob".into()),
-                cause: None,
-            }),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:1".parse()?,
+                    is: Value::String("Alice".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            ),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/email".parse()?,
+                    of: "user:1".parse()?,
+                    is: Value::String("alice@example.com".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            ),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:2".parse()?,
+                    is: Value::String("Bob".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            ),
         ];
 
         branch
@@ -511,24 +526,33 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let artifacts = vec![
-            Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:alice".parse()?,
-                is: Value::String("Alice".into()),
-                cause: None,
-            }),
-            Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:bob".parse()?,
-                is: Value::String("Bob".into()),
-                cause: None,
-            }),
-            Instruction::Assert(Artifact {
-                the: "user/email".parse()?,
-                of: "user:alice".parse()?,
-                is: Value::String("alice@example.com".into()),
-                cause: None,
-            }),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:alice".parse()?,
+                    is: Value::String("Alice".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            ),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:bob".parse()?,
+                    is: Value::String("Bob".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            ),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/email".parse()?,
+                    of: "user:alice".parse()?,
+                    is: Value::String("alice@example.com".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            ),
         ];
 
         branch
@@ -590,7 +614,10 @@ mod tests {
         };
 
         branch
-            .commit(stream::iter(vec![Instruction::Assert(artifact.clone())]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                artifact.clone(),
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -2108,7 +2135,12 @@ mod tests {
             // both the branch commit and the overlay query from clones.
             let mut changes = Changes::new();
             for (e, a, v) in &facts {
-                changes.associate(a.clone(), e.clone(), v.clone());
+                changes.associate(
+                    a.clone(),
+                    e.clone(),
+                    v.clone(),
+                    dialog_artifacts::Policy::All,
+                );
             }
 
             // Commit a clone to the branch (Changes itself is a Statement now).

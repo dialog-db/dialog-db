@@ -45,8 +45,8 @@ use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, AttributeKey, Cause, Changes, DialogArtifactsError, Entity,
-    EntityKey, Instruction, Key, KeyViewConstruct, SortKey, Standing, Statement, Update, ValueKey,
-    sort_key,
+    EntityKey, Instruction, Key, KeyViewConstruct, Policy, SortKey, Standing, Statement, Update,
+    ValueKey, sort_key,
 };
 use dialog_common::Blake3Hash;
 use dialog_search_tree::Manifest;
@@ -270,24 +270,12 @@ impl State {
 
     fn apply(&mut self, instruction: Instruction, delta: &mut Delta) {
         match instruction {
-            Instruction::Assert(fact) => self.insert(fact, delta),
-            Instruction::Replace(fact) => {
-                let mut standing = false;
-                for prior in self.facts.cell(&fact.of, &fact.the) {
-                    if prior.is == fact.is {
-                        standing = true;
-                    } else {
-                        self.remove(&prior, delta);
-                    }
-                }
-                if !standing {
-                    self.insert(fact, delta);
-                }
-            }
-            // A succession among transients: the claim the policy elects
-            // of the cell gives way to the value. Transients carry no
-            // version, so the election orders them by cause, then value.
-            Instruction::Succeed(fact, succession) => {
+            Instruction::Assert(fact, Policy::All) => self.insert(fact, delta),
+            // A write under a choosing policy among transients: the claim
+            // the policy elects of the cell gives way to the value.
+            // Transients carry no version, so the election orders them by
+            // cause, then value.
+            Instruction::Assert(fact, policy) => {
                 let cell: Vec<Artifact> = self.facts.cell(&fact.of, &fact.the);
                 if cell.iter().any(|prior| prior.is == fact.is) {
                     return;
@@ -299,7 +287,7 @@ impl State {
                         cause: prior.cause.clone().unwrap_or(Cause([0; 32])),
                     })
                     .collect();
-                let elected = succession.elect(
+                let elected = policy.elect(
                     cell.iter()
                         .zip(standings.iter())
                         .map(|(prior, standing)| (&prior.is, Some(standing))),
@@ -432,7 +420,12 @@ impl Ephemeral {
             changes.dissociate(fact.the.clone(), fact.of.clone(), fact.is.clone());
         }
         for fact in state.facts.iter() {
-            changes.associate(fact.the.clone(), fact.of.clone(), fact.is.clone());
+            changes.associate(
+                fact.the.clone(),
+                fact.of.clone(),
+                fact.is.clone(),
+                dialog_artifacts::Policy::All,
+            );
         }
         changes
     }
@@ -589,7 +582,12 @@ mod tests {
 
     impl Statement for Claim {
         fn assert(self, update: &mut impl dialog_artifacts::Update) {
-            update.associate(self.0.the, self.0.of, self.0.is);
+            update.associate(
+                self.0.the,
+                self.0.of,
+                self.0.is,
+                dialog_artifacts::Policy::All,
+            );
         }
 
         fn retract(self, update: &mut impl dialog_artifacts::Update) {
@@ -609,7 +607,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_asserts_idempotently_and_replaces_per_cell() {
+    fn it_asserts_idempotently_and_succeeds_per_cell() {
         let line = Ephemeral::new();
         line.assert(
             the!("person/name")
@@ -633,7 +631,8 @@ mod tests {
         );
         assert_eq!(line.len(), 1);
 
-        // A second value accumulates; a replace supersedes both.
+        // A second value accumulates; a write under `last` succeeds the
+        // one transient the policy elects and leaves the other.
         line.assert(
             the!("person/name")
                 .of("id:a".parse().unwrap())
@@ -642,18 +641,18 @@ mod tests {
         .unwrap();
         assert_eq!(values(&line, "id:a", "person/name").len(), 2);
         let mut changes = Changes::new();
-        changes.associate_unique(
+        changes.associate(
             "person/name".parse().unwrap(),
             "id:a".parse().unwrap(),
             Value::String("C".into()),
+            dialog_artifacts::Policy::Last,
         );
-        let replaced = line.apply(changes).unwrap().expect("replace mints");
-        assert_eq!(replaced.retracted.len(), 2);
-        assert_eq!(replaced.asserted, vec![fact("id:a", "person/name", "C")]);
-        assert_eq!(
-            values(&line, "id:a", "person/name"),
-            vec![Value::String("C".into())]
-        );
+        let succeeded = line.apply(changes).unwrap().expect("the write mints");
+        assert_eq!(succeeded.retracted.len(), 1);
+        assert_eq!(succeeded.asserted, vec![fact("id:a", "person/name", "C")]);
+        let after = values(&line, "id:a", "person/name");
+        assert_eq!(after.len(), 2);
+        assert!(after.contains(&Value::String("C".into())));
         assert_eq!(line.revision().sequence, 3);
     }
 

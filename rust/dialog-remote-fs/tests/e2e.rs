@@ -116,9 +116,12 @@ async fn it_pushes_and_pulls_via_fs_remote() -> Result<()> {
     branch
         .transaction()
         .integrate(
-            vec![Instruction::Assert(artifact("user:1", "Alice")?)]
-                .into_iter()
-                .collect(),
+            vec![Instruction::Assert(
+                artifact("user:1", "Alice")?,
+                dialog_artifacts::Policy::All,
+            )]
+            .into_iter()
+            .collect(),
         )
         .commit()
         .publish()
@@ -157,9 +160,12 @@ async fn it_shares_an_fs_remote_between_two_repos() -> Result<()> {
     alice_branch
         .transaction()
         .integrate(
-            vec![Instruction::Assert(artifact("user:alice", "Alice")?)]
-                .into_iter()
-                .collect(),
+            vec![Instruction::Assert(
+                artifact("user:alice", "Alice")?,
+                dialog_artifacts::Policy::All,
+            )]
+            .into_iter()
+            .collect(),
         )
         .commit()
         .publish()
@@ -258,9 +264,12 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
     alice_branch
         .transaction()
         .integrate(
-            vec![Instruction::Assert(artifact("user:alice", "Alice")?)]
-                .into_iter()
-                .collect(),
+            vec![Instruction::Assert(
+                artifact("user:alice", "Alice")?,
+                dialog_artifacts::Policy::All,
+            )]
+            .into_iter()
+            .collect(),
         )
         .commit()
         .publish()
@@ -273,9 +282,12 @@ async fn it_rejects_a_stale_push_on_cas_conflict() -> Result<()> {
     bob_branch
         .transaction()
         .integrate(
-            vec![Instruction::Assert(artifact("user:bob", "Bob")?)]
-                .into_iter()
-                .collect(),
+            vec![Instruction::Assert(
+                artifact("user:bob", "Bob")?,
+                dialog_artifacts::Policy::All,
+            )]
+            .into_iter()
+            .collect(),
         )
         .commit()
         .publish()

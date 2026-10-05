@@ -9,7 +9,7 @@ use crate::statement::Statement;
 use crate::term::Term;
 use crate::types::{Scalar, Typed};
 use crate::{Claim, Premise, Proposition};
-use dialog_artifacts::{Succession, Update};
+use dialog_artifacts::{Policy, Update};
 use std::ops::Not;
 
 /// Converts a value into a [`Term`], resolving the type unambiguously
@@ -63,7 +63,7 @@ impl<T, Of> DynamicAttributeExpressionBuilder<T, Of> {
             is: value,
             cause: None,
             cardinality: None,
-            succession: None,
+            policy: None,
         }
     }
 }
@@ -88,14 +88,12 @@ pub struct DynamicAttributeExpression<The, Of, Is> {
     pub is: Is,
     /// Provenance/cause for this expression.
     pub cause: Option<Cause>,
-    /// Optional cardinality override. When `Some(Cardinality::One)`,
-    /// `assert` uses `associate_unique`.
+    /// Optional cardinality override. When `Some(Cardinality::One)` and
+    /// no policy is spelled, `assert` writes under `last`.
     pub cardinality: Option<Cardinality>,
-    /// How `assert` succeeds a claim of the cell when the attribute is
-    /// read under a choosing policy (`max`, `min`, `top`): the claim the
-    /// policy elects is retracted beside the written value. `None`
-    /// writes by the cardinality alone.
-    pub succession: Option<Succession>,
+    /// The policy `assert` writes under: the one the attribute is read
+    /// under. `None` writes by the cardinality alone.
+    pub policy: Option<Policy>,
 }
 
 impl<The, Of, Is> DynamicAttributeExpression<The, Of, Is> {
@@ -157,17 +155,17 @@ impl<Is: Scalar> Statement for DynamicAttributeExpression<The, Entity, Is> {
     fn assert(self, update: &mut impl Update) {
         let the = self.the;
         let value: Value = self.is.into();
-        match (self.succession, self.cardinality) {
-            (Some(succession), _) => {
-                update.succeed(the.into(), self.of, value, succession);
+        match (self.policy, self.cardinality) {
+            (Some(policy), _) => {
+                update.associate(the.into(), self.of, value, policy);
             }
             // A cardinality-one write with no policy spelled is a
             // `last` write.
             (None, Some(Cardinality::One)) => {
-                update.succeed(the.into(), self.of, value, Succession::Last);
+                update.associate(the.into(), self.of, value, Policy::Last);
             }
             (None, _) => {
-                update.associate(the.into(), self.of, value);
+                update.associate(the.into(), self.of, value, dialog_artifacts::Policy::All);
             }
         }
     }
@@ -224,7 +222,7 @@ impl<Is: Scalar> From<DynamicAttributeExpression<The, Entity, Is>> for Attribute
             is: expression.is.into(),
             cause: expression.cause,
             cardinality: expression.cardinality,
-            succession: expression.succession,
+            policy: expression.policy,
         }
     }
 }

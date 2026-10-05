@@ -992,12 +992,15 @@ mod tests {
             .await?
             .transaction()
             .integrate(
-                vec![Instruction::Assert(Artifact {
-                    the: "user/name".parse()?,
-                    of: "user:elsewhere".parse()?,
-                    is: Value::String("Elsewhere".into()),
-                    cause: None,
-                })]
+                vec![Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse()?,
+                        of: "user:elsewhere".parse()?,
+                        is: Value::String("Elsewhere".into()),
+                        cause: None,
+                    },
+                    dialog_artifacts::Policy::All,
+                )]
                 .into_iter()
                 .collect(),
             )

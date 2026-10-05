@@ -43,7 +43,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &blocks,
         &mut delta,
         None,
-        futures_util::stream::iter(data.into_iter().map(Instruction::Assert)),
+        futures_util::stream::iter(
+            data.into_iter()
+                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All)),
+        ),
         false,
     )
     .await?;

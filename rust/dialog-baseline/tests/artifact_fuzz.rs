@@ -83,7 +83,7 @@ fn generate(seed: u64, op_count: usize) -> Vec<Instruction> {
                     cause: None,
                 };
                 live.push(artifact.clone());
-                Instruction::Assert(artifact)
+                Instruction::Assert(artifact, dialog_artifacts::Policy::All)
             }
             // Replace: cardinality-one supersession (cause chains from the
             // superseded fact — the ordering-sensitive path).
@@ -94,9 +94,21 @@ fn generate(seed: u64, op_count: usize) -> Vec<Instruction> {
                     is: value(&mut rng),
                     cause: None,
                 };
-                live.retain(|held| !(held.the == the && held.of == of));
-                live.push(artifact.clone());
-                Instruction::Replace(artifact)
+                // A `last` write retires the one claim the read elects,
+                // which the model can name only while the cell holds at
+                // most one; a fuller cell takes an append instead.
+                let held = live
+                    .iter()
+                    .filter(|held| held.the == the && held.of == of)
+                    .count();
+                if held <= 1 {
+                    live.retain(|held| !(held.the == the && held.of == of));
+                    live.push(artifact.clone());
+                    Instruction::Assert(artifact, dialog_artifacts::Policy::Last)
+                } else {
+                    live.push(artifact.clone());
+                    Instruction::Assert(artifact, dialog_artifacts::Policy::All)
+                }
             }
             // Retract a real fact when one exists...
             7 | 8 if !live.is_empty() => {

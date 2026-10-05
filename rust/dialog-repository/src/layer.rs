@@ -21,8 +21,8 @@
 //!   each `(the, of)` run.
 //! - [`tombstones_from`] lifts retract instructions out of a
 //!   [`Changes`] overlay, and [`Hidden`] + [`filter_hidden`] apply them,
-//!   with a transaction's staged retracts and the cells its replaces
-//!   claimed, to a source stream as a filter — the mechanism that lets a
+//!   with a transaction's staged retracts, to a source stream as a
+//!   filter — the mechanism that lets a
 //!   [`Transaction::retract`](crate::repository::branch::Transaction::retract)
 //!   suppress facts in the underlying branch view.
 
@@ -35,8 +35,6 @@ use dialog_artifacts::{
 };
 use dialog_search_tree::Manifest;
 use futures_util::{StreamExt, stream};
-
-use crate::Cells;
 
 /// Merge sorted artifact streams into one stream whose order matches
 /// what a single physical prolly tree containing every input would
@@ -227,13 +225,11 @@ pub(crate) fn tombstones_from(changes: &Changes, manifest: &Manifest) -> HashSet
 }
 
 /// What a query's upper layers hide in the streams beneath them: exact
-/// facts (tombstones, by sort key) and whole `(attribute, entity)`
-/// cells (claimed by a replace). Holds each layer's sets as shared,
-/// rather than one merged copy, so building it never copies a set.
+/// facts, by sort key. Holds each layer's set as shared, rather than
+/// one merged copy, so building it never copies a set.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Hidden {
     facts: Vec<Arc<HashSet<SortKey>>>,
-    cells: Vec<Arc<Cells>>,
 }
 
 impl Hidden {
@@ -245,60 +241,23 @@ impl Hidden {
         self
     }
 
-    /// Also hide every fact in `cells`.
-    pub(crate) fn cells(mut self, cells: Arc<Cells>) -> Self {
-        if !cells.is_empty() {
-            self.cells.push(cells);
-        }
-        self
-    }
-
     /// Whether nothing is hidden.
     pub(crate) fn is_empty(&self) -> bool {
-        self.facts.is_empty() && self.cells.is_empty()
+        self.facts.is_empty()
     }
 
-    /// What of this can hide a row `selector` matches: cells of another
-    /// attribute cannot, so a scan that no replace touched is not
-    /// filtered for cells at all.
-    pub(crate) fn within(&self, selector: &ArtifactSelector<Constrained>) -> Self {
-        let Some(attribute) = selector.attribute() else {
-            return self.clone();
-        };
-        let the = attribute.as_str().as_bytes();
-        Self {
-            facts: self.facts.clone(),
-            cells: self
-                .cells
-                .iter()
-                .filter(|cells| cells.contains_key(the))
-                .cloned()
-                .collect(),
-        }
+    /// What of this can hide a row `selector` matches: every hidden
+    /// fact, since a tombstone is keyed by the whole fact.
+    pub(crate) fn within(&self, _selector: &ArtifactSelector<Constrained>) -> Self {
+        self.clone()
     }
 
-    /// Whether `view` is hidden. A claimed cell is checked on the row's
-    /// attribute and entity bytes as stored; the sort key is derived
-    /// only when an exact fact could match it.
+    /// Whether `view` is hidden: its sort key names a hidden fact.
     fn hides(
         &self,
         view: &ArtifactView,
         manifest: &Manifest,
     ) -> Result<bool, dialog_artifacts::DialogArtifactsError> {
-        if !self.cells.is_empty() {
-            let the = view.the_bytes()?;
-            let mut claimed = self
-                .cells
-                .iter()
-                .filter_map(|cells| cells.get(the.as_ref()))
-                .peekable();
-            if claimed.peek().is_some() {
-                let of = view.of_bytes()?;
-                if claimed.any(|entities| entities.contains(of.as_ref())) {
-                    return Ok(true);
-                }
-            }
-        }
         if self.facts.is_empty() {
             return Ok(false);
         }
@@ -309,7 +268,7 @@ impl Hidden {
 
 /// Wrap an artifact stream in a filter that drops any item `hidden`
 /// hides, its sort key taken under `manifest` (which the hidden facts
-/// must be keyed under too; cells key the same under every format).
+/// must be keyed under too).
 /// No-op when nothing is hidden.
 pub(crate) fn filter_hidden<'a>(
     inner: ArtifactStream<'a>,
@@ -431,6 +390,7 @@ mod tests {
             "test/name".parse()?,
             alice.clone(),
             Value::String("Alice".into()),
+            dialog_artifacts::Policy::All,
         );
         changes.dissociate(
             "test/name".parse()?,
@@ -463,28 +423,6 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_common::test]
-    async fn it_filters_every_value_of_a_claimed_cell() -> anyhow::Result<()> {
-        let keep = artifact("id:a", "test/name", "Keep");
-        let first = artifact("id:b", "test/name", "One");
-        let second = artifact("id:b", "test/name", "Two");
-        let other = artifact("id:b", "test/age", "Kept");
-        let mut cells = Cells::new();
-        cells
-            .entry(b"test/name".to_vec())
-            .or_default()
-            .insert(b"id:b".to_vec());
-
-        let filtered = filter_hidden(
-            stream_of(vec![keep.clone(), first, second, other.clone()]),
-            Hidden::default().cells(Arc::new(cells)),
-            Manifest::default(),
-        );
-        let items = collect(filtered).await?;
-        assert_eq!(items, vec![keep, other]);
-        Ok(())
-    }
-
     /// A tree holding `facts`, written under `manifest`, and its store.
     async fn tree_under(
         manifest: Manifest,
@@ -498,7 +436,11 @@ mod tests {
         tree.apply(
             &store,
             &mut delta,
-            stream::iter(facts.into_iter().map(Instruction::Assert)),
+            stream::iter(
+                facts
+                    .into_iter()
+                    .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All)),
+            ),
         )
         .await?;
         delta.flush_into(&store);

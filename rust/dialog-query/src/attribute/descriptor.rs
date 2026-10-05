@@ -8,7 +8,7 @@ use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::types::Type;
-use dialog_artifacts::{NameShape, Succession, Symbol};
+use dialog_artifacts::{NameShape, Policy, Symbol};
 
 use base58::ToBase58;
 use serde::{Deserialize, Serialize};
@@ -483,16 +483,16 @@ impl AttributeDescriptor {
         &self.among
     }
 
-    /// How a write through this attribute succeeds a claim, when its
-    /// policy chooses one: the claim a read returns is retracted beside
-    /// the written value. `all` appends and succeeds nothing.
-    pub fn succession(&self) -> Option<Succession> {
+    /// The policy a write through this attribute carries: the one it
+    /// is read under. A choosing policy succeeds the claim a read
+    /// returns, retracted beside the written value; `all` appends.
+    pub fn policy(&self) -> Policy {
         match self.select {
-            Select::Last => Some(Succession::Last),
-            Select::Max => Some(Succession::Max),
-            Select::Min => Some(Succession::Min),
-            Select::Top => Some(Succession::Top(self.among.clone())),
-            Select::All => None,
+            Select::Last => Policy::Last,
+            Select::All => Policy::All,
+            Select::Max => Policy::Max,
+            Select::Min => Policy::Min,
+            Select::Top => Policy::Top(self.among.clone()),
         }
     }
 

@@ -812,22 +812,28 @@ mod tests {
         let bob = "did:key:z6MkDiL3ZaJ4V7VSdQruLenZLA4RNbu6cErR5m8K5Wj99wTF";
 
         branch
-            .commit(stream::iter(vec![Instruction::Replace(Artifact {
-                the: "person/name".parse()?,
-                of: alice.parse()?,
-                is: Value::String("Alice".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "person/name".parse()?,
+                    of: alice.parse()?,
+                    is: Value::String("Alice".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::Last,
+            )]))
             .perform(&operator)
             .await?;
 
         branch
-            .commit(stream::iter(vec![Instruction::Replace(Artifact {
-                the: "person/name".parse()?,
-                of: bob.parse()?,
-                is: Value::String("Bob".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "person/name".parse()?,
+                    of: bob.parse()?,
+                    is: Value::String("Bob".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::Last,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -858,7 +864,10 @@ mod tests {
             cause: None,
         };
 
-        let instructions = stream::iter(vec![Instruction::Assert(artifact.clone())]);
+        let instructions = stream::iter(vec![Instruction::Assert(
+            artifact.clone(),
+            dialog_artifacts::Policy::All,
+        )]);
 
         let revision = branch.commit(instructions).perform(&operator).await?;
         // The commit wrote data, so its tree is not the derived empty tree.
@@ -912,24 +921,30 @@ mod tests {
         // A commits first, advancing the head in storage. B's cache is now
         // stale.
         writer_a
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:a".parse()?,
-                is: Value::String("Alice".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:a".parse()?,
+                    is: Value::String("Alice".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
 
         // B commits from its stale snapshot — must fail loudly, not silently
         // drop A's commit.
         let raced = writer_b
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:b".parse()?,
-                is: Value::String("Bob".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:b".parse()?,
+                    is: Value::String("Bob".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await;
         assert!(
@@ -945,12 +960,15 @@ mod tests {
         // Recovery: refresh B's view of the head, then re-commit.
         writer_b.refresh(&operator).await?;
         writer_b
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:b".parse()?,
-                is: Value::String("Bob".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:b".parse()?,
+                    is: Value::String("Bob".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -1010,18 +1028,20 @@ mod history_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let first = branch
-            .commit(stream::iter(vec![Instruction::Assert(title(
-                "post:1", "Hej",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hej"),
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
 
         // Refresh so the next commit builds on the published head.
         branch.refresh(&operator).await?;
         let second = branch
-            .commit(stream::iter(vec![Instruction::Replace(title(
-                "post:1", "Hi",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hi"),
+                dialog_artifacts::Policy::Last,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -1078,9 +1098,10 @@ mod history_tests {
         // first-parent steps back, from the third revision to the first.
         branch.refresh(&operator).await?;
         let third = branch
-            .commit(stream::iter(vec![Instruction::Replace(title(
-                "post:1", "Hello",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hello"),
+                dialog_artifacts::Policy::Last,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1105,9 +1126,10 @@ mod history_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let revision = branch
-            .commit(stream::iter(vec![Instruction::Assert(title(
-                "post:1", "Hej",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hej"),
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -1152,8 +1174,8 @@ mod history_tests {
             cause: None,
         };
         for instruction in [
-            Instruction::Assert(forged.clone()),
-            Instruction::Replace(forged.clone()),
+            Instruction::Assert(forged.clone(), dialog_artifacts::Policy::All),
+            Instruction::Assert(forged.clone(), dialog_artifacts::Policy::Last),
             Instruction::Retract(forged),
         ] {
             let result = branch
@@ -1184,9 +1206,10 @@ mod history_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let first = branch
-            .commit(stream::iter(vec![Instruction::Assert(title(
-                "post:1", "Hej",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hej"),
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1233,9 +1256,10 @@ mod history_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let first = branch
-            .commit(stream::iter(vec![Instruction::Assert(title(
-                "post:1", "Hej",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hej"),
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1273,9 +1297,10 @@ mod history_tests {
         let repo = test_repo(&operator, &profile).await;
 
         let seed = repo.branch("main").open().perform(&operator).await?;
-        seed.commit(stream::iter(vec![Instruction::Assert(title(
-            "post:1", "Hej",
-        ))]))
+        seed.commit(stream::iter(vec![Instruction::Assert(
+            title("post:1", "Hej"),
+            dialog_artifacts::Policy::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -1295,9 +1320,10 @@ mod history_tests {
         // where the write looks like a cardinality-one no-op. It must not
         // report success while leaving the title retracted at the head.
         let raced = reasserter
-            .commit(stream::iter(vec![Instruction::Replace(title(
-                "post:1", "Hej",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hej"),
+                dialog_artifacts::Policy::Last,
+            )]))
             .perform(&operator)
             .await;
 
@@ -1336,9 +1362,10 @@ mod history_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let revision = branch
-            .commit(stream::iter(vec![Instruction::Assert(title(
-                "post:1", "Hej",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hej"),
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
 

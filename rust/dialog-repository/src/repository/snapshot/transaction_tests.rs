@@ -549,7 +549,11 @@ async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
     };
     let result = snapshot
         .transaction()
-        .integrate([Instruction::Assert(forged)].into_iter().collect())
+        .integrate(
+            [Instruction::Assert(forged, dialog_artifacts::Policy::All)]
+                .into_iter()
+                .collect(),
+        )
         .commit()
         .perform(&operator)
         .await;
@@ -841,9 +845,12 @@ async fn it_commits_through_a_cold_handle() -> Result<()> {
     let minted = cold
         .transaction()
         .integrate(
-            [Instruction::Assert(fact("user:bob", "Bob"))]
-                .into_iter()
-                .collect(),
+            [Instruction::Assert(
+                fact("user:bob", "Bob"),
+                dialog_artifacts::Policy::All,
+            )]
+            .into_iter()
+            .collect(),
         )
         .commit()
         .canonicalize()

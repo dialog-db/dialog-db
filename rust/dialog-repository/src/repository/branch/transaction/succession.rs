@@ -1,4 +1,4 @@
-//! Succession of a claim under a choosing policy, settled at commit and
+//! Policy of a claim under a choosing policy, settled at commit and
 //! in a transaction's own reads.
 //!
 //! A write through an attribute read under `last`, `max`, `min` or
@@ -11,7 +11,7 @@
 //! observes the round view it fired on.
 //!
 //! What a read returns depends on the line and on the rules deriving
-//! the relation, so the statement records a [`Succession`] and the
+//! the relation, so the statement records a [`Policy`] and the
 //! settlement runs here, over the transaction's ordered log: each write
 //! is replayed in order over the claims the line holds for its cell;
 //! a succession elects among the live claims and the candidates rules
@@ -21,7 +21,8 @@
 //! as one more candidate. Writing a value the cell already holds writes
 //! nothing. At commit, a cell no rule derives is left to the tree,
 //! which elects among the cell's stored claims in the descent that
-//! writes the value ([`dialog_artifacts::Instruction::Succeed`]); the
+//! writes the value ([`dialog_artifacts::Instruction::Assert`] under a
+//! choosing [`Policy`]); the
 //! settlement here is for the cells rules derive, whose candidates the
 //! tree cannot see, and for a transaction's own reads. What a cell's
 //! writes settle to is squashed as one commit's
@@ -37,7 +38,7 @@ use crate::repository::staged::squash;
 use crate::{CommitError, RemoteSite, Staged};
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Cause, Change, Changes, Entity, Select, Value,
+    Artifact, ArtifactSelector, Attribute, Cause, Change, Changes, Entity, Policy, Select, Value,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -115,7 +116,7 @@ where
         let mut relations: Vec<&Attribute> = Vec::new();
         let mut unseen = false;
         for (the, of, change) in staged.log() {
-            if !matches!(change, Change::Succeed(..)) {
+            if !change.elects() {
                 continue;
             }
             if !relations.contains(&the) {
@@ -148,10 +149,10 @@ where
     for (position, (the, of, change)) in staged.log().iter().enumerate() {
         let key = (the.clone(), of.clone());
         if !cells.contains_key(&key) {
-            let observed = if matches!(change, Change::Succeed(..))
+            let observed = if change.elects()
                 || staged.log()[position..]
                     .iter()
-                    .any(|(t, o, c)| t == the && o == of && matches!(c, Change::Succeed(..)))
+                    .any(|(t, o, c)| t == the && o == of && c.elects())
             {
                 claims_of(&line, the, of).await?
             } else {
@@ -162,7 +163,7 @@ where
         }
         let cell = cells.get_mut(&key).expect("cell loaded above");
         let derived = match change {
-            Change::Succeed(..) => {
+            Change::Assert(_, policy) if policy.elects() => {
                 let view = QueryEnv::new(sources.clone(), overlay.clone(), env)
                     .with_layers(vec![prefix.clone()]);
                 let candidates = derived_candidates(&view, the, of).await?;
@@ -259,7 +260,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
+    let failed = |error: &dyn Display| CommitError::Policy(error.to_string());
     let selector = ArtifactSelector::new().the(the.clone()).of(of.clone());
     let rows = Provider::<Select<'_>>::execute(view, selector)
         .await
@@ -309,7 +310,7 @@ where
 {
     let rules = Provider::<SelectRules>::execute(view, relation_predicate(the))
         .await
-        .map_err(|error| CommitError::Succession(error.to_string()))?;
+        .map_err(|error| CommitError::Policy(error.to_string()))?;
     Ok(!rules.installed().is_empty())
 }
 
@@ -333,7 +334,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
+    let failed = |error: &dyn Display| CommitError::Policy(error.to_string());
     let predicate = relation_predicate(the);
     let rules = Provider::<SelectRules>::execute(view, predicate.clone())
         .await
@@ -400,13 +401,13 @@ impl Cell {
         squash(self.settled, &|value| line.contains(value))
     }
 
-    /// Replay one write: a plain assertion adds a claim, standing at
-    /// the commit's edition, as every write of the transaction does; a
-    /// retraction removes one; a replace keeps its value alone; a
-    /// succession elects among the live claims and the derived
-    /// candidates that are not claims, retracts the elected claim when
-    /// it is one and adds its value, or adds nothing when the cell holds
-    /// the value already. Returns what the write settles to.
+    /// Replay one write: an assertion under `all` adds a claim, standing
+    /// at the commit's edition, as every write of the transaction does;
+    /// a retraction removes one; an assertion under a choosing policy
+    /// elects among the live claims and the derived candidates that are
+    /// not claims, retracts the elected claim when it is one and adds
+    /// its value, or adds nothing when the cell holds the value already.
+    /// Returns what the write settles to.
     fn write(
         &mut self,
         change: &Change,
@@ -429,13 +430,8 @@ impl Cell {
             claim: true,
         };
         Ok(match change {
-            Change::Assert(value) => {
+            Change::Assert(value, Policy::All) => {
                 self.live.retain(|claim| claim.value != *value);
-                self.live.push(staged(value));
-                vec![change.clone()]
-            }
-            Change::Replace(value) => {
-                self.live.clear();
                 self.live.push(staged(value));
                 vec![change.clone()]
             }
@@ -443,7 +439,7 @@ impl Cell {
                 self.live.retain(|claim| claim.value != *value);
                 vec![change.clone()]
             }
-            Change::Succeed(value, succession) => {
+            Change::Assert(value, policy) => {
                 if self
                     .live
                     .iter()
@@ -465,16 +461,16 @@ impl Cell {
                         )
                     })
                     .collect();
-                let elected = Election::from(succession)
+                let elected = Election::from(policy)
                     .elect_claims(pool)
-                    .map_err(|error| CommitError::Succession(error.to_string()))?;
+                    .map_err(|error| CommitError::Policy(error.to_string()))?;
                 let mut settled = Vec::with_capacity(2);
                 if let Some((elected, true)) = elected {
                     self.live.retain(|claim| claim.value != elected);
                     settled.push(Change::Retract(elected));
                 }
                 self.live.push(staged(value));
-                settled.push(Change::Assert(value.clone()));
+                settled.push(Change::Assert(value.clone(), Policy::All));
                 settled
             }
         })
@@ -490,7 +486,7 @@ mod tests {
     use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_artifacts::history::Edition;
-    use dialog_artifacts::{ArtifactSelector, Attribute, Change, Entity, Succession, Value};
+    use dialog_artifacts::{ArtifactSelector, Attribute, Change, Entity, Policy, Value};
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::The;
     use dialog_query::query::Output as _;
@@ -514,21 +510,24 @@ mod tests {
         let edition = Edition::from(7u64);
         let mut cell = super::Cell::over(Vec::new());
         for value in [200u32, 300] {
-            let change = Change::Succeed(Value::UnsignedInt(value.into()), Succession::Last);
+            let change = Change::Assert(Value::UnsignedInt(value.into()), Policy::Last);
             let written = cell.write(&change, &[], edition, &the, &of)?;
             cell.settled.extend(written);
         }
         assert_eq!(
             cell.settled,
             vec![
-                Change::Assert(Value::UnsignedInt(200)),
+                Change::Assert(Value::UnsignedInt(200), dialog_artifacts::Policy::All),
                 Change::Retract(Value::UnsignedInt(200)),
-                Change::Assert(Value::UnsignedInt(300)),
+                Change::Assert(Value::UnsignedInt(300), dialog_artifacts::Policy::All),
             ]
         );
         assert_eq!(
             cell.squashed(),
-            vec![Change::Assert(Value::UnsignedInt(300))]
+            vec![Change::Assert(
+                Value::UnsignedInt(300),
+                dialog_artifacts::Policy::All
+            )]
         );
         Ok(())
     }
@@ -542,7 +541,7 @@ mod tests {
             is: Value::UnsignedInt(value.into()),
             cause: None,
             cardinality: Some(Cardinality::One),
-            succession: Some(Succession::Max),
+            policy: Some(Policy::Max),
         }
     }
 
@@ -795,7 +794,7 @@ mod tests {
     /// overlay.
     fn session_salary(of: &Entity, value: u32) -> AttributeStatement {
         AttributeStatement {
-            succession: None,
+            policy: None,
             ..salary(of, value)
         }
     }
@@ -813,7 +812,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            succession: Some(Succession::Last),
+            policy: Some(Policy::Last),
             ..salary(&alice, value)
         };
         branch
@@ -923,7 +922,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            succession: Some(Succession::Last),
+            policy: Some(Policy::Last),
             ..salary(&alice, value)
         };
         branch
@@ -972,7 +971,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            succession: Some(Succession::Last),
+            policy: Some(Policy::Last),
             ..salary(&alice, value)
         };
         branch
@@ -1062,7 +1061,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            succession: Some(Succession::Last),
+            policy: Some(Policy::Last),
             ..salary(&alice, value)
         };
         branch
@@ -1114,11 +1113,11 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            succession: Some(Succession::Last),
+            policy: Some(Policy::Last),
             ..salary(&alice, value)
         };
         let all = |value: u32| AttributeStatement {
-            succession: None,
+            policy: None,
             cardinality: Some(Cardinality::Many),
             ..salary(&alice, value)
         };
@@ -1233,7 +1232,7 @@ mod tests {
         assert_eq!(stored(&branch, &operator, &alice).await?, vec![100, 200]);
 
         let last = AttributeStatement {
-            succession: Some(Succession::Last),
+            policy: Some(Policy::Last),
             ..salary(&alice, 150)
         };
         branch

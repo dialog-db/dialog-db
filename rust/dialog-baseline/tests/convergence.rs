@@ -85,10 +85,7 @@ async fn facts(repo: &VolatileRepo, log: &SeLog) -> Result<Vec<String>> {
     let mut attributes = Vec::new();
     for commit in &log.transactions {
         for instruction in se_instructions(commit)? {
-            let (Instruction::Assert(fact)
-            | Instruction::Replace(fact)
-            | Instruction::Retract(fact)
-            | Instruction::Succeed(fact, _)) = instruction;
+            let (Instruction::Assert(fact, _) | Instruction::Retract(fact)) = instruction;
             attributes.push(fact.the.to_string());
         }
     }
