@@ -496,8 +496,8 @@ pub enum CommitError {
 
     /// A write succeeding a claim under a choosing policy could not
     /// read the claims of its cell to elect the one it succeeds.
-    #[error("Succession failed: {0}")]
-    Succession(String),
+    #[error("Policy failed: {0}")]
+    Policy(String),
 
     /// Reading the registry for what a write replaces failed.
     #[error("Failed to read the registry: {0}")]

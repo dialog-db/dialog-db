@@ -66,7 +66,10 @@ async fn assert_all(
 ) -> Result<Revision> {
     commit(
         branch,
-        facts.into_iter().map(Instruction::Assert).collect(),
+        facts
+            .into_iter()
+            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All))
+            .collect(),
         operator,
     )
     .await
@@ -273,7 +276,7 @@ async fn it_leaves_no_key_when_assert_and_retract_a_novel_fact_in_one_batch() ->
     commit(
         &branch,
         vec![
-            Instruction::Assert(transient.clone()),
+            Instruction::Assert(transient.clone(), dialog_artifacts::Policy::All),
             Instruction::Retract(transient.clone()),
         ],
         &operator,
@@ -1148,7 +1151,7 @@ async fn it_can_query_efficiently_by_entity_and_value() -> Result<()> {
     branch
         .commit(stream::iter(
             data.into_iter()
-                .map(Instruction::Assert)
+                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
@@ -1202,7 +1205,7 @@ async fn it_can_query_efficiently_by_attribute_and_value() -> Result<()> {
     branch
         .commit(stream::iter(
             data.into_iter()
-                .map(Instruction::Assert)
+                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
@@ -1248,7 +1251,7 @@ async fn it_uses_indexes_to_optimize_reads() -> Result<()> {
         .commit(stream::iter(
             generate_data(512)?
                 .into_iter()
-                .map(Instruction::Assert)
+                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
@@ -1342,11 +1345,21 @@ async fn it_produces_the_same_version_with_different_insertion_order() -> Result
 
     let mut forward = Changes::new();
     for artifact in data.iter().cloned() {
-        forward.associate(artifact.the, artifact.of, artifact.is);
+        forward.associate(
+            artifact.the,
+            artifact.of,
+            artifact.is,
+            dialog_artifacts::Policy::All,
+        );
     }
     let mut backward = Changes::new();
     for artifact in data.into_iter().rev() {
-        backward.associate(artifact.the, artifact.of, artifact.is);
+        backward.associate(
+            artifact.the,
+            artifact.of,
+            artifact.is,
+            dialog_artifacts::Policy::All,
+        );
     }
 
     let one = branch
@@ -1390,11 +1403,10 @@ async fn it_can_upsert_facts() -> Result<()> {
     .await?;
     commit(
         &branch,
-        vec![Instruction::Replace(fact(
-            "test/attribute",
-            entity.clone(),
-            Value::Boolean(true),
-        )?)],
+        vec![Instruction::Assert(
+            fact("test/attribute", entity.clone(), Value::Boolean(true))?,
+            dialog_artifacts::Policy::Last,
+        )],
         &operator,
     )
     .await?;
@@ -1455,11 +1467,14 @@ async fn it_avoids_unnecessary_storage_writes() -> Result<()> {
     );
 
     reopened
-        .commit(stream::iter(vec![Instruction::Assert(fact(
-            "test/attribute",
-            Entity::new()?,
-            Value::String("another value".into()),
-        )?)]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            fact(
+                "test/attribute",
+                Entity::new()?,
+                Value::String("another value".into()),
+            )?,
+            dialog_artifacts::Policy::All,
+        )]))
         .perform(&counting)
         .await?;
     assert!(counting.count("archive::Import") > 0);
@@ -1597,11 +1612,10 @@ async fn it_replaces_a_spilled_prior() -> Result<()> {
         for value in [spilled_prior.clone(), new_value.clone()] {
             commit(
                 &branch,
-                vec![Instruction::Replace(fact(
-                    "doc/body",
-                    entity.clone(),
-                    value,
-                )?)],
+                vec![Instruction::Assert(
+                    fact("doc/body", entity.clone(), value)?,
+                    dialog_artifacts::Policy::Last,
+                )],
                 &operator,
             )
             .await?;
@@ -1785,6 +1799,7 @@ async fn it_commits_identically_when_the_spine_is_reused() -> Result<()> {
             "test/value".parse()?,
             format!("entity:00000000-0000-0000-0000-{:012}", n % 40).parse()?,
             Value::String(format!("value {n}")),
+            dialog_artifacts::Policy::All,
         );
 
         // The oracle opens a fresh handle (and therefore reads the root

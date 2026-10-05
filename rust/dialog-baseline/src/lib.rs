@@ -341,7 +341,10 @@ pub(crate) fn artifacts_for(row: &FactRow) -> Result<[Artifact; 2]> {
 pub(crate) fn instructions_for(rows: &[FactRow]) -> Result<Vec<Instruction>> {
     let mut instructions = Vec::with_capacity(rows.len() * 2);
     for row in rows {
-        instructions.extend(artifacts_for(row)?.map(Instruction::Assert));
+        instructions.extend(
+            artifacts_for(row)?
+                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All)),
+        );
     }
     Ok(instructions)
 }
@@ -352,10 +355,8 @@ pub fn changes_of(instructions: impl IntoIterator<Item = Instruction>) -> Change
     let mut changes = Changes::new();
     for instruction in instructions {
         match instruction {
-            Instruction::Assert(fact) => changes.associate(fact.the, fact.of, fact.is),
-            Instruction::Replace(fact) => changes.associate_unique(fact.the, fact.of, fact.is),
-            Instruction::Succeed(fact, succession) => {
-                changes.succeed(fact.the, fact.of, fact.is, succession)
+            Instruction::Assert(fact, policy) => {
+                changes.associate(fact.the, fact.of, fact.is, policy)
             }
             Instruction::Retract(fact) => changes.dissociate(fact.the, fact.of, fact.is),
         }

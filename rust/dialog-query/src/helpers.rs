@@ -694,7 +694,10 @@ where
             .perform(&self.operator)
             .await?;
 
-        let instructions: Vec<Instruction> = data.into_iter().map(Instruction::Assert).collect();
+        let instructions: Vec<Instruction> = data
+            .into_iter()
+            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All))
+            .collect();
         branch
             .transaction()
             .integrate(instructions.into_iter().collect())
@@ -1155,12 +1158,15 @@ where
             if seen.insert(row[of_at].clone()) {
                 entities.push(of.clone());
             }
-            pending.push(Instruction::Assert(Artifact {
-                the,
-                of,
-                is,
-                cause: None,
-            }));
+            pending.push(Instruction::Assert(
+                Artifact {
+                    the,
+                    of,
+                    is,
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            ));
         }
 
         if !pending.is_empty() {

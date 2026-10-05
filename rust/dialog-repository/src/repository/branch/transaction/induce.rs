@@ -144,10 +144,11 @@ where
         let mut replace_attrs: BTreeSet<Attribute> = BTreeSet::new();
         for instruction in &stimulus {
             match instruction {
-                Instruction::Assert(a) => assert_rows.push(a.clone()),
-                Instruction::Replace(a) | Instruction::Succeed(a, _) => {
+                Instruction::Assert(a, policy) => {
                     assert_rows.push(a.clone());
-                    replace_attrs.insert(a.the.clone());
+                    if policy.elects() {
+                        replace_attrs.insert(a.the.clone());
+                    }
                 }
                 Instruction::Retract(a) => {
                     retract_attrs.insert(a.the.clone());
@@ -161,10 +162,9 @@ where
         let mut touched: BTreeSet<Reach> = stimulus
             .iter()
             .map(|instruction| match instruction {
-                Instruction::Assert(a)
-                | Instruction::Replace(a)
-                | Instruction::Retract(a)
-                | Instruction::Succeed(a, _) => Reach::Attribute(a.the.clone()),
+                Instruction::Assert(a, _) | Instruction::Retract(a) => {
+                    Reach::Attribute(a.the.clone())
+                }
             })
             .collect();
         let direct = touched.clone();
@@ -190,9 +190,7 @@ where
         let mut installed: BTreeSet<Entity> = BTreeSet::new();
         let mut installed_deductive: BTreeSet<Entity> = BTreeSet::new();
         for instruction in &stimulus {
-            if let Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Succeed(a, _) =
-                instruction
-            {
+            if let Instruction::Assert(a, _) = instruction {
                 if a.the == on {
                     installed.insert(a.of.clone());
                 } else if a.the == reads {
@@ -356,9 +354,7 @@ impl OverlayTriggers {
         let mut slice = OverlayTriggers::default();
         for (entity, attribute, change) in changes.iter() {
             if *attribute == on {
-                if let Change::Assert(Value::Entity(key)) | Change::Replace(Value::Entity(key)) =
-                    change
-                {
+                if let Change::Assert(Value::Entity(key), _) = change {
                     slice
                         .on
                         .entry(key.clone())
@@ -366,9 +362,7 @@ impl OverlayTriggers {
                         .push(entity.clone());
                 }
             } else if *attribute == reads {
-                if let Change::Assert(Value::Entity(key)) | Change::Replace(Value::Entity(key)) =
-                    change
-                {
+                if let Change::Assert(Value::Entity(key), _) = change {
                     slice
                         .reads
                         .entry(key.clone())
@@ -377,7 +371,7 @@ impl OverlayTriggers {
                 }
             } else if *attribute == source {
                 match change {
-                    Change::Assert(Value::Bytes(bytes)) | Change::Replace(Value::Bytes(bytes)) => {
+                    Change::Assert(Value::Bytes(bytes), _) => {
                         slice.sources.insert(entity.clone(), bytes.clone());
                     }
                     Change::Retract(_) => {
@@ -387,7 +381,7 @@ impl OverlayTriggers {
                 }
             } else if *attribute == transient {
                 match change {
-                    Change::Assert(_) | Change::Replace(_) | Change::Succeed(..) => {
+                    Change::Assert(_, _) => {
                         slice.transient.insert(entity.clone());
                     }
                     Change::Retract(_) => {
@@ -853,7 +847,7 @@ where
             continue;
         }
         lag.push(if arriving {
-            Instruction::Assert(fact)
+            Instruction::Assert(fact, dialog_artifacts::Policy::All)
         } else {
             Instruction::Retract(fact)
         });
@@ -1161,25 +1155,15 @@ where
                 // An asserting head writes as the field's policy says: a
                 // set appends, and a choosing policy succeeds the claim
                 // it elects, resolved against the view at commit.
-                Polarity::Assert => match field.descriptor().succession() {
-                    Some(succession) => {
-                        dialog_artifacts::Update::succeed(
-                            &mut head,
-                            attribute,
-                            this.clone(),
-                            value,
-                            succession,
-                        );
-                    }
-                    None => {
-                        dialog_artifacts::Update::associate(
-                            &mut head,
-                            attribute,
-                            this.clone(),
-                            value,
-                        );
-                    }
-                },
+                Polarity::Assert => {
+                    dialog_artifacts::Update::associate(
+                        &mut head,
+                        attribute,
+                        this.clone(),
+                        value,
+                        field.descriptor().policy(),
+                    );
+                }
             }
         }
 
@@ -1194,14 +1178,8 @@ where
         for instruction in head.into_instructions() {
             if is_novel(view, &instruction).await? {
                 match instruction {
-                    Instruction::Assert(a) => {
-                        dialog_artifacts::Update::associate(novelty, a.the, a.of, a.is)
-                    }
-                    Instruction::Replace(a) => {
-                        dialog_artifacts::Update::associate_unique(novelty, a.the, a.of, a.is)
-                    }
-                    Instruction::Succeed(a, succession) => {
-                        dialog_artifacts::Update::succeed(novelty, a.the, a.of, a.is, succession)
+                    Instruction::Assert(a, policy) => {
+                        dialog_artifacts::Update::associate(novelty, a.the, a.of, a.is, policy)
                     }
                     Instruction::Retract(a) => {
                         dialog_artifacts::Update::dissociate(novelty, a.the, a.of, a.is)
@@ -1237,10 +1215,7 @@ where
         + 'static,
 {
     let artifact = match instruction {
-        Instruction::Assert(a)
-        | Instruction::Replace(a)
-        | Instruction::Retract(a)
-        | Instruction::Succeed(a, _) => a,
+        Instruction::Assert(a, _) | Instruction::Retract(a) => a,
     };
     let selector = ArtifactSelector::new()
         .the(artifact.the.clone())
@@ -1248,7 +1223,7 @@ where
         .is(artifact.is.clone());
     let present = !select(view, selector).await?.is_empty();
     Ok(match instruction {
-        Instruction::Assert(_) | Instruction::Replace(_) | Instruction::Succeed(..) => !present,
+        Instruction::Assert(_, _) => !present,
         Instruction::Retract(_) => present,
     })
 }
@@ -1661,9 +1636,7 @@ mod tests {
             .into_instructions()
             .into_iter()
             .filter_map(|instruction| match instruction {
-                Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Succeed(a, _) => {
-                    Some((a.the.to_string(), a.of, a.is))
-                }
+                Instruction::Assert(a, _) => Some((a.the.to_string(), a.of, a.is)),
                 Instruction::Retract(_) => None,
             })
             .collect();
@@ -2679,12 +2652,15 @@ mod tests {
         // Head advances without induction — the pull surrogate.
         let doc: Entity = "doc:1".parse()?;
         branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "doc/title".parse()?,
-                of: doc.clone(),
-                is: Value::String("hello".into()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "doc/title".parse()?,
+                    of: doc.clone(),
+                    is: Value::String("hello".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2762,12 +2738,15 @@ mod tests {
         // P arrives outside any transaction.
         let subject: Entity = "pair:1".parse()?;
         branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "fact.p/v".parse()?,
-                of: subject.clone(),
-                is: Value::String("p".into()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "fact.p/v".parse()?,
+                    of: subject.clone(),
+                    is: Value::String("p".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2818,12 +2797,15 @@ mod tests {
             .await?;
         branch.refresh(&operator).await?;
         branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "doc/title".parse()?,
-                of: old.clone(),
-                is: Value::String("old".into()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "doc/title".parse()?,
+                    of: old.clone(),
+                    is: Value::String("old".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2843,12 +2825,15 @@ mod tests {
         // up at the next instant.
         let fresh: Entity = "doc:new".parse()?;
         branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "doc/title".parse()?,
-                of: fresh.clone(),
-                is: Value::String("new".into()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "doc/title".parse()?,
+                    of: fresh.clone(),
+                    is: Value::String("new".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;

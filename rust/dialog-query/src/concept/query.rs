@@ -28,7 +28,7 @@ use crate::{
     Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Requirement, Schema,
     Term, try_stream,
 };
-use dialog_artifacts::{Succession, encode_value_owned};
+use dialog_artifacts::{Policy, encode_value_owned};
 use dialog_capability::Provider;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
@@ -1125,13 +1125,14 @@ pub struct Election {
     among: Vec<Value>,
 }
 
-impl From<&Succession> for Election {
-    fn from(succession: &Succession) -> Self {
-        match succession {
-            Succession::Last => Election::plain(Select::Last),
-            Succession::Max => Election::plain(Select::Max),
-            Succession::Min => Election::plain(Select::Min),
-            Succession::Top(among) => Election {
+impl From<&Policy> for Election {
+    fn from(policy: &Policy) -> Self {
+        match policy {
+            Policy::Last => Election::plain(Select::Last),
+            Policy::All => Election::plain(Select::All),
+            Policy::Max => Election::plain(Select::Max),
+            Policy::Min => Election::plain(Select::Min),
+            Policy::Top(among) => Election {
                 select: Select::Top,
                 among: among.clone(),
             },
@@ -1180,7 +1181,7 @@ impl Election {
     /// the field lists any, first best and an unlisted value last; then
     /// by the relation it came from, in the order the field lists them.
     fn rank<T>(&self, entry: &Entry<T>) -> (usize, usize) {
-        let listed = Succession::Top(self.among.clone()).rank_of(&entry.value);
+        let listed = Policy::Top(self.among.clone()).rank_of(&entry.value);
         (listed, entry.rank)
     }
 
@@ -1199,13 +1200,13 @@ impl Election {
         let mine = (&candidate.value, candidate.standing.as_ref());
         let theirs = (&incumbent.value, incumbent.standing.as_ref());
         match self.select {
-            Select::Last => Ok(Succession::Last.prefers(mine, theirs)),
-            Select::Max => Ok(Succession::Max.prefers(mine, theirs)),
-            Select::Min => Ok(Succession::Min.prefers(mine, theirs)),
+            Select::Last => Ok(Policy::Last.prefers(mine, theirs)),
+            Select::Max => Ok(Policy::Max.prefers(mine, theirs)),
+            Select::Min => Ok(Policy::Min.prefers(mine, theirs)),
             Select::Top => {
                 let (mine_rank, theirs_rank) = (self.rank(candidate), self.rank(incumbent));
                 Ok(mine_rank < theirs_rank
-                    || (mine_rank == theirs_rank && Succession::newer(mine, theirs)))
+                    || (mine_rank == theirs_rank && Policy::newer(mine, theirs)))
             }
             Select::All => Err(EvaluationError::Store(format!(
                 "`{}` does not choose among candidates",

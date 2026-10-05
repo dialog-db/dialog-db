@@ -29,12 +29,15 @@ use crate::helpers::Counting;
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
 
 fn assert_fact(entity: usize, value: &str) -> Instruction {
-    Instruction::Assert(Artifact {
-        the: "bench/field".parse().unwrap(),
-        of: format!("user:{entity}").parse().unwrap(),
-        is: Value::String(value.to_string()),
-        cause: None,
-    })
+    Instruction::Assert(
+        Artifact {
+            the: "bench/field".parse().unwrap(),
+            of: format!("user:{entity}").parse().unwrap(),
+            is: Value::String(value.to_string()),
+            cause: None,
+        },
+        dialog_artifacts::Policy::All,
+    )
 }
 
 struct Sample {

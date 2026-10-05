@@ -190,38 +190,50 @@ fn entity_facts(index: usize) -> Result<Vec<Instruction>> {
     facts
         .into_iter()
         .map(|(the, is)| {
-            Ok(Instruction::Assert(Artifact {
-                the: the.parse()?,
-                of: of.clone(),
-                is,
-                cause: None,
-            }))
+            Ok(Instruction::Assert(
+                Artifact {
+                    the: the.parse()?,
+                    of: of.clone(),
+                    is,
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            ))
         })
         .collect()
 }
 
 /// The space's metadata and membership facts (what a join probes).
 fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
-    let mut facts = vec![Instruction::Assert(Artifact {
-        the: "db/name".parse()?,
-        of: "id:space".parse()?,
-        is: Value::String("soak space".into()),
-        cause: None,
-    })];
+    let mut facts = vec![Instruction::Assert(
+        Artifact {
+            the: "db/name".parse()?,
+            of: "id:space".parse()?,
+            is: Value::String("soak space".into()),
+            cause: None,
+        },
+        dialog_artifacts::Policy::All,
+    )];
     for member in 0..members {
         let of: dialog_artifacts::Entity = format!("member:{member}").parse()?;
-        facts.push(Instruction::Assert(Artifact {
-            the: "member/name".parse()?,
-            of: of.clone(),
-            is: Value::String(format!("Member {member}")),
-            cause: None,
-        }));
-        facts.push(Instruction::Assert(Artifact {
-            the: "member/role".parse()?,
-            of,
-            is: Value::String(if member == 0 { "owner" } else { "editor" }.into()),
-            cause: None,
-        }));
+        facts.push(Instruction::Assert(
+            Artifact {
+                the: "member/name".parse()?,
+                of: of.clone(),
+                is: Value::String(format!("Member {member}")),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        ));
+        facts.push(Instruction::Assert(
+            Artifact {
+                the: "member/role".parse()?,
+                of,
+                is: Value::String(if member == 0 { "owner" } else { "editor" }.into()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        ));
     }
     Ok(facts)
 }
@@ -275,24 +287,33 @@ fn open_card_rule() -> Result<DeductiveRule> {
 fn claim_facts() -> Result<Vec<Instruction>> {
     let of: dialog_artifacts::Entity = "member:joiner".parse()?;
     Ok(vec![
-        Instruction::Assert(Artifact {
-            the: "member/name".parse()?,
-            of: of.clone(),
-            is: Value::String("The Joiner".into()),
-            cause: None,
-        }),
-        Instruction::Assert(Artifact {
-            the: "member/role".parse()?,
-            of: of.clone(),
-            is: Value::String("editor".into()),
-            cause: None,
-        }),
-        Instruction::Assert(Artifact {
-            the: "member/joined".parse()?,
-            of,
-            is: Value::String("2026-09-01".into()),
-            cause: None,
-        }),
+        Instruction::Assert(
+            Artifact {
+                the: "member/name".parse()?,
+                of: of.clone(),
+                is: Value::String("The Joiner".into()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        ),
+        Instruction::Assert(
+            Artifact {
+                the: "member/role".parse()?,
+                of: of.clone(),
+                is: Value::String("editor".into()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        ),
+        Instruction::Assert(
+            Artifact {
+                the: "member/joined".parse()?,
+                of,
+                is: Value::String("2026-09-01".into()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        ),
     ])
 }
 

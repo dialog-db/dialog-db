@@ -596,7 +596,12 @@ impl ConceptStatement {
 impl Statement for ConceptStatement {
     fn assert(self, update: &mut impl Update) {
         for attribution in self.with {
-            update.associate(attribution.the, self.this.clone(), attribution.is);
+            update.associate(
+                attribution.the,
+                self.this.clone(),
+                attribution.is,
+                dialog_artifacts::Policy::All,
+            );
         }
     }
     fn retract(self, update: &mut impl Update) {

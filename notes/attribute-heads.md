@@ -186,8 +186,9 @@ elect it again once the new value is gone; under `last` that leaves
 an older concurrent claim live where the cardinality-one replacement
 retracted every prior, which no `last` read can tell apart. What a
 write observes is the line and the writes before it in its own
-transaction, in order: the statement records only the succession
-(`Change::Succeed`), the transaction keeps its writes in order, and
+transaction, in order: the statement records the assertion with its
+policy (`Change::Assert(value, policy)`, the one write form beside a
+retraction), the transaction keeps its writes in order, and
 the tree elects among the cell's stored claims in the descent that
 writes the value, retracting the claim it elects and recording the new
 claim with the elected claim's versions as its cause, as a replacement

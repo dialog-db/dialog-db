@@ -31,17 +31,12 @@ use std::sync::Arc;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, AssetChange, Attribute, Change, Changes, Entity, Instruction,
-    SortKey, Statement, Update, Value, sort_key,
+    Policy, SortKey, Statement, Update, Value, sort_key,
 };
 use dialog_search_tree::Manifest;
 
 use super::ephemeral::Facts;
 use crate::rules::conclusion_attr;
-
-/// Cells a replace claimed, by attribute then entity, in the byte form
-/// a [`SortKey`] carries them, so a row's key is checked without
-/// allocating.
-pub(crate) type Cells = HashMap<Vec<u8>, HashSet<Vec<u8>>>;
 
 /// A transaction's writes. See the [module docs](self).
 #[derive(Clone, Debug, Default)]
@@ -56,10 +51,6 @@ struct State {
     retracted: BTreeMap<SortKey, Artifact>,
     /// The sort keys of `retracted`, shared with readers.
     tombstones: Arc<HashSet<SortKey>>,
-    /// The value each claimed cell was replaced with, by cell.
-    replaced: HashMap<(Attribute, Entity), Artifact>,
-    /// The claimed cells, shared with readers.
-    cells: Arc<Cells>,
     /// The asset changes, held as a batch with no facts.
     assets: Changes,
     /// Every write in the order the transaction made it, cell by cell:
@@ -71,8 +62,9 @@ struct State {
 impl State {
     /// Apply one recorded write: hold or drop its fact for reads, give
     /// it its place among the transaction's writes, and log it. A
-    /// succession holds its value as one more candidate until the
-    /// commit settles which claim it succeeds; a read over the
+    /// write under a choosing policy holds its value as one more
+    /// candidate until the commit settles which claim it succeeds; a
+    /// read over the
     /// transaction settles the same way (see
     /// [`succession`](crate::repository::branch::transaction)).
     fn apply_change(&mut self, the: &Attribute, of: &Entity, change: &Change) {
@@ -83,11 +75,8 @@ impl State {
             cause: None,
         };
         match change {
-            Change::Assert(value) | Change::Succeed(value, _) => {
-                self.apply(Instruction::Assert(fact(value)));
-            }
-            Change::Replace(value) => {
-                self.apply(Instruction::Replace(fact(value)));
+            Change::Assert(value, policy) => {
+                self.apply(Instruction::Assert(fact(value), policy.clone()));
             }
             Change::Retract(value) => {
                 self.apply(Instruction::Retract(fact(value)));
@@ -98,10 +87,10 @@ impl State {
 
     fn apply(&mut self, instruction: Instruction) {
         match instruction {
-            // A succession holds its value here and retires nothing: what
-            // it succeeds is settled against the line when the store is
-            // read or committed.
-            Instruction::Assert(fact) | Instruction::Succeed(fact, _) => {
+            // A write holds its value here and retires nothing: what a
+            // choosing policy succeeds is settled against the line when
+            // the store is read or committed.
+            Instruction::Assert(fact, _) => {
                 self.facts.insert(fact);
             }
             Instruction::Retract(fact) => {
@@ -111,37 +100,6 @@ impl State {
                     Arc::make_mut(&mut self.tombstones).insert(key.clone());
                     self.retracted.insert(key, fact);
                 }
-            }
-            Instruction::Replace(fact) => {
-                for prior in self.facts.cell(&fact.of, &fact.the) {
-                    if prior.is != fact.is {
-                        self.facts.remove(&prior);
-                    }
-                }
-                // The cell is claimed, so what was retracted in it is
-                // hidden anyway and the replace retracts it at commit.
-                let (the, of, _) = sort_key(&fact, self.facts.manifest());
-                let start = (the.clone(), of.clone(), Vec::new());
-                let dropped: Vec<SortKey> = self
-                    .retracted
-                    .range(start..)
-                    .take_while(|(key, _)| key.0 == the && key.1 == of)
-                    .map(|(key, _)| key.clone())
-                    .collect();
-                if !dropped.is_empty() {
-                    let tombstones = Arc::make_mut(&mut self.tombstones);
-                    for key in dropped {
-                        tombstones.remove(&key);
-                        self.retracted.remove(&key);
-                    }
-                }
-                Arc::make_mut(&mut self.cells)
-                    .entry(the)
-                    .or_default()
-                    .insert(of);
-                self.replaced
-                    .insert((fact.the.clone(), fact.of.clone()), fact.clone());
-                self.facts.insert(fact);
             }
         }
     }
@@ -198,16 +156,13 @@ impl Staged {
 
     /// Whether any write succeeds a claim the commit has yet to settle.
     pub(crate) fn has_successions(&self) -> bool {
-        self.0
-            .log
-            .iter()
-            .any(|(_, _, change)| matches!(change, Change::Succeed(..)))
+        self.0.log.iter().any(|(_, _, change)| change.elects())
     }
 
     /// The writes as the batch a commit applies: each cell's writes in
     /// the order the transaction made them, squashed as one commit's
-    /// are ([`squash`]), a succession as the succession it was written
-    /// as, for the transactor to settle. Applying it to a line leaves
+    /// are ([`squash`]), a choosing write as it was written, for the
+    /// transactor or the tree to settle. Applying it to a line leaves
     /// what this store reads as over it.
     pub(crate) fn export(&self) -> Changes {
         let mut changes = self.0.assets.clone();
@@ -272,12 +227,6 @@ impl Staged {
             .scan(&ArtifactSelector::new().the(conclusion_attr()))
             .is_empty()
     }
-
-    /// The cells whose values beneath this store hides. A cell is an
-    /// attribute and an entity, which key the same under every format.
-    pub(crate) fn cells(&self) -> Arc<Cells> {
-        self.0.cells.clone()
-    }
 }
 
 /// One cell's writes squashed as the writes of one commit are: a
@@ -288,8 +237,8 @@ impl Staged {
 /// line. A write repeating the cell's standing change for its value is
 /// dropped. A retraction followed by an assertion of the same value
 /// keeps both: the commit retracts the line's claim and asserts afresh.
-/// A replace resets the cell, as it does at commit, and a succession is
-/// kept as written for the transactor to settle.
+/// An assertion under a choosing policy is kept as written, for the
+/// transactor or the tree to settle.
 pub(crate) fn squash(cell: Vec<Change>, held: &dyn Fn(&Value) -> bool) -> Vec<Change> {
     let mut out: Vec<Change> = Vec::with_capacity(cell.len());
     for change in cell {
@@ -297,13 +246,9 @@ pub(crate) fn squash(cell: Vec<Change>, held: &dyn Fn(&Value) -> bool) -> Vec<Ch
             .iter()
             .rposition(|prior| prior.value() == change.value());
         match (&change, last.map(|at| &out[at])) {
-            (Change::Replace(_), _) => {
-                out.clear();
-                out.push(change);
-            }
-            (Change::Assert(_), Some(Change::Assert(_)))
+            (Change::Assert(_, Policy::All), Some(Change::Assert(_, Policy::All)))
             | (Change::Retract(_), Some(Change::Retract(_))) => {}
-            (Change::Retract(value), Some(Change::Assert(_))) => {
+            (Change::Retract(value), Some(Change::Assert(_, Policy::All))) => {
                 out.remove(last.expect("a prior write"));
                 let before = out
                     .iter()
@@ -333,7 +278,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use dialog_artifacts::{Asset, Change, Succession, Value};
+    use dialog_artifacts::{Asset, Change, Policy, Value};
 
     fn fact(of: &str, the: &str, is: &str) -> Artifact {
         Artifact {
@@ -347,9 +292,7 @@ mod tests {
     fn apply(staged: &mut Staged, instruction: Instruction) {
         let mut changes = Changes::new();
         match instruction {
-            Instruction::Assert(f) => changes.associate(f.the, f.of, f.is),
-            Instruction::Replace(f) => changes.associate_unique(f.the, f.of, f.is),
-            Instruction::Succeed(f, s) => changes.succeed(f.the, f.of, f.is, s),
+            Instruction::Assert(f, policy) => changes.associate(f.the, f.of, f.is, policy),
             Instruction::Retract(f) => changes.dissociate(f.the, f.of, f.is),
         }
         staged.apply(changes);
@@ -377,7 +320,10 @@ mod tests {
     fn it_retracts_what_was_asserted_before() {
         let mut staged = Staged::default();
         let x = fact("id:a", "person/name", "A");
-        apply(&mut staged, Instruction::Assert(x.clone()));
+        apply(
+            &mut staged,
+            Instruction::Assert(x.clone(), dialog_artifacts::Policy::All),
+        );
         apply(&mut staged, Instruction::Retract(x.clone()));
         assert!(held(&staged, "id:a", "person/name").is_empty());
         assert!(
@@ -403,18 +349,39 @@ mod tests {
         // A later retraction cancels the assertion; the retraction stays
         // for the line's claim, unless the line is known not to hold it.
         assert_eq!(
-            squash(vec![Change::Assert(a()), Change::Retract(a())], &unknown),
+            squash(
+                vec![
+                    Change::Assert(a(), dialog_artifacts::Policy::All),
+                    Change::Retract(a())
+                ],
+                &unknown
+            ),
             vec![Change::Retract(a())]
         );
         assert_eq!(
-            squash(vec![Change::Assert(a()), Change::Retract(a())], &|_| false),
+            squash(
+                vec![
+                    Change::Assert(a(), dialog_artifacts::Policy::All),
+                    Change::Retract(a())
+                ],
+                &|_| false
+            ),
             Vec::<Change>::new()
         );
         // Retract then assert keeps both: the commit retracts the
         // line's claim and asserts afresh.
         assert_eq!(
-            squash(vec![Change::Retract(a()), Change::Assert(a())], &unknown),
-            vec![Change::Retract(a()), Change::Assert(a())]
+            squash(
+                vec![
+                    Change::Retract(a()),
+                    Change::Assert(a(), dialog_artifacts::Policy::All)
+                ],
+                &unknown
+            ),
+            vec![
+                Change::Retract(a()),
+                Change::Assert(a(), dialog_artifacts::Policy::All)
+            ]
         );
         // Retract, assert, retract: the second retraction cancels the
         // assertion and repeats the first.
@@ -422,7 +389,7 @@ mod tests {
             squash(
                 vec![
                     Change::Retract(a()),
-                    Change::Assert(a()),
+                    Change::Assert(a(), dialog_artifacts::Policy::All),
                     Change::Retract(a())
                 ],
                 &unknown
@@ -433,35 +400,43 @@ mod tests {
         assert_eq!(
             squash(
                 vec![
-                    Change::Assert(a()),
-                    Change::Assert(b()),
-                    Change::Assert(a()),
+                    Change::Assert(a(), dialog_artifacts::Policy::All),
+                    Change::Assert(b(), dialog_artifacts::Policy::All),
+                    Change::Assert(a(), dialog_artifacts::Policy::All),
                     Change::Retract(b()),
                     Change::Retract(b())
                 ],
                 &unknown
             ),
-            vec![Change::Assert(a()), Change::Retract(b())]
+            vec![
+                Change::Assert(a(), dialog_artifacts::Policy::All),
+                Change::Retract(b())
+            ]
         );
-        // A replace resets the cell.
+        // A choosing write does not reset the cell: it is kept as
+        // written beside the writes before it, a later retraction too.
         assert_eq!(
             squash(
                 vec![
-                    Change::Assert(a()),
-                    Change::Replace(b()),
+                    Change::Assert(a(), dialog_artifacts::Policy::All),
+                    Change::Assert(b(), dialog_artifacts::Policy::Last),
                     Change::Retract(b())
                 ],
                 &unknown
             ),
-            vec![Change::Replace(b()), Change::Retract(b())]
+            vec![
+                Change::Assert(a(), dialog_artifacts::Policy::All),
+                Change::Assert(b(), dialog_artifacts::Policy::Last),
+                Change::Retract(b())
+            ]
         );
-        // A succession is kept for the transactor, retraction or not.
+        // A choosing write is kept for the transactor, retraction or not.
         assert_eq!(
             squash(
-                vec![Change::Succeed(a(), Succession::Last), Change::Retract(a())],
+                vec![Change::Assert(a(), Policy::Last), Change::Retract(a())],
                 &unknown
             ),
-            vec![Change::Succeed(a(), Succession::Last), Change::Retract(a())]
+            vec![Change::Assert(a(), Policy::Last), Change::Retract(a())]
         );
     }
 
@@ -470,7 +445,10 @@ mod tests {
         let mut staged = Staged::default();
         let x = fact("id:a", "person/name", "A");
         apply(&mut staged, Instruction::Retract(x.clone()));
-        apply(&mut staged, Instruction::Assert(x.clone()));
+        apply(
+            &mut staged,
+            Instruction::Assert(x.clone(), dialog_artifacts::Policy::All),
+        );
         assert_eq!(
             held(&staged, "id:a", "person/name"),
             vec![Value::String("A".into())]
@@ -485,17 +463,22 @@ mod tests {
             changes,
             vec![
                 Change::Retract(Value::String("A".into())),
-                Change::Assert(Value::String("A".into()))
+                Change::Assert(Value::String("A".into()), dialog_artifacts::Policy::All)
             ]
         );
     }
 
+    /// A write under a choosing policy holds its value beside the
+    /// cell's other staged claims and retires nothing here: what it
+    /// succeeds is settled against the line when the store is read or
+    /// committed. A retraction of a fact the store does not hold still
+    /// hides it beneath.
     #[dialog_common::test]
-    fn it_claims_a_replaced_cell() {
+    fn it_holds_a_choosing_write_beside_the_cell() {
         let mut staged = Staged::default();
         apply(
             &mut staged,
-            Instruction::Assert(fact("id:a", "person/name", "A")),
+            Instruction::Assert(fact("id:a", "person/name", "A"), Policy::All),
         );
         apply(
             &mut staged,
@@ -503,37 +486,45 @@ mod tests {
         );
         apply(
             &mut staged,
-            Instruction::Replace(fact("id:a", "person/name", "B")),
+            Instruction::Assert(fact("id:a", "person/name", "B"), Policy::Last),
         );
         assert_eq!(
             held(&staged, "id:a", "person/name"),
-            vec![Value::String("B".into())]
+            vec![Value::String("A".into()), Value::String("B".into())]
         );
-        assert!(
-            staged.tombstones(&Manifest::default()).is_empty(),
-            "the claimed cell hides what the retract did"
-        );
-        let cells = staged.cells();
-        assert!(
-            cells
-                .get("person/name".as_bytes())
-                .is_some_and(|entities| entities.contains("id:a".as_bytes()))
+        assert_eq!(
+            staged.tombstones(&Manifest::default()).len(),
+            1,
+            "the retract of a fact the store does not hold hides it beneath"
         );
         assert_eq!(
             exported(&staged),
-            vec![(
-                "id:a person/name".into(),
-                Change::Replace(Value::String("B".into()))
-            )]
+            vec![
+                (
+                    "id:a person/name".into(),
+                    Change::Assert(Value::String("A".into()), Policy::All)
+                ),
+                (
+                    "id:a person/name".into(),
+                    Change::Assert(Value::String("B".into()), Policy::Last)
+                ),
+                (
+                    "id:a person/name".into(),
+                    Change::Retract(Value::String("old".into()))
+                ),
+            ]
         );
     }
 
     #[dialog_common::test]
-    fn it_keeps_later_writes_to_a_replaced_cell() {
+    fn it_keeps_later_writes_to_a_cell_written_under_last() {
         let mut staged = Staged::default();
         apply(
             &mut staged,
-            Instruction::Replace(fact("id:a", "person/name", "B")),
+            Instruction::Assert(
+                fact("id:a", "person/name", "B"),
+                dialog_artifacts::Policy::Last,
+            ),
         );
         apply(
             &mut staged,
@@ -541,13 +532,16 @@ mod tests {
         );
         apply(
             &mut staged,
-            Instruction::Assert(fact("id:a", "person/name", "C")),
+            Instruction::Assert(
+                fact("id:a", "person/name", "C"),
+                dialog_artifacts::Policy::All,
+            ),
         );
         assert_eq!(
             held(&staged, "id:a", "person/name"),
             vec![Value::String("C".into())]
         );
-        // Replace resets the cell, then the retract and the assert.
+        // The choosing write is kept as written, then the retract and the assert.
         let changes: Vec<Change> = staged
             .export()
             .iter()
@@ -556,9 +550,9 @@ mod tests {
         assert_eq!(
             changes,
             vec![
-                Change::Replace(Value::String("B".into())),
+                Change::Assert(Value::String("B".into()), dialog_artifacts::Policy::Last),
                 Change::Retract(Value::String("B".into())),
-                Change::Assert(Value::String("C".into()))
+                Change::Assert(Value::String("C".into()), dialog_artifacts::Policy::All)
             ]
         );
     }
@@ -568,12 +562,18 @@ mod tests {
         let mut staged = Staged::default();
         apply(
             &mut staged,
-            Instruction::Assert(fact("id:a", "person/name", "A")),
+            Instruction::Assert(
+                fact("id:a", "person/name", "A"),
+                dialog_artifacts::Policy::All,
+            ),
         );
         let view = staged.clone();
         apply(
             &mut staged,
-            Instruction::Assert(fact("id:b", "person/name", "B")),
+            Instruction::Assert(
+                fact("id:b", "person/name", "B"),
+                dialog_artifacts::Policy::All,
+            ),
         );
         assert!(held(&view, "id:b", "person/name").is_empty());
         assert_eq!(

@@ -564,8 +564,20 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
         Ok(())
     };
 
-    apply(&mut tree, &store, first, Instruction::Assert(title("Hej"))).await?;
-    apply(&mut tree, &store, second, Instruction::Replace(title("Hi"))).await?;
+    apply(
+        &mut tree,
+        &store,
+        first,
+        Instruction::Assert(title("Hej"), crate::Policy::All),
+    )
+    .await?;
+    apply(
+        &mut tree,
+        &store,
+        second,
+        Instruction::Assert(title("Hi"), crate::Policy::Last),
+    )
+    .await?;
 
     // The replacement's record supersedes the first claim, detectable via
     // the tiered conflict detection over the same tree
@@ -614,7 +626,7 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
-    use crate::Succession;
+    use crate::Policy;
     use futures_util::stream;
 
     let store = MemoryBlocks::new();
@@ -670,8 +682,20 @@ async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
         Ok(values)
     };
 
-    apply(&mut tree, &store, first, Instruction::Assert(salary(100))).await?;
-    apply(&mut tree, &store, second, Instruction::Assert(salary(200))).await?;
+    apply(
+        &mut tree,
+        &store,
+        first,
+        Instruction::Assert(salary(100), crate::Policy::All),
+    )
+    .await?;
+    apply(
+        &mut tree,
+        &store,
+        second,
+        Instruction::Assert(salary(200), crate::Policy::All),
+    )
+    .await?;
 
     // `max` elects 200, the greatest, and 150 succeeds it; 100 stays.
     assert!(
@@ -679,7 +703,7 @@ async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
             &mut tree,
             &store,
             third,
-            Instruction::Succeed(salary(150), Succession::Max)
+            Instruction::Assert(salary(150), Policy::Max)
         )
         .await?
     );
@@ -702,7 +726,7 @@ async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
             &mut tree,
             &store,
             fourth,
-            Instruction::Succeed(salary(150), Succession::Max)
+            Instruction::Assert(salary(150), Policy::Max)
         )
         .await?
     );
@@ -713,7 +737,7 @@ async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
         &mut tree,
         &store,
         fifth,
-        Instruction::Succeed(salary(300), Succession::Last),
+        Instruction::Assert(salary(300), Policy::Last),
     )
     .await?;
     assert_eq!(held(&tree, &store).await?, vec![100, 300]);
@@ -775,7 +799,7 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
         &mut tree,
         &store,
         first,
-        vec![Instruction::Assert(title("Hej"))],
+        vec![Instruction::Assert(title("Hej"), crate::Policy::All)],
     )
     .await?;
     apply(
@@ -783,13 +807,16 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
         &store,
         second,
         vec![
-            Instruction::Replace(title("Hi")),
-            Instruction::Assert(Artifact {
-                the: other.clone(),
-                of: entity.clone(),
-                is: Value::String("hi".into()),
-                cause: None,
-            }),
+            Instruction::Assert(title("Hi"), crate::Policy::Last),
+            Instruction::Assert(
+                Artifact {
+                    the: other.clone(),
+                    of: entity.clone(),
+                    is: Value::String("hi".into()),
+                    cause: None,
+                },
+                crate::Policy::All,
+            ),
         ],
     )
     .await?;
@@ -871,12 +898,15 @@ async fn it_selects_records_whose_values_spilled() -> Result<()> {
         &store,
         &mut delta,
         Some(version),
-        stream::iter(vec![Instruction::Assert(Artifact {
-            the: the.clone(),
-            of: entity.clone(),
-            is: Value::String(body.clone()),
-            cause: None,
-        })]),
+        stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: the.clone(),
+                of: entity.clone(),
+                is: Value::String(body.clone()),
+                cause: None,
+            },
+            crate::Policy::All,
+        )]),
     )
     .await?;
     delta.flush_into(&store);
@@ -977,12 +1007,15 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
     let mut delta = ArchiveDelta::zero();
     let mut claims = Vec::new();
     for body in &bodies {
-        claims.push(Instruction::Assert(Artifact {
-            the: the.clone(),
-            of: Entity::new()?,
-            is: Value::String(body.clone()),
-            cause: None,
-        }));
+        claims.push(Instruction::Assert(
+            Artifact {
+                the: the.clone(),
+                of: Entity::new()?,
+                is: Value::String(body.clone()),
+                cause: None,
+            },
+            crate::Policy::All,
+        ));
     }
     tree.apply_versioned(&store, &mut delta, Some(version), stream::iter(claims))
         .await?;
@@ -1206,7 +1239,7 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
             &mut delta,
             Some(version),
             stream::iter(vec![
-                Instruction::Assert(title.clone()),
+                Instruction::Assert(title.clone(), crate::Policy::All),
                 Instruction::Retract(title),
             ]),
         )
@@ -1272,7 +1305,7 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
         &store,
         &mut delta,
         Some(first),
-        stream::iter(vec![Instruction::Assert(title.clone())]),
+        stream::iter(vec![Instruction::Assert(title.clone(), crate::Policy::All)]),
     )
     .await?;
     delta.flush_into(&store);
@@ -1285,7 +1318,7 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
             Some(second),
             stream::iter(vec![
                 Instruction::Retract(title.clone()),
-                Instruction::Assert(title.clone()),
+                Instruction::Assert(title.clone(), crate::Policy::All),
             ]),
         )
         .await?;
@@ -1343,10 +1376,13 @@ async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
 
     let mut tree = ArtifactTree::empty();
     for (version, instruction) in [
-        (first, Instruction::Assert(doc(big.clone()))),
+        (
+            first,
+            Instruction::Assert(doc(big.clone()), crate::Policy::All),
+        ),
         (
             second,
-            Instruction::Replace(doc(Value::String("v2".into()))),
+            Instruction::Assert(doc(Value::String("v2".into())), crate::Policy::Last),
         ),
     ] {
         let mut delta = ArchiveDelta::zero();
@@ -1456,12 +1492,15 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
 
     let mut tree = ArtifactTree::empty();
     for (version, instructions) in [
-        (old, vec![Instruction::Assert(title.clone())]),
+        (
+            old,
+            vec![Instruction::Assert(title.clone(), crate::Policy::All)],
+        ),
         (
             new,
             vec![
                 Instruction::Retract(title.clone()),
-                Instruction::Assert(title.clone()),
+                Instruction::Assert(title.clone(), crate::Policy::All),
             ],
         ),
     ] {
@@ -1554,8 +1593,11 @@ async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
 
     let mut tree = ArtifactTree::empty();
     for (version, instruction) in [
-        (bob, Instruction::Assert(urgent.clone())),
-        (mallory, Instruction::Assert(urgent.clone())),
+        (bob, Instruction::Assert(urgent.clone(), crate::Policy::All)),
+        (
+            mallory,
+            Instruction::Assert(urgent.clone(), crate::Policy::All),
+        ),
         (retractor, Instruction::Retract(urgent.clone())),
     ] {
         let mut delta = ArchiveDelta::zero();
@@ -1629,7 +1671,10 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
             &store,
             &mut delta,
             Some(version),
-            stream::iter(vec![Instruction::Assert(urgent.clone())]),
+            stream::iter(vec![Instruction::Assert(
+                urgent.clone(),
+                crate::Policy::All,
+            )]),
         )
         .await?;
         delta.flush_into(&store);
@@ -1744,21 +1789,42 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
 
     // Two values stand at the same (entity, attribute) — assertions are
     // additive, so this is the cardinality-many shape.
-    apply(&mut tree, &store, first, Instruction::Assert(title("Hej"))).await?;
-    apply(&mut tree, &store, second, Instruction::Assert(title("Hi"))).await?;
+    apply(
+        &mut tree,
+        &store,
+        first,
+        Instruction::Assert(title("Hej"), crate::Policy::All),
+    )
+    .await?;
+    apply(
+        &mut tree,
+        &store,
+        second,
+        Instruction::Assert(title("Hi"), crate::Policy::All),
+    )
+    .await?;
 
-    // Replacing with one of the standing values repairs the anomaly:
-    // the different-valued claim is superseded, the same-valued one stays.
-    let changed = apply(&mut tree, &store, third, Instruction::Replace(title("Hi"))).await?;
-    assert!(changed, "superseding a standing value is a change");
+    // A `last` write succeeds the one claim a `last` read returns, the
+    // newer: that claim is superseded, the other stays beside the
+    // written value.
+    let changed = apply(
+        &mut tree,
+        &store,
+        third,
+        Instruction::Assert(title("Hello"), crate::Policy::Last),
+    )
+    .await?;
+    assert!(changed, "succeeding a standing value is a change");
 
-    let data = tree.select_data(store.clone(), &entity, &the).await?;
-    assert_eq!(data.len(), 1);
+    let mut data = tree.select_data(store.clone(), &entity, &the).await?;
+    data.sort_by_key(|datum| datum.version.map(|version| version.edition));
+    assert_eq!(data.len(), 2);
     assert_eq!(
         data[0].version,
-        Some(second),
-        "the surviving claim keeps its original version"
+        Some(first),
+        "the older claim keeps its original version"
     );
+    assert_eq!(data[1].version, Some(third));
 
     let history = TreeHistory::new(tree.clone(), store.clone());
     let records = history
@@ -1767,21 +1833,21 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
         .await?;
     assert_eq!(records.len(), 3);
     let (_, replacement) = &records[2];
-    assert!(replacement.claim().cause.contains(&first));
+    assert!(replacement.claim().cause.contains(&second));
     assert!(
-        !replacement.claim().cause.contains(&second),
-        "the surviving same-valued claim is not superseded"
+        !replacement.claim().cause.contains(&first),
+        "the older claim the read did not return is not superseded"
     );
 
-    // And replaying the exact same replacement is now a pure no-op.
+    // Writing a value the cell holds is a pure no-op.
     let changed = apply(
         &mut tree,
         &store,
         Version::new(Origin::from([7u8; 32]), Edition::new(3)),
-        Instruction::Replace(title("Hi")),
+        Instruction::Assert(title("Hello"), crate::Policy::Last),
     )
     .await?;
-    assert!(!changed, "re-replacing the only standing value is a no-op");
+    assert!(!changed, "re-writing a standing value is a no-op");
 
     Ok(())
 }
@@ -1807,12 +1873,15 @@ async fn it_disambiguates_truncated_history_keys_in_queries() -> Result<()> {
 
     let version = Version::new(Origin::from([7u8; 32]), Edition::new(0));
     let claim = |of: &Entity, the: &Attribute, value: &str| {
-        Instruction::Assert(Artifact {
-            the: the.clone(),
-            of: of.clone(),
-            is: Value::String(value.into()),
-            cause: None,
-        })
+        Instruction::Assert(
+            Artifact {
+                the: the.clone(),
+                of: of.clone(),
+                is: Value::String(value.into()),
+                cause: None,
+            },
+            crate::Policy::All,
+        )
     };
 
     let mut tree = ArtifactTree::empty();
@@ -2350,8 +2419,11 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
 
     let mut tree = ArtifactTree::empty();
     for (version, instruction) in [
-        (first, Instruction::Assert(title("Hej"))),
-        (second, Instruction::Replace(title("Hi"))),
+        (first, Instruction::Assert(title("Hej"), crate::Policy::All)),
+        (
+            second,
+            Instruction::Assert(title("Hi"), crate::Policy::Last),
+        ),
         (third, Instruction::Retract(title("Hi"))),
     ] {
         let mut delta = ArchiveDelta::zero();

@@ -162,7 +162,7 @@ where
         for row in rows {
             let changes: Changes = artifacts_for(row)?
                 .into_iter()
-                .map(Instruction::Assert)
+                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All))
                 .collect();
             self.branch
                 .transaction()

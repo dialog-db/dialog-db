@@ -252,12 +252,15 @@ mod tests {
             .apply(
                 &store,
                 &mut delta,
-                stream::iter(vec![Instruction::Assert(Artifact {
-                    the: "doc/body".parse().unwrap(),
-                    of: "doc:1".parse().unwrap(),
-                    is: value.clone(),
-                    cause: None,
-                })]),
+                stream::iter(vec![Instruction::Assert(
+                    Artifact {
+                        the: "doc/body".parse().unwrap(),
+                        of: "doc:1".parse().unwrap(),
+                        is: value.clone(),
+                        cause: None,
+                    },
+                    crate::Policy::All,
+                )]),
             )
             .await?;
         delta.flush_into(&store);
@@ -295,7 +298,10 @@ mod tests {
         base.apply(
             &store,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(artifact.clone())]),
+            stream::iter(vec![Instruction::Assert(
+                artifact.clone(),
+                crate::Policy::All,
+            )]),
         )
         .await?;
         delta.flush_into(&store);
@@ -357,7 +363,10 @@ mod tests {
                 &store,
                 &mut delta,
                 Some(Version::new(Origin::from([1u8; 32]), Edition::new(0))),
-                stream::iter(vec![Instruction::Assert(artifact.clone())]),
+                stream::iter(vec![Instruction::Assert(
+                    artifact.clone(),
+                    crate::Policy::All,
+                )]),
             )
             .await?;
         delta.flush_into(&store);
@@ -411,7 +420,10 @@ mod tests {
                 &store,
                 &mut delta,
                 Some(Version::new(Origin::from([2u8; 32]), Edition::new(0))),
-                stream::iter(vec![Instruction::Assert(artifact.clone())]),
+                stream::iter(vec![Instruction::Assert(
+                    artifact.clone(),
+                    crate::Policy::All,
+                )]),
             )
             .await?;
         delta.flush_into(&store);
@@ -445,12 +457,15 @@ mod tests {
             .apply(
                 &store,
                 &mut delta,
-                stream::iter(vec![Instruction::Assert(Artifact {
-                    the: "user/name".parse().unwrap(),
-                    of: "user:1".parse().unwrap(),
-                    is: Value::String("Alice".to_string()),
-                    cause: None,
-                })]),
+                stream::iter(vec![Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse().unwrap(),
+                        of: "user:1".parse().unwrap(),
+                        is: Value::String("Alice".to_string()),
+                        cause: None,
+                    },
+                    crate::Policy::All,
+                )]),
             )
             .await?;
         delta.flush_into(&store);

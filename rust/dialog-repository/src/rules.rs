@@ -90,7 +90,12 @@ pub struct Transient(pub Entity);
 
 impl Statement for Transient {
     fn assert(self, update: &mut impl Update) {
-        update.associate(transient_attr(), self.0, Value::Boolean(true));
+        update.associate(
+            transient_attr(),
+            self.0,
+            Value::Boolean(true),
+            dialog_artifacts::Policy::All,
+        );
     }
 
     fn retract(self, update: &mut impl Update) {
@@ -771,7 +776,7 @@ pub(crate) fn overlay_rules(changes: &Changes, concept: &Entity) -> Vec<Deductiv
     let mut rule_entities: Vec<Entity> = Vec::new();
     for (entity, attribute, change) in changes.iter() {
         if *attribute == conclusion
-            && let Change::Assert(Value::Entity(c)) | Change::Replace(Value::Entity(c)) = change
+            && let Change::Assert(Value::Entity(c), _) = change
             && c == concept
         {
             rule_entities.push(entity.clone());
@@ -784,8 +789,7 @@ pub(crate) fn overlay_rules(changes: &Changes, concept: &Entity) -> Vec<Deductiv
         for (entity, attribute, change) in changes.iter() {
             if *entity == rule_entity
                 && *attribute == source
-                && let Change::Assert(Value::Bytes(bytes)) | Change::Replace(Value::Bytes(bytes)) =
-                    change
+                && let Change::Assert(Value::Bytes(bytes), _) = change
                 && let Ok(rule) = hydrate(bytes)
             {
                 out.push(rule);
@@ -809,7 +813,7 @@ pub(crate) fn overlay_rules_deriving(changes: &Changes, on: &Entity) -> Vec<Dedu
     let mut rule_entities: Vec<Entity> = Vec::new();
     for (entity, attribute, change) in changes.iter() {
         if *attribute == derives
-            && let Change::Assert(Value::Entity(c)) | Change::Replace(Value::Entity(c)) = change
+            && let Change::Assert(Value::Entity(c), _) = change
             && c == on
             && !rule_entities.contains(entity)
         {
@@ -822,8 +826,7 @@ pub(crate) fn overlay_rules_deriving(changes: &Changes, on: &Entity) -> Vec<Dedu
         for (entity, attribute, change) in changes.iter() {
             if *entity == rule_entity
                 && *attribute == source
-                && let Change::Assert(Value::Bytes(bytes)) | Change::Replace(Value::Bytes(bytes)) =
-                    change
+                && let Change::Assert(Value::Bytes(bytes), _) = change
                 && let Ok(rule) = hydrate(bytes)
             {
                 out.push(rule);
