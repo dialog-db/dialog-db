@@ -78,16 +78,17 @@ What this changes for you:
 - One departure remains: commit-time induction runs at commit, so what
   an inductive rule would derive from the transaction's writes is not
   in `transaction.query()` yet. That was true before this change.
-- A second departure: a succession settles against the line's stored
-  claims and the candidates rules derive, not against the session
-  overlay. Where the overlay and the tree hold claims of one cell, a
-  write under `max`, `min` or `top` can retire the stored claim while
-  a read keeps electing the overlay's, and the derived path can emit
-  a retraction of an overlay claim that the tree does not hold. Under
-  `last` an overlay claim loses to every stored claim, as before, so
-  the write retires what the read returned. A relation held in one
-  store only, which is how tonk uses the overlay, never meets this.
-  What the overlay means for a relation the tree also holds is open.
+- The session overlay is the newest facts. An overlay row stands
+  past the edition the next commit mints, above every committed claim
+  and every staged write, so a `last` read returns it over a committed
+  claim of the same cell (it used to lose to any committed claim, and
+  could only shadow one by retracting it first), and `max`, `min` and
+  `top` rank it with the rest. A commit never takes an overlay row
+  back: a succession the read resolves to an overlay row retires
+  nothing and stands beside it, as beside a candidate a rule derives,
+  and a transaction reads the overlay above its own writes. Retracting
+  an overlay row is the session's write, on the overlay itself. A cell
+  the overlay holds is settled by the transactor, not the tree.
 
 Why: `Replace` encoded one policy, last-writer-wins, in the write path,
 while reads had grown four. A write is a claim that succeeds what the

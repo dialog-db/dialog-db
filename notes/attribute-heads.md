@@ -225,15 +225,18 @@ write through the other.
 
 The claim a write succeeds is one the line holds: a stored claim, or
 none where the read elects a candidate a rule derives. The session
-overlay is outside this. Its rows carry no standing, so under `last`
-a stored claim beats them and the write retires what the read
-returned; under `max`, `min` or `top` a read can elect an overlay
-claim the write cannot retire, and the write retires the stored claim
-instead. In practice the overlay holds relations of its own (tonk
-stamps nothing into it that it also commits), so the case does not
-arise; what the overlay should mean for a relation the tree also
-holds, a layer that wins or a source of claims among claims, is an
-open question this branch does not answer.
+overlay is the newest facts: an overlay row stands past the edition
+the next commit mints, above every committed claim and every staged
+write, so `last` returns it and the other policies rank it with the
+rest. It is not a claim a commit can take back. A succession the read
+resolves to an overlay row retires nothing and stands beside it,
+exactly as beside a derived candidate, and the written claim is what
+the read elects once the session drops its row. A transaction reads
+the overlay above its own writes, as a read after the commit will.
+Retracting an overlay row is a write on the overlay, the session's to
+make. The tree settles a succession alone only where it can see every
+candidate; a cell the overlay holds goes through the transactor's
+settlement, which reads the union.
 
 A list is a ranked choice. `as: [case:active, case:registered]`
 lists the values the attribute ranks among, best first, and `the:
