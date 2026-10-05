@@ -195,7 +195,9 @@ where
             + 'static,
     {
         match self.source {
-            SourceRef::Branch(branch) => self.perform_on_branch(branch, env).await,
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => {
+                self.perform_on_branch(branch, env).await
+            }
             SourceRef::Snapshot(snapshot) => self.perform_on_snapshot(snapshot, env).await,
         }
     }

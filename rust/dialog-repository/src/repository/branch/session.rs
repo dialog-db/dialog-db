@@ -39,7 +39,7 @@ use crate::rules::{
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
 };
-use crate::{Branch, Hydrate, NetworkedIndex, RemoteSite, Snapshot, Staged};
+use crate::{Branch, Ephemeral, Hydrate, NetworkedIndex, RemoteSite, Snapshot, Staged};
 
 /// A composable query over one or more lines (branches, snapshots)
 /// plus an in-memory overlay.
@@ -84,7 +84,30 @@ use crate::{Branch, Hydrate, NetworkedIndex, RemoteSite, Snapshot, Staged};
 #[derive(Default, Clone)]
 pub struct QueryLayer<'a> {
     sources: Vec<SourceRef<'a>>,
+    /// Ephemeral layers joined on their own, not as some tree line's
+    /// session store: the memory layers of a [`Stack`](crate::Stack).
+    ephemerals: Vec<&'a Ephemeral>,
     changes: Changes,
+}
+
+/// The lines a query env reads, owned: every tree line with its
+/// session store, plus every standalone ephemeral layer. What a
+/// [`QueryLayer`] resolves to at perform time, and what a
+/// [`Stack`](crate::Stack) hands its induction.
+#[derive(Default, Clone)]
+pub(crate) struct Composite {
+    pub(crate) sources: Vec<Source>,
+    pub(crate) ephemerals: Vec<Ephemeral>,
+}
+
+impl Composite {
+    /// A composite of one tree line.
+    pub(crate) fn of(source: Source) -> Self {
+        Self {
+            sources: vec![source],
+            ephemerals: Vec::new(),
+        }
+    }
 }
 
 impl<'a> QueryLayer<'a> {
@@ -114,18 +137,28 @@ impl<'a> QueryLayer<'a> {
     pub fn join(mut self, other: impl Into<QueryLayer<'a>>) -> Self {
         let other = other.into();
         self.sources.extend(other.sources);
+        self.ephemerals.extend(other.ephemerals);
         other.changes.assert(&mut self.changes);
         self
+    }
+
+    /// The owned lines this layer reads.
+    pub(crate) fn composite(&self) -> Composite {
+        Composite {
+            sources: self
+                .sources
+                .iter()
+                .map(|source| source.to_source())
+                .collect(),
+            ephemerals: self.ephemerals.iter().map(|line| (*line).clone()).collect(),
+        }
     }
 
     /// The branches this layer reads from, in join order.
     pub fn branches(&self) -> Vec<&'a Branch> {
         self.sources
             .iter()
-            .filter_map(|source| match source {
-                SourceRef::Branch(branch) => Some(*branch),
-                SourceRef::Snapshot(_) => None,
-            })
+            .filter_map(|source| source.branch())
             .collect()
     }
 
@@ -135,7 +168,7 @@ impl<'a> QueryLayer<'a> {
             .iter()
             .filter_map(|source| match source {
                 SourceRef::Snapshot(snapshot) => Some(*snapshot),
-                SourceRef::Branch(_) => None,
+                SourceRef::Branch(_) | SourceRef::Pinned(..) => None,
             })
             .collect()
     }
@@ -253,6 +286,17 @@ impl<'a> From<SourceRef<'a>> for QueryLayer<'a> {
     fn from(source: SourceRef<'a>) -> Self {
         Self {
             sources: vec![source],
+            ephemerals: Vec::new(),
+            changes: Changes::new(),
+        }
+    }
+}
+
+impl<'a> From<&'a Ephemeral> for QueryLayer<'a> {
+    fn from(ephemeral: &'a Ephemeral) -> Self {
+        Self {
+            sources: Vec::new(),
+            ephemerals: vec![ephemeral],
             changes: Changes::new(),
         }
     }
@@ -274,6 +318,7 @@ impl From<Changes> for QueryLayer<'_> {
     fn from(changes: Changes) -> Self {
         Self {
             sources: Vec::new(),
+            ephemerals: Vec::new(),
             changes,
         }
     }
@@ -324,9 +369,9 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
                 .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
 
             let overlay = layer.overlay(&operator);
-            let sources: Vec<Source> =
-                layer.sources.iter().map(|source| source.to_source()).collect();
-            let query_env = QueryEnv::new(sources.clone(), overlay, env);
+            let composite = layer.composite();
+            let sources = composite.sources.clone();
+            let query_env = QueryEnv::over(composite, overlay, env);
             let results = Box::pin(query.perform(&query_env));
             // The query's own stream drives the env's preload queue:
             // evaluator hints (its own and any concurrent evaluation's)
@@ -356,6 +401,10 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// erased lifetimes in `QueryEnv<'0>: Provider<Select<'1>>` hit
     /// rustc's #100013 limitation; a named lifetime does not).
     sources: Vec<Source>,
+    /// Standalone ephemeral layers, read live like each tree line's
+    /// session store. Their tombstones hide facts in every tree line:
+    /// a stack's memory layer shadows what the layers beneath it hold.
+    ephemerals: Vec<Ephemeral>,
     /// All overlay facts — caller-asserted + auto-injected metadata —
     /// merged into one batch. Queried via [`Changes::select`] under the
     /// lines' format.
@@ -405,6 +454,10 @@ struct Format {
     /// Per line, in line order: its manifest and the tombstone sets its
     /// streams are filtered with.
     lines: Vec<LineFormat>,
+    /// What the standalone ephemeral layers' streams are filtered with,
+    /// keyed under `manifest`: the per-query retracts and the staged
+    /// layers' (see [`LineFormat::staged`]).
+    staged: Hidden,
 }
 
 /// One line's manifest and the tombstone sets its streams are filtered
@@ -446,6 +499,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
         let fetches = sources.iter().any(|source| source.as_ref().fetches());
         Self {
             sources,
+            ephemerals: Vec::new(),
             changes,
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
@@ -456,10 +510,31 @@ impl<'a, Env> QueryEnv<'a, Env> {
         }
     }
 
+    /// Build a runtime env over a [`Composite`]: its tree lines and its
+    /// standalone ephemeral layers.
+    pub(crate) fn over(
+        composite: Composite,
+        changes: impl Into<Arc<Changes>>,
+        env: &'a Env,
+    ) -> Self {
+        let Composite {
+            sources,
+            ephemerals,
+        } = composite;
+        Self::new(sources, changes, env).with_ephemerals(ephemerals)
+    }
+
     /// Read `layers` above the lines too: a transaction's writes, held
     /// so reading them costs a range read however many there are.
     pub(crate) fn with_layers(mut self, layers: Vec<Staged>) -> Self {
         self.layers = layers;
+        self
+    }
+
+    /// Read `ephemerals` beside the lines too: standalone ephemeral
+    /// layers, read live, whose tombstones hide facts in every line.
+    pub(crate) fn with_ephemerals(mut self, ephemerals: Vec<Ephemeral>) -> Self {
+        self.ephemerals = ephemerals;
         self
     }
 
@@ -536,6 +611,9 @@ where
                         let mut tombstones = staged
                             .clone()
                             .facts(source.as_ref().overlay().tombstones(&line));
+                        for ephemeral in &self.ephemerals {
+                            tombstones = tombstones.facts(ephemeral.tombstones(&line));
+                        }
                         for layer in &self.layers {
                             tombstones = tombstones.cells(layer.cells());
                         }
@@ -546,10 +624,15 @@ where
                         }
                     })
                     .collect();
+                let mut staged = Hidden::default().facts(shared);
+                for layer in &self.layers {
+                    staged = staged.facts(layer.tombstones(&manifest));
+                }
                 Ok(Format {
                     manifest,
                     keys,
                     lines,
+                    staged,
                 })
             })
             .await
@@ -560,6 +643,7 @@ impl<Env> Clone for QueryEnv<'_, Env> {
     fn clone(&self) -> Self {
         Self {
             sources: self.sources.clone(),
+            ephemerals: self.ephemerals.clone(),
             changes: self.changes.clone(),
             layers: self.layers.clone(),
             format: self.format.clone(),
@@ -672,6 +756,19 @@ where
                 line.staged.clone(),
                 line.manifest.clone(),
             ));
+        }
+
+        // Each standalone ephemeral layer, read live and filtered the
+        // same way: a layer's own tombstones hide facts beneath it,
+        // never its own.
+        for ephemeral in &self.ephemerals {
+            let rows = ephemeral.select(&input, &manifest);
+            if rows.is_empty() {
+                continue;
+            }
+            let rows: ArtifactStream<'a> =
+                Box::pin(stream::iter(rows.into_iter().map(|fact| Ok(fact.into()))));
+            streams.push(filter_hidden(rows, format.staged.clone(), manifest.clone()));
         }
 
         // Overlay stream — the per-query changes, read in the lines'
@@ -906,18 +1003,17 @@ where
             .await
     }
 
-    /// The rules concluding `concept` held in `source`'s session
-    /// overlay: session-asserted `dialog.rule/*` facts, read fresh (the
-    /// overlay is in memory and never head-cached). Recorded as rule
-    /// demand, so a subscription re-evaluates when a session rule for
-    /// the concept arrives or goes.
-    fn session_rules(
+    /// The rules concluding `concept` held in an ephemeral layer, a
+    /// line's session overlay or a standalone one: `dialog.rule/*`
+    /// facts read fresh (the layer is in memory and never head-cached).
+    /// Recorded as rule demand, so a subscription re-evaluates when a
+    /// session rule for the concept arrives or goes.
+    fn ephemeral_rules(
         &self,
-        source: &Source,
+        overlay: &Ephemeral,
         concept: &Entity,
         manifest: &Manifest,
     ) -> Result<Vec<DeductiveRule>, EvaluationError> {
-        let overlay = source.as_ref().overlay();
         let conclusions = conclusion_selector(concept);
         if let Some(demand) = &self.demand {
             demand.record_rules(&conclusions, manifest);
@@ -1069,6 +1165,7 @@ where
                         .sources
                         .iter()
                         .any(|source| holds_rules(source.as_ref().overlay()))
+                    && !self.ephemerals.iter().any(holds_rules)
             });
         if let Some(bundle) = cache
             .as_ref()
@@ -1092,7 +1189,10 @@ where
         let manifest = &self.format().await?.manifest;
         for source in &self.sources {
             rules.extend(self.durable_rules(source, &concept).await?);
-            rules.extend(self.session_rules(source, &concept, manifest)?);
+            rules.extend(self.ephemeral_rules(source.as_ref().overlay(), &concept, manifest)?);
+        }
+        for ephemeral in &self.ephemerals {
+            rules.extend(self.ephemeral_rules(ephemeral, &concept, manifest)?);
         }
         // Transient layers — the per-query overlay and the staged
         // writes, read fresh.
@@ -1206,7 +1306,14 @@ where
                     let manifest = &self.format().await?.manifest;
                     for source in &self.sources {
                         rules.extend(self.durable_rules(source, &entity).await?);
-                        rules.extend(self.session_rules(source, &entity, manifest)?);
+                        rules.extend(self.ephemeral_rules(
+                            source.as_ref().overlay(),
+                            &entity,
+                            manifest,
+                        )?);
+                    }
+                    for ephemeral in &self.ephemerals {
+                        rules.extend(self.ephemeral_rules(ephemeral, &entity, manifest)?);
                     }
                     rules.extend(overlay_rules(&self.changes, &entity));
                     for layer in &self.layers {
@@ -2318,6 +2425,72 @@ mod rule_tests {
         assert!(
             employees.contains(&carol),
             "v2 resolves its agent input via its own body, not v1's cached one"
+        );
+        Ok(())
+    }
+
+    /// A rule asserted into the branch's ephemeral store resolves like
+    /// a committed one: session-held rules are a layer of their own,
+    /// read fresh every query and never head-cached.
+    #[dialog_common::test]
+    async fn it_resolves_a_rule_held_in_the_ephemeral_store() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let bob: Entity = "id:bob".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/contractor-name")
+                    .of(bob.clone())
+                    .is("Bob".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let employees = || {
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("this"));
+            terms.insert("name".into(), Term::var("name"));
+            ConceptQuery {
+                predicate: employee_descriptor(),
+                terms,
+            }
+        };
+        let before: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(before.is_empty(), "no rule, no employees");
+
+        branch
+            .overlay()
+            .assert(rule_with_person_attr("org/contractor-name"))?;
+        let after: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            after.iter().map(|c| c.entity().clone()).collect::<Vec<_>>(),
+            vec![bob],
+            "the session rule concludes Bob"
+        );
+
+        branch.overlay().clear();
+        let cleared: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(
+            cleared.is_empty(),
+            "dropping the session rule drops its conclusions"
         );
         Ok(())
     }

@@ -82,16 +82,28 @@ impl Branch {
         {
             return metadata.clone();
         }
-        let metadata = self.derive_metadata(profile);
+        let metadata = self.derive_metadata(profile, revision.clone());
         *cache = Some((profile.clone(), revision, metadata.clone()));
         metadata
     }
 
-    /// Derive the metadata [`metadata`](Self::metadata) memoizes.
-    fn derive_metadata(&self, profile: &Did) -> BranchMetadata {
+    /// The schema metadata for this branch as if its head were
+    /// `revision`: what a read pinned at a captured revision injects.
+    /// Not memoized; a pinned read is a stack's, which holds few.
+    pub(crate) fn metadata_at(
+        &self,
+        operator: &Capability<Operator>,
+        revision: Option<crate::Revision>,
+    ) -> BranchMetadata {
+        self.derive_metadata(operator.profile(), revision)
+    }
+
+    /// Derive the metadata [`metadata`](Self::metadata) memoizes, as of
+    /// `revision`.
+    fn derive_metadata(&self, profile: &Did, revision: Option<crate::Revision>) -> BranchMetadata {
         let replica = Replica::new(profile.clone(), self.of().clone());
         let branch = BranchConcept::new(&replica, self.name());
-        let revision = self.revision().map(|revision| {
+        let revision = revision.map(|revision| {
             let tree_bytes: &[u8] = revision.tree.hash();
             BranchRevision {
                 this: branch.this.clone(),

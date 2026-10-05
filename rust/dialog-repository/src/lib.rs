@@ -49,6 +49,16 @@ pub use revision_ext::*;
 pub(crate) mod rules;
 pub use rules::{RuleCache, Transient};
 
+/// Attribute placement: which layer an attribute's facts live in.
+pub mod placement;
+pub use placement::{Bindings, DefaultScope, Placement, TransientAttribute, attribute_entity};
+
+pub mod stack;
+pub use stack::{
+    AsLayer, Audience, Head, Layer, OpenStack, Stack, StackCommit, StackEnv, StackError,
+    StackPublish, StackQuery, StackSelect, StackSubscription, StackTransaction,
+};
+
 pub use dialog_artifacts::{Exporter, Importer};
 
 /// Test helpers for setting up profiles, operators, repositories, and test data.
