@@ -9,7 +9,7 @@ use dialog_search_tree::MemoryBlocks;
 use ed25519_dalek::SigningKey;
 use futures_util::TryStreamExt as _;
 
-use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
+use crate::tree::{ArtifactTree, ArtifactTreeExt as _, SpillCache};
 use crate::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Value, encode_bytes};
 
 use super::{
@@ -603,6 +603,127 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
             .await?
             .is_empty()
     );
+
+    Ok(())
+}
+
+/// A succession elects among the cell's stored claims in the write that
+/// lands its value: the elected claim is retracted, the new claim's
+/// record cites its versions, and every other claim stays. Writing a
+/// value the cell holds records nothing.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
+    use crate::Succession;
+    use futures_util::stream;
+
+    let store = MemoryBlocks::new();
+    let entity = Entity::new()?;
+    let the: Attribute = "org/salary".parse()?;
+    let salary = |value: u32| Artifact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: Value::UnsignedInt(value.into()),
+        cause: None,
+    };
+    let first = Version::new(Origin::from([7u8; 32]), Edition::new(0));
+    let second = Version::new(Origin::from([7u8; 32]), Edition::new(1));
+    let third = Version::new(Origin::from([7u8; 32]), Edition::new(2));
+    let fourth = Version::new(Origin::from([7u8; 32]), Edition::new(3));
+    let fifth = Version::new(Origin::from([7u8; 32]), Edition::new(4));
+
+    let mut tree = ArtifactTree::empty();
+    let apply = async |tree: &mut ArtifactTree,
+                       store: &MemoryBlocks,
+                       version: Version,
+                       instruction: Instruction|
+           -> Result<bool> {
+        let mut delta = ArchiveDelta::zero();
+        let changed = tree
+            .apply_versioned(
+                store,
+                &mut delta,
+                Some(version),
+                stream::iter(vec![instruction]),
+            )
+            .await?;
+        delta.flush_into(store);
+        Ok(changed)
+    };
+    let held = async |tree: &ArtifactTree, store: &MemoryBlocks| -> Result<Vec<u128>> {
+        let selector = crate::ArtifactSelector::new()
+            .of(entity.clone())
+            .the(the.clone());
+        let rows: Vec<Artifact> = tree
+            .clone()
+            .scan_owned(store.clone(), SpillCache::with_budget(0), selector)
+            .try_collect()
+            .await?;
+        let mut values: Vec<u128> = rows
+            .into_iter()
+            .filter_map(|artifact| match artifact.is {
+                Value::UnsignedInt(value) => Some(value),
+                _ => None,
+            })
+            .collect();
+        values.sort();
+        Ok(values)
+    };
+
+    apply(&mut tree, &store, first, Instruction::Assert(salary(100))).await?;
+    apply(&mut tree, &store, second, Instruction::Assert(salary(200))).await?;
+
+    // `max` elects 200, the greatest, and 150 succeeds it; 100 stays.
+    assert!(
+        apply(
+            &mut tree,
+            &store,
+            third,
+            Instruction::Succeed(salary(150), Succession::Max)
+        )
+        .await?
+    );
+    assert_eq!(held(&tree, &store).await?, vec![100, 150]);
+    let history = TreeHistory::new(tree.clone(), store.clone());
+    let records = history
+        .select(HistorySelector::All)
+        .try_collect::<Vec<_>>()
+        .await?;
+    assert_eq!(records.len(), 3);
+    let (version, record) = &records[2];
+    assert_eq!(*version, third);
+    assert!(record.is_assertion());
+    assert!(record.claim().cause.contains(&second));
+    assert!(!record.claim().cause.contains(&first));
+
+    // The value stands already: nothing changes, nothing is recorded.
+    assert!(
+        !apply(
+            &mut tree,
+            &store,
+            fourth,
+            Instruction::Succeed(salary(150), Succession::Max)
+        )
+        .await?
+    );
+    assert_eq!(held(&tree, &store).await?, vec![100, 150]);
+
+    // `last` elects the newest, 150, and 300 succeeds it; 100 stays.
+    apply(
+        &mut tree,
+        &store,
+        fifth,
+        Instruction::Succeed(salary(300), Succession::Last),
+    )
+    .await?;
+    assert_eq!(held(&tree, &store).await?, vec![100, 300]);
+    let history = TreeHistory::new(tree.clone(), store.clone());
+    let records = history
+        .select(HistorySelector::All)
+        .try_collect::<Vec<_>>()
+        .await?;
+    assert_eq!(records.len(), 4);
+    assert!(records[3].1.claim().cause.contains(&third));
 
     Ok(())
 }

@@ -87,7 +87,8 @@ async fn facts(repo: &VolatileRepo, log: &SeLog) -> Result<Vec<String>> {
         for instruction in se_instructions(commit)? {
             let (Instruction::Assert(fact)
             | Instruction::Replace(fact)
-            | Instruction::Retract(fact)) = instruction;
+            | Instruction::Retract(fact)
+            | Instruction::Succeed(fact, _)) = instruction;
             attributes.push(fact.the.to_string());
         }
     }

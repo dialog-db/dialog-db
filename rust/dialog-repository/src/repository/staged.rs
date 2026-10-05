@@ -98,7 +98,10 @@ impl State {
 
     fn apply(&mut self, instruction: Instruction) {
         match instruction {
-            Instruction::Assert(fact) => {
+            // A succession holds its value here and retires nothing: what
+            // it succeeds is settled against the line when the store is
+            // read or committed.
+            Instruction::Assert(fact) | Instruction::Succeed(fact, _) => {
                 self.facts.insert(fact);
             }
             Instruction::Retract(fact) => {
@@ -346,6 +349,7 @@ mod tests {
         match instruction {
             Instruction::Assert(f) => changes.associate(f.the, f.of, f.is),
             Instruction::Replace(f) => changes.associate_unique(f.the, f.of, f.is),
+            Instruction::Succeed(f, s) => changes.succeed(f.the, f.of, f.is, s),
             Instruction::Retract(f) => changes.dissociate(f.the, f.of, f.is),
         }
         staged.apply(changes);

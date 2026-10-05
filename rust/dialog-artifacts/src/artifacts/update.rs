@@ -1,9 +1,11 @@
+use crate::artifacts::ordvalue::encode_value_owned;
 use crate::artifacts::query::Select;
+use crate::history::Edition;
 use crate::key::value_tail_bytes;
 use crate::selector::Constrained;
 use crate::{
-    Artifact, ArtifactSelector, ArtifactStream, Asset, Attribute, DialogArtifactsError, Entity,
-    Instruction, Value,
+    Artifact, ArtifactSelector, ArtifactStream, Asset, Attribute, Cause, DialogArtifactsError,
+    Entity, Instruction, Value,
 };
 use async_trait::async_trait;
 use dialog_capability::Provider;
@@ -12,6 +14,7 @@ use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 use futures_util::stream;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::mem::take;
 use std::pin::Pin;
@@ -31,9 +34,10 @@ pub enum Change {
     Retract(Value),
     /// Assert a value and retract the one live claim of the cell the
     /// succession elects: the claim a read under the attribute's policy
-    /// returns. The election reads the line, so the transactor settles
-    /// it before the batch commits; [`Changes::into_stream`] refuses a
-    /// batch still holding one.
+    /// returns. Committed as [`Instruction::Succeed`], which elects
+    /// among the cell's stored claims in the tree write itself; a
+    /// transactor settles it against derived candidates first where a
+    /// rule derives the relation.
     Succeed(Value, Succession),
 }
 
@@ -66,6 +70,115 @@ pub enum Succession {
     /// The claim whose value is listed first, best first; an unlisted
     /// value ranks last, and the newest wins among equals.
     Top(Vec<Value>),
+}
+
+/// The standing of a claim: the deepest revision version it carries, as
+/// the edition and the hash of that version, and its cause. Ordered as
+/// an election orders claims: a versioned claim beats an unversioned
+/// one, a deeper version a shallower, then the cause decides.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Standing {
+    /// The deepest revision version the claim carries, as its edition
+    /// and the hash of the version. `None` for a claim no revision
+    /// carries yet.
+    pub version: Option<(Edition, [u8; 32])>,
+    /// The claim's cause.
+    pub cause: Cause,
+}
+
+impl Ord for Standing {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.version.cmp(&other.version).then_with(|| {
+            self.cause
+                .partial_cmp(&other.cause)
+                .unwrap_or(Ordering::Equal)
+        })
+    }
+}
+
+impl PartialOrd for Standing {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// A claim as an election sees it: its value and its standing, the
+/// latter absent for a candidate no fact stands behind.
+pub type Contender<'a> = (&'a Value, Option<&'a Standing>);
+
+/// Whether `candidate` orders after `incumbent` by value alone: the
+/// values' own order where they have one, their encoding's otherwise.
+fn value_beats(candidate: &Value, incumbent: &Value) -> bool {
+    match candidate.partial_cmp(incumbent) {
+        Some(ordering) => ordering.is_gt(),
+        None => encode_value_owned(candidate) > encode_value_owned(incumbent),
+    }
+}
+
+impl Succession {
+    /// Where `value` ranks under this succession: its position among
+    /// the values a `top` lists, best first, an unlisted value last;
+    /// zero under every other policy and under a `top` listing nothing.
+    pub fn rank_of(&self, value: &Value) -> usize {
+        match self {
+            Succession::Top(among) if !among.is_empty() => among
+                .iter()
+                .position(|listed| listed == value)
+                .unwrap_or(usize::MAX),
+            _ => 0,
+        }
+    }
+
+    /// Whether `candidate` is the newer of two claims: the greater
+    /// standing, then the greater value. This is the whole of `last`,
+    /// and what every other policy falls back to among equals.
+    pub fn newer(candidate: Contender<'_>, incumbent: Contender<'_>) -> bool {
+        candidate.1 > incumbent.1
+            || (candidate.1 == incumbent.1 && value_beats(candidate.0, incumbent.0))
+    }
+
+    /// Whether `candidate` displaces `incumbent` under this succession:
+    /// the one a read under the policy returns of the two. `last` takes
+    /// the newer; `top` the better rank, then the newer; `max` and `min`
+    /// the greater or the lesser value, then the greater standing. This
+    /// is the one ordering every election runs on, whether it elects
+    /// among a cell's stored claims at the tree or among stored and
+    /// derived candidates in a query.
+    pub fn prefers(&self, candidate: Contender<'_>, incumbent: Contender<'_>) -> bool {
+        match self {
+            Succession::Last => Self::newer(candidate, incumbent),
+            Succession::Top(_) => {
+                let (mine, theirs) = (self.rank_of(candidate.0), self.rank_of(incumbent.0));
+                mine < theirs || (mine == theirs && Self::newer(candidate, incumbent))
+            }
+            Succession::Max | Succession::Min => {
+                let ordering = candidate.0.partial_cmp(incumbent.0).unwrap_or_else(|| {
+                    encode_value_owned(candidate.0).cmp(&encode_value_owned(incumbent.0))
+                });
+                let wanted = match self {
+                    Succession::Max => Ordering::Greater,
+                    _ => Ordering::Less,
+                };
+                ordering == wanted || (ordering.is_eq() && candidate.1 > incumbent.1)
+            }
+        }
+    }
+
+    /// The claim this succession elects among `claims`, by index: the
+    /// one a read under the policy returns. `None` over no claims.
+    pub fn elect<'a, I>(&self, claims: I) -> Option<usize>
+    where
+        I: IntoIterator<Item = Contender<'a>>,
+    {
+        let mut best: Option<(usize, Contender<'a>)> = None;
+        for (index, claim) in claims.into_iter().enumerate() {
+            best = Some(match best {
+                Some(incumbent) if !self.prefers(claim, incumbent.1) => incumbent,
+                _ => (index, claim),
+            });
+        }
+        best.map(|(index, _)| index)
+    }
 }
 
 /// The write side of the triple store.
@@ -307,18 +420,13 @@ impl Changes {
         self.assets.insert(hash, change);
     }
 
-    /// Convert to an instruction stream, the form a commit applies.
-    ///
-    /// A succession is resolved against the line before the batch
-    /// commits; a batch still holding one has not been through the
-    /// transactor, and committing it raw would land its value without
-    /// succeeding anything. Commit such a batch through a transaction
-    /// (`transaction().integrate(changes)`), which resolves it.
+    /// Convert to an instruction stream, the form a commit applies. A
+    /// succession commits as [`Instruction::Succeed`]: the tree elects
+    /// among the cell's stored claims. A relation some rule derives has
+    /// derived candidates the tree cannot see, so a transaction settles
+    /// those successions against its view before it commits; a raw
+    /// commit of a batch elects among stored claims alone.
     pub fn into_stream(self) -> ChangeStream {
-        assert!(
-            !self.has_successions(),
-            "a batch holding successions commits through a transaction, which resolves them"
-        );
         ChangeStream::from(self)
     }
 
@@ -432,25 +540,30 @@ impl Changes {
     /// Asset changes are not instructions and are left out: a caller that
     /// commits the batch drains them first with
     /// [`take_assets`](Self::take_assets), and any other caller refuses a
-    /// batch that [`has_assets`](Self::has_assets). A succession reads as
-    /// the assertion of its value: what the batch claims, which is what a
-    /// caller inspecting the batch asks. The retraction it resolves to
-    /// exists only once the transactor has settled it against the line
-    /// ([`into_stream`](Self::into_stream) refuses a batch before that).
+    /// batch that [`has_assets`](Self::has_assets). A succession is the
+    /// instruction of the same name: the tree elects among the cell's
+    /// stored claims when it applies it.
     pub fn into_instructions(self) -> Vec<Instruction> {
         let mut instructions = Vec::new();
         for (entity, attributes) in self.facts {
             for (attribute, operations) in attributes {
                 for operation in operations {
                     let instruction = match operation {
-                        Change::Assert(value) | Change::Succeed(value, _) => {
-                            Instruction::Assert(Artifact {
+                        Change::Assert(value) => Instruction::Assert(Artifact {
+                            the: attribute.clone(),
+                            of: entity.clone(),
+                            is: value,
+                            cause: None,
+                        }),
+                        Change::Succeed(value, succession) => Instruction::Succeed(
+                            Artifact {
                                 the: attribute.clone(),
                                 of: entity.clone(),
                                 is: value,
                                 cause: None,
-                            })
-                        }
+                            },
+                            succession,
+                        ),
                         Change::Replace(value) => Instruction::Replace(Artifact {
                             the: attribute.clone(),
                             of: entity.clone(),
@@ -685,7 +798,7 @@ impl Statement for Changes {
         // c.retract(t);` round-trips when `t` is a fresh target.
         for instruction in self.into_instructions() {
             match instruction {
-                Instruction::Assert(a) | Instruction::Replace(a) => {
+                Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Succeed(a, _) => {
                     update.dissociate(a.the, a.of, a.is)
                 }
                 Instruction::Retract(a) => update.associate(a.the, a.of, a.is),

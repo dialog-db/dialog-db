@@ -145,7 +145,7 @@ where
         for instruction in &stimulus {
             match instruction {
                 Instruction::Assert(a) => assert_rows.push(a.clone()),
-                Instruction::Replace(a) => {
+                Instruction::Replace(a) | Instruction::Succeed(a, _) => {
                     assert_rows.push(a.clone());
                     replace_attrs.insert(a.the.clone());
                 }
@@ -161,9 +161,10 @@ where
         let mut touched: BTreeSet<Reach> = stimulus
             .iter()
             .map(|instruction| match instruction {
-                Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Retract(a) => {
-                    Reach::Attribute(a.the.clone())
-                }
+                Instruction::Assert(a)
+                | Instruction::Replace(a)
+                | Instruction::Retract(a)
+                | Instruction::Succeed(a, _) => Reach::Attribute(a.the.clone()),
             })
             .collect();
         let direct = touched.clone();
@@ -189,7 +190,9 @@ where
         let mut installed: BTreeSet<Entity> = BTreeSet::new();
         let mut installed_deductive: BTreeSet<Entity> = BTreeSet::new();
         for instruction in &stimulus {
-            if let Instruction::Assert(a) | Instruction::Replace(a) = instruction {
+            if let Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Succeed(a, _) =
+                instruction
+            {
                 if a.the == on {
                     installed.insert(a.of.clone());
                 } else if a.the == reads {
@@ -1197,6 +1200,9 @@ where
                     Instruction::Replace(a) => {
                         dialog_artifacts::Update::associate_unique(novelty, a.the, a.of, a.is)
                     }
+                    Instruction::Succeed(a, succession) => {
+                        dialog_artifacts::Update::succeed(novelty, a.the, a.of, a.is, succession)
+                    }
                     Instruction::Retract(a) => {
                         dialog_artifacts::Update::dissociate(novelty, a.the, a.of, a.is)
                     }
@@ -1231,7 +1237,10 @@ where
         + 'static,
 {
     let artifact = match instruction {
-        Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Retract(a) => a,
+        Instruction::Assert(a)
+        | Instruction::Replace(a)
+        | Instruction::Retract(a)
+        | Instruction::Succeed(a, _) => a,
     };
     let selector = ArtifactSelector::new()
         .the(artifact.the.clone())
@@ -1239,7 +1248,7 @@ where
         .is(artifact.is.clone());
     let present = !select(view, selector).await?.is_empty();
     Ok(match instruction {
-        Instruction::Assert(_) | Instruction::Replace(_) => !present,
+        Instruction::Assert(_) | Instruction::Replace(_) | Instruction::Succeed(..) => !present,
         Instruction::Retract(_) => present,
     })
 }
@@ -1652,7 +1661,7 @@ mod tests {
             .into_instructions()
             .into_iter()
             .filter_map(|instruction| match instruction {
-                Instruction::Assert(a) | Instruction::Replace(a) => {
+                Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Succeed(a, _) => {
                     Some((a.the.to_string(), a.of, a.is))
                 }
                 Instruction::Retract(_) => None,

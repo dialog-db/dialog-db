@@ -1,5 +1,4 @@
 use futures_util::stream::once;
-use std::cmp::Ordering;
 use std::sync::Arc;
 use std::{iter, mem};
 
@@ -10,8 +9,6 @@ use crate::term::{Term, VariableName};
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::types::Record;
-use dialog_artifacts::Cause;
-use dialog_artifacts::history::Edition;
 
 use super::Selection;
 
@@ -161,37 +158,12 @@ struct Frame {
 }
 
 /// What a row brings to a cardinality-one election: the standing of
-/// the fact it cites, as [`ArtifactView::elect`] compares it. A row
-/// derived by a rule stands as the newest of the facts its body
-/// consumed. Ordered as the election orders: a versioned row beats an
-/// unversioned one, a deeper version beats a shallower, then the
-/// cause decides.
+/// the fact it cites, as [`ArtifactView::elect`] compares it and as a
+/// succession orders stored claims. A row derived by a rule stands as
+/// the fact that bound its value does.
 ///
 /// [`ArtifactView::elect`]: dialog_artifacts::ArtifactView::elect
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Standing {
-    /// The deepest revision version the fact carries, as its edition
-    /// and the hash of the version.
-    pub version: Option<(Edition, [u8; 32])>,
-    /// The fact's cause.
-    pub cause: Cause,
-}
-
-impl Ord for Standing {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.version.cmp(&other.version).then_with(|| {
-            self.cause
-                .partial_cmp(&other.cause)
-                .unwrap_or(Ordering::Equal)
-        })
-    }
-}
-
-impl PartialOrd for Standing {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
+pub use dialog_artifacts::Standing;
 
 /// Binding order is premise-evaluation order, an artifact of the plan;
 /// two rows are the same result when they bind the same names to the

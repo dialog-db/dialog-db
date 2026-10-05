@@ -563,6 +563,7 @@ where
                         self.sources.clone(),
                         self.changes.clone(),
                         layer,
+                        super::transaction::Settlement::Read,
                         self.env,
                     ))
                     .await
