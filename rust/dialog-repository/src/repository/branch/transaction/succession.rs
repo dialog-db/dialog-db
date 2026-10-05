@@ -31,19 +31,15 @@
 //! reads, so a read over the transaction sees what the commit will
 //! leave.
 
-use crate::repository::branch::session::QueryEnv;
+use crate::repository::branch::session::{Erased, QueryEnv};
 use crate::repository::source::Source;
 use crate::repository::staged::squash;
-use crate::{CommitError, RemoteSite, Staged};
+use crate::{CommitError, Staged};
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Attribute, Cause, Change, Changes, Entity, Select, Value,
 };
-use dialog_capability::{Fork, Provider};
-use dialog_common::ConditionalSync;
-use dialog_effects::archive::{Get, Put};
-use dialog_effects::blob::Read as BlobRead;
-use dialog_effects::memory::Resolve;
+use dialog_capability::Provider;
 use dialog_query::attribute::{AttributeDescriptor, Relation, The};
 use dialog_query::concept::query::Election;
 use dialog_query::query::Output as _;
@@ -80,24 +76,13 @@ pub(crate) enum Settlement {
 /// successions stay as written and the tree settles them. Each write is
 /// settled over the line and the writes before it, in the order the
 /// transaction made them.
-pub(crate) async fn settle<Env>(
+pub(crate) async fn settle(
     sources: Vec<Source>,
     overlay: Arc<Changes>,
     staged: &Staged,
     settlement: Settlement,
-    env: &Env,
-) -> Result<Changes, CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+    env: &Erased,
+) -> Result<Changes, CommitError> {
     if !staged.has_successions() {
         return Ok(staged.export());
     }
@@ -179,21 +164,10 @@ where
 /// an inductive rule fired on, which is what its head observed: the
 /// claims the view holds, the writes before it in the round included,
 /// and the candidates rules derive through it.
-pub(crate) async fn resolve_against<Env>(
-    view: &QueryEnv<'_, Env>,
+pub(crate) async fn resolve_against(
+    view: &QueryEnv<'_>,
     head: &mut Changes,
-) -> Result<(), CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<(), CommitError> {
     let cells = head.cells_with_successions();
     if cells.is_empty() {
         return Ok(());
@@ -221,22 +195,11 @@ struct Candidate {
 }
 
 /// The claims a cell holds as `view` reads them.
-async fn claims_of<Env>(
-    view: &QueryEnv<'_, Env>,
+async fn claims_of(
+    view: &QueryEnv<'_>,
     the: &Attribute,
     of: &Entity,
-) -> Result<Vec<Candidate>, CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<Vec<Candidate>, CommitError> {
     let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
     let selector = ArtifactSelector::new().the(the.clone()).of(of.clone());
     let rows = Provider::<Select<'_>>::execute(view, selector)
@@ -273,18 +236,7 @@ fn relation_predicate(the: &Attribute) -> ConceptDescriptor {
 }
 
 /// Whether some rule `view` knows derives the relation `the` names.
-async fn rules_derive<Env>(view: &QueryEnv<'_, Env>, the: &Attribute) -> Result<bool, CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+async fn rules_derive(view: &QueryEnv<'_>, the: &Attribute) -> Result<bool, CommitError> {
     let rules = Provider::<SelectRules>::execute(view, relation_predicate(the))
         .await
         .map_err(|error| CommitError::Succession(error.to_string()))?;
@@ -295,22 +247,11 @@ where
 /// `view`, when some rule derives the relation; nothing otherwise, as
 /// the claims are then all there is. A derived one is what the read
 /// offers beyond the claims.
-async fn derived_candidates<Env>(
-    view: &QueryEnv<'_, Env>,
+async fn derived_candidates(
+    view: &QueryEnv<'_>,
     the: &Attribute,
     of: &Entity,
-) -> Result<Vec<Candidate>, CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<Vec<Candidate>, CommitError> {
     let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
     let predicate = relation_predicate(the);
     let rules = Provider::<SelectRules>::execute(view, predicate.clone())
