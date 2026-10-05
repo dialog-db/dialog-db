@@ -44,8 +44,9 @@ use std::sync::Arc;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, AttributeKey, Changes, DialogArtifactsError, Entity, EntityKey,
-    Instruction, Key, KeyViewConstruct, SortKey, Statement, Update, ValueKey, sort_key,
+    Artifact, ArtifactSelector, AttributeKey, Cause, Changes, DialogArtifactsError, Entity,
+    EntityKey, Instruction, Key, KeyViewConstruct, SortKey, Standing, Statement, Update, ValueKey,
+    sort_key,
 };
 use dialog_common::Blake3Hash;
 use dialog_search_tree::Manifest;
@@ -282,6 +283,31 @@ impl State {
                 if !standing {
                     self.insert(fact, delta);
                 }
+            }
+            // A succession among transients: the claim the policy elects
+            // of the cell gives way to the value. Transients carry no
+            // version, so the election orders them by cause, then value.
+            Instruction::Succeed(fact, succession) => {
+                let cell: Vec<Artifact> = self.facts.cell(&fact.of, &fact.the);
+                if cell.iter().any(|prior| prior.is == fact.is) {
+                    return;
+                }
+                let standings: Vec<Standing> = cell
+                    .iter()
+                    .map(|prior| Standing {
+                        version: None,
+                        cause: prior.cause.clone().unwrap_or(Cause([0; 32])),
+                    })
+                    .collect();
+                let elected = succession.elect(
+                    cell.iter()
+                        .zip(standings.iter())
+                        .map(|(prior, standing)| (&prior.is, Some(standing))),
+                );
+                if let Some(index) = elected {
+                    self.remove(&cell[index], delta);
+                }
+                self.insert(fact, delta);
             }
             Instruction::Retract(fact) => {
                 if self.remove(&fact, delta) {

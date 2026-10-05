@@ -32,7 +32,6 @@ use dialog_artifacts::{Succession, encode_value_owned};
 use dialog_capability::Provider;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Display;
 use std::mem;
@@ -1181,14 +1180,7 @@ impl Election {
     /// the field lists any, first best and an unlisted value last; then
     /// by the relation it came from, in the order the field lists them.
     fn rank<T>(&self, entry: &Entry<T>) -> (usize, usize) {
-        let listed = if self.among.is_empty() {
-            0
-        } else {
-            self.among
-                .iter()
-                .position(|listed| *listed == entry.value)
-                .unwrap_or(usize::MAX)
-        };
+        let listed = Succession::Top(self.among.clone()).rank_of(&entry.value);
         (listed, entry.rank)
     }
 
@@ -1201,28 +1193,19 @@ impl Election {
         candidate: &Entry<T>,
         incumbent: &Entry<T>,
     ) -> Result<bool, EvaluationError> {
-        let newer = |candidate: &Entry<T>, incumbent: &Entry<T>| -> Result<bool, EvaluationError> {
-            Ok(candidate.standing > incumbent.standing
-                || (candidate.standing == incumbent.standing
-                    && value_beats(&candidate.value, &incumbent.value)?))
-        };
+        // One ordering decides every election, here and in the tree:
+        // the succession's. A `top` over listed relations adds the
+        // relation's rank between the listed rank and the standing.
+        let mine = (&candidate.value, candidate.standing.as_ref());
+        let theirs = (&incumbent.value, incumbent.standing.as_ref());
         match self.select {
-            Select::Last => newer(candidate, incumbent),
+            Select::Last => Ok(Succession::Last.prefers(mine, theirs)),
+            Select::Max => Ok(Succession::Max.prefers(mine, theirs)),
+            Select::Min => Ok(Succession::Min.prefers(mine, theirs)),
             Select::Top => {
-                let (mine, theirs) = (self.rank(candidate), self.rank(incumbent));
-                Ok(mine < theirs || (mine == theirs && newer(candidate, incumbent)?))
-            }
-            Select::Max | Select::Min => {
-                let ordering = match candidate.value.partial_cmp(&incumbent.value) {
-                    Some(ordering) => ordering,
-                    None => encode_value(&candidate.value)?.cmp(&encode_value(&incumbent.value)?),
-                };
-                let wanted = match self.select {
-                    Select::Max => Ordering::Greater,
-                    _ => Ordering::Less,
-                };
-                Ok(ordering == wanted
-                    || (ordering.is_eq() && candidate.standing > incumbent.standing))
+                let (mine_rank, theirs_rank) = (self.rank(candidate), self.rank(incumbent));
+                Ok(mine_rank < theirs_rank
+                    || (mine_rank == theirs_rank && Succession::newer(mine, theirs)))
             }
             Select::All => Err(EvaluationError::Store(format!(
                 "`{}` does not choose among candidates",
@@ -1413,15 +1396,6 @@ fn entity_key(value: &Value) -> Result<Vec<u8>, EvaluationError> {
     match value {
         Value::Entity(entity) => Ok(entity.to_string().into_bytes()),
         other => encode_value(other),
-    }
-}
-
-/// Whether `candidate` wins the tie-break against `incumbent`: by the
-/// values' own order where they have one, else by their bytes.
-fn value_beats(candidate: &Value, incumbent: &Value) -> Result<bool, EvaluationError> {
-    match candidate.partial_cmp(incumbent) {
-        Some(ordering) => Ok(ordering.is_gt()),
-        None => Ok(encode_value(candidate)? > encode_value(incumbent)?),
     }
 }
 

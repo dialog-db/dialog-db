@@ -354,6 +354,9 @@ pub fn changes_of(instructions: impl IntoIterator<Item = Instruction>) -> Change
         match instruction {
             Instruction::Assert(fact) => changes.associate(fact.the, fact.of, fact.is),
             Instruction::Replace(fact) => changes.associate_unique(fact.the, fact.of, fact.is),
+            Instruction::Succeed(fact, succession) => {
+                changes.succeed(fact.the, fact.of, fact.is, succession)
+            }
             Instruction::Retract(fact) => changes.dissociate(fact.the, fact.of, fact.is),
         }
     }

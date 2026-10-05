@@ -42,13 +42,13 @@ use crate::history::{Cause as HistoryCause, Claim, Record, RecordEntries, Versio
 use crate::key::value_payload as build_value_payload;
 use crate::{
     ATTRIBUTE_KEY_TAG, ArchiveDelta, ArchiveReader, Artifact, ArtifactSelector, ArtifactView,
-    ArtifactWriter, AttributeKey, AttributeKeyPart, Datum, DeltaOverlay, DialogArtifactsError,
-    ENTITY_KEY_TAG, EntityKey, EntityKeyPart, Instruction, Key, KeyView, KeyViewConstruct,
-    KeyViewMut, LoadBlob, SelectorMatch, State, VALUE_KEY_TAG, Value, ValueDataType, ValueKey,
-    decode_value_parts, encode_bytes, encode_value_owned,
+    ArtifactWriter, AttributeKey, AttributeKeyPart, Cause, Datum, DeltaOverlay,
+    DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart, Instruction, Key, KeyView,
+    KeyViewConstruct, KeyViewMut, LoadBlob, SelectorMatch, Standing, State, VALUE_KEY_TAG, Value,
+    ValueDataType, ValueKey, decode_value_parts, encode_bytes, encode_value_owned,
     key::varkey::{self, KeyRef, ValuePayload, ValueRef, parse_key_ref},
     key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
-    match_selector_and_key_ref,
+    make_reference, match_selector_and_key_ref,
     selector::Constrained,
     value_predicates_admit,
 };
@@ -1387,7 +1387,8 @@ where
         if scope == WriteScope::Application {
             let (Instruction::Assert(artifact)
             | Instruction::Replace(artifact)
-            | Instruction::Retract(artifact)) = &instruction;
+            | Instruction::Retract(artifact)
+            | Instruction::Succeed(artifact, _)) = &instruction;
             let the = artifact.the.as_str();
             if the.starts_with("dialog.")
                 && !the.starts_with("dialog.rule/")
@@ -1579,6 +1580,122 @@ where
                 // block before recording the fact.
                 stage_spilled_value(staged, encoded.spill);
 
+                let mut datum = Datum::for_artifact(&artifact);
+                datum.version = version;
+                let added = State::Added(datum);
+                transient = transient
+                    .write_all(
+                        vec![
+                            (entity_key, added.clone()),
+                            (attribute_key, added.clone()),
+                            (value_key, added),
+                        ],
+                        storage,
+                    )
+                    .await?;
+            }
+            Instruction::Succeed(artifact, succession) => {
+                let entity_key = EntityKey::from_artifact(&artifact, manifest);
+
+                // Scan the cell's claims against the in-flight write target,
+                // as `Replace` does, so writes from earlier instructions in
+                // this batch are candidates too. Each prior is kept with its
+                // key, its versions and its standing: the deepest version it
+                // carries and its cause, which is how a read orders it.
+                let mut priors: Vec<(Key, Vec<Version>, Value, Standing)> = Vec::new();
+                let mut found_same_value = false;
+                {
+                    let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
+                        .set_entity(entity_key.entity())
+                        .set_attribute(entity_key.attribute())
+                        .into_key();
+                    let search_end = <EntityKey<Key> as KeyViewConstruct>::max()
+                        .set_entity(entity_key.entity())
+                        .set_attribute(entity_key.attribute())
+                        .into_key();
+                    let search_stream = transient.scan(search_start..=search_end, storage);
+                    tokio::pin!(search_stream);
+                    while let Some(candidate) = search_stream.next().await {
+                        let candidate = candidate?;
+                        if let State::Added(current_element) = &candidate.value {
+                            let spilled = fetch_spilled(storage, &candidate.key).await?;
+                            let current = Artifact::from_key_datum_with_value(
+                                &candidate.key,
+                                current_element,
+                                spilled,
+                            )?;
+                            if current.of != artifact.of || current.the != artifact.the {
+                                continue;
+                            }
+                            if current.is == artifact.is {
+                                found_same_value = true;
+                                continue;
+                            }
+                            let versions: Vec<Version> =
+                                current_element.versions().copied().collect();
+                            let standing = Standing {
+                                version: versions
+                                    .iter()
+                                    .map(|version| {
+                                        (version.edition, make_reference(version.key_bytes()))
+                                    })
+                                    .max(),
+                                cause: current.cause.clone().unwrap_or(Cause([0; 32])),
+                            };
+                            priors.push((candidate.key, versions, current.is, standing));
+                        }
+                    }
+                }
+
+                // The value stands already: nothing to succeed, and a fresh
+                // record would fork the claim's lineage away from the
+                // version the standing datum carries.
+                if found_same_value {
+                    continue;
+                }
+                changed = true;
+
+                // The elected claim is the one a read under the policy
+                // returns over these priors. It is retracted outright, as a
+                // retraction is, and its versions become the new claim's
+                // cause, as a replacement's superseded versions do.
+                let elected = succession.elect(
+                    priors
+                        .iter()
+                        .map(|(_, _, value, standing)| (value, Some(standing))),
+                );
+                let mut superseded_versions: Vec<Version> = Vec::new();
+                if let Some(index) = elected {
+                    let (key, versions, _, _) = priors.swap_remove(index);
+                    superseded_versions = versions;
+                    let (entity_key, attribute_key, value_key) = reproject_index_keys(&key)?;
+                    transient = transient.erase(&entity_key, storage).await?;
+                    transient = transient.erase(&value_key, storage).await?;
+                    transient = transient.erase(&attribute_key, storage).await?;
+                }
+
+                // A record must not claim itself as its cause: a claim this
+                // batch asserted earlier carries this batch's own version.
+                if let Some(version) = &version {
+                    let superseded: Vec<Version> = superseded_versions
+                        .into_iter()
+                        .filter(|superseded| superseded != version)
+                        .collect();
+                    let record = Record::Assert(Claim {
+                        the: artifact.the.clone(),
+                        of: artifact.of.clone(),
+                        is: artifact.is.clone(),
+                        cause: HistoryCause::new(superseded),
+                    });
+                    buffer_record(&mut history_records, record, version);
+                }
+
+                // The assertion itself, as `Assert` writes one: the value
+                // is not held, so there is no standing datum to fold into.
+                let encoded = EncodedValue::new(&artifact.is, manifest);
+                let (entity_key, attribute_key, value_key) =
+                    artifact_index_keys_with(&artifact, encoded.payload);
+                stage_spilled_value(staged, encoded.spill);
                 let mut datum = Datum::for_artifact(&artifact);
                 datum.version = version;
                 let added = State::Added(datum);

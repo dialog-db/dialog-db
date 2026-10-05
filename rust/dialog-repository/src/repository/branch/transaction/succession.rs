@@ -19,7 +19,12 @@
 //! its value. A derived candidate is not a claim: when the read elects
 //! a derived value nothing is retracted, and the write stands beside it
 //! as one more candidate. Writing a value the cell already holds writes
-//! nothing. What a cell's writes settle to is squashed as one commit's
+//! nothing. At commit, a cell no rule derives is left to the tree,
+//! which elects among the cell's stored claims in the descent that
+//! writes the value ([`dialog_artifacts::Instruction::Succeed`]); the
+//! settlement here is for the cells rules derive, whose candidates the
+//! tree cannot see, and for a transaction's own reads. What a cell's
+//! writes settle to is squashed as one commit's
 //! writes are: an assertion a later retraction cancels leaves only the
 //! retraction, so a claim that lived only inside the transaction leaves
 //! no tombstone. The same settlement runs for a transaction's own
@@ -53,15 +58,33 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::Arc;
 
-/// Settle a transaction's writes against `sources`, read with `overlay`:
-/// the batch a commit applies, every succession replaced by the
+/// What a settlement is for: the batch a commit applies, or the view a
+/// transaction's own reads see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Settlement {
+    /// The tree elects among a cell's stored claims when it applies a
+    /// succession, in the same descent that writes the value, so a
+    /// commit settles here only the cells some rule derives: those
+    /// have candidates the tree cannot see.
+    Commit,
+    /// A reader sees what the commit will leave, so every succession is
+    /// settled to the retraction and assertion it comes to.
+    Read,
+}
+
+/// Settle a transaction's writes against `sources`, read with `overlay`.
+/// For a [`Settlement::Read`], every succession is replaced by the
 /// retraction of the claim it succeeds, if any, and the assertion of
-/// its value. Each write is settled over the line and the writes before
-/// it, in the order the transaction made them.
+/// its value. For a [`Settlement::Commit`], the same happens only when
+/// some rule derives a relation a succession writes; otherwise the
+/// successions stay as written and the tree settles them. Each write is
+/// settled over the line and the writes before it, in the order the
+/// transaction made them.
 pub(crate) async fn settle<Env>(
     sources: Vec<Source>,
     overlay: Arc<Changes>,
     staged: &Staged,
+    settlement: Settlement,
     env: &Env,
 ) -> Result<Changes, CommitError>
 where
@@ -82,6 +105,24 @@ where
     // What every write observed of the line: its claims, read once per
     // cell a succession writes.
     let line = QueryEnv::new(sources.clone(), overlay.clone(), env);
+    if settlement == Settlement::Commit {
+        let mut relations: Vec<&Attribute> = Vec::new();
+        for (the, _, change) in staged.log() {
+            if matches!(change, Change::Succeed(..)) && !relations.contains(&the) {
+                relations.push(the);
+            }
+        }
+        let mut derived = false;
+        for the in relations {
+            if rules_derive(&line, the).await? {
+                derived = true;
+                break;
+            }
+        }
+        if !derived {
+            return Ok(staged.export());
+        }
+    }
     let edition = line.pending_edition();
     let mut cells: HashMap<(Attribute, Entity), Cell> = HashMap::new();
     let mut order: Vec<(Attribute, Entity)> = Vec::new();
@@ -215,6 +256,37 @@ where
     Ok(claims)
 }
 
+/// The attribute concept over `the`, under which the rules deriving the
+/// relation are found.
+fn relation_predicate(the: &Attribute) -> ConceptDescriptor {
+    let attribute = AttributeDescriptor::over(
+        Relation::Attribute(The::from(the.clone())),
+        "",
+        Cardinality::Many,
+        None,
+    );
+    ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(attribute))
+}
+
+/// Whether some rule `view` knows derives the relation `the` names.
+async fn rules_derive<Env>(view: &QueryEnv<'_, Env>, the: &Attribute) -> Result<bool, CommitError>
+where
+    Env: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
+    let rules = Provider::<SelectRules>::execute(view, relation_predicate(the))
+        .await
+        .map_err(|error| CommitError::Succession(error.to_string()))?;
+    Ok(!rules.installed().is_empty())
+}
+
 /// Every candidate a read of the relation sees for the entity through
 /// `view`, when some rule derives the relation; nothing otherwise, as
 /// the claims are then all there is. A derived one is what the read
@@ -236,13 +308,7 @@ where
         + 'static,
 {
     let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
-    let attribute = AttributeDescriptor::over(
-        Relation::Attribute(The::from(the.clone())),
-        "",
-        Cardinality::Many,
-        None,
-    );
-    let predicate = ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(attribute));
+    let predicate = relation_predicate(the);
     let rules = Provider::<SelectRules>::execute(view, predicate.clone())
         .await
         .map_err(|error| failed(&error))?;

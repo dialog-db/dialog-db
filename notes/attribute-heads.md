@@ -188,9 +188,13 @@ retracted every prior, which no `last` read can tell apart. What a
 write observes is the line and the writes before it in its own
 transaction, in order: the statement records only the succession
 (`Change::Succeed`), the transaction keeps its writes in order, and
-the commit replays each cell's writes over the claims the line holds,
-each succession electing among the live claims and the derived
-candidates and retracting the stored claim it elects. The guarantee
+the tree elects among the cell's stored claims in the descent that
+writes the value, retracting the claim it elects and recording the new
+claim with the elected claim's versions as its cause, as a replacement
+did. Where a rule derives the relation the tree cannot see the derived
+candidates, so the commit first replays that cell's writes over the
+claims the line holds, each succession electing among the live claims
+and the derived candidates. The guarantee
 is transactional: an assertion succeeds whatever a reader at that
 point in the transaction would have observed, and `all` is the one
 policy that asserts without succeeding anything. The transaction's

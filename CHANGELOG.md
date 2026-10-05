@@ -13,11 +13,13 @@ argues it in full. Newest first.
 
 A write through an attribute read under `last`, `max`, `min` or `top`
 no longer replaces its cell. It succeeds one claim: the one a read under
-the same policy returns. At commit the transactor reads the attribute
-for that entity, through the commit's own view and without the value
-being written, and retracts the stored claim holding what the read
-elected, beside asserting the new value. Every other claim in the cell
-stays. A write under `all` appends, as before.
+the same policy returns. The tree elects that claim among the cell's
+stored claims in the same descent that writes the value, retracts it,
+and records the new claim with the elected claim's versions as its
+cause, as a replacement did. Every other claim in the cell stays. Where
+a rule derives the relation, the transactor settles the write first
+against the derived candidates the tree cannot see, through the
+commit's own view. A write under `all` appends, as before.
 
 The guarantee this gives is transactional. A transaction is a commit
 that has not been flushed: querying it returns what querying the
@@ -44,12 +46,12 @@ What this changes for you:
   `succeed` key that older readers do not know. Batches are not stored
   or sent between replicas today, so this bites only code that encodes
   a batch itself.
-- A `Changes` batch holding successions commits through a transaction
-  (`branch.transaction().integrate(changes).commit()`), which settles
-  them. `Changes::into_stream`, the form a raw commit takes, refuses a
-  batch that still holds one rather than land its value without
-  succeeding anything. `into_instructions`, which code uses to inspect
-  a batch, reads a succession as the assertion of its value.
+- A succession commits as `Instruction::Succeed`, a new variant beside
+  `Assert`, `Replace` and `Retract`; code matching on `Instruction`
+  exhaustively gains an arm. A raw commit of a `Changes` batch elects
+  among the cell's stored claims; only a transaction sees the
+  candidates rules derive, so a write to a derived relation belongs in
+  one (`branch.transaction().integrate(changes).commit()`).
 - What a write observes is the line and the writes before it in its
   own transaction, in order. A cell's writes are replayed in that order
   at commit: a write under `all` after a write under `last` stands
