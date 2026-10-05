@@ -892,22 +892,10 @@ where
 }
 
 /// Collect the artifacts a selector matches in the layered view.
-async fn select<'a, Env>(
-    view: &QueryEnv<'a, Env>,
+async fn select<'a>(
+    view: &QueryEnv<'a>,
     selector: ArtifactSelector<Constrained>,
-) -> Result<Vec<Artifact>, CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<Vec<Artifact>, CommitError> {
     let stream = Provider::<Select<'_>>::execute(view, selector)
         .await
         .map_err(|error| CommitError::Induction(format!("dispatch probe: {error}")))?;
@@ -921,25 +909,13 @@ where
 /// Evaluate one rule's body against the frozen round view and emit its
 /// head for every binding: transient heads into `transients`, durable
 /// heads (novelty-checked against the view) into `novelty`.
-async fn fire<'a, Env>(
+async fn fire<'a>(
     rule: &InductiveRule,
     transient_head: bool,
-    view: &QueryEnv<'a, Env>,
+    view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
-) -> Result<(), CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<(), CommitError> {
     let plan = rule.plan(&Environment::new());
     let matches: Vec<Match> = plan
         .evaluate(Match::new().seed(), view)
@@ -981,26 +957,14 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 /// premise (removal-enabled and derived-premise firings take the
 /// full-body path instead), so seeding is complete for this candidate
 /// class while costing the delta's join fan-out, not relation size.
-async fn fire_seeded<'a, Env>(
+async fn fire_seeded<'a>(
     rule: &InductiveRule,
     transient_head: bool,
     rows: &[Artifact],
-    view: &QueryEnv<'a, Env>,
+    view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
-) -> Result<(), CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<(), CommitError> {
     use dialog_query::{Premise, Proposition};
 
     let mut matches: Vec<Match> = Vec::new();
@@ -1101,26 +1065,14 @@ fn bind_seed(
 /// Emit a rule's head for every produced match: transient heads into
 /// `transients`, durable heads (novelty-checked against the frozen
 /// view) into `novelty`.
-async fn emit_matches<'a, Env>(
+async fn emit_matches<'a>(
     rule: &InductiveRule,
     transient_head: bool,
     matches: Vec<Match>,
-    view: &QueryEnv<'a, Env>,
+    view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
-) -> Result<(), CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<(), CommitError> {
     let conclusion = rule.conclusion();
     for matched in matches {
         // The head subject. A rule whose premises leave `this` unbound
@@ -1220,22 +1172,7 @@ where
 /// re-derives existing state terminates for free. The view is the
 /// frozen round view, so siblings within a round judge novelty against
 /// identical state.
-async fn is_novel<'a, Env>(
-    view: &QueryEnv<'a, Env>,
-    instruction: &Instruction,
-) -> Result<bool, CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<bool, CommitError> {
     let artifact = match instruction {
         Instruction::Assert(a)
         | Instruction::Replace(a)
