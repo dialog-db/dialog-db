@@ -352,7 +352,42 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
 ///
 /// Built fresh on each `.perform(env)`; the environment reference
 /// is never captured on the layer itself.
-pub(crate) struct QueryEnv<'a, Env> {
+/// The capabilities every read runs on, as one trait object: the
+/// query environment holds `&dyn Capabilities`, so the evaluator is
+/// instantiated once for every environment that reads through it
+/// rather than once per concrete peer type. Each instantiation names
+/// the peer type in every nested future it builds, and a commit that
+/// settles successions reaches the evaluator from every crate that
+/// commits; erased, those names and copies collapse.
+pub(crate) trait Capabilities:
+    Provider<BlobRead>
+    + Provider<Get>
+    + Provider<Put>
+    + Provider<Resolve>
+    + Provider<Hydrate>
+    + Provider<Preload>
+    + Provider<Fork<RemoteSite, Resolve>>
+    + ConditionalSync
+{
+}
+
+impl<T> Capabilities for T where
+    T: Provider<BlobRead>
+        + Provider<Get>
+        + Provider<Put>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + Provider<Preload>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+{
+}
+
+/// A read's capabilities, erased: the type every query environment
+/// holds its environment as.
+pub(crate) type Erased = dyn Capabilities;
+
+pub(crate) struct QueryEnv<'a> {
     /// Owned (cheaply cloned: shared caches) so the env's only
     /// lifetime is the underlying `env` reference. A poll/evaluation
     /// can then type its `QueryEnv` with the *named* env lifetime
@@ -397,7 +432,7 @@ pub(crate) struct QueryEnv<'a, Env> {
     /// The per-query memo rule heads share their source body's rows
     /// through.
     memo: Memo,
-    env: &'a Env,
+    env: &'a Erased,
 }
 
 /// The format [`Manifest`]s of the trees a [`QueryEnv`] reads, and the
@@ -438,7 +473,7 @@ struct LineFormat {
     tombstones: Hidden,
 }
 
-impl<'a, Env> QueryEnv<'a, Env> {
+impl<'a> QueryEnv<'a> {
     /// Build a runtime env from already-resolved parts: the lines to
     /// read, the per-query overlay (caller changes + injected metadata),
     /// and the underlying capability env. The tombstones are lifted
@@ -454,7 +489,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
     pub(crate) fn new(
         sources: Vec<Source>,
         changes: impl Into<Arc<Changes>>,
-        env: &'a Env,
+        env: &'a Erased,
     ) -> Self {
         let changes = changes.into();
         let fetches = sources.iter().any(|source| source.as_ref().fetches());
@@ -529,18 +564,7 @@ impl<'a, Env> QueryEnv<'a, Env> {
     }
 }
 
-impl<Env> QueryEnv<'_, Env>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Hydrate>
-        + Provider<Preload>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+impl QueryEnv<'_> {
     /// The layers as a read sees them. A layer holding a succession is
     /// settled against the lines once, the way the commit settles it
     /// (see [`succession`](super::transaction)), so the claim a write
@@ -629,7 +653,7 @@ where
     }
 }
 
-impl<Env> Clone for QueryEnv<'_, Env> {
+impl Clone for QueryEnv<'_> {
     fn clone(&self) -> Self {
         Self {
             sources: self.sources.clone(),
@@ -658,21 +682,11 @@ impl<Env> Clone for QueryEnv<'_, Env> {
 /// not the setup's futures alongside it (together they came to 16 KiB,
 /// allocated and copied for every scan a query ran), and the scan is
 /// built in its box ([`Select::execute_boxed`](crate::Select)).
-pub(crate) async fn select_from_source<'a, Env>(
+pub(crate) async fn select_from_source<'a>(
     source: SourceRef<'_>,
-    env: &'a Env,
+    env: &'a Erased,
     input: ArtifactSelector<Constrained>,
-) -> Result<ArtifactStream<'a>, DialogArtifactsError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Hydrate>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
     let select = crate::Select::from_source(source, input);
     let remote = source.fallback();
     // Concurrent reads of one digest share fetch-and-hydrate through
@@ -697,18 +711,7 @@ where
 // `&QueryEnv<'a>` to `&QueryEnv<'s>` implicitly — the strict impl
 // is what forces region inference to unify the two into one
 // variable.
-impl<'a, Env> Provider<Select<'a>> for QueryEnv<'a, Env>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Hydrate>
-        + Provider<Preload>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
     async fn execute(
         &self,
         input: ArtifactSelector<Constrained>,
@@ -805,17 +808,7 @@ where
 // yields `None`.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Env> Provider<Estimate> for QueryEnv<'_, Env>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Hydrate>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+impl Provider<Estimate> for QueryEnv<'_> {
     async fn execute(
         &self,
         input: ArtifactSelector<Constrained>,
@@ -849,10 +842,7 @@ where
 // row only for it to be dropped.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Env> Provider<Preload> for QueryEnv<'_, Env>
-where
-    Env: Provider<Preload> + ConditionalSync,
-{
+impl Provider<Preload> for QueryEnv<'_> {
     async fn execute(&self, input: PreloadRequest) -> bool {
         if !self.fetches {
             return false;
@@ -868,17 +858,7 @@ where
 // nodes, so the node cache is not consulted.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a, Env> Provider<LoadBlob> for QueryEnv<'a, Env>
-where
-    Env: Provider<Get>
-        + Provider<BlobRead>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Hydrate>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+impl<'a> Provider<LoadBlob> for QueryEnv<'a> {
     async fn execute(
         &self,
         LoadBlob { hash }: LoadBlob,
@@ -909,16 +889,7 @@ where
 // block every time.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<'a, Env> Provider<LoadBlock> for QueryEnv<'a, Env>
-where
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Hydrate>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+impl<'a> Provider<LoadBlock> for QueryEnv<'a> {
     async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
         for source in &self.sources {
             let source = source.as_ref();
@@ -976,18 +947,7 @@ fn staged_rules(layer: &Staged, index: Index, key: &Entity) -> Vec<DeductiveRule
     rules
 }
 
-impl<'a, Env> QueryEnv<'a, Env>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Hydrate>
-        + Provider<Preload>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+impl<'a> QueryEnv<'a> {
     /// Read a `dialog.rule/*` selector against a single line's committed
     /// tree only (NOT the overlay) and collect the matching artifacts.
     /// The durable layer's reads must be tree-only so the head-keyed
@@ -1133,18 +1093,7 @@ where
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl<Env> Provider<SelectRules> for QueryEnv<'_, Env>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Hydrate>
-        + Provider<Preload>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+impl Provider<SelectRules> for QueryEnv<'_> {
     /// Resolve a concept's deductive rules by unioning across layers:
     /// each line is a durable layer (committed `dialog.rule/*`, head-cached),
     /// the overlay is a transient layer (uncommitted `dialog.rule/*`, fresh).
@@ -1243,13 +1192,13 @@ fn relation_concept(field: &ConceptFieldDescriptor) -> Entity {
     .this()
 }
 
-impl<Env> BodyMemo for QueryEnv<'_, Env> {
+impl BodyMemo for QueryEnv<'_> {
     fn memo(&self) -> Option<&Memo> {
         Some(&self.memo)
     }
 }
 
-impl<Env> QueryEnv<'_, Env> {
+impl QueryEnv<'_> {
     /// `bundle` carrying this query's retained fixpoint, when a polling
     /// subscription is evaluating `concept` recursively. Attached per
     /// query, never cached: it belongs to the subscription.
@@ -1263,18 +1212,7 @@ impl<Env> QueryEnv<'_, Env> {
     }
 }
 
-impl<'a, Env> QueryEnv<'a, Env>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Hydrate>
-        + Provider<Preload>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+impl<'a> QueryEnv<'a> {
     /// Every rule under `index` at `key`, unioned across layers: each
     /// line's durable layer (committed, head-cached) and session
     /// overlay, the per-query overlay, and the staged layers, the last

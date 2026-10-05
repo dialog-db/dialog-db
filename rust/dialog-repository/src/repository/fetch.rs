@@ -78,7 +78,7 @@ type SharedFallback<'a> = Shared<FallbackFuture<'a>>;
 /// shared by every job: the remote a branch tracks does not change while
 /// one evaluation runs, and loading it per job put a store read in front
 /// of every warm-up.
-pub(crate) struct Driven<'a, S, Env> {
+pub(crate) struct Driven<'a, S, Env: ?Sized> {
     inner: S,
     queue: Arc<PreloadQueue>,
     sources: Vec<(Source, SharedFallback<'a>)>,
@@ -92,7 +92,8 @@ pub(crate) struct Driven<'a, S, Env> {
 impl<'a, S, Env> Driven<'a, S, Env>
 where
     S: Stream + Unpin + 'a,
-    Env: Provider<Get>
+    Env: ?Sized
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -179,7 +180,8 @@ where
 impl<'a, S, Env> Stream for Driven<'a, S, Env>
 where
     S: Stream + Unpin + 'a,
-    Env: Provider<Get>
+    Env: ?Sized
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -230,7 +232,8 @@ async fn warm_source<Env>(
     likelihood: Likelihood,
 ) -> Result<(), DialogSearchTreeError>
 where
-    Env: Provider<Get>
+    Env: ?Sized
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<Hydrate>
@@ -279,12 +282,12 @@ where
 /// spine a peer already warmed re-reads nothing), and every miss that
 /// checks as a node lands in it, so the demand read that follows a warm is
 /// served from memory without checking the node again.
-struct CacheThrough<'a, Env> {
+struct CacheThrough<'a, Env: ?Sized> {
     cache: ArtifactNodeCache,
     store: NetworkedIndex<'a, Env>,
 }
 
-impl<Env> Clone for CacheThrough<'_, Env> {
+impl<Env: ?Sized> Clone for CacheThrough<'_, Env> {
     fn clone(&self) -> Self {
         Self {
             cache: self.cache.clone(),
@@ -297,7 +300,7 @@ impl<Env> Clone for CacheThrough<'_, Env> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<LoadBlock> for CacheThrough<'_, Env>
 where
-    Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
 {
     async fn execute(
         &self,

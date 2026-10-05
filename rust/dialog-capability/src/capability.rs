@@ -124,7 +124,7 @@ impl<Fx: Effect> Capability<Fx> {
     /// Perform the invocation directly against a provider.
     pub async fn perform<Env>(self, env: &Env) -> Fx::Output
     where
-        Env: Provider<Fx>,
+        Env: Provider<Fx> + ?Sized,
     {
         env.execute(self).await
     }

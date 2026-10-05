@@ -906,7 +906,7 @@ where
                 // clone, no generator-local borrows) so the poll
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
-                let query_env: QueryEnv<'a, Env> =
+                let query_env: QueryEnv<'a> =
                     QueryEnv::new(vec![Source::from(self.branch.clone())], overlay, env)
                         .with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
@@ -1025,7 +1025,7 @@ where
             demand.anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let mut query_env: QueryEnv<'a, Env> =
+            let mut query_env: QueryEnv<'a> =
                 QueryEnv::new(vec![Source::from(self.branch.clone())], overlay, env)
                     .with_demand(demand.clone());
             // Recursive concept subscriptions retain their fixpoint
@@ -1085,7 +1085,7 @@ where
                 .anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let query_env: QueryEnv<'a, Env> =
+            let query_env: QueryEnv<'a> =
                 QueryEnv::new(vec![Source::from(self.branch.clone())], overlay, env)
                     .with_demand(self.demand.clone())
                     .with_fixpoint(
