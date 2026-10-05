@@ -13,12 +13,12 @@ use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
 /// from one catalog of the local archive, performing `Get` against the
 /// environment it borrows. It never writes: a commit writes what its batch
 /// staged.
-pub struct LocalIndex<'a, Env> {
+pub struct LocalIndex<'a, Env: ?Sized> {
     env: &'a Env,
     catalog: CatalogScope,
 }
 
-impl<Env> Clone for LocalIndex<'_, Env> {
+impl<Env: ?Sized> Clone for LocalIndex<'_, Env> {
     fn clone(&self) -> Self {
         Self {
             env: self.env,
@@ -27,7 +27,7 @@ impl<Env> Clone for LocalIndex<'_, Env> {
     }
 }
 
-impl<'a, Env> LocalIndex<'a, Env> {
+impl<'a, Env: ?Sized> LocalIndex<'a, Env> {
     /// Create a local index for the given catalog capability.
     pub fn new(env: &'a Env, catalog: CatalogScope) -> Self {
         Self { env, catalog }
@@ -46,7 +46,7 @@ impl<'a, Env> LocalIndex<'a, Env> {
 
 impl<Env> LocalIndex<'_, Env>
 where
-    Env: Provider<Get> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + ConditionalSync + 'static,
 {
     /// The block stored under `hash` in the local archive, if any, as the
     /// archive holds it: unverified. Readers outside the crate load through
@@ -64,7 +64,7 @@ where
 
 impl<Env> LocalIndex<'_, Env>
 where
-    Env: Provider<Get> + Provider<BlobRead> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<BlobRead> + ConditionalSync + 'static,
 {
     /// The spilled value stored under `hash` locally, if any.
     ///
@@ -113,7 +113,7 @@ pub(crate) fn archive_error(error: BlobError) -> ArchiveError {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<LoadBlock> for LocalIndex<'_, Env>
 where
-    Env: Provider<Get> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + ConditionalSync + 'static,
 {
     async fn execute(
         &self,
@@ -131,7 +131,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<LoadBlob> for LocalIndex<'_, Env>
 where
-    Env: Provider<Get> + Provider<BlobRead> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<BlobRead> + ConditionalSync + 'static,
 {
     async fn execute(
         &self,

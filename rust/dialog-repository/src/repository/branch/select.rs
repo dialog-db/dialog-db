@@ -60,7 +60,8 @@ pub(crate) async fn line_manifest<Env>(
     env: &Env,
 ) -> Result<Manifest, DialogArtifactsError>
 where
-    Env: Provider<Get>
+    Env: ?Sized
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
