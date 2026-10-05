@@ -24,7 +24,7 @@ use futures_util::{Stream, stream};
 /// Command that commits a stream of changes (assert/retract) to a branch
 /// or a snapshot.
 ///
-/// Created by [`Branch::commit`] or [`Snapshot::commit`]. Execute with
+/// Created by [`Branch::commit`]. Execute with
 /// `.perform(&env)`.
 pub struct Commit<'a, Changes> {
     source: SourceRef<'a>,
@@ -106,7 +106,7 @@ impl<'a, Changes> Commit<'a, Changes> {
     /// # -> anyhow::Result<()>
     /// # where Env: dialog_capability::Provider<dialog_effects::memory::Resolve> {
     /// # let _ = (branch, env, changes);
-    /// // branch.commit(stream::iter(changes)).canonicalize().perform(env).await?;
+    /// // branch.transaction().integrate(changes).commit().canonicalize().publish().perform(env).await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -151,17 +151,12 @@ impl<'a, Changes> Commit<'a, Changes> {
 }
 
 impl Branch {
-    /// Commit a stream of changes to this branch.
-    pub fn commit<Changes>(&self, changes: Changes) -> Commit<'_, Changes> {
-        Commit::new(self, changes)
-    }
-}
-
-impl Snapshot {
-    /// Commit a stream of changes to this snapshot: the same [`Commit`]
-    /// a branch runs. The minted revision is persisted and the snapshot
-    /// advances to it; no branch head moves. Mirrors [`Branch::commit`].
-    pub fn commit<Changes>(&self, changes: Changes) -> Commit<'_, Changes> {
+    /// Commit a stream of instructions to this branch as the machinery
+    /// does: no induction runs and no succession is settled against
+    /// derived candidates. A write goes through
+    /// [`transaction`](Self::transaction), which is the one path that
+    /// reads the line as the commit will leave it.
+    pub(crate) fn commit<Changes>(&self, changes: Changes) -> Commit<'_, Changes> {
         Commit::new(self, changes)
     }
 }

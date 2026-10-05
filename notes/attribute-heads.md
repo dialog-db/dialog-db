@@ -223,6 +223,18 @@ Nothing about the write is a second policy. A relation that should be
 read one way and written another is two attributes: read through one,
 write through the other.
 
+The claim a write succeeds is one the line holds: a stored claim, or
+none where the read elects a candidate a rule derives. The session
+overlay is outside this. Its rows carry no standing, so under `last`
+a stored claim beats them and the write retires what the read
+returned; under `max`, `min` or `top` a read can elect an overlay
+claim the write cannot retire, and the write retires the stored claim
+instead. In practice the overlay holds relations of its own (tonk
+stamps nothing into it that it also commits), so the case does not
+arise; what the overlay should mean for a relation the tree also
+holds, a layer that wins or a source of claims among claims, is an
+open question this branch does not answer.
+
 A list is a ranked choice. `as: [case:active, case:registered]`
 lists the values the attribute ranks among, best first, and `the:
 [user/email, user/phone]` lists the relations it reads, best first:

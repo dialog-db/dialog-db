@@ -36,7 +36,6 @@ use dialog_repository::{
 };
 use dialog_storage::NativeTempSpace;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
-use futures_util::stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use crate::metered::{Meter, Metered, Tally};
@@ -161,9 +160,15 @@ where
     /// Commit each row as its own branch commit (the small-commit shape).
     pub async fn insert_per_row_transactions(&self, rows: &[FactRow]) -> Result<()> {
         for row in rows {
-            let instructions = stream::iter(artifacts_for(row)?.map(Instruction::Assert));
+            let changes: Changes = artifacts_for(row)?
+                .into_iter()
+                .map(Instruction::Assert)
+                .collect();
             self.branch
-                .commit(instructions)
+                .transaction()
+                .integrate(changes)
+                .commit()
+                .publish()
                 .perform(&self.operator)
                 .await?;
         }
@@ -174,7 +179,10 @@ where
     pub async fn insert_one_transaction(&self, rows: &[FactRow]) -> Result<()> {
         let instructions = instructions_for(rows)?;
         self.branch
-            .commit(stream::iter(instructions))
+            .transaction()
+            .integrate(instructions.into_iter().collect())
+            .commit()
+            .publish()
             .perform(&self.operator)
             .await?;
         Ok(())
@@ -301,9 +309,11 @@ where
     /// buffer, leaving the head on the canonical tree its facts determine.
     pub async fn canonicalize(&self) -> Result<()> {
         self.branch
-            .commit(stream::iter(Vec::new()))
+            .transaction()
+            .commit()
             .allow_empty()
             .canonicalize()
+            .publish()
             .perform(&self.operator)
             .await?;
         Ok(())
@@ -410,14 +420,20 @@ where
             gathered += 1;
             if gathered.is_multiple_of(group) {
                 self.branch
-                    .commit(stream::iter(std::mem::take(&mut pending)))
+                    .transaction()
+                    .integrate(std::mem::take(&mut pending).into_iter().collect())
+                    .commit()
+                    .publish()
                     .perform(&self.operator)
                     .await?;
             }
         }
         if !pending.is_empty() {
             self.branch
-                .commit(stream::iter(pending))
+                .transaction()
+                .integrate(pending.into_iter().collect())
+                .commit()
+                .publish()
                 .perform(&self.operator)
                 .await?;
         }
@@ -440,7 +456,10 @@ where
         for commit in &log.transactions {
             let instructions = se_instructions(commit)?;
             self.branch
-                .commit(stream::iter(instructions))
+                .transaction()
+                .integrate(instructions.into_iter().collect())
+                .commit()
+                .publish()
                 .perform(&self.operator)
                 .await?;
         }

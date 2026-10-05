@@ -48,10 +48,16 @@ What this changes for you:
   a batch itself.
 - A succession commits as `Instruction::Succeed`, a new variant beside
   `Assert`, `Replace` and `Retract`; code matching on `Instruction`
-  exhaustively gains an arm. A raw commit of a `Changes` batch elects
-  among the cell's stored claims; only a transaction sees the
-  candidates rules derive, so a write to a derived relation belongs in
-  one (`branch.transaction().integrate(changes).commit()`).
+  exhaustively gains an arm.
+- `Branch::commit` and `Snapshot::commit`, which took a stream of
+  instructions, are no longer public: they ran no induction and saw no
+  derived candidate, so a write through them could land a value
+  without succeeding what a reader observed. Every write goes through
+  a transaction. A caller holding instructions collects them into a
+  batch (`Changes` implements `FromIterator<Instruction>`) and
+  integrates it: `branch.transaction().integrate(changes).commit()
+  .publish()`; an empty commit is `branch.transaction().commit()
+  .allow_empty().publish()`.
 - What a write observes is the line and the writes before it in its
   own transaction, in order. A cell's writes are replayed in that order
   at commit: a write under `all` after a write under `last` stands
@@ -72,6 +78,16 @@ What this changes for you:
 - One departure remains: commit-time induction runs at commit, so what
   an inductive rule would derive from the transaction's writes is not
   in `transaction.query()` yet. That was true before this change.
+- A second departure: a succession settles against the line's stored
+  claims and the candidates rules derive, not against the session
+  overlay. Where the overlay and the tree hold claims of one cell, a
+  write under `max`, `min` or `top` can retire the stored claim while
+  a read keeps electing the overlay's, and the derived path can emit
+  a retraction of an overlay claim that the tree does not hold. Under
+  `last` an overlay claim loses to every stored claim, as before, so
+  the write retires what the read returned. A relation held in one
+  store only, which is how tonk uses the overlay, never meets this.
+  What the overlay means for a relation the tree also holds is open.
 
 Why: `Replace` encoded one policy, last-writer-wins, in the write path,
 while reads had grown four. A write is a claim that succeeds what the

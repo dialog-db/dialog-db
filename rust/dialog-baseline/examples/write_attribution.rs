@@ -25,7 +25,6 @@ use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_capability::Provider;
 use dialog_common::{Blake3Hash, ConditionalSync};
 use dialog_search_tree::{Buffer as TreeBuffer, LoadBlock, NodeBody};
-use futures_util::stream;
 
 #[derive(Default, Clone, Copy)]
 struct ClassVolume {
@@ -177,7 +176,10 @@ fn main() -> anyhow::Result<()> {
         let mut window_started = std::time::Instant::now();
         for commit in &log.transactions {
             repo.branch()
-                .commit(stream::iter(se_instructions(commit)?))
+                .transaction()
+                .integrate(se_instructions(commit)?.into_iter().collect())
+                .commit()
+                .publish()
                 .perform(repo.operator())
                 .await?;
             committed += 1;

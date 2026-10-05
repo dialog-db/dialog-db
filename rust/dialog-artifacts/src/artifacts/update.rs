@@ -643,6 +643,25 @@ pub struct ChangeStream {
     iter: IntoIter<Instruction>,
 }
 
+/// A batch collected from instructions, each recorded as the change it
+/// stands for: what a caller holding instructions hands a transaction.
+impl FromIterator<Instruction> for Changes {
+    fn from_iter<I: IntoIterator<Item = Instruction>>(instructions: I) -> Self {
+        let mut changes = Changes::new();
+        for instruction in instructions {
+            match instruction {
+                Instruction::Assert(a) => changes.associate(a.the, a.of, a.is),
+                Instruction::Replace(a) => changes.associate_unique(a.the, a.of, a.is),
+                Instruction::Succeed(a, succession) => {
+                    changes.succeed(a.the, a.of, a.is, succession)
+                }
+                Instruction::Retract(a) => changes.dissociate(a.the, a.of, a.is),
+            }
+        }
+        changes
+    }
+}
+
 impl From<Changes> for ChangeStream {
     fn from(changes: Changes) -> Self {
         Self {
