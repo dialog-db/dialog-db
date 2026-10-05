@@ -339,7 +339,10 @@ impl Match {
     /// consumed, which is how it competes in an attribute's election
     /// against stored rows. `None` for a row citing nothing.
     pub fn standing(&self) -> Option<Standing> {
-        self.standings().map(|(_, standing)| standing).max().cloned()
+        self.standings()
+            .map(|(_, standing)| standing)
+            .max()
+            .cloned()
     }
 
     /// Adopt every standing `other` cites for a variable this row cites
