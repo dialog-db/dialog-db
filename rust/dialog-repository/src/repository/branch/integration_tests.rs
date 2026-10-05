@@ -5479,7 +5479,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
         const OWN_FACTS: usize = 16;
         branch
             .commit(stream::iter(
-                (0..OWN_FACTS).map(|i| Instruction::Assert(facts(i), _)),
+                (0..OWN_FACTS).map(|i| Instruction::Assert(facts(i), dialog_artifacts::Policy::All)),
             ))
             .perform(&operator)
             .await?;
