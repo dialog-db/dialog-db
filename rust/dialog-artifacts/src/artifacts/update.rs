@@ -122,12 +122,22 @@ impl Policy {
     /// zero under every other policy and under a `top` listing nothing.
     pub fn rank_of(&self, value: &Value) -> usize {
         match self {
-            Policy::Top(among) if !among.is_empty() => among
-                .iter()
-                .position(|listed| listed == value)
-                .unwrap_or(usize::MAX),
+            Policy::Top(among) => Self::rank_among(among, value),
             _ => 0,
         }
+    }
+
+    /// Where `value` ranks among `listed`, best first: an unlisted
+    /// value ranks last, and every value ranks first when nothing is
+    /// listed.
+    pub fn rank_among(listed: &[Value], value: &Value) -> usize {
+        if listed.is_empty() {
+            return 0;
+        }
+        listed
+            .iter()
+            .position(|candidate| candidate == value)
+            .unwrap_or(usize::MAX)
     }
 
     /// Whether `candidate` is the newer of two claims: the greater

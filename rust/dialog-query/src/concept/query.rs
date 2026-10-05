@@ -1181,8 +1181,7 @@ impl Election {
     /// the field lists any, first best and an unlisted value last; then
     /// by the relation it came from, in the order the field lists them.
     fn rank<T>(&self, entry: &Entry<T>) -> (usize, usize) {
-        let listed = Policy::Top(self.among.clone()).rank_of(&entry.value);
-        (listed, entry.rank)
+        (Policy::rank_among(&self.among, &entry.value), entry.rank)
     }
 
     /// Whether `candidate` displaces `incumbent` under a choosing
