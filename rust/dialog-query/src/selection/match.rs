@@ -1,7 +1,7 @@
 use futures_util::stream::once;
 use std::cmp::Ordering;
 use std::sync::Arc;
-use std::{iter, mem, slice};
+use std::{iter, mem};
 
 use crate::Claim;
 use crate::artifact::Value;
@@ -137,7 +137,7 @@ pub struct Match {
     // directly as Value::Record in bindings, eliminating this separate list.
     claims: Vec<(Arc<str>, Arc<Claim>)>,
     /// The standing of the fact that bound each cited variable.
-    standings: Standings,
+    standings: Vec<(Arc<str>, Standing)>,
     /// The bindings and claims this row extends, shared with every other
     /// row extending the same ones.
     frame: Option<Arc<Frame>>,
@@ -156,52 +156,8 @@ pub struct Match {
 struct Frame {
     bindings: Vec<(Arc<str>, Binding)>,
     claims: Vec<(Arc<str>, Arc<Claim>)>,
-    standings: Standings,
+    standings: Vec<(Arc<str>, Standing)>,
     parent: Option<Arc<Frame>>,
-}
-
-/// The standings a row cites, by the variable the fact bound. A scan
-/// cites one fact per row, so one entry is held inline and costs no
-/// allocation to record, clone or drop; a row that joins several scans
-/// spills to a vec.
-#[derive(Debug, Clone, Default)]
-enum Standings {
-    #[default]
-    None,
-    One([(Arc<str>, Standing); 1]),
-    Many(Vec<(Arc<str>, Standing)>),
-}
-
-impl Standings {
-    fn is_empty(&self) -> bool {
-        matches!(self, Standings::None)
-    }
-
-    fn iter(&self) -> slice::Iter<'_, (Arc<str>, Standing)> {
-        match self {
-            Standings::None => [].iter(),
-            Standings::One(one) => one.iter(),
-            Standings::Many(many) => many.iter(),
-        }
-    }
-
-    /// Record `standing` for `name`, replacing what `name` had.
-    fn cite(&mut self, name: &Arc<str>, standing: Standing) {
-        match self {
-            Standings::None => *self = Standings::One([(name.clone(), standing)]),
-            Standings::One([(held, slot)]) if held == name => *slot = standing,
-            Standings::One(_) => {
-                let Standings::One([first]) = mem::take(self) else {
-                    unreachable!("matched above")
-                };
-                *self = Standings::Many(vec![first, (name.clone(), standing)]);
-            }
-            Standings::Many(many) => match many.iter_mut().find(|(held, _)| held == name) {
-                Some((_, slot)) => *slot = standing,
-                None => many.push((name.clone(), standing)),
-            },
-        }
-    }
 }
 
 /// What a row brings to a cardinality-one election: the standing of
@@ -300,6 +256,15 @@ impl Match {
         iter::successors(self.frame.as_deref(), |frame| frame.parent.as_deref())
     }
 
+    /// Every claim this row cites, its own first, then its frames'
+    /// innermost first; a name cited twice along the ancestry appears
+    /// twice, the first occurrence being the one the row sees.
+    fn claims(&self) -> impl Iterator<Item = &(Arc<str>, Arc<Claim>)> {
+        self.claims
+            .iter()
+            .chain(self.frames().flat_map(|frame| frame.claims.iter()))
+    }
+
     /// Every standing this row cites, its own first, then its frames'
     /// innermost first. A name the row and a frame both cite is cited
     /// once as the row sees it: the first occurrence.
@@ -352,7 +317,7 @@ impl Match {
     fn adopt_standings(&mut self, other: &Match) {
         for (name, standing) in other.standings() {
             if self.standing_entry(name).is_none() {
-                self.standings.cite(name, standing.clone());
+                self.standings.push((name.clone(), standing.clone()));
             }
         }
     }
@@ -368,7 +333,7 @@ impl Match {
     /// not: a result leaving a nested scope keeps the facts it was
     /// derived from, so the row it merges into stands as they do.
     pub(crate) fn adopt_citations(&mut self, other: &Match) {
-        for (name, claim) in other.all_claims() {
+        for (name, claim) in other.claims() {
             if self.find_claim(name).is_none() {
                 self.claims.push((name.clone(), claim.clone()));
             }
@@ -389,7 +354,10 @@ impl Match {
     /// Record that `variable` was bound from a fact of `standing`, so
     /// a value derived from it stands as that fact does.
     pub(crate) fn cite_variable_standing(&mut self, variable: &Arc<str>, standing: Standing) {
-        self.standings.cite(variable, standing);
+        match self.standings.iter_mut().find(|(held, _)| held == variable) {
+            Some((_, slot)) => *slot = standing,
+            None => self.standings.push((variable.clone(), standing)),
+        }
     }
 
     /// The standing of the fact that bound `variable`, when a scan did:
@@ -498,7 +466,7 @@ impl Match {
                 Some(_) => return None,
             }
         }
-        for (name, claim) in other.all_claims() {
+        for (name, claim) in other.claims() {
             if self.find_claim(name).is_none() {
                 self.claims.push((name.clone(), claim.clone()));
             }
