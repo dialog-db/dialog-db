@@ -186,7 +186,6 @@ impl AttributeQueryAll {
         }
         if let Some(name) = self.is.shared_name() {
             candidate.bind_variable(name, self.is.kind(), claim.is().clone())?;
-            candidate.cite_variable_standing(name, standing.clone());
         }
         if let Some(name) = self.cause.shared_name() {
             candidate.bind_variable(
@@ -196,7 +195,13 @@ impl AttributeQueryAll {
             )?;
         }
         candidate.cite_owned(&self.source, claim);
-        candidate.cite_standing(&self.source, standing);
+        // The fact's standing is cited once, under the variable its
+        // value bound when the scan names one, so a value derived from
+        // it stands as it does; under the scan's own source otherwise.
+        match self.is.shared_name() {
+            Some(name) => candidate.cite_variable_standing(name, standing),
+            None => candidate.cite_standing(&self.source, standing),
+        }
         Ok(())
     }
 
