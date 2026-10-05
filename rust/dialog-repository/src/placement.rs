@@ -12,7 +12,7 @@
 //! # Scopes are names
 //!
 //! A scope is an entity, conventionally under a `memory:` scheme
-//! (`memory:shared`, `memory:session`), and nothing about the name is
+//! (`memory:space`, `memory:session`), and nothing about the name is
 //! fixed. What is *shared* — which attribute goes to which name — is
 //! declared in the replicated tree. What is *local* — which store
 //! stands under a name on this replica — is a [binding](Bindings)
@@ -23,7 +23,7 @@
 //! # Declarations, as facts on the layer
 //!
 //! ```text
-//! <repository did>          dialog.attribute/default    memory:shared   # the implicit scope
+//! <repository did>          dialog.attribute/default    memory:space    # the implicit scope
 //! attribute:ui/selected     dialog.attribute/scope      memory:session  # an override
 //! attribute:cmd.rename/name dialog.attribute/transient  true            # lives one round
 //! ```

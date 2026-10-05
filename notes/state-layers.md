@@ -44,8 +44,8 @@ replica, for this tab) is a binding made at stack construction.
 ## Declarations, as facts on the bottom layer
 
 ```
-<repository did>      dialog.attribute/default  memory:shared   # the implicit scope
-attribute:ui/selected dialog.attribute/scope    memory:tab      # an override
+<repository did>      dialog.attribute/default  memory:space   # the implicit scope
+attribute:ui/selected dialog.attribute/scope    memory:session      # an override
 ```
 
 Those are the only replicated declarations. Scope names are plain
@@ -61,7 +61,7 @@ above:
 
 ```yaml
 concept!: &site
-  scope: memory:tab
+  scope: memory:session
   with:
     path: { the: xyz.tonk.site/path, as: text }
 ```
@@ -75,7 +75,7 @@ machinery in the same commit that moves its head:
 ```
 <link> dialog.link/from      <enclosing layer>
 <link> dialog.link/to        <enclosed layer>
-<link> dialog.link/name      memory:shared        # the scope this link binds under
+<link> dialog.link/name      memory:space        # the scope this link binds under
 <link> dialog.link/revision  <revision of the enclosed layer, as last seen>
 ```
 
@@ -219,9 +219,9 @@ let state = Ephemeral::create().perform(&env).await;
 let tab = Ephemeral::create().perform(&env).await;
 
 let stack = Stack::open(tab.clone())
-    .link(&tab, &state, "memory:state")
-    .link(&state, &local, "memory:local")
-    .link(&local, &shared, "memory:shared")   // shared: memory:shared by the repository default
+    .link(&session, &application, "memory:application")
+    .link(&application, &device, "memory:device")
+    .link(&device, &space, "memory:space")   // shared: memory:space by the repository default
     .perform(&env)
     .await?;
 ```
@@ -321,7 +321,7 @@ stack is just never listed. Nothing durable is written by naming.
 stack.select(query).perform(&env)          // composite read, all layers
 stack.subscribe(query)                     // composite subscription, pins every layer
 stack.transaction().assert(doc).commit().perform(&env)   // routes by placement
-stack.scope(&"memory:tab".parse()?)        // the bound layer(s), for direct access
+stack.scope(&"memory:session".parse()?)        // the bound layer(s), for direct access
 stack.revision()                           // the stack revision: see below
 ```
 
@@ -514,7 +514,7 @@ names, read as one composite and written by placement.
   opened from its top layer, `Stack::open(top)`, and wired by edits:
   `.link(&from, &to, name)` on the open command or on a transaction.
   `link` binds a name to the layer it points at, so
-  `link(&local, &shared, "memory:shared")` routes `memory:shared` to
+  `link(&device, &space, "memory:space")` routes `memory:space` to
   `shared`. A name may be bound by several links; a write to it lands
   in every layer so bound and the composite read dedups the fact.
   `unlink` drops a link and whatever the top no longer reaches. Wiring
@@ -657,11 +657,11 @@ ephemeral layer, as far as the transport allows.
 
 **The tonk side** (order-of-work item 4, in `tonk-labs/tonk`): the
 reactor holds every branch as a stack `[branch, state, top]` with the
-process's state layer linked under `memory:state`; reads,
+process's state layer linked under `memory:application`; reads,
 subscriptions, and writes go through it; the analyzer lowers a
 concept's `scope:` to one `dialog.attribute/scope` placement per
 attribute, and the library declares its session-only concepts and
-commands on `memory:state`; the post-commit dispatcher runs the
+commands on `memory:application`; the post-commit dispatcher runs the
 commands the commit *witnessed* rather than the request's pre-commit
 bucket, so a rule-concluded command reaches its provider; and a
 worker command's redirect is a `tonk:site` `target` fact on the tab's
@@ -700,16 +700,11 @@ decision (topology, not induction) stands.
   alone, `named`, the registry metadata.
 - The upper-layer watermark lag, and rule dispatch from a layer's
   session store (both listed under *Known limits*).
-- Per-tab layers in tonk (`memory:tab`, one layer per connection
-  linked above the state layer) and the inspector over the
-  environment's ephemeral registry.
+- Per-session layers in tonk (`memory:session`, one layer per
+  connection linked above the application layer) and the inspector
+  over the environment's ephemeral registry.
 - The channel transport: a `Catchup` carried over the remote site, and
   a scope's `replicated` property resolving to a channel.
-- In tonk, a commit made through the branch handle rather than the
-  stack (the evaluate route) routes `memory:state` facts to the
-  branch's own session store, which the stack reads but a stack
-  `forget` or `clear` of the scope does not reach; moving the
-  evaluate route onto the stack removes the second home.
 
 ## Decisions recorded
 
@@ -756,7 +751,7 @@ and not accidents:
   source. A rule-concluded command is therefore run, which the bucket
   alone could never do (dialog-db #483).
 - **A worker's redirect is a fact on the tab's site.** The desired
-  location is asserted on `memory:state`; the tab's stamp
+  location is asserted on `memory:application`; the tab's stamp
   subscription follows it and the next `tonk:load` clears it. No
   worker-to-client message carries a location.
 - **Placement is the only way to say where a fact goes.** The
@@ -784,7 +779,7 @@ and not accidents:
   and `dialog.attribute/transient` facts from the bottom layer's
   session store as well as its tree. A writer that knows where its
   facts belong (tonk's reactor placing session concepts on
-  `memory:state`) asserts the placement into `branch.overlay()`: it
+  `memory:application`) asserts the placement into `branch.overlay()`: it
   routes commits through the branch and through any stack whose
   bottom the branch is, it outranks the committed declaration and
   yields to one the batch itself carries, and the tree never holds
@@ -806,9 +801,14 @@ and not accidents:
   maintains and every tab stack links, so the join is topology rather
   than a special case in induction. Induction is unchanged; the
   registry is a layer.
-- **Scope name convention.** `memory:shared`, `memory:local`,
-  `memory:state`, `memory:tab` are used above as a convention only;
-  the repository default fact and the placements are what bind them.
+- **Scope name convention.** `memory:space`, `memory:device`,
+  `memory:application`, `memory:session` are used above as a
+  convention only; the repository default fact and the placements are
+  what bind them. Tonk names them by what owns the layer: the space
+  (the replicated branch), the device (a branch with no upstream),
+  the application (one worker or one CLI process), the session (a
+  browser tab or a CLI invocation, whose site is a URL path or a
+  working directory).
 - **Snapshots in stacks.** A snapshot can be bound as the bottom of a
   read-only stack. Whether a transaction over such a stack should
   advance the snapshot the way `Snapshot::transaction` does today is
