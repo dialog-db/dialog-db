@@ -741,14 +741,23 @@ where
         // Each line's session overlay, read live. Filtered by the
         // staged retracts only: the overlay's own tombstones hide facts
         // *beneath* it, never its own. Pushed only when it has rows,
-        // for the same reason the per-query stream is below.
+        // for the same reason the per-query stream is below. An
+        // overlay row is the newest fact of its cell: it stands past
+        // the edition the next commit mints, above every committed row
+        // and every staged write, so a read elects it under `last` and
+        // ranks it with the rest under any other policy, until the
+        // session takes it back.
+        let pending = self.pending_edition();
+        let session = pending.successor();
         for (source, line) in self.sources.iter().zip(&format.lines) {
             let rows = source.as_ref().overlay().select(&input, &line.manifest);
             if rows.is_empty() {
                 continue;
             }
-            let rows: ArtifactStream<'a> =
-                Box::pin(stream::iter(rows.into_iter().map(|fact| Ok(fact.into()))));
+            let rows: ArtifactStream<'a> = Box::pin(stream::iter(
+                rows.into_iter()
+                    .map(move |fact| Ok(ArtifactView::pending(fact, session))),
+            ));
             streams.push(filter_hidden(
                 rows,
                 line.staged.clone(),
@@ -778,7 +787,6 @@ where
         // the edition that commit mints, equal to every other write of
         // the transaction: a read over the transaction elects as a read
         // after the commit will.
-        let pending = self.pending_edition();
         for layer in self.layers().await? {
             let rows = layer.select(&input, &manifest);
             if !rows.is_empty() {

@@ -105,25 +105,36 @@ where
     // What every write observed of the line: its claims, read once per
     // cell a succession writes.
     let line = QueryEnv::new(sources.clone(), overlay.clone(), env);
-    // A commit leaves a cell to the tree unless some rule derives its
-    // relation: one the line knows, or one this transaction installs,
+    // A commit leaves a cell to the tree unless the tree cannot see
+    // every candidate the read elects among: a rule derives the
+    // relation (one the line knows, or one this transaction installs,
     // which the line cannot know yet and the settlement below reads
-    // through the writes before each succession.
+    // through the writes before each succession), or the session
+    // overlay holds the cell.
     if settlement == Settlement::Commit && !staged.holds_rules() {
         let mut relations: Vec<&Attribute> = Vec::new();
-        for (the, _, change) in staged.log() {
-            if matches!(change, Change::Succeed(..)) && !relations.contains(&the) {
+        let mut unseen = false;
+        for (the, of, change) in staged.log() {
+            if !matches!(change, Change::Succeed(..)) {
+                continue;
+            }
+            if !relations.contains(&the) {
                 relations.push(the);
             }
-        }
-        let mut derived = false;
-        for the in relations {
-            if rules_derive(&line, the).await? {
-                derived = true;
+            if overlay_holds(&sources, the, of) {
+                unseen = true;
                 break;
             }
         }
-        if !derived {
+        if !unseen {
+            for the in relations {
+                if rules_derive(&line, the).await? {
+                    unseen = true;
+                    break;
+                }
+            }
+        }
+        if !unseen {
             return Ok(staged.export());
         }
     }
@@ -213,14 +224,25 @@ where
 }
 
 /// A claim or candidate a succession may elect: its value and its
-/// standing, and whether it is a stored claim a write can succeed.
+/// standing, and whether it is a stored claim a write can succeed. A
+/// candidate a rule derives is not; neither is a session overlay row,
+/// which only the session takes back.
 struct Candidate {
     value: Value,
     standing: Option<Standing>,
     claim: bool,
 }
 
-/// The claims a cell holds as `view` reads them.
+/// Whether some line's session overlay holds a fact of the cell.
+fn overlay_holds(sources: &[Source], the: &Attribute, of: &Entity) -> bool {
+    let selector = ArtifactSelector::new().the(the.clone()).of(of.clone());
+    sources
+        .iter()
+        .any(|source| !source.as_ref().overlay().scan(&selector).is_empty())
+}
+
+/// The claims a cell holds as `view` reads them: the stored claims a
+/// write can succeed, and the session overlay's rows, which it cannot.
 async fn claims_of<Env>(
     view: &QueryEnv<'_, Env>,
     the: &Attribute,
@@ -254,7 +276,7 @@ where
                 cause: Claim::from(artifact.clone()).cause().clone(),
             }),
             value: artifact.is,
-            claim: true,
+            claim: row.key().is_some(),
         });
     }
     Ok(claims)
@@ -360,7 +382,11 @@ impl Cell {
     /// A cell over the claims the line holds.
     fn over(claims: Vec<Candidate>) -> Self {
         Self {
-            line: claims.iter().map(|claim| claim.value.clone()).collect(),
+            line: claims
+                .iter()
+                .filter(|claim| claim.claim)
+                .map(|claim| claim.value.clone())
+                .collect(),
             live: claims,
             settled: Vec::new(),
         }
@@ -418,7 +444,11 @@ impl Cell {
                 vec![change.clone()]
             }
             Change::Succeed(value, succession) => {
-                if self.live.iter().any(|claim| claim.value == *value) {
+                if self
+                    .live
+                    .iter()
+                    .any(|claim| claim.claim && claim.value == *value)
+                {
                     return Ok(Vec::new());
                 }
                 let pool: Vec<(Value, Option<Standing>, (Value, bool))> = self
@@ -731,6 +761,240 @@ mod tests {
             stored(&branch, &operator, &alice).await?,
             vec![100, 150],
             "the write succeeds the stored claim the read now elects"
+        );
+        Ok(())
+    }
+
+    /// `org/salary` read for `of` under `select`, every row.
+    async fn read_under(
+        branch: &Branch,
+        operator: &dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
+        of: &Entity,
+        select: &str,
+    ) -> Result<Vec<u64>> {
+        let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": select }
+        }}))?;
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::constant(of.clone()));
+        terms.insert("salary".to_string(), Term::<Any>::var("salary"));
+        let rows: Vec<ConceptConclusion> = branch
+            .select(ConceptQuery { predicate, terms })
+            .perform(operator)
+            .try_vec()
+            .await?;
+        let mut read: Vec<u64> = rows
+            .iter()
+            .map(|row| row.get::<u64>("salary"))
+            .collect::<Result<_, _>>()?;
+        read.sort();
+        Ok(read)
+    }
+
+    /// An `org/salary` fact for `of`, as a session asserts it into the
+    /// overlay.
+    fn session_salary(of: &Entity, value: u32) -> AttributeStatement {
+        AttributeStatement {
+            succession: None,
+            ..salary(of, value)
+        }
+    }
+
+    /// The session overlay is the newest facts: an overlay row wins a
+    /// `last` read over the committed claim of its cell, and a write
+    /// the read resolves to the overlay row retires nothing, since a
+    /// commit never takes back what only the session put there. The
+    /// written claim stands beside the committed one, and is what a
+    /// `last` read elects once the session drops its row.
+    #[dialog_common::test]
+    async fn it_leaves_an_overlay_row_a_last_read_elects() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice = Entity::new()?;
+        let last = |value: u32| AttributeStatement {
+            succession: Some(Succession::Last),
+            ..salary(&alice, value)
+        };
+        branch
+            .transaction()
+            .assert(last(300))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.overlay().assert(session_salary(&alice, 500))?;
+        assert_eq!(
+            read_under(&branch, &operator, &alice, "last").await?,
+            vec![500],
+            "the overlay row is the newest fact of the cell"
+        );
+
+        branch
+            .transaction()
+            .assert(last(400))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            stored(&branch, &operator, &alice).await?,
+            vec![300, 400],
+            "the read elected the overlay row, so no stored claim is succeeded"
+        );
+        assert_eq!(
+            read_under(&branch, &operator, &alice, "last").await?,
+            vec![500],
+            "the overlay row still stands above the written claim"
+        );
+        assert_eq!(
+            read_under(&branch, &operator, &alice, "all").await?,
+            vec![300, 400, 500]
+        );
+
+        branch.overlay().clear();
+        assert_eq!(
+            read_under(&branch, &operator, &alice, "last").await?,
+            vec![400],
+            "with the session row gone the written claim is the newest"
+        );
+        assert_eq!(stored(&branch, &operator, &alice).await?, vec![300, 400]);
+        Ok(())
+    }
+
+    /// Under `max` the overlay row ranks by value like any claim: a
+    /// write succeeds the stored claim the read elects beneath a
+    /// smaller overlay row, and retires nothing when the overlay row is
+    /// the greatest.
+    #[dialog_common::test]
+    async fn it_succeeds_the_stored_claim_a_max_read_elects_beside_the_overlay() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice = Entity::new()?;
+        branch
+            .transaction()
+            .assert(salary(&alice, 300))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        branch.overlay().assert(session_salary(&alice, 100))?;
+        assert_eq!(read_max(&branch, &operator, &alice).await?, vec![300]);
+        branch
+            .transaction()
+            .assert(salary(&alice, 400))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            stored(&branch, &operator, &alice).await?,
+            vec![400],
+            "the stored claim the read elected is succeeded; the overlay row is not a claim"
+        );
+        assert_eq!(read_max(&branch, &operator, &alice).await?, vec![400]);
+
+        branch.overlay().assert(session_salary(&alice, 500))?;
+        assert_eq!(read_max(&branch, &operator, &alice).await?, vec![500]);
+        branch
+            .transaction()
+            .assert(salary(&alice, 450))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            stored(&branch, &operator, &alice).await?,
+            vec![400, 450],
+            "the read elected the overlay row, so no stored claim is succeeded"
+        );
+        assert_eq!(read_max(&branch, &operator, &alice).await?, vec![500]);
+        Ok(())
+    }
+
+    /// A transaction reads the overlay above its own writes, as a read
+    /// after its commit will: the overlay row stays the newest fact.
+    #[dialog_common::test]
+    async fn it_reads_the_overlay_above_its_own_writes() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice = Entity::new()?;
+        let last = |value: u32| AttributeStatement {
+            succession: Some(Succession::Last),
+            ..salary(&alice, value)
+        };
+        branch
+            .transaction()
+            .assert(last(300))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.overlay().assert(session_salary(&alice, 500))?;
+
+        let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+        }}))?;
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));
+        terms.insert("salary".to_string(), Term::<Any>::var("salary"));
+        let transaction = branch.transaction().assert(last(400));
+        let rows: Vec<ConceptConclusion> = transaction
+            .query()
+            .select(ConceptQuery { predicate, terms })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let read: Vec<u64> = rows
+            .iter()
+            .map(|row| row.get::<u64>("salary"))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(read, vec![500], "the overlay row outranks the staged write");
+
+        transaction.commit().publish().perform(&operator).await?;
+        assert_eq!(
+            read_under(&branch, &operator, &alice, "last").await?,
+            vec![500]
+        );
+        Ok(())
+    }
+
+    /// Writing the value the overlay holds still lands it: the overlay
+    /// row is not a claim of the line, so the cell does not hold the
+    /// value yet, and the write stands once the session row is gone.
+    #[dialog_common::test]
+    async fn it_lands_a_value_only_the_overlay_holds() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice = Entity::new()?;
+        let last = |value: u32| AttributeStatement {
+            succession: Some(Succession::Last),
+            ..salary(&alice, value)
+        };
+        branch
+            .transaction()
+            .assert(last(300))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.overlay().assert(session_salary(&alice, 400))?;
+        branch
+            .transaction()
+            .assert(last(400))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(stored(&branch, &operator, &alice).await?, vec![300, 400]);
+        branch.overlay().clear();
+        assert_eq!(
+            read_under(&branch, &operator, &alice, "last").await?,
+            vec![400]
         );
         Ok(())
     }
