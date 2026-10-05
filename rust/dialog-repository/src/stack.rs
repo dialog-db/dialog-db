@@ -14,8 +14,8 @@
 //! # fn example(shared: Branch, local: Branch, state: Ephemeral) -> anyhow::Result<()> {
 //! // `state` was created through the environment: `Ephemeral::create()`.
 //! let open = Stack::open(state.clone())
-//!     .link(&state, &local, "memory:local".parse()?)
-//!     .link(&local, &shared, "memory:shared".parse()?); // the bottom: placements live here
+//!     .link(&state, &local, "memory:device".parse()?)
+//!     .link(&local, &shared, "memory:space".parse()?); // the bottom: placements live here
 //! // `.perform(&env).await?` walks the links `state` already records,
 //! // then commits the new ones, checking the shape as it goes.
 //! # let _ = open;
@@ -1825,6 +1825,29 @@ impl<'a> StackTransaction<'a> {
         self
     }
 
+    /// The stack this transaction runs on.
+    pub fn stack(&self) -> &'a Stack {
+        self.stack
+    }
+
+    /// Run queries against this transaction's "as-if committed" view
+    /// of the stack: the composite at the heads the stack reads at,
+    /// with the pending asserts and retracts folded in over it and the
+    /// dispatched transients beside them. Retracts hide what the
+    /// layers hold, as the commit would; nothing lands, and the
+    /// transaction stays open and committable. The view is taken as
+    /// the writes stand now: later writes to the transaction do not
+    /// reach a query already opened.
+    pub fn query(&self) -> StackQuery {
+        let mut changes = self.changes.clone();
+        self.transients.clone().assert(&mut changes);
+        StackQuery {
+            stack: self.stack.clone(),
+            composite: self.stack.composite(),
+            changes,
+        }
+    }
+
     /// Finalize into a commit command. Its `perform` stages; chain
     /// [`publish`](StackCommit::publish) to stage and publish in one
     /// step.
@@ -2041,7 +2064,10 @@ impl StackPublish<'_> {
 }
 
 /// A query over a [`Stack`] at its captured heads, with optional
-/// overlay facts. Created by [`Stack::query`].
+/// overlay facts. Created by [`Stack::query`], or by
+/// [`StackTransaction::query`] with the transaction's pending writes
+/// as the overlay.
+#[derive(Clone)]
 pub struct StackQuery {
     stack: Stack,
     composite: Composite,
@@ -4005,6 +4031,123 @@ mod tests {
                 Err(StackError::Commit(CommitError::UnboundScope { .. }))
             ),
             "a scope nothing is linked under refuses the write: {unbound:?}"
+        );
+        Ok(())
+    }
+
+    /// The values a `(the, of)` pair holds in a query's view.
+    async fn seen<V: Scalar>(
+        query: &StackQuery,
+        env: &impl StackEnv,
+        the: &str,
+        of: &Entity,
+    ) -> Result<Vec<Value>> {
+        let select = AttributeQuery::from(
+            Term::<The>::from(the.parse::<The>()?)
+                .of(Term::<Entity>::from(of.clone()))
+                .is(Term::<V>::var("v")),
+        );
+        let claims = query.select(select).perform(env).try_vec().await?;
+        Ok(claims.into_iter().map(|claim| claim.is).collect())
+    }
+
+    /// A transaction's query is the stack as the commit would leave
+    /// it: a pending assert shows, a pending retract hides what a
+    /// layer holds, a dispatched transient shows beside them, and the
+    /// stack itself is untouched until the commit lands.
+    #[dialog_common::test]
+    async fn it_queries_a_transaction_as_if_committed() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        shared
+            .transaction()
+            .assert(Placement::new("ui/selected".parse()?, name("state")))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&state, &shared, name("shared"))
+            .link(&top, &state, name("state"))
+            .perform(&operator)
+            .await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .assert(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let transaction = stack
+            .transaction()
+            .retract(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Draft".to_string()),
+            )
+            .retract(dialog_query::the!("ui/selected").of(doc.clone()).is(true))
+            .dispatch(dialog_query::the!("cmd/open").of(doc.clone()).is(true));
+        let view = transaction.query();
+
+        assert_eq!(
+            seen::<String>(&view, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Draft".into())],
+            "the pending assert shows and the pending retract hides the tree fact"
+        );
+        assert!(
+            seen::<bool>(&view, &operator, "ui/selected", &doc)
+                .await?
+                .is_empty(),
+            "the pending retract hides the state layer's fact too"
+        );
+        assert_eq!(
+            seen::<bool>(&view, &operator, "cmd/open", &doc).await?,
+            vec![Value::Boolean(true)],
+            "the dispatched transient is in the view"
+        );
+        assert_eq!(
+            values::<String>(&stack, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Notes".into())],
+            "the stack itself is unchanged until the commit lands"
+        );
+        assert!(
+            values::<bool>(&stack, &operator, "cmd/open", &doc)
+                .await?
+                .is_empty(),
+            "and never sees the transient"
+        );
+        assert_eq!(
+            stack
+                .transaction()
+                .query()
+                .select(AttributeQuery::from(
+                    Term::<The>::from(dialog_query::the!("doc/title"))
+                        .of(Term::<Entity>::from(doc.clone()))
+                        .is(Term::<String>::var("v")),
+                ))
+                .perform(&operator)
+                .try_vec()
+                .await?
+                .len(),
+            1,
+            "an empty transaction's view is the stack's"
         );
         Ok(())
     }
