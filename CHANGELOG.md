@@ -270,6 +270,15 @@ happens to it.
   a repository together, or upgrade readers before writers: a replica
   on the older release pulls such a branch, but a read that meets a
   rule it cannot decode fails with the decoding error.
+- A descriptor's JSON no longer spells `cardinality`. It writes
+  `select` where the policy says more than the lists imply (a ranked
+  `the` or `as` list reads as `top`, a plain attribute as `last`), so
+  a plain `last` field carries neither key. A program that told a
+  one-valued field apart by `cardinality: one` reads `select` instead:
+  a field is one-valued unless it says `select: all`. tonk's template
+  planner did this; a reader rebuilding a descriptor from stored facts
+  has to keep the policy and the ranked list beside the cardinality,
+  or a `top` field comes back as `last`.
 - Programs the older release refused run. `unless` and optional
   premises inside a recursive component were an error
   (`NegationThroughRecursion`); they evaluate under the cycle policy
