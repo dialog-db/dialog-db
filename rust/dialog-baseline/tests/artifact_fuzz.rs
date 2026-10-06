@@ -237,12 +237,32 @@ async fn it_converges_across_canonicalization_points_with_supersession_and_spill
         for (label, every) in [("every link", 1usize), ("every fourth link", 4)] {
             let arm = stage(&repo, seed, op_count, every).await?;
             assert_eq!(arm.version(), reference.version());
-            assert_eq!(
-                arm.revision().tree,
-                reference.revision().tree,
-                "seed {seed}, canonicalized {label}: same facts, different \
-                 canonical tree (history-independence break)"
-            );
+            if arm.revision().tree != reference.revision().tree {
+                // Which arm left canonical form, and where: the validator
+                // names the level and node, and the fact sets say whether
+                // the trees even hold the same entries.
+                let divergences = |batch: &TransactionBatch| {
+                    ArtifactTree::from_hash(NodeHash::from(*batch.revision().tree.hash()))
+                };
+                let reference_divergences = divergences(&reference)
+                    .canonical_divergences(&repo.index())
+                    .await?;
+                let arm_divergences = divergences(&arm)
+                    .canonical_divergences(&repo.index())
+                    .await?;
+                let reference_facts = staged_facts(&repo, &reference).await?;
+                let arm_facts = staged_facts(&repo, &arm).await?;
+                panic!(
+                    "seed {seed}, canonicalized {label}: same facts, different canonical tree \
+                     (history-independence break)\n  reference tree {} divergences: {:?}\n  arm tree {} \
+                     divergences: {:?}\n  fact sets equal: {}",
+                    reference.revision().tree,
+                    reference_divergences,
+                    arm.revision().tree,
+                    arm_divergences,
+                    reference_facts == arm_facts,
+                );
+            }
         }
 
         let tree = ArtifactTree::from_hash(NodeHash::from(*reference.revision().tree.hash()));

@@ -311,13 +311,15 @@ async fn seed_vault(repo: &Repository<SignerCredential>, location: &Location) ->
     Ok(FsAddress::new(location.clone()))
 }
 
-/// Open a repository for `profile`, wire `origin` at `address` for the
-/// server's subject, and track its `main` branch.
+/// Open a repository for `profile`, connect to the server's subject
+/// through the `origin` peer the run registered, and track its `main`
+/// branch. The peer is the host's, shared by every client the run mounts:
+/// registering it again under a fresh DID would leave two peers named
+/// `origin`, and the name would then resolve to neither.
 async fn mount_client(
     operator: &Peer<VolatileSpace, dialog_peer::Session>,
     profile: &Peer<VolatileSpace>,
     server: &Repository<SignerCredential>,
-    address: &FsAddress,
     name: &str,
 ) -> Result<Branch> {
     let repo = profile
@@ -325,20 +327,12 @@ async fn mount_client(
         .open()
         .perform(operator)
         .await?;
-    let origin = {
-        let site = SiteAddress::Fs(address.clone());
-        contact(&vault_peer().await?)
-            .add_address(site)
-            .name("origin")
-            .perform(operator)
-            .await?;
-        contact("origin")
-            .connect()
-            .repository(server.did())
-            .open()
-            .perform(operator)
-            .await?
-    };
+    let origin = contact("origin")
+        .connect()
+        .repository(server.did())
+        .open()
+        .perform(operator)
+        .await?;
     let branch = repo.branch("main").open().perform(operator).await?;
     let remote_branch = origin.branch("main").open().perform(operator).await?;
     branch.set_upstream(remote_branch).perform(operator).await?;
@@ -531,7 +525,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     simulation::reset_tally();
     let mut phases = Vec::new();
 
-    let client = mount_client(&operator, &profile, &server, &address, "soak-client").await?;
+    let client = mount_client(&operator, &profile, &server, "soak-client").await?;
 
     measured("pull", &mut phases, async {
         client.pull().perform(&operator).await?;
@@ -638,8 +632,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // phase is the yardstick issue #492 is judged by. The client is fresh
     // so every block is cold; the pull that adopts the head runs outside
     // the measured window.
-    let concept_client =
-        mount_client(&operator, &profile, &server, &address, "soak-concept").await?;
+    let concept_client = mount_client(&operator, &profile, &server, "soak-concept").await?;
     concept_client.pull().perform(&operator).await?;
     measured("concept", &mut phases, async {
         let layer = concept_client.query();
@@ -664,8 +657,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // scan drives the join and the other premises become entity probes. The
     // contrast between this phase and `concept` is the block-count versus
     // round-trip tradeoff the merge-versus-fold decision weighs.
-    let filtered_client =
-        mount_client(&operator, &profile, &server, &address, "soak-filtered").await?;
+    let filtered_client = mount_client(&operator, &profile, &server, "soak-filtered").await?;
     filtered_client.pull().perform(&operator).await?;
     let closed = (0..scenario.entities)
         .filter(|index| index % 3 == 2)
@@ -693,8 +685,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // client. With the ambient queue the subscription's evaluation enqueues
     // and drives its own hints, so this phase gates bead dialog-db-82's
     // subscription parity.
-    let subscribe_client =
-        mount_client(&operator, &profile, &server, &address, "soak-subscribe").await?;
+    let subscribe_client = mount_client(&operator, &profile, &server, "soak-subscribe").await?;
     subscribe_client.pull().perform(&operator).await?;
     measured("subscribe", &mut phases, async {
         let mut subscription = subscribe_client.subscribe(Query::<Card> {
@@ -724,8 +715,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // queue are shared across evaluations, so the unique count reads as
     // the union of the two footprints and duplicates stay zero), and the
     // rounds read as overlapped work, not the sum of two sequential runs.
-    let overlap_client =
-        mount_client(&operator, &profile, &server, &address, "soak-overlap").await?;
+    let overlap_client = mount_client(&operator, &profile, &server, "soak-overlap").await?;
     overlap_client.pull().perform(&operator).await?;
     measured("overlap", &mut phases, async {
         let board_layer = overlap_client.query();
@@ -762,7 +752,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // scan), hydrate its body (source fetch), and run the body's join
     // cold. The general rule-join speculation of bead dialog-db-80 is
     // measured against this phase.
-    let rule_client = mount_client(&operator, &profile, &server, &address, "soak-rule").await?;
+    let rule_client = mount_client(&operator, &profile, &server, "soak-rule").await?;
     rule_client.pull().perform(&operator).await?;
     let open = (0..scenario.entities)
         .filter(|index| index % 3 == 0)
@@ -783,7 +773,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     })
     .await?;
 
-    let downloader = mount_client(&operator, &profile, &server, &address, "soak-download").await?;
+    let downloader = mount_client(&operator, &profile, &server, "soak-download").await?;
     measured("download", &mut phases, async {
         downloader.pull().download().perform(&operator).await?;
         Ok(())
@@ -799,7 +789,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // the shape whose integrate read the remote tree leaf by leaf while
     // its opening pass looked ahead a fixed number of changes: the
     // rounds here should track the tree's depth, never its leaf count.
-    let seeded = mount_client(&operator, &profile, &server, &address, "soak-seeded").await?;
+    let seeded = mount_client(&operator, &profile, &server, "soak-seeded").await?;
     let mut seed = Vec::new();
     for index in scenario.entities..scenario.entities + scenario.entities / 4 {
         seed.extend(entity_facts(index)?);
