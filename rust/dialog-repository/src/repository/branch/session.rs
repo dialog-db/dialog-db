@@ -1,7 +1,6 @@
 use dialog_effects::blob::Read as BlobRead;
 use std::collections::{BTreeSet, HashSet};
 
-use dialog_artifacts::LoadBlob;
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
@@ -9,12 +8,13 @@ use dialog_artifacts::{
     DialogArtifactsError, Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey,
     Speculation, Statement, sort_key,
 };
+use dialog_artifacts::{Attribute, LoadBlob};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
-use dialog_query::attribute::AttributeDescriptor;
+use dialog_query::attribute::{AttributeDescriptor, Relation, The};
 use dialog_query::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use dialog_query::concept::query::fixpoint::Continuation;
 use dialog_query::concept::query::{ConceptRules, Exact, PlanCache};
@@ -24,7 +24,7 @@ use dialog_query::recall::{BodyMemo, Memo};
 use dialog_query::rule::statement::derives_entities;
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
-use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
+use dialog_query::{Cardinality, DeductiveRule, Negation, Premise, Proposition};
 use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest, PersistentNode};
 use futures_util::future::try_join_all;
 use futures_util::{TryStreamExt as _, stream};
@@ -1438,16 +1438,11 @@ impl<'a> QueryEnv<'a> {
     /// existed, concluding the attribute concept. Only the index is
     /// read; no bundle is assembled, which is what a commit asks once
     /// per relation it writes.
-    pub(crate) async fn rules_derive(
-        &self,
-        the: &dialog_artifacts::Attribute,
-    ) -> Result<bool, EvaluationError> {
+    pub(crate) async fn rules_derive(&self, the: &Attribute) -> Result<bool, EvaluationError> {
         let field = ConceptFieldDescriptor::required(AttributeDescriptor::over(
-            dialog_query::attribute::Relation::Attribute(dialog_query::attribute::The::from(
-                the.clone(),
-            )),
+            Relation::Attribute(The::from(the.clone())),
             "",
-            dialog_query::Cardinality::Many,
+            Cardinality::Many,
             None,
         ));
         let single = ConceptDescriptor::of_attribute(&field);
