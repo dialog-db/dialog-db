@@ -202,6 +202,34 @@ impl<State> ArtifactSelector<State>
 where
     State: ArtifactSelectorState,
 {
+    /// The cells this selector reads from: its entity and attribute
+    /// bounds alone, with every bound on the value dropped. `None` when
+    /// it bounds only the value, and so reads from every cell.
+    pub fn cells(&self) -> Option<ArtifactSelector<Constrained>> {
+        if self.entity.is_none()
+            && self.attribute.is_none()
+            && self.entity_prefix.is_none()
+            && self.attribute_prefix.is_none()
+            && self.attribute_name.is_none()
+            && self.name_shape.is_none()
+        {
+            return None;
+        }
+        Some(ArtifactSelector {
+            entity: self.entity.clone(),
+            attribute: self.attribute.clone(),
+            value: None,
+            entity_prefix: self.entity_prefix.clone(),
+            attribute_prefix: self.attribute_prefix.clone(),
+            attribute_name: self.attribute_name.clone(),
+            name_shape: self.name_shape.clone(),
+            value_prefix: None,
+            value_lower: None,
+            value_upper: None,
+            state_type: PhantomData,
+        })
+    }
+
     /// The [`Entity`] (or subject) that selected [`Artifact`]s should refer to
     pub fn entity(&self) -> Option<&Entity> {
         self.entity.as_ref()
@@ -497,5 +525,42 @@ where
             value_upper: Some(bound),
             state_type: PhantomData,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ArtifactSelector;
+    use crate::{Attribute, Entity, Value};
+
+    /// A selector's cells keep its entity and attribute bounds and
+    /// drop its value bounds; a selector bounding only the value has
+    /// none.
+    #[dialog_common::test]
+    fn it_keeps_the_cell_bounds_alone() {
+        let the: Attribute = "person/name".parse().expect("an attribute");
+        let of: Entity = "id:alice".parse().expect("an entity");
+        let cells = ArtifactSelector::new()
+            .the(the.clone())
+            .of(of.clone())
+            .is(Value::String("Alice".into()))
+            .cells()
+            .expect("bounded cells");
+        assert_eq!(cells.attribute(), Some(&the));
+        assert_eq!(cells.entity(), Some(&of));
+        assert_eq!(cells.value(), None);
+        let cells = ArtifactSelector::new()
+            .the_starting_with("person/")
+            .is_at_least(Value::UnsignedInt(1))
+            .cells()
+            .expect("bounded cells");
+        assert_eq!(cells.attribute_prefix(), Some("person/"));
+        assert_eq!(cells.value(), None);
+        assert!(
+            ArtifactSelector::new()
+                .is(Value::String("Alice".into()))
+                .cells()
+                .is_none()
+        );
     }
 }

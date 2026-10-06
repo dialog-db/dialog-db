@@ -59,10 +59,12 @@ struct State {
     /// what the commit applies, so a write that succeeds a claim is
     /// settled against the line and the writes before it, in order.
     log: Vec<(Attribute, Entity, Change)>,
-    /// Every fact a write under a choosing policy asserted, kept past
-    /// its retraction: the cells a read of a range must settle, found
-    /// by the range as the log's writes to them.
+    /// One fact per cell a write under a choosing policy asserted, kept
+    /// past its retraction: the cells a read of a range must settle,
+    /// found by the range's entity and attribute bounds.
     written: Facts,
+    /// The cells `written` holds a fact for.
+    electing: HashSet<(Attribute, Entity)>,
     /// The log's writes by cell, in the order the transaction made
     /// them: what a read settles one cell by.
     by_cell: HashMap<(Attribute, Entity), Vec<Change>>,
@@ -144,7 +146,7 @@ impl State {
         };
         match change {
             Change::Assert(value, policy) => {
-                if policy.elects() {
+                if policy.elects() && self.electing.insert((the.clone(), of.clone())) {
                     self.written.insert(fact(value));
                 }
                 self.apply(Instruction::Assert(fact(value), policy.clone()));
@@ -303,21 +305,19 @@ impl Staged {
     }
 
     /// The cells written under a choosing policy that `selector`
-    /// reaches, by the writes themselves, retracted since or not: what
-    /// a read of that range settles.
+    /// reaches, retracted since or not: what a read of that range
+    /// settles. A bound on the value is no bound on the cell, since a
+    /// write may succeed a claim of a value it does not share, so the
+    /// cells are found by the entity and attribute bounds alone.
     pub(crate) fn electing_cells_within(
         &self,
         selector: &ArtifactSelector<Constrained>,
     ) -> Vec<(Attribute, Entity)> {
-        let mut cells: Vec<(Attribute, Entity)> = Vec::new();
-        let mut seen: HashSet<(Attribute, Entity)> = HashSet::new();
-        for fact in self.0.written.scan(selector) {
-            let cell = (fact.the, fact.of);
-            if seen.insert(cell.clone()) {
-                cells.push(cell);
-            }
+        let cell = |fact: &Artifact| (fact.the.clone(), fact.of.clone());
+        match selector.cells() {
+            Some(cells) => self.0.written.scan(&cells).iter().map(cell).collect(),
+            None => self.0.written.iter().map(cell).collect(),
         }
-        cells
     }
 
     /// The writes of one cell, in the order the transaction made them.

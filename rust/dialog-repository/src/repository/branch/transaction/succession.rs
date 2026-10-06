@@ -1256,6 +1256,60 @@ mod tests {
         Ok(())
     }
 
+    /// A read bounded on the value settles the cells it reaches by
+    /// their entity and attribute: a succeeded claim is hidden from a
+    /// read of its own value, though the write succeeding it wrote
+    /// another.
+    #[dialog_common::test]
+    async fn it_hides_a_succeeded_claim_from_a_read_of_its_value() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice: Entity = "id:alice".parse()?;
+        let last = |of: &Entity, value: u32| AttributeStatement {
+            policy: Some(Policy::Last),
+            ..salary(of, value)
+        };
+        branch
+            .transaction()
+            .assert(last(&alice, 10))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let transaction = branch.transaction().assert(last(&alice, 11));
+        let read = |value: u32| {
+            let predicate: ConceptDescriptor =
+                serde_json::from_value(serde_json::json!({ "with": {
+                    "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": "all" }
+                }}))
+                .expect("a descriptor");
+            let mut terms = Parameters::new();
+            terms.insert("this".to_string(), Term::<Any>::var("this"));
+            terms.insert(
+                "salary".to_string(),
+                Term::<Any>::Constant(Value::UnsignedInt(value.into())),
+            );
+            ConceptQuery { predicate, terms }
+        };
+        let rows: Vec<ConceptConclusion> = transaction
+            .query()
+            .select(read(10))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(rows.is_empty(), "the succeeded claim is hidden by value");
+        let rows: Vec<ConceptConclusion> = transaction
+            .query()
+            .select(read(11))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(rows.len(), 1, "the write reads by value");
+        Ok(())
+    }
+
     /// A write under a choosing policy reads, through its transaction,
     /// as the commit will leave the cell: the line's claim it succeeds
     /// is gone from an `all` read, and a write of the value the line
