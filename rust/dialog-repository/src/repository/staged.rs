@@ -88,7 +88,24 @@ struct CellMemo {
     observed: ReadObservation,
     /// Whether some rule derives the relation, by attribute.
     derived: HashMap<Attribute, bool>,
-    cells: HashMap<(Attribute, Entity), CellSettlement>,
+    /// Each settled cell: whether its candidates were derived, and
+    /// how it settled.
+    cells: HashMap<(Attribute, Entity), (bool, CellSettlement)>,
+}
+
+impl CellMemo {
+    /// Forget what a write to `cell` changes: the cell's own
+    /// settlement, and every settlement that read derived candidates,
+    /// since a rule's body may read any cell. A write in the rule
+    /// namespace may change what derives any relation, so it forgets
+    /// those answers too.
+    fn forget(&mut self, cell: &(Attribute, Entity)) {
+        self.cells
+            .retain(|settled, (derived, _)| !*derived && settled != cell);
+        if cell.0.as_str().starts_with("dialog.rule/") {
+            self.derived.clear();
+        }
+    }
 }
 
 /// How a read sees one cell's writes settled: the claims the writes
@@ -136,7 +153,42 @@ impl State {
     /// transaction settles the same way (see
     /// [`succession`](crate::repository::branch::transaction)).
     fn apply_change(&mut self, the: &Attribute, of: &Entity, change: &Change) {
-        self.cells = Arc::default();
+        // A write that repeats the cell's latest write exactly, value and
+        // policy alike, is the same write: the facts already hold the
+        // value, the tree would fold the two asserts into one claim, and
+        // a commit would otherwise settle the cell in the transactor as a
+        // cell written twice. tonk seeds a library's schema into a
+        // transaction and then evaluates the document that asserts the
+        // same facts, so every cell of a library install arrives twice.
+        if matches!(change, Change::Assert(..))
+            && self
+                .by_cell
+                .get(&(the.clone(), of.clone()))
+                .and_then(|writes| writes.last())
+                .is_some_and(|latest| latest == change)
+        {
+            return;
+        }
+        // A read's settlements survive the writes that do not touch
+        // them: a cell settles against the line's claims, fixed for the
+        // transaction, and its own writes. A clone taken before the
+        // write keeps the memo it shares; this store forgets in its
+        // own copy.
+        match Arc::get_mut(&mut self.cells) {
+            Some(memo) => {
+                if let Some(memo) = memo.get_mut().as_mut() {
+                    memo.forget(&(the.clone(), of.clone()));
+                }
+            }
+            None => {
+                let memo = self.cells.lock().as_ref().map(|memo| {
+                    let mut memo = memo.clone();
+                    memo.forget(&(the.clone(), of.clone()));
+                    memo
+                });
+                self.cells = Arc::new(parking_lot::Mutex::new(memo));
+            }
+        }
         self.generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
         let fact = |value: &Value| Artifact {
             the: the.clone(),
@@ -378,19 +430,25 @@ impl Staged {
         let memo = self.0.cells.lock();
         memo.as_ref()
             .filter(|memo| memo.observed.matches(observed))
-            .and_then(|memo| memo.cells.get(cell).cloned())
+            .and_then(|memo| {
+                memo.cells
+                    .get(cell)
+                    .map(|(_, settlement)| settlement.clone())
+            })
     }
 
-    /// Keep how a read under `observed` settled the cell.
+    /// Keep how a read under `observed` settled the cell, and whether
+    /// it read derived candidates to do so.
     pub(crate) fn record_cell_settlement(
         &self,
         observed: &ReadObservation,
         cell: (Attribute, Entity),
+        derived: bool,
         settlement: CellSettlement,
     ) {
         let mut memo = self.0.cells.lock();
         let memo = Self::cell_memo(&mut memo, observed);
-        memo.cells.insert(cell, settlement);
+        memo.cells.insert(cell, (derived, settlement));
     }
 
     /// The cell memo for `observed`, started afresh when the last read
@@ -565,7 +623,7 @@ mod tests {
             succeeded: vec![fact("id:a", "person/name", "old")],
             held: Vec::new(),
         };
-        staged.record_cell_settlement(&observed, cell.clone(), settlement.clone());
+        staged.record_cell_settlement(&observed, cell.clone(), false, settlement.clone());
         staged.record_relation_derived(&observed, the.clone(), false);
         let again = ReadObservation {
             metadata: Arc::new(Changes::new()),
@@ -600,6 +658,115 @@ mod tests {
         assert!(
             shared.cell_settlement(&observed, &cell).is_some(),
             "the clone before keeps its own"
+        );
+    }
+
+    /// A read's settlement of one cell survives a write to another
+    /// cell: the cell settles against the line's claims, fixed for
+    /// the transaction, and its own writes. A settlement over a
+    /// relation a rule derives does not: the other cell's write may
+    /// feed the rule. A rule installed later forgets which relations
+    /// are derived.
+    #[dialog_common::test]
+    fn it_keeps_the_settlements_a_write_does_not_touch() {
+        let mut staged = Staged::default();
+        let the: Attribute = "person/name".parse().expect("attribute");
+        let a: Entity = "id:a".parse().expect("entity");
+        let b: Entity = "id:b".parse().expect("entity");
+        let overlay = super::super::ephemeral::Ephemeral::new();
+        let observed = ReadObservation {
+            heads: vec![None],
+            overlays: vec![overlay.revision()],
+            metadata: Arc::new(Changes::new()),
+        };
+        let stored = CellSettlement {
+            succeeded: vec![fact("id:a", "person/name", "old")],
+            held: Vec::new(),
+        };
+        let derived = CellSettlement {
+            succeeded: vec![fact("id:b", "person/name", "old")],
+            held: Vec::new(),
+        };
+        staged.record_cell_settlement(&observed, (the.clone(), a.clone()), false, stored.clone());
+        staged.record_cell_settlement(&observed, (the.clone(), b.clone()), true, derived);
+        staged.record_relation_derived(&observed, the.clone(), false);
+
+        let c: Entity = "id:c".parse().expect("entity");
+        staged.apply_change(
+            &the,
+            &c,
+            &Change::Assert(Value::String("C".into()), Policy::Last),
+        );
+        assert_eq!(
+            staged.cell_settlement(&observed, &(the.clone(), a.clone())),
+            Some(stored),
+            "a write elsewhere keeps a stored cell's settlement"
+        );
+        assert!(
+            staged
+                .cell_settlement(&observed, &(the.clone(), b.clone()))
+                .is_none(),
+            "a write elsewhere drops a derived cell's settlement"
+        );
+        assert_eq!(staged.relation_derived(&observed, &the), Some(false));
+
+        staged.apply_change(
+            &the,
+            &a,
+            &Change::Assert(Value::String("A".into()), Policy::Last),
+        );
+        assert!(
+            staged
+                .cell_settlement(&observed, &(the.clone(), a.clone()))
+                .is_none(),
+            "a write to the cell drops its settlement"
+        );
+
+        let rule: Entity = "rule:x".parse().expect("entity");
+        staged.apply_change(
+            &derives_attr(),
+            &rule,
+            &Change::Assert(
+                Value::Entity("on:person/name".parse().expect("entity")),
+                Policy::All,
+            ),
+        );
+        assert!(
+            staged.relation_derived(&observed, &the).is_none(),
+            "a rule write forgets which relations are derived"
+        );
+    }
+
+    /// A write that repeats the cell's latest write exactly is the same
+    /// write: it is recorded once, and the cell is not written twice.
+    #[dialog_common::test]
+    fn it_records_a_repeated_write_once() {
+        let mut staged = Staged::default();
+        let the: Attribute = "person/name".parse().expect("attribute");
+        let a: Entity = "id:a".parse().expect("entity");
+        let write = Change::Assert(Value::String("A".into()), Policy::Last);
+        staged.apply_change(&the, &a, &write);
+        let written = staged.generation();
+        staged.apply_change(&the, &a, &write);
+        assert_eq!(staged.writes_of(&the, &a), vec![write.clone()]);
+        assert_eq!(staged.generation(), written, "the repeat is no write");
+        assert_eq!(
+            exported(&staged),
+            vec![("id:a person/name".into(), write.clone())]
+        );
+
+        let other = Change::Assert(Value::String("A".into()), Policy::All);
+        staged.apply_change(&the, &a, &other);
+        assert_eq!(
+            staged.writes_of(&the, &a),
+            vec![write.clone(), other.clone()],
+            "the same value under another policy is another write"
+        );
+        staged.apply_change(&the, &a, &write);
+        assert_eq!(
+            staged.writes_of(&the, &a),
+            vec![write.clone(), other, write],
+            "only the latest write folds a repeat"
         );
     }
 

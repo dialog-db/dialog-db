@@ -14,17 +14,17 @@ use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
-use dialog_query::attribute::{AttributeDescriptor, Relation, The};
+use dialog_query::attribute::AttributeDescriptor;
 use dialog_query::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use dialog_query::concept::query::fixpoint::Continuation;
 use dialog_query::concept::query::{ConceptRules, Exact, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use dialog_query::recall::{BodyMemo, Memo};
-use dialog_query::rule::statement::derives_entities;
+use dialog_query::rule::statement::{derives_entities, on_entity};
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
-use dialog_query::{Cardinality, DeductiveRule, Negation, Premise, Proposition};
+use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
 use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest, PersistentNode};
 use futures_util::future::try_join_all;
 use futures_util::{TryStreamExt as _, stream};
@@ -39,10 +39,10 @@ use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
 use crate::repository::{CellSettlement, ReadObservation};
 use crate::rules::{
-    LayerRoots, Legacy, RuleRead, Selecting, assemble, builtin, builtin_deriving, conclusion_attr,
-    conclusion_selector, derives_attr, derives_keys, derives_selector, has_overlay_rules,
-    head_onto, hydrate, overlay_rules, overlay_rules_deriving, rule_entities, source_attr,
-    source_bytes, source_selector,
+    LayerRoots, Legacy, RuleRead, Selecting, assemble, builtin, builtin_derives, builtin_deriving,
+    conclusion_attr, conclusion_selector, derives_attr, derives_keys, derives_selector,
+    has_overlay_rules, head_onto, hydrate, overlay_rules, overlay_rules_deriving, rule_entities,
+    source_attr, source_bytes, source_selector,
 };
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
@@ -595,7 +595,7 @@ impl<'a> QueryEnv<'a> {
                 ))
                 .await
                 .map_err(failed)?;
-                layer.record_cell_settlement(observed, cell, settlement.clone());
+                layer.record_cell_settlement(observed, cell, derived, settlement.clone());
                 settlements.push(settlement);
             }
             settled.push((index, settlements));
@@ -1165,6 +1165,69 @@ impl<'a> QueryEnv<'a> {
         Ok(legacy)
     }
 
+    /// The committed rule entities under `index` at `key` on `source`:
+    /// discovery alone, no body read. Cached per (key, head); a head
+    /// move (commit/pull) re-scans.
+    async fn durable_rule_entities(
+        &self,
+        source: &Source,
+        index: Index,
+        key: &Entity,
+    ) -> Result<Vec<Entity>, EvaluationError> {
+        let cache = source.as_ref().rule_cache();
+        let head = source.as_ref().revision();
+        let discovered = head.as_ref().and_then(|h| match index {
+            Index::Concluding => cache.discovered(key, h),
+            Index::Deriving => cache.derived(key, h),
+        });
+        if let Some(entities) = discovered {
+            return Ok(entities);
+        }
+        // The moment any resolution scans cold, the whole
+        // `dialog.rule/*` region is committed work: this
+        // concept's rules read it now, and every concept its
+        // rule bodies reference reads it next (rule premises
+        // recurse). The region is small — rules, not facts —
+        // so hint both spans whole and let the ambient driver
+        // replicate them level-parallel while this walk
+        // demand-reads; closure depth then finds it local.
+        for attribute in [conclusion_attr(), derives_attr(), source_attr()] {
+            let listening = Provider::<Preload>::execute(
+                self,
+                PreloadRequest {
+                    selector: ArtifactSelector::new().the(attribute),
+                    likelihood: Likelihood::Likely,
+                },
+            )
+            .await;
+            if !listening {
+                break;
+            }
+        }
+        let claims = self
+            .select_tree(source, index.selector(key))
+            .await
+            .map_err(|e| EvaluationError::Store(format!("rule index lookup: {e:?}")))?;
+        let mut entities = rule_entities(claims);
+        // A rule installed before the `derives` index existed
+        // carries no `derives` fact: it is found by what its
+        // stored body derives, scanned once per head.
+        if index == Index::Deriving {
+            for entity in self.legacy_rules(source).await?.deriving(key) {
+                if !entities.contains(&entity) {
+                    entities.push(entity);
+                }
+            }
+        }
+        if let Some(head) = head.clone() {
+            match index {
+                Index::Concluding => cache.record_discovery(key.clone(), head, entities.clone()),
+                Index::Deriving => cache.record_derived(key.clone(), head, entities.clone()),
+            }
+        }
+        Ok(entities)
+    }
+
     async fn durable_rules(
         &self,
         source: &Source,
@@ -1172,66 +1235,7 @@ impl<'a> QueryEnv<'a> {
         key: &Entity,
     ) -> Result<Vec<DeductiveRule>, EvaluationError> {
         let cache = source.as_ref().rule_cache();
-        let head = source.as_ref().revision();
-
-        // Discovery: which rule entities sit under this key (committed).
-        // Cached per (key, head); a head move (commit/pull) re-scans.
-        let discovered = head.as_ref().and_then(|h| match index {
-            Index::Concluding => cache.discovered(key, h),
-            Index::Deriving => cache.derived(key, h),
-        });
-        let rule_entities = match discovered {
-            Some(entities) => entities,
-            None => {
-                // The moment any resolution scans cold, the whole
-                // `dialog.rule/*` region is committed work: this
-                // concept's rules read it now, and every concept its
-                // rule bodies reference reads it next (rule premises
-                // recurse). The region is small — rules, not facts —
-                // so hint both spans whole and let the ambient driver
-                // replicate them level-parallel while this walk
-                // demand-reads; closure depth then finds it local.
-                for attribute in [conclusion_attr(), derives_attr(), source_attr()] {
-                    let listening = Provider::<Preload>::execute(
-                        self,
-                        PreloadRequest {
-                            selector: ArtifactSelector::new().the(attribute),
-                            likelihood: Likelihood::Likely,
-                        },
-                    )
-                    .await;
-                    if !listening {
-                        break;
-                    }
-                }
-                let claims = self
-                    .select_tree(source, index.selector(key))
-                    .await
-                    .map_err(|e| EvaluationError::Store(format!("rule index lookup: {e:?}")))?;
-                let mut entities = rule_entities(claims);
-                // A rule installed before the `derives` index existed
-                // carries no `derives` fact: it is found by what its
-                // stored body derives, scanned once per head.
-                if index == Index::Deriving {
-                    for entity in self.legacy_rules(source).await?.deriving(key) {
-                        if !entities.contains(&entity) {
-                            entities.push(entity);
-                        }
-                    }
-                }
-                if let Some(head) = head.clone() {
-                    match index {
-                        Index::Concluding => {
-                            cache.record_discovery(key.clone(), head, entities.clone())
-                        }
-                        Index::Deriving => {
-                            cache.record_derived(key.clone(), head, entities.clone())
-                        }
-                    }
-                }
-                entities
-            }
-        };
+        let rule_entities = self.durable_rule_entities(source, index, key).await?;
 
         // Hydration: reuse cached bodies (content-addressed, never
         // stale) and fetch + compile the rest from each rule's
@@ -1434,33 +1438,41 @@ impl<'a> QueryEnv<'a> {
 
     /// Whether some rule derives the relation `the` names, as
     /// [`resolve_bundle`](Self::resolve_bundle) would find one for the
-    /// attribute concept over it: a built-in, a rule under the
-    /// relation's `derives` key, or one installed before the index
-    /// existed, concluding the attribute concept. Only the index is
-    /// read; no bundle is assembled, which is what a commit asks once
-    /// per relation it writes.
+    /// attribute concept over it: a built-in, or a rule under the
+    /// relation's `derives` key on any layer, with the rules installed
+    /// before the index existed folded into the committed key. Only the
+    /// index is read from the key the attribute spells; no concept is
+    /// described or hashed and no body is hydrated, which is what a
+    /// commit asks once per relation it writes.
     pub(crate) async fn rules_derive(&self, the: &Attribute) -> Result<bool, EvaluationError> {
-        let field = ConceptFieldDescriptor::required(AttributeDescriptor::over(
-            Relation::Attribute(The::from(the.clone())),
-            "",
-            Cardinality::Many,
-            None,
-        ));
-        let single = ConceptDescriptor::of_attribute(&field);
-        let concept = single.this();
-        if !builtin_deriving(&concept).is_empty() {
-            return Ok(true);
-        }
-        let Some(on) = derives_keys(&single).into_iter().next() else {
+        let Some(on) = on_entity(the) else {
             return Ok(false);
         };
-        if !self.resolve_rules(Index::Deriving, &on).await?.is_empty() {
+        if builtin_derives(&on) {
             return Ok(true);
         }
-        Ok(!self
-            .resolve_rules(Index::Concluding, &concept)
-            .await?
-            .is_empty())
+        let selector = Index::Deriving.selector(&on);
+        let manifest = &self.format().await?.manifest;
+        for source in &self.sources {
+            if !self
+                .durable_rule_entities(source, Index::Deriving, &on)
+                .await?
+                .is_empty()
+            {
+                return Ok(true);
+            }
+            self.read_rules(&selector, manifest);
+            if !source.as_ref().overlay().scan(&selector).is_empty() {
+                return Ok(true);
+            }
+        }
+        if !overlay_rules_deriving(&self.changes, &on).is_empty() {
+            return Ok(true);
+        }
+        Ok(self
+            .layers
+            .iter()
+            .any(|layer| !layer.scan(&selector).is_empty()))
     }
 
     /// The rule bundle for `descriptor`, resolved from every layer.

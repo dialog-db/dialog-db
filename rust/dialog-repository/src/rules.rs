@@ -33,7 +33,7 @@
 //!   the overlay in its own layer is what makes the "overlay rule masked
 //!   by a head-keyed cache" bug structurally impossible.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use dialog_artifacts::history::REVISION_ATTRIBUTE;
@@ -45,7 +45,7 @@ use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, Exact, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::formula::revision::{RevisionParentQuery, RevisionQuery};
-use dialog_query::rule::statement::Reach;
+use dialog_query::rule::statement::{Reach, derives_entities};
 use dialog_query::type_system::Type as Kind;
 use dialog_query::types::Any;
 use dialog_query::{
@@ -280,6 +280,15 @@ pub(crate) fn builtin_rules() -> &'static [DeductiveRule] {
 /// The built-in rules deriving the attribute concept `attribute`, each
 /// re-headed onto it: how a query over one attribute of a built-in
 /// concept sees the built-in derivation.
+/// Whether a built-in rule derives the relation whose trigger key is
+/// `on`: the key alone decides, so a caller formed it from the
+/// attribute without describing or hashing a concept.
+pub(crate) fn builtin_derives(on: &Entity) -> bool {
+    static KEYS: OnceLock<HashSet<Entity>> = OnceLock::new();
+    KEYS.get_or_init(|| builtin_rules().iter().flat_map(derives_entities).collect())
+        .contains(on)
+}
+
 pub(crate) fn builtin_deriving(attribute: &Entity) -> Vec<DeductiveRule> {
     static HEADS: OnceLock<HashMap<Entity, Vec<DeductiveRule>>> = OnceLock::new();
     HEADS
