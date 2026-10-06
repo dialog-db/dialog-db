@@ -56,6 +56,8 @@ use dialog_query::{
 use futures_util::TryStreamExt;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
+#[cfg(not(target_arch = "wasm32"))]
+use std::env::var_os;
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -143,14 +145,13 @@ pub(crate) async fn settle(
             Entry::Vacant(vacant) => {
                 vacant.insert(CellWrites {
                     elects: change.elects(),
-                    first: change.clone(),
-                    repeated: true,
+                    single: true,
                 });
             }
             Entry::Occupied(mut occupied) => {
                 let cell = occupied.get_mut();
                 cell.elects |= change.elects();
-                cell.repeated &= cell.first == *change;
+                cell.single = false;
             }
         }
     }
@@ -163,11 +164,16 @@ pub(crate) async fn settle(
             // Only a cell written once, or with one write repeated, is
             // left to the tree: the tree settles a batch's writes to
             // one cell as a set, so a value retracted and written back
-            // in one transaction must reach it settled.
+            // in one transaction must reach it settled. A repeated write
+            // is settled here all the same: the tree's election costs
+            // more than reading the cell, since it forces the buffered
+            // writes down to the leaf it scans (see the settlement
+            // measurements in the pull request).
             let leave_to_tree = settles
-                && writes.is_some_and(|writes| writes.repeated)
+                && writes.is_some_and(|writes| writes.single)
                 && !overlay_holds(&sources, the, of)
-                && !derives.at(&line, the).await?;
+                && !derives.at(&line, the).await?
+                && !settle_everything();
             if leave_to_tree {
                 passed.insert(key.clone());
             }
@@ -342,10 +348,22 @@ pub(crate) async fn settle_cell(
 struct CellWrites {
     /// Whether some write of the cell elects.
     elects: bool,
-    /// The first write of the cell.
-    first: Change,
-    /// Whether every write of the cell repeats the first.
-    repeated: bool,
+    /// Whether the cell is written once.
+    single: bool,
+}
+
+/// Whether every succession is settled here rather than left to the
+/// tree: a measurement switch, native only, for comparing the two
+/// paths on one build (temporary).
+fn settle_everything() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        var_os("DIALOG_SETTLE_EVERYTHING").is_some()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
 }
 
 /// A claim or candidate a succession may elect: its value and its
