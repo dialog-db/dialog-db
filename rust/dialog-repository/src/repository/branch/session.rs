@@ -1431,6 +1431,42 @@ impl<'a> QueryEnv<'a> {
         Ok(head)
     }
 
+    /// Whether some rule derives the relation `the` names, as
+    /// [`resolve_bundle`](Self::resolve_bundle) would find one for the
+    /// attribute concept over it: a built-in, a rule under the
+    /// relation's `derives` key, or one installed before the index
+    /// existed, concluding the attribute concept. Only the index is
+    /// read; no bundle is assembled, which is what a commit asks once
+    /// per relation it writes.
+    pub(crate) async fn rules_derive(
+        &self,
+        the: &dialog_artifacts::Attribute,
+    ) -> Result<bool, EvaluationError> {
+        let field = ConceptFieldDescriptor::required(AttributeDescriptor::over(
+            dialog_query::attribute::Relation::Attribute(dialog_query::attribute::The::from(
+                the.clone(),
+            )),
+            "",
+            dialog_query::Cardinality::Many,
+            None,
+        ));
+        let single = ConceptDescriptor::of_attribute(&field);
+        let concept = single.this();
+        if !builtin_deriving(&concept).is_empty() {
+            return Ok(true);
+        }
+        let Some(on) = derives_keys(&single).into_iter().next() else {
+            return Ok(false);
+        };
+        if !self.resolve_rules(Index::Deriving, &on).await?.is_empty() {
+            return Ok(true);
+        }
+        Ok(!self
+            .resolve_rules(Index::Concluding, &concept)
+            .await?
+            .is_empty())
+    }
+
     /// The rule bundle for `descriptor`, resolved from every layer.
     ///
     /// A built-in concept is exact: nothing stores or derives its

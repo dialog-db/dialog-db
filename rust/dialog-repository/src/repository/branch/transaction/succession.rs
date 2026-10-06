@@ -429,12 +429,13 @@ impl Derives {
     }
 }
 
-/// Whether some rule `view` knows derives the relation `the` names.
+/// Whether some rule `view` knows derives the relation `the` names:
+/// read from the rule index alone, without assembling the relation's
+/// bundle.
 async fn rules_derive(view: &QueryEnv<'_>, the: &Attribute) -> Result<bool, CommitError> {
-    let rules = Provider::<SelectRules>::execute(view, relation_predicate(the))
+    view.rules_derive(the)
         .await
-        .map_err(|error| CommitError::Policy(error.to_string()))?;
-    Ok(!rules.installed().is_empty())
+        .map_err(|error| CommitError::Policy(error.to_string()))
 }
 
 /// Every candidate a read of the relation sees for the entity through
