@@ -228,3 +228,49 @@ What this changes for you:
 Why: whatever is true of an asserted fact must be true of a derived
 one. Asserting `Employee` writes two attribute facts and nothing else;
 deriving it must land in the same place.
+
+### Compatibility and migration
+
+What a replica holds from the release before this branch, and what
+happens to it.
+
+- Stored claims are unchanged: a claim is its attribute, entity,
+  value and cause, with the versions that carry it. A cell the older
+  release wrote through a cardinality-one replacement holds one claim,
+  and a `last` read returns it, as before. Nothing is rewritten.
+- Stored rules decode. A rule is stored as the dag-cbor of its
+  descriptor, and the older descriptor spells `cardinality: one` or
+  `many` and a single relation under `the`; both read as `last` and
+  `all` over that relation. Re-encoded, a rule never writes the older
+  spelling back.
+- Rules installed by the older release are found, and indexed by the
+  first commit. Such a rule carries its conclusion and its body but no
+  `derives` fact, and its entity is the older byte-hash identity. A
+  read takes the rules with a `conclusion` fact and no `derives` fact,
+  once per head from those two index ranges, decodes only those bodies
+  and finds the rule by the relations its head derives, whether the
+  head names a concept or an attribute. The next commit on the line,
+  whatever it changes, writes the `derives` facts a current install
+  would have, so every later head finds the rule by the index alone
+  and the read decodes nothing. There is no migration step to run or
+  to have missed: sync can bring such rules from a replica on the
+  older release at any time, and the next commit indexes those too.
+  The rule keeps its stored entity; nothing is reinstalled.
+- Library YAML in the older spelling parses: `cardinality:` is read as
+  `select: all` for `many` and the default `last` for `one`, and a
+  `select:` beside it wins. tonk's standard libraries carry a seed
+  version that is the hash of their text, so a worker on this release
+  sees the mismatch on first start, retracts the installed library's
+  facts by the provenance it recorded, and installs the new one.
+- The older release cannot read what this one writes. A rule written
+  here may list relations or values under `the` or `as`, which the
+  older descriptor refuses, and carries `select`, which the older
+  descriptor ignores, reading a `max` as `last`. A batch of changes
+  serializes each assertion with its policy. Upgrade every replica of
+  a repository together, or upgrade readers before writers: a replica
+  on the older release pulls such a branch, but a read that meets a
+  rule it cannot decode fails with the decoding error.
+- Programs the older release refused run. `unless` and optional
+  premises inside a recursive component were an error
+  (`NegationThroughRecursion`); they evaluate under the cycle policy
+  now, and the analysis reports each such premise.
