@@ -437,8 +437,8 @@ pub(crate) fn squash(cell: Vec<Change>, held: &dyn Fn(&Value) -> bool) -> Vec<Ch
             .iter()
             .rposition(|prior| prior.value() == change.value());
         match (&change, last.map(|at| &out[at])) {
-            (Change::Assert(_, Policy::All), Some(Change::Assert(_, Policy::All)))
-            | (Change::Retract(_), Some(Change::Retract(_))) => {}
+            (Change::Assert(_, policy), Some(Change::Assert(_, prior))) if policy == prior => {}
+            (Change::Retract(_), Some(Change::Retract(_))) => {}
             (Change::Retract(value), Some(Change::Assert(_, Policy::All))) => {
                 out.remove(last.expect("a prior write"));
                 let before = out
@@ -684,6 +684,17 @@ mod tests {
                 &|_| false
             ),
             Vec::<Change>::new()
+        );
+        // A write repeated under one policy is one write.
+        assert_eq!(
+            squash(
+                vec![
+                    Change::Assert(a(), dialog_artifacts::Policy::Last),
+                    Change::Assert(a(), dialog_artifacts::Policy::Last)
+                ],
+                &unknown
+            ),
+            vec![Change::Assert(a(), dialog_artifacts::Policy::Last)]
         );
         // Retract then assert keeps both: the commit retracts the
         // line's claim and asserts afresh.

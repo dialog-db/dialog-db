@@ -119,8 +119,11 @@ pub(crate) async fn settle(
     let mut cells: HashMap<(Attribute, Entity), Cell> = HashMap::new();
     let mut order: Vec<(Attribute, Entity)> = Vec::new();
     // The writes settled so far, as the view a later write reads the
-    // derived candidates through.
+    // derived candidates through: held back until some write needs the
+    // view, which a transaction writing under no derived relation
+    // never does.
     let mut prefix = Staged::default();
+    let mut unapplied: Vec<(Attribute, Entity, Change)> = Vec::new();
     // Whether some rule derives a relation at each write: a rule the
     // line knows, asked once per relation, or one the prefix installed
     // before the write, found by the relation's probes among the
@@ -131,27 +134,37 @@ pub(crate) async fn settle(
     // every candidate and elects in its own descent. Their writes pass
     // through as written, and the line is never read for them.
     let mut passed: HashSet<(Attribute, Entity)> = HashSet::new();
-    // How often each cell is written, and whether some write of it
-    // elects.
-    let mut writes_per_cell: HashMap<(Attribute, Entity), (usize, bool)> = HashMap::new();
+    // Each cell's writes: whether some write of it elects, and whether
+    // every write of it repeats the first.
+    let mut writes_per_cell: HashMap<(Attribute, Entity), CellWrites> = HashMap::new();
     for (the, of, change) in staged.log() {
-        let cell = writes_per_cell
-            .entry((the.clone(), of.clone()))
-            .or_default();
-        cell.0 += 1;
-        cell.1 |= change.elects();
+        match writes_per_cell.entry((the.clone(), of.clone())) {
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert(CellWrites {
+                    elects: change.elects(),
+                    first: change.clone(),
+                    repeated: true,
+                });
+            }
+            std::collections::hash_map::Entry::Occupied(mut occupied) => {
+                let cell = occupied.get_mut();
+                cell.elects |= change.elects();
+                cell.repeated &= cell.first == *change;
+            }
+        }
     }
 
     for (the, of, change) in staged.log() {
         let key = (the.clone(), of.clone());
         if !cells.contains_key(&key) {
-            let (writes, settles) = writes_per_cell.get(&key).copied().unwrap_or((0, false));
-            // Only a cell written once is left to the tree: the tree
-            // settles a batch's writes to one cell as a set, so a value
-            // retracted and written back in one transaction must reach
-            // it settled.
+            let writes = writes_per_cell.get(&key);
+            let settles = writes.is_some_and(|writes| writes.elects);
+            // Only a cell written once, or with one write repeated, is
+            // left to the tree: the tree settles a batch's writes to
+            // one cell as a set, so a value retracted and written back
+            // in one transaction must reach it settled.
             let leave_to_tree = settles
-                && writes == 1
+                && writes.is_some_and(|writes| writes.repeated)
                 && !overlay_holds(&sources, the, of)
                 && !derives.at(&line, the).await?;
             if leave_to_tree {
@@ -167,13 +180,16 @@ pub(crate) async fn settle(
         }
         let cell = cells.get_mut(&key).expect("cell loaded above");
         if passed.contains(&key) {
-            prefix.apply_change(the, of, change);
             derives.gained(the, change);
+            unapplied.push((the.clone(), of.clone(), change.clone()));
             cell.settled.push(change.clone());
             continue;
         }
         let derived = match change {
             Change::Assert(_, policy) if policy.elects() && derives.at(&line, the).await? => {
+                for (the, of, change) in unapplied.drain(..) {
+                    prefix.apply_change(&the, &of, &change);
+                }
                 let view = QueryEnv::new(sources.clone(), overlay.clone(), env)
                     .with_layers(vec![prefix.clone()]);
                 let candidates = derived_candidates(&view, the, of).await?;
@@ -183,8 +199,8 @@ pub(crate) async fn settle(
             _ => Vec::new(),
         };
         for written in cell.write(change, &derived, edition, the, of)? {
-            prefix.apply_change(the, of, &written);
             derives.gained(the, &written);
+            unapplied.push((the.clone(), of.clone(), written.clone()));
             cell.settled.push(written);
         }
     }
@@ -318,6 +334,17 @@ pub(crate) async fn settle_cell(
         }
     }
     Ok(settlement)
+}
+
+/// What a transaction's writes to one cell amount to, as the commit
+/// decides whether the tree can settle them.
+struct CellWrites {
+    /// Whether some write of the cell elects.
+    elects: bool,
+    /// The first write of the cell.
+    first: Change,
+    /// Whether every write of the cell repeats the first.
+    repeated: bool,
 }
 
 /// A claim or candidate a succession may elect: its value and its
@@ -1208,20 +1235,23 @@ mod tests {
         assert_eq!(stored(&branch, &operator, &alice).await?, vec![10]);
         assert_eq!(stored(&branch, &operator, &bob).await?, vec![20]);
 
-        // Written again with the same values, beside the rule again.
+        // Written again with the same values, beside the rule again;
+        // bob's cell written once more with another value, so its
+        // writes are not one write repeated and settle here.
         branch
             .transaction()
             .assert(&rule)
             .assert(last(&alice, 10))
             .assert(last(&bob, 20))
             .assert(last(&bob, 20))
+            .assert(last(&bob, 21))
             .commit()
             .publish()
             .perform(&operator)
             .await?;
         let branch = repo.branch("main").open().perform(&operator).await?;
         assert_eq!(stored(&branch, &operator, &alice).await?, vec![10]);
-        assert_eq!(stored(&branch, &operator, &bob).await?, vec![20]);
+        assert_eq!(stored(&branch, &operator, &bob).await?, vec![21]);
         Ok(())
     }
 
