@@ -2218,12 +2218,6 @@ mod rule_tests {
         Ok(())
     }
 
-    /// A committed rule derives a relation a query elects over: the
-    /// rule stores, discovers and hydrates through the `db.rule/*`
-    /// rail, and a read of its relation under `max` chooses among the
-    /// candidates it derives over committed facts, found by the
-    /// relation whatever policy the read declares over it.
-    #[dialog_common::test]
     /// A rule the release before the `derives` index installed holds
     /// only its conclusion and its body: a named head concludes the
     /// concept's own entity, and no fact says which relations it
@@ -2518,6 +2512,11 @@ mod rule_tests {
         Ok(())
     }
 
+    /// A committed rule derives a relation a query elects over: the
+    /// rule stores, discovers and hydrates through the `db.rule/*`
+    /// rail, and a read of its relation under `max` chooses among the
+    /// candidates it derives over committed facts, found by the
+    /// relation whatever policy the read declares over it.
     #[dialog_common::test]
     async fn it_elects_over_a_relation_a_committed_rule_derives() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
