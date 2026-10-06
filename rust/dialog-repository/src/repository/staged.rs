@@ -58,20 +58,16 @@ struct State {
     /// what the commit applies, so a write that succeeds a claim is
     /// settled against the line and the writes before it, in order.
     log: Vec<(Attribute, Entity, Change)>,
-    /// The writes as a read last settled them, kept with what the
-    /// settlement read, so every query over the same writes shares one
-    /// settlement instead of settling every succession again. Shared
-    /// by the clones a query takes; a write replaces it.
-    settled: Arc<parking_lot::Mutex<Option<ReadSettlement>>>,
-    /// The cells some write under a choosing policy wrote.
-    electing: HashSet<(Attribute, Entity)>,
-    /// Whether a retraction followed a choosing write of its cell: such
-    /// a cell holds no fact a range read finds it by, so a read settles
-    /// the whole store the way a commit does rather than cell by cell.
-    electing_retracted: bool,
-    /// The cells a read settled one by one, with what it observed and
-    /// whether some rule derives each relation it asked about. Shared
-    /// by the clones a query takes; a write replaces it.
+    /// Every fact a write under a choosing policy asserted, kept past
+    /// its retraction: the cells a read of a range must settle, found
+    /// by the range as the log's writes to them.
+    written: Facts,
+    /// The log's writes by cell, in the order the transaction made
+    /// them: what a read settles one cell by.
+    by_cell: HashMap<(Attribute, Entity), Vec<Change>>,
+    /// The cells a read settled, with what it observed and whether some
+    /// rule derives each relation it asked about. Shared by the clones
+    /// a query takes; a write replaces it.
     cells: Arc<parking_lot::Mutex<Option<CellMemo>>>,
 }
 
@@ -84,13 +80,16 @@ struct CellMemo {
     cells: HashMap<(Attribute, Entity), CellSettlement>,
 }
 
-/// How a read sees one cell's writes settled: the line's claims the
-/// writes succeed, hidden from the line; and the values written under
-/// a choosing policy the cell already held as claims, hidden from the
-/// store's own rows, since the commit writes nothing for them.
+/// How a read sees one cell's writes settled: the claims the writes
+/// succeed, hidden from the line and from the store's own rows (a
+/// succeeded claim is the line's, or an earlier write of the cell the
+/// commit squashes away); and the values written under a choosing
+/// policy the line already held as claims, hidden from the store's own
+/// rows, since the commit writes nothing for them and the line's row
+/// is the read's.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct CellSettlement {
-    /// The line's claims the cell's writes succeed.
+    /// The claims the cell's writes succeed.
     pub(crate) succeeded: Vec<Artifact>,
     /// The written facts the cell already held as claims.
     pub(crate) held: Vec<Artifact>,
@@ -117,13 +116,6 @@ impl ReadObservation {
     }
 }
 
-/// A read settlement of a store's writes, with what it observed.
-#[derive(Clone, Debug)]
-struct ReadSettlement {
-    observed: ReadObservation,
-    settled: Staged,
-}
-
 impl State {
     /// Apply one recorded write: hold or drop its fact for reads, give
     /// it its place among the transaction's writes, and log it. A
@@ -133,14 +125,7 @@ impl State {
     /// transaction settles the same way (see
     /// [`succession`](crate::repository::branch::transaction)).
     fn apply_change(&mut self, the: &Attribute, of: &Entity, change: &Change) {
-        self.settled = Arc::default();
         self.cells = Arc::default();
-        let cell = (the.clone(), of.clone());
-        if change.elects() {
-            self.electing.insert(cell);
-        } else if matches!(change, Change::Retract(_)) && self.electing.contains(&cell) {
-            self.electing_retracted = true;
-        }
         let fact = |value: &Value| Artifact {
             the: the.clone(),
             of: of.clone(),
@@ -149,6 +134,9 @@ impl State {
         };
         match change {
             Change::Assert(value, policy) => {
+                if policy.elects() {
+                    self.written.insert(fact(value));
+                }
                 self.apply(Instruction::Assert(fact(value), policy.clone()));
             }
             Change::Retract(value) => {
@@ -156,6 +144,10 @@ impl State {
             }
         }
         self.log.push((the.clone(), of.clone(), change.clone()));
+        self.by_cell
+            .entry((the.clone(), of.clone()))
+            .or_default()
+            .push(change.clone());
     }
 
     fn apply(&mut self, instruction: Instruction) {
@@ -294,40 +286,18 @@ impl Staged {
         )
     }
 
-    /// The writes as a read settled them under `observed`, if a read
-    /// already did.
-    pub(crate) fn read_settlement(&self, observed: &ReadObservation) -> Option<Staged> {
-        let memo = self.0.settled.lock();
-        memo.as_ref()
-            .filter(|settlement| settlement.observed.matches(observed))
-            .map(|settlement| settlement.settled.clone())
-    }
-
-    /// Keep the writes as a read settled them under `observed`, for
-    /// every later read observing the same.
-    pub(crate) fn record_read_settlement(&self, observed: ReadObservation, settled: Staged) {
-        *self.0.settled.lock() = Some(ReadSettlement { observed, settled });
-    }
-
-    /// Whether a retraction followed a choosing write of its cell, so a
-    /// read settles the whole store rather than cell by cell.
-    pub(crate) fn has_electing_retractions(&self) -> bool {
-        self.0.electing_retracted
-    }
-
-    /// The cells written under a choosing policy whose held facts
-    /// `selector` matches: what a read of that range settles.
+    /// The cells written under a choosing policy that `selector`
+    /// reaches, by the writes themselves, retracted since or not: what
+    /// a read of that range settles.
     pub(crate) fn electing_cells_within(
         &self,
         selector: &ArtifactSelector<Constrained>,
     ) -> Vec<(Attribute, Entity)> {
-        if self.0.electing.is_empty() {
-            return Vec::new();
-        }
         let mut cells: Vec<(Attribute, Entity)> = Vec::new();
-        for fact in self.0.facts.scan(selector) {
+        let mut seen: HashSet<(Attribute, Entity)> = HashSet::new();
+        for fact in self.0.written.scan(selector) {
             let cell = (fact.the, fact.of);
-            if self.0.electing.contains(&cell) && !cells.contains(&cell) {
+            if seen.insert(cell.clone()) {
                 cells.push(cell);
             }
         }
@@ -337,11 +307,10 @@ impl Staged {
     /// The writes of one cell, in the order the transaction made them.
     pub(crate) fn writes_of(&self, the: &Attribute, of: &Entity) -> Vec<Change> {
         self.0
-            .log
-            .iter()
-            .filter(|(t, o, _)| t == the && o == of)
-            .map(|(_, _, change)| change.clone())
-            .collect()
+            .by_cell
+            .get(&(the.clone(), of.clone()))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// The `on:` entities of every rule this store installs, from its
@@ -522,88 +491,99 @@ mod tests {
         out
     }
 
-    /// A read settlement is kept for a later read observing the same
-    /// lines and metadata, missed by one observing another head or
-    /// other metadata, and dropped by the next write.
+    /// A read finds the cells it must settle by the log's choosing
+    /// writes, a retracted one included; what it settled is kept for a
+    /// read observing the same lines, missed by one observing other
+    /// metadata, and dropped by the next write.
     #[dialog_common::test]
-    fn it_keeps_a_read_settlement_until_the_next_write() {
+    fn it_finds_electing_cells_by_their_writes_and_keeps_their_settlement() {
         let mut staged = Staged::default();
+        let the: Attribute = "person/name".parse().expect("attribute");
+        let a: Entity = "id:a".parse().expect("entity");
+        let b: Entity = "id:b".parse().expect("entity");
         staged.apply_change(
-            &"person/name".parse().expect("attribute"),
-            &"id:a".parse().expect("entity"),
+            &the,
+            &a,
             &Change::Assert(Value::String("A".into()), Policy::Last),
         );
+        staged.apply_change(
+            &the,
+            &b,
+            &Change::Assert(Value::String("B".into()), Policy::Last),
+        );
+        staged.apply_change(&the, &b, &Change::Retract(Value::String("B".into())));
+        staged.apply_change(
+            &the,
+            &a,
+            &Change::Assert(Value::String("C".into()), Policy::All),
+        );
+
+        let mut cells = staged.electing_cells_within(&ArtifactSelector::new().the(the.clone()));
+        cells.sort();
+        assert_eq!(
+            cells,
+            vec![(the.clone(), a.clone()), (the.clone(), b.clone())],
+            "both cells, the retracted write's included"
+        );
+        assert_eq!(
+            staged.electing_cells_within(&ArtifactSelector::new().the(the.clone()).of(b.clone())),
+            vec![(the.clone(), b.clone())]
+        );
+        assert_eq!(
+            staged.writes_of(&the, &b),
+            vec![
+                Change::Assert(Value::String("B".into()), Policy::Last),
+                Change::Retract(Value::String("B".into()))
+            ]
+        );
+
         let overlay = super::super::ephemeral::Ephemeral::new();
         let observed = ReadObservation {
             heads: vec![None],
             overlays: vec![overlay.revision()],
             metadata: Arc::new(Changes::new()),
         };
-        assert!(
-            staged.read_settlement(&observed).is_none(),
-            "nothing read yet"
-        );
-
-        let settled = Staged::default();
-        staged.record_read_settlement(observed.clone(), settled.clone());
+        let cell = (the.clone(), a.clone());
+        assert!(staged.cell_settlement(&observed, &cell).is_none());
+        let settlement = CellSettlement {
+            succeeded: vec![fact("id:a", "person/name", "old")],
+            held: Vec::new(),
+        };
+        staged.record_cell_settlement(&observed, cell.clone(), settlement.clone());
+        staged.record_relation_derived(&observed, the.clone(), false);
         let again = ReadObservation {
             metadata: Arc::new(Changes::new()),
             ..observed.clone()
         };
-        assert!(
-            staged.read_settlement(&again).is_some(),
-            "the same observation, in another allocation, reads the settlement"
-        );
+        assert_eq!(staged.cell_settlement(&again, &cell), Some(settlement));
+        assert_eq!(staged.relation_derived(&again, &the), Some(false));
 
-        let mut other_metadata = Changes::new();
-        other_metadata.associate(
-            "person/name".parse().expect("attribute"),
-            "id:b".parse().expect("entity"),
-            Value::String("B".into()),
+        let mut other = Changes::new();
+        other.associate(
+            the.clone(),
+            "id:z".parse().expect("entity"),
+            Value::String("Z".into()),
             Policy::All,
         );
         let elsewhere = ReadObservation {
-            metadata: Arc::new(other_metadata),
+            metadata: Arc::new(other),
             ..observed.clone()
         };
-        assert!(
-            staged.read_settlement(&elsewhere).is_none(),
-            "other metadata misses"
-        );
-        let mut overlay_write = Changes::new();
-        overlay_write.associate(
-            "person/name".parse().expect("attribute"),
-            "id:c".parse().expect("entity"),
-            Value::String("C".into()),
-            Policy::All,
-        );
-        overlay.apply(overlay_write).expect("overlay write");
-        let moved = ReadObservation {
-            overlays: vec![overlay.revision()],
-            ..observed.clone()
-        };
-        assert!(
-            staged.read_settlement(&moved).is_none(),
-            "a moved overlay misses"
-        );
+        assert!(staged.cell_settlement(&elsewhere, &cell).is_none());
 
         let shared = staged.clone();
-        assert!(
-            shared.read_settlement(&observed).is_some(),
-            "a clone shares the settlement"
-        );
         staged.apply_change(
-            &"person/name".parse().expect("attribute"),
-            &"id:a".parse().expect("entity"),
-            &Change::Assert(Value::String("A2".into()), Policy::Last),
+            &the,
+            &a,
+            &Change::Assert(Value::String("D".into()), Policy::Last),
         );
         assert!(
-            staged.read_settlement(&observed).is_none(),
-            "a write drops the settlement"
+            staged.cell_settlement(&observed, &cell).is_none(),
+            "a write drops it"
         );
         assert!(
-            shared.read_settlement(&observed).is_some(),
-            "the clone taken before the write keeps its own"
+            shared.cell_settlement(&observed, &cell).is_some(),
+            "the clone before keeps its own"
         );
     }
 

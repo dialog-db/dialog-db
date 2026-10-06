@@ -596,7 +596,6 @@ where
         vec![source.to_source()],
         QueryLayer::from(source).overlay(&operator),
         &changes,
-        succession::Settlement::Commit,
         env,
     ))
     .await?;

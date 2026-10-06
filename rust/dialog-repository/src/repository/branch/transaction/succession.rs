@@ -36,7 +36,7 @@ use crate::repository::CellSettlement;
 use crate::repository::branch::session::{Erased, QueryEnv};
 use crate::repository::source::Source;
 use crate::repository::staged::squash;
-use crate::rules::{conclusion_attr, derives_attr};
+use crate::rules::derives_attr;
 use crate::{CommitError, Staged};
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::{
@@ -60,31 +60,19 @@ use std::sync::Arc;
 
 /// What a settlement is for: the batch a commit applies, or the view a
 /// transaction's own reads see.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Settlement {
-    /// The tree elects among a cell's stored claims when it applies a
-    /// succession, in the same descent that writes the value, so a
-    /// commit settles here only the cells some rule derives: those
-    /// have candidates the tree cannot see.
-    Commit,
-    /// A reader sees what the commit will leave, so every succession is
-    /// settled to the retraction and assertion it comes to.
-    Read,
-}
-
-/// Settle a transaction's writes against `sources`, read with `overlay`.
-/// For a [`Settlement::Read`], every succession is replaced by the
-/// retraction of the claim it succeeds, if any, and the assertion of
-/// its value. For a [`Settlement::Commit`], the same happens only when
-/// some rule derives a relation a succession writes; otherwise the
-/// successions stay as written and the tree settles them. Each write is
-/// settled over the line and the writes before it, in the order the
-/// transaction made them.
+/// Settle a transaction's writes for its commit against `sources`,
+/// read with `overlay`. A write under a choosing policy succeeds the
+/// claim the policy elects: where the tree sees every candidate, the
+/// write passes through as written and the tree elects in the descent
+/// that lands it; where it cannot (some rule derives the relation, the
+/// session overlay holds the cell, or the cell is written more than
+/// once), the write is settled here to the retraction of the claim it
+/// succeeds and the assertion of its value, over the line and the writes
+/// before it, in the order the transaction made them.
 pub(crate) async fn settle(
     sources: Vec<Source>,
     overlay: Arc<Changes>,
     staged: &Staged,
-    settlement: Settlement,
     env: &Erased,
 ) -> Result<Changes, CommitError> {
     if !staged.has_successions() {
@@ -100,7 +88,7 @@ pub(crate) async fn settle(
     // which the line cannot know yet and the settlement below reads
     // through the writes before each succession), or the session
     // overlay holds the cell.
-    if settlement == Settlement::Commit && !staged.holds_rules() {
+    if !staged.holds_rules() {
         let mut relations: Vec<&Attribute> = Vec::new();
         let mut unseen = false;
         for (the, of, change) in staged.log() {
@@ -133,37 +121,39 @@ pub(crate) async fn settle(
     // The writes settled so far, as the view a later write reads the
     // derived candidates through.
     let mut prefix = Staged::default();
-    // Whether some rule derives a relation, as of the rules the prefix
-    // held when it was asked: a write under a relation no rule derives
-    // has no candidates beyond the cell's claims, and most writes are
-    // such, so the answer is asked once per relation and again only
-    // after the prefix gains a rule.
-    let mut derives: HashMap<Attribute, (usize, bool)> = HashMap::new();
-    let mut rules_in_prefix = 0usize;
-    let rule_attributes = [conclusion_attr(), derives_attr()];
+    // Whether some rule derives a relation at each write: a rule the
+    // line knows, asked once per relation, or one the prefix installed
+    // before the write, found by the relation's probes among the
+    // `derives` facts the prefix holds.
+    let mut derives = Derives::default();
     // The cells a commit leaves to the tree: no rule derives their
     // relation and no session overlay holds them, so the tree sees
     // every candidate and elects in its own descent. Their writes pass
     // through as written, and the line is never read for them.
     let mut passed: HashSet<(Attribute, Entity)> = HashSet::new();
+    // How often each cell is written, and whether some write of it
+    // elects.
+    let mut writes_per_cell: HashMap<(Attribute, Entity), (usize, bool)> = HashMap::new();
+    for (the, of, change) in staged.log() {
+        let cell = writes_per_cell
+            .entry((the.clone(), of.clone()))
+            .or_default();
+        cell.0 += 1;
+        cell.1 |= change.elects();
+    }
 
-    for (position, (the, of, change)) in staged.log().iter().enumerate() {
+    for (the, of, change) in staged.log() {
         let key = (the.clone(), of.clone());
-        let elects_later = || {
-            staged.log()[position..]
-                .iter()
-                .any(|(t, o, c)| t == the && o == of && c.elects())
-        };
         if !cells.contains_key(&key) {
-            let settles = change.elects() || elects_later();
-            let leave_to_tree = settlement == Settlement::Commit
-                && settles
+            let (writes, settles) = writes_per_cell.get(&key).copied().unwrap_or((0, false));
+            // Only a cell written once is left to the tree: the tree
+            // settles a batch's writes to one cell as a set, so a value
+            // retracted and written back in one transaction must reach
+            // it settled.
+            let leave_to_tree = settles
+                && writes == 1
                 && !overlay_holds(&sources, the, of)
-                && !{
-                    let view = QueryEnv::new(sources.clone(), overlay.clone(), env)
-                        .with_layers(vec![prefix.clone()]);
-                    derived_at(&mut derives, rules_in_prefix, &view, the).await?
-                };
+                && !derives.at(&line, the).await?;
             if leave_to_tree {
                 passed.insert(key.clone());
             }
@@ -178,32 +168,23 @@ pub(crate) async fn settle(
         let cell = cells.get_mut(&key).expect("cell loaded above");
         if passed.contains(&key) {
             prefix.apply_change(the, of, change);
+            derives.gained(the, change);
             cell.settled.push(change.clone());
-            if rule_attributes.contains(the) {
-                rules_in_prefix += 1;
-            }
             continue;
         }
         let derived = match change {
-            Change::Assert(_, policy) if policy.elects() => {
+            Change::Assert(_, policy) if policy.elects() && derives.at(&line, the).await? => {
                 let view = QueryEnv::new(sources.clone(), overlay.clone(), env)
                     .with_layers(vec![prefix.clone()]);
-                let derived = derived_at(&mut derives, rules_in_prefix, &view, the).await?;
-                let candidates = if derived {
-                    derived_candidates(&view, the, of).await?
-                } else {
-                    Vec::new()
-                };
+                let candidates = derived_candidates(&view, the, of).await?;
                 drop(view);
                 candidates
             }
             _ => Vec::new(),
         };
-        if rule_attributes.contains(the) {
-            rules_in_prefix += 1;
-        }
         for written in cell.write(change, &derived, edition, the, of)? {
             prefix.apply_change(the, of, &written);
+            derives.gained(the, &written);
             cell.settled.push(written);
         }
     }
@@ -287,30 +268,53 @@ pub(crate) async fn settle_cell(
     } else {
         Vec::new()
     };
+    let line_values: Vec<Value> = observed
+        .iter()
+        .filter(|candidate| candidate.claim)
+        .map(|candidate| candidate.value.clone())
+        .collect();
     let mut cell = Cell::over(observed);
-    let mut settlement = CellSettlement::default();
-    for change in layer.writes_of(the, of) {
-        let written = cell.write(&change, &candidates, edition, the, of)?;
-        if written.is_empty()
-            && let Change::Assert(value, policy) = &change
-            && policy.elects()
+    let writes = layer.writes_of(the, of);
+    // The values the writes staged afresh: a value written back after
+    // a retraction is the layer's row, not the line's.
+    let mut restaged: Vec<Value> = Vec::new();
+    for change in &writes {
+        let written = cell.write(change, &candidates, edition, the, of)?;
+        if let Change::Assert(value, _) = change
+            && !written.is_empty()
         {
-            settlement.held.push(Artifact {
-                the: the.clone(),
-                of: of.clone(),
-                is: value.clone(),
-                cause: None,
-            });
+            restaged.push(value.clone());
         }
-        for write in written {
-            if let Change::Retract(value) = write {
-                settlement.succeeded.push(Artifact {
-                    the: the.clone(),
-                    of: of.clone(),
-                    is: value,
-                    cause: None,
-                });
-            }
+    }
+    // What the cell comes to: the claims live after its writes. Every
+    // value written or held that is not among them is hidden from the
+    // line and the layer alike; a live value the line holds is hidden
+    // from the layer's rows, the line's row being the read's.
+    let live: Vec<Value> = cell
+        .live
+        .iter()
+        .filter(|candidate| candidate.claim)
+        .map(|candidate| candidate.value.clone())
+        .collect();
+    let fact = |value: &Value| Artifact {
+        the: the.clone(),
+        of: of.clone(),
+        is: value.clone(),
+        cause: None,
+    };
+    let mut settlement = CellSettlement::default();
+    let written = writes.iter().filter_map(|change| match change {
+        Change::Assert(value, _) => Some(value),
+        Change::Retract(_) => None,
+    });
+    for value in written.chain(line_values.iter()) {
+        if !live.contains(value) && !settlement.succeeded.iter().any(|gone| gone.is == *value) {
+            settlement.succeeded.push(fact(value));
+        }
+    }
+    for value in &live {
+        if line_values.contains(value) && !restaged.contains(value) {
+            settlement.held.push(fact(value));
         }
     }
     Ok(settlement)
@@ -376,23 +380,53 @@ fn relation_predicate(the: &Attribute) -> ConceptDescriptor {
     ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(attribute))
 }
 
-/// Whether some rule derives `the`, as of the `rules_in_prefix` rules
-/// the prefix holds: asked of `view` once per relation, and again only
-/// after the prefix gains a rule.
-async fn derived_at(
-    derives: &mut HashMap<Attribute, (usize, bool)>,
-    rules_in_prefix: usize,
-    view: &QueryEnv<'_>,
-    the: &Attribute,
-) -> Result<bool, CommitError> {
-    if let Some((asked_at, derived)) = derives.get(the)
-        && *asked_at == rules_in_prefix
-    {
-        return Ok(*derived);
+/// Which relations rules derive as a commit's writes are settled in
+/// order: those the line's rules derive, asked once per relation, and
+/// those a rule the writes before installed derives, known by the
+/// `derives` facts the settled prefix holds.
+#[derive(Default)]
+struct Derives {
+    /// Whether the line's rules derive the relation, by attribute.
+    line: HashMap<Attribute, bool>,
+    /// The `on:` entities of the rules the prefix installed.
+    staged: HashSet<Entity>,
+    /// The trigger entities each relation probes, by attribute.
+    probes: HashMap<Attribute, Vec<Entity>>,
+}
+
+impl Derives {
+    /// Whether some rule derives `the` at this point of the settlement.
+    async fn at(&mut self, line: &QueryEnv<'_>, the: &Attribute) -> Result<bool, CommitError> {
+        let known = match self.line.get(the) {
+            Some(known) => *known,
+            None => {
+                let known = rules_derive(line, the).await?;
+                self.line.insert(the.clone(), known);
+                known
+            }
+        };
+        if known {
+            return Ok(true);
+        }
+        if self.staged.is_empty() {
+            return Ok(false);
+        }
+        let probes = self
+            .probes
+            .entry(the.clone())
+            .or_insert_with(|| Reach::of(&Relation::Attribute(The::from(the.clone()))).probes());
+        Ok(probes.iter().any(|probe| self.staged.contains(probe)))
     }
-    let derived = rules_derive(view, the).await?;
-    derives.insert(the.clone(), (rules_in_prefix, derived));
-    Ok(derived)
+
+    /// Note a write the prefix gained: a `derives` fact names a
+    /// relation a rule the prefix installs derives.
+    fn gained(&mut self, the: &Attribute, change: &Change) {
+        if *the == derives_attr()
+            && let Change::Assert(Value::Entity(on), _) = change
+        {
+            self.staged.insert(on.clone());
+        }
+    }
 }
 
 /// Whether some rule `view` knows derives the relation `the` names.
@@ -993,6 +1027,278 @@ mod tests {
 
     /// A transaction reads the overlay above its own writes, as a read
     /// after its commit will: the overlay row stays the newest fact.
+    /// A transaction's writes under a choosing policy read back through
+    /// the transaction, by entity and over the whole relation, on a line
+    /// holding nothing of them; a cell written twice reads as its later
+    /// write alone, and a value written back after another reads once.
+    #[dialog_common::test]
+    async fn it_reads_its_own_choosing_writes_on_an_empty_line() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let last = |of: &Entity, value: u32| AttributeStatement {
+            policy: Some(Policy::Last),
+            ..salary(of, value)
+        };
+        let carol: Entity = "id:carol".parse()?;
+        let transaction = branch
+            .transaction()
+            .assert(last(&alice, 10))
+            .assert(last(&bob, 20))
+            .assert(last(&bob, 21))
+            .assert(last(&carol, 30))
+            .assert(last(&carol, 40))
+            .assert(last(&carol, 30));
+
+        let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": "last" }
+        }}))?;
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));
+        terms.insert("salary".to_string(), Term::<Any>::var("salary"));
+        let rows: Vec<ConceptConclusion> = transaction
+            .query()
+            .select(ConceptQuery {
+                predicate: predicate.clone(),
+                terms,
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let read: Vec<u64> = rows
+            .iter()
+            .map(|row| row.get::<u64>("salary"))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(read, vec![10], "alice's write reads by entity");
+
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("this"));
+        terms.insert("salary".to_string(), Term::<Any>::var("salary"));
+        let rows: Vec<ConceptConclusion> = transaction
+            .query()
+            .select(ConceptQuery { predicate, terms })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let mut read: Vec<(String, u64)> = rows
+            .iter()
+            .map(|row| Ok((row.entity().to_string(), row.get::<u64>("salary")?)))
+            .collect::<Result<_>>()?;
+        read.sort();
+        assert_eq!(
+            read,
+            vec![
+                ("id:alice".to_string(), 10),
+                ("id:bob".to_string(), 21),
+                ("id:carol".to_string(), 30)
+            ],
+            "every write reads over the relation: a cell by its later write, a value written back once"
+        );
+        Ok(())
+    }
+
+    /// A value the line holds, retracted and written back under a
+    /// choosing policy in one transaction, reads through the transaction
+    /// once, and the commit keeps it; one retracted and replaced reads as
+    /// the replacement, and the commit lands that.
+    #[dialog_common::test]
+    async fn it_keeps_a_value_written_back_after_its_retraction() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let last = |of: &Entity, value: u32| AttributeStatement {
+            policy: Some(Policy::Last),
+            ..salary(of, value)
+        };
+        branch
+            .transaction()
+            .assert(last(&alice, 10))
+            .assert(last(&bob, 20))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let transaction = branch
+            .transaction()
+            .retract(last(&alice, 10))
+            .assert(last(&alice, 10))
+            .retract(last(&bob, 20))
+            .assert(last(&bob, 25));
+        let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": "all" }
+        }}))?;
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("this"));
+        terms.insert("salary".to_string(), Term::<Any>::var("salary"));
+        let rows: Vec<ConceptConclusion> = transaction
+            .query()
+            .select(ConceptQuery {
+                predicate: predicate.clone(),
+                terms: terms.clone(),
+            })
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let mut read: Vec<(String, u64)> = rows
+            .iter()
+            .map(|row| Ok((row.entity().to_string(), row.get::<u64>("salary")?)))
+            .collect::<Result<_>>()?;
+        read.sort();
+        assert_eq!(
+            read,
+            vec![("id:alice".to_string(), 10), ("id:bob".to_string(), 25)],
+            "the transaction reads the value written back once, and the replacement"
+        );
+
+        transaction.commit().publish().perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        assert_eq!(stored(&branch, &operator, &alice).await?, vec![10]);
+        assert_eq!(stored(&branch, &operator, &bob).await?, vec![25]);
+        Ok(())
+    }
+
+    /// A commit that installs a rule lands every other cell it writes
+    /// under a choosing policy: one written once, which the tree
+    /// settles, and one written twice with one value, which the
+    /// transactor settles to a single claim.
+    #[dialog_common::test]
+    async fn it_lands_choosing_writes_beside_a_rule_it_installs() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let last = |of: &Entity, value: u32| AttributeStatement {
+            policy: Some(Policy::Last),
+            ..salary(of, value)
+        };
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": {
+                "title": { "the": "org/title", "as": "Text" }
+            }},
+            "when": [{
+                "assert": { "with": {
+                    "level": { "the": "org/level", "as": "Text" }
+                }},
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "level": { "?": { "name": "title" } }
+                }
+            }]
+        }))?;
+        let rule: DeductiveRule = descriptor.compile()?;
+        branch
+            .transaction()
+            .assert(&rule)
+            .assert(last(&alice, 10))
+            .assert(last(&alice, 10))
+            .assert(last(&bob, 20))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        assert_eq!(stored(&branch, &operator, &alice).await?, vec![10]);
+        assert_eq!(stored(&branch, &operator, &bob).await?, vec![20]);
+
+        // Written again with the same values, beside the rule again.
+        branch
+            .transaction()
+            .assert(&rule)
+            .assert(last(&alice, 10))
+            .assert(last(&bob, 20))
+            .assert(last(&bob, 20))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        assert_eq!(stored(&branch, &operator, &alice).await?, vec![10]);
+        assert_eq!(stored(&branch, &operator, &bob).await?, vec![20]);
+        Ok(())
+    }
+
+    /// A write under a choosing policy reads, through its transaction,
+    /// as the commit will leave the cell: the line's claim it succeeds
+    /// is gone from an `all` read, and a write of the value the line
+    /// holds reads that claim once. A read of another cell settles
+    /// nothing of this one.
+    #[dialog_common::test]
+    async fn it_reads_a_succession_as_the_commit_leaves_it() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let alice: Entity = "id:alice".parse()?;
+        let bob: Entity = "id:bob".parse()?;
+        let last = |of: &Entity, value: u32| AttributeStatement {
+            policy: Some(Policy::Last),
+            ..salary(of, value)
+        };
+        branch
+            .transaction()
+            .assert(last(&alice, 10))
+            .assert(last(&bob, 20))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let transaction = branch
+            .transaction()
+            .assert(last(&alice, 11))
+            .assert(last(&bob, 20));
+        let read = |of: &Entity| {
+            let predicate: ConceptDescriptor =
+                serde_json::from_value(serde_json::json!({ "with": {
+                    "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": "all" }
+                }}))
+                .expect("a descriptor");
+            let mut terms = Parameters::new();
+            terms.insert("this".to_string(), Term::<Any>::constant(of.clone()));
+            terms.insert("salary".to_string(), Term::<Any>::var("salary"));
+            ConceptQuery { predicate, terms }
+        };
+        let salaries = |rows: Vec<ConceptConclusion>| -> Result<Vec<u64>> {
+            let mut read: Vec<u64> = rows
+                .iter()
+                .map(|row| row.get::<u64>("salary"))
+                .collect::<Result<_, _>>()?;
+            read.sort();
+            Ok(read)
+        };
+        let rows = transaction
+            .query()
+            .select(read(&alice))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            salaries(rows)?,
+            vec![11],
+            "the succeeded claim is gone from an all read"
+        );
+        let rows = transaction
+            .query()
+            .select(read(&bob))
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(salaries(rows)?, vec![20], "the held value reads once");
+
+        transaction.commit().publish().perform(&operator).await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        assert_eq!(stored(&branch, &operator, &alice).await?, vec![11]);
+        assert_eq!(stored(&branch, &operator, &bob).await?, vec![20]);
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_reads_the_overlay_above_its_own_writes() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;

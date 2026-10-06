@@ -4,7 +4,7 @@ mod query;
 mod succession;
 pub use batch::*;
 pub use query::{TransactionQuery, TransactionSelectQuery};
-pub(crate) use succession::{Settlement, relation_derived, settle, settle_cell};
+pub(crate) use succession::{relation_derived, settle_cell};
 
 use crate::Commit;
 use crate::repository::branch::QueryLayer;
@@ -250,7 +250,6 @@ impl TransactionCommit<&Snapshot> {
             vec![source.to_source()],
             QueryLayer::from(source).overlay(&operator),
             &self.changes,
-            Settlement::Commit,
             env,
         ))
         .await?;

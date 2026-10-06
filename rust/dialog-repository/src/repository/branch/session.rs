@@ -407,10 +407,6 @@ pub(crate) struct QueryEnv<'a> {
     /// selector is a range read (see [`Staged`]) and shared, never
     /// copied, per query.
     layers: Vec<Staged>,
-    /// The layers as reads see them: each layer holding a succession is
-    /// settled against the lines on the first read, so a transaction
-    /// reads what its commit will leave. Shared by clones.
-    settled: Arc<OnceCell<Vec<Staged>>>,
     /// The lines' format and the tombstones keyed under it, resolved on
     /// the first read (it needs the lines' tree roots) and shared by clones.
     format: Arc<OnceCell<Format>>,
@@ -505,7 +501,6 @@ impl<'a> QueryEnv<'a> {
             sources,
             changes,
             layers: Vec::new(),
-            settled: Arc::new(OnceCell::new()),
             format: Arc::new(OnceCell::new()),
             demand: None,
             reads: Arc::new(Mutex::new(Vec::new())),
@@ -521,7 +516,6 @@ impl<'a> QueryEnv<'a> {
     /// so reading them costs a range read however many there are.
     pub(crate) fn with_layers(mut self, layers: Vec<Staged>) -> Self {
         self.layers = layers;
-        self.settled = Arc::new(OnceCell::new());
         self
     }
 
@@ -553,9 +547,7 @@ impl<'a> QueryEnv<'a> {
     /// Settle, cell by cell, the layers' choosing writes a read of
     /// `input` meets: for each cell, the line's claims its writes
     /// succeed and the written values the cell already held, each
-    /// settled once per layer and observation. A layer with a retracted
-    /// choosing write was settled whole by [`layers`](Self::layers)
-    /// and meets none here.
+    /// settled once per layer and observation.
     async fn settle_within(
         &self,
         input: &ArtifactSelector<Constrained>,
@@ -563,7 +555,7 @@ impl<'a> QueryEnv<'a> {
         if !self.settles {
             return Ok(Vec::new());
         }
-        let layers = self.layers().await?;
+        let layers = self.layers();
         let mut settled: Vec<(usize, Vec<CellSettlement>)> = Vec::new();
         let mut observed: Option<ReadObservation> = None;
         for (index, layer) in layers.iter().enumerate() {
@@ -660,53 +652,11 @@ impl<'a> QueryEnv<'a> {
 }
 
 impl QueryEnv<'_> {
-    /// The layers as a read sees them. A layer holding a succession is
-    /// settled against the lines once, the way the commit settles it
-    /// (see [`succession`](super::transaction)), so the claim a write
-    /// succeeds is gone from the transaction's own view.
-    ///
-    /// A layer keeps the settlement it was last read under, with the
-    /// lines' heads, their session overlays and the metadata the read
-    /// folded in: every query over the same writes, between one write
-    /// and the next, reads that settlement rather than settling every
-    /// succession again. A document that stages its whole schema and
-    /// then resolves hundreds of names against the transaction would
-    /// otherwise settle thousands of writes per name.
-    async fn layers(&self) -> Result<&Vec<Staged>, DialogArtifactsError> {
-        self.settled
-            .get_or_try_init(|| async {
-                let whole =
-                    |layer: &Staged| layer.has_successions() && layer.has_electing_retractions();
-                if !self.settles || !self.layers.iter().any(whole) {
-                    return Ok(self.layers.clone());
-                }
-                let observed = self.observation();
-                let mut settled = Vec::with_capacity(self.layers.len());
-                for layer in &self.layers {
-                    if !whole(layer) {
-                        settled.push(layer.clone());
-                        continue;
-                    }
-                    if let Some(kept) = layer.read_settlement(&observed) {
-                        settled.push(kept);
-                        continue;
-                    }
-                    let changes = Box::pin(super::transaction::settle(
-                        self.sources.clone(),
-                        self.changes.clone(),
-                        layer,
-                        super::transaction::Settlement::Read,
-                        self.env,
-                    ))
-                    .await
-                    .map_err(|error| DialogArtifactsError::Storage(error.to_string()))?;
-                    let read = Staged::from(changes);
-                    layer.record_read_settlement(observed.clone(), read.clone());
-                    settled.push(read);
-                }
-                Ok(settled)
-            })
-            .await
+    /// The layers a read merges above the lines: the writes as held,
+    /// settled cell by cell as a read meets them
+    /// ([`settle_within`](Self::settle_within)).
+    fn layers(&self) -> &Vec<Staged> {
+        &self.layers
     }
 
     /// The lines' formats and the tombstones keyed under them, resolved
@@ -714,7 +664,7 @@ impl QueryEnv<'_> {
     async fn format(&self) -> Result<&Format, DialogArtifactsError> {
         self.format
             .get_or_try_init(|| async {
-                let layers = self.layers().await?;
+                let layers = self.layers();
                 let mut lines = Vec::with_capacity(self.sources.len());
                 for source in &self.sources {
                     lines.push(line_manifest(source.as_ref(), self.env).await?);
@@ -771,7 +721,6 @@ impl Clone for QueryEnv<'_> {
             sources: self.sources.clone(),
             changes: self.changes.clone(),
             layers: self.layers.clone(),
-            settled: self.settled.clone(),
             format: self.format.clone(),
             demand: self.demand.clone(),
             reads: self.reads.clone(),
@@ -911,7 +860,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // the edition that commit mints, equal to every other write of
         // the transaction: a read over the transaction elects as a read
         // after the commit will.
-        for (index, layer) in self.layers().await?.iter().enumerate() {
+        for (index, layer) in self.layers().iter().enumerate() {
             let rows = layer.select(&input, &manifest);
             if rows.is_empty() {
                 continue;
@@ -920,7 +869,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
                 .iter()
                 .filter(|(settled_index, _)| *settled_index == index)
                 .flat_map(|(_, cells)| cells.iter())
-                .flat_map(|cell| cell.held.iter())
+                .flat_map(|cell| cell.held.iter().chain(cell.succeeded.iter()))
                 .map(|fact| sort_key(fact, &manifest))
                 .collect();
             let rows: ArtifactStream<'a> = Box::pin(stream::iter(

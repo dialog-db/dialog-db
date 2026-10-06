@@ -212,7 +212,9 @@ pub trait Update {
     /// [`Policy::All`] the value is appended beside the cell's claims.
     /// Under any other policy the one live claim of the cell the
     /// policy elects is retracted when the batch commits, and every
-    /// other claim of the cell stays.
+    /// other claim of the cell stays. A batch holds one write of a
+    /// cell under [`Policy::Last`]: a later one succeeds the earlier
+    /// and takes its place.
     fn associate(&mut self, the: Attribute, of: Entity, is: Value, policy: Policy);
 
     /// Retract that the `attribute` of `entity` is `value`.
@@ -578,12 +580,16 @@ impl Changes {
 
 impl Update for Changes {
     fn associate(&mut self, the: Attribute, of: Entity, is: Value, policy: Policy) {
-        self.facts
-            .entry(of)
-            .or_default()
-            .entry(the)
-            .or_default()
-            .push(Change::Assert(is, policy));
+        let cell = self.facts.entry(of).or_default().entry(the).or_default();
+        // A write under `last` succeeds the cell's newest claim, and the
+        // batch's own earlier `last` write of the cell is that claim:
+        // it would be retracted the moment it landed, so the batch
+        // keeps the later write alone. Every other policy elects by
+        // value, where the earlier write may be the one that stands.
+        if policy == Policy::Last {
+            cell.retain(|change| !matches!(change, Change::Assert(_, Policy::Last)));
+        }
+        cell.push(Change::Assert(is, policy));
     }
 
     fn dissociate(&mut self, the: Attribute, of: Entity, is: Value) {
@@ -945,6 +951,70 @@ mod tests {
                 crate::Policy::Last
             )),
             "a replacement stays a replacement"
+        );
+    }
+
+    /// Two `last` writes of one cell in one batch keep the later alone,
+    /// the earlier being the claim it would succeed; writes under `all`
+    /// and under a value-electing policy stay beside it.
+    #[dialog_common::test]
+    fn it_keeps_the_later_of_two_last_writes_of_a_cell() {
+        let mut changes = Changes::new();
+        changes.associate(
+            role_attr(),
+            alice(),
+            Value::String("staff".into()),
+            crate::Policy::All,
+        );
+        changes.associate(
+            role_attr(),
+            alice(),
+            Value::String("member".into()),
+            crate::Policy::Last,
+        );
+        changes.associate(
+            role_attr(),
+            alice(),
+            Value::String("admin".into()),
+            crate::Policy::Last,
+        );
+        changes.associate(
+            role_attr(),
+            alice(),
+            Value::String("owner".into()),
+            crate::Policy::Max,
+        );
+        changes.associate(
+            role_attr(),
+            bob(),
+            Value::String("guest".into()),
+            crate::Policy::Last,
+        );
+
+        let of_alice: Vec<Change> = changes
+            .iter()
+            .filter(|(entity, attribute, _)| **entity == alice() && **attribute == role_attr())
+            .map(|(_, _, change)| change.clone())
+            .collect();
+        assert_eq!(
+            of_alice,
+            vec![
+                Change::Assert(Value::String("staff".into()), crate::Policy::All),
+                Change::Assert(Value::String("admin".into()), crate::Policy::Last),
+                Change::Assert(Value::String("owner".into()), crate::Policy::Max),
+            ]
+        );
+        let of_bob: Vec<Change> = changes
+            .iter()
+            .filter(|(entity, _, _)| **entity == bob())
+            .map(|(_, _, change)| change.clone())
+            .collect();
+        assert_eq!(
+            of_bob,
+            vec![Change::Assert(
+                Value::String("guest".into()),
+                crate::Policy::Last
+            )]
         );
     }
 
