@@ -1,6 +1,8 @@
 use dialog_effects::archive::prelude::CatalogExt as _;
 use dialog_effects::archive::prelude::GetBlockExt as _;
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _};
+#[cfg(not(target_arch = "wasm32"))]
+use std::backtrace::Backtrace;
 use std::sync::Arc;
 
 use crate::RemoteSite;
@@ -193,7 +195,7 @@ where
         {
             eprintln!(
                 "dialog: hydrating block {hash} on lane {lane:?}\n{}",
-                std::backtrace::Backtrace::force_capture()
+                Backtrace::force_capture()
             );
         }
         let hydrated = Provider::<Hydrate>::execute(self.local.env(), request)
