@@ -222,7 +222,7 @@ where
             entity_prefix: self.entity_prefix.clone(),
             attribute_prefix: self.attribute_prefix.clone(),
             attribute_name: self.attribute_name.clone(),
-            name_shape: self.name_shape.clone(),
+            name_shape: self.name_shape,
             value_prefix: None,
             value_lower: None,
             value_upper: None,
