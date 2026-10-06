@@ -57,7 +57,6 @@ use futures_util::TryStreamExt;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 #[cfg(not(target_arch = "wasm32"))]
-use std::env::var_os;
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -172,8 +171,7 @@ pub(crate) async fn settle(
             let leave_to_tree = settles
                 && writes.is_some_and(|writes| writes.single)
                 && !overlay_holds(&sources, the, of)
-                && !derives.at(&line, the).await?
-                && !settle_everything();
+                && !derives.at(&line, the).await?;
             if leave_to_tree {
                 passed.insert(key.clone());
             }
@@ -350,20 +348,6 @@ struct CellWrites {
     elects: bool,
     /// Whether the cell is written once.
     single: bool,
-}
-
-/// Whether every succession is settled here rather than left to the
-/// tree: a measurement switch, native only, for comparing the two
-/// paths on one build (temporary).
-fn settle_everything() -> bool {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        var_os("DIALOG_SETTLE_EVERYTHING").is_some()
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        false
-    }
 }
 
 /// A claim or candidate a succession may elect: its value and its
