@@ -189,7 +189,21 @@ where
             lane,
             priority: self.priority,
         };
-        let hydrated = Provider::<Hydrate>::execute(self.local.env(), request).await?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            eprintln!(
+                "dialog: hydrating block {hash} on lane {lane:?}\n{}",
+                std::backtrace::Backtrace::force_capture()
+            );
+        }
+        let hydrated = Provider::<Hydrate>::execute(self.local.env(), request)
+            .await
+            .map_err(|error| {
+                ArchiveError::Storage(format!(
+                    "block {hash} is not in the local archive and could not hydrate on \
+                     lane {lane:?}: {error}"
+                ))
+            })?;
         Ok(hydrated.map(|bytes| Buffer::from(bytes.as_ref().clone())))
     }
 }
