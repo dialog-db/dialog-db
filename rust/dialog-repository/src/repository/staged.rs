@@ -35,7 +35,8 @@ use dialog_artifacts::{
 };
 use dialog_search_tree::Manifest;
 
-use super::ephemeral::Facts;
+use super::ephemeral::{EphemeralRevision, Facts};
+use crate::Revision;
 use crate::rules::conclusion_attr;
 
 /// A transaction's writes. See the [module docs](self).
@@ -57,6 +58,39 @@ struct State {
     /// what the commit applies, so a write that succeeds a claim is
     /// settled against the line and the writes before it, in order.
     log: Vec<(Attribute, Entity, Change)>,
+    /// The writes as a read last settled them, kept with what the
+    /// settlement read, so every query over the same writes shares one
+    /// settlement instead of settling every succession again. Shared
+    /// by the clones a query takes; a write replaces it.
+    settled: Arc<parking_lot::Mutex<Option<ReadSettlement>>>,
+}
+
+/// What a read settlement observed: the lines it settled against and
+/// the metadata it read with. A later read with the same observation
+/// settles to the same writes.
+#[derive(Clone, Debug)]
+pub(crate) struct ReadObservation {
+    /// Each line's head.
+    pub(crate) heads: Vec<Option<Revision>>,
+    /// Each line's session overlay.
+    pub(crate) overlays: Vec<EphemeralRevision>,
+    /// The metadata the read folded in.
+    pub(crate) metadata: Arc<Changes>,
+}
+
+impl ReadObservation {
+    fn matches(&self, other: &ReadObservation) -> bool {
+        self.heads == other.heads
+            && self.overlays == other.overlays
+            && (Arc::ptr_eq(&self.metadata, &other.metadata) || *self.metadata == *other.metadata)
+    }
+}
+
+/// A read settlement of a store's writes, with what it observed.
+#[derive(Clone, Debug)]
+struct ReadSettlement {
+    observed: ReadObservation,
+    settled: Staged,
 }
 
 impl State {
@@ -68,6 +102,7 @@ impl State {
     /// transaction settles the same way (see
     /// [`succession`](crate::repository::branch::transaction)).
     fn apply_change(&mut self, the: &Attribute, of: &Entity, change: &Change) {
+        self.settled = Arc::default();
         let fact = |value: &Value| Artifact {
             the: the.clone(),
             of: of.clone(),
@@ -221,6 +256,21 @@ impl Staged {
         )
     }
 
+    /// The writes as a read settled them under `observed`, if a read
+    /// already did.
+    pub(crate) fn read_settlement(&self, observed: &ReadObservation) -> Option<Staged> {
+        let memo = self.0.settled.lock();
+        memo.as_ref()
+            .filter(|settlement| settlement.observed.matches(observed))
+            .map(|settlement| settlement.settled.clone())
+    }
+
+    /// Keep the writes as a read settled them under `observed`, for
+    /// every later read observing the same.
+    pub(crate) fn record_read_settlement(&self, observed: ReadObservation, settled: Staged) {
+        *self.0.settled.lock() = Some(ReadSettlement { observed, settled });
+    }
+
     /// Whether this store holds any rule, for any concept.
     pub(crate) fn holds_rules(&self) -> bool {
         !self
@@ -314,6 +364,91 @@ mod tests {
             .collect();
         out.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
         out
+    }
+
+    /// A read settlement is kept for a later read observing the same
+    /// lines and metadata, missed by one observing another head or
+    /// other metadata, and dropped by the next write.
+    #[dialog_common::test]
+    fn it_keeps_a_read_settlement_until_the_next_write() {
+        let mut staged = Staged::default();
+        staged.apply_change(
+            &"person/name".parse().expect("attribute"),
+            &"id:a".parse().expect("entity"),
+            &Change::Assert(Value::String("A".into()), Policy::Last),
+        );
+        let overlay = super::super::ephemeral::Ephemeral::new();
+        let observed = ReadObservation {
+            heads: vec![None],
+            overlays: vec![overlay.revision()],
+            metadata: Arc::new(Changes::new()),
+        };
+        assert!(
+            staged.read_settlement(&observed).is_none(),
+            "nothing read yet"
+        );
+
+        let settled = Staged::default();
+        staged.record_read_settlement(observed.clone(), settled.clone());
+        let again = ReadObservation {
+            metadata: Arc::new(Changes::new()),
+            ..observed.clone()
+        };
+        assert!(
+            staged.read_settlement(&again).is_some(),
+            "the same observation, in another allocation, reads the settlement"
+        );
+
+        let mut other_metadata = Changes::new();
+        other_metadata.associate(
+            "person/name".parse().expect("attribute"),
+            "id:b".parse().expect("entity"),
+            Value::String("B".into()),
+            Policy::All,
+        );
+        let elsewhere = ReadObservation {
+            metadata: Arc::new(other_metadata),
+            ..observed.clone()
+        };
+        assert!(
+            staged.read_settlement(&elsewhere).is_none(),
+            "other metadata misses"
+        );
+        let mut overlay_write = Changes::new();
+        overlay_write.associate(
+            "person/name".parse().expect("attribute"),
+            "id:c".parse().expect("entity"),
+            Value::String("C".into()),
+            Policy::All,
+        );
+        overlay.apply(overlay_write).expect("overlay write");
+        let moved = ReadObservation {
+            overlays: vec![overlay.revision()],
+            ..observed.clone()
+        };
+        assert!(
+            staged.read_settlement(&moved).is_none(),
+            "a moved overlay misses"
+        );
+
+        let shared = staged.clone();
+        assert!(
+            shared.read_settlement(&observed).is_some(),
+            "a clone shares the settlement"
+        );
+        staged.apply_change(
+            &"person/name".parse().expect("attribute"),
+            &"id:a".parse().expect("entity"),
+            &Change::Assert(Value::String("A2".into()), Policy::Last),
+        );
+        assert!(
+            staged.read_settlement(&observed).is_none(),
+            "a write drops the settlement"
+        );
+        assert!(
+            shared.read_settlement(&observed).is_some(),
+            "the clone taken before the write keeps its own"
+        );
     }
 
     #[dialog_common::test]

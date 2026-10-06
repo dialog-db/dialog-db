@@ -35,6 +35,7 @@
 use crate::repository::branch::session::{Erased, QueryEnv};
 use crate::repository::source::Source;
 use crate::repository::staged::squash;
+use crate::rules::{conclusion_attr, derives_attr};
 use crate::{CommitError, Staged};
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::{
@@ -130,6 +131,14 @@ pub(crate) async fn settle(
     // The writes settled so far, as the view a later write reads the
     // derived candidates through.
     let mut prefix = Staged::default();
+    // Whether some rule derives a relation, as of the rules the prefix
+    // held when it was asked: a write under a relation no rule derives
+    // has no candidates beyond the cell's claims, and most writes are
+    // such, so the answer is asked once per relation and again only
+    // after the prefix gains a rule.
+    let mut derives: HashMap<Attribute, (usize, bool)> = HashMap::new();
+    let mut rules_in_prefix = 0usize;
+    let rule_attributes = [conclusion_attr(), derives_attr()];
 
     for (position, (the, of, change)) in staged.log().iter().enumerate() {
         let key = (the.clone(), of.clone());
@@ -149,14 +158,33 @@ pub(crate) async fn settle(
         let cell = cells.get_mut(&key).expect("cell loaded above");
         let derived = match change {
             Change::Assert(_, policy) if policy.elects() => {
+                let known = derives
+                    .get(the)
+                    .filter(|(asked_at, _)| *asked_at == rules_in_prefix)
+                    .map(|(_, derived)| *derived);
                 let view = QueryEnv::new(sources.clone(), overlay.clone(), env)
                     .with_layers(vec![prefix.clone()]);
-                let candidates = derived_candidates(&view, the, of).await?;
+                let derived = match known {
+                    Some(derived) => derived,
+                    None => {
+                        let derived = rules_derive(&view, the).await?;
+                        derives.insert(the.clone(), (rules_in_prefix, derived));
+                        derived
+                    }
+                };
+                let candidates = if derived {
+                    derived_candidates(&view, the, of).await?
+                } else {
+                    Vec::new()
+                };
                 drop(view);
                 candidates
             }
             _ => Vec::new(),
         };
+        if rule_attributes.contains(the) {
+            rules_in_prefix += 1;
+        }
         for written in cell.write(change, &derived, edition, the, of)? {
             prefix.apply_change(the, of, &written);
             cell.settled.push(written);
