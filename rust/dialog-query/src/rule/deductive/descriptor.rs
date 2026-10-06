@@ -118,6 +118,7 @@ impl DeductiveRuleDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::Select;
     use serde_json::json;
 
     #[dialog_common::test]
@@ -185,6 +186,90 @@ mod tests {
         assert_eq!(def.deduce.with().iter().count(), 3);
         assert_eq!(def.when.len(), 3);
         assert!(def.unless.is_empty());
+    }
+
+    /// A rule stored by the release before policies decodes: its
+    /// attributes spell `cardinality` and a single `the`, which read as
+    /// `last` and `all` over that relation. The bytes are the dag-cbor
+    /// of the descriptor as that release wrote it, which is what a
+    /// replica holds for every rule a user installed under it.
+    #[dialog_common::test]
+    fn it_decodes_a_rule_stored_before_policies() {
+        let legacy = json!({
+            "deduce": {
+                "description": "An ingredient",
+                "with": {
+                    "name": {
+                        "description": "Ingredient name",
+                        "the": "diy.cook/ingredient-name",
+                        "cardinality": "one",
+                        "as": "Text"
+                    },
+                    "tags": {
+                        "description": "",
+                        "the": "diy.cook/tag",
+                        "cardinality": "many",
+                        "as": "Text"
+                    }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "name": {
+                                "the": "diy.cook/ingredient-name",
+                                "cardinality": "one",
+                                "as": "Text"
+                            }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": {
+                            "tags": {
+                                "the": "diy.cook/tag",
+                                "cardinality": "many",
+                                "as": "Text"
+                            }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "tags": { "?": { "name": "tags" } }
+                    }
+                }
+            ]
+        });
+        let bytes = serde_ipld_dagcbor::to_vec(&legacy).expect("the legacy form encodes");
+        let rule = super::super::DeductiveRule::decode(&bytes).expect("a legacy rule decodes");
+        let head = rule.conclusion();
+        let field = |wanted: &str| {
+            head.with()
+                .iter()
+                .find(|(name, _)| *name == wanted)
+                .map(|(_, field)| field)
+                .expect("the field")
+        };
+        let (name, tags) = (field("name"), field("tags"));
+        assert_eq!(name.descriptor().select(), Select::Last);
+        assert_eq!(tags.descriptor().select(), Select::All);
+        assert_eq!(name.descriptor().cardinality(), crate::Cardinality::One);
+        assert_eq!(tags.descriptor().cardinality(), crate::Cardinality::Many);
+        // Re-encoded, the rule never writes the older spelling back.
+        let again = rule.encode();
+        let decoded: serde_json::Value =
+            serde_ipld_dagcbor::from_slice(&again).expect("the re-encoding is a map");
+        assert!(
+            decoded.to_string().contains("\"select\"")
+                || !decoded.to_string().contains("cardinality"),
+            "the branch spells policies as `select`: {decoded}"
+        );
     }
 
     #[dialog_common::test]

@@ -438,6 +438,29 @@ pub(crate) struct TriggerFootprint {
 /// order: `None` for a layer with no tree yet.
 type LayerRoots = Vec<Option<[u8; 32]>>;
 
+/// The deductive rules a line holds that were installed before the
+/// `derives` index existed: each carries a `conclusion` fact but no
+/// `derives` fact, so resolution by attribute would not find it. The
+/// relations each derives are read from its stored body instead, and
+/// the first commit on the line writes them as the `derives` facts a
+/// current install would have, after which the set is empty.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Legacy {
+    /// Each unindexed rule entity with the relations its head derives.
+    pub(crate) rules: Vec<(Entity, BTreeSet<Entity>)>,
+}
+
+impl Legacy {
+    /// The unindexed rules deriving the relation `on`.
+    pub(crate) fn deriving(&self, on: &Entity) -> Vec<Entity> {
+        self.rules
+            .iter()
+            .filter(|(_, derives)| derives.contains(on))
+            .map(|(rule, _)| rule.clone())
+            .collect()
+    }
+}
+
 #[derive(Debug, Default)]
 struct RuleCacheInner {
     /// Which rule entities conclude a concept, as of a branch head.
@@ -448,6 +471,9 @@ struct RuleCacheInner {
     /// Keyed by the attribute's `on:` entity and head-tagged like
     /// `discovery`.
     derived: HashMap<Entity, (Revision, Vec<Entity>)>,
+    /// The rules installed before the `derives` index existed, with
+    /// the relations their decoded heads derive, as of a branch head.
+    legacy: Option<(Revision, Arc<Legacy>)>,
     /// A rule's head re-spelled onto an attribute concept, keyed by
     /// (rule entity, attribute concept entity). Both halves are
     /// content-addressed, so an entry is never stale.
@@ -555,6 +581,24 @@ impl RuleCache {
     /// Record the committed rule entities deriving `on` at `head`.
     pub(crate) fn record_derived(&self, on: Entity, head: Revision, entities: Vec<Entity>) {
         self.inner.write().derived.insert(on, (head, entities));
+    }
+
+    /// The rules installed before the `derives` index existed that
+    /// derive `on`, as the last scan at `head` found them; `None` when
+    /// no scan at `head` has run.
+    /// The legacy rule set if scanned at `head`; `None` if absent or
+    /// stale (caller must re-scan the tree).
+    pub(crate) fn legacy(&self, head: &Revision) -> Option<Arc<Legacy>> {
+        let inner = self.inner.read();
+        match &inner.legacy {
+            Some((scanned_at, legacy)) if scanned_at == head => Some(legacy.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record the legacy rule set scanned at `head`.
+    pub(crate) fn record_legacy(&self, head: Revision, legacy: Arc<Legacy>) {
+        self.inner.write().legacy = Some((head, legacy));
     }
 
     /// The head of `rule` deriving the relation indexed by `attribute`, if recorded.
