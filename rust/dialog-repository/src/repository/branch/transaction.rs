@@ -4,7 +4,7 @@ mod query;
 mod succession;
 pub use batch::*;
 pub use query::{TransactionQuery, TransactionSelectQuery};
-pub(crate) use succession::{Settlement, settle};
+pub(crate) use succession::{Settlement, relation_derived, settle, settle_cell};
 
 use crate::Commit;
 use crate::repository::branch::QueryLayer;

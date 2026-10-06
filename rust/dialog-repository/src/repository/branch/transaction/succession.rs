@@ -32,6 +32,7 @@
 //! reads, so a read over the transaction sees what the commit will
 //! leave.
 
+use crate::repository::CellSettlement;
 use crate::repository::branch::session::{Erased, QueryEnv};
 use crate::repository::source::Source;
 use crate::repository::staged::squash;
@@ -45,6 +46,7 @@ use dialog_capability::Provider;
 use dialog_query::attribute::{AttributeDescriptor, Relation, The};
 use dialog_query::concept::query::Election;
 use dialog_query::query::Output as _;
+use dialog_query::rule::statement::Reach;
 use dialog_query::source::SelectRules;
 use dialog_query::types::Any;
 use dialog_query::{
@@ -52,7 +54,7 @@ use dialog_query::{
     Parameters, Standing, Term,
 };
 use futures_util::TryStreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -139,15 +141,33 @@ pub(crate) async fn settle(
     let mut derives: HashMap<Attribute, (usize, bool)> = HashMap::new();
     let mut rules_in_prefix = 0usize;
     let rule_attributes = [conclusion_attr(), derives_attr()];
+    // The cells a commit leaves to the tree: no rule derives their
+    // relation and no session overlay holds them, so the tree sees
+    // every candidate and elects in its own descent. Their writes pass
+    // through as written, and the line is never read for them.
+    let mut passed: HashSet<(Attribute, Entity)> = HashSet::new();
 
     for (position, (the, of, change)) in staged.log().iter().enumerate() {
         let key = (the.clone(), of.clone());
+        let elects_later = || {
+            staged.log()[position..]
+                .iter()
+                .any(|(t, o, c)| t == the && o == of && c.elects())
+        };
         if !cells.contains_key(&key) {
-            let observed = if change.elects()
-                || staged.log()[position..]
-                    .iter()
-                    .any(|(t, o, c)| t == the && o == of && c.elects())
-            {
+            let settles = change.elects() || elects_later();
+            let leave_to_tree = settlement == Settlement::Commit
+                && settles
+                && !overlay_holds(&sources, the, of)
+                && !{
+                    let view = QueryEnv::new(sources.clone(), overlay.clone(), env)
+                        .with_layers(vec![prefix.clone()]);
+                    derived_at(&mut derives, rules_in_prefix, &view, the).await?
+                };
+            if leave_to_tree {
+                passed.insert(key.clone());
+            }
+            let observed = if settles && !leave_to_tree {
                 claims_of(&line, the, of).await?
             } else {
                 Vec::new()
@@ -156,22 +176,19 @@ pub(crate) async fn settle(
             order.push(key.clone());
         }
         let cell = cells.get_mut(&key).expect("cell loaded above");
+        if passed.contains(&key) {
+            prefix.apply_change(the, of, change);
+            cell.settled.push(change.clone());
+            if rule_attributes.contains(the) {
+                rules_in_prefix += 1;
+            }
+            continue;
+        }
         let derived = match change {
             Change::Assert(_, policy) if policy.elects() => {
-                let known = derives
-                    .get(the)
-                    .filter(|(asked_at, _)| *asked_at == rules_in_prefix)
-                    .map(|(_, derived)| *derived);
                 let view = QueryEnv::new(sources.clone(), overlay.clone(), env)
                     .with_layers(vec![prefix.clone()]);
-                let derived = match known {
-                    Some(derived) => derived,
-                    None => {
-                        let derived = rules_derive(&view, the).await?;
-                        derives.insert(the.clone(), (rules_in_prefix, derived));
-                        derived
-                    }
-                };
+                let derived = derived_at(&mut derives, rules_in_prefix, &view, the).await?;
                 let candidates = if derived {
                     derived_candidates(&view, the, of).await?
                 } else {
@@ -224,6 +241,79 @@ pub(crate) async fn resolve_against(
         head.put_cell(the, of, cell.squashed());
     }
     Ok(())
+}
+
+/// Whether some rule `view` knows, or `layer` installs, derives the
+/// relation `the` names.
+pub(crate) async fn relation_derived(
+    view: &QueryEnv<'_>,
+    layer: &Staged,
+    the: &Attribute,
+) -> Result<bool, CommitError> {
+    if layer.holds_rules() {
+        let staged = layer.staged_derives();
+        if !staged.is_empty() {
+            let reach = Reach::of(&Relation::Attribute(The::from(the.clone())));
+            if reach.probes().iter().any(|probe| staged.contains(probe)) {
+                return Ok(true);
+            }
+        }
+    }
+    rules_derive(view, the).await
+}
+
+/// Settle one cell of `layer` the way a read sees it: against the
+/// lines read with `overlay`, and, when `derived`, the candidates rules
+/// derive through the whole of `layer`, as a read of the transaction
+/// sees every write it made. Returns the line's claims the cell's
+/// writes succeed and the written values the cell already held.
+pub(crate) async fn settle_cell(
+    sources: Vec<Source>,
+    overlay: Arc<Changes>,
+    layer: &Staged,
+    the: &Attribute,
+    of: &Entity,
+    derived: bool,
+    env: &Erased,
+) -> Result<CellSettlement, CommitError> {
+    let line = QueryEnv::new(sources.clone(), overlay.clone(), env);
+    let edition = line.pending_edition();
+    let observed = claims_of(&line, the, of).await?;
+    let candidates = if derived {
+        let view = QueryEnv::new(sources, overlay, env)
+            .with_layers(vec![layer.clone()])
+            .unsettled();
+        derived_candidates(&view, the, of).await?
+    } else {
+        Vec::new()
+    };
+    let mut cell = Cell::over(observed);
+    let mut settlement = CellSettlement::default();
+    for change in layer.writes_of(the, of) {
+        let written = cell.write(&change, &candidates, edition, the, of)?;
+        if written.is_empty()
+            && let Change::Assert(value, policy) = &change
+            && policy.elects()
+        {
+            settlement.held.push(Artifact {
+                the: the.clone(),
+                of: of.clone(),
+                is: value.clone(),
+                cause: None,
+            });
+        }
+        for write in written {
+            if let Change::Retract(value) = write {
+                settlement.succeeded.push(Artifact {
+                    the: the.clone(),
+                    of: of.clone(),
+                    is: value,
+                    cause: None,
+                });
+            }
+        }
+    }
+    Ok(settlement)
 }
 
 /// A claim or candidate a succession may elect: its value and its
@@ -284,6 +374,25 @@ fn relation_predicate(the: &Attribute) -> ConceptDescriptor {
         None,
     );
     ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(attribute))
+}
+
+/// Whether some rule derives `the`, as of the `rules_in_prefix` rules
+/// the prefix holds: asked of `view` once per relation, and again only
+/// after the prefix gains a rule.
+async fn derived_at(
+    derives: &mut HashMap<Attribute, (usize, bool)>,
+    rules_in_prefix: usize,
+    view: &QueryEnv<'_>,
+    the: &Attribute,
+) -> Result<bool, CommitError> {
+    if let Some((asked_at, derived)) = derives.get(the)
+        && *asked_at == rules_in_prefix
+    {
+        return Ok(*derived);
+    }
+    let derived = rules_derive(view, the).await?;
+    derives.insert(the.clone(), (rules_in_prefix, derived));
+    Ok(derived)
 }
 
 /// Whether some rule `view` knows derives the relation `the` names.

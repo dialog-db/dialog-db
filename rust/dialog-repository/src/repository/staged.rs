@@ -37,7 +37,7 @@ use dialog_search_tree::Manifest;
 
 use super::ephemeral::{EphemeralRevision, Facts};
 use crate::Revision;
-use crate::rules::conclusion_attr;
+use crate::rules::{conclusion_attr, derives_attr};
 
 /// A transaction's writes. See the [module docs](self).
 #[derive(Clone, Debug, Default)]
@@ -63,6 +63,37 @@ struct State {
     /// settlement instead of settling every succession again. Shared
     /// by the clones a query takes; a write replaces it.
     settled: Arc<parking_lot::Mutex<Option<ReadSettlement>>>,
+    /// The cells some write under a choosing policy wrote.
+    electing: HashSet<(Attribute, Entity)>,
+    /// Whether a retraction followed a choosing write of its cell: such
+    /// a cell holds no fact a range read finds it by, so a read settles
+    /// the whole store the way a commit does rather than cell by cell.
+    electing_retracted: bool,
+    /// The cells a read settled one by one, with what it observed and
+    /// whether some rule derives each relation it asked about. Shared
+    /// by the clones a query takes; a write replaces it.
+    cells: Arc<parking_lot::Mutex<Option<CellMemo>>>,
+}
+
+/// What a read settled cell by cell under one observation.
+#[derive(Clone, Debug)]
+struct CellMemo {
+    observed: ReadObservation,
+    /// Whether some rule derives the relation, by attribute.
+    derived: HashMap<Attribute, bool>,
+    cells: HashMap<(Attribute, Entity), CellSettlement>,
+}
+
+/// How a read sees one cell's writes settled: the line's claims the
+/// writes succeed, hidden from the line; and the values written under
+/// a choosing policy the cell already held as claims, hidden from the
+/// store's own rows, since the commit writes nothing for them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct CellSettlement {
+    /// The line's claims the cell's writes succeed.
+    pub(crate) succeeded: Vec<Artifact>,
+    /// The written facts the cell already held as claims.
+    pub(crate) held: Vec<Artifact>,
 }
 
 /// What a read settlement observed: the lines it settled against and
@@ -103,6 +134,13 @@ impl State {
     /// [`succession`](crate::repository::branch::transaction)).
     fn apply_change(&mut self, the: &Attribute, of: &Entity, change: &Change) {
         self.settled = Arc::default();
+        self.cells = Arc::default();
+        let cell = (the.clone(), of.clone());
+        if change.elects() {
+            self.electing.insert(cell);
+        } else if matches!(change, Change::Retract(_)) && self.electing.contains(&cell) {
+            self.electing_retracted = true;
+        }
         let fact = |value: &Value| Artifact {
             the: the.clone(),
             of: of.clone(),
@@ -269,6 +307,124 @@ impl Staged {
     /// every later read observing the same.
     pub(crate) fn record_read_settlement(&self, observed: ReadObservation, settled: Staged) {
         *self.0.settled.lock() = Some(ReadSettlement { observed, settled });
+    }
+
+    /// Whether a retraction followed a choosing write of its cell, so a
+    /// read settles the whole store rather than cell by cell.
+    pub(crate) fn has_electing_retractions(&self) -> bool {
+        self.0.electing_retracted
+    }
+
+    /// The cells written under a choosing policy whose held facts
+    /// `selector` matches: what a read of that range settles.
+    pub(crate) fn electing_cells_within(
+        &self,
+        selector: &ArtifactSelector<Constrained>,
+    ) -> Vec<(Attribute, Entity)> {
+        if self.0.electing.is_empty() {
+            return Vec::new();
+        }
+        let mut cells: Vec<(Attribute, Entity)> = Vec::new();
+        for fact in self.0.facts.scan(selector) {
+            let cell = (fact.the, fact.of);
+            if self.0.electing.contains(&cell) && !cells.contains(&cell) {
+                cells.push(cell);
+            }
+        }
+        cells
+    }
+
+    /// The writes of one cell, in the order the transaction made them.
+    pub(crate) fn writes_of(&self, the: &Attribute, of: &Entity) -> Vec<Change> {
+        self.0
+            .log
+            .iter()
+            .filter(|(t, o, _)| t == the && o == of)
+            .map(|(_, _, change)| change.clone())
+            .collect()
+    }
+
+    /// The `on:` entities of every rule this store installs, from its
+    /// `dialog.rule/derives` facts: the relations a staged rule derives.
+    pub(crate) fn staged_derives(&self) -> Vec<Entity> {
+        self.0
+            .facts
+            .scan(&ArtifactSelector::new().the(derives_attr()))
+            .into_iter()
+            .filter_map(|fact| match fact.is {
+                Value::Entity(on) => Some(on),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Whether a read under `observed` found some rule deriving `the`,
+    /// if it asked.
+    pub(crate) fn relation_derived(
+        &self,
+        observed: &ReadObservation,
+        the: &Attribute,
+    ) -> Option<bool> {
+        let memo = self.0.cells.lock();
+        memo.as_ref()
+            .filter(|memo| memo.observed.matches(observed))
+            .and_then(|memo| memo.derived.get(the).copied())
+    }
+
+    /// Keep whether some rule derives `the`, as a read under `observed`
+    /// found.
+    pub(crate) fn record_relation_derived(
+        &self,
+        observed: &ReadObservation,
+        the: Attribute,
+        derived: bool,
+    ) {
+        let mut memo = self.0.cells.lock();
+        let memo = Self::cell_memo(&mut memo, observed);
+        memo.derived.insert(the, derived);
+    }
+
+    /// How a read under `observed` settled the cell, if one did.
+    pub(crate) fn cell_settlement(
+        &self,
+        observed: &ReadObservation,
+        cell: &(Attribute, Entity),
+    ) -> Option<CellSettlement> {
+        let memo = self.0.cells.lock();
+        memo.as_ref()
+            .filter(|memo| memo.observed.matches(observed))
+            .and_then(|memo| memo.cells.get(cell).cloned())
+    }
+
+    /// Keep how a read under `observed` settled the cell.
+    pub(crate) fn record_cell_settlement(
+        &self,
+        observed: &ReadObservation,
+        cell: (Attribute, Entity),
+        settlement: CellSettlement,
+    ) {
+        let mut memo = self.0.cells.lock();
+        let memo = Self::cell_memo(&mut memo, observed);
+        memo.cells.insert(cell, settlement);
+    }
+
+    /// The cell memo for `observed`, started afresh when the last read
+    /// observed something else.
+    fn cell_memo<'m>(
+        memo: &'m mut Option<CellMemo>,
+        observed: &ReadObservation,
+    ) -> &'m mut CellMemo {
+        if !memo
+            .as_ref()
+            .is_some_and(|memo| memo.observed.matches(observed))
+        {
+            *memo = Some(CellMemo {
+                observed: observed.clone(),
+                derived: HashMap::new(),
+                cells: HashMap::new(),
+            });
+        }
+        memo.as_mut().expect("set above")
     }
 
     /// Whether this store holds any rule, for any concept.

@@ -6,8 +6,8 @@ use dialog_artifacts::history::Edition;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, ArtifactStream, ArtifactView, ArtifactViewStream as _, Changes,
-    DialogArtifactsError, Entity, Estimate, Likelihood, Preload, PreloadRequest, Select,
-    Speculation, Statement,
+    DialogArtifactsError, Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey,
+    Speculation, Statement, sort_key,
 };
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::{Buffer, ConditionalSync};
@@ -31,12 +31,13 @@ use futures_util::{TryStreamExt as _, stream};
 use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
 
+use crate::CommitError;
 use crate::REGISTRY;
 use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped, tombstones_from};
-use crate::repository::ReadObservation;
 use crate::repository::branch::select::line_manifest;
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
+use crate::repository::{CellSettlement, ReadObservation};
 use crate::rules::{
     Legacy, RuleRead, Selecting, assemble, builtin, builtin_deriving, conclusion_attr,
     conclusion_selector, derives_attr, derives_keys, derives_selector, has_overlay_rules,
@@ -431,6 +432,11 @@ pub(crate) struct QueryEnv<'a> {
     /// [`SourceRef::fetches`](crate::repository::source::SourceRef)):
     /// preload hints are refused when none can.
     fetches: bool,
+    /// Whether a read settles the layers' choosing writes against the
+    /// lines. Off for the view a settlement evaluates derived candidates
+    /// through, which reads the writes as held, so settling one cell
+    /// never settles the cells its relation's rules read.
+    settles: bool,
     /// The per-query memo rule heads share their source body's rows
     /// through.
     memo: Memo,
@@ -505,6 +511,7 @@ impl<'a> QueryEnv<'a> {
             reads: Arc::new(Mutex::new(Vec::new())),
             fixpoint: None,
             fetches,
+            settles: true,
             memo: Memo::default(),
             env,
         }
@@ -516,6 +523,92 @@ impl<'a> QueryEnv<'a> {
         self.layers = layers;
         self.settled = Arc::new(OnceCell::new());
         self
+    }
+
+    /// Read the layers' writes as held, settling none of them: the view
+    /// a settlement evaluates derived candidates through.
+    pub(crate) fn unsettled(mut self) -> Self {
+        self.settles = false;
+        self
+    }
+
+    /// What a read settlement observes of this environment: the lines'
+    /// heads, their session overlays and the metadata read with.
+    fn observation(&self) -> ReadObservation {
+        ReadObservation {
+            heads: self
+                .sources
+                .iter()
+                .map(|source| source.as_ref().revision())
+                .collect(),
+            overlays: self
+                .sources
+                .iter()
+                .map(|source| source.as_ref().overlay().revision())
+                .collect(),
+            metadata: self.changes.clone(),
+        }
+    }
+
+    /// Settle, cell by cell, the layers' choosing writes a read of
+    /// `input` meets: for each cell, the line's claims its writes
+    /// succeed and the written values the cell already held, each
+    /// settled once per layer and observation. A layer with a retracted
+    /// choosing write was settled whole by [`layers`](Self::layers)
+    /// and meets none here.
+    async fn settle_within(
+        &self,
+        input: &ArtifactSelector<Constrained>,
+    ) -> Result<Vec<(usize, Vec<CellSettlement>)>, DialogArtifactsError> {
+        if !self.settles {
+            return Ok(Vec::new());
+        }
+        let layers = self.layers().await?;
+        let mut settled: Vec<(usize, Vec<CellSettlement>)> = Vec::new();
+        let mut observed: Option<ReadObservation> = None;
+        for (index, layer) in layers.iter().enumerate() {
+            if !layer.has_successions() {
+                continue;
+            }
+            let cells = layer.electing_cells_within(input);
+            if cells.is_empty() {
+                continue;
+            }
+            let observed = observed.get_or_insert_with(|| self.observation());
+            let failed = |error: CommitError| DialogArtifactsError::Storage(error.to_string());
+            let mut settlements = Vec::with_capacity(cells.len());
+            for cell in cells {
+                if let Some(settlement) = layer.cell_settlement(observed, &cell) {
+                    settlements.push(settlement);
+                    continue;
+                }
+                let derived = match layer.relation_derived(observed, &cell.0) {
+                    Some(derived) => derived,
+                    None => {
+                        let derived = super::transaction::relation_derived(self, layer, &cell.0)
+                            .await
+                            .map_err(failed)?;
+                        layer.record_relation_derived(observed, cell.0.clone(), derived);
+                        derived
+                    }
+                };
+                let settlement = Box::pin(super::transaction::settle_cell(
+                    self.sources.clone(),
+                    self.changes.clone(),
+                    layer,
+                    &cell.0,
+                    &cell.1,
+                    derived,
+                    self.env,
+                ))
+                .await
+                .map_err(failed)?;
+                layer.record_cell_settlement(observed, cell, settlement.clone());
+                settlements.push(settlement);
+            }
+            settled.push((index, settlements));
+        }
+        Ok(settled)
     }
 
     /// The edition a commit on this environment's line would mint: what
@@ -582,25 +675,15 @@ impl QueryEnv<'_> {
     async fn layers(&self) -> Result<&Vec<Staged>, DialogArtifactsError> {
         self.settled
             .get_or_try_init(|| async {
-                if !self.layers.iter().any(Staged::has_successions) {
+                let whole =
+                    |layer: &Staged| layer.has_successions() && layer.has_electing_retractions();
+                if !self.settles || !self.layers.iter().any(whole) {
                     return Ok(self.layers.clone());
                 }
-                let observed = ReadObservation {
-                    heads: self
-                        .sources
-                        .iter()
-                        .map(|source| source.as_ref().revision())
-                        .collect(),
-                    overlays: self
-                        .sources
-                        .iter()
-                        .map(|source| source.as_ref().overlay().revision())
-                        .collect(),
-                    metadata: self.changes.clone(),
-                };
+                let observed = self.observation();
                 let mut settled = Vec::with_capacity(self.layers.len());
                 for layer in &self.layers {
-                    if !layer.has_successions() {
+                    if !whole(layer) {
                         settled.push(layer.clone());
                         continue;
                     }
@@ -694,6 +777,7 @@ impl Clone for QueryEnv<'_> {
             reads: self.reads.clone(),
             fixpoint: self.fixpoint.clone(),
             fetches: self.fetches,
+            settles: self.settles,
             memo: Memo::default(),
             env: self.env,
         }
@@ -750,6 +834,19 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         self.record_demand(&input, &manifest);
         let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.sources.len() + 1);
 
+        // The choosing writes this read meets, settled cell by cell:
+        // the line's claims they succeed are hidden from every line,
+        // and the values the cells already held are hidden from the
+        // layers' own rows, as the commit would write nothing for them.
+        let settled = self.settle_within(&input).await?;
+        let succeeded: Vec<&Artifact> = settled
+            .iter()
+            .flat_map(|(_, cells)| cells.iter().flat_map(|cell| cell.succeeded.iter()))
+            .collect();
+        let hidden_in = |line: &Manifest| -> Arc<HashSet<SortKey>> {
+            Arc::new(succeeded.iter().map(|fact| sort_key(fact, line)).collect())
+        };
+
         // Line streams — each filtered by tombstones from the
         // overlay's retracts so a `tx.retract(x)` (or any user-asserted
         // retract in `with(..)`) suppresses matching source facts, and
@@ -758,11 +855,11 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // borrows only `self.env`.
         for (source, line) in self.sources.iter().zip(&format.lines) {
             let raw = select_from_source(source.as_ref(), self.env, input.clone()).await?;
-            streams.push(filter_hidden(
-                raw,
-                line.tombstones.within(&input),
-                line.manifest.clone(),
-            ));
+            let mut hidden = line.tombstones.within(&input);
+            if !succeeded.is_empty() {
+                hidden = hidden.facts(hidden_in(&line.manifest));
+            }
+            streams.push(filter_hidden(raw, hidden, line.manifest.clone()));
         }
 
         // Each line's session overlay, read live. Filtered by the
@@ -814,13 +911,30 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // the edition that commit mints, equal to every other write of
         // the transaction: a read over the transaction elects as a read
         // after the commit will.
-        for layer in self.layers().await? {
+        for (index, layer) in self.layers().await?.iter().enumerate() {
             let rows = layer.select(&input, &manifest);
-            if !rows.is_empty() {
-                streams.push(Box::pin(stream::iter(
-                    rows.into_iter()
-                        .map(move |fact| Ok(ArtifactView::pending(fact, pending))),
-                )));
+            if rows.is_empty() {
+                continue;
+            }
+            let held: HashSet<SortKey> = settled
+                .iter()
+                .filter(|(settled_index, _)| *settled_index == index)
+                .flat_map(|(_, cells)| cells.iter())
+                .flat_map(|cell| cell.held.iter())
+                .map(|fact| sort_key(fact, &manifest))
+                .collect();
+            let rows: ArtifactStream<'a> = Box::pin(stream::iter(
+                rows.into_iter()
+                    .map(move |fact| Ok(ArtifactView::pending(fact, pending))),
+            ));
+            if held.is_empty() {
+                streams.push(rows);
+            } else {
+                streams.push(filter_hidden(
+                    rows,
+                    Hidden::default().facts(Arc::new(held)),
+                    manifest.clone(),
+                ));
             }
         }
 
