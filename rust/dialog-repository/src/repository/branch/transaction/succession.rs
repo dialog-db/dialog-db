@@ -56,7 +56,6 @@ use dialog_query::{
 use futures_util::TryStreamExt;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-#[cfg(not(target_arch = "wasm32"))]
 use std::fmt::Display;
 use std::sync::Arc;
 
