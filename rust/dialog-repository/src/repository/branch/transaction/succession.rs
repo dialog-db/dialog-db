@@ -54,6 +54,7 @@ use dialog_query::{
     Parameters, Standing, Term,
 };
 use futures_util::TryStreamExt;
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
@@ -139,14 +140,14 @@ pub(crate) async fn settle(
     let mut writes_per_cell: HashMap<(Attribute, Entity), CellWrites> = HashMap::new();
     for (the, of, change) in staged.log() {
         match writes_per_cell.entry((the.clone(), of.clone())) {
-            std::collections::hash_map::Entry::Vacant(vacant) => {
+            Entry::Vacant(vacant) => {
                 vacant.insert(CellWrites {
                     elects: change.elects(),
                     first: change.clone(),
                     repeated: true,
                 });
             }
-            std::collections::hash_map::Entry::Occupied(mut occupied) => {
+            Entry::Occupied(mut occupied) => {
                 let cell = occupied.get_mut();
                 cell.elects |= change.elects();
                 cell.repeated &= cell.first == *change;
