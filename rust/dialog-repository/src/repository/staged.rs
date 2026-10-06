@@ -40,6 +40,10 @@ use super::ephemeral::{EphemeralRevision, Facts};
 use crate::Revision;
 use crate::rules::{conclusion_attr, derives_attr};
 
+mod electing;
+
+use electing::ElectingCells;
+
 /// A transaction's writes. See the [module docs](self).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Staged(Arc<State>);
@@ -59,12 +63,10 @@ struct State {
     /// what the commit applies, so a write that succeeds a claim is
     /// settled against the line and the writes before it, in order.
     log: Vec<(Attribute, Entity, Change)>,
-    /// One fact per cell a write under a choosing policy asserted, kept
-    /// past its retraction: the cells a read of a range must settle,
+    /// The cells a write under a choosing policy asserted, kept past
+    /// their retraction: the cells a read of a range must settle,
     /// found by the range's entity and attribute bounds.
-    written: Facts,
-    /// The cells `written` holds a fact for.
-    electing: HashSet<(Attribute, Entity)>,
+    electing: ElectingCells,
     /// The log's writes by cell, in the order the transaction made
     /// them: what a read settles one cell by.
     by_cell: HashMap<(Attribute, Entity), Vec<Change>>,
@@ -87,10 +89,11 @@ static GENERATIONS: AtomicU64 = AtomicU64::new(1);
 struct CellMemo {
     observed: ReadObservation,
     /// Whether some rule derives the relation, by attribute.
-    derived: HashMap<Attribute, bool>,
-    /// Each settled cell: whether its candidates were derived, and
-    /// how it settled.
-    cells: HashMap<(Attribute, Entity), (bool, CellSettlement)>,
+    relations: HashMap<Attribute, bool>,
+    /// Each cell settled against stored claims alone.
+    stored: HashMap<(Attribute, Entity), CellSettlement>,
+    /// Each cell settled against derived candidates too.
+    derived: HashMap<(Attribute, Entity), CellSettlement>,
 }
 
 impl CellMemo {
@@ -100,11 +103,16 @@ impl CellMemo {
     /// namespace may change what derives any relation, so it forgets
     /// those answers too.
     fn forget(&mut self, cell: &(Attribute, Entity)) {
-        self.cells
-            .retain(|settled, (derived, _)| !*derived && settled != cell);
+        self.stored.remove(cell);
+        self.derived.clear();
         if cell.0.as_str().starts_with("dialog.rule/") {
-            self.derived.clear();
+            self.relations.clear();
         }
+    }
+
+    /// How a read settled `cell`, however it read.
+    fn settlement(&self, cell: &(Attribute, Entity)) -> Option<&CellSettlement> {
+        self.stored.get(cell).or_else(|| self.derived.get(cell))
     }
 }
 
@@ -198,8 +206,8 @@ impl State {
         };
         match change {
             Change::Assert(value, policy) => {
-                if policy.elects() && self.electing.insert((the.clone(), of.clone())) {
-                    self.written.insert(fact(value));
+                if policy.elects() {
+                    self.electing.insert(the, of);
                 }
                 self.apply(Instruction::Assert(fact(value), policy.clone()));
             }
@@ -291,7 +299,7 @@ impl Staged {
 
     /// Whether any write succeeds a claim the commit has yet to settle.
     pub(crate) fn has_successions(&self) -> bool {
-        self.0.log.iter().any(|(_, _, change)| change.elects())
+        !self.0.electing.is_empty()
     }
 
     /// The writes as the batch a commit applies: each cell's writes in
@@ -365,11 +373,7 @@ impl Staged {
         &self,
         selector: &ArtifactSelector<Constrained>,
     ) -> Vec<(Attribute, Entity)> {
-        let cell = |fact: &Artifact| (fact.the.clone(), fact.of.clone());
-        match selector.cells() {
-            Some(cells) => self.0.written.scan(&cells).iter().map(cell).collect(),
-            None => self.0.written.iter().map(cell).collect(),
-        }
+        self.0.electing.within(selector)
     }
 
     /// The writes of one cell, in the order the transaction made them.
@@ -405,7 +409,7 @@ impl Staged {
         let memo = self.0.cells.lock();
         memo.as_ref()
             .filter(|memo| memo.observed.matches(observed))
-            .and_then(|memo| memo.derived.get(the).copied())
+            .and_then(|memo| memo.relations.get(the).copied())
     }
 
     /// Keep whether some rule derives `the`, as a read under `observed`
@@ -418,7 +422,7 @@ impl Staged {
     ) {
         let mut memo = self.0.cells.lock();
         let memo = Self::cell_memo(&mut memo, observed);
-        memo.derived.insert(the, derived);
+        memo.relations.insert(the, derived);
     }
 
     /// How a read under `observed` settled the cell, if one did.
@@ -430,11 +434,7 @@ impl Staged {
         let memo = self.0.cells.lock();
         memo.as_ref()
             .filter(|memo| memo.observed.matches(observed))
-            .and_then(|memo| {
-                memo.cells
-                    .get(cell)
-                    .map(|(_, settlement)| settlement.clone())
-            })
+            .and_then(|memo| memo.settlement(cell).cloned())
     }
 
     /// Keep how a read under `observed` settled the cell, and whether
@@ -448,7 +448,11 @@ impl Staged {
     ) {
         let mut memo = self.0.cells.lock();
         let memo = Self::cell_memo(&mut memo, observed);
-        memo.cells.insert(cell, (derived, settlement));
+        if derived {
+            memo.derived.insert(cell, settlement);
+        } else {
+            memo.stored.insert(cell, settlement);
+        }
     }
 
     /// The cell memo for `observed`, started afresh when the last read
@@ -463,8 +467,9 @@ impl Staged {
         {
             *memo = Some(CellMemo {
                 observed: observed.clone(),
+                relations: HashMap::new(),
+                stored: HashMap::new(),
                 derived: HashMap::new(),
-                cells: HashMap::new(),
             });
         }
         memo.as_mut().expect("set above")

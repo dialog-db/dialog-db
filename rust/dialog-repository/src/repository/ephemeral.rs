@@ -157,12 +157,13 @@ impl Facts {
 
     /// Hold `fact`. Returns whether it was not held before.
     pub(crate) fn insert(&mut self, fact: Artifact) -> bool {
-        if self.holds(&fact) {
+        let [entity, attribute, value] = index_keys(&fact, &self.manifest);
+        if self.map.contains_key(&entity) {
             return false;
         }
-        for key in index_keys(&fact, &self.manifest) {
-            self.map.insert(key, fact.clone());
-        }
+        self.map.insert(entity, fact.clone());
+        self.map.insert(attribute, fact.clone());
+        self.map.insert(value, fact);
         true
     }
 
