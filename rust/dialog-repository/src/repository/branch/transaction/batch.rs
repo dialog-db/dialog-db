@@ -986,6 +986,69 @@ mod tests {
         Ok(())
     }
 
+    /// A no-op amend asked to canonicalize still re-seals the staged tree.
+    ///
+    /// A chain canonicalized only at its last link leaves its buffers in
+    /// place whenever that link changes nothing (a retract of a fact that
+    /// was never asserted), unless the request reaches the tree: the tip
+    /// keeps its version, and its tree is the one a single canonicalized
+    /// commit of the same facts produces.
+    #[dialog_common::test]
+    async fn it_canonicalizes_on_a_no_op_amend() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        // A base wide enough for an index root, so later links buffer in
+        // it instead of landing in a lone leaf.
+        let mut seed = branch.transaction();
+        for index in 0..400 {
+            seed = seed.assert(note(&format!("seed-{index}"))?);
+        }
+        seed.commit().publish().perform(&operator).await?;
+
+        let (first, second) = (note("first")?, note("second")?);
+        let whole = branch
+            .transaction()
+            .assert(first.clone())
+            .assert(second.clone())
+            .commit()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+
+        let buffered = branch
+            .transaction()
+            .assert(first)
+            .commit()
+            .perform(&operator)
+            .await?
+            .assert(second)
+            .commit()
+            .amend()
+            .perform(&operator)
+            .await?;
+        let staged = buffered.version();
+        let resealed = buffered
+            .retract(note("never-asserted")?)
+            .commit()
+            .amend()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            resealed.version(),
+            staged,
+            "the no-op amend keeps the tip's version"
+        );
+        assert_eq!(
+            resealed.revision().tree,
+            whole.revision().tree,
+            "the no-op amend leaves the chain's canonical tree"
+        );
+        Ok(())
+    }
+
     /// History recorded by an amend folds into what the amended commit
     /// already recorded at the same history key, exactly as two writes of
     /// one commit fold.
