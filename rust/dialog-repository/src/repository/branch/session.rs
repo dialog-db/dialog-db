@@ -33,6 +33,7 @@ use tokio::sync::OnceCell;
 
 use crate::REGISTRY;
 use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped, tombstones_from};
+use crate::repository::ReadObservation;
 use crate::repository::branch::select::line_manifest;
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
@@ -570,16 +571,41 @@ impl QueryEnv<'_> {
     /// settled against the lines once, the way the commit settles it
     /// (see [`succession`](super::transaction)), so the claim a write
     /// succeeds is gone from the transaction's own view.
+    ///
+    /// A layer keeps the settlement it was last read under, with the
+    /// lines' heads, their session overlays and the metadata the read
+    /// folded in: every query over the same writes, between one write
+    /// and the next, reads that settlement rather than settling every
+    /// succession again. A document that stages its whole schema and
+    /// then resolves hundreds of names against the transaction would
+    /// otherwise settle thousands of writes per name.
     async fn layers(&self) -> Result<&Vec<Staged>, DialogArtifactsError> {
         self.settled
             .get_or_try_init(|| async {
                 if !self.layers.iter().any(Staged::has_successions) {
                     return Ok(self.layers.clone());
                 }
+                let observed = ReadObservation {
+                    heads: self
+                        .sources
+                        .iter()
+                        .map(|source| source.as_ref().revision())
+                        .collect(),
+                    overlays: self
+                        .sources
+                        .iter()
+                        .map(|source| source.as_ref().overlay().revision())
+                        .collect(),
+                    metadata: self.changes.clone(),
+                };
                 let mut settled = Vec::with_capacity(self.layers.len());
                 for layer in &self.layers {
                     if !layer.has_successions() {
                         settled.push(layer.clone());
+                        continue;
+                    }
+                    if let Some(kept) = layer.read_settlement(&observed) {
+                        settled.push(kept);
                         continue;
                     }
                     let changes = Box::pin(super::transaction::settle(
@@ -591,7 +617,9 @@ impl QueryEnv<'_> {
                     ))
                     .await
                     .map_err(|error| DialogArtifactsError::Storage(error.to_string()))?;
-                    settled.push(Staged::from(changes));
+                    let read = Staged::from(changes);
+                    layer.record_read_settlement(observed.clone(), read.clone());
+                    settled.push(read);
                 }
                 Ok(settled)
             })
