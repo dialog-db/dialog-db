@@ -630,8 +630,17 @@ where
         // only by edition (unless `allow_empty` asks for one). Only a
         // line with no revision at all still publishes, to establish
         // its genesis.
+        //
+        // An amend asked to canonicalize is the exception: the staged
+        // revision is this writer's own, and its tree may still carry
+        // the buffers of the links before this one, so the no-op link
+        // re-seals it in canonical form without minting anything. A
+        // fresh commit keeps the no-op semantics: minting a revision
+        // only to canonicalize is what `allow_empty` is for.
+        let reseals = self.canonicalize && self.amend.is_some();
         if !changed
             && !self.allow_empty
+            && !reseals
             && let Some(base) = base_revision
         {
             return Ok(Outcome::Unchanged(base));
