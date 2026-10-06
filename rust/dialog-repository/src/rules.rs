@@ -55,6 +55,7 @@ use dialog_query::{
 use dialog_search_tree::Manifest;
 use parking_lot::RwLock;
 
+use crate::repository::EphemeralRevision;
 use crate::{Revision, schema};
 
 // The `dialog.rule/*` vocabulary and the Statement lowerings that
@@ -436,7 +437,19 @@ pub(crate) struct TriggerFootprint {
 
 /// The tree root of every layer a rule set was resolved from, in layer
 /// order: `None` for a layer with no tree yet.
-type LayerRoots = Vec<Option<[u8; 32]>>;
+/// The layers a rule set was assembled over, each by what names its
+/// rules: a line by its root, a session overlay by its revision, and
+/// a staged store by its generation. A later read over the same
+/// layers finds the same rules.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LayerRoots {
+    /// Each line's tree root.
+    pub(crate) lines: Vec<Option<[u8; 32]>>,
+    /// Each line's session overlay revision.
+    pub(crate) overlays: Vec<EphemeralRevision>,
+    /// Each staged layer's generation.
+    pub(crate) staged: Vec<u64>,
+}
 
 /// The deductive rules a line holds that were installed before the
 /// `derives` index existed: each carries a `conclusion` fact but no
@@ -621,13 +634,11 @@ impl RuleCache {
     pub(crate) fn bundle(
         &self,
         descriptor: &ConceptDescriptor,
-        roots: &[Option<[u8; 32]>],
+        roots: &LayerRoots,
     ) -> Option<(ConceptRules, Vec<RuleRead>)> {
         let inner = self.inner.read();
         match inner.bundles.get(&descriptor.this()) {
-            Some(bundle)
-                if bundle.roots.as_slice() == roots && bundle.descriptor == *descriptor =>
-            {
+            Some(bundle) if bundle.roots == *roots && bundle.descriptor == *descriptor => {
                 Some((bundle.rules.clone(), bundle.reads.clone()))
             }
             _ => None,
@@ -796,13 +807,6 @@ pub(crate) fn has_overlay_rules(changes: &Changes) -> bool {
     changes
         .iter()
         .any(|(_, attribute, _)| *attribute == conclusion)
-}
-
-/// Whether a session overlay holds any rule, for any concept.
-pub(crate) fn holds_rules(overlay: &crate::Ephemeral) -> bool {
-    !overlay
-        .scan(&ArtifactSelector::new().the(conclusion_attr()))
-        .is_empty()
 }
 
 /// Read rules from an overlay [`Changes`] batch concluding `concept`.

@@ -27,6 +27,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
@@ -69,7 +70,15 @@ struct State {
     /// rule derives each relation it asked about. Shared by the clones
     /// a query takes; a write replaces it.
     cells: Arc<parking_lot::Mutex<Option<CellMemo>>>,
+    /// Which writes this store holds, as a number no other store's
+    /// writes share: minted afresh by every write, so two stores with
+    /// the same number hold the same writes. Zero for a store nothing
+    /// was written to.
+    generation: u64,
 }
+
+/// The generations minted so far, across every staged store.
+static GENERATIONS: AtomicU64 = AtomicU64::new(1);
 
 /// What a read settled cell by cell under one observation.
 #[derive(Clone, Debug)]
@@ -126,6 +135,7 @@ impl State {
     /// [`succession`](crate::repository::branch::transaction)).
     fn apply_change(&mut self, the: &Attribute, of: &Entity, change: &Change) {
         self.cells = Arc::default();
+        self.generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
         let fact = |value: &Value| Artifact {
             the: the.clone(),
             of: of.clone(),
@@ -207,6 +217,12 @@ impl Staged {
     /// Apply one write, as [`apply`](Self::apply) does for a batch.
     pub(crate) fn apply_change(&mut self, the: &Attribute, of: &Entity, change: &Change) {
         Arc::make_mut(&mut self.0).apply_change(the, of, change);
+    }
+
+    /// The number naming the writes this store holds: equal between
+    /// stores holding the same writes, different otherwise.
+    pub(crate) fn generation(&self) -> u64 {
+        self.0.generation
     }
 
     /// Every write in the order the transaction made it.
@@ -585,6 +601,36 @@ mod tests {
             shared.cell_settlement(&observed, &cell).is_some(),
             "the clone before keeps its own"
         );
+    }
+
+    /// A store's generation names its writes: a clone shares it, a
+    /// write mints a new one, and no two stores written separately
+    /// share one.
+    #[dialog_common::test]
+    fn it_mints_a_generation_per_write() {
+        let mut staged = Staged::default();
+        assert_eq!(staged.generation(), 0);
+        apply(
+            &mut staged,
+            Instruction::Assert(fact("id:a", "person/name", "A"), Policy::All),
+        );
+        let written = staged.generation();
+        assert_ne!(written, 0);
+        let clone = staged.clone();
+        assert_eq!(clone.generation(), written);
+        apply(
+            &mut staged,
+            Instruction::Assert(fact("id:a", "person/name", "B"), Policy::All),
+        );
+        assert_ne!(staged.generation(), written);
+        assert_eq!(clone.generation(), written);
+        let mut other = Staged::default();
+        apply(
+            &mut other,
+            Instruction::Assert(fact("id:a", "person/name", "A"), Policy::All),
+        );
+        assert_ne!(other.generation(), written);
+        assert_ne!(other.generation(), staged.generation());
     }
 
     #[dialog_common::test]

@@ -39,10 +39,10 @@ use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
 use crate::repository::{CellSettlement, ReadObservation};
 use crate::rules::{
-    Legacy, RuleRead, Selecting, assemble, builtin, builtin_deriving, conclusion_attr,
+    LayerRoots, Legacy, RuleRead, Selecting, assemble, builtin, builtin_deriving, conclusion_attr,
     conclusion_selector, derives_attr, derives_keys, derives_selector, has_overlay_rules,
-    head_onto, holds_rules, hydrate, overlay_rules, overlay_rules_deriving, rule_entities,
-    source_attr, source_bytes, source_selector,
+    head_onto, hydrate, overlay_rules, overlay_rules_deriving, rule_entities, source_attr,
+    source_bytes, source_selector,
 };
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
@@ -1285,23 +1285,24 @@ impl Provider<SelectRules> for QueryEnv<'_> {
         // or from a line's session overlay, which moves without moving its
         // root. A query recording what it reads reuses the set as well,
         // and records the rule reads that assembled it as its own.
-        let roots: Vec<_> = self
-            .sources
-            .iter()
-            .map(|source| source.as_ref().root())
-            .collect();
+        let roots = LayerRoots {
+            lines: self
+                .sources
+                .iter()
+                .map(|source| source.as_ref().root())
+                .collect(),
+            overlays: self
+                .sources
+                .iter()
+                .map(|source| source.as_ref().overlay().revision())
+                .collect(),
+            staged: self.layers.iter().map(Staged::generation).collect(),
+        };
         let cache = self
             .sources
             .first()
             .map(|source| source.as_ref().rule_cache())
-            .filter(|_| {
-                !has_overlay_rules(&self.changes)
-                    && !self.layers.iter().any(Staged::holds_rules)
-                    && !self
-                        .sources
-                        .iter()
-                        .any(|source| holds_rules(source.as_ref().overlay()))
-            });
+            .filter(|_| !has_overlay_rules(&self.changes));
         if let Some((bundle, reads)) = cache
             .as_ref()
             .and_then(|cache| cache.bundle(&input, &roots))
