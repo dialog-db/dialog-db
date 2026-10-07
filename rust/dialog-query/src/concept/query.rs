@@ -410,17 +410,31 @@ impl ConceptQuery {
     where
         Env: crate::Scope<'a>,
     {
+        // The caller's stream is erased at every entry (here, in
+        // `evaluate_unsorted`, `through` and the conjunction's merge), and
+        // the body lives in a function generic over the environment
+        // alone. A rule body evaluates its premises through these entries
+        // again, and a closure or async block inside a generic function
+        // carries that function's arguments in its own type: a body
+        // generic over the stream handed the next level a type that held
+        // this level's, and the compiler unrolled the recursion forty
+        // levels deep (a 50 KB type term) in a workload's binary.
+        self.evaluate_erased(Box::pin(selection), env)
+    }
+
+    fn evaluate_erased<'a, Env>(
+        self,
+        selection: Pin<Box<dyn Selection + 'a>>,
+        env: &'a Env,
+    ) -> impl Selection + 'a
+    where
+        Env: crate::Scope<'a>,
+    {
         let app = self.canonical();
         let this = app.terms.get("this").cloned();
 
         try_stream! {
-            // The caller's stream is erased here, at the entry, and in every
-            // entry below: a rule body evaluates its premises through this
-            // function again, and a stream type that kept its caller's type
-            // inside (`Chain<Once<..>, Pin<Box<M>>>` around the next level's)
-            // grew by a layer per round until the compiler had unrolled the
-            // whole recursion, forty levels deep in a workload's binary.
-            let mut selection: Pin<Box<dyn Selection + 'a>> = Box::pin(selection);
+            let mut selection = selection;
             let Some(first) = selection.next().await else {
                 return;
             };
@@ -440,7 +454,7 @@ impl ConceptQuery {
             if sort {
                 let unsorted = app.clone().evaluate_unsorted(
                     rules,
-                    stream::once(async { Ok(first) }).chain(selection),
+                    Box::pin(stream::iter([Ok(first)]).chain(selection)),
                     env,
                 );
                 let mut rows: Vec<(Vec<u8>, Match)> = Vec::new();
@@ -461,7 +475,7 @@ impl ConceptQuery {
             }
             for await row in app.evaluate_unsorted(
                 rules,
-                stream::once(async { Ok(first) }).chain(selection),
+                Box::pin(stream::iter([Ok(first)]).chain(selection)),
                 env,
             ) {
                 yield row?;
@@ -471,10 +485,10 @@ impl ConceptQuery {
 
     /// [`evaluate`](Self::evaluate) with the rules already resolved,
     /// yielding rows in evaluation order.
-    fn evaluate_unsorted<'a, Env, M: Selection + 'a>(
+    fn evaluate_unsorted<'a, Env>(
         self,
         rules: ConceptRules,
-        selection: M,
+        selection: Pin<Box<dyn Selection + 'a>>,
         env: &'a Env,
     ) -> impl Selection + 'a
     where
@@ -483,8 +497,7 @@ impl ConceptQuery {
         let app = self;
 
         try_stream! {
-            // Erased at the entry; see `evaluate`.
-            let mut selection: Pin<Box<dyn Selection + 'a>> = Box::pin(selection);
+            let mut selection = selection;
             let Some(first) = selection.next().await else {
                 return;
             };
@@ -517,7 +530,7 @@ impl ConceptQuery {
                     }
                     None => table.to_vec(),
                 };
-                let rows = stream::once(async { Ok(first) }).chain(selection);
+                let rows = stream::iter([Ok(first)]).chain(selection);
                 for await each in rows {
                     let input = each?;
                     let mut matched = false;
@@ -554,7 +567,7 @@ impl ConceptQuery {
                 && let Some(plan) = rules.plan_exact(&app.terms, &first)
             {
                 let elect = app.election(&rules);
-                let rows = stream::once(async { Ok(first) }).chain(selection);
+                let rows = stream::iter([Ok(first)]).chain(selection);
                 for await merged in app.through(&plan, rows, env, elect, widen) {
                     yield merged?;
                 }
@@ -565,7 +578,7 @@ impl ConceptQuery {
             // stored scan, every head and every fold are elected per
             // entity and one row is built per winner.
             if app.predicate.attribute_field().is_some() && !rules.installed().is_empty() {
-                let rows = stream::once(async { Ok(first) }).chain(selection);
+                let rows = stream::iter([Ok(first)]).chain(selection);
                 for await row in app.relation(rules, reduced, rows, env) {
                     yield row?;
                 }
@@ -574,7 +587,7 @@ impl ConceptQuery {
 
             let elect = app.election(&rules);
             let plan = rules.plan(&app.terms, &first);
-            let rows = stream::once(async { Ok(first) }).chain(selection);
+            let rows = stream::iter([Ok(first)]).chain(selection);
 
             if reduced.is_empty() {
                 for await merged in app.through(&plan, rows, env, elect, widen) {
@@ -636,6 +649,21 @@ impl ConceptQuery {
     where
         Env: crate::Scope<'a>,
     {
+        // Erased at the entry; see `evaluate`.
+        self.through_erased(plan, Box::pin(rows), env, elect, widen)
+    }
+
+    fn through_erased<'a, Env>(
+        &self,
+        plan: &Disjunction,
+        rows: Pin<Box<dyn Selection + 'a>>,
+        env: &'a Env,
+        elect: Option<Election>,
+        widen: bool,
+    ) -> Pin<Box<dyn Selection + 'a>>
+    where
+        Env: crate::Scope<'a>,
+    {
         let key_operand = Relation::key_operand(ConceptDescriptor::VALUE);
         // Under an election the caller's value, bound or constant, is
         // tested against what the election yields, never used to seed
@@ -651,8 +679,6 @@ impl ConceptQuery {
         // has run, which of them nothing matched.
         let callers: Arc<Mutex<Vec<Arc<Match>>>> = Arc::new(Mutex::new(Vec::new()));
         let kept = callers.clone();
-        // Erased at the entry; see `evaluate`.
-        let rows: Pin<Box<dyn Selection + 'a>> = Box::pin(rows);
         let scoped = rows.map(move |each| {
             let mut input = each?;
             // Every result merges back into a clone of this row: share its

@@ -236,9 +236,20 @@ impl Conjunction {
     where
         Env: crate::Scope<'a>,
     {
+        // Erased at the entry; see `ConceptQuery::evaluate`.
+        self.evaluate_maybe_merge_erased(Box::pin(selection), env, variable)
+    }
+
+    fn evaluate_maybe_merge_erased<'a, Env>(
+        self,
+        selection: Pin<Box<dyn Selection + 'a>>,
+        env: &'a Env,
+        variable: String,
+    ) -> Pin<Box<dyn Selection + 'a>>
+    where
+        Env: crate::Scope<'a>,
+    {
         Box::pin(crate::try_stream! {
-            // Erased at the entry; see `ConceptQuery::evaluate`.
-            let selection: Pin<Box<dyn Selection + 'a>> = Box::pin(selection);
             let mut selection = Box::pin(selection.peekable());
 
             // Rows share one binding pattern, so the first says whether the
