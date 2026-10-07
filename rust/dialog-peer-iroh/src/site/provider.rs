@@ -7,7 +7,7 @@
 //! reads the answer back.
 
 use dialog_capability::access::{
-    Access, Authorization as _, AuthorizeError, FromCapability, Protocol, Recourse, TimeRange,
+    Access, AuthorizeError, FromCapability, Protocol, Recourse, TimeRange,
 };
 use dialog_capability::{
     Ability, Authorize as AuthorizeEffect, Capability, Constraint, Effect, ForkInvocation,
@@ -76,7 +76,10 @@ where
             .perform(env)
             .await?;
 
-        let invocation = authorization.invoke().await?;
+        // Addressed to the peer, not to the subject: the peer answers for
+        // itself, and an invocation it received is no use against another
+        // peer, which checks that the audience is its own DID.
+        let invocation = authorization.invoke_to(self.0.address().did()).await?;
         let blocks = dialog_capability::Policy::of(self.0.capability()).blocks();
         let bundle = InvocationBundle::from_chain(invocation.chain(), blocks).map_err(|error| {
             AuthorizeError::Malformed {

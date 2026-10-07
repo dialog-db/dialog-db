@@ -288,6 +288,24 @@ impl Authorization<Ucan> for UcanAuthorization {
     }
 
     async fn invoke(&self) -> Result<UcanInvocation, AuthorizeError> {
+        self.invoke_with(None).await
+    }
+}
+
+impl UcanAuthorization {
+    /// Create a signed invocation addressed to `audience`, rather than to
+    /// its subject.
+    ///
+    /// [`Authorization::invoke`] addresses an invocation to its subject,
+    /// which is right for a service that acts on the subject's behalf. A
+    /// peer that answers for itself names its own DID instead, so that an
+    /// invocation it received cannot be replayed against another peer (see
+    /// `InvocationChain::check_audience`).
+    pub async fn invoke_to(&self, audience: Did) -> Result<UcanInvocation, AuthorizeError> {
+        self.invoke_with(Some(audience)).await
+    }
+
+    async fn invoke_with(&self, audience: Option<Did>) -> Result<UcanInvocation, AuthorizeError> {
         let subject_did = match &self.scope.subject {
             UcanSubject::Specific(did) => did.clone(),
             UcanSubject::Any => match dialog_capability::ANY_SUBJECT.parse() {
@@ -312,9 +330,10 @@ impl Authorization<Ucan> for UcanAuthorization {
             format!("/{}", command.join("/"))
         };
 
+        let audience = audience.unwrap_or_else(|| subject_did.clone());
         let invocation = InvocationBuilder::new()
             .issuer(self.signer.clone())
-            .audience(&subject_did)
+            .audience(&audience)
             .subject(&subject_did)
             .command(command)
             .arguments(args)
