@@ -827,15 +827,7 @@ where
             .map_err(|error| CommitError::Induction(format!("watermark spilled: {error:?}")))?;
         let fact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)
             .map_err(|error| CommitError::Induction(format!("watermark datum: {error:?}")))?;
-        // Version-control records (which every commit writes) are
-        // excluded from the lag; the carved-out rule and marker
-        // prefixes pass through, so a rule arriving by pull or raw
-        // commit installs at this instant.
-        let the = fact.the.to_string();
-        if the.starts_with("dialog.")
-            && !the.starts_with("dialog.rule/")
-            && !the.starts_with("dialog.concept/")
-        {
+        if induction_ignores(&fact.the.to_string()) {
             continue;
         }
         if !seen.insert((
@@ -853,6 +845,22 @@ where
         });
     }
     Ok(lag)
+}
+
+/// Whether induction drops facts under `the`: version-control records
+/// (which every commit writes) are excluded from the lag, so catching
+/// up over N commits stimulates rules with the *data* those commits
+/// changed, not their bookkeeping. The carved-out rule and marker
+/// prefixes pass through, so a rule arriving by pull or raw commit
+/// installs at this instant.
+///
+/// A commit whose every fact this drops is an inducing instant with an
+/// empty delta; [`Branch::commit`](crate::Branch::commit) carries the
+/// watermark over such a commit on that ground.
+pub(crate) fn induction_ignores(the: &str) -> bool {
+    the.starts_with("dialog.")
+        && !the.starts_with("dialog.rule/")
+        && !the.starts_with("dialog.concept/")
 }
 
 /// Collect the artifacts a selector matches on the line's committed
@@ -1172,7 +1180,7 @@ mod tests {
 
     use crate::helpers::test_repo;
     use crate::rules::Transient;
-    use crate::{Branch, CommitError, RemoteSite};
+    use crate::{Branch, CommitError, RemoteSite, Revision};
     use anyhow::Result;
     use dialog_artifacts::{ArtifactSelector, Changes, Entity, Instruction, Value};
     use dialog_capability::{Fork, Provider};
@@ -2561,6 +2569,127 @@ mod tests {
             }]
         }))
         .expect("tagger rule compiles")
+    }
+
+    /// The induction watermark of a branch, as stored.
+    async fn watermark<Env>(branch: &Branch, env: &Env) -> Result<Option<Revision>>
+    where
+        Env: Provider<Resolve> + ConditionalSync,
+    {
+        let cell = branch.induction_cell();
+        cell.resolve().perform(env).await?;
+        Ok(cell.content())
+    }
+
+    /// A machinery commit writes the reserved records induction drops,
+    /// so it is an inducing instant with an empty delta: the watermark
+    /// follows it when it stood at the head the commit built on. A lag
+    /// an application fact left through the raw path stays where it
+    /// is, and the next inducing instant catches up over both.
+    #[dialog_common::test]
+    async fn it_carries_the_watermark_over_a_machinery_commit() -> Result<()> {
+        use dialog_artifacts::{Artifact, Instruction};
+        use futures_util::stream;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(tagger())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            branch.revision(),
+            "a transaction leaves the watermark at the head"
+        );
+
+        let record = |audience: &str| -> Result<Instruction> {
+            Ok(Instruction::Assert(
+                Artifact {
+                    the: "dialog.ucan/audience".parse()?,
+                    of: "ucan:1".parse()?,
+                    is: Value::String(audience.into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            ))
+        };
+
+        // Reserved records alone: the watermark follows the head.
+        branch
+            .commit(stream::iter(vec![record("did:key:zAlice")?]))
+            .machinery()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            branch.revision(),
+            "a machinery commit carries the watermark to its head"
+        );
+        let carried = branch.revision();
+
+        // An application fact through the raw path lags.
+        let doc: Entity = "doc:1".parse()?;
+        branch
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "doc/title".parse()?,
+                    of: doc.clone(),
+                    is: Value::String("hello".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            carried,
+            "a raw commit of an application fact leaves the watermark behind"
+        );
+
+        // A machinery commit over a lag leaves the lag for the next
+        // inducing instant.
+        branch
+            .commit(stream::iter(vec![record("did:key:zBob")?]))
+            .machinery()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            carried,
+            "a machinery commit does not skip a lag"
+        );
+        assert!(
+            values(&branch, &operator, "derived/tag", &doc)
+                .await?
+                .is_empty(),
+            "nothing induced yet"
+        );
+
+        // The next inducing instant catches up over both commits.
+        branch.induce(&operator).await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "derived/tag", &doc).await?,
+            vec![Value::String("hello".into())],
+            "the lagged fact induces at the next instant"
+        );
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            branch.revision(),
+            "the catch-up carries the watermark to the head"
+        );
+        Ok(())
     }
 
     /// A raw [`Branch::commit`] bypasses induction — the model of a

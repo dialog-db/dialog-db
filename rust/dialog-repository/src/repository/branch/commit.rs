@@ -1,4 +1,5 @@
 use super::merge::merge_with_winner;
+use super::transaction::induction_ignores;
 use crate::repository::archive::persist;
 use crate::repository::source::SourceRef;
 use crate::{
@@ -19,7 +20,9 @@ use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::{Publish, Resolve};
-use futures_util::{Stream, stream};
+use futures_util::{Stream, StreamExt as _, stream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Command that commits a stream of changes (assert/retract) to a branch
 /// or a snapshot.
@@ -150,12 +153,26 @@ impl<'a, Changes> Commit<'a, Changes> {
     }
 }
 
+/// Whether induction would see this instruction's fact; see
+/// [`induction_ignores`].
+fn induces(instruction: &Instruction) -> bool {
+    let (Instruction::Assert(artifact, _) | Instruction::Retract(artifact)) = instruction;
+    !induction_ignores(&artifact.the.to_string())
+}
+
 impl Branch {
     /// Commit a stream of instructions to this branch as the machinery
     /// does: no induction runs and no succession is settled against
     /// derived candidates. A write goes through
     /// [`transaction`](Self::transaction), which is the one path that
     /// reads the line as the commit will leave it.
+    ///
+    /// A commit of reserved records alone (`dialog.*`, bar rules and
+    /// concepts) carries the induction watermark to its head when the
+    /// watermark stood at the head it built on: induction drops those
+    /// records, so the commit is an inducing instant with an empty
+    /// delta. Any other fact leaves the watermark where it is, and the
+    /// next inducing instant catches up over the lag.
     pub(crate) fn commit<Changes>(&self, changes: Changes) -> Commit<'_, Changes> {
         Commit::new(self, changes)
     }
@@ -252,11 +269,26 @@ where
         let base_revision = branch.revision();
         let base_version = branch.revision.edition().map(|edition| edition.version);
         let merging = self.merge.then(|| base_revision.clone());
+        let built_on = base_revision.clone();
+
+        // Whether any fact of this commit is one induction would see.
+        // A commit of reserved records alone is an inducing instant with
+        // an empty delta, and carries the watermark below; the stream is
+        // consumed by the mint, so it is watched as it passes.
+        let inducible = Arc::new(AtomicBool::new(self.machinery.iter().any(induces)));
+        let changes = {
+            let inducible = Arc::clone(&inducible);
+            self.changes.inspect(move |instruction| {
+                if induces(instruction) {
+                    inducible.store(true, Ordering::Relaxed);
+                }
+            })
+        };
 
         let minted = Mint {
             source: SourceRef::from(branch),
             base: base_revision,
-            changes: self.changes,
+            changes,
             entries: self.entries,
             machinery: self.machinery,
             scope: self.scope,
@@ -315,6 +347,26 @@ where
         let version = revision.version();
         branch.records().insert(version, record);
         branch.contexts().insert(version, context);
+
+        // No induction ran, and none was owed: every fact here is a
+        // reserved record the lag drops. The commit is then an inducing
+        // instant with an empty delta, and the watermark follows it when
+        // it stood at the head this built on. A lag left by an earlier
+        // pull or raw commit stays for the next inducing instant, which
+        // catches up over this commit's records and drops them. Without
+        // this, the next transaction would diff this commit against the
+        // watermark to drop its records, reading the tree around a
+        // buffered write on a replica that may by then be offline, or
+        // without the grant the records retracted.
+        if !inducible.load(Ordering::Relaxed) {
+            let watermark = branch.induction_cell();
+            watermark.resolve().perform(env).await?;
+            if let (Some(standing), Some(built_on)) = (watermark.content(), built_on)
+                && standing == built_on
+            {
+                watermark.publish(revision.clone()).perform(env).await?;
+            }
+        }
 
         Ok(revision)
     }
