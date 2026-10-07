@@ -2,6 +2,8 @@ mod batch;
 mod induce;
 #[cfg(test)]
 mod invariants;
+#[cfg(test)]
+mod migration;
 pub(crate) use induce::induction_ignores;
 mod query;
 mod succession;

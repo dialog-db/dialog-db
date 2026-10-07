@@ -123,17 +123,15 @@ async fn seed_memberships(
     Ok((g1, g2))
 }
 
-/// A concept's rows are what its rule derived. `Member { group, role }`
-/// is concluded by one rule from alice's two memberships, admin of g1
-/// and viewer of g2; a read of `Member` under `all` returns those two
-/// rows, as a read of the memberships does. It returns their cross
-/// product instead: the engine selects each attribute's relation
-/// separately and joins them on the entity, so alice is also "viewer of
-/// g1" and "admin of g2", pairs no membership holds and the rule never
-/// derived. The design note calls this "the EAV model, not a bug"; a
-/// reader of the rule cannot tell from it that the pairing is lost.
+/// A rule derives attributes; a concept selects them. `Member { group,
+/// role }` reads each attribute through its own relation and joins
+/// them on the entity, so alice's memberships, admin of g1 and viewer
+/// of g2, read under `all` as every group beside every role: the cross
+/// product the design note calls "the EAV model, not a bug". Asserting
+/// the same two instances as facts gives the same four rows. This test
+/// pins the intended semantics and passes on the head.
 #[dialog_common::test]
-async fn a_concept_read_under_all_returns_the_rows_its_rule_derived() -> anyhow::Result<()> {
+async fn a_concept_read_under_all_joins_the_attributes_a_rule_derives() -> anyhow::Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
@@ -142,15 +140,39 @@ async fn a_concept_read_under_all_returns_the_rows_its_rule_derived() -> anyhow:
     let mut registry = RuleRegistry::new();
     registry.register(member_rule()?)?;
     let source = TestEnv::new(&branch, &operator, registry);
-    let mut expected = vec![
-        (Value::Entity(g1), Value::String("admin".into())),
-        (Value::Entity(g2), Value::String("viewer".into())),
-    ];
+    let mut expected = Vec::new();
+    for group in [&g1, &g2] {
+        for role in ["admin", "viewer"] {
+            expected.push((Value::Entity(group.clone()), Value::String(role.into())));
+        }
+    }
     expected.sort_by_key(|pair| format!("{pair:?}"));
+    assert_eq!(member_rows(&source, &alice, "all").await?, expected);
+    Ok(())
+}
+
+/// Under `last` each attribute of `Member` elects one value per entity,
+/// by the standing of the fact that bound it: m1's group fact, g1, is
+/// the newest group, and m2's role fact, viewer, the newest role. So
+/// alice reads as one row, `(g1, viewer)`. While nothing is stored
+/// under `member/group` or `member/role` the engine answers through
+/// the covering rule, the one rule re-headed onto the concept, which
+/// runs no election for a multi-field concept and returns the body's
+/// two rows: two values of a `last` attribute for one entity.
+#[dialog_common::test]
+async fn a_concept_read_under_last_elects_one_value_per_attribute() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let alice: Entity = "id:alice".parse()?;
+    let (g1, _) = seed_memberships(&branch, &operator, &alice).await?;
+    let mut registry = RuleRegistry::new();
+    registry.register(member_rule()?)?;
+    let source = TestEnv::new(&branch, &operator, registry);
     assert_eq!(
-        member_rows(&source, &alice, "all").await?,
-        expected,
-        "the rows the rule derived, not their cross product"
+        member_rows(&source, &alice, "last").await?,
+        vec![(Value::Entity(g1), Value::String("viewer".into()))],
+        "one row: each attribute's newest value"
     );
     Ok(())
 }
@@ -163,7 +185,8 @@ async fn a_concept_read_under_all_returns_the_rows_its_rule_derived() -> anyhow:
 /// says nothing about alice, so alice's rows must not change. Under
 /// the default policy, `last`, they do: the covering rule yields the
 /// body's two rows (no election runs on that path for a multi-field
-/// concept), and the election yields one row.
+/// concept), and the election yields one row, the right one under
+/// attribute heads (see `a_concept_read_under_last_elects_one_value_per_attribute`).
 #[dialog_common::test]
 async fn a_fact_about_another_entity_does_not_change_a_derived_concepts_rows_under_last()
 -> anyhow::Result<()> {
@@ -195,46 +218,6 @@ async fn a_fact_about_another_entity_does_not_change_a_derived_concepts_rows_und
         after, before,
         "alice's rows under `last` do not depend on a stored fact about bob"
     );
-    Ok(())
-}
-
-/// A derived row pairs values one body row bound together. A concept
-/// read under `last` must not answer with a `(group, role)` pair no
-/// membership holds. With the election path on (a fact under
-/// `member/role` of another entity), the per-attribute `last` election
-/// picks each attribute's winner by the standing of the fact that
-/// bound it: m1's group, g1, is the newest group fact and m2's role,
-/// viewer, the newest role fact, so alice reads as "viewer of g1".
-#[dialog_common::test]
-async fn a_concept_read_under_last_returns_a_pair_some_body_row_bound() -> anyhow::Result<()> {
-    let (operator, profile) = test_session_with_peer().await;
-    let repo = test_repo(&operator, &profile).await;
-    let branch = repo.branch("main").open().perform(&operator).await?;
-    let alice: Entity = "id:alice".parse()?;
-    let bob: Entity = "id:bob".parse()?;
-    let (g1, g2) = seed_memberships(&branch, &operator, &alice).await?;
-    branch
-        .transaction()
-        .assert(the!("member/role").of(bob.clone()).is("guest".to_string()))
-        .commit()
-        .publish()
-        .perform(&operator)
-        .await?;
-    let mut registry = RuleRegistry::new();
-    registry.register(member_rule()?)?;
-    let source = TestEnv::new(&branch, &operator, registry);
-    let rows = member_rows(&source, &alice, "last").await?;
-    let held = [
-        (Value::Entity(g1), Value::String("admin".into())),
-        (Value::Entity(g2), Value::String("viewer".into())),
-    ];
-    for row in &rows {
-        assert!(
-            held.contains(row),
-            "{row:?} is a pair no membership of alice holds; her memberships are {held:?}"
-        );
-    }
-    assert!(!rows.is_empty());
     Ok(())
 }
 
@@ -587,6 +570,85 @@ async fn a_bulk_negation_keys_on_the_variables_each_candidate_binds() -> anyhow:
         rows.len(),
         people - 1,
         "one nickname is banned, so one person is excluded: {rows:?}"
+    );
+    Ok(())
+}
+
+/// "One ordering decides every election, here and in the tree." Two
+/// claims of a cell land in one commit, so they stand equal and the
+/// tie falls to the value: a `last` concept read returns the greater
+/// value. A cardinality-one attribute premise reads the same cell
+/// through its own election, which breaks the tie by the hash of each
+/// fact instead, so for some value pairs the two reads of one cell
+/// under one policy disagree.
+#[dialog_common::test]
+async fn every_last_read_of_a_cell_elects_the_same_claim() -> anyhow::Result<()> {
+    use crate::attribute::query::AttributeQuery;
+    use crate::{Cardinality, Environment, Planner, Premise, Proposition};
+    use futures_util::TryStreamExt as _;
+
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let pairs = [
+        (300u32, 400u32),
+        (123, 321),
+        (7, 8),
+        (1000, 2000),
+        (11, 12),
+        (99, 100),
+    ];
+    let mut transaction = branch.transaction();
+    for (index, (first, second)) in pairs.iter().enumerate() {
+        let of: Entity = format!("id:e{index}").parse()?;
+        transaction = transaction
+            .assert(the!("org/salary").of(of.clone()).is(*first))
+            .assert(the!("org/salary").of(of.clone()).is(*second));
+    }
+    transaction.commit().publish().perform(&operator).await?;
+    let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+    let mut disagree = Vec::new();
+    for (index, pair) in pairs.iter().enumerate() {
+        let of: Entity = format!("id:e{index}").parse()?;
+        let premise = Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
+            Term::from(the!("org/salary")),
+            Term::<Entity>::from(of.clone()),
+            Term::var("salary"),
+            Term::blank(),
+            Some(Cardinality::One),
+        ))));
+        let rows: Vec<Match> = Planner::from(vec![premise])
+            .plan(&Environment::new())?
+            .evaluate(Match::new().seed(), &source)
+            .try_collect()
+            .await?;
+        let by_attribute: Vec<Value> = rows
+            .iter()
+            .map(|row| row.lookup(&Term::<Any>::var("salary"))?.content())
+            .collect::<Result<_, crate::EvaluationError>>()?;
+
+        let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": "last" }
+        }}))?;
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::<Any>::constant(of.clone()));
+        terms.insert("salary".into(), Term::var("salary"));
+        let rows = ConceptQuery { terms, predicate }
+            .evaluate(Match::new().seed(), &source)
+            .try_vec()
+            .await?;
+        let by_concept: Vec<Value> = rows
+            .iter()
+            .map(|row| row.lookup(&Term::<Any>::var("salary"))?.content())
+            .collect::<Result<_, crate::EvaluationError>>()?;
+        if by_attribute != by_concept {
+            disagree.push((pair, by_attribute, by_concept));
+        }
+    }
+    assert!(
+        disagree.is_empty(),
+        "a cardinality-one attribute read and a `last` concept read elect different claims of one cell: {disagree:?}"
     );
     Ok(())
 }

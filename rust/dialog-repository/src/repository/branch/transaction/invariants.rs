@@ -533,3 +533,102 @@ async fn a_last_write_succeeds_the_claim_a_last_read_returns_among_equals() -> R
     );
     Ok(())
 }
+
+/// "A write under `max` succeeds the claim a `max` read returns." The
+/// cell holds 100 and 200, both live, so `max` reads 200. A `max` write
+/// of 100 succeeds 200 and leaves 100 alone in the cell. The write
+/// finds 100 already held and writes nothing, so 200 stays and `max`
+/// keeps reading it: the held-value shortcut runs before the election,
+/// whatever the policy.
+#[dialog_common::test]
+async fn a_max_write_of_a_held_value_succeeds_the_claim_a_max_read_returns() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let alice: Entity = "id:alice".parse()?;
+    branch
+        .transaction()
+        .assert(salary(&alice, 100, Policy::All))
+        .assert(salary(&alice, 200, Policy::All))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        read_branch(&branch, &operator, &alice, "max").await?,
+        vec![200]
+    );
+    branch
+        .transaction()
+        .assert(salary(&alice, 100, Policy::Max))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        read_branch(&branch, &operator, &alice, "all").await?,
+        vec![100],
+        "the write succeeded the claim the read elected"
+    );
+    Ok(())
+}
+
+/// "The session overlay is the newest facts. An overlay row stands
+/// past the edition the next commit mints, above every committed
+/// claim." Branch `b` has ten commits and holds a salary of 300; its
+/// overlay holds 500. A query over `a` joined with `b` reads `last`
+/// over both lines. The overlay's standing is taken from the first
+/// line's head, `a`'s, which has one commit, so `b`'s overlay row
+/// stands below `b`'s own committed claim and `last` returns 300.
+#[dialog_common::test]
+async fn an_overlay_row_stands_above_its_own_lines_commits_in_a_join() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let alice: Entity = "id:alice".parse()?;
+    let a = repo.branch("a").open().perform(&operator).await?;
+    a.transaction()
+        .assert(salary(&alice, 1, Policy::All))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let b = repo.branch("b").open().perform(&operator).await?;
+    for value in 290..300u32 {
+        b.transaction()
+            .assert(write("org/other", &alice, value, Policy::All))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+    }
+    b.transaction()
+        .assert(salary(&alice, 300, Policy::All))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let a = repo.branch("a").open().perform(&operator).await?;
+    let b = repo.branch("b").open().perform(&operator).await?;
+    b.overlay().assert(AttributeStatement {
+        policy: None,
+        ..salary(&alice, 500, Policy::All)
+    })?;
+    assert_eq!(
+        read_branch(&b, &operator, &alice, "last").await?,
+        vec![500],
+        "alone, b's overlay row is its newest fact"
+    );
+    let rows: Vec<ConceptConclusion> = a
+        .query()
+        .join(&b)
+        .select(salary_query(&alice, "last"))
+        .perform(&operator)
+        .try_vec()
+        .await?;
+    assert_eq!(
+        salaries(rows)?,
+        vec![500],
+        "joined, b's overlay row is still newer than every committed claim"
+    );
+    Ok(())
+}

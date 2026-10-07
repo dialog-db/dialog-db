@@ -282,3 +282,68 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod counted {
+    use crate::counters::{Counters, since};
+    use crate::env::{Env, assert_all, attribute, entity, fact, text};
+    use dialog_artifacts::Policy;
+    use std::sync::OnceLock;
+
+    /// The counting subscriber, installed once for the test process.
+    fn counters() -> &'static Counters {
+        static COUNTERS: OnceLock<Counters> = OnceLock::new();
+        COUNTERS.get_or_init(Counters::install)
+    }
+
+    /// The README counts "commits" among the engine steps a scenario
+    /// takes. A branch commit is what every write scenario makes; the
+    /// `commit` span sits on the snapshot path, which no scenario
+    /// takes, so a branch commit counts none and every baseline
+    /// records `span.commit: 0`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_branch_commit_counts_a_commit_step() -> anyhow::Result<()> {
+        let counters = counters();
+        let env = Env::open().await?;
+        let before = counters.snapshot(env.tally());
+        env.commit(assert_all(
+            [fact(&entity("thing", 0), "stuff/name", text("a"))],
+            Policy::All,
+        ))
+        .await?;
+        let moved = since(&before, &counters.snapshot(env.tally()));
+        assert!(
+            moved.get("span.commit").copied().unwrap_or(0) >= 1,
+            "one commit, counted: {moved:?}"
+        );
+        let _ = attribute("stuff/name");
+        Ok(())
+    }
+
+    /// "Two runs write the same records": the harness pins its peer and
+    /// space keys and canonicalises batch order so a scenario's blocks
+    /// are the same run to run, which the block gate depends on. The
+    /// same commits from a fresh repository, run several times, mint
+    /// the same head every time.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_same_commits_mint_the_same_head() -> anyhow::Result<()> {
+        let mut heads = Vec::new();
+        for _ in 0..6 {
+            let env = Env::open().await?;
+            for batch in 0..4 {
+                let facts = (0..50).map(|index| {
+                    fact(
+                        &entity("thing", batch * 50 + index),
+                        "stuff/name",
+                        text(format!("name {index}")),
+                    )
+                });
+                env.commit(assert_all(facts, Policy::Last)).await?;
+            }
+            heads.push(env.head());
+        }
+        heads.dedup();
+        assert_eq!(heads.len(), 1, "every run minted one head: {heads:#?}");
+        Ok(())
+    }
+}

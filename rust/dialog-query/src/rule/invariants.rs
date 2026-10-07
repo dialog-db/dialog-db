@@ -38,8 +38,9 @@ fn friend_rule(when: Vec<Value>) -> DeductiveRule {
 
 /// "A body stored before identities were canonical sits under the
 /// hash of its bytes; hydration accepts that identity too, so such a
-/// rule stays live." The bytes are what the older release wrote: its
-/// descriptor spelled every field's `cardinality` and `description`.
+/// rule stays live." The bytes spell every field as the older release
+/// did, with its `cardinality` and an empty `description`; the
+/// repository's migration tests replay bytes captured from `main`.
 /// The check hashes this release's re-encoding of the decoded rule,
 /// which spells neither, so the stored identity is never recognised
 /// and the rule goes inert on the commit path.
@@ -47,7 +48,6 @@ fn friend_rule(when: Vec<Value>) -> DeductiveRule {
 fn a_rule_stored_by_the_older_release_is_recognised_under_its_stored_identity() {
     let legacy = json!({
         "deduce": {
-            "description": "",
             "with": {
                 "friend": {
                     "description": "",
