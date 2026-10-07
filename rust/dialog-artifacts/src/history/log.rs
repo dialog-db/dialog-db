@@ -50,3 +50,54 @@ pub async fn log<H: History>(
 
     Ok(entries)
 }
+
+/// The revisions reachable from `head` that `known` does not hold, ancestors
+/// first: what adopting `head` would bring into a replica whose history is
+/// `known`.
+///
+/// Walks the revision DAG of `upstream` from `head` through each record's
+/// parents, and stops at each revision that `known` records — the replica
+/// holds it, and everything it leads to, already. The result is in causal
+/// order: every revision after each of its ancestors that it lists.
+///
+/// Unlike [`log`], a hole is an error. [`log`] lists what a replica can
+/// vouch for, and skips a revision whose record it lacks; a puller deciding
+/// whether to adopt `head` must see every revision that it would bring in,
+/// so a revision that neither `upstream` nor `known` records — a head whose
+/// history its peer does not serve — fails the walk with
+/// [`DialogArtifactsError::IncompleteHistory`], and nothing of `head` can be
+/// vouched for.
+pub async fn novelty<U: History, K: History>(
+    head: &Version,
+    upstream: &U,
+    known: &K,
+) -> Result<Vec<(Version, RevisionRecord)>, DialogArtifactsError> {
+    let mut frontier = BinaryHeap::new();
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+
+    seen.insert(*head);
+    frontier.push(*head);
+
+    while let Some(version) = frontier.pop() {
+        if known.revision_record(&version).await?.is_some() {
+            continue;
+        }
+        let Some(record) = upstream.revision_record(&version).await? else {
+            return Err(DialogArtifactsError::IncompleteHistory(format!(
+                "the history of {head:?} holds the revision {version:?}, \
+                 whose record is not present"
+            )));
+        };
+        for parent in &record.parents {
+            if seen.insert(*parent) {
+                frontier.push(*parent);
+            }
+        }
+        entries.push((version, record));
+    }
+
+    // The heap yields every revision before its ancestors.
+    entries.reverse();
+    Ok(entries)
+}

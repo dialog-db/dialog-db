@@ -176,6 +176,28 @@ mod tests {
             .into()
     }
 
+    /// A replica reached at addresses its embedder keeps is the replica of
+    /// that peer, at those addresses, and records no contact of the host.
+    #[dialog_common::test]
+    fn it_reaches_a_replica_at_addresses_its_embedder_keeps() {
+        use crate::schema::DidExt as _;
+
+        let subject = did!("key:z6MkkZfZmshVFcBYo9RS6ZyUstxYdjjStQaFaL2TSTVdsiJh");
+        let peer = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
+        let addresses = vec![site("https://a.example")];
+
+        let replica = ConnectedReplica::reached_at(
+            Subject::from(subject.clone()),
+            &peer,
+            addresses.clone(),
+            subject.clone(),
+        );
+
+        assert_eq!(replica.did(), subject);
+        assert_eq!(replica.peer(), &peer.this());
+        assert_eq!(replica.addresses(), addresses.as_slice());
+    }
+
     /// A publish is a conditional write: one that failed on the wire may
     /// have landed, so a connection does not send it to another address.
     #[dialog_common::test]

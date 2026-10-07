@@ -15,7 +15,7 @@ use crate::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Valu
 use super::{
     Authority, Causality, CausalityCache, Cause, Claim, Edition, History, HistorySelector,
     MemoryHistory, Origin, Revision, RevisionRecord, TreeHistory, Version, causality,
-    common_ancestor, extend_skips, log,
+    common_ancestor, extend_skips, log, novelty,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -1999,6 +1999,66 @@ async fn it_logs_ancestry_newest_first() -> Result<()> {
         4,
         "a replication hole truncates the walk instead of failing it"
     );
+
+    Ok(())
+}
+
+/// The novelty of a head is what a replica lacks of its history, ancestors
+/// first, and a revision of that history whose record is not present fails
+/// the walk rather than truncating it.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_lists_the_novelty_of_a_head_and_fails_on_a_hole() -> Result<()> {
+    let repo = Entity::new()?;
+    let alice = signing_key(1);
+    let bob = signing_key(2);
+
+    let genesis = revise(&repo, &alice, &[], 0);
+    let a1 = revise(&repo, &alice, &[&genesis], 1);
+    let b1 = revise(&repo, &bob, &[&genesis], 2);
+    let merge = revise(&repo, &bob, &[&a1, &b1], 3);
+    let tip = revise(&repo, &bob, &[&merge], 4);
+
+    let mut upstream = MemoryHistory::default();
+    for revision in [&genesis, &a1, &b1, &merge, &tip] {
+        upstream.record_revision(revision)?;
+    }
+    // The replica holds alice's line.
+    let mut known = MemoryHistory::default();
+    for revision in [&genesis, &a1] {
+        known.record_revision(revision)?;
+    }
+
+    let novel = novelty(&tip.version(), &upstream, &known).await?;
+
+    let versions: Vec<_> = novel.iter().map(|(version, _)| *version).collect();
+    assert_eq!(
+        versions,
+        vec![b1.version(), merge.version(), tip.version()],
+        "what the replica lacks, ancestors first"
+    );
+    assert_eq!(novel[0].1.authority, authority_of(&bob).to_string());
+    assert!(
+        novelty(&a1.version(), &upstream, &known).await?.is_empty(),
+        "a head the replica holds brings nothing"
+    );
+
+    // A hole: b1's record is absent from the upstream's history, so the
+    // merge cannot be vouched for, and the walk fails.
+    let mut holed = MemoryHistory::default();
+    for revision in [&genesis, &a1, &merge, &tip] {
+        holed.record_revision(revision)?;
+    }
+    let error = novelty(&tip.version(), &holed, &known)
+        .await
+        .expect_err("a hole fails the walk");
+    assert!(
+        matches!(error, DialogArtifactsError::IncompleteHistory(_)),
+        "{error:?}"
+    );
+    // The same hole is no hole for a replica that holds b1.
+    known.record_revision(&b1)?;
+    assert_eq!(novelty(&tip.version(), &holed, &known).await?.len(), 2);
 
     Ok(())
 }
