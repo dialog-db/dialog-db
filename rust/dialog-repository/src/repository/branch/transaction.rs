@@ -1,5 +1,7 @@
 mod batch;
 mod induce;
+#[cfg(test)]
+mod invariants;
 pub(crate) use induce::induction_ignores;
 mod query;
 mod succession;

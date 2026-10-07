@@ -4,6 +4,8 @@ pub mod adornment;
 pub mod affected;
 /// Semi-naive fixpoint evaluation for recursive concepts.
 pub mod fixpoint;
+#[cfg(test)]
+mod invariants;
 /// Shared, branch-owned plan cache keyed by (rule identity, adornment).
 mod plan_cache;
 /// Per-concept rule management with adornment-keyed plan caching.

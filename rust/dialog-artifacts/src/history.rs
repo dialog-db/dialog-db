@@ -88,6 +88,8 @@ pub use revision_record::*;
 pub const REVISION_ATTRIBUTE: &str = "dialog.db/revision";
 
 #[cfg(test)]
+mod invariants;
+#[cfg(test)]
 mod tests;
 
 impl From<HistoryError> for crate::DialogArtifactsError {

@@ -222,3 +222,63 @@ fn compare_reports(base: &Report, new: &Report, tolerance: &Tolerance, out: &mut
     out.summary
         .push(format!("{name}: {instructions} | {moved}"));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report(counters: &[(&str, u64)]) -> Report {
+        Report {
+            scenario: "s".into(),
+            size: 1,
+            profile: "release".into(),
+            outcome: BTreeMap::new(),
+            counters: counters
+                .iter()
+                .map(|(key, value)| (key.to_string(), *value))
+                .collect(),
+            instructions: None,
+            volatile: false,
+        }
+    }
+
+    /// A step the baseline never took, taken now, is a change in what
+    /// the engine does: a scenario that settled no cell and now settles
+    /// five hundred regresses. The comparison walks the baseline's
+    /// counters alone, so a counter the baseline lacks is never gated.
+    #[test]
+    fn a_step_the_baseline_never_took_is_a_regression() {
+        let mut comparison = Comparison::default();
+        compare_reports(
+            &report(&[]),
+            &report(&[("span.settle_cell", 500)]),
+            &Tolerance::default(),
+            &mut comparison,
+        );
+        assert!(
+            !comparison.passed(),
+            "500 settlements where the baseline had none: {:?}",
+            comparison.summary
+        );
+    }
+
+    /// A read scenario that starts writing blocks is a change in what
+    /// the engine does, not seam wobble: the block allowance is for a
+    /// commit landing a block earlier or later, and a baseline of zero
+    /// has no seams to wobble.
+    #[test]
+    fn a_read_that_starts_writing_is_a_regression() {
+        let mut comparison = Comparison::default();
+        compare_reports(
+            &report(&[("archive.put", 0)]),
+            &report(&[("archive.put", 2)]),
+            &Tolerance::default(),
+            &mut comparison,
+        );
+        assert!(
+            !comparison.passed(),
+            "two blocks written where the baseline wrote none: {:?}",
+            comparison.summary
+        );
+    }
+}

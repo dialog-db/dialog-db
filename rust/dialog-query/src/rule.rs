@@ -34,6 +34,8 @@ pub mod canonical;
 pub mod deductive;
 /// Inductive rule definitions (a.k.a. effects).
 pub mod inductive;
+#[cfg(test)]
+mod invariants;
 /// Premises collection type.
 pub mod premises;
 /// Rules as statements: `dialog.rule/*` vocabulary and install-by-assert.
