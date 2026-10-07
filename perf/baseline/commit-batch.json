@@ -1,0 +1,22 @@
+{
+  "scenario": "commit-batch",
+  "size": 1000,
+  "profile": "release",
+  "outcome": {
+    "facts": 2000
+  },
+  "counters": {
+    "archive.get": 2,
+    "archive.get.bytes": 16276,
+    "archive.put": 36,
+    "archive.put.bytes": 1163520,
+    "span.apply_batch_reusing": 1,
+    "span.buffer_records": 2,
+    "span.commit": 0,
+    "span.resolve_bundle": 0,
+    "span.resolve_rules": 0,
+    "span.seal_batch": 1,
+    "span.write_instructions": 1
+  },
+  "instructions": 373349653
+}

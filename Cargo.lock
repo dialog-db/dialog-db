@@ -1396,6 +1396,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "dialog-perf"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "clap",
+ "dialog-artifacts",
+ "dialog-capability",
+ "dialog-common",
+ "dialog-credentials",
+ "dialog-effects",
+ "dialog-peer",
+ "dialog-query",
+ "dialog-repository",
+ "dialog-storage",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "dialog-query"
 version = "0.1.0"
 dependencies = [
