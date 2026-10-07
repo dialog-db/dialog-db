@@ -84,14 +84,23 @@ few bytes different from one run to the next.
 
 ## Re-baselining
 
+An instruction count belongs to a binary, and a different toolchain
+builds a different binary: a sweep from this container's own `rustc`
+ran 2 to 6% under the same code built by the nix-pinned one CI uses.
+The baselines are therefore the nix toolchain's numbers. Record them
+in the nix dev shell:
+
 ```sh
-cargo run -p dialog-perf --release -- sweep --out-dir perf/baseline
+nix develop --command bash -lc \
+  'cargo run -p dialog-perf --release -- sweep --out-dir perf/baseline'
 git add perf/baseline
 ```
 
-Commit the reports with the pull request that changes the cost, with
-the numbers in its body. `compare` also lists improvements past the
-allowance; re-baseline after one so the gate holds the new level.
+or take them from the `Perf gate` job's uploaded `perf-current`
+artifact, which is the same sweep on the same toolchain. Commit the
+reports with the pull request that changes the cost, with the numbers
+in its body. `compare` also lists improvements past the allowance;
+re-baseline after one so the gate holds the new level.
 
 ## Adding a scenario
 

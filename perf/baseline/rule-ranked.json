@@ -11,7 +11,7 @@
   },
   "counters": {
     "archive.get": 14,
-    "archive.get.bytes": 446540,
+    "archive.get.bytes": 446548,
     "archive.put": 0,
     "archive.put.bytes": 0,
     "span.apply_batch_reusing": 0,
@@ -23,5 +23,5 @@
     "span.seal_batch": 0,
     "span.write_instructions": 0
   },
-  "instructions": 69597284
+  "instructions": 70572351
 }
