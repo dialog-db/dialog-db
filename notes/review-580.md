@@ -54,6 +54,11 @@ Open, each needing a decision:
 
 - **5, absence tests inside a cycle.** Options: refuse per component and report; evaluate
   the negation against stored facts and lower strata only; a well-founded semantics.
+  The same defect is reachable without `unless`: an election is "this candidate and
+  nothing better", so a ranked choice over a sentinel default is an absence test, and
+  inside a cycle the choice reads its candidate set
+  (`a_ranked_default_inside_a_cycle_still_elects`). Whatever the decision, it covers
+  elections inside a cycle as well as `unless`.
 - **10, field names in identity.** Not blocking.
 
 ## Decided since the first review

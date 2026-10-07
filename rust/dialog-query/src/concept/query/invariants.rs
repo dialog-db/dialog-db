@@ -389,6 +389,94 @@ async fn a_stratified_negation_keeps_its_meaning_when_another_rule_closes_a_cycl
     Ok(())
 }
 
+/// An absence test spelled as a ranked choice: `x/default(e)` is the
+/// sentinel `"none"` for every item, and `status` reads `top` over
+/// `[x/real, x/default]`, so it is `"none"` exactly when no `x/real`
+/// exists. `x/flag(e) := s :- status(e) = s, s == "none"` is then
+/// `x/flag(e) :- unless x/real(e)`: an election is "this candidate,
+/// and nothing better", and the "nothing better" is a negation. With
+/// `b`'s stored `x/real`, only `a` is flagged. A rule that reads
+/// `x/flag` into `x/real` closes a cycle through the choice, and
+/// derives nothing (no entity has an `x/mirror`). Inside the cycle the
+/// choice reads its candidate set, `{"set", "none"}` for `b`, so the
+/// sentinel matches and `b` is flagged too: the cycle policy for
+/// negation, reached through a policy instead of `unless`.
+#[dialog_common::test]
+async fn a_ranked_default_inside_a_cycle_still_elects() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let a: Entity = "id:a".parse()?;
+    let b: Entity = "id:b".parse()?;
+    branch
+        .transaction()
+        .assert(the!("x/item").of(a.clone()).is("none".to_string()))
+        .assert(the!("x/item").of(b.clone()).is("none".to_string()))
+        .assert(the!("x/real").of(b.clone()).is("set".to_string()))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+
+    let default = compile(serde_json::json!({
+        "deduce": { "with": { "default": { "the": "x/default", "as": "Text" } } },
+        "when": [{
+            "assert": { "with": { "item": { "the": "x/item", "as": "Text" } } },
+            "where": { "this": { "?": { "name": "this" } }, "item": { "?": { "name": "default" } } }
+        }]
+    }))?;
+    let flag = compile(serde_json::json!({
+        "deduce": { "with": { "flag": { "the": "x/flag", "as": "Text" } } },
+        "when": [
+            {
+                "assert": { "with": {
+                    "status": { "the": ["x/real", "x/default"], "as": "Text" }
+                }},
+                "where": { "this": { "?": { "name": "this" } }, "status": { "?": { "name": "flag" } } }
+            },
+            {
+                "assert": "==",
+                "where": { "this": { "?": { "name": "flag" } }, "is": "none" }
+            }
+        ]
+    }))?;
+    let close = compile(serde_json::json!({
+        "deduce": { "with": { "real": { "the": "x/real", "as": "Text" } } },
+        "when": [{
+            "assert": { "with": {
+                "flag": { "the": "x/flag", "as": "Text" },
+                "mirror": { "the": "x/mirror", "as": "Text" }
+            }},
+            "where": {
+                "this": { "?": { "name": "this" } },
+                "flag": { "?": { "name": "real" } },
+                "mirror": { "?": { "name": "real" } }
+            }
+        }]
+    }))?;
+    let expected = vec![(Value::Entity(a), Value::String("none".into()))];
+
+    let mut registry = RuleRegistry::new();
+    registry.register(default)?;
+    registry.register(flag)?;
+    {
+        let source = TestEnv::new(&branch, &operator, registry.clone());
+        assert_eq!(
+            relation_under(&source, "x/flag", "all").await?,
+            expected,
+            "outside a cycle: b's x/real outranks the sentinel, so only a is flagged"
+        );
+    }
+    registry.register(close)?;
+    let source = TestEnv::new(&branch, &operator, registry);
+    assert_eq!(
+        relation_under(&source, "x/flag", "all").await?,
+        expected,
+        "a rule that derives nothing does not change the election the sentinel reads"
+    );
+    Ok(())
+}
+
 /// `ancestor(this, a) :- parent(this, a)` and `ancestor(this, a) :-
 /// parent(this, p), ancestor(p, a)`, read through a field under the
 /// default policy, `last`. The design says election "runs once, over
