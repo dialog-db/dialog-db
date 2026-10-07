@@ -414,7 +414,13 @@ impl ConceptQuery {
         let this = app.terms.get("this").cloned();
 
         try_stream! {
-            let mut selection = Box::pin(selection);
+            // The caller's stream is erased here, at the entry, and in every
+            // entry below: a rule body evaluates its premises through this
+            // function again, and a stream type that kept its caller's type
+            // inside (`Chain<Once<..>, Pin<Box<M>>>` around the next level's)
+            // grew by a layer per round until the compiler had unrolled the
+            // whole recursion, forty levels deep in a workload's binary.
+            let mut selection: Pin<Box<dyn Selection + 'a>> = Box::pin(selection);
             let Some(first) = selection.next().await else {
                 return;
             };
@@ -477,7 +483,8 @@ impl ConceptQuery {
         let app = self;
 
         try_stream! {
-            let mut selection = Box::pin(selection);
+            // Erased at the entry; see `evaluate`.
+            let mut selection: Pin<Box<dyn Selection + 'a>> = Box::pin(selection);
             let Some(first) = selection.next().await else {
                 return;
             };
@@ -644,6 +651,8 @@ impl ConceptQuery {
         // has run, which of them nothing matched.
         let callers: Arc<Mutex<Vec<Arc<Match>>>> = Arc::new(Mutex::new(Vec::new()));
         let kept = callers.clone();
+        // Erased at the entry; see `evaluate`.
+        let rows: Pin<Box<dyn Selection + 'a>> = Box::pin(rows);
         let scoped = rows.map(move |each| {
             let mut input = each?;
             // Every result merges back into a clone of this row: share its

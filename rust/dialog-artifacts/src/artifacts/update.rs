@@ -548,6 +548,14 @@ impl Changes {
     /// batch that [`has_assets`](Self::has_assets). An assertion carries
     /// its policy into the instruction: the tree elects among the cell's
     /// stored claims when it applies one under a choosing policy.
+    ///
+    /// The instructions come in entity then attribute order, a cell's
+    /// in the order they were recorded. A batch records its facts in a
+    /// hash map, whose order differs from one process to the next, and
+    /// the tree buffers the writes it is handed and flushes by what has
+    /// accumulated: handed the same facts in another order it wrote
+    /// another set of intermediate nodes. In a fixed order, two commits
+    /// of the same facts write the same blocks.
     pub fn into_instructions(self) -> Vec<Instruction> {
         let mut instructions = Vec::new();
         for (entity, attributes) in self.facts {
@@ -574,6 +582,11 @@ impl Changes {
                 }
             }
         }
+        let cell = |instruction: &Instruction| {
+            let (Instruction::Assert(artifact, _) | Instruction::Retract(artifact)) = instruction;
+            (artifact.of.clone(), artifact.the.clone())
+        };
+        instructions.sort_by_cached_key(cell);
         instructions
     }
 }
@@ -891,6 +904,66 @@ impl Changes {
 
 #[cfg(test)]
 mod tests {
+    /// The instructions of a batch come in entity then attribute order,
+    /// a cell's in the order they were recorded, however the facts were
+    /// recorded: the batch the tree is handed is the same from one
+    /// process to the next.
+    #[dialog_common::test]
+    fn it_orders_a_batchs_instructions() {
+        use super::{Changes, Instruction, Policy, Value};
+        let fact = |of: &str, the: &str, is: &str| -> Instruction {
+            Instruction::Assert(
+                super::Artifact {
+                    the: the.parse().expect("attribute"),
+                    of: of.parse().expect("entity"),
+                    is: Value::String(is.into()),
+                    cause: None,
+                },
+                Policy::All,
+            )
+        };
+        let recorded = || {
+            [
+                fact("id:b", "stuff/role", "x"),
+                fact("id:a", "stuff/role", "y"),
+                fact("id:b", "stuff/name", "first"),
+                fact("id:a", "stuff/name", "z"),
+                fact("id:b", "stuff/name", "second"),
+            ]
+        };
+        let forward: Changes = recorded().into_iter().collect();
+        let backward: Changes = recorded().into_iter().rev().collect();
+        let cells = |changes: Changes| -> Vec<(String, String, String)> {
+            changes
+                .into_instructions()
+                .into_iter()
+                .map(|instruction| {
+                    let (Instruction::Assert(artifact, _) | Instruction::Retract(artifact)) =
+                        instruction;
+                    let Value::String(is) = artifact.is else {
+                        panic!("a text value")
+                    };
+                    (artifact.of.to_string(), artifact.the.to_string(), is)
+                })
+                .collect()
+        };
+        let expected: Vec<(String, String, String)> = [
+            ("id:a", "stuff/name", "z"),
+            ("id:a", "stuff/role", "y"),
+            ("id:b", "stuff/name", "first"),
+            ("id:b", "stuff/name", "second"),
+            ("id:b", "stuff/role", "x"),
+        ]
+        .into_iter()
+        .map(|(of, the, is)| (of.into(), the.into(), is.into()))
+        .collect();
+        assert_eq!(cells(forward), expected);
+        let mut reversed = cells(backward);
+        // Recorded backwards, a cell's two values come in that order.
+        reversed.swap(2, 3);
+        assert_eq!(reversed, expected);
+    }
+
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 

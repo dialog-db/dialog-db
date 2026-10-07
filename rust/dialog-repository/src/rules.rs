@@ -138,6 +138,7 @@ pub(crate) fn source_selector(rule: &Entity) -> ArtifactSelector<Constrained> {
 
 /// Hydrate a compiled [`DeductiveRule`] from a `dialog.rule/source` claim
 /// value (the canonical dag-cbor [`DeductiveRuleDescriptor`]).
+#[tracing::instrument(skip_all, name = "hydrate_rule")]
 pub(crate) fn hydrate(source: &[u8]) -> Result<DeductiveRule, EvaluationError> {
     DeductiveRule::decode(source)
         .map_err(|reason| EvaluationError::Store(format!("rule hydrate: {reason}")))

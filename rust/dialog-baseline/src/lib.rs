@@ -31,7 +31,9 @@
 //! production SQLite deployment would actually run, and is the number to
 //! beat once dialog has an explicit durability story.
 
-pub mod metered;
+/// The metered operator, kept with the peer's test helpers so any
+/// measurement crate can count the blocks a workload moves.
+pub use dialog_peer::helpers::metered;
 pub mod nodes;
 pub mod repo;
 pub mod se;

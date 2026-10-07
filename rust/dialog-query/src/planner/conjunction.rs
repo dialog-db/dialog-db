@@ -237,6 +237,8 @@ impl Conjunction {
         Env: crate::Scope<'a>,
     {
         Box::pin(crate::try_stream! {
+            // Erased at the entry; see `ConceptQuery::evaluate`.
+            let selection: Pin<Box<dyn Selection + 'a>> = Box::pin(selection);
             let mut selection = Box::pin(selection.peekable());
 
             // Rows share one binding pattern, so the first says whether the

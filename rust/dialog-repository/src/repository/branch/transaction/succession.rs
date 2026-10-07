@@ -268,6 +268,7 @@ pub(crate) async fn relation_derived(
 /// derive through the whole of `layer`, as a read of the transaction
 /// sees every write it made. Returns the line's claims the cell's
 /// writes succeed and the written values the cell already held.
+#[tracing::instrument(skip_all, name = "settle_cell")]
 pub(crate) async fn settle_cell(
     sources: Vec<Source>,
     overlay: Arc<Changes>,

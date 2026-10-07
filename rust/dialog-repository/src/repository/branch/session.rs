@@ -1391,6 +1391,7 @@ impl<'a> QueryEnv<'a> {
     /// line's durable layer (committed, head-cached) and session
     /// overlay, the per-query overlay, and the staged layers, the last
     /// three read fresh.
+    #[tracing::instrument(skip_all, name = "resolve_rules")]
     async fn resolve_rules(
         &self,
         index: Index,
@@ -1487,6 +1488,7 @@ impl<'a> QueryEnv<'a> {
     /// derived attribute through the attribute concept and the rest
     /// from stored facts, and a rule concluding exactly this concept
     /// without a `derives` index installs as written beside it.
+    #[tracing::instrument(skip_all, name = "resolve_bundle")]
     async fn resolve_bundle(
         &self,
         descriptor: &ConceptDescriptor,
