@@ -37,6 +37,7 @@ carries_nothing!(
     archive::Get,
     memory::Resolve,
     memory::Retract,
+    memory::Watch,
     peer::Hello,
     peer::Spaces
 );

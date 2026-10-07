@@ -197,6 +197,24 @@ performs_by_value!(
     memory::Retract,
 );
 
+/// Following a cell needs a stream that stays open while the cell changes,
+/// which an exchange of one request and one answer is not. Until this site
+/// keeps one, a watch is refused by name, and the cell is read by resolving
+/// it again.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<ForkInvocation<Iroh, memory::Watch>> for Iroh {
+    async fn execute(
+        &self,
+        _: ForkInvocation<Iroh, memory::Watch>,
+    ) -> Result<memory::Editions, memory::MemoryError> {
+        Err(Rejection::Unsupported {
+            reason: "this peer site exchanges one request and one answer".into(),
+        }
+        .into())
+    }
+}
+
 /// A peer's refusal, in the caller's own vocabulary.
 ///
 /// Only [`Refusal::Unauthorized`] is an access decision, and it is the
