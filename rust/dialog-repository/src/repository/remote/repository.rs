@@ -61,6 +61,23 @@ impl ConnectedReplica {
         }
     }
 
+    /// A repository `subject` held at the peer `peer`, reached at
+    /// `addresses`, with its state cached under `host`.
+    ///
+    /// For an embedder that keeps the addresses of its peers itself, rather
+    /// than as contacts of the host (see [`contact`](crate::contact)): it
+    /// reaches the replica without recording `dialog.peer/address`.
+    /// `addresses` is not empty: a peer with nowhere to reach it is not
+    /// connected to.
+    pub fn reached_at(
+        host: Subject,
+        peer: &Did,
+        addresses: Vec<SiteAddress>,
+        subject: Did,
+    ) -> Self {
+        Self::new(host, peer.this(), None, addresses, subject)
+    }
+
     /// The replica of `subject` at the peer `connection` reaches, with
     /// its state cached under `host`. Reaching it goes through the
     /// connection's addresses, and shares with every other user of the
