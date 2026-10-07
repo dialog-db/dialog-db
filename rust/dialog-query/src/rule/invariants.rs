@@ -8,8 +8,8 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::Environment;
 use crate::concept::query::PlanCache;
 use crate::concept::query::adornment::Adornment;
+use crate::rule::deductive::DeductiveRule;
 use crate::rule::deductive::descriptor::DeductiveRuleDescriptor;
-use crate::rule::deductive::{DeductiveRule, legacy_identity};
 use serde_json::{Value, json};
 
 fn compile(json: Value) -> DeductiveRule {
@@ -36,16 +36,14 @@ fn friend_rule(when: Vec<Value>) -> DeductiveRule {
     }))
 }
 
-/// "A body stored before identities were canonical sits under the
-/// hash of its bytes; hydration accepts that identity too, so such a
-/// rule stays live." The bytes spell every field as the older release
-/// did, with its `cardinality` and an empty `description`; the
+/// A rule the previous release stored sits under the hash of its bytes,
+/// not under its identity. It is not live there: no permanent
+/// compatibility path reads it, and `Branch::upgrade_rules` re-installs
+/// it under its identity. The bytes spell every field as the previous
+/// release did, with its `cardinality` and an empty `description`; the
 /// repository's migration tests replay bytes captured from `main`.
-/// The check hashes this release's re-encoding of the decoded rule,
-/// which spells neither, so the stored identity is never recognised
-/// and the rule goes inert on the commit path.
 #[dialog_common::test]
-fn a_rule_stored_by_the_older_release_is_recognised_under_its_stored_identity() {
+fn a_rule_the_previous_release_stored_is_inert_under_its_byte_hash() {
     let legacy = json!({
         "deduce": {
             "with": {
@@ -73,11 +71,21 @@ fn a_rule_stored_by_the_older_release_is_recognised_under_its_stored_identity() 
         }]
     });
     let bytes = serde_ipld_dagcbor::to_vec(&legacy).expect("the legacy form encodes");
-    let stored_under = legacy_identity(Some(bytes.clone())).expect("an identity");
+    let hash = blake3::hash(&bytes);
+    let stored_under: crate::Entity = format!(
+        "rule:{}",
+        base58::ToBase58::to_base58(hash.as_bytes().as_ref())
+    )
+    .parse()
+    .expect("an entity");
     let rule = DeductiveRule::decode(&bytes).expect("a legacy rule decodes");
     assert!(
-        rule.stored_as(&stored_under),
-        "the rule is live under the hash of the bytes it was stored as"
+        !rule.stored_as(&stored_under),
+        "the rule is not live under the hash of the bytes it was stored as"
+    );
+    assert!(
+        rule.stored_as(&rule.this()),
+        "it is live under its identity"
     );
 }
 
@@ -128,7 +136,6 @@ fn a_plan_is_cached_by_the_working_spelling_it_was_planned_for() {
         "when": [premise("x/p", "p", "b"), premise("x/q", "q", "a")],
     }));
     assert_eq!(one.this(), other.this(), "one rule, two spellings");
-    assert_eq!(one.spelling(), other.spelling(), "the same operand names");
     let scope = Environment::new();
     let adornment = Adornment::binding(&one.conclusion().sorted_operands(), &scope);
     let cache = PlanCache::default();

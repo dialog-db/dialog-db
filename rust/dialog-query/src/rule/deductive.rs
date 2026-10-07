@@ -319,11 +319,31 @@ impl DeductiveRule {
     /// The head's spelling: what the identity leaves out. Two rules of
     /// one identity under different field names plan and remember
     /// their bodies under different variables, so what is keyed by
-    /// identity is keyed by this as well.
+    /// identity is keyed by this as well. It is each field's name with
+    /// the relation the field reads, and the operands beside them: two
+    /// heads using one set of names for different attributes bind those
+    /// names from different premises, so the names alone do not say
+    /// which plan is theirs.
     pub fn spelling(&self) -> Vec<u8> {
-        let operands = self.conclusion().sorted_operands();
-        let parts: Vec<&[u8]> = operands.iter().map(|name| name.as_bytes()).collect();
-        blake3::hash(&parts.concat()).as_bytes()[..8].to_vec()
+        let mut hasher = blake3::Hasher::new();
+        let mut fields: Vec<(String, String)> = self
+            .conclusion()
+            .with()
+            .iter()
+            .map(|(name, field)| (name.to_string(), field.the().to_string()))
+            .collect();
+        fields.sort();
+        for (name, relation) in &fields {
+            for part in [name.as_bytes(), relation.as_bytes()] {
+                hasher.update(&(part.len() as u64).to_be_bytes());
+                hasher.update(part);
+            }
+        }
+        for name in self.conclusion().sorted_operands().iter() {
+            hasher.update(&(name.len() as u64).to_be_bytes());
+            hasher.update(name.as_bytes());
+        }
+        hasher.finalize().as_bytes()[..8].to_vec()
     }
 
     /// This rule re-headed onto `target`, a concept of the same
@@ -449,13 +469,12 @@ impl DeductiveRule {
     }
 
     /// Whether this rule's body is what was stored under `entity`:
-    /// `entity` is its identity, or the identity its spelling had
-    /// before identities were canonical (the hash of the stored bytes),
-    /// so a rule installed then stays live. Bytes stored under any other
-    /// entity are forged or corrupt.
+    /// `entity` is its identity. Bytes stored under any other entity
+    /// are forged, corrupt, or a rule an earlier release stored under
+    /// the hash of its bytes, which stays inert until
+    /// `Branch::upgrade_rules` re-installs it under its identity.
     pub fn stored_as(&self, entity: &Entity) -> bool {
         self.try_this().as_ref() == Some(entity)
-            || legacy_identity(self.try_encode()).as_ref() == Some(entity)
     }
 
     /// The source this head was split from, when it was.
@@ -839,19 +858,6 @@ pub(crate) fn same_attribute(a: &ConceptFieldDescriptor, b: &ConceptFieldDescrip
     a.the() == b.the() && a.cardinality() == b.cardinality() && a.content_type() == b.content_type()
 }
 
-/// The identity a stored body had before identities were canonical:
-/// `rule:<base58(blake3(bytes))>` over its encoding as stored. What
-/// [`DeductiveRule::stored_as`] and [`InductiveRule::stored_as`] accept
-/// beside the canonical identity.
-///
-/// [`InductiveRule::stored_as`]: crate::rule::inductive::InductiveRule::stored_as
-pub fn legacy_identity(encoded: Option<Vec<u8>>) -> Option<Entity> {
-    use base58::ToBase58;
-    let hash = blake3::hash(&encoded?);
-    let encoded = hash.as_bytes().as_ref().to_base58();
-    format!("rule:{encoded}").parse().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -984,11 +990,11 @@ mod tests {
         );
     }
 
-    /// A body stored before identities were canonical sits under the
-    /// hash of its bytes: the rule is stored as that entity and as its
-    /// canonical identity, and as nothing else.
+    /// A rule is stored as its canonical identity and as nothing else,
+    /// not even the hash of its own bytes, the identity an earlier
+    /// release gave it.
     #[dialog_common::test]
-    fn it_is_stored_as_its_legacy_identity_too() {
+    fn it_is_stored_as_its_identity_alone() {
         use serde_json::json;
         let json = json!({
             "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
@@ -1005,14 +1011,13 @@ mod tests {
         let descriptor: DeductiveRuleDescriptor =
             serde_json::from_value(json).expect("descriptor parses");
         let rule = descriptor.compile().expect("rule compiles");
-        let legacy = legacy_identity(rule.try_encode()).expect("an encodable body");
-        assert_ne!(
-            legacy,
-            rule.this(),
-            "the legacy identity hashes the stored bytes"
-        );
+        let bytes = blake3::hash(&rule.encode()).as_bytes().to_vec();
+        let legacy: Entity = format!("rule:{}", base58::ToBase58::to_base58(bytes.as_slice()))
+            .parse()
+            .expect("an entity");
+        assert_ne!(legacy, rule.this(), "the byte hash is not the identity");
         assert!(rule.stored_as(&rule.this()));
-        assert!(rule.stored_as(&legacy));
+        assert!(!rule.stored_as(&legacy));
         let other: Entity = "rule:forged".parse().expect("an entity");
         assert!(!rule.stored_as(&other));
     }

@@ -1469,7 +1469,9 @@ where
                 // key, its versions and its standing: the deepest version it
                 // carries and its cause, which is how a read orders it.
                 let mut priors: Vec<(Key, Vec<Version>, Value, Standing)> = Vec::new();
-                let mut found_same_value = false;
+                // The prior holding the written value, when the cell holds
+                // it: one more candidate the election may return.
+                let mut held: Option<usize> = None;
                 {
                     let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
                         .set_entity(entity_key.entity())
@@ -1494,8 +1496,7 @@ where
                                 continue;
                             }
                             if current.is == artifact.is {
-                                found_same_value = true;
-                                continue;
+                                held = Some(priors.len());
                             }
                             let versions: Vec<Version> =
                                 current_element.versions().copied().collect();
@@ -1513,26 +1514,57 @@ where
                     }
                 }
 
-                // The value stands already: nothing to succeed, and a fresh
-                // record would fork the claim's lineage away from the
-                // version the standing datum carries.
-                if found_same_value {
-                    continue;
-                }
-                changed = true;
-
                 // The elected claim is the one a read under the policy
-                // returns over these priors. It is retracted outright, as a
-                // retraction is, and its versions become the new claim's
-                // cause, as a replacement's superseded versions do.
+                // returns over these priors, the written value's own claim
+                // among them when the cell holds it.
                 let elected = policy.elect(
                     priors
                         .iter()
                         .map(|(_, _, value, standing)| (value, Some(standing))),
                 );
+                // A read returns the written value already: nothing to
+                // succeed, and a fresh record would fork the claim's
+                // lineage away from the version the standing datum carries.
+                if held.is_some() && elected == held {
+                    continue;
+                }
+                changed = true;
+                // The written value's claim, when the cell holds one the
+                // read does not return: the write folds the commit's
+                // version into it, as an assertion of a value that stands
+                // does, so it stands past the claim it succeeds.
+                let held_versions: Vec<Version> = held
+                    .map(|index| priors[index].1.clone())
+                    .unwrap_or_default();
+
+                // The elected claim is retracted outright, as a retraction
+                // is, and its versions become the new claim's cause, as a
+                // replacement's superseded versions do.
                 let mut superseded_versions: Vec<Version> = Vec::new();
                 if let Some(index) = elected {
-                    let (key, versions, _, _) = priors.swap_remove(index);
+                    let (key, versions, elected_value, _) = priors.swap_remove(index);
+                    // A claim this batch asserted carries the batch's own
+                    // version, and its assertion record is buffered under
+                    // that version. Succeeding it within the batch
+                    // withdraws it, as a retraction would: the record fold
+                    // nets the two, so the history never shows a claim no
+                    // index held.
+                    if let Some(version) = &version
+                        && versions.contains(version)
+                    {
+                        let withdrawn: Vec<Version> = versions
+                            .iter()
+                            .filter(|withdrawn| *withdrawn != version)
+                            .copied()
+                            .collect();
+                        let record = Record::Retract(Claim {
+                            the: artifact.the.clone(),
+                            of: artifact.of.clone(),
+                            is: elected_value,
+                            cause: HistoryCause::new(withdrawn),
+                        });
+                        buffer_record(&mut history_records, record, version);
+                    }
                     superseded_versions = versions;
                     let (entity_key, attribute_key, value_key) = reproject_index_keys(&key)?;
                     transient = transient.erase(&entity_key, storage).await?;
@@ -1556,14 +1588,18 @@ where
                     buffer_record(&mut history_records, record, version);
                 }
 
-                // The assertion itself, as `Assert` writes one: the value
-                // is not held, so there is no standing datum to fold into.
+                // The assertion itself, as `Assert` writes one, folding in
+                // the versions of the written value's own claim when the
+                // cell held it.
                 let encoded = EncodedValue::new(&artifact.is, manifest);
                 let (entity_key, attribute_key, value_key) =
                     artifact_index_keys_with(&artifact, encoded.payload);
                 stage_spilled_value(staged, encoded.spill);
                 let mut datum = Datum::for_artifact(&artifact);
                 datum.version = version;
+                if version.is_some() {
+                    datum.absorb_versions(held_versions.iter());
+                }
                 let added = State::Added(datum);
                 transient = transient
                     .write_all(

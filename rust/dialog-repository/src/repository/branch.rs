@@ -81,6 +81,9 @@ pub use reference::*;
 mod reset;
 pub use reset::*;
 
+mod upgrade;
+pub use upgrade::*;
+
 mod select;
 pub use select::*;
 

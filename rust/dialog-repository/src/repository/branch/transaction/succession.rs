@@ -70,6 +70,7 @@ use std::sync::Arc;
 /// once), the write is settled here to the retraction of the claim it
 /// succeeds and the assertion of its value, over the line and the writes
 /// before it, in the order the transaction made them.
+#[tracing::instrument(skip_all, name = "settle")]
 pub(crate) async fn settle(
     sources: Vec<Source>,
     overlay: Arc<Changes>,
@@ -202,7 +203,7 @@ pub(crate) async fn settle(
             }
             _ => Vec::new(),
         };
-        for written in cell.write(change, &derived, edition, the, of)? {
+        for written in cell.write(change, &derived, edition)? {
             derives.gained(the, &written);
             unapplied.push((the.clone(), of.clone(), written.clone()));
             cell.settled.push(written);
@@ -236,7 +237,7 @@ pub(crate) async fn resolve_against(
         let mut cell = Cell::over(claims_of(view, &the, &of).await?);
         let derived = derived_candidates(view, &the, &of).await?;
         for change in &list {
-            let written = cell.write(change, &derived, edition, &the, &of)?;
+            let written = cell.write(change, &derived, edition)?;
             cell.settled.extend(written);
         }
         head.put_cell(the, of, cell.squashed());
@@ -300,9 +301,15 @@ pub(crate) async fn settle_cell(
     // a retraction is the layer's row, not the line's.
     let mut restaged: Vec<Value> = Vec::new();
     for change in &writes {
-        let written = cell.write(change, &candidates, edition, the, of)?;
+        // A write of a value the cell holds as a claim re-asserts that
+        // claim rather than staging a new one; the line's row stays the
+        // read's.
+        let held = matches!(change, Change::Assert(value, _)
+            if cell.live.iter().any(|claim| claim.claim && claim.value == *value));
+        let written = cell.write(change, &candidates, edition)?;
         if let Change::Assert(value, _) = change
             && !written.is_empty()
+            && !held
         {
             restaged.push(value.clone());
         }
@@ -556,18 +563,15 @@ impl Cell {
         change: &Change,
         derived: &[Candidate],
         edition: Edition,
-        the: &Attribute,
-        of: &Entity,
     ) -> Result<Vec<Change>, CommitError> {
+        // A staged claim stands as a reader sees it: at the commit's
+        // edition with no cause, like every claim of one commit, so a
+        // tie among them falls to the value, as it does in every read
+        // and in the tree.
         let staged = |value: &Value| Candidate {
             standing: Some(Standing {
                 version: Some((edition, [0; 32])),
-                cause: Cause::from(&Artifact {
-                    the: the.clone(),
-                    of: of.clone(),
-                    is: value.clone(),
-                    cause: None,
-                }),
+                cause: Cause([0; 32]),
             }),
             value: value.clone(),
             claim: true,
@@ -583,13 +587,9 @@ impl Cell {
                 vec![change.clone()]
             }
             Change::Assert(value, policy) => {
-                if self
-                    .live
-                    .iter()
-                    .any(|claim| claim.claim && claim.value == *value)
-                {
-                    return Ok(Vec::new());
-                }
+                // The claim a read under the policy returns, among the
+                // live claims (the written value's own claim included,
+                // when the cell holds it) and the derived candidates.
                 let pool: Vec<(Value, Option<Standing>, (Value, bool))> = self
                     .live
                     .iter()
@@ -607,11 +607,23 @@ impl Cell {
                 let elected = Election::from(policy)
                     .elect_claims(pool)
                     .map_err(|error| CommitError::Policy(error.to_string()))?;
+                // The read returns a claim of the written value already:
+                // the write changes nothing. An overlay row or a derived
+                // candidate of the value is not a claim, and the write
+                // lands beside it.
+                if matches!(&elected, Some((elected, true)) if elected == value) {
+                    return Ok(Vec::new());
+                }
                 let mut settled = Vec::with_capacity(2);
                 if let Some((elected, true)) = elected {
                     self.live.retain(|claim| claim.value != elected);
                     settled.push(Change::Retract(elected));
                 }
+                // A claim of the written value the read did not return is
+                // asserted again: the tree folds the commit's version into
+                // it, so it stands past the claim it succeeds.
+                self.live
+                    .retain(|claim| !(claim.claim && claim.value == *value));
                 self.live.push(staged(value));
                 settled.push(Change::Assert(value.clone(), Policy::All));
                 settled
@@ -648,13 +660,11 @@ mod tests {
     /// commit carries one assertion and no tombstone.
     #[dialog_common::test]
     fn it_settles_two_last_writes_to_the_later_one() -> Result<()> {
-        let the: Attribute = "org/salary".parse()?;
-        let of = Entity::new()?;
         let edition = Edition::from(7u64);
         let mut cell = super::Cell::over(Vec::new());
         for value in [200u32, 300] {
             let change = Change::Assert(Value::UnsignedInt(value.into()), Policy::Last);
-            let written = cell.write(&change, &[], edition, &the, &of)?;
+            let written = cell.write(&change, &[], edition)?;
             cell.settled.extend(written);
         }
         assert_eq!(

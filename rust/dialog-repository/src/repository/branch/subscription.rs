@@ -2695,9 +2695,12 @@ mod tests {
         pub struct Parent(pub Entity);
 
         /// An ancestor edge (`family/ancestor`) — the recursive
-        /// conclusion.
+        /// conclusion. Every ancestor is one, so the relation is read
+        /// as a set: under the default `last` a reader outside the
+        /// recursion elects one ancestor.
         #[derive(Attribute, Clone, PartialEq)]
         #[domain("family")]
+        #[cardinality(many)]
         pub struct Ancestor(pub Entity);
 
         /// Direct parenthood.

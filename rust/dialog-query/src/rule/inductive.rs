@@ -24,7 +24,6 @@ use crate::negation::Negation;
 use crate::planner::{Conjunction, Planner};
 use crate::premise::Premise;
 use crate::rule::analyzer::AnalyzedRule;
-use crate::rule::deductive::legacy_identity;
 use crate::rule::{Compile, RuleKind, fmt_rule_schema};
 use crate::{Environment, Parameters, Proposition};
 use descriptor::InductiveRuleDescriptor;
@@ -164,13 +163,12 @@ impl InductiveRule {
     }
 
     /// Whether this rule's body is what was stored under `entity`:
-    /// `entity` is its identity, or the identity its spelling had
-    /// before identities were canonical (the hash of the stored bytes),
-    /// so a rule installed then keeps firing. Bytes stored under any
-    /// other entity are forged or corrupt.
+    /// `entity` is its identity. Bytes stored under any other entity
+    /// are forged, corrupt, or a rule an earlier release stored under
+    /// the hash of its bytes, which stays inert until
+    /// `Branch::upgrade_rules` re-installs it under its identity.
     pub fn stored_as(&self, entity: &Entity) -> bool {
         self.try_this().as_ref() == Some(entity)
-            || legacy_identity(self.try_encode()).as_ref() == Some(entity)
     }
 
     /// Canonical dag-cbor encoding, panicking if the rule has no
@@ -329,11 +327,11 @@ mod tests {
         ]
     }
 
-    /// A body stored before identities were canonical sits under the
-    /// hash of its bytes: the rule is stored as that entity and as its
-    /// canonical identity, and as nothing else.
+    /// A rule is stored as its canonical identity and as nothing else,
+    /// not even the hash of its own bytes, the identity an earlier
+    /// release gave it.
     #[dialog_common::test]
-    fn it_is_stored_as_its_legacy_identity_too() {
+    fn it_is_stored_as_its_identity_alone() {
         let descriptor: InductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
             "assert!": {
                 "with": { "tag": { "the": "derived/tag", "as": "Text" } }
@@ -350,14 +348,13 @@ mod tests {
         }))
         .expect("descriptor parses");
         let rule = descriptor.compile().expect("rule compiles");
-        let legacy = legacy_identity(rule.try_encode()).expect("an encodable body");
-        assert_ne!(
-            legacy,
-            rule.this(),
-            "the legacy identity hashes the stored bytes"
-        );
+        let bytes = blake3::hash(&rule.encode()).as_bytes().to_vec();
+        let legacy: Entity = format!("rule:{}", base58::ToBase58::to_base58(bytes.as_slice()))
+            .parse()
+            .expect("an entity");
+        assert_ne!(legacy, rule.this(), "the byte hash is not the identity");
         assert!(rule.stored_as(&rule.this()));
-        assert!(rule.stored_as(&legacy));
+        assert!(!rule.stored_as(&legacy));
         let other: Entity = "rule:forged".parse().expect("an entity");
         assert!(!rule.stored_as(&other));
     }

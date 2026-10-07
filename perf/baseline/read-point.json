@@ -14,8 +14,9 @@
     "span.buffer_records": 0,
     "span.commit": 0,
     "span.resolve_bundle": 1,
-    "span.resolve_rules": 2,
+    "span.resolve_rules": 1,
     "span.seal_batch": 0,
+    "span.settle": 0,
     "span.write_instructions": 0
   },
   "instructions": 31709697

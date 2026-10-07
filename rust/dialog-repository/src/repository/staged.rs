@@ -271,7 +271,17 @@ impl Staged {
                 AssetChange::Discard(asset) => state.assets.discard(asset),
             }
         }
-        for (entity, attribute, change) in changes.iter() {
+        // A batch keeps its cells in a hash map: taken in that order,
+        // the log, and the order the tree is handed its writes, would
+        // differ from run to run, and a buffered tree's shape follows
+        // the order of its writes. The cells are taken by entity and
+        // attribute instead, each cell's writes in the order they were
+        // recorded, so the same batch commits the same tree.
+        let mut writes: Vec<(&Entity, &Attribute, &Change)> = changes.iter().collect();
+        writes.sort_by(|(of, the, _), (other_of, other_the, _)| {
+            (*of, *the).cmp(&(*other_of, *other_the))
+        });
+        for (entity, attribute, change) in writes {
             state.apply_change(attribute, entity, change);
         }
     }

@@ -399,10 +399,9 @@ one per head attribute, using the same `on:` reach entities `reads`
 and `on` use. Discovery for `{ a }` is one value-constrained selector,
 the shape `expand_through_deduction` already probes `reads` with.
 `conclusion` keeps being written for tooling that lists rules by the
-concept they were written against; it is no longer consulted on the
-query path, except for rules that predate the `derives` index, which
-resolve by `conclusion` and are re-spelled per head attribute on
-hydration.
+concept they were written against; it is not consulted on the query
+path. A rule that predates the `derives` index is inert until
+`Branch::upgrade_rules` re-installs it, which writes its index.
 
 ### Identity
 
@@ -435,11 +434,12 @@ whose operands it could not bind.
 
 The authored spelling is kept beside the canonical one and is what
 the rule stores and shows, so a rule reads back as written; the
-content-address check on hydration compares identities, which the
-canonical spelling makes a pure function of the rule. A body stored
-before identities were canonical sits under the hash of its bytes;
-hydration accepts that identity too, so such a rule stays live, and
-bytes under any other entity stay inert. A body the notation cannot
+content-address check on hydration, on every read and at commit,
+compares identities, which the canonical spelling makes a pure
+function of the rule. A body stored before identities were canonical
+sits under the hash of its bytes and is inert, like bytes under any
+other entity, until `Branch::upgrade_rules` re-installs it under its
+identity. A body the notation cannot
 express (a raw attribute scan, as in a concept's implicit rule) has
 no encoding, hence no identity, and keeps the spelling it was given.
 

@@ -518,13 +518,15 @@ impl ConceptQuery {
                     None => fixpoint::evaluate(&app.predicate, analysis, env).await?,
                 };
                 // The component yields its candidates as a set; a read
-                // under a policy that is a function of that set elects
-                // at the exit. `last` is not: a fixpoint row has no
-                // standing, so it reads the set as before.
+                // under a choosing policy elects one of them at the exit,
+                // so a reader outside the component sees one value. A
+                // fixpoint row carries no standing yet, so under `last`
+                // the candidates tie and the value decides, as every tie
+                // does.
                 let table: Vec<fixpoint::Row> = match app.predicate.attribute_field() {
                     Some((name, field)) => {
                         let election = Election::of(field);
-                        if election.select.elects() && election.select != Select::Last {
+                        if election.select.elects() {
                             election.elect_rows(table.to_vec(), name)?
                         } else {
                             table.to_vec()
@@ -560,11 +562,16 @@ impl ConceptQuery {
             }
             // All matches in the selection share the first one's binding
             // pattern (same variables bound), only the values differ.
-            // One rule derives every derived attribute of this concept:
-            // while nothing is stored under those attributes, the rule
-            // re-headed onto the concept is its whole answer, evaluated
-            // once rather than once per attribute.
-            if let Some(exact) = rules.exact()
+            // One rule derives the attribute of this attribute concept:
+            // while nothing is stored under it, the rule re-headed onto
+            // the concept is its whole answer, its rows elected per
+            // entity as the relation's would be. A concept of several
+            // attributes is not answered this way: it selects each
+            // attribute and joins them, which a body yielding several
+            // rows for one entity does not, so its rows would depend on
+            // whether anything is stored under one of its attributes.
+            if app.predicate.attribute_field().is_some()
+                && let Some(exact) = rules.exact()
                 && stored_absent(&exact.attributes, env).await?
                 && let Some(plan) = rules.plan_exact(&app.terms, &first)
             {

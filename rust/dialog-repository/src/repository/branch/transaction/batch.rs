@@ -21,7 +21,7 @@
 
 use super::induce::induce;
 use super::succession;
-use super::{Transaction, TransactionCommit, carry_footprint, index_legacy_rules, touches_rules};
+use super::{Transaction, TransactionCommit, carry_footprint, touches_rules};
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::source::{Caches, SourceRef};
@@ -600,7 +600,6 @@ where
     ))
     .await?;
     let induced = induce(source, &mut changes, transients, env).await?;
-    index_legacy_rules(source, &mut changes, env).await?;
     let touches = touches_rules(&changes);
     let previous = base.clone();
     let machinery = store_assets(source, changes.take_assets(), env).await?;

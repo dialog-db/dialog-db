@@ -14,13 +14,10 @@ pub(crate) use succession::{relation_derived, settle_cell};
 use crate::Commit;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::asset::store_assets;
-use crate::repository::branch::session::QueryEnv;
 use crate::repository::source::SourceRef;
-use crate::rules::{
-    SharedRuleCache, TriggerFootprint, conclusion_attr, derives_attr, on_attr, reads_attr,
-};
+use crate::rules::{SharedRuleCache, TriggerFootprint, on_attr, reads_attr};
 use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot, Staged};
-use dialog_artifacts::{Change, Changes, Entity, Policy, Statement, Update as _, Value};
+use dialog_artifacts::{Changes, Statement};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
@@ -269,8 +266,6 @@ impl TransactionCommit<&Snapshot> {
         )
         .await?;
 
-        index_legacy_rules(SourceRef::Snapshot(snapshot), &mut changes, env).await?;
-
         let previous = snapshot.revision();
         let touches_rules = touches_rules(&changes);
         let machinery =
@@ -294,66 +289,6 @@ impl TransactionCommit<&Snapshot> {
         }
         Ok(revision)
     }
-}
-
-/// Fold into `changes` the `dialog.rule/derives` facts of every rule on
-/// `source` installed before that index existed, so the revision this
-/// commit mints finds them by the index alone, as it finds a rule a
-/// current release installs. Reads find such a rule meanwhile by its
-/// stored body (see [`QueryEnv::legacy_rules`]); this is what retires
-/// that read, per line, once a writer commits. A line every rule of
-/// which is indexed adds nothing, at the cost of the two index range
-/// reads the legacy scan makes once per head.
-///
-/// Sync can bring such rules in again, from a replica an older release
-/// writes, and the next commit indexes those the same way: the index
-/// converges per revision rather than being migrated once.
-pub(super) async fn index_legacy_rules<Env>(
-    source: SourceRef<'_>,
-    changes: &mut Changes,
-    env: &Env,
-) -> Result<(), CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
-    let line = source.to_source();
-    let view = QueryEnv::new(vec![line.clone()], Changes::new(), env);
-    let legacy = view
-        .legacy_rules(&line)
-        .await
-        .map_err(|error| CommitError::Induction(format!("legacy rule index: {error}")))?;
-    // A rule this very commit uninstalls is not indexed on its way out.
-    let conclusion = conclusion_attr();
-    let uninstalled: Vec<Entity> = changes
-        .iter()
-        .filter(|(_, attribute, change)| {
-            **attribute == conclusion && matches!(change, Change::Retract(_))
-        })
-        .map(|(of, _, _)| of.clone())
-        .collect();
-    for (rule, derives) in &legacy.rules {
-        if uninstalled.contains(rule) {
-            continue;
-        }
-        for on in derives {
-            changes.associate(
-                derives_attr(),
-                rule.clone(),
-                Value::Entity(on.clone()),
-                Policy::All,
-            );
-        }
-    }
-    Ok(())
 }
 
 /// Whether a settled change batch touches the trigger structures, i.e.

@@ -343,7 +343,16 @@ where
         .parameters()
         .iter()
         .filter_map(|(_, term)| term.name().map(String::from))
-        .filter(|name| candidates[0].value_of(name).is_some())
+        // A variable any candidate binds is part of the key; a candidate
+        // that leaves it without a value (absent, from an optional
+        // premise before the negation) has no key, and the candidates
+        // then go through the per-candidate evaluation, which reads an
+        // absent value as matching nothing.
+        .filter(|name| {
+            candidates
+                .iter()
+                .any(|candidate| candidate.value_of(name).is_some())
+        })
         .collect::<BTreeSet<String>>()
         .into_iter()
         .collect();

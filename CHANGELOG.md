@@ -38,8 +38,13 @@ What this changes for you:
 - If the read elects a candidate a rule derives, nothing is retracted:
   a derived candidate is not a claim. The write lands beside it and
   competes under the policy.
-- Writing a value the cell already holds writes nothing, as replacing
-  with the value already held did: the revision's tree does not move.
+- Writing a value a read under the policy already returns writes
+  nothing: the revision's tree does not move. Writing a value the cell
+  holds as a claim the read does not return succeeds the claim it does
+  return, and folds the commit's version into the held claim, so the
+  written value stands past the claim it succeeded and a read returns
+  it. Under `last` the write is the newest fact of the cell, as a
+  last-writer-wins write is.
 - Every write carries its policy. `Change::Assert(Value, Policy)` and
   `Instruction::Assert(Artifact, Policy)` are the one write form, beside
   `Retract`; `Change::Replace`, `Instruction::Replace`, `Change::Succeed`
@@ -219,8 +224,9 @@ What this changes for you:
 - A rule's identity is the hash of its canonical spelling, not of the
   bytes you wrote: variables are renamed by structure and premises are
   ordered. Two authors writing one rule under different names install
-  one rule. A body stored under the older byte-hash identity is still
-  accepted on hydration.
+  one rule. A body stored under any other entity, the older byte-hash
+  identity included, is inert on every read and at commit until
+  `Branch::upgrade_rules` re-installs it (see below).
 - The dependency graph, the fixpoint and the registry key an attribute
   concept by its relation, so every read of a relation, under any type
   or policy, meets the rules deriving it.
@@ -243,19 +249,25 @@ happens to it.
   `many` and a single relation under `the`; both read as `last` and
   `all` over that relation. Re-encoded, a rule never writes the older
   spelling back.
-- Rules installed by the older release are found, and indexed by the
-  first commit. Such a rule carries its conclusion and its body but no
-  `derives` fact, and its entity is the older byte-hash identity. A
-  read takes the rules with a `conclusion` fact and no `derives` fact,
-  once per head from those two index ranges, decodes only those bodies
-  and finds the rule by the relations its head derives, whether the
-  head names a concept or an attribute. The next commit on the line,
-  whatever it changes, writes the `derives` facts a current install
-  would have, so every later head finds the rule by the index alone
-  and the read decodes nothing. There is no migration step to run or
-  to have missed: sync can bring such rules from a replica on the
-  older release at any time, and the next commit indexes those too.
-  The rule keeps its stored entity; nothing is reinstalled.
+- Rules installed by the older release are inert until upgraded. Such
+  a rule sits under the hash of its stored bytes, with its conclusion
+  and its body but no `derives` fact. No read looks for it there, so
+  no read pays for rules that may not exist. `Branch::upgrade_rules()
+  .perform(env)` reads the branch's rule bodies, retracts the facts of
+  every rule stored under an entity that is not its identity, and
+  installs it again under its identity, in one commit. It is
+  idempotent, and two replicas upgrading concurrently converge, since
+  a rule's identity is a function of the rule. It needs the branch's
+  `dialog.rule/` range, not a full replica. A replica still on the
+  older release can write such rules again and sync brings them in;
+  they stay inert until the upgrade runs again. When to run it, once
+  or after every pull, is the embedder's decision.
+- Attribute and concept identities are unchanged for every attribute
+  read under `last` or `all`: an attribute's identity hashes its
+  domain, name, cardinality and type as before, and adds `select`,
+  `then` and `among` only when they say more than the cardinality.
+  What is keyed by a concept's identity, a transient marker or an
+  application's own reference, needs no upgrade.
 - Library YAML in the older spelling parses: `cardinality:` is read as
   `select: all` for `many` and the default `last` for `one`, and a
   `select:` beside it wins. tonk's standard libraries carry a seed

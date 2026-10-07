@@ -1189,7 +1189,6 @@ mod tests {
     use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
     use dialog_peer::helpers::test_session_with_peer;
-    use dialog_query::rule::deductive::legacy_identity;
     use dialog_query::rule::statement::on_entities;
     use dialog_query::{ConceptDescriptor, InductiveRule};
     use futures_util::StreamExt as _;
@@ -2318,59 +2317,6 @@ mod tests {
                 .await?
                 .is_empty(),
             "a forged rule fact must never fire"
-        );
-        Ok(())
-    }
-
-    /// A rule stored before identities were canonical sits under the
-    /// hash of its bytes rather than its canonical identity. Hydration
-    /// accepts that entity, so the rule keeps firing, while the forged
-    /// entity above stays inert.
-    #[dialog_common::test]
-    async fn it_fires_a_rule_stored_under_its_legacy_identity() -> Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-
-        let rule = tagger();
-        let legacy = legacy_identity(rule.try_encode()).expect("an encodable body");
-        assert_ne!(
-            legacy,
-            rule.this(),
-            "the legacy identity is not the canonical one"
-        );
-        let on: Entity = "on:doc/title".parse()?;
-        branch
-            .transaction()
-            .assert(
-                dialog_query::the!("dialog.rule/source")
-                    .of(legacy.clone())
-                    .is(rule.encode()),
-            )
-            .assert(dialog_query::the!("dialog.rule/on").of(legacy).is(on))
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        branch.refresh(&operator).await?;
-
-        let doc: Entity = "doc:1".parse()?;
-        branch
-            .transaction()
-            .assert(
-                dialog_query::the!("doc/title")
-                    .of(doc.clone())
-                    .is("hello".to_string()),
-            )
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        branch.refresh(&operator).await?;
-        assert_eq!(
-            values(&branch, &operator, "derived/tag", &doc).await?,
-            vec![Value::String("hello".to_string())],
-            "a rule stored under its legacy identity fires"
         );
         Ok(())
     }

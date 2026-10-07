@@ -24,7 +24,7 @@
 //! # Two layers, two caches
 //!
 //! - A **durable** layer reads a branch's committed tree. Its rule
-//!   discovery (the `conclusion` lookup) is cacheable by branch head —
+//!   discovery (the `derives` lookup) is cacheable by branch head —
 //!   the committed rule set for a concept only changes when the head
 //!   moves. Hydrated bodies are cached by content-addressed rule entity.
 //! - A **transient** layer reads the per-query overlay. Overlay rules
@@ -102,14 +102,6 @@ impl Statement for Transient {
     fn retract(self, update: &mut impl Update) {
         update.dissociate(transient_attr(), self.0, Value::Boolean(true));
     }
-}
-
-/// Selector for `dialog.rule/conclusion is = <concept>` — finds the rule
-/// entities concluding a concept.
-pub(crate) fn conclusion_selector(concept: &Entity) -> ArtifactSelector<Constrained> {
-    ArtifactSelector::new()
-        .the(conclusion_attr())
-        .is(Value::Entity(concept.clone()))
 }
 
 /// Selector for `dialog.rule/derives is = <on:attribute>` — finds the rule
@@ -461,42 +453,12 @@ pub(crate) struct LayerRoots {
     pub(crate) staged: Vec<u64>,
 }
 
-/// The deductive rules a line holds that were installed before the
-/// `derives` index existed: each carries a `conclusion` fact but no
-/// `derives` fact, so resolution by attribute would not find it. The
-/// relations each derives are read from its stored body instead, and
-/// the first commit on the line writes them as the `derives` facts a
-/// current install would have, after which the set is empty.
-#[derive(Debug, Default, Clone)]
-pub(crate) struct Legacy {
-    /// Each unindexed rule entity with the relations its head derives.
-    pub(crate) rules: Vec<(Entity, BTreeSet<Entity>)>,
-}
-
-impl Legacy {
-    /// The unindexed rules deriving the relation `on`.
-    pub(crate) fn deriving(&self, on: &Entity) -> Vec<Entity> {
-        self.rules
-            .iter()
-            .filter(|(_, derives)| derives.contains(on))
-            .map(|(rule, _)| rule.clone())
-            .collect()
-    }
-}
-
 #[derive(Debug, Default)]
 struct RuleCacheInner {
-    /// Which rule entities conclude a concept, as of a branch head.
-    /// Keyed by concept; tagged with the head it was scanned at so a
-    /// head advance (commit/pull) triggers a re-scan of that concept.
-    discovery: HashMap<Entity, (Revision, Vec<Entity>)>,
     /// Which rule entities derive an attribute, as of a branch head.
-    /// Keyed by the attribute's `on:` entity and head-tagged like
-    /// `discovery`.
+    /// Keyed by the attribute's `on:` entity and tagged with the head
+    /// it was scanned at, so a head advance (commit/pull) re-scans it.
     derived: HashMap<Entity, (Revision, Vec<Entity>)>,
-    /// The rules installed before the `derives` index existed, with
-    /// the relations their decoded heads derive, as of a branch head.
-    legacy: Option<(Revision, Arc<Legacy>)>,
     /// A rule's head re-spelled onto an attribute concept, keyed by
     /// (rule entity, attribute concept entity). Both halves are
     /// content-addressed, so an entry is never stale.
@@ -573,24 +535,6 @@ impl RuleCache {
         Self::default()
     }
 
-    /// Cached committed rule entities concluding `concept` if scanned at
-    /// `head`; `None` if absent or stale (caller must re-scan the tree).
-    pub(crate) fn discovered(&self, concept: &Entity, head: &Revision) -> Option<Vec<Entity>> {
-        let inner = self.inner.read();
-        match inner.discovery.get(concept) {
-            Some((scanned_at, entities)) if scanned_at == head => Some(entities.clone()),
-            _ => None,
-        }
-    }
-
-    /// Record the committed rule entities concluding `concept` at `head`.
-    pub(crate) fn record_discovery(&self, concept: Entity, head: Revision, entities: Vec<Entity>) {
-        self.inner
-            .write()
-            .discovery
-            .insert(concept, (head, entities));
-    }
-
     /// Cached committed rule entities deriving the attribute `on` if
     /// scanned at `head`; `None` if absent or stale.
     pub(crate) fn derived(&self, on: &Entity, head: &Revision) -> Option<Vec<Entity>> {
@@ -604,24 +548,6 @@ impl RuleCache {
     /// Record the committed rule entities deriving `on` at `head`.
     pub(crate) fn record_derived(&self, on: Entity, head: Revision, entities: Vec<Entity>) {
         self.inner.write().derived.insert(on, (head, entities));
-    }
-
-    /// The rules installed before the `derives` index existed that
-    /// derive `on`, as the last scan at `head` found them; `None` when
-    /// no scan at `head` has run.
-    /// The legacy rule set if scanned at `head`; `None` if absent or
-    /// stale (caller must re-scan the tree).
-    pub(crate) fn legacy(&self, head: &Revision) -> Option<Arc<Legacy>> {
-        let inner = self.inner.read();
-        match &inner.legacy {
-            Some((scanned_at, legacy)) if scanned_at == head => Some(legacy.clone()),
-            _ => None,
-        }
-    }
-
-    /// Record the legacy rule set scanned at `head`.
-    pub(crate) fn record_legacy(&self, head: Revision, legacy: Arc<Legacy>) {
-        self.inner.write().legacy = Some((head, legacy));
     }
 
     /// The head of `rule` deriving the relation indexed by `attribute`, if recorded.
@@ -813,49 +739,10 @@ pub(crate) fn assemble(
 /// sets resolved from an overlay without rules can be cached with the
 /// committed layers alone.
 pub(crate) fn has_overlay_rules(changes: &Changes) -> bool {
-    let conclusion = conclusion_attr();
+    let derives = derives_attr();
     changes
         .iter()
-        .any(|(_, attribute, _)| *attribute == conclusion)
-}
-
-/// Read rules from an overlay [`Changes`] batch concluding `concept`.
-///
-/// The overlay is in-memory, so this is cheap and done fresh every
-/// query (never cached). Walks the batch for `dialog.rule/conclusion`
-/// pointing at `concept`, then their `dialog.rule/source` bodies.
-pub(crate) fn overlay_rules(changes: &Changes, concept: &Entity) -> Vec<DeductiveRule> {
-    use dialog_artifacts::Change;
-
-    let conclusion = conclusion_attr();
-    let source = source_attr();
-
-    // rule entities whose conclusion is `concept`, asserted in the overlay.
-    let mut rule_entities: Vec<Entity> = Vec::new();
-    for (entity, attribute, change) in changes.iter() {
-        if *attribute == conclusion
-            && let Change::Assert(Value::Entity(c), _) = change
-            && c == concept
-        {
-            rule_entities.push(entity.clone());
-        }
-    }
-
-    // each rule entity's source body, hydrated.
-    let mut out = Vec::new();
-    for rule_entity in rule_entities {
-        for (entity, attribute, change) in changes.iter() {
-            if *entity == rule_entity
-                && *attribute == source
-                && let Change::Assert(Value::Bytes(bytes), _) = change
-                && let Ok(rule) = hydrate(bytes)
-            {
-                out.push(rule);
-                break;
-            }
-        }
-    }
-    out
+        .any(|(_, attribute, _)| *attribute == derives)
 }
 
 /// Read rules from an overlay [`Changes`] batch deriving the attribute
@@ -886,6 +773,7 @@ pub(crate) fn overlay_rules_deriving(changes: &Changes, on: &Entity) -> Vec<Dedu
                 && *attribute == source
                 && let Change::Assert(Value::Bytes(bytes), _) = change
                 && let Ok(rule) = hydrate(bytes)
+                && rule.stored_as(&rule_entity)
             {
                 out.push(rule);
                 break;

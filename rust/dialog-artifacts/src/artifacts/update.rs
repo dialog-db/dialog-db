@@ -594,13 +594,23 @@ impl Changes {
 impl Update for Changes {
     fn associate(&mut self, the: Attribute, of: Entity, is: Value, policy: Policy) {
         let cell = self.facts.entry(of).or_default().entry(the).or_default();
-        // A write under `last` succeeds the cell's newest claim, and the
-        // batch's own earlier `last` write of the cell is that claim:
-        // it would be retracted the moment it landed, so the batch
-        // keeps the later write alone. Every other policy elects by
-        // value, where the earlier write may be the one that stands.
-        if policy == Policy::Last {
-            cell.retain(|change| !matches!(change, Change::Assert(_, Policy::Last)));
+        // A write under `last` succeeds the cell's newest claim. The
+        // writes of one batch stand at one edition, so the batch's own
+        // earlier `last` write is that claim only when it is the cell's
+        // latest change and no other assertion of the cell came before
+        // it: then it would be retracted the moment it landed, and this
+        // write succeeds what it succeeded, so it takes its place. With
+        // another assertion of the cell in the batch the two claims
+        // stand equal and either may be the one elected, so every write
+        // stays, in order, and is replayed as written. Every other
+        // policy elects by value, where the earlier write may stand.
+        if policy == Policy::Last
+            && let Some((Change::Assert(_, Policy::Last), before)) = cell.split_last()
+            && before
+                .iter()
+                .all(|change| matches!(change, Change::Retract(_)))
+        {
+            cell.pop();
         }
         cell.push(Change::Assert(is, policy));
     }
@@ -1027,9 +1037,11 @@ mod tests {
         );
     }
 
-    /// Two `last` writes of one cell in one batch keep the later alone,
-    /// the earlier being the claim it would succeed; writes under `all`
-    /// and under a value-electing policy stay beside it.
+    /// Two `last` writes of one cell in one batch keep the later alone
+    /// when the earlier is the cell's only assertion, the earlier being
+    /// the claim the later succeeds. With another assertion of the cell
+    /// before them every write stays, since the batch's claims stand
+    /// equal and the later write may elect either.
     #[dialog_common::test]
     fn it_keeps_the_later_of_two_last_writes_of_a_cell() {
         let mut changes = Changes::new();
@@ -1060,6 +1072,12 @@ mod tests {
         changes.associate(
             role_attr(),
             bob(),
+            Value::String("visitor".into()),
+            crate::Policy::Last,
+        );
+        changes.associate(
+            role_attr(),
+            bob(),
             Value::String("guest".into()),
             crate::Policy::Last,
         );
@@ -1073,9 +1091,11 @@ mod tests {
             of_alice,
             vec![
                 Change::Assert(Value::String("staff".into()), crate::Policy::All),
+                Change::Assert(Value::String("member".into()), crate::Policy::Last),
                 Change::Assert(Value::String("admin".into()), crate::Policy::Last),
                 Change::Assert(Value::String("owner".into()), crate::Policy::Max),
-            ]
+            ],
+            "staff stands at the batch's edition beside member, so admin may elect either: every write is replayed"
         );
         let of_bob: Vec<Change> = changes
             .iter()

@@ -6,16 +6,17 @@
     "rows": 2000
   },
   "counters": {
-    "archive.get": 13,
-    "archive.get.bytes": 323176,
+    "archive.get": 12,
+    "archive.get.bytes": 323620,
     "archive.put": 0,
     "archive.put.bytes": 0,
     "span.apply_batch_reusing": 0,
     "span.buffer_records": 0,
     "span.commit": 0,
     "span.resolve_bundle": 1,
-    "span.resolve_rules": 2,
+    "span.resolve_rules": 1,
     "span.seal_batch": 0,
+    "span.settle": 0,
     "span.write_instructions": 0
   },
   "instructions": 40263730

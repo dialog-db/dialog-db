@@ -189,7 +189,6 @@ where
     /// adopt the new [`Revision`] with the updated logical clock: a
     /// branch publishes it to its revision cell, a snapshot advances its
     /// own head.
-    #[tracing::instrument(skip_all, name = "commit")]
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
         Env: Provider<BlobImport>
@@ -518,6 +517,7 @@ where
     /// revision is minted under, given the profile and issuer the
     /// environment identifies as — a branch's content-derived branch
     /// entity, a snapshot's own lineage.
+    #[tracing::instrument(skip_all, name = "commit")]
     pub(crate) async fn perform<Env>(
         self,
         env: &Env,

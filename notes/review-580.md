@@ -25,6 +25,46 @@ cargo test -p dialog-artifacts  --lib history::invariants
 cargo test -p dialog-perf       --lib
 ```
 
+## Fix status
+
+Fixed on this branch, each with its test now passing:
+
+| Defect | Fix |
+|---|---|
+| 1, 3: rules the previous release installed | Permanent legacy path removed (conclusion index, legacy scan, commit-time indexing, byte-hash acceptance). `Branch::upgrade_rules` re-installs them; idempotent, convergent, re-runnable when an old replica reintroduces them. |
+| 2: attribute and concept identities | The identity hashes `{domain, name, cardinality, type}` as `main` did, adding `select`, `then`, `among` only when they say more. Plain attributes, concepts and transient markers keep their identities. |
+| 4: covering rule under `last` | The covering rule answers attribute concepts only, whose rows it elects; a multi-field concept selects and joins. |
+| 6 (part): recursive relation under `last` | The component's exit elects under `last` too, so a reader sees one value. |
+| 7: bulk anti-join | The key covers every variable any candidate binds; a candidate missing one falls back to per-candidate evaluation. |
+| 8: plan cache | A head's spelling pairs each field name with its relation. |
+| 9: forged rule facts on the query path | Every hydration checks the content address, on reads as at commit. |
+| 11: held losing value | Tree and transactor elect over every claim, the held one included. A write that does not re-elect the held claim succeeds the winner and folds the commit's version into the held claim. |
+| 13: batch order | `Changes::associate` drops an earlier `last` write only when it is the cell's only assertion in the batch. |
+| 14: transactor tie-break | A staged claim stands with no cause, as every reader sees it. |
+| 16: overlay in a join | An overlay row stands past every joined line's head. |
+| 17: same-batch history record | A claim succeeded within its batch gets a retraction record; the supersession it carried survives the fold. |
+| 19: perf gate | Counters are compared over both reports' keys, a zero baseline has no slack, a missing baseline or scenario fails, and every commit path counts a `commit` step; the commit-side settlement counts `settle`. Counter baselines refreshed; instruction baselines need the CI toolchain's sweep. |
+
+Re-diagnosed: **18** is the perf harness, not the engine. Opening a repository mints a
+fresh account key, its encrypted secret and a delegation into the tree; the facts the
+scenario's commits write are identical run to run. The harness needs a seeded account key.
+
+Open, each needing a decision:
+
+- **12, transaction reads differ from the commit.** Needs one settlement engine. Proposed:
+  settle the log incrementally on first read or at commit, extending a memoized settled
+  prefix with only the new writes, against the line plus that prefix: the commit's own
+  algorithm, so reads and commit share one result and each write is settled once. It
+  replaces the PR's per-cell read settlement; tonk's bootstrap is the cost to measure.
+- **15, a transaction retracting an overlay row.** Either the commit also retracts the row
+  from the session overlay, or the transaction refuses a retraction only the overlay holds.
+- **5, absence tests inside a cycle.** Options: refuse per component and report; evaluate
+  the negation against stored facts and lower strata only; a well-founded semantics.
+- **6 (rest), standings through the fixpoint.** A derived fact's standing must be the
+  maximum over its derivations, propagated as its own fixpoint, before `last` can pick the
+  newest candidate of a recursive relation; until then it picks by value.
+- **10, field names in identity.** Not blocking.
+
 ## Decided since the first review
 
 Rules derive attributes and concepts select them. A multi-field head is a set of

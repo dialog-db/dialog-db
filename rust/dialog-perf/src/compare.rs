@@ -79,13 +79,15 @@ impl Comparison {
 }
 
 /// Whether `new` grew past `base` by more than both `slack` and
-/// `threshold_pct`.
+/// `threshold_pct`. From a baseline of zero any growth is a change in
+/// what the workload does, not wobble around a level it already had,
+/// so the slack does not apply.
 fn regressed(base: u64, new: u64, slack: u64, threshold_pct: f64) -> bool {
+    if base == 0 {
+        return new > 0;
+    }
     if new.saturating_sub(base) <= slack {
         return false;
-    }
-    if base == 0 {
-        return true;
     }
     (new - base) as f64 / base as f64 * 100.0 > threshold_pct
 }
@@ -129,9 +131,18 @@ pub fn compare_dirs(baseline: &Path, new: &Path, tolerance: &Tolerance) -> Resul
     for name in &shared {
         compare_reports(&baseline[*name], &new[*name], tolerance, &mut comparison);
     }
+    // A scenario the sweep ran with no baseline is ungated, and a
+    // baseline no scenario answers gates nothing: both fail, so a
+    // scenario cannot drop out of the gate by being renamed or by its
+    // baseline being deleted.
     for name in new.keys().filter(|name| !baseline.contains_key(*name)) {
-        comparison.summary.push(format!(
+        comparison.regressions.push(format!(
             "{name}: no baseline (sweep into the baseline directory to add one)"
+        ));
+    }
+    for name in baseline.keys().filter(|name| !new.contains_key(*name)) {
+        comparison.regressions.push(format!(
+            "{name}: a baseline no scenario in the sweep answers"
         ));
     }
     Ok(comparison)
@@ -155,8 +166,13 @@ fn compare_reports(base: &Report, new: &Report, tolerance: &Tolerance, out: &mut
         }
     }
 
+    // Every counter either report has: a step the baseline never took
+    // and the new run takes counts from zero.
+    let keys: std::collections::BTreeSet<&String> =
+        base.counters.keys().chain(new.counters.keys()).collect();
     let mut moved = Vec::new();
-    for (key, &before) in &base.counters {
+    for key in keys {
+        let before = base.counters.get(key).copied().unwrap_or(0);
         let after = new.counters.get(key).copied().unwrap_or(0);
         if before == after {
             continue;
@@ -320,11 +336,15 @@ mod counted {
         Ok(())
     }
 
-    /// "Two runs write the same records": the harness pins its peer and
-    /// space keys and canonicalises batch order so a scenario's blocks
-    /// are the same run to run, which the block gate depends on. The
-    /// same commits from a fresh repository, run several times, mint
-    /// the same head every time.
+    /// "Two runs write the same records": the harness pins its peer's
+    /// key so a scenario's blocks are the same run to run, which the
+    /// block gate depends on. The same commits from a fresh repository,
+    /// run several times, mint the same head every time. They do not:
+    /// opening the repository mints a fresh account key, its encrypted
+    /// secret and a delegation into the tree, with random content each
+    /// run, so the tree a scenario's commits land in differs. The
+    /// facts the commits themselves write are the same every run; the
+    /// randomness is the harness's setup, not the commit path.
     #[tokio::test(flavor = "current_thread")]
     async fn the_same_commits_mint_the_same_head() -> anyhow::Result<()> {
         let mut heads = Vec::new();

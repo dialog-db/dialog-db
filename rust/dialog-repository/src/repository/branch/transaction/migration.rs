@@ -1,13 +1,17 @@
-//! What a replica that ran the previous release holds, read and written
-//! by this one.
+//! What a replica that ran the previous release holds, read, upgraded
+//! and written by this one.
 //!
 //! Every test here replays facts captured from `main` at `120fba8`
 //! (`fixtures/main-120fba8.json`, produced as `fixtures/README.md`
-//! says), so it tests the bytes and identities a real replica holds.
-//! The pull request's own legacy tests install this release's encoding
-//! under a made-up entity, which cannot see an encoding or identity
-//! change. A failing test here is a place where upgrading a replica
-//! loses or changes what it held.
+//! says), so it tests the bytes and identities a real replica holds,
+//! not this release's encoding of the same rules.
+//!
+//! A rule the previous release stored sits under the hash of its bytes
+//! and is inert here until [`Branch::upgrade_rules`] re-installs it
+//! under its identity. Attribute and concept identities are unchanged
+//! for every attribute read under `last` or `all`, so what is keyed by
+//! them (a transient marker, an application's references) needs no
+//! upgrade.
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -112,6 +116,22 @@ async fn install(
     Ok(())
 }
 
+/// Run the rule upgrade, then reopen the branch at its new head.
+async fn upgrade(branch: &Branch, operator: &Operator) -> Result<crate::RulesUpgraded> {
+    let upgraded = branch.upgrade_rules().perform(operator).await?;
+    branch.refresh(operator).await?;
+    Ok(upgraded)
+}
+
+/// The entity `main` stored the rule named `name` under.
+fn stored_by_main(name: &str) -> Entity {
+    fixture()["rules"][name]["entity"]
+        .as_str()
+        .expect("captured")
+        .parse()
+        .expect("an entity")
+}
+
 async fn commit(branch: &Branch, operator: &Operator, fact: AttributeStatement) -> Result<()> {
     branch
         .transaction()
@@ -184,12 +204,12 @@ fn unsigned(the: &str, of: &Entity, value: u32, policy: Policy) -> AttributeStat
     }
 }
 
-/// "Stored rules decode", and a read "finds the rule by what its head
-/// derives": `main`'s `org/salary := org/bonus`, installed as `main`
-/// installed it, derives alice's salary from her bonus. This pins the
-/// query path the pull request's migration note describes.
+/// `main`'s `org/salary := org/bonus`, installed as `main` installed
+/// it, derives nothing here: no read pays to find a rule under the hash
+/// of its bytes. The upgrade re-installs it under its identity, and it
+/// derives alice's salary from her bonus.
 #[dialog_common::test]
-async fn a_rule_the_previous_release_installed_derives_on_the_query_path() -> Result<()> {
+async fn a_rule_the_previous_release_installed_derives_once_upgraded() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
@@ -201,23 +221,141 @@ async fn a_rule_the_previous_release_installed_derives_on_the_query_path() -> Re
         unsigned("org/bonus", &alice, 500, Policy::All),
     )
     .await?;
+    assert_eq!(
+        salary(&branch, &operator, &alice, "all").await?,
+        Vec::<u64>::new(),
+        "inert before the upgrade"
+    );
+    let upgraded = upgrade(&branch, &operator).await?;
+    assert_eq!(upgraded.reinstalled.len(), 1);
+    assert_eq!(
+        upgraded.reinstalled[0].0,
+        stored_by_main("salary_from_bonus")
+    );
     assert_eq!(salary(&branch, &operator, &alice, "all").await?, vec![500]);
     Ok(())
 }
 
-/// "Rules stored under the old identity still hydrate and fire."
-/// `main`'s inductive `derived/tag := doc/title`, installed as `main`
-/// installed it, fires when a title lands. Hydration accepts a body
-/// under the hash of this release's re-encoding of it, which is not
-/// the hash of the bytes `main` stored (they spell `cardinality` and
-/// an empty `description`), so the rule is dropped as forged.
+/// The upgrade is idempotent: a second run finds nothing to re-install
+/// and commits nothing.
 #[dialog_common::test]
-async fn a_rule_the_previous_release_installed_fires_at_commit() -> Result<()> {
+async fn an_upgrade_runs_twice_as_once() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    install(&branch, &operator, installed_by_main("salary_from_bonus")).await?;
+    install(&branch, &operator, installed_by_main("tagger")).await?;
+    let first = upgrade(&branch, &operator).await?;
+    assert_eq!(first.reinstalled.len(), 2);
+    let head = branch.revision();
+    let second = upgrade(&branch, &operator).await?;
+    assert_eq!(second, crate::RulesUpgraded::default());
+    assert_eq!(branch.revision(), head, "nothing committed");
+    Ok(())
+}
+
+/// Two replicas holding `main`'s rule upgrade concurrently and then
+/// sync. Each retracted the old entity's facts and asserted the rule
+/// under its identity, which is the same on both: after the merge the
+/// rule derives on both and the old entity holds no rule fact.
+#[dialog_common::test]
+async fn concurrent_upgrades_converge() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let alice: Entity = "id:alice".parse()?;
+    let a = repo.branch("a").open().perform(&operator).await?;
+    install(&a, &operator, installed_by_main("salary_from_bonus")).await?;
+    commit(
+        &a,
+        &operator,
+        unsigned("org/bonus", &alice, 500, Policy::All),
+    )
+    .await?;
+    let b = repo.branch("b").open().perform(&operator).await?;
+    b.pull().from(&a).perform(&operator).await?;
+    b.refresh(&operator).await?;
+
+    upgrade(&a, &operator).await?;
+    upgrade(&b, &operator).await?;
+    let mut quiesced = false;
+    for _ in 0..4 {
+        let pulled_a = a.pull().from(&b).perform(&operator).await?;
+        let pulled_b = b.pull().from(&a).perform(&operator).await?;
+        if pulled_a.is_none() && pulled_b.is_none() {
+            quiesced = true;
+            break;
+        }
+    }
+    assert!(quiesced, "mutual pulls reach a fixed point");
+    let old = stored_by_main("salary_from_bonus");
+    for branch in [&a, &b] {
+        branch.refresh(&operator).await?;
+        assert_eq!(salary(branch, &operator, &alice, "all").await?, vec![500]);
+        for the in [
+            "dialog.rule/source",
+            "dialog.rule/conclusion",
+            "dialog.rule/reads",
+        ] {
+            assert!(
+                stored(branch, &operator, the, &old).await?.is_empty(),
+                "no {the} fact left under the entity main stored the rule as"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// A replica still on the previous release writes the rule again under
+/// the old entity after this one upgraded, and sync brings it in. It is
+/// inert beside the upgraded rule, and the next upgrade re-installs it,
+/// which leaves the rule as the first upgrade did.
+#[dialog_common::test]
+async fn a_rule_reintroduced_by_the_previous_release_is_inert_until_the_next_upgrade() -> Result<()>
+{
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let alice: Entity = "id:alice".parse()?;
+    install(&branch, &operator, installed_by_main("salary_from_bonus")).await?;
+    upgrade(&branch, &operator).await?;
+    install(&branch, &operator, installed_by_main("salary_from_bonus")).await?;
+    commit(
+        &branch,
+        &operator,
+        unsigned("org/bonus", &alice, 500, Policy::All),
+    )
+    .await?;
+    assert_eq!(
+        salary(&branch, &operator, &alice, "all").await?,
+        vec![500],
+        "the upgraded rule derives; the reintroduced copy is inert"
+    );
+    let again = upgrade(&branch, &operator).await?;
+    assert_eq!(again.reinstalled.len(), 1);
+    assert!(
+        stored(
+            &branch,
+            &operator,
+            "dialog.rule/source",
+            &stored_by_main("salary_from_bonus")
+        )
+        .await?
+        .is_empty()
+    );
+    assert_eq!(salary(&branch, &operator, &alice, "all").await?, vec![500]);
+    Ok(())
+}
+
+/// `main`'s inductive `derived/tag := doc/title`, installed as `main`
+/// installed it, fires once upgraded.
+#[dialog_common::test]
+async fn a_rule_the_previous_release_installed_fires_at_commit_once_upgraded() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     let doc: Entity = "doc:1".parse()?;
     install(&branch, &operator, installed_by_main("tagger")).await?;
+    upgrade(&branch, &operator).await?;
     commit(
         &branch,
         &operator,
@@ -233,18 +371,17 @@ async fn a_rule_the_previous_release_installed_fires_at_commit() -> Result<()> {
 }
 
 /// A rule this release installs reads a relation a rule the previous
-/// release installed derives: `assert! derived/paid := s when
-/// org/salary(x) = s` over `main`'s `org/salary := org/bonus`. A bonus
-/// landing derives a salary, and the inductive rule pays it. The
-/// commit hydrates the deductive body through the same identity check,
-/// which drops it.
+/// release installed derives, once upgraded: `assert! derived/paid :=
+/// s when org/salary(x) = s` over `main`'s `org/salary := org/bonus`.
+/// A bonus landing derives a salary, and the inductive rule pays it.
 #[dialog_common::test]
-async fn a_rule_the_previous_release_installed_feeds_induction() -> Result<()> {
+async fn a_rule_the_previous_release_installed_feeds_induction_once_upgraded() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     let alice: Entity = "id:alice".parse()?;
     install(&branch, &operator, installed_by_main("salary_from_bonus")).await?;
+    upgrade(&branch, &operator).await?;
     let paid: InductiveRule = serde_json::from_value(json!({
         "assert!": {
             "with": { "paid": { "the": "derived/paid", "as": "UnsignedInteger" } }
@@ -283,16 +420,17 @@ async fn a_rule_the_previous_release_installed_feeds_induction() -> Result<()> {
 
 /// "If the read elects a candidate a rule derives, nothing is
 /// retracted." Alice's stored salary is 100, her bonus 500, and
-/// `main`'s rule derives her salary from her bonus, so a `max` read
-/// elects the derived 500 and a `max` write of 200 lands beside the
-/// stored 100 without retracting it.
+/// `main`'s rule, upgraded, derives her salary from her bonus, so a
+/// `max` read elects the derived 500 and a `max` write of 200 lands
+/// beside the stored 100 without retracting it.
 #[dialog_common::test]
-async fn a_choosing_write_beside_a_rule_the_previous_release_installed() -> Result<()> {
+async fn a_choosing_write_beside_an_upgraded_rule() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     let alice: Entity = "id:alice".parse()?;
     install(&branch, &operator, installed_by_main("salary_from_bonus")).await?;
+    upgrade(&branch, &operator).await?;
     commit(
         &branch,
         &operator,
@@ -322,17 +460,17 @@ async fn a_choosing_write_beside_a_rule_the_previous_release_installed() -> Resu
 }
 
 /// Retracting a rule uninstalls it. A writer holding `main`'s rule,
-/// decoded from what `main` stored, retracts it. This release writes
-/// the retraction under the rule's canonical identity, which is not
-/// the entity `main` installed it under, so the installed facts stay
-/// and the rule keeps deriving.
+/// decoded from what `main` stored, retracts it once the branch is
+/// upgraded: the retraction lands under the rule's identity, where the
+/// upgrade put it.
 #[dialog_common::test]
-async fn retracting_a_rule_the_previous_release_installed_uninstalls_it() -> Result<()> {
+async fn retracting_an_upgraded_rule_uninstalls_it() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     let alice: Entity = "id:alice".parse()?;
     install(&branch, &operator, installed_by_main("salary_from_bonus")).await?;
+    upgrade(&branch, &operator).await?;
     commit(
         &branch,
         &operator,
@@ -359,12 +497,10 @@ async fn retracting_a_rule_the_previous_release_installed_uninstalls_it() -> Res
     Ok(())
 }
 
-/// A concept `main` marked transient stays transient. `main` keyed the
-/// marker by the concept's identity, a hash over each attribute's
-/// `{domain, name, cardinality, type}`; this release hashes `{domain,
-/// name, then, type, select, among}`, so the marker sits under an
-/// entity no concept of this release has. A command concept's facts
-/// then land on the branch instead of living for one round.
+/// A concept `main` marked transient stays transient, with no upgrade:
+/// `main` keyed the marker by the concept's identity, and a concept
+/// over attributes read under `last` or `all` has the identity `main`
+/// gave it.
 #[dialog_common::test]
 async fn a_concept_the_previous_release_marked_transient_stays_transient() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -428,9 +564,6 @@ async fn a_concept_the_previous_release_marked_transient_stays_transient() -> Re
 /// An attribute and a concept keep the identities the previous release
 /// gave them. Every stored fact keyed by one (a transient marker, a
 /// rule's conclusion, an application's own references) depends on it.
-/// The changelog says "stored claims are unchanged" and the comment on
-/// the identity encoding says "every existing identity is preserved";
-/// neither holds for a plain cardinality-one attribute.
 #[dialog_common::test]
 fn an_attribute_and_a_concept_keep_the_identities_the_previous_release_gave_them() -> Result<()> {
     let fixture = fixture();
@@ -448,21 +581,21 @@ fn an_attribute_and_a_concept_keep_the_identities_the_previous_release_gave_them
     );
     let concept =
         ConceptDescriptor::try_from(vec![("salary", salary.clone()), ("tag", tag.clone())])?;
+    let captured = |section: &str, key: &str| -> String {
+        fixture[section][key]
+            .as_str()
+            .expect("captured")
+            .to_string()
+    };
     assert_eq!(
         (salary.to_uri(), tag.to_uri(), concept.this().to_string()),
         (
-            fixture["attributes"]["org/salary one UnsignedInteger"]
-                .as_str()
-                .expect("captured")
-                .to_string(),
-            fixture["attributes"]["org/tag many Text"]
-                .as_str()
-                .expect("captured")
-                .to_string(),
-            fixture["concepts"]["{salary: org/salary one UnsignedInteger, tag: org/tag many Text}"]
-                .as_str()
-                .expect("captured")
-                .to_string(),
+            captured("attributes", "org/salary one UnsignedInteger"),
+            captured("attributes", "org/tag many Text"),
+            captured(
+                "concepts",
+                "{salary: org/salary one UnsignedInteger, tag: org/tag many Text}"
+            ),
         )
     );
     Ok(())
@@ -470,9 +603,8 @@ fn an_attribute_and_a_concept_keep_the_identities_the_previous_release_gave_them
 
 /// "Bytes stored under any other entity stay inert." This release's
 /// `org/salary := org/bonus`, with every fact an install writes, under
-/// an entity that is not the hash of its body. The commit path refuses
-/// such a rule; the query path hydrates bodies without checking the
-/// entity, so the forged rule derives alice's salary.
+/// an entity that is not its identity, derives nothing on the query
+/// path, as on the commit path.
 #[dialog_common::test]
 async fn rule_facts_under_an_entity_that_is_not_their_address_derive_nothing() -> Result<()> {
     use dialog_artifacts::{Change, Changes};

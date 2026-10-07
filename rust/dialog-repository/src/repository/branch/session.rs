@@ -1,5 +1,5 @@
 use dialog_effects::blob::Read as BlobRead;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::HashSet;
 
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::selector::Constrained;
@@ -21,7 +21,7 @@ use dialog_query::concept::query::{ConceptRules, Exact, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use dialog_query::recall::{BodyMemo, Memo};
-use dialog_query::rule::statement::{derives_entities, on_entity};
+use dialog_query::rule::statement::on_entity;
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
 use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
@@ -39,10 +39,9 @@ use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
 use crate::repository::{CellSettlement, ReadObservation};
 use crate::rules::{
-    LayerRoots, Legacy, RuleRead, Selecting, assemble, builtin, builtin_derives, builtin_deriving,
-    conclusion_attr, conclusion_selector, derives_attr, derives_keys, derives_selector,
-    has_overlay_rules, head_onto, hydrate, overlay_rules, overlay_rules_deriving, rule_entities,
-    source_attr, source_bytes, source_selector,
+    LayerRoots, RuleRead, Selecting, assemble, builtin, builtin_derives, builtin_deriving,
+    conclusion_attr, derives_attr, derives_keys, derives_selector, has_overlay_rules, head_onto,
+    hydrate, overlay_rules_deriving, rule_entities, source_attr, source_bytes, source_selector,
 };
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
@@ -821,7 +820,16 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // ranks it with the rest under any other policy, until the
         // session takes it back.
         let pending = self.pending_edition();
-        let session = pending.successor();
+        // Past every line's head, not only the first's: a join reads
+        // lines of different lengths, and an overlay row is newer than
+        // every committed row of every line it is read beside.
+        let session = self
+            .sources
+            .iter()
+            .filter_map(|source| source.as_ref().revision())
+            .map(|revision| revision.edition.successor())
+            .fold(pending, |newest, edition| newest.max(edition))
+            .successor();
         for (source, line) in self.sources.iter().zip(&format.lines) {
             let rows = source.as_ref().overlay().select(&input, &line.manifest);
             if rows.is_empty() {
@@ -1004,19 +1012,20 @@ impl<'a> Provider<LoadBlock> for QueryEnv<'a> {
     }
 }
 
-/// How rules are looked up: by the concept they conclude
-/// (`dialog.rule/conclusion`), or by an attribute they derive
-/// (`dialog.rule/derives`, keyed by the attribute's `on:` entity).
+/// How rules are looked up: by an attribute they derive
+/// (`dialog.rule/derives`, keyed by the attribute's `on:` entity). A
+/// rule's `conclusion` fact is kept for tooling and is not read here:
+/// every install writes the `derives` index, and a rule an earlier
+/// release installed without it is inert until
+/// [`Branch::upgrade_rules`](crate::Branch::upgrade_rules).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Index {
-    Concluding,
     Deriving,
 }
 
 impl Index {
     fn selector(self, key: &Entity) -> ArtifactSelector<Constrained> {
         match self {
-            Index::Concluding => conclusion_selector(key),
             Index::Deriving => derives_selector(key),
         }
     }
@@ -1032,6 +1041,7 @@ fn staged_rules(layer: &Staged, index: Index, key: &Entity) -> Vec<DeductiveRule
     for rule_entity in entities {
         if let Some(bytes) = source_bytes(layer.scan(&source_selector(&rule_entity)))
             && let Ok(rule) = hydrate(&bytes)
+            && rule.stored_as(&rule_entity)
         {
             rules.push(rule);
         }
@@ -1089,80 +1099,15 @@ impl<'a> QueryEnv<'a> {
             let Some(bytes) = source_bytes(overlay.scan(&sources)) else {
                 continue;
             };
-            rules.push(hydrate(&bytes)?);
+            // A body under an entity it does not hash to is forged,
+            // corrupt, or stored by an earlier release: inert, as at
+            // commit.
+            let rule = hydrate(&bytes)?;
+            if rule.stored_as(&rule_entity) {
+                rules.push(rule);
+            }
         }
         Ok(rules)
-    }
-
-    /// The durable rules under `index` at `key` on `source`: the
-    /// committed `dialog.rule/*` rules, read from the tree and cached
-    /// by head (re-scanned only when the head moves), with hydrated
-    /// bodies cached by content-addressed rule entity.
-    /// The rules on `source` installed before the `derives` index
-    /// existed: every rule with a `conclusion` fact and no `derives`
-    /// fact, with the relations its stored body derives. Scanned once
-    /// per head, from the two index ranges alone; only an unindexed
-    /// rule has its body read, and that lands in the body cache. On a
-    /// line every rule of which is indexed the set is empty and no
-    /// body is read.
-    pub(crate) async fn legacy_rules(
-        &self,
-        source: &Source,
-    ) -> Result<Arc<Legacy>, EvaluationError> {
-        let cache = source.as_ref().rule_cache();
-        let head = source.as_ref().revision();
-        if let Some(head) = &head
-            && let Some(found) = cache.legacy(head)
-        {
-            return Ok(found);
-        }
-        let lookup = |error: dialog_artifacts::DialogArtifactsError| {
-            EvaluationError::Store(format!("legacy rule index: {error:?}"))
-        };
-        let indexed: HashSet<Entity> = self
-            .select_tree(source, ArtifactSelector::new().the(derives_attr()))
-            .await
-            .map_err(lookup)?
-            .into_iter()
-            .map(|claim| claim.of)
-            .collect();
-        let mut rules: Vec<(Entity, BTreeSet<Entity>)> = Vec::new();
-        for claim in self
-            .select_tree(source, ArtifactSelector::new().the(conclusion_attr()))
-            .await
-            .map_err(lookup)?
-        {
-            let rule = claim.of;
-            if indexed.contains(&rule) || rules.iter().any(|(seen, _)| *seen == rule) {
-                continue;
-            }
-            let body = match cache.body(&rule) {
-                Some(body) => body,
-                None => {
-                    let source_claims = self
-                        .select_tree(source, source_selector(&rule))
-                        .await
-                        .map_err(lookup)?;
-                    let Some(bytes) = source_bytes(source_claims) else {
-                        continue;
-                    };
-                    // A body this release cannot decode is reported
-                    // where its concept is read, not here: the index
-                    // scan must not fail every read of the line.
-                    let Ok(body) = hydrate(&bytes) else {
-                        continue;
-                    };
-                    cache.record_body(rule.clone(), body.clone());
-                    body
-                }
-            };
-            rules.push((rule, derives_entities(&body)));
-        }
-        let legacy = Arc::new(Legacy { rules });
-        if let Some(head) = head {
-            cache.record_legacy(head, legacy.clone());
-        }
-        Ok(legacy)
     }
 
     /// The committed rule entities under `index` at `key` on `source`:
@@ -1177,7 +1122,6 @@ impl<'a> QueryEnv<'a> {
         let cache = source.as_ref().rule_cache();
         let head = source.as_ref().revision();
         let discovered = head.as_ref().and_then(|h| match index {
-            Index::Concluding => cache.discovered(key, h),
             Index::Deriving => cache.derived(key, h),
         });
         if let Some(entities) = discovered {
@@ -1208,20 +1152,9 @@ impl<'a> QueryEnv<'a> {
             .select_tree(source, index.selector(key))
             .await
             .map_err(|e| EvaluationError::Store(format!("rule index lookup: {e:?}")))?;
-        let mut entities = rule_entities(claims);
-        // A rule installed before the `derives` index existed
-        // carries no `derives` fact: it is found by what its
-        // stored body derives, scanned once per head.
-        if index == Index::Deriving {
-            for entity in self.legacy_rules(source).await?.deriving(key) {
-                if !entities.contains(&entity) {
-                    entities.push(entity);
-                }
-            }
-        }
+        let entities = rule_entities(claims);
         if let Some(head) = head.clone() {
             match index {
-                Index::Concluding => cache.record_discovery(key.clone(), head, entities.clone()),
                 Index::Deriving => cache.record_derived(key.clone(), head, entities.clone()),
             }
         }
@@ -1256,6 +1189,13 @@ impl<'a> QueryEnv<'a> {
                 return Ok(None);
             };
             let body = hydrate(&bytes)?;
+            // A body under an entity it does not hash to is forged,
+            // corrupt, or stored by an earlier release
+            // (`Branch::upgrade_rules` re-installs those): inert, as at
+            // commit.
+            if !body.stored_as(&rule_entity) {
+                return Ok(None);
+            }
             cache.record_body(rule_entity, body.clone());
             Ok(Some(body))
         }))
@@ -1404,7 +1344,6 @@ impl<'a> QueryEnv<'a> {
             rules.extend(self.session_rules(source, index, key, manifest)?);
         }
         rules.extend(match index {
-            Index::Concluding => overlay_rules(&self.changes, key),
             Index::Deriving => overlay_rules_deriving(&self.changes, key),
         });
         for layer in &self.layers {
@@ -1502,7 +1441,6 @@ impl<'a> QueryEnv<'a> {
             for head in builtin_deriving(&concept) {
                 bundle.install(head);
             }
-            let mut found: Vec<Entity> = Vec::new();
             // The one source rule every head comes from, if it is one
             // and none of them folds: while nothing is stored under the
             // attribute, that rule re-headed onto the concept is its
@@ -1542,21 +1480,7 @@ impl<'a> QueryEnv<'a> {
                 let Some(on) = derives_keys(&single).into_iter().next() else {
                     continue;
                 };
-                let legacy = single.this();
                 for rule in self.resolve_rules(Index::Deriving, &on).await? {
-                    found.extend(rule.try_this());
-                    if let Some(head) = self.head_for(&rule, &on)? {
-                        note(&head);
-                        bundle.install(head);
-                    }
-                }
-                for rule in self.resolve_rules(Index::Concluding, &legacy).await? {
-                    if rule
-                        .try_this()
-                        .is_some_and(|entity| found.contains(&entity))
-                    {
-                        continue;
-                    }
                     if let Some(head) = self.head_for(&rule, &on)? {
                         note(&head);
                         bundle.install(head);
@@ -1605,18 +1529,6 @@ impl<'a> QueryEnv<'a> {
             for on in derives_keys(&attribute) {
                 rules.extend(self.resolve_rules(Index::Deriving, &on).await?);
             }
-            // A rule installed before the `derives` index existed is
-            // found by the attribute concept it concludes.
-            let known: HashSet<Entity> = rules.iter().filter_map(DeductiveRule::try_this).collect();
-            for rule in self.resolve_rules(Index::Concluding, &entity).await? {
-                if rule
-                    .try_this()
-                    .is_some_and(|identity| known.contains(&identity))
-                {
-                    continue;
-                }
-                rules.push(rule);
-            }
             // A field whose policy is not the plain stored read is read
             // through its attribute concept whether or not a rule
             // derives it, so its candidates are gathered and elected.
@@ -1661,7 +1573,7 @@ impl<'a> QueryEnv<'a> {
         }
         // Nothing derived: the descriptor's own implicit rule, whose
         // plans it memoizes, is the selecting rule.
-        let mut bundle = if derived.is_empty() {
+        let bundle = if derived.is_empty() {
             ConceptRules::with_plan_cache(descriptor, plan_cache)
         } else {
             // The selecting rule and the covering rule are functions of
@@ -1711,15 +1623,6 @@ impl<'a> QueryEnv<'a> {
                 None => bundle,
             }
         };
-        for rule in self.resolve_rules(Index::Concluding, &concept).await? {
-            if rule
-                .try_this()
-                .is_some_and(|entity| deriving.contains(&entity))
-            {
-                continue;
-            }
-            bundle.install(rule);
-        }
         Ok(bundle)
     }
 
@@ -1843,7 +1746,6 @@ mod rule_tests {
     use crate::Branch;
     use crate::helpers::{Counting, connect, test_repo};
     use dialog_peer::helpers::test_session_with_peer;
-    use dialog_query::attribute::The;
     use dialog_query::concept::descriptor::{ConceptConclusion, ConceptDescriptor};
     use dialog_query::concept::query::ConceptQuery;
     use dialog_query::rule::DeductiveRuleDescriptor;
@@ -2355,300 +2257,6 @@ mod rule_tests {
         Ok(())
     }
 
-    /// A rule the release before the `derives` index installed holds
-    /// only its conclusion and its body: a named head concludes the
-    /// concept's own entity, and no fact says which relations it
-    /// derives. A read of such a relation still finds the rule, by
-    /// what its stored body derives.
-    #[dialog_common::test]
-    async fn it_finds_a_rule_installed_before_the_derives_index() -> anyhow::Result<()> {
-        use dialog_query::rule::statement::{conclusion_attr, source_attr};
-
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-
-        let rule = {
-            let json = serde_json::json!({
-                "deduce": {
-                    "this": "org:dept-salary",
-                    "with": {
-                        "salary": { "the": "org/dept-salary", "as": "UnsignedInteger", "cardinality": "many" }
-                    }
-                },
-                "when": [{
-                    "assert": { "with": {
-                        "dept": { "the": "org/dept", "as": "Entity" },
-                        "salary": { "the": "org/salary", "as": "UnsignedInteger" }
-                    }},
-                    "where": {
-                        "this": { "?": { "name": "employee" } },
-                        "dept": { "?": { "name": "this" } },
-                        "salary": { "?": { "name": "salary" } }
-                    }
-                }]
-            });
-            let descriptor: DeductiveRuleDescriptor =
-                serde_json::from_value(json).expect("descriptor parses");
-            descriptor.compile().expect("rule compiles")
-        };
-        // Installed as the older release installed it: under an entity
-        // of its own making, with its conclusion and its body alone.
-        let installed: Entity = "rule:installed-before-derives".parse()?;
-        let dept: Entity = "id:dept-a".parse()?;
-        let alice: Entity = "id:alice".parse()?;
-        branch
-            .transaction()
-            .assert(the!("org/dept").of(alice.clone()).is(dept.clone()))
-            .assert(the!("org/salary").of(alice.clone()).is(3u32))
-            .assert(
-                The::from(conclusion_attr())
-                    .of(installed.clone())
-                    .is(rule.conclusion().this()),
-            )
-            .assert(
-                The::from(source_attr())
-                    .of(installed.clone())
-                    .is(rule.encode()),
-            )
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-
-        let read: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "all" }
-        }}))?;
-        let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("dept"));
-        terms.insert("salary".into(), Term::var("salary"));
-        let rows: Vec<ConceptConclusion> = branch
-            .query()
-            .select(ConceptQuery {
-                predicate: read,
-                terms,
-            })
-            .perform(&operator)
-            .try_vec()
-            .await?;
-        assert_eq!(rows.len(), 1, "the relation the old rule derives is read");
-        assert_eq!(*rows[0].entity(), dept);
-        assert_eq!(rows[0].get::<u64>("salary")?, 3);
-        Ok(())
-    }
-
-    /// The first commit on a line holding a rule installed before the
-    /// `derives` index writes that rule's `derives` facts, whatever the
-    /// commit itself changes: from then on the index alone finds the
-    /// rule, and the relation it derives reads the same.
-    #[dialog_common::test]
-    async fn it_indexes_a_rule_installed_before_the_derives_index_on_commit() -> anyhow::Result<()>
-    {
-        use dialog_query::rule::statement::{conclusion_attr, derives_attr, source_attr};
-        use futures_util::TryStreamExt as _;
-
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-
-        let rule = {
-            let json = serde_json::json!({
-                "deduce": {
-                    "this": "org:dept-salary",
-                    "with": {
-                        "salary": { "the": "org/dept-salary", "as": "UnsignedInteger", "cardinality": "many" }
-                    }
-                },
-                "when": [{
-                    "assert": { "with": {
-                        "dept": { "the": "org/dept", "as": "Entity" },
-                        "salary": { "the": "org/salary", "as": "UnsignedInteger" }
-                    }},
-                    "where": {
-                        "this": { "?": { "name": "employee" } },
-                        "dept": { "?": { "name": "this" } },
-                        "salary": { "?": { "name": "salary" } }
-                    }
-                }]
-            });
-            let descriptor: DeductiveRuleDescriptor =
-                serde_json::from_value(json).expect("descriptor parses");
-            descriptor.compile().expect("rule compiles")
-        };
-        let installed: Entity = "rule:installed-before-derives".parse()?;
-        let dept: Entity = "id:dept-a".parse()?;
-        let alice: Entity = "id:alice".parse()?;
-        let bob: Entity = "id:bob".parse()?;
-        branch
-            .transaction()
-            .assert(the!("org/dept").of(alice.clone()).is(dept.clone()))
-            .assert(the!("org/salary").of(alice.clone()).is(3u32))
-            .assert(
-                The::from(conclusion_attr())
-                    .of(installed.clone())
-                    .is(rule.conclusion().this()),
-            )
-            .assert(
-                The::from(source_attr())
-                    .of(installed.clone())
-                    .is(rule.encode()),
-            )
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-
-        let derives_of = ArtifactSelector::new()
-            .the(derives_attr())
-            .of(installed.clone());
-        let branch = repo.branch("main").open().perform(&operator).await?;
-        let before: Vec<Artifact> = branch
-            .claims()
-            .select(derives_of.clone())
-            .perform(&operator)
-            .await?
-            .owned()
-            .try_collect()
-            .await?;
-        assert!(before.is_empty(), "installed the old way: no derives fact");
-
-        // A commit touching nothing about rules.
-        branch
-            .transaction()
-            .assert(the!("org/dept").of(bob.clone()).is(dept.clone()))
-            .assert(the!("org/salary").of(bob.clone()).is(4u32))
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-
-        let branch = repo.branch("main").open().perform(&operator).await?;
-        let after: Vec<Artifact> = branch
-            .claims()
-            .select(derives_of)
-            .perform(&operator)
-            .await?
-            .owned()
-            .try_collect()
-            .await?;
-        let on: Entity = "on:org/dept-salary".parse()?;
-        assert_eq!(after.len(), 1, "the commit indexed the old rule");
-        assert_eq!(after[0].is, dialog_artifacts::Value::Entity(on));
-
-        let read: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "all" }
-        }}))?;
-        let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("dept"));
-        terms.insert("salary".into(), Term::var("salary"));
-        let mut rows: Vec<u64> = branch
-            .query()
-            .select(ConceptQuery {
-                predicate: read,
-                terms,
-            })
-            .perform(&operator)
-            .try_vec()
-            .await?
-            .into_iter()
-            .map(|row: ConceptConclusion| row.get::<u64>("salary"))
-            .collect::<Result<_, _>>()?;
-        rows.sort();
-        assert_eq!(rows, vec![3, 4], "the indexed rule derives both salaries");
-        Ok(())
-    }
-
-    /// A commit that uninstalls a rule installed before the `derives`
-    /// index, by retracting its conclusion and body as the older
-    /// release's retraction does, leaves no `derives` fact behind: the
-    /// rule is not indexed on its way out.
-    #[dialog_common::test]
-    async fn it_does_not_index_a_legacy_rule_the_commit_uninstalls() -> anyhow::Result<()> {
-        use dialog_query::rule::statement::{conclusion_attr, source_attr};
-        use futures_util::TryStreamExt as _;
-
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-
-        let rule = {
-            let json = serde_json::json!({
-                "deduce": {
-                    "this": "org:dept-salary",
-                    "with": {
-                        "salary": { "the": "org/dept-salary", "as": "UnsignedInteger", "cardinality": "many" }
-                    }
-                },
-                "when": [{
-                    "assert": { "with": {
-                        "dept": { "the": "org/dept", "as": "Entity" },
-                        "salary": { "the": "org/salary", "as": "UnsignedInteger" }
-                    }},
-                    "where": {
-                        "this": { "?": { "name": "employee" } },
-                        "dept": { "?": { "name": "this" } },
-                        "salary": { "?": { "name": "salary" } }
-                    }
-                }]
-            });
-            let descriptor: DeductiveRuleDescriptor =
-                serde_json::from_value(json).expect("descriptor parses");
-            descriptor.compile().expect("rule compiles")
-        };
-        let installed: Entity = "rule:installed-before-derives".parse()?;
-        let conclusion = rule.conclusion().this();
-        branch
-            .transaction()
-            .assert(
-                The::from(conclusion_attr())
-                    .of(installed.clone())
-                    .is(conclusion.clone()),
-            )
-            .assert(
-                The::from(source_attr())
-                    .of(installed.clone())
-                    .is(rule.encode()),
-            )
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-
-        let branch = repo.branch("main").open().perform(&operator).await?;
-        branch
-            .transaction()
-            .retract(
-                The::from(conclusion_attr())
-                    .of(installed.clone())
-                    .is(conclusion),
-            )
-            .retract(
-                The::from(source_attr())
-                    .of(installed.clone())
-                    .is(rule.encode()),
-            )
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-
-        let branch = repo.branch("main").open().perform(&operator).await?;
-        let rule_facts: Vec<Artifact> = branch
-            .claims()
-            .select(ArtifactSelector::new().of(installed.clone()))
-            .perform(&operator)
-            .await?
-            .owned()
-            .try_collect()
-            .await?;
-        assert!(
-            rule_facts.is_empty(),
-            "nothing of the uninstalled rule remains, no derives fact either: {rule_facts:?}"
-        );
-        Ok(())
-    }
-
     /// A committed rule derives a relation a query elects over: the
     /// rule stores, discovers and hydrates through the `db.rule/*`
     /// rail, and a read of its relation under `max` chooses among the
@@ -2809,67 +2417,6 @@ mod rule_tests {
             tops,
             vec![(dept_a, 4), (dept_b, 9)],
             "the committed and the overlay rule both contribute"
-        );
-        Ok(())
-    }
-
-    /// A rule stored before the `derives` index existed is found by the
-    /// concept it concludes: a concept selecting that attribute beside
-    /// others counts it as derived and reads it through the attribute
-    /// concept, where the rule is found the same way.
-    #[dialog_common::test]
-    async fn it_derives_a_field_from_a_rule_stored_without_a_derives_index() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-
-        // status := nick, concluded on the attribute concept alone.
-        let rule: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-            "deduce": { "with": {
-                "status": { "the": "org/status", "as": "Entity" }
-            }},
-            "when": [{
-                "assert": { "with": {
-                    "nick": { "the": "org/nick", "as": "Entity" }
-                }},
-                "where": {
-                    "this": { "?": { "name": "this" } },
-                    "nick": { "?": { "name": "status" } }
-                }
-            }]
-        }))?;
-        let rule = rule.compile()?;
-        let alice: Entity = "id:alice".parse()?;
-        let nick: Entity = "id:nick-a".parse()?;
-        let name: Entity = "id:name-a".parse()?;
-        // Stored by hand as a pre-index writer did: its source and the
-        // concept it concludes, and no `derives` entry.
-        branch
-            .transaction()
-            .assert(the!("dialog.rule/source").of(rule.this()).is(rule.encode()))
-            .assert(
-                the!("dialog.rule/conclusion")
-                    .of(rule.this())
-                    .is(rule.conclusion().this()),
-            )
-            .assert(the!("org/nick").of(alice.clone()).is(nick.clone()))
-            .assert(the!("org/name").of(alice.clone()).is(name.clone()))
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-
-        let rows = entities_of(
-            &branch,
-            &operator,
-            &[("name", "org/name"), ("status", "org/status")],
-        )
-        .await?;
-        assert_eq!(
-            rows,
-            vec![(alice, vec![name.to_string(), nick.to_string()])],
-            "the legacy rule derives the status read beside the name"
         );
         Ok(())
     }
@@ -3742,62 +3289,6 @@ mod rule_tests {
             ]
         );
         Ok(())
-    }
-
-    /// `rows_of` for entity-valued fields.
-    async fn entities_of<Env>(
-        branch: &Branch,
-        operator: &Env,
-        fields: &[(&str, &str)],
-    ) -> anyhow::Result<Vec<(Entity, Vec<String>)>>
-    where
-        Env: Provider<BlobRead>
-            + dialog_capability::Provider<Get>
-            + dialog_capability::Provider<Put>
-            + dialog_capability::Provider<Resolve>
-            + dialog_capability::Provider<Identify>
-            + dialog_capability::Provider<crate::Hydrate>
-            + dialog_capability::Provider<dialog_artifacts::Preload>
-            + dialog_capability::Provider<dialog_artifacts::Speculation>
-            + dialog_capability::Provider<Fork<RemoteSite, Resolve>>
-            + ConditionalSync
-            + 'static,
-    {
-        let with: serde_json::Map<String, serde_json::Value> = fields
-            .iter()
-            .map(|(field, the)| {
-                (
-                    field.to_string(),
-                    serde_json::json!({ "the": the, "as": "Entity" }),
-                )
-            })
-            .collect();
-        let predicate: ConceptDescriptor =
-            serde_json::from_value(serde_json::json!({ "with": with }))?;
-        let mut terms = Parameters::new();
-        terms.insert("this".into(), Term::var("this"));
-        for (field, _) in fields {
-            terms.insert(field.to_string(), Term::var(*field));
-        }
-        let rows: Vec<ConceptConclusion> = branch
-            .select(ConceptQuery { predicate, terms })
-            .perform(operator)
-            .try_vec()
-            .await?;
-        let mut out: Vec<(Entity, Vec<String>)> = rows
-            .iter()
-            .map(|row| {
-                let values = fields
-                    .iter()
-                    .filter_map(|(field, _)| {
-                        row.get::<Entity>(field).ok().map(|value| value.to_string())
-                    })
-                    .collect();
-                (row.entity().clone(), values)
-            })
-            .collect();
-        out.sort();
-        Ok(out)
     }
 }
 

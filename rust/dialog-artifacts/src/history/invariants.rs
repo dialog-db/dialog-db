@@ -205,5 +205,11 @@ async fn a_claim_succeeded_within_its_own_batch_leaves_no_standing_record() -> R
         !standing.contains(&150) || retracted.contains(&150),
         "150 was succeeded by 120 in the same batch; it is retracted or unrecorded, not standing: asserted {standing:?}, retracted {retracted:?}"
     );
+    assert!(
+        records
+            .iter()
+            .any(|(_, record)| record.claim().cause.contains(&version(0))),
+        "the batch superseded the stored 100, and some record of it still says so, so a peer holding 100 retires it"
+    );
     Ok(())
 }
