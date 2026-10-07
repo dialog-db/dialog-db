@@ -22,6 +22,7 @@
 use super::induce::induce;
 use super::succession;
 use super::{Transaction, TransactionCommit, carry_footprint, touches_rules};
+use crate::Ephemeral;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::source::{Caches, SourceRef};
@@ -31,7 +32,9 @@ use crate::{
 };
 use dialog_artifacts::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
 use dialog_artifacts::tree::WriteScope;
-use dialog_artifacts::{Changes, Entity, Statement};
+use dialog_artifacts::{
+    Artifact, ArtifactSelector, Change, Changes, Entity, Statement, Update as _,
+};
 use dialog_capability::history::Origin;
 use dialog_capability::{Did, Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -100,6 +103,51 @@ pub struct TransactionBatch {
     /// links, across every round of every link. See
     /// [`induced`](Self::induced).
     induced: Changes,
+    /// The branch's session overlay, and the facts the staged links
+    /// retract that only it holds: retracted from it once the publish
+    /// lands, so what a transaction read is what its publish leaves.
+    overlay: Ephemeral,
+    overlay_retractions: Vec<Artifact>,
+}
+
+/// The facts `changes` retracts that `overlay` holds. A transaction's
+/// read hides such a fact, and the commit's retraction of it lands
+/// nothing in the tree, which never held it: the publish retracts it
+/// from the overlay, so the session's row does not come back.
+fn overlay_retractions(changes: &Staged, overlay: &Ephemeral) -> Vec<Artifact> {
+    let mut retracted = Vec::new();
+    for (the, of, change) in changes.log() {
+        let Change::Retract(value) = change else {
+            continue;
+        };
+        let selector = ArtifactSelector::new()
+            .the(the.clone())
+            .of(of.clone())
+            .is(value.clone());
+        if !overlay.scan(&selector).is_empty() {
+            retracted.push(Artifact {
+                the: the.clone(),
+                of: of.clone(),
+                is: value.clone(),
+                cause: None,
+            });
+        }
+    }
+    retracted
+}
+
+/// Retract `facts` from the session overlay, once the publish that
+/// retracted them landed.
+fn retract_from_overlay(overlay: &Ephemeral, facts: Vec<Artifact>) -> Result<(), CommitError> {
+    if facts.is_empty() {
+        return Ok(());
+    }
+    let mut changes = Changes::new();
+    for fact in facts {
+        changes.dissociate(fact.the, fact.of, fact.is);
+    }
+    overlay.apply(changes)?;
+    Ok(())
 }
 
 impl TransactionBatch {
@@ -220,6 +268,8 @@ impl BatchPublish {
             records,
             contexts,
             induced: _,
+            overlay,
+            overlay_retractions,
         } = self.batch;
         let tip = snapshot.revision();
 
@@ -242,10 +292,12 @@ impl BatchPublish {
             if induction.content().as_ref() != Some(&tip) {
                 induction.publish(tip.clone()).perform(env).await?;
             }
+            retract_from_overlay(&overlay, overlay_retractions)?;
             return Ok(tip);
         }
 
         head.publish(tip.clone(), env).await?;
+        retract_from_overlay(&overlay, overlay_retractions)?;
 
         // Only now that the head has actually advanced do the staged
         // records and context enter the branch's shared memos: they are
@@ -411,6 +463,8 @@ impl TransactionCommit<&Branch> {
         // it for the links that follow.
         let authority = Identify.perform(env).await?;
         let (line, _) = branch.commit_identity(authority.profile(), &authority.did());
+        let overlay = branch.overlay().clone();
+        let retractions = overlay_retractions(&self.changes, &overlay);
 
         let (outcome, induced) = Box::pin(mint_link(
             SourceRef::Branch(branch),
@@ -447,6 +501,8 @@ impl TransactionCommit<&Branch> {
                 records: branch.records(),
                 contexts: branch.contexts(),
                 induced,
+                overlay,
+                overlay_retractions: retractions,
             },
             Outcome::Minted(minted) => {
                 let Minted {
@@ -469,6 +525,8 @@ impl TransactionCommit<&Branch> {
                     records: branch.records(),
                     contexts: branch.contexts(),
                     induced,
+                    overlay,
+                    overlay_retractions: retractions,
                 }
             }
         })
@@ -512,6 +570,7 @@ impl TransactionCommit<TransactionBatch> {
             _ => None,
         };
         let amending = amend.is_some();
+        let retractions = overlay_retractions(&self.changes, &batch.overlay);
 
         let (outcome, induced) = Box::pin(mint_link(
             SourceRef::Snapshot(&batch.snapshot),
@@ -526,6 +585,7 @@ impl TransactionCommit<TransactionBatch> {
         ))
         .await?;
         induced.assert(&mut batch.induced);
+        batch.overlay_retractions.extend(retractions);
 
         if let Outcome::Minted(minted) = outcome {
             let Minted {

@@ -109,7 +109,7 @@ pub type Contender<'a> = (&'a Value, Option<&'a Standing>);
 
 /// Whether `candidate` orders after `incumbent` by value alone: the
 /// values' own order where they have one, their encoding's otherwise.
-fn value_beats(candidate: &Value, incumbent: &Value) -> bool {
+pub(crate) fn value_beats(candidate: &Value, incumbent: &Value) -> bool {
     match candidate.partial_cmp(incumbent) {
         Some(ordering) => ordering.is_gt(),
         None => encode_value_owned(candidate) > encode_value_owned(incumbent),

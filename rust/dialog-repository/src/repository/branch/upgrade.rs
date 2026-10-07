@@ -12,9 +12,17 @@
 //! the branch holds, and each one stored under an entity that is not
 //! its identity is retracted from that entity and asserted again, which
 //! writes it under its identity with every index a current install
-//! writes. The upgrade is idempotent and convergent: a second run finds
+//! writes.
+//!
+//! The earlier release also gave every attribute and concept another
+//! identity (see [`dialog_query::migration`]), and keyed a concept's
+//! `dialog.concept/transient` marker by it. For the concept every rule
+//! on the branch concludes, a marker under the concept's earlier
+//! identity is moved to its current one.
+//!
+//! The upgrade is idempotent and convergent: a second run finds
 //! nothing, and two replicas that upgrade concurrently write the same
-//! facts, since the identity is a function of the rule.
+//! facts, since every identity is a function of what it identifies.
 //!
 //! A replica still on the earlier release can write such rules again,
 //! and sync brings them in. They stay inert until the upgrade runs
@@ -23,7 +31,8 @@
 //!
 //! [`DeductiveRule::stored_as`]: dialog_query::rule::DeductiveRule::stored_as
 
-use crate::{Branch, CommitError, RemoteSite, Revision};
+use crate::rules::transient_attr;
+use crate::{Branch, CommitError, RemoteSite, Revision, Transient};
 use dialog_artifacts::{ArtifactSelector, Attribute, Entity, Policy, Value};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -32,9 +41,10 @@ use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead, Size as BlobSize};
 use dialog_effects::memory::{Publish, Resolve};
 use dialog_query::attribute::The;
+use dialog_query::migration::concept_identity_v0;
 use dialog_query::rule::statement::source_attr;
 use dialog_query::rule::{DeductiveRule, InductiveRule};
-use dialog_query::{AttributeStatement, Cardinality};
+use dialog_query::{AttributeStatement, Cardinality, ConceptDescriptor};
 use futures_util::TryStreamExt as _;
 
 /// What [`Branch::upgrade_rules`] did.
@@ -46,6 +56,9 @@ pub struct RulesUpgraded {
     /// Rule entities whose stored body this release cannot decode as
     /// either kind of rule. They are left as they are.
     pub undecodable: Vec<Entity>,
+    /// Each transient marker moved: the concept identity the earlier
+    /// release keyed it by, and the concept's identity now.
+    pub remarked: Vec<(Entity, Entity)>,
     /// The revision the upgrade committed, or `None` when there was
     /// nothing to re-install.
     pub revision: Option<Revision>,
@@ -85,6 +98,13 @@ impl Decoded {
             Decoded::Inductive(rule) => rule.try_this(),
         }
     }
+
+    fn conclusion(&self) -> &ConceptDescriptor {
+        match self {
+            Decoded::Deductive(rule) => rule.conclusion(),
+            Decoded::Inductive(rule) => rule.conclusion(),
+        }
+    }
 }
 
 impl UpgradeRules<'_> {
@@ -120,6 +140,7 @@ impl UpgradeRules<'_> {
 
         let mut upgraded = RulesUpgraded::default();
         let mut transaction = branch.transaction();
+        let mut conclusions: Vec<ConceptDescriptor> = Vec::new();
         for view in sources {
             let stored = view.to_owned()?;
             let Value::Bytes(bytes) = &stored.is else {
@@ -132,6 +153,12 @@ impl UpgradeRules<'_> {
             let Some(identity) = rule.identity() else {
                 continue;
             };
+            if !conclusions
+                .iter()
+                .any(|known| known.this() == rule.conclusion().this())
+            {
+                conclusions.push(rule.conclusion().clone());
+            }
             if identity == stored.of
                 || upgraded
                     .reinstalled
@@ -162,7 +189,34 @@ impl UpgradeRules<'_> {
             };
             upgraded.reinstalled.push((stored.of.clone(), identity));
         }
-        if upgraded.reinstalled.is_empty() {
+        // A transient marker under a concluded concept's earlier
+        // identity, moved to its current one.
+        for concept in conclusions {
+            let earlier = concept_identity_v0(&concept);
+            let current = concept.this();
+            if earlier == current {
+                continue;
+            }
+            let marked = branch
+                .claims()
+                .select(
+                    ArtifactSelector::new()
+                        .the(transient_attr())
+                        .of(earlier.clone()),
+                )
+                .perform(env)
+                .await?
+                .try_collect::<Vec<_>>()
+                .await?;
+            if marked.is_empty() {
+                continue;
+            }
+            transaction = transaction
+                .retract(Transient(earlier.clone()))
+                .assert(Transient(current.clone()));
+            upgraded.remarked.push((earlier, current));
+        }
+        if upgraded.reinstalled.is_empty() && upgraded.remarked.is_empty() {
             return Ok(upgraded);
         }
         upgraded.revision = Some(transaction.commit().publish().perform(env).await?);

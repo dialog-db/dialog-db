@@ -8,10 +8,10 @@
 //!
 //! A rule the previous release stored sits under the hash of its bytes
 //! and is inert here until [`Branch::upgrade_rules`] re-installs it
-//! under its identity. Attribute and concept identities are unchanged
-//! for every attribute read under `last` or `all`, so what is keyed by
-//! them (a transient marker, an application's references) needs no
-//! upgrade.
+//! under its identity. Every attribute and concept identity changed
+//! too; the upgrade moves the transient markers keyed by the old ones,
+//! and [`dialog_query::migration`] reproduces the old identities for
+//! an application moving its own.
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -497,12 +497,12 @@ async fn retracting_an_upgraded_rule_uninstalls_it() -> Result<()> {
     Ok(())
 }
 
-/// A concept `main` marked transient stays transient, with no upgrade:
-/// `main` keyed the marker by the concept's identity, and a concept
-/// over attributes read under `last` or `all` has the identity `main`
-/// gave it.
+/// A concept `main` marked transient stays transient once upgraded:
+/// `main` keyed the marker by the concept's earlier identity, and the
+/// upgrade moves it to the identity of the concept the rule concludes.
 #[dialog_common::test]
-async fn a_concept_the_previous_release_marked_transient_stays_transient() -> Result<()> {
+async fn a_concept_the_previous_release_marked_transient_stays_transient_once_upgraded()
+-> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
@@ -524,7 +524,7 @@ async fn a_concept_the_previous_release_marked_transient_stays_transient() -> Re
     };
     branch
         .transaction()
-        .assert(Transient(stage))
+        .assert(Transient(stage.clone()))
         .assert(rule("cmd.start/target", "cmd.stage/target")?)
         .assert(rule("cmd.stage/target", "result/target")?)
         .commit()
@@ -532,6 +532,9 @@ async fn a_concept_the_previous_release_marked_transient_stays_transient() -> Re
         .perform(&operator)
         .await?;
     branch.refresh(&operator).await?;
+    let upgraded = upgrade(&branch, &operator).await?;
+    assert_eq!(upgraded.remarked.len(), 1, "the marker moved once");
+    assert_eq!(upgraded.remarked[0].0, stage);
 
     let command: Entity = "cmd:start".parse()?;
     let target: Entity = "doc:1".parse()?;
@@ -561,11 +564,14 @@ async fn a_concept_the_previous_release_marked_transient_stays_transient() -> Re
     Ok(())
 }
 
-/// An attribute and a concept keep the identities the previous release
-/// gave them. Every stored fact keyed by one (a transient marker, a
-/// rule's conclusion, an application's own references) depends on it.
+/// The identities the previous release gave an attribute and a concept
+/// are reproduced exactly, so a migration finds what it keyed by them:
+/// the transient markers the upgrade moves, and an application's own
+/// references. The current identities differ.
 #[dialog_common::test]
-fn an_attribute_and_a_concept_keep_the_identities_the_previous_release_gave_them() -> Result<()> {
+fn the_previous_release_identities_are_reproduced_for_migration() -> Result<()> {
+    use dialog_query::migration::{attribute_uri_v0, concept_identity_v0};
+
     let fixture = fixture();
     let salary = AttributeDescriptor::new(
         "org/salary".parse()?,
@@ -587,17 +593,24 @@ fn an_attribute_and_a_concept_keep_the_identities_the_previous_release_gave_them
             .expect("captured")
             .to_string()
     };
-    assert_eq!(
-        (salary.to_uri(), tag.to_uri(), concept.this().to_string()),
-        (
-            captured("attributes", "org/salary one UnsignedInteger"),
-            captured("attributes", "org/tag many Text"),
-            captured(
-                "concepts",
-                "{salary: org/salary one UnsignedInteger, tag: org/tag many Text}"
-            ),
-        )
+    let earlier = (
+        captured("attributes", "org/salary one UnsignedInteger"),
+        captured("attributes", "org/tag many Text"),
+        captured(
+            "concepts",
+            "{salary: org/salary one UnsignedInteger, tag: org/tag many Text}",
+        ),
     );
+    assert_eq!(
+        (
+            attribute_uri_v0(&salary),
+            attribute_uri_v0(&tag),
+            concept_identity_v0(&concept).to_string()
+        ),
+        earlier
+    );
+    assert_ne!(salary.to_uri(), earlier.0, "the current identity differs");
+    assert_ne!(concept.this().to_string(), earlier.2);
     Ok(())
 }
 

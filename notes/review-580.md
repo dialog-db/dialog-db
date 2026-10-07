@@ -32,7 +32,7 @@ Fixed on this branch, each with its test now passing:
 | Defect | Fix |
 |---|---|
 | 1, 3: rules the previous release installed | Permanent legacy path removed (conclusion index, legacy scan, commit-time indexing, byte-hash acceptance). `Branch::upgrade_rules` re-installs them; idempotent, convergent, re-runnable when an old replica reintroduces them. |
-| 2: attribute and concept identities | The identity hashes `{domain, name, cardinality, type}` as `main` did, adding `select`, `then`, `among` only when they say more. Plain attributes, concepts and transient markers keep their identities. |
+| 2: attribute and concept identities | The PR's identities stand. `Branch::upgrade_rules` moves transient markers from a concluded concept's earlier identity to its current one; `dialog_query::migration` reproduces the earlier identities for an application's own references. |
 | 4: covering rule under `last` | The covering rule answers attribute concepts only, whose rows it elects; a multi-field concept selects and joins. |
 | 6 (part): recursive relation under `last` | The component's exit elects under `last` too, so a reader sees one value. |
 | 7: bulk anti-join | The key covers every variable any candidate binds; a candidate missing one falls back to per-candidate evaluation. |
@@ -44,25 +44,16 @@ Fixed on this branch, each with its test now passing:
 | 16: overlay in a join | An overlay row stands past every joined line's head. |
 | 17: same-batch history record | A claim succeeded within its batch gets a retraction record; the supersession it carried survives the fold. |
 | 19: perf gate | Counters are compared over both reports' keys, a zero baseline has no slack, a missing baseline or scenario fails, and every commit path counts a `commit` step; the commit-side settlement counts `settle`. Counter baselines refreshed; instruction baselines need the CI toolchain's sweep. |
-
-Re-diagnosed: **18** is the perf harness, not the engine. Opening a repository mints a
-fresh account key, its encrypted secret and a delegation into the tree; the facts the
-scenario's commits write are identical run to run. The harness needs a seeded account key.
+| 12: transaction reads differ from the commit | One settlement engine. The log settles in order, incrementally: the first read settles what is logged, later reads and the commit settle only what was logged since, and the result is kept per observation of the lines. |
+| 15: a transaction retracting an overlay row | The commit takes the row off the session overlay when it publishes. |
+| 6 (rest): standings through the fixpoint | Each fixpoint row stands as the newest of its derivations; a row raised to a newer standing re-enters the delta; DRed re-derives a suspect at its newest surviving derivation; the exit election and every join out of the component carry it. |
+| 18: nondeterministic trees in the perf harness | Opening the space records random access facts (key, encrypted secret, delegation) in `main`; the scenarios now commit to their own branch, so the same commits mint the same head. |
+| Commit consistency under `last` | Equal editions order by version hash before value, at every election site (the cardinality-one read used to fall back to the fact hash). Pinned end to end: concurrent commits on two replicas, mutually pulled, are won by one commit in every cell. |
 
 Open, each needing a decision:
 
-- **12, transaction reads differ from the commit.** Needs one settlement engine. Proposed:
-  settle the log incrementally on first read or at commit, extending a memoized settled
-  prefix with only the new writes, against the line plus that prefix: the commit's own
-  algorithm, so reads and commit share one result and each write is settled once. It
-  replaces the PR's per-cell read settlement; tonk's bootstrap is the cost to measure.
-- **15, a transaction retracting an overlay row.** Either the commit also retracts the row
-  from the session overlay, or the transaction refuses a retraction only the overlay holds.
 - **5, absence tests inside a cycle.** Options: refuse per component and report; evaluate
   the negation against stored facts and lower strata only; a well-founded semantics.
-- **6 (rest), standings through the fixpoint.** A derived fact's standing must be the
-  maximum over its derivations, propagated as its own fixpoint, before `last` can pick the
-  newest candidate of a recursive relation; until then it picks by value.
 - **10, field names in identity.** Not blocking.
 
 ## Decided since the first review

@@ -75,9 +75,13 @@ What this changes for you:
   beside it, and a write under `max` after an `all` write succeeds the
   staged claim it elects. An inductive rule's head observes the round
   view it fired on.
-- A transaction reads what its commit will leave. Its own reads settle
-  its writes the same way the commit does, on the first read, so the
-  claim a write succeeds is already gone from `transaction.query()`.
+- A transaction reads what its commit will leave. Reads and the commit
+  share one settlement: the log is settled in order against the line
+  and the writes before each one, the first read settles what is
+  logged so far, a later read or the commit settles only the writes
+  logged since, and the result is kept while the lines read stay the
+  same. So the claim a write succeeds is already gone from
+  `transaction.query()`, and what a read showed is what lands.
   Two `last` writes of one cell in one transaction leave the later one
   alone, never both and never a hash-decided one, and a staged claim a
   later write retires or retracts leaves no tombstone: it never
@@ -97,9 +101,15 @@ What this changes for you:
   `top` rank it with the rest. A commit never takes an overlay row
   back: a succession the read resolves to an overlay row retires
   nothing and stands beside it, as beside a candidate a rule derives,
-  and a transaction reads the overlay above its own writes. Retracting
-  an overlay row is the session's write, on the overlay itself. A cell
-  the overlay holds is settled by the transactor, not the tree.
+  and a transaction reads the overlay above its own writes. A
+  transaction that retracts an overlay row takes it off the overlay
+  when the commit publishes, so the row stays gone after the commit as
+  it was in the transaction's reads. A cell the overlay holds is
+  settled by the transactor, not the tree.
+- Concurrent `last` writes settle by commit. Candidates of equal
+  edition order by version hash before value, in the tree, the
+  transactor and every read alike, so when two replicas' commits meet,
+  one commit's writes win every cell they share, never some cells each.
 
 Why: `Replace` encoded one policy, last-writer-wins, in the write path,
 while reads had grown four. A write is a claim that succeeds what the
@@ -118,6 +128,14 @@ the newest fact the rule's body touched, so an unrelated input landing
 could make a derived value look fresher than the stored claim it was
 competing with. A value a formula computes cites no fact of its own
 and keeps the old behaviour.
+
+A recursive relation's values stand the same way. Each row of the
+fixpoint stands as the newest of its derivations, carried from row to
+row as the fixpoint runs; a row derived again from a newer fact
+re-enters the next round, so what it derives stands as new. A
+subscription that maintains the fixpoint across polls keeps the
+standings too: a deletion re-derives a suspect row at the newest
+derivation that survives it.
 
 ### `unless` and optional premises evaluate under the cycle policy
 
@@ -262,12 +280,14 @@ happens to it.
   older release can write such rules again and sync brings them in;
   they stay inert until the upgrade runs again. When to run it, once
   or after every pull, is the embedder's decision.
-- Attribute and concept identities are unchanged for every attribute
-  read under `last` or `all`: an attribute's identity hashes its
-  domain, name, cardinality and type as before, and adds `select`,
-  `then` and `among` only when they say more than the cardinality.
-  What is keyed by a concept's identity, a transient marker or an
-  application's own reference, needs no upgrade.
+- Every attribute and concept identity changes: an attribute's
+  identity hashes the relations it ranks, its policy and its ranked
+  values beside its domain, name and type, so two reads of one
+  relation under different policies are two attributes. The upgrade
+  moves the `dialog.concept/transient` markers keyed by the older
+  identities, for the concepts the branch's rules conclude.
+  `dialog_query::migration` reproduces the older identities, for an
+  application that keyed facts of its own by them.
 - Library YAML in the older spelling parses: `cardinality:` is read as
   `select: all` for `many` and the default `last` for `one`, and a
   `select:` beside it wins. tonk's standard libraries carry a seed

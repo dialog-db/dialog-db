@@ -452,11 +452,15 @@ impl ArtifactView {
     /// cannot separate (both unversioned, or both written by the same
     /// revision) fall to the older rule: the higher cause wins, a caused
     /// row beats an uncaused one, and equal (including absent) causes fall
-    /// to the fact hash. Every tier is deterministic and commutative:
-    /// folding any set of rows in any order elects the same row, which is
-    /// what lets every replica agree on the observed value without
-    /// coordination. Versions and causes read straight off the rows; only
-    /// a genuine tie pays for the materialization the fact hash needs.
+    /// to the value, the greater winning. This is the order
+    /// [`Policy::prefers`](crate::Policy::prefers) elects by under `last`,
+    /// in the tree, in a commit's settlement and in a concept read, so
+    /// every read of a cell under `last` returns the same claim. Every
+    /// tier is deterministic and commutative: folding any set of rows in
+    /// any order elects the same row, which is what lets every replica
+    /// agree on the observed value without coordination. Versions and
+    /// causes read straight off the rows; only a genuine tie pays for the
+    /// materialization the value needs.
     pub fn elect(self, challenger: ArtifactView) -> Result<ArtifactView, DialogArtifactsError> {
         match (self.standing(), challenger.standing()) {
             (Some(a), Some(b)) if a > b => return Ok(self),
@@ -471,9 +475,10 @@ impl ArtifactView {
             (Some(_), None) => self,
             (None, Some(_)) => challenger,
             _ => {
-                // Causes are equal: the fact hash is the deterministic
-                // tiebreaker. The hash needs materialization, which is where
-                // a corrupt stored row (`CorruptEntry`) surfaces — such a row
+                // Causes are equal: the value is the deterministic
+                // tiebreaker, as it is for every other election of the
+                // cell. The value needs materialization, which is where a
+                // corrupt stored row (`CorruptEntry`) surfaces — such a row
                 // must be invisible to readers, so it LOSES to any
                 // materializable rival. Two corrupt rows elect either (the
                 // winner fails materialization downstream and is skipped
@@ -481,10 +486,10 @@ impl ArtifactView {
                 use DialogArtifactsError::CorruptEntry;
                 match (self.to_owned(), challenger.to_owned()) {
                     (Ok(a), Ok(b)) => {
-                        if Cause::from(&a) >= Cause::from(&b) {
-                            self
-                        } else {
+                        if super::update::value_beats(&b.is, &a.is) {
                             challenger
+                        } else {
+                            self
                         }
                     }
                     (Ok(_), Err(CorruptEntry(_))) => self,

@@ -60,7 +60,7 @@ use crate::planner::{Conjunction, Planner};
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::rule::deductive::DeductiveRule;
-use crate::selection::{Binding, Match};
+use crate::selection::{Binding, Match, Standing};
 use crate::session::ProgramAnalysis;
 use crate::source::SelectRules;
 use crate::term::Term;
@@ -70,6 +70,7 @@ use core::fmt;
 use core::{iter, mem};
 use dialog_capability::Provider;
 use futures_util::TryStreamExt;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -84,15 +85,29 @@ pub const MAX_ROUNDS: usize = 1000;
 /// to `Absent` (optional fields) are omitted.
 pub type Row = BTreeMap<String, Value>;
 
+/// A derived row and the standing it holds: the newest fact any of its
+/// derivations consumed, as a row a rule derives outside a cycle stands
+/// as the facts it was bound from. `None` for a row no derivation bound
+/// from a fact, as for a value a formula computed.
+#[derive(Debug, Clone)]
+pub struct Answer {
+    /// The derived conclusion.
+    pub row: Row,
+    /// The newest standing among the row's derivations.
+    pub standing: Option<Standing>,
+}
+
 /// Storage for the answers accumulated during a fixpoint run. The
 /// trait is the swap point for bounded-memory (disk-backed)
 /// implementations; the evaluator only ever appends, advances, and
 /// scans.
 pub trait AnswerTable {
-    /// Stage a freshly derived row. Returns `false` when the row is
-    /// already known (in the total or already staged), `true` when
-    /// it is new.
-    fn insert(&mut self, concept: &Entity, row: Row) -> bool;
+    /// Stage a freshly derived row, standing as `standing`. Returns
+    /// `true` when the row is new, or known but now stands newer than
+    /// any earlier derivation of it (the newer standing must reach the
+    /// rows derived from it, so the row re-enters the delta); `false`
+    /// otherwise.
+    fn insert(&mut self, concept: &Entity, row: Row, standing: Option<Standing>) -> bool;
 
     /// End the round: staged rows become the new delta and join the
     /// total. Returns `true` when the new delta is non-empty (the
@@ -101,10 +116,11 @@ pub trait AnswerTable {
 
     /// Every row derived for the concept so far, including the
     /// current delta.
-    fn total(&self, concept: &Entity) -> Vec<Row>;
+    fn total(&self, concept: &Entity) -> Vec<Answer>;
 
-    /// The rows first derived in the previous round.
-    fn delta(&self, concept: &Entity) -> Vec<Row>;
+    /// The rows first derived, or raised to a newer standing, in the
+    /// previous round.
+    fn delta(&self, concept: &Entity) -> Vec<Answer>;
 }
 
 /// In-memory [`AnswerTable`]. [`Value`] has no total order (floats),
@@ -112,9 +128,9 @@ pub trait AnswerTable {
 /// stored in sorted maps for deterministic iteration.
 #[derive(Debug, Default)]
 pub struct InMemoryAnswerTable {
-    total: HashMap<Entity, BTreeMap<Vec<u8>, Row>>,
-    delta: HashMap<Entity, BTreeMap<Vec<u8>, Row>>,
-    staged: HashMap<Entity, BTreeMap<Vec<u8>, Row>>,
+    total: HashMap<Entity, BTreeMap<Vec<u8>, Answer>>,
+    delta: HashMap<Entity, BTreeMap<Vec<u8>, Answer>>,
+    staged: HashMap<Entity, BTreeMap<Vec<u8>, Answer>>,
 }
 
 /// The canonical identity of a row: its dag-cbor bytes. dag-cbor
@@ -125,41 +141,47 @@ fn row_key(row: &Row) -> Vec<u8> {
 }
 
 impl AnswerTable for InMemoryAnswerTable {
-    fn insert(&mut self, concept: &Entity, row: Row) -> bool {
+    fn insert(&mut self, concept: &Entity, row: Row, standing: Option<Standing>) -> bool {
         let key = row_key(&row);
-        if self
-            .total
-            .get(concept)
-            .is_some_and(|rows| rows.contains_key(&key))
+        if let Some(known) = self.total.get(concept).and_then(|rows| rows.get(&key))
+            && known.standing >= standing
         {
             return false;
         }
-        self.staged
-            .entry(concept.clone())
-            .or_default()
-            .insert(key, row)
-            .is_none()
+        match self.staged.entry(concept.clone()).or_default().entry(key) {
+            Entry::Vacant(slot) => {
+                slot.insert(Answer { row, standing });
+                true
+            }
+            Entry::Occupied(mut slot) => {
+                let staged = slot.get_mut();
+                if staged.standing < standing {
+                    staged.standing = standing;
+                }
+                false
+            }
+        }
     }
 
     fn advance(&mut self) -> bool {
         self.delta = mem::take(&mut self.staged);
         for (concept, rows) in &self.delta {
-            self.total
-                .entry(concept.clone())
-                .or_default()
-                .extend(rows.iter().map(|(key, row)| (key.clone(), row.clone())));
+            self.total.entry(concept.clone()).or_default().extend(
+                rows.iter()
+                    .map(|(key, answer)| (key.clone(), answer.clone())),
+            );
         }
         self.delta.values().any(|rows| !rows.is_empty())
     }
 
-    fn total(&self, concept: &Entity) -> Vec<Row> {
+    fn total(&self, concept: &Entity) -> Vec<Answer> {
         self.total
             .get(concept)
             .map(|rows| rows.values().cloned().collect())
             .unwrap_or_default()
     }
 
-    fn delta(&self, concept: &Entity) -> Vec<Row> {
+    fn delta(&self, concept: &Entity) -> Vec<Answer> {
         self.delta
             .get(concept)
             .map(|rows| rows.values().cloned().collect())
@@ -176,6 +198,18 @@ impl InMemoryAnswerTable {
             rows.remove(&row_key(row));
         }
     }
+}
+
+/// The standing a row projected from `matched` holds: that of the fact
+/// which bound the concept's attribute field, when it is an attribute
+/// concept and a fact did, else the newest fact the match cites. This
+/// is how a rule's row stands outside a cycle, so a value stands the
+/// same whether or not its relation is recursive.
+fn standing_of(descriptor: &ConceptDescriptor, matched: &Match) -> Option<Standing> {
+    descriptor
+        .attribute_field()
+        .and_then(|(name, _)| matched.standing_of(name))
+        .or_else(|| matched.standing())
 }
 
 /// Join one caller row against one derived row: bind the caller's
@@ -276,16 +310,40 @@ fn in_component<'p>(
 
 /// Bind one recursive occurrence's terms from a table row, as
 /// [`join`] does: an operand the row lacks is an optional field the
-/// row resolved to `Absent`, and binds so. Returns `false` when the
-/// row conflicts with the bindings accumulated so far (the
-/// combination is a non-match).
-fn bind_occurrence(matched: &mut Match, occurrence: &ConceptQuery, row: &Row) -> bool {
-    match join(matched, &occurrence.terms, row) {
+/// row resolved to `Absent`, and binds so. Every variable the row
+/// binds cites the row's standing, so what a rule derives from it
+/// stands at least as new. Returns `false` when the row conflicts
+/// with the bindings accumulated so far (the combination is a
+/// non-match).
+fn bind_occurrence(matched: &mut Match, occurrence: &ConceptQuery, answer: &Answer) -> bool {
+    match join(matched, &occurrence.terms, &answer.row) {
         Ok(Some(merged)) => {
             *matched = merged;
+            if let Some(standing) = &answer.standing {
+                cite(matched, &occurrence.terms, &answer.row, standing);
+            }
             true
         }
         _ => false,
+    }
+}
+
+/// Cite `standing` for every variable of `terms` that `row` binds,
+/// keeping a newer standing the variable already cites.
+pub(crate) fn cite(matched: &mut Match, terms: &Parameters, row: &Row, standing: &Standing) {
+    for (param, term) in terms.iter() {
+        let Some(name) = term.shared_name() else {
+            continue;
+        };
+        if !row.contains_key(param) {
+            continue;
+        }
+        if matched
+            .standing_of(name)
+            .is_none_or(|held| held < *standing)
+        {
+            matched.cite_variable_standing(name, standing.clone());
+        }
     }
 }
 
@@ -468,7 +526,7 @@ async fn collect_rule_rows<'a, Env>(
     matched: Match,
     scope: &Environment,
     env: &'a Env,
-) -> Result<Vec<Row>, EvaluationError>
+) -> Result<Vec<Answer>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
@@ -486,7 +544,7 @@ where
     .await?;
     Ok(results
         .iter()
-        .filter_map(|result| project_complete(&member.descriptor, result))
+        .filter_map(|result| answer_complete(&member.descriptor, result))
         .collect())
 }
 
@@ -506,7 +564,7 @@ async fn join_rest<'a, Env>(
     split: &SplitRule,
     mut base: Vec<Premise>,
     mut siblings: Vec<usize>,
-    totals: &[Vec<Row>],
+    totals: &[Vec<Answer>],
     mut partials: Vec<Match>,
     mut scope: Environment,
     plans: &mut HashMap<usize, Conjunction>,
@@ -604,6 +662,14 @@ pub(crate) fn project_complete(descriptor: &ConceptDescriptor, matched: &Match) 
         .then_some(row)
 }
 
+/// [`project_complete`] with the standing the projected row holds.
+fn answer_complete(descriptor: &ConceptDescriptor, matched: &Match) -> Option<Answer> {
+    project_complete(descriptor, matched).map(|row| Answer {
+        row,
+        standing: standing_of(descriptor, matched),
+    })
+}
+
 /// [`collect_rule_rows`], staging every row into the table.
 async fn stage_rule_rows<'a, Env>(
     member: &Member,
@@ -617,8 +683,12 @@ async fn stage_rule_rows<'a, Env>(
 where
     Env: crate::Scope<'a>,
 {
-    for row in collect_rule_rows(member, split, rest, matched, scope, env).await? {
-        table.insert(&ProgramAnalysis::node(&member.descriptor), row);
+    for answer in collect_rule_rows(member, split, rest, matched, scope, env).await? {
+        table.insert(
+            &ProgramAnalysis::node(&member.descriptor),
+            answer.row,
+            answer.standing,
+        );
     }
     Ok(())
 }
@@ -650,7 +720,7 @@ where
                 if split.occurrences.is_empty() {
                     continue;
                 }
-                let totals: Vec<Vec<Row>> = split
+                let totals: Vec<Vec<Answer>> = split
                     .occurrences
                     .iter()
                     .map(|occurrence| table.total(&ProgramAnalysis::node(&occurrence.predicate)))
@@ -662,10 +732,14 @@ where
                     if delta.is_empty() {
                         continue;
                     }
-                    for row in
+                    for answer in
                         fire_occurrence(member, split, delta_index, &delta, &totals, env).await?
                     {
-                        table.insert(&ProgramAnalysis::node(&member.descriptor), row);
+                        table.insert(
+                            &ProgramAnalysis::node(&member.descriptor),
+                            answer.row,
+                            answer.standing,
+                        );
                     }
                 }
             }
@@ -681,10 +755,10 @@ async fn fire_occurrence<'a, Env>(
     member: &Member,
     split: &SplitRule,
     delta_index: usize,
-    delta: &[Row],
-    totals: &[Vec<Row>],
+    delta: &[Answer],
+    totals: &[Vec<Answer>],
     env: &'a Env,
-) -> Result<Vec<Row>, EvaluationError>
+) -> Result<Vec<Answer>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
@@ -715,11 +789,11 @@ where
             env,
         )
         .await?;
-        for complete in &complete {
-            if let Some(row) = project_complete(&member.descriptor, complete) {
-                derived.push(row);
-            }
-        }
+        derived.extend(
+            complete
+                .iter()
+                .filter_map(|complete| answer_complete(&member.descriptor, complete)),
+        );
     }
     Ok(derived)
 }
@@ -732,7 +806,7 @@ pub async fn evaluate_table<'a, Env>(
     analysis: &ProgramAnalysis,
     env: &'a Env,
     table: &mut InMemoryAnswerTable,
-) -> Result<Vec<Row>, EvaluationError>
+) -> Result<Vec<Answer>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
@@ -764,8 +838,12 @@ where
                     env,
                 )
                 .await?;
-                for row in rows {
-                    table.insert(&ProgramAnalysis::node(&member.descriptor), row);
+                for answer in rows {
+                    table.insert(
+                        &ProgramAnalysis::node(&member.descriptor),
+                        answer.row,
+                        answer.standing,
+                    );
                 }
                 continue;
             }
@@ -779,6 +857,7 @@ where
                 table.insert(
                     &ProgramAnalysis::node(&member.descriptor),
                     project(&member.descriptor, &matched),
+                    standing_of(&member.descriptor, &matched),
                 );
             }
         }
@@ -795,7 +874,7 @@ pub async fn evaluate<'a, Env>(
     root: &ConceptDescriptor,
     analysis: &ProgramAnalysis,
     env: &'a Env,
-) -> Result<Vec<Row>, EvaluationError>
+) -> Result<Vec<Answer>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
@@ -966,7 +1045,7 @@ pub async fn extend<'a, Env>(
     env: &'a Env,
     table: &mut InMemoryAnswerTable,
     additions: &[Artifact],
-) -> Result<Option<Vec<Row>>, EvaluationError>
+) -> Result<Option<Vec<Answer>>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
@@ -1059,7 +1138,7 @@ where
                 for (seed_match, seed_scope) in seeds {
                     // Occurrences read the retained totals: the new
                     // fact is the delta position.
-                    let choices: Vec<Vec<Row>> = split
+                    let choices: Vec<Vec<Answer>> = split
                         .occurrences
                         .iter()
                         .map(|occurrence| {
@@ -1224,7 +1303,7 @@ where
                 continue;
             }
             let entity = ProgramAnalysis::node(&member.descriptor);
-            for row in table.total(&entity) {
+            for Answer { row, .. } in table.total(&entity) {
                 let suspect = patterns.iter().any(|pattern| {
                     pattern
                         .iter()
@@ -1251,16 +1330,24 @@ where
                     continue;
                 }
                 for delta_index in 0..split.occurrences.len() {
-                    let choices: Vec<Vec<Row>> = split
+                    let choices: Vec<Vec<Answer>> = split
                         .occurrences
                         .iter()
                         .enumerate()
                         .map(|(index, occurrence)| {
                             let target = ProgramAnalysis::node(&occurrence.predicate);
                             if index == delta_index {
+                                // Suspicion follows rows, not standings.
                                 frontier
                                     .get(&target)
-                                    .map(|rows| rows.values().cloned().collect())
+                                    .map(|rows| {
+                                        rows.values()
+                                            .map(|row| Answer {
+                                                row: row.clone(),
+                                                standing: None,
+                                            })
+                                            .collect()
+                                    })
                                     .unwrap_or_default()
                             } else {
                                 table.total(&target)
@@ -1298,7 +1385,7 @@ where
                         )
                         .await?;
                         let entity = ProgramAnalysis::node(&member.descriptor);
-                        for row in rows {
+                        for Answer { row, .. } in rows {
                             let key = row_key(&row);
                             let known = suspects
                                 .get(&entity)
@@ -1335,8 +1422,8 @@ where
             };
             let mut survived: Vec<Vec<u8>> = Vec::new();
             for (key, row) in rows {
-                if derivable(member, row, table, env).await? {
-                    table.insert(&entity, row.clone());
+                if let Some(standing) = derivable(member, row, table, env).await? {
+                    table.insert(&entity, row.clone(), standing);
                     survived.push(key.clone());
                     rederived = true;
                 }
@@ -1364,16 +1451,19 @@ where
 /// Whether a suspect row still has a derivation: bind its head
 /// operands into each rule body (occurrences read the current
 /// table, base premises the current store) and check whether any
-/// result projects back to the row.
+/// result projects back to the row. A row that does stands as the
+/// newest of its surviving derivations, which every derivation is
+/// read for: the one it stood by may be the one deleted.
 async fn derivable<'a, Env>(
     member: &Member,
     row: &Row,
     table: &InMemoryAnswerTable,
     env: &'a Env,
-) -> Result<bool, EvaluationError>
+) -> Result<Option<Option<Standing>>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
+    let mut derived: Option<Option<Standing>> = None;
     for split in &member.rules {
         let mut seed = Match::new();
         let mut seed_scope = Environment::new();
@@ -1392,7 +1482,7 @@ where
             continue;
         }
 
-        let choices: Vec<Vec<Row>> = split
+        let choices: Vec<Vec<Answer>> = split
             .occurrences
             .iter()
             .map(|occurrence| table.total(&ProgramAnalysis::node(&occurrence.predicate)))
@@ -1425,12 +1515,14 @@ where
             }
             let rows =
                 collect_rule_rows(member, split, split.base.clone(), matched, &scope, env).await?;
-            if rows.iter().any(|candidate| candidate == row) {
-                return Ok(true);
+            for candidate in rows {
+                if candidate.row == *row {
+                    derived = Some(derived.flatten().max(candidate.standing));
+                }
             }
         }
     }
-    Ok(false)
+    Ok(derived)
 }
 
 /// A retained fixpoint carried across evaluations by a standing
@@ -1489,7 +1581,7 @@ impl Continuation {
         root: &ConceptDescriptor,
         analysis: &ProgramAnalysis,
         env: &'a Env,
-    ) -> Result<Vec<Row>, EvaluationError>
+    ) -> Result<Vec<Answer>, EvaluationError>
     where
         Env: crate::Scope<'a>,
     {

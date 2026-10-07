@@ -459,9 +459,9 @@ async fn a_recursive_relation_read_under_last_yields_one_value_per_entity() -> a
 /// x/src(e) = v`: the derived value stands as the `x/src` fact, which
 /// is newer than the stored `x/a`, so a `last` read returns the derived
 /// value. The same relation made recursive by a second rule, `x/a(e)
-/// := v :- x/a(e) = v`, goes through the fixpoint, which drops every
-/// row's standing and elects nothing under `last` at its exit: the
-/// read returns the stored and the derived value both.
+/// := v :- x/a(e) = v`, goes through the fixpoint, whose rows carry the
+/// newest standing of their derivations through every round: the exit
+/// election under `last` picks the same value.
 #[dialog_common::test]
 async fn a_derived_value_stands_by_the_fact_that_bound_it_through_a_fixpoint() -> anyhow::Result<()>
 {

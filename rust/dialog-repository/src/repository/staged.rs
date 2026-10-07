@@ -38,7 +38,8 @@ use dialog_search_tree::Manifest;
 
 use super::ephemeral::{EphemeralRevision, Facts};
 use crate::Revision;
-use crate::rules::{conclusion_attr, derives_attr};
+use crate::repository::branch::ReadSettlement;
+use crate::rules::conclusion_attr;
 
 mod electing;
 
@@ -70,10 +71,11 @@ struct State {
     /// The log's writes by cell, in the order the transaction made
     /// them: what a read settles one cell by.
     by_cell: HashMap<(Attribute, Entity), Vec<Change>>,
-    /// The cells a read settled, with what it observed and whether some
-    /// rule derives each relation it asked about. Shared by the clones
-    /// a query takes; a write replaces it.
-    cells: Arc<parking_lot::Mutex<Option<CellMemo>>>,
+    /// The settlement of these writes a read or commit made, with what
+    /// it observed of the lines. Shared by the clones a query takes; a
+    /// write to a shared store detaches its own copy, which keeps
+    /// settling where the shared one stopped, the log being append-only.
+    cells: Arc<parking_lot::Mutex<Option<SettlementMemo>>>,
     /// Which writes this store holds, as a number no other store's
     /// writes share: minted afresh by every write, so two stores with
     /// the same number hold the same writes. Zero for a store nothing
@@ -84,35 +86,18 @@ struct State {
 /// The generations minted so far, across every staged store.
 static GENERATIONS: AtomicU64 = AtomicU64::new(1);
 
-/// What a read settled cell by cell under one observation.
-#[derive(Clone, Debug)]
-struct CellMemo {
+/// A settlement of a store's writes under one observation of the lines.
+#[derive(Clone)]
+struct SettlementMemo {
     observed: ReadObservation,
-    /// Whether some rule derives the relation, by attribute.
-    relations: HashMap<Attribute, bool>,
-    /// Each cell settled against stored claims alone.
-    stored: HashMap<(Attribute, Entity), CellSettlement>,
-    /// Each cell settled against derived candidates too.
-    derived: HashMap<(Attribute, Entity), CellSettlement>,
+    settlement: ReadSettlement,
 }
 
-impl CellMemo {
-    /// Forget what a write to `cell` changes: the cell's own
-    /// settlement, and every settlement that read derived candidates,
-    /// since a rule's body may read any cell. A write in the rule
-    /// namespace may change what derives any relation, so it forgets
-    /// those answers too.
-    fn forget(&mut self, cell: &(Attribute, Entity)) {
-        self.stored.remove(cell);
-        self.derived.clear();
-        if cell.0.as_str().starts_with("dialog.rule/") {
-            self.relations.clear();
-        }
-    }
-
-    /// How a read settled `cell`, however it read.
-    fn settlement(&self, cell: &(Attribute, Entity)) -> Option<&CellSettlement> {
-        self.stored.get(cell).or_else(|| self.derived.get(cell))
+impl std::fmt::Debug for SettlementMemo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SettlementMemo")
+            .field("observed", &self.observed)
+            .finish_non_exhaustive()
     }
 }
 
@@ -177,25 +162,14 @@ impl State {
         {
             return;
         }
-        // A read's settlements survive the writes that do not touch
-        // them: a cell settles against the line's claims, fixed for the
-        // transaction, and its own writes. A clone taken before the
-        // write keeps the memo it shares; this store forgets in its
-        // own copy.
-        match Arc::get_mut(&mut self.cells) {
-            Some(memo) => {
-                if let Some(memo) = memo.get_mut().as_mut() {
-                    memo.forget(&(the.clone(), of.clone()));
-                }
-            }
-            None => {
-                let memo = self.cells.lock().as_ref().map(|memo| {
-                    let mut memo = memo.clone();
-                    memo.forget(&(the.clone(), of.clone()));
-                    memo
-                });
-                self.cells = Arc::new(parking_lot::Mutex::new(memo));
-            }
+        // A settlement survives the writes after it: the log is
+        // append-only, and the next read settles only what it has not.
+        // A clone taken before the write keeps the memo it shares; this
+        // store continues in its own copy, since the two logs diverge
+        // from here.
+        if Arc::get_mut(&mut self.cells).is_none() {
+            let memo = self.cells.lock().clone();
+            self.cells = Arc::new(parking_lot::Mutex::new(memo));
         }
         self.generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
         let fact = |value: &Value| Artifact {
@@ -302,11 +276,6 @@ impl Staged {
         &self.0.log
     }
 
-    /// The asset changes the transaction made, as a batch with no facts.
-    pub(crate) fn assets(&self) -> &Changes {
-        &self.0.assets
-    }
-
     /// Whether any write succeeds a claim the commit has yet to settle.
     pub(crate) fn has_successions(&self) -> bool {
         !self.0.electing.is_empty()
@@ -387,6 +356,7 @@ impl Staged {
     }
 
     /// The writes of one cell, in the order the transaction made them.
+    #[cfg(test)]
     pub(crate) fn writes_of(&self, the: &Attribute, of: &Entity) -> Vec<Change> {
         self.0
             .by_cell
@@ -395,94 +365,28 @@ impl Staged {
             .unwrap_or_default()
     }
 
-    /// The `on:` entities of every rule this store installs, from its
-    /// `dialog.rule/derives` facts: the relations a staged rule derives.
-    pub(crate) fn staged_derives(&self) -> Vec<Entity> {
-        self.0
-            .facts
-            .scan(&ArtifactSelector::new().the(derives_attr()))
-            .into_iter()
-            .filter_map(|fact| match fact.is {
-                Value::Entity(on) => Some(on),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Whether a read under `observed` found some rule deriving `the`,
-    /// if it asked.
-    pub(crate) fn relation_derived(
-        &self,
-        observed: &ReadObservation,
-        the: &Attribute,
-    ) -> Option<bool> {
-        let memo = self.0.cells.lock();
-        memo.as_ref()
-            .filter(|memo| memo.observed.matches(observed))
-            .and_then(|memo| memo.relations.get(the).copied())
-    }
-
-    /// Keep whether some rule derives `the`, as a read under `observed`
-    /// found.
-    pub(crate) fn record_relation_derived(
-        &self,
-        observed: &ReadObservation,
-        the: Attribute,
-        derived: bool,
-    ) {
+    /// The settlement of these writes made under `observed`, taken out
+    /// of the store for the caller to advance and put back; `None` when
+    /// none was kept under that observation.
+    pub(crate) fn take_settlement(&self, observed: &ReadObservation) -> Option<ReadSettlement> {
         let mut memo = self.0.cells.lock();
-        let memo = Self::cell_memo(&mut memo, observed);
-        memo.relations.insert(the, derived);
-    }
-
-    /// How a read under `observed` settled the cell, if one did.
-    pub(crate) fn cell_settlement(
-        &self,
-        observed: &ReadObservation,
-        cell: &(Attribute, Entity),
-    ) -> Option<CellSettlement> {
-        let memo = self.0.cells.lock();
-        memo.as_ref()
-            .filter(|memo| memo.observed.matches(observed))
-            .and_then(|memo| memo.settlement(cell).cloned())
-    }
-
-    /// Keep how a read under `observed` settled the cell, and whether
-    /// it read derived candidates to do so.
-    pub(crate) fn record_cell_settlement(
-        &self,
-        observed: &ReadObservation,
-        cell: (Attribute, Entity),
-        derived: bool,
-        settlement: CellSettlement,
-    ) {
-        let mut memo = self.0.cells.lock();
-        let memo = Self::cell_memo(&mut memo, observed);
-        if derived {
-            memo.derived.insert(cell, settlement);
-        } else {
-            memo.stored.insert(cell, settlement);
-        }
-    }
-
-    /// The cell memo for `observed`, started afresh when the last read
-    /// observed something else.
-    fn cell_memo<'m>(
-        memo: &'m mut Option<CellMemo>,
-        observed: &ReadObservation,
-    ) -> &'m mut CellMemo {
-        if !memo
+        if memo
             .as_ref()
             .is_some_and(|memo| memo.observed.matches(observed))
         {
-            *memo = Some(CellMemo {
-                observed: observed.clone(),
-                relations: HashMap::new(),
-                stored: HashMap::new(),
-                derived: HashMap::new(),
-            });
+            memo.take().map(|memo| memo.settlement)
+        } else {
+            None
         }
-        memo.as_mut().expect("set above")
+    }
+
+    /// Keep `settlement`, made under `observed`, for the next read or
+    /// the commit.
+    pub(crate) fn put_settlement(&self, observed: &ReadObservation, settlement: ReadSettlement) {
+        *self.0.cells.lock() = Some(SettlementMemo {
+            observed: observed.clone(),
+            settlement,
+        });
     }
 
     /// Whether this store holds any rule, for any concept.
@@ -581,9 +485,9 @@ mod tests {
     }
 
     /// A read finds the cells it must settle by the log's choosing
-    /// writes, a retracted one included; what it settled is kept for a
+    /// writes, a retracted one included; the settlement is kept for a
     /// read observing the same lines, missed by one observing other
-    /// metadata, and dropped by the next write.
+    /// metadata, and a write to a shared store continues in a copy.
     #[dialog_common::test]
     fn it_finds_electing_cells_by_their_writes_and_keeps_their_settlement() {
         let mut staged = Staged::default();
@@ -632,124 +536,40 @@ mod tests {
             overlays: vec![overlay.revision()],
             metadata: Arc::new(Changes::new()),
         };
-        let cell = (the.clone(), a.clone());
-        assert!(staged.cell_settlement(&observed, &cell).is_none());
-        let settlement = CellSettlement {
-            succeeded: vec![fact("id:a", "person/name", "old")],
-            held: Vec::new(),
-        };
-        staged.record_cell_settlement(&observed, cell.clone(), false, settlement.clone());
-        staged.record_relation_derived(&observed, the.clone(), false);
-        let again = ReadObservation {
-            metadata: Arc::new(Changes::new()),
-            ..observed.clone()
-        };
-        assert_eq!(staged.cell_settlement(&again, &cell), Some(settlement));
-        assert_eq!(staged.relation_derived(&again, &the), Some(false));
+        assert!(staged.take_settlement(&observed).is_none());
+        let settlement = ReadSettlement::new(dialog_artifacts::history::Edition::GENESIS);
+        staged.put_settlement(&observed, settlement.clone());
 
-        let mut other = Changes::new();
-        other.associate(
-            the.clone(),
-            "id:z".parse().expect("entity"),
-            Value::String("Z".into()),
-            Policy::All,
-        );
+        // Another observation of the lines misses it.
         let elsewhere = ReadObservation {
-            metadata: Arc::new(other),
+            metadata: Arc::new({
+                let mut changes = Changes::new();
+                changes.associate(
+                    the.clone(),
+                    a.clone(),
+                    Value::String("x".into()),
+                    Policy::All,
+                );
+                changes
+            }),
             ..observed.clone()
         };
-        assert!(staged.cell_settlement(&elsewhere, &cell).is_none());
+        assert!(staged.take_settlement(&elsewhere).is_none());
 
-        let shared = staged.clone();
-        staged.apply_change(
+        // A clone shares it; a write to the clone continues in a copy of
+        // its own, so taking the clone's leaves the original's.
+        let mut shared = staged.clone();
+        shared.apply_change(
             &the,
             &a,
             &Change::Assert(Value::String("D".into()), Policy::Last),
         );
+        assert!(shared.take_settlement(&observed).is_some());
         assert!(
-            staged.cell_settlement(&observed, &cell).is_none(),
-            "a write drops it"
+            staged.take_settlement(&observed).is_some(),
+            "the store written before the clone keeps its own"
         );
-        assert!(
-            shared.cell_settlement(&observed, &cell).is_some(),
-            "the clone before keeps its own"
-        );
-    }
-
-    /// A read's settlement of one cell survives a write to another
-    /// cell: the cell settles against the line's claims, fixed for
-    /// the transaction, and its own writes. A settlement over a
-    /// relation a rule derives does not: the other cell's write may
-    /// feed the rule. A rule installed later forgets which relations
-    /// are derived.
-    #[dialog_common::test]
-    fn it_keeps_the_settlements_a_write_does_not_touch() {
-        let mut staged = Staged::default();
-        let the: Attribute = "person/name".parse().expect("attribute");
-        let a: Entity = "id:a".parse().expect("entity");
-        let b: Entity = "id:b".parse().expect("entity");
-        let overlay = super::super::ephemeral::Ephemeral::new();
-        let observed = ReadObservation {
-            heads: vec![None],
-            overlays: vec![overlay.revision()],
-            metadata: Arc::new(Changes::new()),
-        };
-        let stored = CellSettlement {
-            succeeded: vec![fact("id:a", "person/name", "old")],
-            held: Vec::new(),
-        };
-        let derived = CellSettlement {
-            succeeded: vec![fact("id:b", "person/name", "old")],
-            held: Vec::new(),
-        };
-        staged.record_cell_settlement(&observed, (the.clone(), a.clone()), false, stored.clone());
-        staged.record_cell_settlement(&observed, (the.clone(), b.clone()), true, derived);
-        staged.record_relation_derived(&observed, the.clone(), false);
-
-        let c: Entity = "id:c".parse().expect("entity");
-        staged.apply_change(
-            &the,
-            &c,
-            &Change::Assert(Value::String("C".into()), Policy::Last),
-        );
-        assert_eq!(
-            staged.cell_settlement(&observed, &(the.clone(), a.clone())),
-            Some(stored),
-            "a write elsewhere keeps a stored cell's settlement"
-        );
-        assert!(
-            staged
-                .cell_settlement(&observed, &(the.clone(), b.clone()))
-                .is_none(),
-            "a write elsewhere drops a derived cell's settlement"
-        );
-        assert_eq!(staged.relation_derived(&observed, &the), Some(false));
-
-        staged.apply_change(
-            &the,
-            &a,
-            &Change::Assert(Value::String("A".into()), Policy::Last),
-        );
-        assert!(
-            staged
-                .cell_settlement(&observed, &(the.clone(), a.clone()))
-                .is_none(),
-            "a write to the cell drops its settlement"
-        );
-
-        let rule: Entity = "rule:x".parse().expect("entity");
-        staged.apply_change(
-            &derives_attr(),
-            &rule,
-            &Change::Assert(
-                Value::Entity("on:person/name".parse().expect("entity")),
-                Policy::All,
-            ),
-        );
-        assert!(
-            staged.relation_derived(&observed, &the).is_none(),
-            "a rule write forgets which relations are derived"
-        );
+        assert!(staged.take_settlement(&observed).is_none(), "taken once");
     }
 
     /// A write that repeats the cell's latest write exactly is the same

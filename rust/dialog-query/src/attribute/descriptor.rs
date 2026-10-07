@@ -694,23 +694,15 @@ impl AttributeDescriptor {
         ))
     }
 
-    /// Encode this attribute's identity as CBOR for hashing:
+    /// Encode this attribute descriptor as CBOR for hashing
     ///
+    /// Creates a CBOR-encoded representation with fields:
     /// - domain: domain
     /// - name: name
     /// - cardinality: cardinality
     /// - type: content_type
-    /// - then: the ranked relations after the first, when there are any
-    /// - select: the policy, when it says more than the cardinality
-    /// - among: the ranked values, when there are any
     ///
-    /// Description is excluded from the encoding. An attribute read
-    /// under `last` or `all` encodes exactly as it did before policies
-    /// existed, the cardinality saying all the policy does, so its
-    /// identity, and every concept's built from it, is the one the
-    /// earlier release gave it. Two reads of one relation under
-    /// different policies still differ: `last` and `all` by their
-    /// cardinality, `top`, `max` and `min` by `select`.
+    /// Description is excluded from the encoding.
     pub fn to_cbor_bytes(&self) -> Vec<u8> {
         use serde::Serialize;
 
@@ -718,18 +710,21 @@ impl AttributeDescriptor {
         // attribute and the key kind for a collection — the two are
         // the same slot because they are the same thing: what the
         // name half of these facts holds. A plain attribute therefore
-        // encodes exactly as it did before collections existed.
+        // encodes exactly as it did before collections existed, so
+        // every existing identity is preserved.
+        // An attribute is a relation, or a ranked chain of them, read
+        // under a type or a listed value domain and a policy: all of
+        // it is the identity, and two reads of one relation under
+        // different policies are two attributes.
         #[derive(Serialize)]
         struct CborAttributeDescriptor<'a> {
             domain: &'a str,
             name: &'a str,
-            cardinality: Cardinality,
-            #[serde(rename = "type")]
-            content_type: Option<Type>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             then: Vec<String>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            select: Option<Select>,
+            #[serde(rename = "type")]
+            content_type: Option<Type>,
+            select: Select,
             #[serde(skip_serializing_if = "<[Value]>::is_empty")]
             among: &'a [Value],
         }
@@ -741,21 +736,16 @@ impl AttributeDescriptor {
                 Keyed::Sequence => "<sequence>",
             },
         };
-        let select = match self.select() {
-            Select::Last | Select::All => None,
-            other => Some(other),
-        };
         let schema = CborAttributeDescriptor {
             domain: self.domain(),
             name,
-            cardinality: self.cardinality(),
-            content_type: self.content_type(),
             then: self
                 .then
                 .iter()
                 .map(|relation| relation.to_string())
                 .collect(),
-            select,
+            content_type: self.content_type(),
+            select: self.select(),
             among: &self.among,
         };
 

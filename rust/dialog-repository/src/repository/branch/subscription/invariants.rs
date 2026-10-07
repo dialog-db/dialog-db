@@ -96,3 +96,110 @@ async fn a_rule_landing_on_a_subscribed_attribute_wakes_the_subscription() -> an
     );
     Ok(())
 }
+
+/// A value the relation `x/a` derives (`x/a(e) := v :- x/src1(e) = v`,
+/// the same from `x/src2` and `x/src3`, and `x/a(e) := v :- x/a(e) =
+/// v`, which makes the relation recursive).
+#[derive(Attribute, Clone, PartialEq, Debug)]
+#[domain("x")]
+pub struct A(pub String);
+
+/// An entity's `x/a`, read under `last`.
+#[derive(Concept, Debug, Clone, PartialEq)]
+pub struct HeldA {
+    /// The entity.
+    pub this: Entity,
+    /// Its elected `x/a`.
+    pub a: A,
+}
+
+/// "A derived value stands by the fact that bound it", kept by a
+/// subscription that maintains the relation's fixpoint across polls
+/// rather than rebuilding it. `v` is derived from `x/src1` (oldest) and
+/// later from `x/src3` too; `w` from `x/src2`, in between. A poll after
+/// `x/src3` lands reads `v`: the known row stands newer than before. A
+/// poll after `x/src3` is retracted reads `w`: `v` keeps its older
+/// derivation, and stands as that one again.
+#[dialog_common::test]
+async fn a_maintained_fixpoint_keeps_each_row_at_its_newest_surviving_derivation()
+-> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let e: Entity = "id:e".parse()?;
+    let rule = |from: &str| -> anyhow::Result<_> {
+        let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "deduce": { "with": { "a": { "the": "x/a", "as": "Text" } } },
+            "when": [{
+                "assert": { "with": { "v": { "the": from, "as": "Text" } } },
+                "where": { "this": { "?": { "name": "this" } }, "v": { "?": { "name": "a" } } }
+            }]
+        }))?;
+        Ok(descriptor.compile()?)
+    };
+    let source = |attribute: &str, value: &str| {
+        let attribute: dialog_artifacts::Attribute = attribute.parse().expect("attribute");
+        dialog_query::attribute::The::from(attribute)
+            .of(e.clone())
+            .is(value.to_string())
+    };
+    branch
+        .transaction()
+        .assert(&rule("x/src1")?)
+        .assert(&rule("x/src2")?)
+        .assert(&rule("x/src3")?)
+        .assert(&rule("x/a")?)
+        .assert(source("x/src1", "v"))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    branch
+        .transaction()
+        .assert(source("x/src2", "w"))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+
+    let held = |value: &str| HeldA {
+        this: e.clone(),
+        a: A(value.into()),
+    };
+    let mut subscription = branch.subscribe(Query::<HeldA>::default());
+    let initial = subscription.poll(&operator).await?.expect("initial");
+    assert_eq!(initial.asserted, vec![held("w")], "w stands newest");
+
+    branch
+        .transaction()
+        .assert(source("x/src3", "v"))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let raised = subscription
+        .poll(&operator)
+        .await?
+        .expect("v now stands newest");
+    assert_eq!(raised.asserted, vec![held("v")]);
+    assert_eq!(raised.retracted, vec![held("w")]);
+
+    branch
+        .transaction()
+        .retract(source("x/src3", "v"))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let lowered = subscription
+        .poll(&operator)
+        .await?
+        .expect("v falls back to its older derivation");
+    assert_eq!(lowered.asserted, vec![held("w")]);
+    assert_eq!(lowered.retracted, vec![held("v")]);
+    assert!(
+        subscription.maintenances() >= 1,
+        "the fixpoint was maintained across a poll, not only rebuilt"
+    );
+    Ok(())
+}

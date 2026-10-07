@@ -80,7 +80,13 @@ impl Meter for Probe {
     }
 }
 
-/// A repository with its `main` branch open, and the operator it is
+/// The branch every scenario works on. Not `main`: opening the space
+/// records its access there (a fresh account key, its encrypted secret
+/// and a delegation, random by design), and a scenario's commits must
+/// land in the same tree on every run for its block counts to repeat.
+const SCENARIO_BRANCH: &str = "scenario";
+
+/// A repository with its scenario branch open, and the operator it is
 /// driven through.
 pub struct Env {
     /// The operator commits and reads run as.
@@ -103,7 +109,11 @@ impl Env {
             .await?;
         let operator = Metered::new(session, Probe::open());
         let repository = profile.space("perf").open().perform(&operator).await?;
-        let branch = repository.branch("main").open().perform(&operator).await?;
+        let branch = repository
+            .branch(SCENARIO_BRANCH)
+            .open()
+            .perform(&operator)
+            .await?;
         Ok(Self {
             operator,
             branch,
@@ -127,7 +137,7 @@ impl Env {
     pub async fn reopen(&mut self) -> Result<()> {
         self.branch = self
             .repository
-            .branch("main")
+            .branch(SCENARIO_BRANCH)
             .open()
             .perform(&self.operator)
             .await?;

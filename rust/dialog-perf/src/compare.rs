@@ -336,15 +336,13 @@ mod counted {
         Ok(())
     }
 
-    /// "Two runs write the same records": the harness pins its peer's
-    /// key so a scenario's blocks are the same run to run, which the
-    /// block gate depends on. The same commits from a fresh repository,
-    /// run several times, mint the same head every time. They do not:
-    /// opening the repository mints a fresh account key, its encrypted
-    /// secret and a delegation into the tree, with random content each
-    /// run, so the tree a scenario's commits land in differs. The
-    /// facts the commits themselves write are the same every run; the
-    /// randomness is the harness's setup, not the commit path.
+    /// "Two runs write the same records": the block gate depends on a
+    /// scenario's commits landing in the same tree every run. The same
+    /// commits from a fresh repository, run several times, mint the
+    /// same head every time. Opening the space records its access, a
+    /// fresh account key with its encrypted secret and a delegation,
+    /// random by design, in `main`; the harness measures on a branch of
+    /// its own, which nothing but the scenario writes.
     #[tokio::test(flavor = "current_thread")]
     async fn the_same_commits_mint_the_same_head() -> anyhow::Result<()> {
         let mut heads = Vec::new();

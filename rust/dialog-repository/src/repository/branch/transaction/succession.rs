@@ -54,22 +54,20 @@ use dialog_query::{
     Parameters, Standing, Term,
 };
 use futures_util::TryStreamExt;
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
 
-/// What a settlement is for: the batch a commit applies, or the view a
-/// transaction's own reads see.
 /// Settle a transaction's writes for its commit against `sources`,
 /// read with `overlay`. A write under a choosing policy succeeds the
-/// claim the policy elects: where the tree sees every candidate, the
-/// write passes through as written and the tree elects in the descent
-/// that lands it; where it cannot (some rule derives the relation, the
-/// session overlay holds the cell, or the cell is written more than
-/// once), the write is settled here to the retraction of the claim it
-/// succeeds and the assertion of its value, over the line and the writes
-/// before it, in the order the transaction made them.
+/// claim the policy elects. Where no rule is involved and the session
+/// overlay holds none of the cells, the tree sees every candidate: the
+/// batch passes through as written, and the tree elects in the descent
+/// that lands each write, in the order every election shares. Otherwise
+/// the [`ReadSettlement`] a read of the transaction keeps settles every
+/// write, over the line and the writes before it, in the order the
+/// transaction made them, so the commit applies what the transaction
+/// read.
 #[tracing::instrument(skip_all, name = "settle")]
 pub(crate) async fn settle(
     sources: Vec<Source>,
@@ -117,106 +115,168 @@ pub(crate) async fn settle(
             return Ok(staged.export());
         }
     }
-    let edition = line.pending_edition();
-    let mut cells: HashMap<(Attribute, Entity), Cell> = HashMap::new();
-    let mut order: Vec<(Attribute, Entity)> = Vec::new();
-    // The writes settled so far, as the view a later write reads the
-    // derived candidates through: held back until some write needs the
-    // view, which a transaction writing under no derived relation
-    // never does.
-    let mut prefix = Staged::default();
-    let mut unapplied: Vec<(Attribute, Entity, Change)> = Vec::new();
-    // Whether some rule derives a relation at each write: a rule the
-    // line knows, asked once per relation, or one the prefix installed
-    // before the write, found by the relation's probes among the
-    // `derives` facts the prefix holds.
-    let mut derives = Derives::default();
-    // The cells a commit leaves to the tree: no rule derives their
-    // relation and no session overlay holds them, so the tree sees
-    // every candidate and elects in its own descent. Their writes pass
-    // through as written, and the line is never read for them.
-    let mut passed: HashSet<(Attribute, Entity)> = HashSet::new();
-    // Each cell's writes: whether some write of it elects, and whether
-    // every write of it repeats the first.
-    let mut writes_per_cell: HashMap<(Attribute, Entity), CellWrites> = HashMap::new();
-    for (the, of, change) in staged.log() {
-        match writes_per_cell.entry((the.clone(), of.clone())) {
-            Entry::Vacant(vacant) => {
-                vacant.insert(CellWrites {
-                    elects: change.elects(),
-                    single: true,
-                });
-            }
-            Entry::Occupied(mut occupied) => {
-                let cell = occupied.get_mut();
-                cell.elects |= change.elects();
-                cell.single = false;
-            }
+    // Some write needs the transactor: the settlement a read of the
+    // transaction keeps, advanced over the whole log. A read under the
+    // same observation of the lines has settled a prefix of it already.
+    let observed = line.observation();
+    let mut settlement = staged
+        .take_settlement(&observed)
+        .unwrap_or_else(|| ReadSettlement::new(line.pending_edition()));
+    settlement.advance(&sources, &overlay, staged, env).await?;
+    // The settled cells replace the writes the export passes through.
+    let mut settled = staged.export();
+    for ((the, of), cell) in &settlement.cells {
+        settled.take_cell(the, of);
+        settled.put_cell(the.clone(), of.clone(), cell.clone().squashed());
+    }
+    staged.put_settlement(&observed, settlement);
+    Ok(settled)
+}
+
+/// A transaction's writes settled in the order it made them, as far as
+/// [`upto`](Self::upto): what the commit applies, and what a read of
+/// the transaction sees. Each write under a choosing policy elects
+/// among the cell's claims as the line and the writes before it leave
+/// them, and among the candidates rules derive through the line and
+/// the writes before it, already settled. A write under `all` and a
+/// retraction settle to themselves. One engine for the commit and for
+/// reads, so a transaction reads what its commit leaves; advanced only
+/// over writes it has not settled, so each write is settled once.
+#[derive(Clone)]
+pub(crate) struct ReadSettlement {
+    /// The edition the commit will mint: what a staged write stands at.
+    edition: Edition,
+    /// How many of the log's writes are settled.
+    upto: usize,
+    /// Each cell some write under a choosing policy wrote, with its
+    /// claims and what its writes settled to.
+    cells: HashMap<(Attribute, Entity), Cell>,
+    /// The settled writes, as the view later writes read the derived
+    /// candidates through.
+    prefix: Staged,
+    /// Which relations rules derive as the settlement proceeds.
+    derives: Derives,
+}
+
+impl ReadSettlement {
+    pub(crate) fn new(edition: Edition) -> Self {
+        Self {
+            edition,
+            upto: 0,
+            cells: HashMap::new(),
+            prefix: Staged::default(),
+            derives: Derives::default(),
         }
     }
 
-    for (the, of, change) in staged.log() {
-        let key = (the.clone(), of.clone());
-        if !cells.contains_key(&key) {
-            let writes = writes_per_cell.get(&key);
-            let settles = writes.is_some_and(|writes| writes.elects);
-            // Only a cell written once, or with one write repeated, is
-            // left to the tree: the tree settles a batch's writes to
-            // one cell as a set, so a value retracted and written back
-            // in one transaction must reach it settled. A repeated write
-            // is settled here all the same: the tree's election costs
-            // more than reading the cell, since it forces the buffered
-            // writes down to the leaf it scans (see the settlement
-            // measurements in the pull request).
-            let leave_to_tree = settles
-                && writes.is_some_and(|writes| writes.single)
-                && !overlay_holds(&sources, the, of)
-                && !derives.at(&line, the).await?;
-            if leave_to_tree {
-                passed.insert(key.clone());
-            }
-            let observed = if settles && !leave_to_tree {
-                claims_of(&line, the, of).await?
-            } else {
-                Vec::new()
-            };
-            cells.insert(key.clone(), Cell::over(observed));
-            order.push(key.clone());
+    /// Settle the writes `layer` logs past [`upto`](Self::upto), against
+    /// the lines read with `overlay`.
+    #[tracing::instrument(skip_all, name = "settle_cell")]
+    pub(crate) async fn advance(
+        &mut self,
+        sources: &[Source],
+        overlay: &Arc<Changes>,
+        layer: &Staged,
+        env: &Erased,
+    ) -> Result<(), CommitError> {
+        let log = layer.log();
+        if self.upto >= log.len() {
+            return Ok(());
         }
-        let cell = cells.get_mut(&key).expect("cell loaded above");
-        if passed.contains(&key) {
-            derives.gained(the, change);
-            unapplied.push((the.clone(), of.clone(), change.clone()));
-            cell.settled.push(change.clone());
-            continue;
-        }
-        let derived = match change {
-            Change::Assert(_, policy) if policy.elects() && derives.at(&line, the).await? => {
-                for (the, of, change) in unapplied.drain(..) {
-                    prefix.apply_change(&the, &of, &change);
+        let line = QueryEnv::new(sources.to_vec(), overlay.clone(), env);
+        for index in self.upto..log.len() {
+            let (the, of, change) = &log[index];
+            let key = (the.clone(), of.clone());
+            if !self.cells.contains_key(&key) {
+                if !change.elects() {
+                    // A cell no choosing write has written yet: the
+                    // write settles to itself.
+                    self.derives.gained(the, change);
+                    self.prefix.apply_change(the, of, change);
+                    continue;
                 }
-                let view = QueryEnv::new(sources.clone(), overlay.clone(), env)
-                    .with_layers(vec![prefix.clone()]);
-                let candidates = derived_candidates(&view, the, of).await?;
-                drop(view);
-                candidates
+                // The cell's claims as the line holds them, with the
+                // cell's earlier writes, all settling to themselves,
+                // replayed over them.
+                let mut cell = Cell::over(claims_of(&line, the, of).await?);
+                for (earlier_the, earlier_of, earlier) in &log[..index] {
+                    if earlier_the == the && earlier_of == of {
+                        let written = cell.write(earlier, &[], self.edition)?;
+                        cell.settled.extend(written);
+                    }
+                }
+                self.cells.insert(key.clone(), cell);
             }
-            _ => Vec::new(),
-        };
-        for written in cell.write(change, &derived, edition)? {
-            derives.gained(the, &written);
-            unapplied.push((the.clone(), of.clone(), written.clone()));
-            cell.settled.push(written);
+            let derived = match change {
+                Change::Assert(_, policy)
+                    if policy.elects() && self.derives.at(&line, the).await? =>
+                {
+                    let view = QueryEnv::new(sources.to_vec(), overlay.clone(), env)
+                        .with_layers(vec![self.prefix.clone()]);
+                    let candidates = derived_candidates(&view, the, of).await?;
+                    drop(view);
+                    candidates
+                }
+                _ => Vec::new(),
+            };
+            let cell = self.cells.get_mut(&key).expect("cell loaded above");
+            for written in cell.write(change, &derived, self.edition)? {
+                self.derives.gained(the, &written);
+                self.prefix.apply_change(the, of, &written);
+                cell.settled.push(written);
+            }
         }
+        self.upto = log.len();
+        Ok(())
     }
-    // What the commit applies: each cell's settled writes, squashed as
-    // one commit's are.
-    let mut settled = staged.assets().clone();
-    for key in order {
-        let cell = cells.remove(&key).expect("cell loaded above");
-        settled.put_cell(key.0, key.1, cell.squashed());
+
+    /// How a read sees `cell` once settled: the claims hidden from the
+    /// line and the store's rows alike, the line's that the writes
+    /// succeeded and the store's the writes left dead; and the store's
+    /// rows hidden from it alone, a value the line holds a live claim
+    /// of, whose row the line's is. `None` for a cell no choosing write
+    /// wrote, which reads as written.
+    pub(crate) fn settlement_of(
+        &self,
+        key: &(Attribute, Entity),
+        layer: &Staged,
+    ) -> Option<CellSettlement> {
+        let cell = self.cells.get(key)?;
+        let (the, of) = key;
+        let live: Vec<&Value> = cell
+            .live
+            .iter()
+            .filter(|candidate| candidate.claim)
+            .map(|candidate| &candidate.value)
+            .collect();
+        let held: Vec<Value> = layer
+            .scan(&ArtifactSelector::new().the(the.clone()).of(of.clone()))
+            .into_iter()
+            .map(|fact| fact.is)
+            .collect();
+        let fact = |value: &Value| Artifact {
+            the: the.clone(),
+            of: of.clone(),
+            is: value.clone(),
+            cause: None,
+        };
+        let mut settlement = CellSettlement::default();
+        for value in cell.line.iter().chain(held.iter()) {
+            if !live.contains(&value) && !settlement.succeeded.iter().any(|gone| gone.is == *value)
+            {
+                settlement.succeeded.push(fact(value));
+            }
+        }
+        for value in &held {
+            if cell.line.contains(value)
+                && live.contains(&value)
+                && !settlement.held.iter().any(|kept| kept.is == *value)
+            {
+                settlement.held.push(fact(value));
+            }
+        }
+        Some(settlement)
     }
-    Ok(settled)
 }
 
 /// Settle every succession `head` holds against `view`, the round view
@@ -245,122 +305,11 @@ pub(crate) async fn resolve_against(
     Ok(())
 }
 
-/// Whether some rule `view` knows, or `layer` installs, derives the
-/// relation `the` names.
-pub(crate) async fn relation_derived(
-    view: &QueryEnv<'_>,
-    layer: &Staged,
-    the: &Attribute,
-) -> Result<bool, CommitError> {
-    if layer.holds_rules() {
-        let staged = layer.staged_derives();
-        if !staged.is_empty() {
-            let reach = Reach::of(&Relation::Attribute(The::from(the.clone())));
-            if reach.probes().iter().any(|probe| staged.contains(probe)) {
-                return Ok(true);
-            }
-        }
-    }
-    rules_derive(view, the).await
-}
-
-/// Settle one cell of `layer` the way a read sees it: against the
-/// lines read with `overlay`, and, when `derived`, the candidates rules
-/// derive through the whole of `layer`, as a read of the transaction
-/// sees every write it made. Returns the line's claims the cell's
-/// writes succeed and the written values the cell already held.
-#[tracing::instrument(skip_all, name = "settle_cell")]
-pub(crate) async fn settle_cell(
-    sources: Vec<Source>,
-    overlay: Arc<Changes>,
-    layer: &Staged,
-    the: &Attribute,
-    of: &Entity,
-    derived: bool,
-    env: &Erased,
-) -> Result<CellSettlement, CommitError> {
-    let line = QueryEnv::new(sources.clone(), overlay.clone(), env);
-    let edition = line.pending_edition();
-    let observed = claims_of(&line, the, of).await?;
-    let candidates = if derived {
-        let view = QueryEnv::new(sources, overlay, env)
-            .with_layers(vec![layer.clone()])
-            .unsettled();
-        derived_candidates(&view, the, of).await?
-    } else {
-        Vec::new()
-    };
-    let line_values: Vec<Value> = observed
-        .iter()
-        .filter(|candidate| candidate.claim)
-        .map(|candidate| candidate.value.clone())
-        .collect();
-    let mut cell = Cell::over(observed);
-    let writes = layer.writes_of(the, of);
-    // The values the writes staged afresh: a value written back after
-    // a retraction is the layer's row, not the line's.
-    let mut restaged: Vec<Value> = Vec::new();
-    for change in &writes {
-        // A write of a value the cell holds as a claim re-asserts that
-        // claim rather than staging a new one; the line's row stays the
-        // read's.
-        let held = matches!(change, Change::Assert(value, _)
-            if cell.live.iter().any(|claim| claim.claim && claim.value == *value));
-        let written = cell.write(change, &candidates, edition)?;
-        if let Change::Assert(value, _) = change
-            && !written.is_empty()
-            && !held
-        {
-            restaged.push(value.clone());
-        }
-    }
-    // What the cell comes to: the claims live after its writes. Every
-    // value written or held that is not among them is hidden from the
-    // line and the layer alike; a live value the line holds is hidden
-    // from the layer's rows, the line's row being the read's.
-    let live: Vec<Value> = cell
-        .live
-        .iter()
-        .filter(|candidate| candidate.claim)
-        .map(|candidate| candidate.value.clone())
-        .collect();
-    let fact = |value: &Value| Artifact {
-        the: the.clone(),
-        of: of.clone(),
-        is: value.clone(),
-        cause: None,
-    };
-    let mut settlement = CellSettlement::default();
-    let written = writes.iter().filter_map(|change| match change {
-        Change::Assert(value, _) => Some(value),
-        Change::Retract(_) => None,
-    });
-    for value in written.chain(line_values.iter()) {
-        if !live.contains(value) && !settlement.succeeded.iter().any(|gone| gone.is == *value) {
-            settlement.succeeded.push(fact(value));
-        }
-    }
-    for value in &live {
-        if line_values.contains(value) && !restaged.contains(value) {
-            settlement.held.push(fact(value));
-        }
-    }
-    Ok(settlement)
-}
-
-/// What a transaction's writes to one cell amount to, as the commit
-/// decides whether the tree can settle them.
-struct CellWrites {
-    /// Whether some write of the cell elects.
-    elects: bool,
-    /// Whether the cell is written once.
-    single: bool,
-}
-
 /// A claim or candidate a succession may elect: its value and its
 /// standing, and whether it is a stored claim a write can succeed. A
 /// candidate a rule derives is not; neither is a session overlay row,
 /// which only the session takes back.
+#[derive(Clone)]
 struct Candidate {
     value: Value,
     standing: Option<Standing>,
@@ -421,7 +370,7 @@ fn relation_predicate(the: &Attribute) -> ConceptDescriptor {
 /// order: those the line's rules derive, asked once per relation, and
 /// those a rule the writes before installed derives, known by the
 /// `derives` facts the settled prefix holds.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Derives {
     /// Whether the line's rules derive the relation, by attribute.
     line: HashMap<Attribute, bool>,
@@ -523,6 +472,7 @@ async fn derived_candidates(
 /// One cell's live claims as the writes replayed so far leave them,
 /// the values the line held before any of them, and what the writes
 /// settled to, in order.
+#[derive(Clone)]
 struct Cell {
     live: Vec<Candidate>,
     line: Vec<Value>,

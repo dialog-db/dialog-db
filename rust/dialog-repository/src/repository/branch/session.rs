@@ -427,11 +427,6 @@ pub(crate) struct QueryEnv<'a> {
     /// [`SourceRef::fetches`](crate::repository::source::SourceRef)):
     /// preload hints are refused when none can.
     fetches: bool,
-    /// Whether a read settles the layers' choosing writes against the
-    /// lines. Off for the view a settlement evaluates derived candidates
-    /// through, which reads the writes as held, so settling one cell
-    /// never settles the cells its relation's rules read.
-    settles: bool,
     /// The per-query memo rule heads share their source body's rows
     /// through.
     memo: Memo,
@@ -505,7 +500,6 @@ impl<'a> QueryEnv<'a> {
             reads: Arc::new(Mutex::new(Vec::new())),
             fixpoint: None,
             fetches,
-            settles: true,
             memo: Memo::default(),
             env,
         }
@@ -518,16 +512,9 @@ impl<'a> QueryEnv<'a> {
         self
     }
 
-    /// Read the layers' writes as held, settling none of them: the view
-    /// a settlement evaluates derived candidates through.
-    pub(crate) fn unsettled(mut self) -> Self {
-        self.settles = false;
-        self
-    }
-
     /// What a read settlement observes of this environment: the lines'
     /// heads, their session overlays and the metadata read with.
-    fn observation(&self) -> ReadObservation {
+    pub(crate) fn observation(&self) -> ReadObservation {
         ReadObservation {
             heads: self
                 .sources
@@ -543,17 +530,16 @@ impl<'a> QueryEnv<'a> {
         }
     }
 
-    /// Settle, cell by cell, the layers' choosing writes a read of
-    /// `input` meets: for each cell, the line's claims its writes
-    /// succeed and the written values the cell already held, each
-    /// settled once per layer and observation.
+    /// The layers' choosing writes a read of `input` meets, each cell
+    /// as the layer's [`ReadSettlement`] leaves it: the settlement the
+    /// commit applies, kept per layer and observation and advanced only
+    /// over the writes it has not settled.
+    ///
+    /// [`ReadSettlement`]: super::transaction::ReadSettlement
     async fn settle_within(
         &self,
         input: &ArtifactSelector<Constrained>,
     ) -> Result<Vec<(usize, Vec<CellSettlement>)>, DialogArtifactsError> {
-        if !self.settles {
-            return Ok(Vec::new());
-        }
         let layers = self.layers();
         let mut settled: Vec<(usize, Vec<CellSettlement>)> = Vec::new();
         let mut observed: Option<ReadObservation> = None;
@@ -567,36 +553,19 @@ impl<'a> QueryEnv<'a> {
             }
             let observed = observed.get_or_insert_with(|| self.observation());
             let failed = |error: CommitError| DialogArtifactsError::Storage(error.to_string());
-            let mut settlements = Vec::with_capacity(cells.len());
-            for cell in cells {
-                if let Some(settlement) = layer.cell_settlement(observed, &cell) {
-                    settlements.push(settlement);
-                    continue;
-                }
-                let derived = match layer.relation_derived(observed, &cell.0) {
-                    Some(derived) => derived,
-                    None => {
-                        let derived = super::transaction::relation_derived(self, layer, &cell.0)
-                            .await
-                            .map_err(failed)?;
-                        layer.record_relation_derived(observed, cell.0.clone(), derived);
-                        derived
-                    }
-                };
-                let settlement = Box::pin(super::transaction::settle_cell(
-                    self.sources.clone(),
-                    self.changes.clone(),
-                    layer,
-                    &cell.0,
-                    &cell.1,
-                    derived,
-                    self.env,
-                ))
+            let mut settlement = layer
+                .take_settlement(observed)
+                .unwrap_or_else(|| super::transaction::ReadSettlement::new(self.pending_edition()));
+            // A settlement that failed partway is not kept: the next
+            // read starts it again.
+            Box::pin(settlement.advance(&self.sources, &self.changes, layer, self.env))
                 .await
                 .map_err(failed)?;
-                layer.record_cell_settlement(observed, cell, derived, settlement.clone());
-                settlements.push(settlement);
-            }
+            let settlements: Vec<CellSettlement> = cells
+                .iter()
+                .filter_map(|cell| settlement.settlement_of(cell, layer))
+                .collect();
+            layer.put_settlement(observed, settlement);
             settled.push((index, settlements));
         }
         Ok(settled)
@@ -725,7 +694,6 @@ impl Clone for QueryEnv<'_> {
             reads: self.reads.clone(),
             fixpoint: self.fixpoint.clone(),
             fetches: self.fetches,
-            settles: self.settles,
             memo: Memo::default(),
             env: self.env,
         }

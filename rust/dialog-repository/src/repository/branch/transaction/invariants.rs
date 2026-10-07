@@ -632,3 +632,68 @@ async fn an_overlay_row_stands_above_its_own_lines_commits_in_a_join() -> Result
     );
     Ok(())
 }
+
+/// Concurrent `last` writes settle by commit: two replicas each write
+/// every one of a dozen cells without seeing the other, and after they
+/// merge, every cell reads the value one and the same commit wrote, on
+/// both replicas. The order of claims is the order of the revisions that
+/// carry them (edition, then the version's hash), never the facts'
+/// values or hashes, so no cell is won by one commit while another is
+/// won by the other.
+#[dialog_common::test]
+async fn concurrent_last_writes_settle_by_commit_across_every_cell() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let a = repo.branch("a").open().perform(&operator).await?;
+    let b = repo.branch("b").open().perform(&operator).await?;
+    let people: Vec<Entity> = (0..12)
+        .map(|index| format!("id:person-{index}").parse())
+        .collect::<Result<_, _>>()?;
+    let mut base = a.transaction();
+    for person in &people {
+        base = base.assert(salary(person, 1, Policy::Last));
+    }
+    base.commit().publish().perform(&operator).await?;
+    b.pull().from(&a).perform(&operator).await?;
+
+    // Concurrent: values chosen so that neither the value order nor the
+    // fact hashes agree with one side across every cell.
+    let mut ours = a.transaction();
+    let mut theirs = b.transaction();
+    for (index, person) in people.iter().enumerate() {
+        let (mine, other) = if index % 2 == 0 {
+            (100, 200)
+        } else {
+            (200, 100)
+        };
+        ours = ours.assert(salary(person, mine + index as u32, Policy::Last));
+        theirs = theirs.assert(salary(person, other + index as u32, Policy::Last));
+    }
+    ours.commit().publish().perform(&operator).await?;
+    theirs.commit().publish().perform(&operator).await?;
+    let mut quiesced = false;
+    for _ in 0..4 {
+        let pulled_a = a.pull().from(&b).perform(&operator).await?;
+        let pulled_b = b.pull().from(&a).perform(&operator).await?;
+        if pulled_a.is_none() && pulled_b.is_none() {
+            quiesced = true;
+            break;
+        }
+    }
+    assert!(quiesced, "mutual pulls reach a fixed point");
+
+    for branch in [&a, &b] {
+        let mut winners = Vec::new();
+        for (index, person) in people.iter().enumerate() {
+            let read = read_branch(branch, &operator, person, "last").await?;
+            assert_eq!(read.len(), 1, "one value per cell under `last`");
+            let ours_value = if index % 2 == 0 { 100 } else { 200 } + index as u64;
+            winners.push(read[0] == ours_value);
+        }
+        assert!(
+            winners.iter().all(|won| *won) || winners.iter().all(|won| !*won),
+            "every cell is won by the same commit: {winners:?}"
+        );
+    }
+    Ok(())
+}

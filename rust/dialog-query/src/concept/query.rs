@@ -519,11 +519,11 @@ impl ConceptQuery {
                 };
                 // The component yields its candidates as a set; a read
                 // under a choosing policy elects one of them at the exit,
-                // so a reader outside the component sees one value. A
-                // fixpoint row carries no standing yet, so under `last`
-                // the candidates tie and the value decides, as every tie
-                // does.
-                let table: Vec<fixpoint::Row> = match app.predicate.attribute_field() {
+                // so a reader outside the component sees one value. Each
+                // row stands as the newest fact any of its derivations
+                // consumed, so under `last` it competes as it would had
+                // its relation not been recursive.
+                let table: Vec<fixpoint::Answer> = match app.predicate.attribute_field() {
                     Some((name, field)) => {
                         let election = Election::of(field);
                         if election.select.elects() {
@@ -538,8 +538,11 @@ impl ConceptQuery {
                 for await each in rows {
                     let input = each?;
                     let mut matched = false;
-                    for row in table.iter() {
-                        if let Some(merged) = fixpoint::join(&input, &app.terms, row)? {
+                    for answer in table.iter() {
+                        if let Some(mut merged) = fixpoint::join(&input, &app.terms, &answer.row)? {
+                            if let Some(standing) = &answer.standing {
+                                fixpoint::cite(&mut merged, &app.terms, &answer.row, standing);
+                            }
                             matched = true;
                             yield merged;
                         }
@@ -1348,13 +1351,14 @@ impl Election {
     /// query's field name, `field`, as the fixpoint projects them.
     fn elect_rows(
         &self,
-        rows: Vec<fixpoint::Row>,
+        rows: Vec<fixpoint::Answer>,
         field: &str,
-    ) -> Result<Vec<fixpoint::Row>, EvaluationError> {
+    ) -> Result<Vec<fixpoint::Answer>, EvaluationError> {
         let key_operand = Relation::key_operand(field);
         let mut order: Vec<Vec<u8>> = Vec::new();
-        let mut groups: HashMap<Vec<u8>, Vec<Entry<fixpoint::Row>>> = HashMap::new();
-        for row in rows {
+        let mut groups: HashMap<Vec<u8>, Vec<Entry<fixpoint::Answer>>> = HashMap::new();
+        for answer in rows {
+            let row = &answer.row;
             let (Some(this), Some(value)) = (row.get("this"), row.get(field)) else {
                 continue;
             };
@@ -1362,16 +1366,19 @@ impl Election {
             if !groups.contains_key(&key) {
                 order.push(key.clone());
             }
-            groups.entry(key).or_default().push(Entry {
-                standing: None,
-                value: value.clone(),
-                identity: match row.get(&key_operand) {
-                    Some(key) => encode_value(key)?,
-                    None => Vec::new(),
-                },
+            let value = value.clone();
+            let identity = match row.get(&key_operand) {
+                Some(key) => encode_value(key)?,
+                None => Vec::new(),
+            };
+            let entry = Entry {
+                standing: answer.standing.clone(),
+                value,
+                identity,
                 rank: 0,
-                carrier: row,
-            });
+                carrier: answer,
+            };
+            groups.entry(key).or_default().push(entry);
         }
         let mut elected = Vec::new();
         for key in order {
