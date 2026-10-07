@@ -135,6 +135,8 @@ pub struct Responder<S, Resolver, Revocations = dialog_ucan_core::UnverifiedRevo
     store: S,
     resolver: Arc<Resolver>,
     revocations: Arc<Revocations>,
+    /// The DID an invocation must be addressed to, if any.
+    audience: Option<Did>,
 }
 
 impl<S, Resolver> Responder<S, Resolver> {
@@ -144,6 +146,7 @@ impl<S, Resolver> Responder<S, Resolver> {
             store,
             resolver: Arc::new(resolver),
             revocations: Arc::new(dialog_ucan_core::UnverifiedRevocations),
+            audience: None,
         }
     }
 }
@@ -163,7 +166,21 @@ impl<S, Resolver, Revocations> Responder<S, Resolver, Revocations> {
             store: self.store,
             resolver: self.resolver,
             revocations: Arc::new(revocations),
+            audience: self.audience,
         }
+    }
+
+    /// Perform only invocations addressed to `peer`, this responder's own
+    /// DID, and refuse every other as unauthorized.
+    ///
+    /// A peer is a principal of its own, not a service acting for the
+    /// subject, so it names itself: an invocation that one peer received
+    /// cannot then be replayed against another. Without this, the audience
+    /// is not checked, which is right for a responder with no identity of
+    /// its own.
+    pub fn addressed_to(mut self, peer: Did) -> Self {
+        self.audience = Some(peer);
+        self
     }
 }
 
@@ -195,6 +212,11 @@ where
             .map_err(|error| Refusal::Malformed(format!("incomplete proofs: {error}")))?;
 
         self.verify(&chain).await?;
+        if let Some(audience) = &self.audience {
+            chain
+                .check_audience(audience)
+                .map_err(|error| Refusal::Unauthorized(error.to_string()))?;
+        }
 
         let subject = chain.subject().clone();
         let args = chain.arguments();

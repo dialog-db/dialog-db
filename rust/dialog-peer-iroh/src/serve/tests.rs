@@ -171,7 +171,25 @@ where
     Fx::Of: dialog_capability::Constraint,
     Capability<Fx>: Ability,
 {
+    request_to(subject, operator, capability, blocks, None).await
+}
+
+/// [`request`], with the invocation addressed to `audience`, or to the
+/// subject with `None`.
+async fn request_to<Fx>(
+    subject: &Ed25519Signer,
+    operator: &Ed25519Signer,
+    capability: &Capability<Fx>,
+    blocks: Vec<Vec<u8>>,
+    audience: Option<&dialog_varsig::did::Did>,
+) -> Vec<u8>
+where
+    Fx: dialog_capability::Effect + Clone,
+    Fx::Of: dialog_capability::Constraint,
+    Capability<Fx>: Ability,
+{
     let subject_did = subject.did();
+    let audience = audience.cloned().unwrap_or_else(|| subject_did.clone());
     // `Scope::invoke`, never `Scope::from`: the former projects payload
     // fields through `Attenuate`, so a block becomes a digest and a
     // checksum. `Scope::from` would inline the block into the signed
@@ -191,7 +209,7 @@ where
 
     let invocation = InvocationBuilder::new()
         .issuer(operator.clone())
-        .audience(&subject_did)
+        .audience(&audience)
         .subject(&subject_did)
         .command(command)
         .arguments(scope.parameters.args())
@@ -276,6 +294,67 @@ async fn a_put_carrying_the_wrong_block_is_refused() {
         Response::Refused(Refusal::Malformed(_) | Refusal::Unauthorized(_)) => {}
         other => panic!("a block that was not signed for must not be stored, got {other:?}"),
     }
+}
+
+/// A responder that names itself performs an invocation addressed to it,
+/// and refuses one addressed to another peer, or to its subject, however
+/// well proven -- and stores nothing for either.
+#[dialog_common::test]
+async fn a_peer_performs_only_what_is_addressed_to_it() {
+    let (subject, operator) = signers().await;
+    let peer = Ed25519Signer::import(&[3u8; 32])
+        .await
+        .expect("peer key")
+        .did();
+    let other = Ed25519Signer::import(&[4u8; 32])
+        .await
+        .expect("other key")
+        .did();
+    let bytes = b"a block for one peer".to_vec();
+    let capability = put_of(&subject, &bytes);
+    let responder = responder(Recording::default()).addressed_to(peer.clone());
+
+    for audience in [Some(&other), None] {
+        let container = request_to(
+            &subject,
+            &operator,
+            &capability,
+            vec![bytes.clone()],
+            audience,
+        )
+        .await;
+        let response = responder.answer(&container).await.without_stream();
+        assert!(
+            matches!(response, Response::Refused(Refusal::Unauthorized(_))),
+            "an invocation addressed to {audience:?} must be refused, got {response:?}"
+        );
+    }
+    assert!(
+        responder
+            .store
+            .blocks
+            .lock()
+            .expect("not poisoned")
+            .is_empty()
+    );
+
+    let container = request_to(
+        &subject,
+        &operator,
+        &capability,
+        vec![bytes.clone()],
+        Some(&peer),
+    )
+    .await;
+    let response = responder.answer(&container).await.without_stream();
+    assert!(
+        matches!(response, Response::Performed(_)),
+        "an invocation addressed to the peer runs, got {response:?}"
+    );
+    assert_eq!(
+        responder.store.blocks.lock().expect("not poisoned").len(),
+        1
+    );
 }
 
 /// An invocation the subject never delegated must not perform, however
