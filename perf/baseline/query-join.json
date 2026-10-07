@@ -7,7 +7,7 @@
   },
   "counters": {
     "archive.get": 16,
-    "archive.get.bytes": 602300,
+    "archive.get.bytes": 592212,
     "archive.put": 0,
     "archive.put.bytes": 0,
     "span.apply_batch_reusing": 0,

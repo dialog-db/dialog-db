@@ -25,6 +25,7 @@
 //! Clones share the store until one of them writes ([`Arc::make_mut`]),
 //! so a query takes the transaction's view without copying it.
 
+use core::fmt;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -93,8 +94,8 @@ struct SettlementMemo {
     settlement: ReadSettlement,
 }
 
-impl std::fmt::Debug for SettlementMemo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for SettlementMemo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SettlementMemo")
             .field("observed", &self.observed)
             .finish_non_exhaustive()
@@ -446,6 +447,7 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use dialog_artifacts::history::Edition;
     use dialog_artifacts::{Asset, Change, Policy, Value};
 
     fn fact(of: &str, the: &str, is: &str) -> Artifact {
@@ -537,7 +539,7 @@ mod tests {
             metadata: Arc::new(Changes::new()),
         };
         assert!(staged.take_settlement(&observed).is_none());
-        let settlement = ReadSettlement::new(dialog_artifacts::history::Edition::GENESIS);
+        let settlement = ReadSettlement::new(Edition::GENESIS);
         staged.put_settlement(&observed, settlement.clone());
 
         // Another observation of the lines misses it.

@@ -6,8 +6,8 @@
     "rows": 2000
   },
   "counters": {
-    "archive.get": 17,
-    "archive.get.bytes": 606860,
+    "archive.get": 16,
+    "archive.get.bytes": 598796,
     "archive.put": 0,
     "archive.put.bytes": 0,
     "span.apply_batch_reusing": 0,

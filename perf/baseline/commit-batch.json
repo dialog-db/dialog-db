@@ -6,10 +6,10 @@
     "facts": 2000
   },
   "counters": {
-    "archive.get": 2,
-    "archive.get.bytes": 16276,
-    "archive.put": 36,
-    "archive.put.bytes": 1163520,
+    "archive.get": 0,
+    "archive.get.bytes": 0,
+    "archive.put": 30,
+    "archive.put.bytes": 1146264,
     "span.apply_batch_reusing": 1,
     "span.buffer_records": 2,
     "span.commit": 1,

@@ -8,7 +8,7 @@ use crate::helpers::test_repo;
 use dialog_artifacts::Entity;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::rule::DeductiveRuleDescriptor;
-use dialog_query::{Attribute, Concept, Query};
+use dialog_query::{Attribute, Concept, Query, The};
 
 /// A badge number (`credential/badge`).
 #[derive(Attribute, Clone, PartialEq)]
@@ -138,8 +138,9 @@ async fn a_maintained_fixpoint_keeps_each_row_at_its_newest_surviving_derivation
         Ok(descriptor.compile()?)
     };
     let source = |attribute: &str, value: &str| {
-        let attribute: dialog_artifacts::Attribute = attribute.parse().expect("attribute");
-        dialog_query::attribute::The::from(attribute)
+        attribute
+            .parse::<The>()
+            .expect("attribute")
             .of(e.clone())
             .is(value.to_string())
     };

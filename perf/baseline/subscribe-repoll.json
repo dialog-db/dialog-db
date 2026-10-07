@@ -9,10 +9,10 @@
     "retracted": 10
   },
   "counters": {
-    "archive.get": 75,
-    "archive.get.bytes": 2482216,
+    "archive.get": 12,
+    "archive.get.bytes": 406876,
     "archive.put": 1,
-    "archive.put.bytes": 7576,
+    "archive.put.bytes": 12596,
     "span.apply_batch_reusing": 1,
     "span.buffer_records": 2,
     "span.commit": 1,

@@ -6,10 +6,10 @@
     "commits": 100
   },
   "counters": {
-    "archive.get": 12,
-    "archive.get.bytes": 403364,
+    "archive.get": 8,
+    "archive.get.bytes": 259608,
     "archive.put": 112,
-    "archive.put.bytes": 3959132,
+    "archive.put.bytes": 3687208,
     "span.apply_batch_reusing": 100,
     "span.buffer_records": 200,
     "span.commit": 100,
