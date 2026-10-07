@@ -201,7 +201,7 @@ impl ReadSettlement {
                 let mut cell = Cell::over(claims_of(&line, the, of).await?);
                 for (earlier_the, earlier_of, earlier) in &log[..index] {
                     if earlier_the == the && earlier_of == of {
-                        let written = cell.write(earlier, &[], self.edition)?;
+                        let written = cell.stage(earlier, &[], self.edition)?;
                         cell.settled.extend(written);
                     }
                 }
@@ -220,7 +220,7 @@ impl ReadSettlement {
                 _ => Vec::new(),
             };
             let cell = self.cells.get_mut(&key).expect("cell loaded above");
-            for written in cell.write(change, &derived, self.edition)? {
+            for written in cell.stage(change, &derived, self.edition)? {
                 self.derives.gained(the, &written);
                 self.prefix.apply_change(the, of, &written);
                 cell.settled.push(written);
@@ -269,6 +269,7 @@ impl ReadSettlement {
         }
         for value in &held {
             if cell.line.contains(value)
+                && !cell.restaged.contains(value)
                 && live.contains(&value)
                 && !settlement.held.iter().any(|kept| kept.is == *value)
             {
@@ -470,13 +471,17 @@ async fn derived_candidates(
 }
 
 /// One cell's live claims as the writes replayed so far leave them,
-/// the values the line held before any of them, and what the writes
-/// settled to, in order.
+/// the values the line held before any of them, what the writes
+/// settled to, in order, and the values the writes staged afresh.
 #[derive(Clone)]
 struct Cell {
     live: Vec<Candidate>,
     line: Vec<Value>,
     settled: Vec<Change>,
+    /// A value written while the cell held no live claim of it, as one
+    /// written back after its retraction: the transaction's row, not
+    /// the line's, is the one a read sees.
+    restaged: Vec<Value>,
 }
 
 impl Cell {
@@ -490,7 +495,28 @@ impl Cell {
                 .collect(),
             live: claims,
             settled: Vec::new(),
+            restaged: Vec::new(),
         }
+    }
+
+    /// [`write`](Self::write), noting a value the write stages afresh.
+    fn stage(
+        &mut self,
+        change: &Change,
+        derived: &[Candidate],
+        edition: Edition,
+    ) -> Result<Vec<Change>, CommitError> {
+        let held = matches!(change, Change::Assert(value, _)
+            if self.live.iter().any(|claim| claim.claim && claim.value == *value));
+        let written = self.write(change, derived, edition)?;
+        if let Change::Assert(value, _) = change
+            && !written.is_empty()
+            && !held
+            && !self.restaged.contains(value)
+        {
+            self.restaged.push(value.clone());
+        }
+        Ok(written)
     }
 
     /// What the writes settled to, squashed as one commit's writes are:

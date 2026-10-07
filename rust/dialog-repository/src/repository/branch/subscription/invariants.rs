@@ -100,7 +100,7 @@ async fn a_rule_landing_on_a_subscribed_attribute_wakes_the_subscription() -> an
 /// A value the relation `x/a` derives (`x/a(e) := v :- x/src1(e) = v`,
 /// the same from `x/src2` and `x/src3`, and `x/a(e) := v :- x/a(e) =
 /// v`, which makes the relation recursive).
-#[derive(Attribute, Clone, PartialEq, Debug)]
+#[derive(Attribute, Clone, PartialEq)]
 #[domain("x")]
 pub struct A(pub String);
 

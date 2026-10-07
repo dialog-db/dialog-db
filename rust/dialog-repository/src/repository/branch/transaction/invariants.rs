@@ -386,9 +386,10 @@ async fn a_transaction_reads_a_last_write_as_succeeding_the_stored_claim_under_a
 /// transaction writes her bonus to 50 under `last`, then her salary to
 /// 120 under `max`. A reader after the bonus write sees the salary
 /// candidates `{100, 50}`, elects 100 under `max`, and the salary write
-/// succeeds it: the cell comes to 120. The settlement reads the derived
-/// candidates through the raw staged rows, where the bonus is still
-/// 900 beside 50, elects the derived 900 and retracts nothing.
+/// succeeds it: the stored claims come to 120, and a read under `all`
+/// sees 120 beside the 50 the rule derives. Settling against the raw
+/// staged rows, where the bonus is still 900 beside 50, would elect the
+/// derived 900 and retract nothing.
 #[dialog_common::test]
 async fn a_write_succeeds_what_a_reader_after_the_earlier_writes_observes() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -416,7 +417,7 @@ async fn a_write_succeeds_what_a_reader_after_the_earlier_writes_observes() -> R
     let branch = repo.branch("main").open().perform(&operator).await?;
     assert_eq!(
         read_branch(&branch, &operator, &alice, "all").await?,
-        vec![120],
+        vec![50, 120],
         "the salary write succeeded the stored 100, the only candidate above the new bonus"
     );
     Ok(())
