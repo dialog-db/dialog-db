@@ -42,11 +42,17 @@ async fn peer() -> (Endpoint, IrohAddress, Peer) {
         .bind()
         .await
         .expect("an endpoint binds");
-    let responder = Arc::new(Responder::new(
-        Volatile::default(),
-        CachingResolver::new(WebResolver::new()),
-    ));
     let address = IrohAddress::from(endpoint.addr());
+    // The peer names itself, so each exchange below also proves that the
+    // site addresses its invocation to the peer it dials, not to the
+    // subject.
+    let responder = Arc::new(
+        Responder::new(
+            Volatile::default(),
+            CachingResolver::new(WebResolver::new()),
+        )
+        .addressed_to(address.did()),
+    );
 
     tokio::spawn(accept(endpoint.clone(), responder.clone()));
 

@@ -203,6 +203,43 @@ impl<S: Signature> InvocationChain<S> {
         self.invocation.issuer()
     }
 
+    /// Get the audience of the invocation: the principal it is addressed to.
+    ///
+    /// The subject, for an invocation that a service performs on the
+    /// subject's behalf; the responder's own DID, for one sent to a peer
+    /// (see [`InvocationChain::check_audience`]).
+    pub fn audience(&self) -> &Did {
+        self.invocation.audience()
+    }
+
+    /// Require that the invocation is addressed to `expected`.
+    ///
+    /// A responder that is a principal of its own -- a peer, rather than a
+    /// service acting for the subject -- names itself here, so that an
+    /// invocation one peer received cannot be replayed against another:
+    /// the audience is signed, and only the peer it names accepts it. An
+    /// invocation addressed to its subject, as one for a service is, does
+    /// not pass unless the subject is `expected`.
+    ///
+    /// Separate from [`InvocationChain::verify`], which checks the chain's
+    /// authority, because the audience is the verifier's identity and not
+    /// the chain's: a caller that has no identity of its own skips it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ContainerError::Invocation`] naming both principals if the
+    /// invocation is addressed to anyone else.
+    pub fn check_audience(&self, expected: &Did) -> Result<(), ContainerError> {
+        let audience = self.audience();
+        if audience == expected {
+            Ok(())
+        } else {
+            Err(ContainerError::Invocation(format!(
+                "the invocation is addressed to '{audience}', not to '{expected}'"
+            )))
+        }
+    }
+
     /// Get the proof CIDs referenced by the invocation.
     pub fn proofs(&self) -> &Vec<Cid> {
         self.invocation.proofs()
@@ -379,6 +416,59 @@ pub(crate) mod tests {
         delegations.insert(delegation_cid, Arc::new(delegation));
 
         (InvocationChain::new(invocation, delegations), subject_did)
+    }
+
+    /// An invocation addressed to a peer, rather than to its subject, still
+    /// verifies -- the audience is the verifier's to check -- and passes the
+    /// audience check of that peer only. One addressed to its subject, the
+    /// shape a service sees, does not pass the peer's check.
+    #[dialog_common::test]
+    async fn it_checks_that_an_invocation_is_addressed_to_the_peer() {
+        let subject_signer = generate_signer().await;
+        let subject_did = subject_signer.did();
+        let operator_signer = generate_signer().await;
+        let peer = generate_signer().await.did();
+        let other = generate_signer().await.did();
+
+        let delegation = create_delegation(
+            &subject_signer,
+            &operator_signer,
+            &subject_signer,
+            &["storage", "get"],
+        )
+        .await
+        .expect("a delegation");
+        let delegation_cid = delegation.to_cid();
+        let addressed = async |audience: &Did| {
+            let invocation = InvocationBuilder::new()
+                .issuer(operator_signer.clone())
+                .audience(audience)
+                .subject(&subject_did)
+                .command(vec!["storage".to_string(), "get".to_string()])
+                .proofs(vec![delegation_cid])
+                .try_build()
+                .await
+                .expect("an invocation");
+            let mut delegations = HashMap::new();
+            delegations.insert(delegation_cid, Arc::new(delegation.clone()));
+            InvocationChain::new(invocation, delegations)
+        };
+
+        let to_peer = addressed(&peer).await;
+        let env = test_environment(&to_peer);
+        to_peer
+            .verify(&test_context(&env))
+            .await
+            .expect("the audience is not the chain's to check");
+        assert_eq!(to_peer.audience(), &peer);
+        to_peer
+            .check_audience(&peer)
+            .expect("addressed to the peer");
+        let refused = to_peer.check_audience(&other).expect_err("not that peer");
+        assert!(refused.to_string().contains(&peer.to_string()), "{refused}");
+
+        let to_subject = addressed(&subject_did).await;
+        assert!(to_subject.check_audience(&peer).is_err());
     }
 
     /// The invocation's own meta entry wins over a proof delegation's;
