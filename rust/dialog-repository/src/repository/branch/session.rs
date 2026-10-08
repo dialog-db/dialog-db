@@ -1264,6 +1264,7 @@ impl Provider<SelectRules> for QueryEnv<'_> {
         let bundle = self.resolve_bundle(&input, plan_cache).await?;
         let analysis = self.program_analysis(&input, &bundle).await?;
         analysis.check(&input)?;
+        let bundle = bundle.without(analysis.quarantined());
         let bundle = if analysis.is_recursive(&ProgramAnalysis::node(&input)) {
             bundle.with_recursion(analysis)
         } else {

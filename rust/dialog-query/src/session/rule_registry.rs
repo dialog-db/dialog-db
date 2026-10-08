@@ -252,12 +252,12 @@ impl RuleRegistry {
     /// regions of the program fail exactly the queries that touch
     /// them. When the concept itself sits on a dependency cycle, the
     /// returned rules carry the program analysis so evaluation
-    /// switches to the semi-naive fixpoint, which evaluates any
-    /// absence test inside the cycle under the cycle policy.
+    /// switches to the semi-naive fixpoint. A rule the analysis
+    /// quarantined is left out of the returned rules.
     pub fn acquire(&self, predicate: &ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let analysis = self.analysis()?;
         analysis.check(predicate)?;
-        let rules = self.bundle(predicate)?;
+        let rules = self.bundle(predicate)?.without(analysis.quarantined());
         Ok(
             if analysis.is_recursive(&ProgramAnalysis::node(predicate)) {
                 rules.with_recursion(analysis)

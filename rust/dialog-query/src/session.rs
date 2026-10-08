@@ -5,7 +5,7 @@ pub mod dependencies;
 /// Registry for deductive rules, indexed by conclusion entity.
 pub mod rule_registry;
 pub use dependencies::{
-    Absence, AbsenceInCycle, AggregationViolation, Closure, Polarity, ProgramAnalysis,
+    Absence, AbsenceInCycle, AggregationViolation, Closure, Polarity, ProgramAnalysis, Quarantine,
 };
 pub use rule_registry::*;
 

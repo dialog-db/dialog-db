@@ -18,30 +18,34 @@
 //! strongly connected components; a concept is *recursive* when its
 //! component is non-trivial.
 //!
-//! Outside a component, negation and optional reads have stratified
-//! semantics: the premise reads a relation derived in full before the
-//! rule runs. Inside a component they read a set the cycle is still
-//! deriving, and the *cycle policy* decides what they mean: the
-//! negation holds and the optional read yields the absent row as well
-//! as the present ones (see the
-//! [fixpoint](crate::concept::query::fixpoint) module). The component
-//! stays positive and has a least fixpoint, so every program
-//! evaluates, and the same way on every replica however its rules
-//! were merged. The analysis reports each such absence test
-//! ([`ProgramAnalysis::absences`]) because a rule rarely means it; an
-//! authoring tool turns the report into a warning. An aggregating
-//! edge inside a component remains a violation: a fold has no
-//! deterministic reading over a set still growing. A deductive rule
-//! refuses `reduce` at compile time, so the violation is unreachable
-//! for authored rules and kept for the structure.
+//! Outside a component, negation, optional reads and elections have
+//! stratified semantics: the premise reads a relation derived in full
+//! before the rule runs. An election is a negation too: a read under a
+//! choosing policy returns a candidate *and nothing better*. Inside a
+//! component such a premise would read a set the cycle is still
+//! deriving, which has no stratified meaning. A merge of rule sets
+//! each fine on its own can close such a cycle, so it is never refused
+//! at install: the analysis *quarantines* a rule of the cycle instead
+//! ([`ProgramAnalysis::quarantined`]), and evaluation leaves it out.
+//! The rule chosen is one whose reads in the cycle are all positive,
+//! when one exists: the rule that fed a negation back into itself,
+//! rather than the negation, which keeps the meaning it had before the
+//! cycle formed. Among equals, the greatest identity, an order every
+//! replica shares. The choice depends on the rules alone, so every
+//! replica holding the same rules quarantines the same ones, and a
+//! quarantine lifts by itself once a rule of the cycle is retracted.
+//! An aggregating edge inside a component remains a violation: a fold
+//! has no deterministic reading over a set still growing. A deductive
+//! rule refuses `reduce` at compile time, so the violation is
+//! unreachable for authored rules and kept for the structure.
 //!
 //! Callers consume the analysis three ways:
 //!
 //! - [`RuleRegistry::validate`](super::rule_registry::RuleRegistry::validate)
 //!   returns every [`AggregationViolation`] in the program, for
 //!   callers that want immediate feedback after an install or a merge.
-//! - [`ProgramAnalysis::absences`] lists the absence tests the cycle
-//!   policy governs, for the same callers.
+//! - [`ProgramAnalysis::quarantined`] lists the rules set aside and the
+//!   cycle each closed, for the same callers.
 //! - [`RuleRegistry::acquire`](super::rule_registry::RuleRegistry::acquire)
 //!   runs the targeted [`ProgramAnalysis::check`] over the queried
 //!   concept's dependency closure, so a recursive region of the
@@ -82,6 +86,10 @@ pub enum Polarity {
     /// clause: the rule's folds consume the premise's full
     /// relation, so the reference demands a complete lower stratum.
     Aggregating,
+    /// The body reads the relation under a choosing policy (`last`,
+    /// `top`, `max`, `min`): the candidate it returns, and nothing
+    /// better, which negates the better candidates.
+    Electing,
 }
 
 /// How a rule tests for absence: by negating a concept or by reading
@@ -92,6 +100,21 @@ pub enum Absence {
     Negated,
     /// A set-widened (optional) read.
     Optional,
+    /// A read under a choosing policy.
+    Elected,
+}
+
+/// A rule the analysis set aside: it closed a cycle through an absence
+/// test or an election, which has no stratified meaning, so evaluation
+/// leaves it out until a rule of the cycle is retracted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Quarantine {
+    /// The rule's identity.
+    pub rule: Entity,
+    /// The concept the rule concludes.
+    pub concept: Entity,
+    /// The concepts of the cycle it closed, sorted.
+    pub cycle: Vec<Entity>,
 }
 
 /// An absence test inside a dependency cycle: some rule concluding
@@ -147,7 +170,18 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
                 Some((query.predicate.clone(), Polarity::Optional))
             }
             Premise::Assert(Proposition::Concept(query)) => {
-                Some((query.predicate.clone(), positive))
+                let electing = positive == Polarity::Positive
+                    && query.predicate.attribute_field().is_some_and(|(_, field)| {
+                        !field.descriptor().is_chain() && field.descriptor().select().elects()
+                    });
+                Some((
+                    query.predicate.clone(),
+                    if electing {
+                        Polarity::Electing
+                    } else {
+                        positive
+                    },
+                ))
             }
             Premise::Unless(Negation(Proposition::Concept(query))) => {
                 Some((query.predicate.clone(), Polarity::Negative))
@@ -168,7 +202,7 @@ fn selecting_edges(
 ) -> Vec<(ConceptDescriptor, Polarity)> {
     let mut edges = structural_edges(descriptor);
     if let Some((_, field)) = descriptor.attribute_field() {
-        // A ranked chain reads every relation it lists.
+        // A ranked chain elects among every relation it lists.
         if field.descriptor().is_chain() {
             for relation in field.descriptor().relations() {
                 let single = AttributeDescriptor::over(
@@ -179,7 +213,7 @@ fn selecting_edges(
                 );
                 edges.push((
                     ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(single)),
-                    Polarity::Positive,
+                    Polarity::Electing,
                 ));
             }
         }
@@ -190,6 +224,8 @@ fn selecting_edges(
         if derived.contains(&ProgramAnalysis::node(&attribute)) {
             let polarity = if field.is_optional() {
                 Polarity::Optional
+            } else if field.descriptor().select().elects() {
+                Polarity::Electing
             } else {
                 Polarity::Positive
             };
@@ -232,9 +268,12 @@ pub struct ProgramAnalysis {
     /// Strongly connected component id per concept. Two recursive
     /// concepts with the same id are on the same cycle.
     component: HashMap<Entity, usize>,
-    /// Every negative or optional edge that lands inside its own
-    /// component.
+    /// Every negative, optional or electing edge that lands inside its
+    /// own component once the quarantined rules are left out: none,
+    /// unless a cycle had no rule to quarantine.
     absences: Vec<AbsenceInCycle>,
+    /// The rules set aside, in the order they were.
+    quarantined: Vec<Quarantine>,
     /// Every aggregating edge that lands inside its own component.
     violations: Vec<AggregationViolation>,
     /// The attribute concepts some rule derives, by entity: what an
@@ -255,6 +294,121 @@ pub enum Closure {
     Recursive,
 }
 
+/// One rule's dependency edges: the identity it can be quarantined by
+/// (`None` for a concept's implicit rule), the node it concludes, and
+/// the nodes its body reads.
+struct RuleEdges {
+    rule: Option<Entity>,
+    concept: Entity,
+    edges: Vec<(Entity, Polarity)>,
+}
+
+/// The dependency graph of the rules not quarantined, with its strongly
+/// connected components.
+struct Graph {
+    edges: HashMap<Entity, Vec<(Entity, Polarity)>>,
+    nodes: Vec<Entity>,
+    index_of: HashMap<Entity, usize>,
+    adjacency: Vec<Vec<usize>>,
+    component: Vec<usize>,
+}
+
+impl Graph {
+    fn of(
+        rules: &[RuleEdges],
+        selecting: &HashMap<Entity, Vec<(Entity, Polarity)>>,
+        quarantined: &[Quarantine],
+        concluded: &HashSet<Entity>,
+    ) -> Self {
+        let mut edges: HashMap<Entity, Vec<(Entity, Polarity)>> = concluded
+            .iter()
+            .map(|node| (node.clone(), Vec::new()))
+            .collect();
+        for rule in rules {
+            if rule
+                .rule
+                .as_ref()
+                .is_some_and(|id| quarantined.iter().any(|set_aside| set_aside.rule == *id))
+            {
+                continue;
+            }
+            edges
+                .entry(rule.concept.clone())
+                .or_default()
+                .extend(rule.edges.iter().cloned());
+        }
+        for (node, out) in selecting {
+            edges.insert(node.clone(), out.clone());
+        }
+
+        // Index the node set (keys plus any edge target) for Tarjan.
+        // Sorted so component numbering and quarantine order are
+        // deterministic regardless of hash-map iteration order.
+        let mut nodes: Vec<Entity> = edges
+            .iter()
+            .flat_map(|(node, out)| {
+                iter::once(node.clone()).chain(out.iter().map(|(target, _)| target.clone()))
+            })
+            .collect();
+        nodes.sort();
+        nodes.dedup();
+        let index_of: HashMap<Entity, usize> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.clone(), i))
+            .collect();
+        let adjacency: Vec<Vec<usize>> = nodes
+            .iter()
+            .map(|node| {
+                edges
+                    .get(node)
+                    .map(|out| out.iter().map(|(target, _)| index_of[target]).collect())
+                    .unwrap_or_default()
+            })
+            .collect();
+        let component = components(&adjacency);
+        Graph {
+            edges,
+            nodes,
+            index_of,
+            adjacency,
+            component,
+        }
+    }
+
+    /// The members, sorted, of the first component (by its least node)
+    /// that reads itself through a negation, an optional read or an
+    /// election.
+    fn first_unstratified(&self) -> Option<Vec<Entity>> {
+        let mut unstratified: Option<usize> = None;
+        for node in &self.nodes {
+            let Some(out) = self.edges.get(node) else {
+                continue;
+            };
+            let here = self.component[self.index_of[node]];
+            let reads_itself = out.iter().any(|(target, polarity)| {
+                matches!(
+                    polarity,
+                    Polarity::Negative | Polarity::Optional | Polarity::Electing
+                ) && self.component[self.index_of[target]] == here
+            });
+            if reads_itself {
+                unstratified = Some(here);
+                break;
+            }
+        }
+        let component = unstratified?;
+        Some(
+            self.nodes
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| self.component[*i] == component)
+                .map(|(_, node)| node.clone())
+                .collect(),
+        )
+    }
+}
+
 impl ProgramAnalysis {
     /// Analyze the program formed by the given per-concept rule
     /// sets: every implicit and installed rule contributes edges,
@@ -273,29 +427,41 @@ impl ProgramAnalysis {
         entries: impl IntoIterator<Item = (&'a Entity, &'a ConceptRules)>,
         derived: HashSet<Entity>,
     ) -> Self {
-        let mut edges: HashMap<Entity, Vec<(Entity, Polarity)>> = HashMap::new();
+        // Each rule's edges, by the node it concludes. An installed rule
+        // carries its identity, by which it can be quarantined; a
+        // concept's implicit rule cannot be.
+        let mut rules: Vec<RuleEdges> = Vec::new();
         let mut aliases: HashMap<Entity, Entity> = HashMap::new();
         let mut pending: VecDeque<ConceptDescriptor> = VecDeque::new();
+        let mut concluded: HashSet<Entity> = HashSet::new();
 
-        for (entity, rules) in entries {
-            let mut out = Vec::new();
-            for rule in rules.rules() {
+        for (entity, bundle) in entries {
+            concluded.insert(entity.clone());
+            let installed = bundle.installed().len();
+            let implicit = bundle.rules().count() - installed;
+            for (position, rule) in bundle.rules().enumerate() {
                 aliases.insert(rule.conclusion().this(), Self::node(rule.conclusion()));
+                let mut out = Vec::new();
                 for (target, polarity) in rule_edges(rule) {
                     let node = Self::node(&target);
                     aliases.insert(target.this(), node.clone());
                     out.push((node, polarity));
                     pending.push_back(target);
                 }
+                rules.push(RuleEdges {
+                    rule: (position >= implicit).then(|| rule.try_this()).flatten(),
+                    concept: entity.clone(),
+                    edges: out,
+                });
             }
-            edges.insert(entity.clone(), out);
         }
 
         // Concepts referenced by premises but never registered still
         // constrain the graph through their embedded descriptors.
+        let mut selecting: HashMap<Entity, Vec<(Entity, Polarity)>> = HashMap::new();
         while let Some(descriptor) = pending.pop_front() {
             let entity = Self::node(&descriptor);
-            if edges.contains_key(&entity) {
+            if concluded.contains(&entity) || selecting.contains_key(&entity) {
                 continue;
             }
             let mut out = Vec::new();
@@ -305,33 +471,63 @@ impl ProgramAnalysis {
                 out.push((node, polarity));
                 pending.push_back(target);
             }
-            edges.insert(entity, out);
+            selecting.insert(entity, out);
         }
 
-        // Index the node set (keys plus any edge target) for Tarjan.
-        // Sorted so component numbering and violation order are
-        // deterministic regardless of hash-map iteration order.
-        let mut nodes: Vec<Entity> = edges
-            .iter()
-            .flat_map(|(node, out)| {
-                iter::once(node.clone()).chain(out.iter().map(|(target, _)| target.clone()))
-            })
-            .collect();
-        nodes.sort();
-        nodes.dedup();
-        let index_of: HashMap<&Entity, usize> =
-            nodes.iter().enumerate().map(|(i, e)| (e, i)).collect();
-        let adjacency: Vec<Vec<usize>> = nodes
-            .iter()
-            .map(|node| {
-                edges
-                    .get(node)
-                    .map(|out| out.iter().map(|(target, _)| index_of[target]).collect())
-                    .unwrap_or_default()
-            })
-            .collect();
+        // Quarantine, one rule at a time, until no cycle reads a set it
+        // is still deriving through a negation, an optional read or an
+        // election.
+        let mut quarantined: Vec<Quarantine> = Vec::new();
+        let graph = loop {
+            let graph = Graph::of(&rules, &selecting, &quarantined, &concluded);
+            let Some(cycle) = graph.first_unstratified() else {
+                break graph;
+            };
+            let members: HashSet<&Entity> = cycle.iter().collect();
+            let mut candidates: Vec<(&Entity, &Entity, bool)> = rules
+                .iter()
+                .filter(|rule| members.contains(&rule.concept))
+                .filter_map(|rule| {
+                    let id = rule.rule.as_ref()?;
+                    if quarantined.iter().any(|set_aside| set_aside.rule == *id) {
+                        return None;
+                    }
+                    let inner: Vec<Polarity> = rule
+                        .edges
+                        .iter()
+                        .filter(|(target, _)| members.contains(target))
+                        .map(|(_, polarity)| *polarity)
+                        .collect();
+                    if inner.is_empty() {
+                        return None;
+                    }
+                    let positive = inner.iter().all(|polarity| *polarity == Polarity::Positive);
+                    Some((id, &rule.concept, positive))
+                })
+                .collect();
+            // A rule whose reads in the cycle are all positive first: the
+            // one that fed the negation back into itself. Then the
+            // greatest identity.
+            candidates.sort_by(|a, b| (a.2, a.0).cmp(&(b.2, b.0)));
+            let Some((rule, concept, _)) = candidates.pop() else {
+                // A cycle with no rule to set aside: it stays, and its
+                // absence tests are reported.
+                break graph;
+            };
+            quarantined.push(Quarantine {
+                rule: rule.clone(),
+                concept: concept.clone(),
+                cycle: cycle.clone(),
+            });
+        };
 
-        let component = components(&adjacency);
+        let Graph {
+            edges,
+            nodes,
+            index_of,
+            adjacency,
+            component,
+        } = graph;
 
         // A concept is recursive when its component has more than
         // one member, or when it has a self-edge.
@@ -347,8 +543,9 @@ impl ProgramAnalysis {
             }
         }
 
-        // A negative, optional or aggregating edge whose endpoints
-        // share a component reads a set the cycle is still deriving.
+        // A negative, optional, electing or aggregating edge whose
+        // endpoints share a component reads a set the cycle is still
+        // deriving.
         let mut absences = Vec::new();
         let mut violations = Vec::new();
         for node in &nodes {
@@ -360,6 +557,7 @@ impl ProgramAnalysis {
                 let absence = match polarity {
                     Polarity::Negative => Absence::Negated,
                     Polarity::Optional => Absence::Optional,
+                    Polarity::Electing => Absence::Elected,
                     Polarity::Aggregating => {
                         violations.push(AggregationViolation {
                             concept: node.clone(),
@@ -389,9 +587,17 @@ impl ProgramAnalysis {
             recursive,
             component,
             absences,
+            quarantined,
             violations,
             derived,
         }
+    }
+
+    /// The rules set aside because each closed a cycle through an
+    /// absence test or an election, in the order they were. Evaluation
+    /// leaves them out; see [`ConceptRules::without`].
+    pub fn quarantined(&self) -> &[Quarantine] {
+        &self.quarantined
     }
 
     /// Every stratification violation in the program, in

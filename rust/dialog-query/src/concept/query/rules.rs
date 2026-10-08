@@ -27,7 +27,7 @@ use crate::recall::Recall;
 use crate::rule::compile_internal;
 use crate::rule::deductive::Origin;
 use crate::selection::Match;
-use crate::session::ProgramAnalysis;
+use crate::session::{ProgramAnalysis, Quarantine};
 use crate::term::Term;
 use crate::types::Any;
 use std::collections::HashMap;
@@ -254,6 +254,25 @@ impl ConceptRules {
             self.installed.push(rule);
             self.plans.write().unwrap().clear();
         }
+    }
+
+    /// This bundle without the installed rules the program analysis
+    /// quarantined: each closed a cycle through an absence test or an
+    /// election, and evaluation leaves it out.
+    pub fn without(mut self, quarantined: &[Quarantine]) -> Self {
+        if quarantined.is_empty() {
+            return self;
+        }
+        let before = self.installed.len();
+        self.installed.retain(|rule| {
+            rule.try_this()
+                .is_none_or(|this| !quarantined.iter().any(|set_aside| set_aside.rule == this))
+        });
+        if self.installed.len() != before {
+            self.plans = Arc::new(RwLock::new(HashMap::new()));
+            self.exact = None;
+        }
+        self
     }
 
     /// The explicitly installed rules (does not include the implicit rule).
