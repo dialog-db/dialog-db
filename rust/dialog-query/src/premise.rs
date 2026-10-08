@@ -107,10 +107,6 @@ pub(crate) fn reading(
     is: crate::Term<crate::types::Any>,
     cardinality: Option<crate::attribute::Cardinality>,
 ) -> Premise {
-    let the = the
-        .as_constant()
-        .expect("a premise reads a named attribute")
-        .clone();
     let field =
         crate::ConceptFieldDescriptor::required(crate::attribute::AttributeDescriptor::new(
             the,
