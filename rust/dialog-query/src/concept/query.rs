@@ -569,12 +569,13 @@ impl ConceptQuery {
             // while nothing is stored under it, the rule re-headed onto
             // the concept is its whole answer, its rows elected per
             // entity as the relation's would be. A concept of several
-            // attributes is not answered this way: it selects each
-            // attribute and joins them, which a body yielding several
-            // rows for one entity does not, so its rows would depend on
-            // whether anything is stored under one of its attributes.
-            if app.predicate.attribute_field().is_some()
-                && let Some(exact) = rules.exact()
+            // attributes selects each attribute and joins them, which a
+            // body yielding several rows for one entity does not; it is
+            // answered this way only when its rule's body yields at most
+            // one row per entity, which is then each attribute's one
+            // candidate and so what every election picks.
+            if let Some(exact) = rules.exact()
+                && (app.predicate.attribute_field().is_some() || exact.rule.single_valued())
                 && stored_absent(&exact.attributes, env).await?
                 && let Some(plan) = rules.plan_exact(&app.terms, &first)
             {

@@ -755,6 +755,61 @@ impl DeductiveRule {
         compile_internal::<Self>(concept.clone(), selecting_premises(concept, derived))
     }
 
+    /// Whether the body binds at most one row per `this`. Every premise
+    /// it asserts reads a concept of an entity already determined (`this`,
+    /// or a value an earlier such read bound) under a choosing policy for
+    /// every field, so each read yields one row; a negation adds none.
+    /// Anything else (a formula, an `all` read, a read keyed by another
+    /// variable) may yield several, and the body is not single-valued.
+    pub fn single_valued(&self) -> bool {
+        let mut determined: BTreeSet<&str> = BTreeSet::from(["this"]);
+        let mut pending: Vec<&ConceptQuery> = Vec::new();
+        for premise in self.analysis().premises() {
+            match premise {
+                Premise::Assert(Proposition::Concept(query)) => pending.push(query),
+                Premise::Unless(_) => {}
+                _ => return false,
+            }
+        }
+        loop {
+            let before = pending.len();
+            let mut index = 0;
+            while index < pending.len() {
+                let query = pending[index];
+                let keyed = query.terms.get("this").is_some_and(|term| {
+                    term.is_constant() || term.name().is_some_and(|name| determined.contains(name))
+                });
+                if !keyed {
+                    index += 1;
+                    continue;
+                }
+                let single = query.predicate.with().iter().all(|(_, field)| {
+                    !field.is_optional()
+                        && field.descriptor().select().elects()
+                        && !field.descriptor().is_chain()
+                        && !matches!(field.the(), Relation::Collection { .. })
+                });
+                if !single || query.widens() {
+                    return false;
+                }
+                for (name, term) in query.terms.iter() {
+                    if name != "this"
+                        && let Some(variable) = term.name()
+                    {
+                        determined.insert(variable);
+                    }
+                }
+                pending.swap_remove(index);
+            }
+            if pending.is_empty() {
+                return true;
+            }
+            if pending.len() == before {
+                return false;
+            }
+        }
+    }
+
     /// This rule re-headed onto `concept`: its body, with the variables of
     /// the head fields it shares with the concept renamed to the concept's
     /// field names, joined with stored scans of the concept's other
@@ -2029,5 +2084,65 @@ mod tests {
             Err(TypeError::CoalesceTypeMismatch { .. }) => {}
             other => panic!("expected CoalesceTypeMismatch, got {other:?}"),
         }
+    }
+
+    fn compiled(json: serde_json::Value) -> DeductiveRule {
+        let descriptor: DeductiveRuleDescriptor =
+            serde_json::from_value(json).expect("a rule descriptor");
+        descriptor.compile().expect("the rule compiles")
+    }
+
+    /// A body reading fields of `this`, and of an entity a read of `this`
+    /// bound, each under `last`, binds one row per entity.
+    #[dialog_common::test]
+    fn a_body_keyed_by_this_under_last_is_single_valued() {
+        let rule = compiled(serde_json::json!({
+            "deduce": { "with": { "title": { "the": "member/title", "as": "Text" } } },
+            "when": [
+                {
+                    "assert": { "with": { "group": { "the": "member/group", "as": "Entity" } } },
+                    "where": { "this": { "?": { "name": "this" } }, "group": { "?": { "name": "group" } } }
+                },
+                {
+                    "assert": { "with": { "name": { "the": "group/name", "as": "Text" } } },
+                    "where": { "this": { "?": { "name": "group" } }, "name": { "?": { "name": "title" } } }
+                }
+            ]
+        }));
+        assert!(rule.single_valued());
+    }
+
+    /// A body that finds `this` as the value of another entity's field
+    /// binds a row per such entity: several memberships of one person.
+    #[dialog_common::test]
+    fn a_body_keyed_by_another_entity_is_not_single_valued() {
+        let rule = compiled(serde_json::json!({
+            "deduce": { "with": { "role": { "the": "member/role", "as": "Text" } } },
+            "when": [{
+                "assert": { "with": {
+                    "person": { "the": "membership/person", "as": "Entity" },
+                    "role": { "the": "membership/role", "as": "Text" }
+                }},
+                "where": {
+                    "this": { "?": { "name": "membership" } },
+                    "person": { "?": { "name": "this" } },
+                    "role": { "?": { "name": "role" } }
+                }
+            }]
+        }));
+        assert!(!rule.single_valued());
+    }
+
+    /// A read under `all` binds a row per value.
+    #[dialog_common::test]
+    fn a_body_reading_under_all_is_not_single_valued() {
+        let rule = compiled(serde_json::json!({
+            "deduce": { "with": { "tag": { "the": "item/label", "as": "Text" } } },
+            "when": [{
+                "assert": { "with": { "tag": { "the": "item/tag", "as": "Text", "select": "all" } } },
+                "where": { "this": { "?": { "name": "this" } }, "tag": { "?": { "name": "tag" } } }
+            }]
+        }));
+        assert!(!rule.single_valued());
     }
 }
