@@ -751,13 +751,18 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.sources.len() + 1);
 
         // The choosing writes this read meets, settled cell by cell:
-        // the line's claims they succeed are hidden from every line,
-        // and the values the cells already held are hidden from the
-        // layers' own rows, as the commit would write nothing for them.
+        // the line's claims they succeed, or succeed and write back, are
+        // hidden from every line, and the values the cells already held
+        // are hidden from the layers' own rows, as the commit would
+        // write nothing for them.
         let settled = self.settle_within(&input).await?;
         let succeeded: Vec<&Artifact> = settled
             .iter()
-            .flat_map(|(_, cells)| cells.iter().flat_map(|cell| cell.succeeded.iter()))
+            .flat_map(|(_, cells)| {
+                cells
+                    .iter()
+                    .flat_map(|cell| cell.succeeded.iter().chain(cell.replaced.iter()))
+            })
             .collect();
         let hidden_in = |line: &Manifest| -> Arc<HashSet<SortKey>> {
             Arc::new(succeeded.iter().map(|fact| sort_key(fact, line)).collect())

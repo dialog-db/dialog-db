@@ -4,6 +4,8 @@ mod induce;
 mod invariants;
 #[cfg(test)]
 mod migration;
+#[cfg(test)]
+mod oracle;
 pub(crate) use induce::induction_ignores;
 mod query;
 mod succession;

@@ -232,9 +232,11 @@ impl ReadSettlement {
 
     /// How a read sees `cell` once settled: the claims hidden from the
     /// line and the store's rows alike, the line's that the writes
-    /// succeeded and the store's the writes left dead; and the store's
-    /// rows hidden from it alone, a value the line holds a live claim
-    /// of, whose row the line's is. `None` for a cell no choosing write
+    /// succeeded and the store's the writes left dead; the store's rows
+    /// hidden from it alone, a value the line holds a live claim of,
+    /// whose row the line's is; and the line's rows hidden from it
+    /// alone, a value the writes succeeded and wrote back, whose row the
+    /// store's is. `None` for a cell no choosing write
     /// wrote, which reads as written.
     pub(crate) fn settlement_of(
         &self,
@@ -268,11 +270,14 @@ impl ReadSettlement {
             }
         }
         for value in &held {
-            if cell.line.contains(value)
-                && !cell.restaged.contains(value)
-                && live.contains(&value)
-                && !settlement.held.iter().any(|kept| kept.is == *value)
-            {
+            if !cell.line.contains(value) || !live.contains(&value) {
+                continue;
+            }
+            if cell.restaged.contains(value) {
+                if !settlement.replaced.iter().any(|gone| gone.is == *value) {
+                    settlement.replaced.push(fact(value));
+                }
+            } else if !settlement.held.iter().any(|kept| kept.is == *value) {
                 settlement.held.push(fact(value));
             }
         }
@@ -353,6 +358,22 @@ async fn claims_of(
         });
     }
     Ok(claims)
+}
+
+/// The stored claims a cell holds as `view` reads them, each with its
+/// standing: what a reference election runs over.
+#[cfg(test)]
+pub(crate) async fn stored_claims(
+    view: &QueryEnv<'_>,
+    the: &Attribute,
+    of: &Entity,
+) -> Result<Vec<(Value, Standing)>, CommitError> {
+    Ok(claims_of(view, the, of)
+        .await?
+        .into_iter()
+        .filter(|candidate| candidate.claim)
+        .filter_map(|candidate| Some((candidate.value, candidate.standing?)))
+        .collect())
 }
 
 /// The attribute concept over `the`, under which the rules deriving the

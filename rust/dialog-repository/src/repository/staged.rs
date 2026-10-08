@@ -115,6 +115,10 @@ pub(crate) struct CellSettlement {
     pub(crate) succeeded: Vec<Artifact>,
     /// The written facts the cell already held as claims.
     pub(crate) held: Vec<Artifact>,
+    /// The line's claims of values the cell's writes succeeded and then
+    /// wrote back: the staged row replaces the line's, so only the
+    /// line's is hidden.
+    pub(crate) replaced: Vec<Artifact>,
 }
 
 /// What a read settlement observed: the lines it settled against and
