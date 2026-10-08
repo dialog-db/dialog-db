@@ -339,6 +339,10 @@ async fn replay(seed: u64, steps: usize) -> Result<()> {
             }
         } else {
             let from = (at + 1 + random.below(branches.len() - 1)) % branches.len();
+            // A replica that has committed nothing has no line to pull.
+            if branches[from].revision().is_none() {
+                continue;
+            }
             history.push(format!("{} pulls from {}", names[at], names[from]));
             branches[at]
                 .pull()
@@ -356,7 +360,7 @@ async fn replay(seed: u64, steps: usize) -> Result<()> {
         let mut changed = false;
         for at in 0..branches.len() {
             for from in 0..branches.len() {
-                if at != from {
+                if at != from && branches[from].revision().is_some() {
                     changed |= branches[at]
                         .pull()
                         .from(&branches[from])
