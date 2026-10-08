@@ -7,10 +7,10 @@
     "rules": 100
   },
   "counters": {
-    "archive.get": 11,
-    "archive.get.bytes": 394768,
-    "archive.put": 12,
-    "archive.put.bytes": 434500,
+    "archive.get": 10,
+    "archive.get.bytes": 436160,
+    "archive.put": 9,
+    "archive.put.bytes": 431548,
     "span.apply_batch_reusing": 1,
     "span.buffer_records": 2,
     "span.commit": 1,
@@ -21,5 +21,5 @@
     "span.settle": 1,
     "span.write_instructions": 1
   },
-  "instructions": 174383863
+  "instructions": 292881776
 }

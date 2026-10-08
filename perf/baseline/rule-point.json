@@ -14,11 +14,11 @@
     "span.buffer_records": 0,
     "span.commit": 0,
     "span.hydrate_rule": 1,
-    "span.resolve_bundle": 9,
-    "span.resolve_rules": 14,
+    "span.resolve_bundle": 5,
+    "span.resolve_rules": 8,
     "span.seal_batch": 0,
     "span.settle": 0,
     "span.write_instructions": 0
   },
-  "instructions": 69114639
+  "instructions": 68293585
 }

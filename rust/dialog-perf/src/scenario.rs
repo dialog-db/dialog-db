@@ -75,7 +75,11 @@ pub fn catalog() -> Vec<Spec> {
             name: "commit-succeed",
             size: 500,
             about: "one transaction rewriting every entity's name under `last`: each write elects and retracts a standing claim",
-            volatile: false,
+            // Like `transaction-reads`, its commit's tree write varies
+            // between runs of one binary (1.60 G to 1.85 G instructions,
+            // every counter equal), in the delete path's forced merges,
+            // on the PR head as on this branch. Gated on counters.
+            volatile: true,
             prepare: |size| Box::pin(commit::succeed(size)),
         },
         Spec {
