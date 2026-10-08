@@ -137,52 +137,75 @@ subscription that maintains the fixpoint across polls keeps the
 standings too: a deletion re-derives a suspect row at the newest
 derivation that survives it.
 
-### `unless` and optional premises evaluate under the cycle policy
+### `unless`, optional premises and elections are stratified; a rule closing a cycle through one is quarantined
 
 [#583](https://github.com/dialog-db/dialog-db/pull/583), detail in
 [`notes/attribute-heads.md`](./notes/attribute-heads.md).
 
-A deductive rule admits `unless` and optional premises. Outside a
-recursive component they mean what they always meant. Inside one, where
-the premise would read a relation the fixpoint is still deriving, the
-engine no longer refuses the program. It evaluates the premise under
-the cycle policy: a negation holds, and an optional read yields the
-absent row for every entity the rule otherwise derives, beside the
-present rows. The component stays positive and has a least fixpoint.
+A deductive rule admits `unless` and optional premises. A read under a
+choosing policy (`last`, `top`, `max`, `min`) is treated the same way:
+it returns a candidate *and nothing better*, which negates the better
+candidates, so a ranked fallback is an absence test however it is
+spelled. Outside a recursive component all of these are stratified:
+the premise reads a relation derived in full before the rule runs, and
+rules can derive, decide and derive again from the decision.
+
+Inside a component, such a premise would read a relation the cycle is
+still deriving, which has no stratified meaning. Merging rule sets that
+are each fine can close such a cycle, so the program is never refused.
+Instead the program analysis *quarantines* one rule of the cycle, and
+evaluation leaves it out:
+
+- It takes the cycle's plainest absence test: an `unless` or an
+  optional read first, then a ranked election, then `last`.
+- It sets aside the rule inside the cycle that derives what that test
+  reads, so the test keeps the meaning it had over everything outside
+  the cycle, the meaning it had before the cycle formed. When the
+  test's own rule derives what it tests, that rule is set aside.
+- Among equals, the greatest rule identity.
+
+The choice depends on the rules alone, so every replica holding the
+same rules quarantines the same ones, and a quarantine lifts by itself
+once a rule of the cycle is retracted. A plain recursion under `all`,
+such as an ancestor closure, is positive and unaffected.
 
 What this changes for you:
 
-- `EvaluationError::NegationThroughRecursion` is gone. A program that
-  used to fail at query time now answers. If you relied on the error
-  to catch a rule negating into its own cycle, read
-  `ProgramAnalysis::absences()` instead: it lists every premise the
-  policy governs, with the concept it tests. Tonk will surface these
-  as warnings; the plumbing for that is a follow-up.
+- `ProgramAnalysis::quarantined()` lists the rules set aside, each with
+  the concept it concludes and the cycle it closed.
+  `ConceptRules::without` is how a bundle leaves them out.
+- A recursive rule that reads its own relation under `last`, or under
+  any choosing policy, is quarantined: recursion through an election
+  is not expressible. Read the relation under `all` inside the
+  recursion and elect where it is read. Inheritance down a hierarchy
+  (a node's own value, else its parent's) is the case this rules out;
+  lattice-valued recursion could admit it later.
+- `EvaluationError::NegationThroughRecursion` is gone, and the cycle
+  policy that replaced it on this branch is gone too.
+  `ProgramAnalysis::absences()` now lists only what a cycle with no
+  rule to set aside still holds.
 - `TypeError::NegationInOpenRule` is gone. It existed on this branch
-  only, between the refusal landing and this change.
+  only.
 - `reduce` in a deductive rule is still refused
   (`TypeError::ReduceInOpenRule`). A fold has no reading over a set
   that is still growing. Put the fold in a query, a subscription or an
   inductive rule.
 
-Why: a deductive rule is installed as facts and read by whatever
-program exists when a query runs, so a set of rules merged from
-several replicas has to be evaluable and has to mean one thing. The
-first attempt bought that by refusing negation outright, which threw
-away every stratified negation to prevent the unstratified ones. The
-cycle policy keeps the goal and drops the cost: no merge can produce a
-program a query cannot answer, and every replica derives the same rows
-from the same rules and facts, whatever order they arrived in.
+Why: rules are installed as facts and merged from several replicas, so
+whatever set arrives has to be evaluable and mean one thing everywhere.
+Refusing negation outright threw away every stratified negation to
+prevent the unstratified ones; reading a negation inside a cycle as
+holding (the cycle policy) answered, but answered wrongly, ignoring
+even stored facts the negation was written against. Quarantine keeps
+every query answering and every answer a stratified one, and reports
+what it set aside.
 
-What is and is not guaranteed, stated plainly. Guaranteed: every
-program evaluates; evaluation is deterministic and independent of
-arrival order; inside a component derivation is monotone. Not
-guaranteed: that a rule's derived set only grows as rules land. A
-negation or an optional read outside a cycle can lose derivations when
-a rule starts deriving what it tests, and a rule that closes a cycle
-through such a premise changes the premise's meaning from stratified to
-the cycle policy. Both are deterministic; neither is monotone in the
-rule set.
+What is guaranteed: every program evaluates; evaluation is
+deterministic and independent of arrival order; what a query returns
+is the stratified answer of the program minus the quarantined rules.
+What is not: that a rule's derived set only grows as rules land. A
+negation can lose derivations when a rule starts deriving what it
+tests; that is what negation means.
 
 ### Selection policies choose members; aggregators are gone from `select`
 
@@ -313,5 +336,5 @@ happens to it.
   or a `top` field comes back as `last`.
 - Programs the older release refused run. `unless` and optional
   premises inside a recursive component were an error
-  (`NegationThroughRecursion`); they evaluate under the cycle policy
-  now, and the analysis reports each such premise.
+  (`NegationThroughRecursion`); the analysis now quarantines a rule of
+  such a cycle and every query answers, without the rule.

@@ -22,26 +22,19 @@
 //!    for rule sets that generate unboundedly (e.g. through
 //!    formulas).
 //!
-//! **The cycle policy.** A premise that tests for absence — an
-//! `unless` over a concept, or a set-widened read of one — has
+//! **Absence tests.** A premise that tests for absence (an `unless`
+//! over a concept, a set-widened read of one, or a read under a
+//! choosing policy, which negates the better candidates) has
 //! stratified semantics when the concept it reads sits below the
 //! component: the relation is derived in full before the fixpoint
-//! runs, so the test reads a finished set. When the concept is a
-//! member of the same component, the test would read a set the
-//! fixpoint is still deriving, and no order-independent answer exists
-//! for it. Such a premise evaluates under the cycle policy instead: a
-//! negated in-component premise holds, and a set-widened in-component
-//! read yields the absent row for every entity its rule otherwise
-//! derives, as well as the present rows the table offers. Both keep
-//! the component positive, so it has a least fixpoint; the policy
-//! depends on the rule set alone and never on the order candidates
-//! arrive, so every replica derives the same rows however its rules
-//! were merged. Attribute concepts read under a choosing policy elect
-//! among the component's candidates at the exit, where the absent
-//! row's `coalesce`d fallback stands among them. The dependency
-//! analysis reports every premise the policy governs
-//! ([`ProgramAnalysis::absences`]), since a rule rarely means it.
-//! A fold inside a component has no such reading and stays refused
+//! runs. When the concept is a member of the same component the test
+//! has no stratified meaning, and the program analysis quarantines a
+//! rule of the cycle ([`ProgramAnalysis::quarantined`]) so no
+//! component evaluated here holds one. The in-component readings
+//! below (a negated premise holds; a set-widened read also yields the
+//! absent row) remain only for a cycle with no rule to set aside,
+//! which [`ProgramAnalysis::absences`] reports. A fold inside a
+//! component has no reading at all and stays refused
 //! ([`ProgramAnalysis::check`]).
 //!
 //! Goal-directed (magic-set) filtering of the component's answer

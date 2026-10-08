@@ -49,16 +49,11 @@ Fixed on this branch, each with its test now passing:
 | 6 (rest): standings through the fixpoint | Each fixpoint row stands as the newest of its derivations; a row raised to a newer standing re-enters the delta; DRed re-derives a suspect at its newest surviving derivation; the exit election and every join out of the component carry it. |
 | 18: nondeterministic trees in the perf harness | Opening the space records random access facts (key, encrypted secret, delegation) in `main`; the scenarios now commit to their own branch, so the same commits mint the same head. |
 | Commit consistency under `last` | Equal editions order by version hash before value, at every election site (the cardinality-one read used to fall back to the fact hash). Pinned end to end: concurrent commits on two replicas, mutually pulled, are won by one commit in every cell. |
+| 5: absence tests inside a cycle | Stratified negation and elections (an election negates the better candidates), with quarantine instead of the cycle policy: the analysis sets aside the rule inside the cycle that derives what the cycle's plainest absence test reads, so the test keeps its meaning over everything outside the cycle. Deterministic over the rule set; lifts when a rule of the cycle is retracted; listed by `ProgramAnalysis::quarantined`. Pinned with the sentinel case (`a_ranked_default_inside_a_cycle_still_elects`). |
+| Oracle findings | A reference election, written apart from the engine, checks the tree, the transaction's settlement and every read over generated histories of writes and pulls across three replicas. It found three ways a transaction read differently from what its commit left: a value succeeded and written back, an `all` write of a held value, and a held value a write refreshes. Each is fixed and pinned by name. |
 
 Open, each needing a decision:
 
-- **5, absence tests inside a cycle.** Options: refuse per component and report; evaluate
-  the negation against stored facts and lower strata only; a well-founded semantics.
-  The same defect is reachable without `unless`: an election is "this candidate and
-  nothing better", so a ranked choice over a sentinel default is an absence test, and
-  inside a cycle the choice reads its candidate set
-  (`a_ranked_default_inside_a_cycle_still_elects`). Whatever the decision, it covers
-  elections inside a cycle as well as `unless`.
 - **10, field names in identity.** Not blocking.
 
 ## Decided since the first review

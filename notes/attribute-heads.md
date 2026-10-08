@@ -88,7 +88,7 @@ the same way on every replica; a writer that saw a claim and succeeded
 it retracted it. Nothing is ever refused at a merge, because the merge
 is a union of claims and the policy reads the union.
 
-## Open rules and the cycle policy
+## Open rules and quarantine
 
 A deductive rule is *open*: it is installed as replicated facts, any
 rule anyone installs later may read its head, and its body is resolved
@@ -98,24 +98,45 @@ has to be computable: nothing a merge can produce may make a query
 unanswerable. The first attempt at this refused `unless` in deductive
 rules, so that every rule would be monotone. That was too much: a
 negation whose target no cycle derives is stratified and perfectly
-answerable, and most negations are that.
+answerable, and most negations are that. It was also not enough: an
+election is a negation too, since a read under a choosing policy
+returns a candidate *and nothing better*, so a ranked fallback over a
+default tests absence as surely as `unless` does.
 
 What is actually required is that the program never meets a premise
-it cannot evaluate. The one such premise is an absence test — an
-`unless` over a concept, or a set-widened read of one — whose target
-is derived in the same recursive component as the rule, so it would
-read a set the fixpoint is still deriving. The *cycle policy* gives
-that premise a reading instead of an error: inside its component a
-negation holds, and a set-widened read yields the absent row for every
-entity its rule otherwise derives, beside the present rows the table
-offers. Both keep the component positive, so it has a least fixpoint;
-both depend on the rule set alone, never on the order candidates
-arrive, so every replica derives the same rows however its rules were
-merged. Outside a component nothing changes: the negation holds when
-the fact is absent, the optional read sees absence, `coalesce` fills
-it. The dependency analysis reports every premise the policy governs
-(`ProgramAnalysis::absences`), because a rule rarely means it; tonk
-turns the report into a warning.
+it cannot give a stratified meaning: an absence test (an `unless`, a
+set-widened read, or an election) whose target is derived in the same
+recursive component as the rule, so it would read a set the fixpoint
+is still deriving. A merge of rule sets each fine on its own can close
+such a cycle, so the program is never refused. The analysis
+*quarantines* one rule of the cycle instead, and evaluation leaves it
+out (`ProgramAnalysis::quarantined`). It takes the cycle's plainest
+absence test, an `unless` or an optional read before a ranked election
+before `last`, and sets aside the rule inside the cycle deriving what
+the test reads: the test then keeps the meaning it had over everything
+outside the cycle, which is the meaning it had before the cycle
+formed. When the test's own rule derives what it tests, that rule goes.
+Among equals, the greatest identity. The choice depends on the rules
+alone, so every replica quarantines the same rules, and a quarantine
+lifts once a rule of the cycle is retracted. Outside a component
+nothing changes: the negation holds when the fact is absent, the
+optional read sees absence, the election picks the best candidate of a
+relation derived in full.
+
+An earlier version gave the premise a reading inside the cycle instead
+(a negation held, an optional read also yielded the absent row). It
+kept every query answering, but its answers ignored even the stored
+facts a negation was written against, and an install elsewhere could
+change what a negation meant. Quarantine keeps the answering and gives
+up only the rule that closed the cycle, named in the report.
+
+Recursion through an election is the cost: a rule reading its own
+relation under `last` is quarantined. Read under `all` inside the
+recursion and elect where the relation is read. Inheritance down a
+hierarchy, a node's own value or else its parent's, is what this rules
+out; lattice-valued recursion, where the chosen value may feed the
+recursion as long as it is only used in ways that respect its order,
+could admit it later.
 
 So `unless` and optional premises stay in deductive rules. `reduce`
 does not: a fold has no reading over a set still growing, and unlike a
@@ -382,7 +403,7 @@ and sees the built-in's head for it like any rule's.
 
 ### Reducing rules
 
-A deductive rule refuses `reduce` (see the cycle policy above). The
+A deductive rule refuses `reduce` (see quarantine above). The
 plumbing that split a reducing rule's heads and folded them stands in
 the code until inductive rules take `reduce`, where a fold has a
 sealed state to read and a fact to write.

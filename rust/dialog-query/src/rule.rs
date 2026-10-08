@@ -177,8 +177,9 @@ pub trait Compile: Sized + Into<Rule> {
 /// whatever program exists when a query runs, so it admits no
 /// `reduce`: a fold withdraws its result when a fact arrives and has no
 /// reading inside a dependency cycle. An `unless` is admitted: outside
-/// a cycle it is stratified, inside one the cycle policy evaluates it
-/// (see the [fixpoint](crate::concept::query::fixpoint) module). The
+/// a cycle it is stratified, and a rule closing a cycle through it is
+/// quarantined by the program analysis
+/// ([`ProgramAnalysis::quarantined`](crate::session::ProgramAnalysis::quarantined)). The
 /// check depends on the rule alone, never on the rest of the program,
 /// so no merge of rule sets is ever rejected.
 fn open_rule_error<T: Compile>(
@@ -187,9 +188,9 @@ fn open_rule_error<T: Compile>(
     reduce: &[(String, ReduceSpec)],
 ) -> Option<TypeError> {
     // A negated attribute or concept premise asks that a fact be
-    // absent. Outside a dependency cycle that is stratified; inside
-    // one the cycle policy evaluates it, so either way the rule
-    // evaluates. A fold has no such reading, so it stays out.
+    // absent. Outside a dependency cycle that is stratified; a rule
+    // closing a cycle through it is quarantined, so either way the
+    // program evaluates. A fold has no such reading, so it stays out.
     if !reduce.is_empty() {
         let rule = Box::new(T::in_progress(conclusion.clone(), premises.to_vec()).into());
         return Some(TypeError::ReduceInOpenRule { rule });

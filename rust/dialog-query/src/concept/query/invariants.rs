@@ -221,14 +221,13 @@ async fn a_fact_about_another_entity_does_not_change_a_derived_concepts_rows_und
     Ok(())
 }
 
-/// `x/p(e) :- x/q(e), unless x/r(e)` and `x/r(e) :- x/p(e)`. The
-/// changelog says that inside a recursive component "a negation holds".
-/// Whatever reading one takes of the cycle, a *stored* `x/r` fact is
-/// not something the fixpoint is still deriving: an entity with a
-/// stored `x/r` is excluded by the rule as written, and must not come
-/// out as `x/p`. The cycle policy drops the premise entirely and
-/// derives `p` for it anyway, so the result violates the rule's own
-/// `unless` against a fact that was in the store before any rule ran.
+/// `x/p(e) :- x/q(e), unless x/r(e)` and `x/r(e) :- x/p(e)`. A
+/// *stored* `x/r` fact is not something the cycle is still deriving: an
+/// entity with a stored `x/r` is excluded by the rule as written, and
+/// must not come out as `x/p`. The analysis quarantines `x/r(e) :-
+/// x/p(e)`, the rule deriving what the negation reads, so the negation
+/// reads the stored facts it was written against. (The cycle policy
+/// this replaced dropped the premise and derived `p` for `b` anyway.)
 #[dialog_common::test]
 async fn a_negation_inside_a_cycle_still_sees_stored_facts() -> anyhow::Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -325,10 +324,11 @@ async fn relation_under(
 /// `x/p(e) :- x/q(e), unless x/r(e)` with a stored `x/r(b)` derives
 /// `p` for `a` alone: a stratified negation. Installing two rules that
 /// neither read `q` nor touch `p`'s body, `x/s(e) :- x/p(e)` and
-/// `x/r(e) :- x/s(e)`, closes a cycle through the negation, and the
-/// cycle policy then reads it as holding: `p` gains `b`. The meaning
-/// of a rule nobody edited changes with an install elsewhere, which a
-/// replica merge can do at any time.
+/// `x/r(e) :- x/s(e)`, closes a cycle through the negation, which a
+/// replica merge can do at any time. The analysis quarantines the rule
+/// deriving what the negation reads, `x/r(e) :- x/s(e)`, so the meaning
+/// of the rule nobody edited stays what it was. (The cycle policy this
+/// replaced read the negation as holding, and `p` gained `b`.)
 #[dialog_common::test]
 async fn a_stratified_negation_keeps_its_meaning_when_another_rule_closes_a_cycle()
 -> anyhow::Result<()> {
@@ -397,10 +397,11 @@ async fn a_stratified_negation_keeps_its_meaning_when_another_rule_closes_a_cycl
 /// and nothing better", and the "nothing better" is a negation. With
 /// `b`'s stored `x/real`, only `a` is flagged. A rule that reads
 /// `x/flag` into `x/real` closes a cycle through the choice, and
-/// derives nothing (no entity has an `x/mirror`). Inside the cycle the
-/// choice reads its candidate set, `{"set", "none"}` for `b`, so the
-/// sentinel matches and `b` is flagged too: the cycle policy for
-/// negation, reached through a policy instead of `unless`.
+/// derives nothing (no entity has an `x/mirror`). The analysis treats
+/// the election as the absence test it is and quarantines that rule,
+/// the one deriving what the choice reads. (Before, the choice read its
+/// candidate set inside the cycle, `{"set", "none"}` for `b`, and
+/// flagged `b` too: the cycle policy reached through a policy.)
 #[dialog_common::test]
 async fn a_ranked_default_inside_a_cycle_still_elects() -> anyhow::Result<()> {
     let (operator, profile) = test_session_with_peer().await;

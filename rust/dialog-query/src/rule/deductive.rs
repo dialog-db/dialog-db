@@ -1513,9 +1513,9 @@ mod tests {
     }
 
     /// A deductive rule admits an `unless` premise: outside a
-    /// dependency cycle it is stratified, inside one the cycle policy
-    /// evaluates it, so the rule compiles whatever program it later
-    /// meets.
+    /// dependency cycle it is stratified, and a rule closing a cycle
+    /// through it is quarantined, so the rule compiles whatever program
+    /// it later meets.
     #[dialog_common::test]
     fn it_admits_negation_in_a_deductive_rule() {
         use crate::negation::Negation;

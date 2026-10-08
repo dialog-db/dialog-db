@@ -69,9 +69,10 @@ use std::iter;
 /// Polarity of a dependency edge: whether the rule body references
 /// the concept positively (an ordinary premise), under `unless`,
 /// set-widened, or from a *reducing* rule whose fold must read the
-/// complete relation. A negative or optional edge inside a dependency
-/// cycle is an absence test the cycle policy governs; an aggregating
-/// one is a stratification violation.
+/// complete relation, or under a choosing policy. A negative, optional
+/// or electing edge inside a dependency cycle is an absence test the
+/// analysis quarantines a rule over; an aggregating one is a
+/// stratification violation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Polarity {
     /// The body asserts the concept.
@@ -145,12 +146,10 @@ pub struct Quarantine {
 }
 
 /// An absence test inside a dependency cycle: some rule concluding
-/// `concept` negates, or reads set-widened, `target`, and both live
-/// in the same cycle, so the test reads a set the cycle is still
-/// deriving. The cycle policy evaluates it as satisfied (the negation
-/// holds; the optional read yields the absent row as well), which
-/// keeps the component positive and every program evaluable, and is
-/// rarely what the rule's author meant. Reported, never refused.
+/// `concept` negates, reads set-widened or elects among `target`, and
+/// both live in the same cycle, so the test reads a set the cycle is
+/// still deriving. The analysis quarantines a rule of every such cycle;
+/// one left over is a cycle with no rule to set aside, reported here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AbsenceInCycle {
     /// The concluding concept whose rule tests absence in its own
@@ -166,8 +165,8 @@ pub struct AbsenceInCycle {
 /// `concept` folds over `aggregated`, and both live in the same
 /// dependency cycle, so the fold reads a relation the cycle itself
 /// is still deriving. No stratified semantics exists for such a
-/// program, and no cycle policy gives a fold a deterministic reading
-/// over a set still growing.
+/// program, and a fold has no deterministic reading over a set still
+/// growing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AggregationViolation {
     /// The concluding concept whose reducing rule folds into its
@@ -280,8 +279,8 @@ fn structural_edges(descriptor: &ConceptDescriptor) -> Vec<(ConceptDescriptor, P
 
 /// A snapshot of the program's dependency structure: edges,
 /// strongly connected components, the recursive concept set, the
-/// absence tests the cycle policy governs, and every stratification
-/// violation. Computed by
+/// rules quarantined, the absence tests left over, and every
+/// stratification violation. Computed by
 /// [`ProgramAnalysis::analyze`] from a registry's rule map and
 /// cached until the next install.
 #[derive(Clone, Debug, Default)]
@@ -710,9 +709,9 @@ impl ProgramAnalysis {
         &self.violations
     }
 
-    /// Every absence test inside its own dependency cycle, in
-    /// deterministic (concept-sorted) order: what the cycle policy
-    /// evaluates as satisfied, and what an authoring tool warns about.
+    /// Every absence test still inside its own dependency cycle once the
+    /// quarantined rules are left out, in deterministic (concept-sorted)
+    /// order: none, unless a cycle had no rule to set aside.
     pub fn absences(&self) -> &[AbsenceInCycle] {
         &self.absences
     }
@@ -763,9 +762,8 @@ impl ProgramAnalysis {
     /// [`EvaluationError::AggregationThroughRecursion`]; otherwise
     /// the closure is classified [`Closure::Recursive`] when it
     /// contains a cycle (the fixpoint evaluator's cue) or
-    /// [`Closure::Acyclic`] for ordinary top-down evaluation. An
-    /// absence test inside a cycle is not a failure: the cycle policy
-    /// evaluates it (see [`Self::absences`]).
+    /// [`Closure::Acyclic`] for ordinary top-down evaluation, over the
+    /// program without the quarantined rules (see [`Self::quarantined`]).
     ///
     /// Takes the descriptor rather than the entity because the
     /// queried concept may be unknown to the analysis (never

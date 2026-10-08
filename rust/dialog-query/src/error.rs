@@ -689,9 +689,8 @@ pub enum EvaluationError {
     /// `concept` folds over `aggregated` inside the same dependency
     /// cycle, so the fold reads a relation the cycle itself is
     /// still deriving. No stratified semantics exists for such a
-    /// program, and unlike a negation or an optional read, which the
-    /// cycle policy evaluates, a fold has no deterministic reading
-    /// over a set still growing. Rules are installed unconditionally
+    /// program, and a fold has no deterministic reading over a set still
+    /// growing. Rules are installed unconditionally
     /// (replicas must converge on the merged rule set), so this
     /// surfaces at query time, on exactly the queries whose closure
     /// folds in a cycle. A deductive rule refuses `reduce` at compile
