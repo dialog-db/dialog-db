@@ -23,16 +23,18 @@
 //!    formulas).
 //!
 //! **Absence tests.** A premise that tests for absence (an `unless`
-//! over a concept, a set-widened read of one, or a read under a
-//! choosing policy, which negates the better candidates) has
-//! stratified semantics when the concept it reads sits below the
-//! component: the relation is derived in full before the fixpoint
-//! runs. When the concept is a member of the same component the test
-//! has no stratified meaning, and the program analysis quarantines a
-//! rule of the cycle ([`ProgramAnalysis::quarantined`]) so no
-//! component evaluated here holds one; a cycle with no rule to set
-//! aside fails with [`EvaluationError::AbsenceThroughRecursion`]. A
-//! fold inside a component has no reading at all and stays refused
+//! over a concept, a set-widened read of one, or a read under a ranked
+//! policy, which negates the better candidates) has stratified
+//! semantics when the concept it reads sits below the component: the
+//! relation is derived in full before the fixpoint runs. When the
+//! concept is a member of the same component the test has no
+//! stratified meaning, and the program analysis quarantines a rule of
+//! the cycle ([`ProgramAnalysis::quarantined`]) so no component
+//! evaluated here holds one; a cycle with no rule to set aside fails
+//! with [`EvaluationError::AbsenceThroughRecursion`]. A read under
+//! `last` is not one: inside its component it reads every candidate the
+//! fixpoint has derived, and its readers elect the newest at the exit.
+//! A fold inside a component has no reading at all and stays refused
 //! ([`ProgramAnalysis::check`]).
 //!
 //! Goal-directed (magic-set) filtering of the component's answer

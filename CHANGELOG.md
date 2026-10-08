@@ -143,10 +143,11 @@ derivation that survives it.
 [`notes/attribute-heads.md`](./notes/attribute-heads.md).
 
 A deductive rule admits `unless` and optional premises. A read under a
-choosing policy (`last`, `top`, `max`, `min`) is treated the same way:
-it returns a candidate *and nothing better*, which negates the better
-candidates, so a ranked fallback is an absence test however it is
-spelled. Outside a recursive component all of these are stratified:
+ranked policy (`top`, a relation chain, `max`, `min`) is treated the
+same way: it returns a candidate *and nothing better*, which negates
+the better candidates, so a ranked fallback is an absence test however
+it is spelled. A read under `last` is too outside a cycle; inside one
+it reads every candidate and elects at the cycle's exit (see below). Outside a recursive component all of these are stratified:
 the premise reads a relation derived in full before the rule runs, and
 rules can derive, decide and derive again from the decision.
 
@@ -165,7 +166,7 @@ evaluation leaves it out:
   rules by registration.
 - Among rules installed together, it takes the cycle's plainest
   absence test (an `unless` or an optional read first, then a ranked
-  election, then `last`) and sets aside the rule inside the cycle that
+  election) and sets aside the rule inside the cycle that
   derives what that test reads; when the test's own rule derives what
   it tests, that rule.
 - Then the greatest rule identity.
@@ -189,10 +190,15 @@ What this changes for you:
   `ConceptRules::without` is how a bundle leaves them out, and
   `ConceptRules::install_at` installs a rule with when it was
   installed (`Installed`).
-- A recursive rule that reads its own relation under `last`, or under
-  any choosing policy, is quarantined: recursion through an election
-  is not expressible. Read the relation under `all` inside the
-  recursion and elect where it is read. Inheritance down a hierarchy
+- A recursive rule may read its own relation under `last`: inside the
+  cycle the read sees every candidate the fixpoint derives, and its
+  readers elect the newest once the cycle is derived in full. A
+  notebook positioning a run of inserted blocks from each block's
+  successor relies on this. A read under a ranked policy (`top`, a
+  relation chain, `max`, `min`) inside its own cycle is an absence
+  test and is quarantined: a default chain is "this, else the
+  default", which has no stratified meaning while "this" is still
+  being derived. Inheritance down a hierarchy through a ranked choice
   (a node's own value, else its parent's) is the case this rules out;
   lattice-valued recursion could admit it later.
 - `EvaluationError::NegationThroughRecursion` is gone, and the cycle

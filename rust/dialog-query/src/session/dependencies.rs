@@ -20,25 +20,29 @@
 //!
 //! Outside a component, negation, optional reads and elections have
 //! stratified semantics: the premise reads a relation derived in full
-//! before the rule runs. An election is a negation too: a read under a
-//! choosing policy returns a candidate *and nothing better*. Inside a
-//! component such a premise would read a set the cycle is still
-//! deriving, which has no stratified meaning. A merge of rule sets
-//! each fine on its own can close such a cycle, so it is never refused
-//! at install: the analysis *quarantines* a rule of the cycle instead
+//! before the rule runs. A ranked election is a negation too: a read
+//! under `top`, a relation chain, `max` or `min` returns a candidate
+//! *and nothing better*. Inside a component such a premise would read a
+//! set the cycle is still deriving, which has no stratified meaning. A
+//! read under `last` inside its own component is not treated as one: it
+//! reads every candidate the fixpoint derives, and its readers elect
+//! the newest at the exit, so the component stays positive.
+//!
+//! A merge of rule sets each fine on its own can close a cycle through
+//! an absence test, so it is never refused at install: the analysis
+//! *quarantines* a rule of the cycle instead
 //! ([`ProgramAnalysis::quarantined`]), and evaluation leaves it out.
-//! The rule chosen is the one inside the cycle deriving what the
-//! cycle's plainest absence test reads (an `unless` or an optional
-//! read before a ranked election before `last`): the test then keeps
-//! the meaning it had over everything outside the cycle, which is the
-//! meaning it had before the cycle formed. When the test's own rule
-//! derives what it tests, that rule is chosen. Among equals, the
-//! greatest identity, an order every replica shares. The choice depends on the rules alone, so every
-//! replica holding the same rules quarantines the same ones, and a
-//! quarantine lifts by itself once a rule of the cycle is retracted.
-//! A rule is set aside by its content address; a rule built in code
-//! that has none, which a stored rule never is, cannot be, and its
-//! cycle stays, reported by [`ProgramAnalysis::absences`].
+//! The rule chosen is the one of the cycle installed last
+//! ([`Installed`]): every read was well defined before it arrived.
+//! Among rules installed together it is the one inside the cycle
+//! deriving what the cycle's plainest absence test reads (an `unless`
+//! or an optional read before a ranked election), so the test keeps
+//! the meaning it had over everything outside the cycle; when the
+//! test's own rule derives what it tests, that rule. Then the greatest
+//! identity. Install order comes from the commits indexing the rules,
+//! which every replica sees the same, so replicas with the same history
+//! quarantine the same rules, and a quarantine lifts by itself once a
+//! rule of the cycle is retracted.
 //! An aggregating edge inside a component remains a violation: a fold
 //! has no deterministic reading over a set still growing. A deductive
 //! rule refuses `reduce` at compile time, so the violation is
@@ -105,17 +109,19 @@ pub enum Polarity {
 }
 
 impl Polarity {
-    /// Whether the edge tests for something's absence: a negation, an
-    /// optional read or an election.
+    /// Whether the edge tests for something's absence inside a cycle: a
+    /// negation, an optional read or a ranked election. A `last` read is
+    /// not: inside its cycle it reads every candidate, and its readers
+    /// elect the newest once the cycle is derived in full.
     fn tests_absence(self) -> bool {
         matches!(
             self,
-            Polarity::Negative | Polarity::Optional | Polarity::Electing { .. }
+            Polarity::Negative | Polarity::Optional | Polarity::Electing { ranked: true }
         )
     }
 
     /// How plainly the edge tests for absence: an `unless` or an
-    /// optional read most, a ranked election next, `last` least.
+    /// optional read most, a ranked election next.
     fn strength(self) -> u8 {
         match self {
             Polarity::Negative | Polarity::Optional => 2,
@@ -686,7 +692,8 @@ impl ProgramAnalysis {
                 let absence = match polarity {
                     Polarity::Negative => Absence::Negated,
                     Polarity::Optional => Absence::Optional,
-                    Polarity::Electing { .. } => Absence::Elected,
+                    Polarity::Electing { ranked: true } => Absence::Elected,
+                    Polarity::Electing { ranked: false } => continue,
                     Polarity::Aggregating => {
                         violations.push(AggregationViolation {
                             concept: node.clone(),
@@ -1106,26 +1113,20 @@ mod tests {
         assert_eq!(registry.acquire(&b).unwrap().installed().len(), 1);
     }
 
-    /// "An election is a negation too." `same := same`, reading `same`
-    /// under `last`, elects among the very candidates it derives: the
-    /// rule is quarantined.
+    /// `same := same`, reading `same` under `last`, recurses through the
+    /// newest candidate: inside the cycle the read sees every candidate,
+    /// and readers elect once the cycle is derived. Nothing is set aside.
     #[dialog_common::test]
-    fn it_quarantines_a_rule_electing_among_its_own_conclusions() {
+    fn it_recurses_through_a_last_read_of_its_own_conclusions() {
         let same = concept("same");
         let electing = rule(&same, &[&same], &[]);
         let mut registry = RuleRegistry::new();
-        registry.register(electing.clone()).unwrap();
+        registry.register(electing).unwrap();
 
         let analysis = registry.analysis().unwrap();
-        assert_eq!(
-            analysis
-                .quarantined()
-                .iter()
-                .map(|set_aside| set_aside.rule.clone())
-                .collect::<Vec<_>>(),
-            vec![electing.this()]
-        );
-        assert!(!registry.is_recursive(&same.this()).unwrap());
+        assert!(analysis.quarantined().is_empty());
+        assert!(analysis.absences().is_empty());
+        assert!(registry.is_recursive(&same.this()).unwrap());
     }
 
     /// A negation between concepts on no common cycle is stratified

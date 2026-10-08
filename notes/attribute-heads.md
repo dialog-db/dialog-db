@@ -117,7 +117,7 @@ version hash, the order a `last` election uses), and an uncommitted
 one is newer than every commit, so replicas holding the same history
 set aside the same rule however the rules reached them. Among rules
 installed together it takes the cycle's plainest absence test, an
-`unless` or an optional read before a ranked election before `last`,
+`unless` or an optional read before a ranked election,
 and sets aside the rule inside the cycle deriving what the test reads,
 so the test keeps the meaning it had over everything outside the
 cycle; when the test's own rule derives what it tests, that rule goes.
@@ -140,13 +140,20 @@ facts a negation was written against, and an install elsewhere could
 change what a negation meant. Quarantine keeps the answering and gives
 up only the rule that closed the cycle, named in the report.
 
-Recursion through an election is the cost: a rule reading its own
-relation under `last` is quarantined. Read under `all` inside the
-recursion and elect where the relation is read. Inheritance down a
-hierarchy, a node's own value or else its parent's, is what this rules
-out; lattice-valued recursion, where the chosen value may feed the
-recursion as long as it is only used in ways that respect its order,
-could admit it later.
+Recursion through a ranked election is the cost: a rule reading its
+own relation under `top`, a chain, `max` or `min` is quarantined.
+Recursion through `last` is not: inside the cycle a `last` read sees
+every candidate the fixpoint derives, and readers elect the newest at
+the exit, as the fixpoint always has. The component stays positive, so
+it has a least fixpoint, and the answer depends on the rules alone. A
+notebook needs this: it positions a run of inserted blocks from each
+block's successor, reading the position relation under `last`. What
+it gives up is the stratified reading of `last` inside a cycle: a
+derivation can start from a candidate a reader would not elect. Inheritance
+down a hierarchy through a ranked choice, a node's own value or else
+its parent's, is what quarantine rules out; lattice-valued recursion,
+where the chosen value may feed the recursion as long as it is only
+used in ways that respect its order, could admit it later.
 
 So `unless` and optional premises stay in deductive rules. `reduce`
 does not: a fold has no reading over a set still growing, and unlike a

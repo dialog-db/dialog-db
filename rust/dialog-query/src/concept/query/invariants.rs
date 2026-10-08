@@ -603,6 +603,59 @@ async fn a_derived_value_stands_by_the_fact_that_bound_it_through_a_fixpoint() -
     Ok(())
 }
 
+/// A rule reading its own relation under `last` recurses: `x/label(e)
+/// := l :- x/next(e) = n, x/label(n) = l` carries the tail's stored
+/// label down the chain `a -> b -> c -> tail`. Inside the cycle the
+/// `last` read sees every candidate; readers elect once the cycle is
+/// derived. This is how a notebook positions a run of inserted blocks
+/// from each block's successor, so the rule is not set aside.
+#[dialog_common::test]
+async fn a_rule_recursing_through_a_last_read_derives_down_the_chain() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let chain: Vec<Entity> = ["id:a", "id:b", "id:c", "id:tail"]
+        .iter()
+        .map(|id| id.parse())
+        .collect::<Result<_, _>>()?;
+    let mut transaction = branch.transaction();
+    for pair in chain.windows(2) {
+        transaction = transaction.assert(the!("x/next").of(pair[0].clone()).is(pair[1].clone()));
+    }
+    transaction = transaction.assert(the!("x/label").of(chain[3].clone()).is("end".to_string()));
+    transaction.commit().publish().perform(&operator).await?;
+
+    let carry = compile(serde_json::json!({
+        "deduce": { "with": { "label": { "the": "x/label", "as": "Text" } } },
+        "when": [
+            {
+                "assert": { "with": { "next": { "the": "x/next", "as": "Entity", "select": "last" } } },
+                "where": { "this": { "?": { "name": "this" } }, "next": { "?": { "name": "next" } } }
+            },
+            {
+                "assert": { "with": { "label": { "the": "x/label", "as": "Text", "select": "last" } } },
+                "where": { "this": { "?": { "name": "next" } }, "label": { "?": { "name": "label" } } }
+            }
+        ]
+    }))?;
+    let mut registry = RuleRegistry::new();
+    registry.register(carry)?;
+    assert!(registry.analysis()?.quarantined().is_empty());
+    let source = TestEnv::new(&branch, &operator, registry);
+    let expected: Vec<(Value, Value)> = chain
+        .iter()
+        .map(|entity| (Value::Entity(entity.clone()), Value::String("end".into())))
+        .collect();
+    let mut expected = expected;
+    expected.sort_by_key(|pair| format!("{pair:?}"));
+    assert_eq!(
+        relation_under(&source, "x/label", "last").await?,
+        expected,
+        "every block of the chain takes the tail's label"
+    );
+    Ok(())
+}
+
 /// `ok(p) := name :- name(p) = name, nickname(p) = ?nick, unless
 /// banned(?nick)`, over enough people that the negation runs as a
 /// bulk anti-join. The person scanned first has no nickname. The bulk
