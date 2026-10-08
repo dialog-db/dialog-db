@@ -33,7 +33,7 @@ Fixed on this branch, each with its test now passing:
 |---|---|
 | 1, 3: rules the previous release installed | Permanent legacy path removed (conclusion index, legacy scan, commit-time indexing, byte-hash acceptance). `Branch::upgrade_rules` re-installs them; idempotent, convergent, re-runnable when an old replica reintroduces them. |
 | 2: attribute and concept identities | The PR's identities stand. `Branch::upgrade_rules` moves transient markers from a concluded concept's earlier identity to its current one; `dialog_query::migration` reproduces the earlier identities for an application's own references. |
-| 4: covering rule under `last` | The covering rule answers attribute concepts only, whose rows it elects; a multi-field concept selects and joins. |
+| 4: covering rule under `last` | The covering rule answers an attribute concept, whose rows it elects, and a multi-field concept only when its rule's body is single-valued (every premise reads `this`, or an entity such a read bound, under a choosing policy), where its one row is what each field's election picks. Otherwise a multi-field concept selects and joins. |
 | 6 (part): recursive relation under `last` | The component's exit elects under `last` too, so a reader sees one value. |
 | 7: bulk anti-join | The key covers every variable any candidate binds; a candidate missing one falls back to per-candidate evaluation. |
 | 8: plan cache | A head's spelling pairs each field name with its relation. |
@@ -56,6 +56,14 @@ Fixed on this branch, each with its test now passing:
 | Quarantine order | The rule of a cycle installed last is set aside: a committed rule by the commit indexing it, an uncommitted one newer than every commit, a registered one by registration. The plainest-absence-test rule breaks ties among rules installed together. Pinned on one branch in both orders and across two replicas installing concurrently. A query reads the set-aside rules as `dialog.rule/quarantined`. |
 
 Nothing is open.
+
+### Cost against the PR head and main
+
+Instruction counts under callgrind, nix toolchain.
+
+- dialog's cost matrix, every scenario run against the PR head's engine with the same scenario code: within 3% or under, except `rule-install`, whose cost depends on where the rules' identities land in the tree (renamed two other ways: 228.1 M vs 220.8 M, 201.5 M vs 200.7 M; under the gate's names 204.4 M vs 292.9 M). `commit-succeed` varies 1.60 G to 1.85 G between runs of one binary on either engine and is gated on its counters.
+- tonk's `rule_load` (500 accounts, 100 spaces, 100 blocks; query phase only): status 294.9 M vs 292.1 M, presence 262.1 M vs 262.2 M, positions 846.7 M vs 838.3 M (PR head vs this branch). Against main, at 2000 accounts, 500 spaces and 500 blocks (one run each, wall time): the data seed 38 s vs 2.6 s, status 74 vs 37 ms, presence 1.23 s vs 43 ms, positions 28 s vs 126 ms, the replicate re-poll 39 s vs 91 ms; the single-entity status lookup is slower, 0.079 vs 0.114 ms.
+- tonk's profile-library reconciliation (`profile_library_acquires_once_and_revalidates_profile_only_changes`, release-test): main 4.33 G, PR head 4.76 G, this branch 4.77 G. The 10% over main is the transaction's read-side settlement (`ReadSettlement::advance`, `State::apply_change`), present on the PR head.
 
 ## Decided since the first review
 
