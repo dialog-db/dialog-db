@@ -22,6 +22,7 @@
 //!
 //! let cell = ticket::reader(&space, &holder);
 //! assert_eq!(cell.ability(), "/use/get/memory/cell");
+//! assert_eq!(ticket::remover(&space, &holder).ability(), "/use/delete/memory/cell");
 //! ```
 
 use crate::MethodExt as _;
@@ -52,6 +53,17 @@ pub fn reader(subject: &Did, holder: &Did) -> Capability<Cell<method::Get>> {
 pub fn writer(subject: &Did, holder: &Did) -> Capability<Cell<method::Put>> {
     Subject::from(subject.clone())
         .writer()
+        .memory()
+        .space(SPACE)
+        .cell(holder.as_str())
+}
+
+/// The cell `subject` keeps `holder`'s ticket in, to empty: taking the
+/// ticket back.
+pub fn remover(subject: &Did, holder: &Did) -> Capability<Cell<method::Delete>> {
+    Subject::from(subject.clone())
+        .user()
+        .attenuate(method::Delete)
         .memory()
         .space(SPACE)
         .cell(holder.as_str())
