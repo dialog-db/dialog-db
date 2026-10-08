@@ -13,7 +13,10 @@
 //!
 //! The head's fields are variables like any other: a field name is
 //! only what ties a body variable to an attribute, and a concept's
-//! identity already ignores it. What pins a head variable is the
+//! identity already ignores it. A premise's fields are the same: the
+//! identity reads each concept premise with its fields named by what
+//! they read, in the order of their encoding, rather than as the author
+//! named them. What pins a head variable is the
 //! attribute it derives, which the labeling sees as one more place
 //! the variable occurs. `this` is the entity slot of every head triple
 //! and stays `this`.
@@ -40,8 +43,12 @@ use std::iter;
 
 use crate::attribute::Relation;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
+use crate::concept::query::ConceptQuery;
 use crate::error::TypeError;
+use crate::negation::Negation;
+use crate::parameters::Parameters;
 use crate::premise::Premise;
+use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
 use crate::rule::deductive::rename::{Rename, rename_premises, rename_term, variables};
 use crate::term::Term;
@@ -148,6 +155,15 @@ pub(crate) fn canonicalize(
         .map(|name| (name.clone(), HOLE.to_string()))
         .collect();
 
+    // The identity reads the premises with their concepts' fields named
+    // by what they read; the working spelling keeps the given names.
+    let given = premises;
+    let unnamed: Vec<Premise> = premises
+        .iter()
+        .map(unnamed)
+        .collect::<Result<_, TypeError>>()?;
+    let premises = unnamed.as_slice();
+
     let mut atoms = Vec::with_capacity(premises.len() + reduce.len() + fields.len());
     let holed = rename_premises(premises, &holes)?;
     for (premise, shape) in premises.iter().zip(&holed) {
@@ -217,7 +233,7 @@ pub(crate) fn canonicalize(
         .filter(|(from, _)| !heads.contains(from))
         .map(|(from, to)| (from.clone(), format!("{prefix}{}", &to[PREFIX.len()..])))
         .collect();
-    let premises = rename_premises(rule.premises, &working)?;
+    let premises = rename_premises(given, &working)?;
     let reduce = rule
         .reduce
         .iter()
@@ -445,6 +461,49 @@ fn spell(rule: &Rule<'_>, names: &Rename) -> Result<(Vec<u8>, Identity), TypeErr
             reduce,
         },
     ))
+}
+
+/// `premise` with each concept it applies re-keyed: the concept's fields
+/// named `#0`, `#1`, … in the order of their descriptors' encoding, and
+/// the terms bound to them carried over, so two spellings that name a
+/// premise's fields differently read as one. Fields whose descriptors
+/// encode alike keep their given relative order.
+fn unnamed(premise: &Premise) -> Result<Premise, TypeError> {
+    let rekey = |query: &ConceptQuery| -> Result<ConceptQuery, TypeError> {
+        let mut fields: Vec<(Vec<u8>, &String, &ConceptFieldDescriptor)> = query
+            .predicate
+            .with()
+            .iter()
+            .map(|(name, field)| Ok((encode(field)?, name, field)))
+            .collect::<Result<_, TypeError>>()?;
+        fields.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+        let mut renamed: Vec<(String, ConceptFieldDescriptor)> = Vec::with_capacity(fields.len());
+        let mut moved: Rename = Rename::new();
+        for (index, (_, name, field)) in fields.iter().enumerate() {
+            let key = format!("#{index}");
+            moved.insert((*name).clone(), key.clone());
+            moved.insert(Relation::key_operand(name), Relation::key_operand(&key));
+            renamed.push((key, (*field).clone()));
+        }
+        let mut terms = Parameters::new();
+        for (key, term) in query.terms.iter() {
+            let key = moved.get(key).cloned().unwrap_or_else(|| key.clone());
+            terms.insert(key, term.clone());
+        }
+        Ok(ConceptQuery {
+            predicate: ConceptDescriptor::try_from(renamed)?,
+            terms,
+        })
+    };
+    Ok(match premise {
+        Premise::Assert(Proposition::Concept(query)) => {
+            Premise::Assert(Proposition::Concept(rekey(query)?))
+        }
+        Premise::Unless(Negation(Proposition::Concept(query))) => {
+            Premise::Unless(Negation(Proposition::Concept(rekey(query)?)))
+        }
+        other => other.clone(),
+    })
 }
 
 /// A premise's encoding: its polarity, then its proposition. `None`
