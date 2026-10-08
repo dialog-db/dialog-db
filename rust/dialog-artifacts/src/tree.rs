@@ -1400,13 +1400,43 @@ where
         }
         match instruction {
             Instruction::Assert(artifact) => {
-                changed = true;
                 // ONE value encode per instruction: the payload feeds all
                 // three index keys, and a spilling value's block bytes and
                 // reference come from the same pass.
                 let encoded = EncodedValue::new(&artifact.is, manifest);
                 let (entity_key, attribute_key, value_key) =
                     artifact_index_keys_with(&artifact, encoded.payload);
+
+                // The fact orderings address a claim by (entity, attribute,
+                // value), so a value that already stands is the SAME key.
+                //
+                // On the canonical target this probe is free (the insert
+                // rebuilds the same leaf it reads); on the buffered target
+                // the insert is a blind append and this probe is the ONLY
+                // read the assert performs — one EAV spine, on a partial
+                // replica hydrated through the store's remote fallback. The
+                // AEV/VAE/history spines are never read by any write, so
+                // nothing downstream may assume a commit hydrated the paths
+                // it touched (see notes/version-control.md, "Push from a
+                // partial replica").
+                let standing = if version.is_some() {
+                    match transient.read(&entity_key, storage).await? {
+                        Some(State::Added(standing)) => Some(standing),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
+                // Cardinality-many no-op, the counterpart of `Replace`'s:
+                // the identical claim already stands, so nothing changes in
+                // the indexes and no history is recorded. Without this a
+                // re-assert of a standing value restamped the datum and
+                // minted a revision whose facts read exactly as before.
+                if standing.is_some() {
+                    continue;
+                }
+                changed = true;
 
                 // Persist a spilling value's bytes as a content-addressed
                 // block before recording the fact; the key holds only the
@@ -1427,29 +1457,6 @@ where
 
                 let mut datum = Datum::for_artifact(&artifact);
                 datum.version = version;
-                // The fact orderings address a claim by (entity, attribute,
-                // value), so asserting a value that already stands re-asserts
-                // the SAME key: the standing claims collapse into the new
-                // datum rather than being overwritten. A later retraction
-                // covers the whole set — an insert-overwrite here silently
-                // orphaned the earlier claim, which could then resurrect the
-                // fact through a merge. Versioned writes only.
-                //
-                // On the canonical target this probe is free (the insert
-                // rebuilds the same leaf it reads); on the buffered target
-                // the insert is a blind append and this probe is the ONLY
-                // read the assert performs — one EAV spine, on a partial
-                // replica hydrated through the store's remote fallback. The
-                // AEV/VAE/history spines are never read by any write, so
-                // nothing downstream may assume a commit hydrated the paths
-                // it touched (see notes/version-control.md, "Push from a
-                // partial replica").
-                if version.is_some()
-                    && let Some(State::Added(standing)) =
-                        transient.read(&entity_key, storage).await?
-                {
-                    datum.absorb_versions(standing.versions());
-                }
                 let added = State::Added(datum);
                 transient = transient
                     .write_all(

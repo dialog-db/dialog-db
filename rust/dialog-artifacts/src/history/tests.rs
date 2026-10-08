@@ -1665,6 +1665,78 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
     Ok(())
 }
 
+/// Re-asserting a value that already stands is a no-op, as re-replacing
+/// one is: the indexes and history are untouched and the standing claim
+/// keeps its version. A different value is still added beside it.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_ignores_a_reassert_of_a_standing_value() -> Result<()> {
+    use futures_util::stream;
+
+    let store = MemoryBlocks::new();
+
+    let entity = Entity::new()?;
+    let the: Attribute = "post/tag".parse()?;
+    let tag = |value: &str| Artifact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: Value::String(value.into()),
+        cause: None,
+    };
+
+    let first = Version::new(Origin::from([7u8; 32]), Edition::new(0));
+    let second = Version::new(Origin::from([7u8; 32]), Edition::new(1));
+    let third = Version::new(Origin::from([7u8; 32]), Edition::new(2));
+
+    let mut tree = ArtifactTree::empty();
+    let apply = async |tree: &mut ArtifactTree,
+                       store: &MemoryBlocks,
+                       version: Version,
+                       instruction: Instruction|
+           -> Result<bool> {
+        let mut delta = ArchiveDelta::zero();
+        let changed = tree
+            .apply_versioned(
+                store,
+                &mut delta,
+                Some(version),
+                stream::iter(vec![instruction]),
+            )
+            .await?;
+        delta.flush_into(store);
+        Ok(changed)
+    };
+
+    assert!(apply(&mut tree, &store, first, Instruction::Assert(tag("rust"))).await?);
+    let root = tree.root().clone();
+
+    let changed = apply(&mut tree, &store, second, Instruction::Assert(tag("rust"))).await?;
+    assert!(!changed, "re-asserting a standing value is a no-op");
+    assert_eq!(tree.root(), &root, "the tree is untouched");
+
+    let data = tree.select_data(store.clone(), &entity, &the).await?;
+    assert_eq!(data.len(), 1);
+    assert_eq!(
+        data[0].version,
+        Some(first),
+        "the standing claim keeps its version"
+    );
+    assert!(data[0].collapsed.is_empty());
+
+    let history = TreeHistory::new(tree.clone(), store.clone());
+    let records = history
+        .select(HistorySelector::All)
+        .try_collect::<Vec<_>>()
+        .await?;
+    assert_eq!(records.len(), 1, "no history is recorded for the no-op");
+
+    // A different value is still a change, added beside the first.
+    assert!(apply(&mut tree, &store, third, Instruction::Assert(tag("wasm"))).await?);
+    assert_eq!(tree.select_data(store.clone(), &entity, &the).await?.len(), 2);
+
+    Ok(())
+}
+
 /// History keys truncate entity and attribute to raw heads; queries must
 /// disambiguate collisions against the stored record. Two attributes
 /// sharing the 57-byte head — and two entities sharing the 32-byte URI
