@@ -19,7 +19,7 @@ pub mod site;
 
 pub use authorizer::{
     Args, DefaultResolver, FromUcanArgs, UcanAuthorizer, check_failed_to_authorize_error,
-    verify_invocation,
+    claimed_subject, verify_invocation,
 };
 pub use site::{Ucan, UcanAddress, UcanAuthorization, UcanFork, UcanInvocation, UcanSite};
 

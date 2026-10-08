@@ -26,6 +26,7 @@
 //! it with that provider.
 
 mod address;
+mod claim;
 mod direct;
 #[cfg(any(test, feature = "helpers"))]
 pub mod helpers;
@@ -36,6 +37,7 @@ mod site;
 mod test;
 
 pub use address::{Exchange, UcanAddress};
+pub use claim::claim;
 pub use dialog_remote_ucan_s3::{Ucan, UcanAuthorization, UcanInvocation};
 pub use direct::{OBJECT_MEDIA_TYPE, SCHEME, credential, credential_container, is_credential};
 pub use server::{Access, Answer, Content, Payload, Refusal, Request, Response, Store, Verified};
