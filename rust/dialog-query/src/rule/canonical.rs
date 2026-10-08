@@ -470,7 +470,7 @@ fn spell(rule: &Rule<'_>, names: &Rename) -> Result<(Vec<u8>, Identity), TypeErr
 /// encode alike keep their given relative order.
 fn unnamed(premise: &Premise) -> Result<Premise, TypeError> {
     let rekey = |query: &ConceptQuery| -> Result<ConceptQuery, TypeError> {
-        let mut fields: Vec<(Vec<u8>, &String, &ConceptFieldDescriptor)> = query
+        let mut fields: Vec<(Vec<u8>, &str, &ConceptFieldDescriptor)> = query
             .predicate
             .with()
             .iter()
@@ -481,7 +481,7 @@ fn unnamed(premise: &Premise) -> Result<Premise, TypeError> {
         let mut moved: Rename = Rename::new();
         for (index, (_, name, field)) in fields.iter().enumerate() {
             let key = format!("#{index}");
-            moved.insert((*name).clone(), key.clone());
+            moved.insert(name.to_string(), key.clone());
             moved.insert(Relation::key_operand(name), Relation::key_operand(&key));
             renamed.push((key, (*field).clone()));
         }
