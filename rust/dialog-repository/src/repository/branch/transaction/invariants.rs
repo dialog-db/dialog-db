@@ -698,3 +698,123 @@ async fn concurrent_last_writes_settle_by_commit_across_every_cell() -> Result<(
     }
     Ok(())
 }
+
+/// Reads `org/salary` of `of` under `select` inside `transaction` and
+/// again after its commit.
+async fn read_through_commit(
+    branch: &Branch,
+    transaction: super::Transaction<&Branch>,
+    operator: &Operator,
+    of: &Entity,
+    select: &str,
+) -> Result<(Vec<u64>, Vec<u64>)> {
+    let read = salaries(
+        transaction
+            .query()
+            .select(salary_query(of, select))
+            .perform(operator)
+            .try_vec()
+            .await?,
+    )?;
+    transaction.commit().publish().perform(operator).await?;
+    Ok((read, read_branch(branch, operator, of, select).await?))
+}
+
+/// "A transaction reads what its commit will leave." The line holds 3
+/// and 5. A `max` write of 4 succeeds 5, and an `all` write then writes
+/// 5 back: the commit lands 5 at its own edition, the newest of the
+/// cell, so a `last` read returns it. The transaction read the line's
+/// older row of 5 instead and returned 4.
+#[dialog_common::test]
+async fn a_value_written_back_after_its_succession_reads_as_the_commit_leaves_it() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let alice: Entity = "id:alice".parse()?;
+    branch
+        .transaction()
+        .assert(salary(&alice, 3, Policy::All))
+        .assert(salary(&alice, 5, Policy::All))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let transaction = branch
+        .transaction()
+        .assert(salary(&alice, 4, Policy::Max))
+        .assert(salary(&alice, 5, Policy::All));
+    let (read, committed) =
+        read_through_commit(&branch, transaction, &operator, &alice, "last").await?;
+    assert_eq!(
+        committed,
+        vec![5],
+        "the commit lands 5 at the newest edition"
+    );
+    assert_eq!(read, committed, "the transaction read what its commit left");
+    Ok(())
+}
+
+/// "A transaction reads what its commit will leave." The line holds 2,
+/// then 5 from a later commit. An `all` write of 2 lands it at the
+/// commit's edition, newer than 5, so a `last` read returns 2. The
+/// transaction's read merged its staged 2 with the line's older row of
+/// the same fact and kept the line's, returning 5.
+#[dialog_common::test]
+async fn an_all_write_of_a_held_value_reads_as_the_commit_leaves_it() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let alice: Entity = "id:alice".parse()?;
+    for value in [2, 5] {
+        branch
+            .transaction()
+            .assert(salary(&alice, value, Policy::All))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+    }
+    let transaction = branch.transaction().assert(salary(&alice, 2, Policy::All));
+    let (read, committed) =
+        read_through_commit(&branch, transaction, &operator, &alice, "last").await?;
+    assert_eq!(
+        committed,
+        vec![2],
+        "the commit refreshes 2 to the newest edition"
+    );
+    assert_eq!(read, committed, "the transaction read what its commit left");
+    Ok(())
+}
+
+/// "A transaction reads what its commit will leave." The line holds 6,
+/// 1 and 2, committed in that order. A `min` write of 6 succeeds 1, the
+/// claim `min` elects, and refreshes the held 6, which the commit lands
+/// at its own edition, so a `last` read returns 6. The settlement took
+/// the held 6 for one the write left alone and hid the staged row, so
+/// the transaction read the line's older 6 and returned 2.
+#[dialog_common::test]
+async fn a_held_value_a_write_refreshes_reads_as_the_commit_leaves_it() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let alice: Entity = "id:alice".parse()?;
+    for value in [6, 1, 2] {
+        branch
+            .transaction()
+            .assert(salary(&alice, value, Policy::All))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+    }
+    let transaction = branch.transaction().assert(salary(&alice, 6, Policy::Min));
+    let (read, committed) =
+        read_through_commit(&branch, transaction, &operator, &alice, "last").await?;
+    assert_eq!(
+        committed,
+        vec![6],
+        "the commit refreshes 6 to the newest edition"
+    );
+    assert_eq!(read, committed, "the transaction read what its commit left");
+    Ok(())
+}
