@@ -1851,15 +1851,16 @@ mod tests {
         Ok(pairs)
     }
 
-    /// A negation inside the component evaluates under the cycle
-    /// policy: it holds. `graph/odd(x) := n :- graph/node(x) = n,
-    /// unless graph/even(x)` and `graph/even(x) := n :- graph/odd(x) =
-    /// n` have no stratified reading; the policy derives both relations
-    /// for every node, the same on every replica, and the analysis
-    /// reports the negation.
+    /// A negation inside a cycle has no stratified reading, so the
+    /// analysis quarantines the rule feeding it back. `graph/odd(x) :=
+    /// n :- graph/node(x) = n, unless graph/even(x)` and `graph/even(x)
+    /// := n :- graph/odd(x) = n`: the rule set aside derives what the
+    /// negation reads, `even`, which then holds nothing, so every node
+    /// is odd, as it was before the cycle formed.
     #[dialog_common::test]
-    async fn it_holds_a_negation_inside_the_component() -> anyhow::Result<()> {
-        use crate::session::{Absence, Closure};
+    async fn it_quarantines_the_rule_feeding_a_negation_back_into_its_cycle() -> anyhow::Result<()>
+    {
+        use crate::session::Closure;
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -1923,17 +1924,17 @@ mod tests {
 
         let mut registry = RuleRegistry::new();
         registry.register(odd_rule)?;
-        registry.register(even_rule)?;
+        registry.register(even_rule.clone())?;
         let analysis = registry.analysis()?;
-        assert_eq!(analysis.check(&odd)?, Closure::Recursive);
+        assert_eq!(analysis.check(&odd)?, Closure::Acyclic);
         assert_eq!(
             analysis
-                .absences()
+                .quarantined()
                 .iter()
-                .map(|absence| absence.absence)
+                .map(|set_aside| set_aside.rule.clone())
                 .collect::<Vec<_>>(),
-            vec![Absence::Negated],
-            "the analysis reports the negation the policy governs"
+            vec![even_rule.this()],
+            "the rule deriving what the negation reads is set aside"
         );
 
         let source = TestEnv::new(&branch, &operator, registry);
@@ -1945,13 +1946,9 @@ mod tests {
         assert_eq!(
             pairs_of(&source, &odd, "name").await?,
             expected,
-            "the negation holds, so every node is odd"
+            "nothing is even, so every node is odd"
         );
-        assert_eq!(
-            pairs_of(&source, &even, "name").await?,
-            expected,
-            "and every odd node is even"
-        );
+        assert!(pairs_of(&source, &even, "name").await?.is_empty());
         Ok(())
     }
 

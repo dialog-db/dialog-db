@@ -381,6 +381,29 @@ mod tests {
         .unwrap()
     }
 
+    /// A rule deriving `concept`'s fields, by name, from the attributes
+    /// `sources` names: a rule that does not read what it derives.
+    fn deriving(concept: &ConceptDescriptor, sources: &[(&str, &str)]) -> DeductiveRule {
+        let premises = sources
+            .iter()
+            .map(|(field, source)| {
+                AttributeQuery::new(
+                    Term::from(
+                        source
+                            .parse::<crate::attribute::The>()
+                            .expect("an attribute"),
+                    ),
+                    Term::var("this"),
+                    Term::var(*field),
+                    Term::blank(),
+                    None,
+                )
+                .into()
+            })
+            .collect();
+        DeductiveRule::new(concept.clone(), premises).expect("the rule compiles")
+    }
+
     fn employee_concept() -> ConceptDescriptor {
         ConceptDescriptor::try_from([
             (
@@ -422,7 +445,7 @@ mod tests {
     async fn it_surfaces_a_registered_rule_through_the_provider() {
         let mut registry = RuleRegistry::new();
         let descriptor = person_concept();
-        let rule = DeductiveRule::from(&descriptor);
+        let rule = deriving(&descriptor, &[("name", "person/alias")]);
         registry.register(rule.clone()).unwrap();
 
         let rules = Provider::<SelectRules>::execute(&registry, descriptor.clone())
@@ -438,7 +461,12 @@ mod tests {
     async fn it_indexes_a_rule_under_each_attribute_it_derives() {
         let mut registry = RuleRegistry::new();
         let employee = employee_concept();
-        registry.register(DeductiveRule::from(&employee)).unwrap();
+        registry
+            .register(deriving(
+                &employee,
+                &[("name", "person/alias"), ("role", "employee/title")],
+            ))
+            .unwrap();
 
         let (_, name) = person_concept()
             .with()
@@ -465,7 +493,7 @@ mod tests {
     #[dialog_common::test]
     async fn it_copies_entries_for_unseen_concepts_on_extend() {
         let descriptor = person_concept();
-        let rule = DeductiveRule::from(&descriptor);
+        let rule = deriving(&descriptor, &[("name", "person/alias")]);
         let mut src = RuleRegistry::new();
         src.register(rule.clone()).unwrap();
 
@@ -479,23 +507,8 @@ mod tests {
         // Two registries with different rules for the same concept; extend
         // should produce a registry where both rules are installed.
         let descriptor = person_concept();
-        let rule_a = DeductiveRule::from(&descriptor);
-        // Same conclusion, body uses `None` cardinality (`All` variant)
-        // instead of the implicit `One`, produces a distinct rule.
-        let rule_b = DeductiveRule::new(
-            descriptor.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("person/name")),
-                    Term::var("this"),
-                    Term::var("name"),
-                    Term::blank(),
-                    None,
-                )
-                .into(),
-            ],
-        )
-        .expect("rule_b is valid");
+        let rule_a = deriving(&descriptor, &[("name", "person/alias")]);
+        let rule_b = deriving(&descriptor, &[("name", "person/handle")]);
         assert_ne!(rule_a, rule_b);
 
         let mut a = RuleRegistry::new();

@@ -62,6 +62,7 @@ use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::rule::deductive::DeductiveRule;
 use crate::rule::statement::Reach;
+use crate::schema::Select;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter;
 
@@ -86,10 +87,36 @@ pub enum Polarity {
     /// clause: the rule's folds consume the premise's full
     /// relation, so the reference demands a complete lower stratum.
     Aggregating,
-    /// The body reads the relation under a choosing policy (`last`,
-    /// `top`, `max`, `min`): the candidate it returns, and nothing
-    /// better, which negates the better candidates.
-    Electing,
+    /// The body reads the relation under a choosing policy: the
+    /// candidate it returns, and nothing better, which negates the
+    /// better candidates. `ranked` for an explicit ranking (`top`, a
+    /// relation chain, `max`, `min`) rather than `last`, the default.
+    Electing {
+        /// Whether the read ranks candidates rather than taking the
+        /// newest.
+        ranked: bool,
+    },
+}
+
+impl Polarity {
+    /// Whether the edge tests for something's absence: a negation, an
+    /// optional read or an election.
+    fn tests_absence(self) -> bool {
+        matches!(
+            self,
+            Polarity::Negative | Polarity::Optional | Polarity::Electing { .. }
+        )
+    }
+
+    /// How plainly the edge tests for absence: an `unless` or an
+    /// optional read most, a ranked election next, `last` least.
+    fn strength(self) -> u8 {
+        match self {
+            Polarity::Negative | Polarity::Optional => 2,
+            Polarity::Electing { ranked: true } => 1,
+            _ => 0,
+        }
+    }
 }
 
 /// How a rule tests for absence: by negating a concept or by reading
@@ -170,18 +197,20 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
                 Some((query.predicate.clone(), Polarity::Optional))
             }
             Premise::Assert(Proposition::Concept(query)) => {
-                let electing = positive == Polarity::Positive
-                    && query.predicate.attribute_field().is_some_and(|(_, field)| {
-                        !field.descriptor().is_chain() && field.descriptor().select().elects()
-                    });
-                Some((
-                    query.predicate.clone(),
-                    if electing {
-                        Polarity::Electing
-                    } else {
-                        positive
-                    },
-                ))
+                let select = query
+                    .predicate
+                    .attribute_field()
+                    .filter(|(_, field)| !field.descriptor().is_chain())
+                    .map(|(_, field)| field.descriptor().select());
+                let polarity = match select {
+                    Some(select) if positive == Polarity::Positive && select.elects() => {
+                        Polarity::Electing {
+                            ranked: select != Select::Last,
+                        }
+                    }
+                    _ => positive,
+                };
+                Some((query.predicate.clone(), polarity))
             }
             Premise::Unless(Negation(Proposition::Concept(query))) => {
                 Some((query.predicate.clone(), Polarity::Negative))
@@ -213,7 +242,7 @@ fn selecting_edges(
                 );
                 edges.push((
                     ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(single)),
-                    Polarity::Electing,
+                    Polarity::Electing { ranked: true },
                 ));
             }
         }
@@ -225,7 +254,9 @@ fn selecting_edges(
             let polarity = if field.is_optional() {
                 Polarity::Optional
             } else if field.descriptor().select().elects() {
-                Polarity::Electing
+                Polarity::Electing {
+                    ranked: field.descriptor().select() != Select::Last,
+                }
             } else {
                 Polarity::Positive
             };
@@ -303,6 +334,14 @@ struct RuleEdges {
     edges: Vec<(Entity, Polarity)>,
 }
 
+/// An absence test inside a cycle: the rule making it (`None` for a
+/// concept's selecting read), the node it reads, and how.
+struct AbsenceTest {
+    owner: Option<Entity>,
+    target: Entity,
+    polarity: Polarity,
+}
+
 /// The dependency graph of the rules not quarantined, with its strongly
 /// connected components.
 struct Graph {
@@ -376,6 +415,51 @@ impl Graph {
         }
     }
 
+    /// Every absence test inside `members`: from a rule not quarantined,
+    /// owned by its identity, or from a concept's selecting read.
+    fn absence_tests(
+        &self,
+        members: &HashSet<&Entity>,
+        rules: &[RuleEdges],
+        quarantined: &[Quarantine],
+    ) -> Vec<AbsenceTest> {
+        let mut tests = Vec::new();
+        for rule in rules {
+            if !members.contains(&rule.concept)
+                || rule
+                    .rule
+                    .as_ref()
+                    .is_some_and(|id| quarantined.iter().any(|set_aside| set_aside.rule == *id))
+            {
+                continue;
+            }
+            for (target, polarity) in &rule.edges {
+                if polarity.tests_absence() && members.contains(target) {
+                    tests.push(AbsenceTest {
+                        owner: rule.rule.clone(),
+                        target: target.clone(),
+                        polarity: *polarity,
+                    });
+                }
+            }
+        }
+        for node in members {
+            if rules.iter().any(|rule| rule.concept == **node) {
+                continue;
+            }
+            for (target, polarity) in self.edges.get(*node).map(Vec::as_slice).unwrap_or(&[]) {
+                if polarity.tests_absence() && members.contains(target) {
+                    tests.push(AbsenceTest {
+                        owner: None,
+                        target: target.clone(),
+                        polarity: *polarity,
+                    });
+                }
+            }
+        }
+        tests
+    }
+
     /// The members, sorted, of the first component (by its least node)
     /// that reads itself through a negation, an optional read or an
     /// election.
@@ -387,10 +471,7 @@ impl Graph {
             };
             let here = self.component[self.index_of[node]];
             let reads_itself = out.iter().any(|(target, polarity)| {
-                matches!(
-                    polarity,
-                    Polarity::Negative | Polarity::Optional | Polarity::Electing
-                ) && self.component[self.index_of[target]] == here
+                polarity.tests_absence() && self.component[self.index_of[target]] == here
             });
             if reads_itself {
                 unstratified = Some(here);
@@ -484,39 +565,62 @@ impl ProgramAnalysis {
                 break graph;
             };
             let members: HashSet<&Entity> = cycle.iter().collect();
-            let mut candidates: Vec<(&Entity, &Entity, bool)> = rules
+            let live = |rule: &RuleEdges| -> Option<Entity> {
+                let id = rule.rule.clone()?;
+                (!quarantined.iter().any(|set_aside| set_aside.rule == id)).then_some(id)
+            };
+            // The rules of the cycle that read the cycle, by the node
+            // each concludes.
+            let feeding: Vec<(Entity, &RuleEdges)> = rules
                 .iter()
                 .filter(|rule| members.contains(&rule.concept))
-                .filter_map(|rule| {
-                    let id = rule.rule.as_ref()?;
-                    if quarantined.iter().any(|set_aside| set_aside.rule == *id) {
-                        return None;
-                    }
-                    let inner: Vec<Polarity> = rule
-                        .edges
+                .filter(|rule| {
+                    rule.edges
                         .iter()
-                        .filter(|(target, _)| members.contains(target))
-                        .map(|(_, polarity)| *polarity)
-                        .collect();
-                    if inner.is_empty() {
-                        return None;
-                    }
-                    let positive = inner.iter().all(|polarity| *polarity == Polarity::Positive);
-                    Some((id, &rule.concept, positive))
+                        .any(|(target, _)| members.contains(target))
                 })
+                .filter_map(|rule| Some((live(rule)?, rule)))
                 .collect();
-            // A rule whose reads in the cycle are all positive first: the
-            // one that fed the negation back into itself. Then the
-            // greatest identity.
-            candidates.sort_by(|a, b| (a.2, a.0).cmp(&(b.2, b.0)));
-            let Some((rule, concept, _)) = candidates.pop() else {
+            // The cycle's plainest absence test, from a rule or from a
+            // concept's selecting read. The relation it reads keeps the
+            // meaning it had over everything outside the cycle once the
+            // rule deriving it from inside is set aside; the test's own
+            // rule is set aside instead when it derives what it tests.
+            let test = graph
+                .absence_tests(&members, &rules, &quarantined)
+                .into_iter()
+                .max_by(|a, b| {
+                    (a.polarity.strength(), &a.target, &a.owner).cmp(&(
+                        b.polarity.strength(),
+                        &b.target,
+                        &b.owner,
+                    ))
+                });
+            let chosen = test.and_then(|test| {
+                let deriving: Vec<&Entity> = feeding
+                    .iter()
+                    .filter(|(_, rule)| rule.concept == test.target)
+                    .map(|(id, _)| id)
+                    .collect();
+                match &test.owner {
+                    Some(owner) if deriving.contains(&owner) => Some(owner.clone()),
+                    _ => deriving.into_iter().max().cloned(),
+                }
+            });
+            let chosen = chosen.or_else(|| feeding.iter().map(|(id, _)| id).max().cloned());
+            let Some(rule) = chosen else {
                 // A cycle with no rule to set aside: it stays, and its
                 // absence tests are reported.
                 break graph;
             };
+            let concept = rules
+                .iter()
+                .find(|edges| edges.rule.as_ref() == Some(&rule))
+                .map(|edges| edges.concept.clone())
+                .expect("the chosen rule is one of the program's");
             quarantined.push(Quarantine {
-                rule: rule.clone(),
-                concept: concept.clone(),
+                rule,
+                concept,
                 cycle: cycle.clone(),
             });
         };
@@ -557,7 +661,7 @@ impl ProgramAnalysis {
                 let absence = match polarity {
                     Polarity::Negative => Absence::Negated,
                     Polarity::Optional => Absence::Optional,
-                    Polarity::Electing => Absence::Elected,
+                    Polarity::Electing { .. } => Absence::Elected,
                     Polarity::Aggregating => {
                         violations.push(AggregationViolation {
                             concept: node.clone(),
@@ -806,6 +910,21 @@ mod tests {
         .expect("concept builds")
     }
 
+    /// [`concept`] read under `all`: a read of it is positive, so a cycle
+    /// through it is plain recursion.
+    fn collection(domain: &str) -> ConceptDescriptor {
+        ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(
+                format!("{domain}/name").parse().expect("valid selector"),
+                "",
+                Cardinality::Many,
+                Some(Type::String),
+            ),
+        )])
+        .expect("concept builds")
+    }
+
     /// A rule concluding `conclusion` whose body asserts each
     /// `positive` concept (binding `this` and `name`) and negates
     /// each `negative` one (joined on `this`).
@@ -842,7 +961,7 @@ mod tests {
     /// than evaluated unboundedly.
     #[dialog_common::test]
     fn it_marks_recursive_closures_for_fixpoint_evaluation() {
-        let same = concept("same");
+        let same = collection("same");
         let mut registry = RuleRegistry::new();
         registry.register(rule(&same, &[&same], &[])).unwrap();
 
@@ -860,9 +979,9 @@ mod tests {
     /// rules carry the recursion context.
     #[dialog_common::test]
     fn it_detects_mutual_and_transitive_recursion() {
-        let a = concept("aaa");
-        let b = concept("bbb");
-        let c = concept("ccc");
+        let a = collection("aaa");
+        let b = collection("bbb");
+        let c = collection("ccc");
 
         let mut mutual = RuleRegistry::new();
         mutual.register(rule(&a, &[&b], &[])).unwrap();
@@ -889,54 +1008,121 @@ mod tests {
         );
     }
 
-    /// A negation inside a cycle is reported, not refused: the program
-    /// has no stratification violation, the closure is recursive so
-    /// the fixpoint evaluates it under the cycle policy, and the
-    /// absence test names the rule's concept and the concept it
-    /// negates.
+    /// "A merge can close a cycle through a negation; the analysis
+    /// quarantines a rule of it instead of refusing the program."
+    /// `a := b` and `b := c, unless a`: the rule set aside is the one
+    /// deriving what the negation reads, `a := b`, so `unless a` keeps
+    /// the meaning it had over everything outside the cycle. Nothing is
+    /// left recursive, nothing is reported as an absence test, and the
+    /// bundle of `a` comes without the rule.
     #[dialog_common::test]
-    fn it_reports_an_absence_test_inside_a_cycle() {
-        let a = concept("aaa");
-        let b = concept("bbb");
-        let c = concept("ccc");
+    fn it_quarantines_the_rule_deriving_what_a_negation_reads_in_its_cycle() {
+        let a = collection("aaa");
+        let b = collection("bbb");
+        let c = collection("ccc");
+        let closing = rule(&a, &[&b], &[]);
+        let negating = rule(&b, &[&c], &[&a]);
         let mut registry = RuleRegistry::new();
-        registry.register(rule(&a, &[&b], &[])).unwrap();
+        registry.register(closing.clone()).unwrap();
+        registry.register(negating.clone()).unwrap();
+
+        let analysis = registry.analysis().unwrap();
+        let mut cycle = vec![ProgramAnalysis::node(&a), ProgramAnalysis::node(&b)];
+        cycle.sort();
+        assert_eq!(
+            analysis.quarantined(),
+            &[Quarantine {
+                rule: closing.this(),
+                concept: ProgramAnalysis::node(&a),
+                cycle,
+            }]
+        );
+        assert!(analysis.absences().is_empty(), "no cycle is left to report");
+        assert_eq!(analysis.check(&a).unwrap(), Closure::Acyclic);
+        assert!(
+            registry.acquire(&a).unwrap().installed().is_empty(),
+            "the quarantined rule is left out of the bundle"
+        );
+        assert_eq!(
+            registry.acquire(&b).unwrap().installed().len(),
+            1,
+            "the negating rule stays"
+        );
+    }
+
+    /// "Every replica holding the same rules quarantines the same ones."
+    /// Two rules that each negate the other, registered in either order,
+    /// lead to the same single quarantine.
+    #[dialog_common::test]
+    fn it_quarantines_the_same_rule_whatever_order_the_rules_arrive_in() {
+        let a = collection("aaa");
+        let b = collection("bbb");
+        let c = collection("ccc");
+        let first = rule(&a, &[&c], &[&b]);
+        let second = rule(&b, &[&c], &[&a]);
+        let mut forward = RuleRegistry::new();
+        forward.register(first.clone()).unwrap();
+        forward.register(second.clone()).unwrap();
+        let mut backward = RuleRegistry::new();
+        backward.register(second).unwrap();
+        backward.register(first).unwrap();
+
+        let quarantined = forward.analysis().unwrap().quarantined().to_vec();
+        assert_eq!(quarantined.len(), 1, "one rule breaks the cycle");
+        assert_eq!(backward.analysis().unwrap().quarantined(), &quarantined[..]);
+    }
+
+    /// "A quarantine lifts by itself once a rule of the cycle is
+    /// retracted." Without the rule closing the cycle, the negation is
+    /// stratified and nothing is set aside.
+    #[dialog_common::test]
+    fn it_lifts_a_quarantine_once_the_cycle_is_broken() {
+        let a = collection("aaa");
+        let b = collection("bbb");
+        let c = collection("ccc");
+        let mut registry = RuleRegistry::new();
         registry.register(rule(&b, &[&c], &[&a])).unwrap();
 
-        assert!(registry.validate().unwrap().is_empty(), "no violation");
+        let analysis = registry.analysis().unwrap();
+        assert!(analysis.quarantined().is_empty());
+        assert_eq!(registry.acquire(&b).unwrap().installed().len(), 1);
+    }
+
+    /// "An election is a negation too." `same := same`, reading `same`
+    /// under `last`, elects among the very candidates it derives: the
+    /// rule is quarantined.
+    #[dialog_common::test]
+    fn it_quarantines_a_rule_electing_among_its_own_conclusions() {
+        let same = concept("same");
+        let electing = rule(&same, &[&same], &[]);
+        let mut registry = RuleRegistry::new();
+        registry.register(electing.clone()).unwrap();
+
         let analysis = registry.analysis().unwrap();
         assert_eq!(
-            analysis.absences(),
-            &[AbsenceInCycle {
-                concept: ProgramAnalysis::node(&b),
-                target: ProgramAnalysis::node(&a),
-                absence: Absence::Negated,
-            }],
-            "an attribute concept is reported by its relation"
+            analysis
+                .quarantined()
+                .iter()
+                .map(|set_aside| set_aside.rule.clone())
+                .collect::<Vec<_>>(),
+            vec![electing.this()]
         );
-        assert_eq!(
-            analysis.check(&a).unwrap(),
-            Closure::Recursive,
-            "the closure evaluates by fixpoint"
-        );
-        assert!(
-            registry.acquire(&b).unwrap().recursion().is_some(),
-            "the negating member is a component member like any other"
-        );
+        assert!(!registry.is_recursive(&same.this()).unwrap());
     }
 
     /// A negation between concepts on no common cycle is stratified
     /// and reported as nothing.
     #[dialog_common::test]
     fn it_reports_nothing_for_a_stratified_negation() {
-        let a = concept("aaa");
-        let b = concept("bbb");
+        let a = collection("aaa");
+        let b = collection("bbb");
         let mut registry = RuleRegistry::new();
         registry.register(rule(&a, &[&a], &[])).unwrap();
         registry.register(rule(&b, &[&b], &[&a])).unwrap();
 
         let analysis = registry.analysis().unwrap();
         assert!(analysis.absences().is_empty());
+        assert!(analysis.quarantined().is_empty());
         assert_eq!(analysis.check(&b).unwrap(), Closure::Recursive);
     }
 
