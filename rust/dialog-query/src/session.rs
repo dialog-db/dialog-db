@@ -59,6 +59,30 @@ mod tests {
             .expect("proposition should plan")
     }
 
+    /// A rule deriving every field of `concept` from a `stated-` attribute
+    /// beside it (`person/name` from `person/stated-name`): a rule in the
+    /// formal notation, as the registry installs, that does not read what
+    /// it derives.
+    fn stated(concept: &ConceptDescriptor) -> DeductiveRule {
+        let premises = concept
+            .with()
+            .iter()
+            .map(|(name, field)| {
+                let relation = field.the().to_string();
+                let (domain, attribute) = relation.split_once('/').expect("a relation");
+                crate::premise::reading(
+                    format!("{domain}/stated-{attribute}")
+                        .parse::<crate::attribute::The>()
+                        .expect("an attribute"),
+                    Term::var("this"),
+                    Term::var(name),
+                    None,
+                )
+            })
+            .collect();
+        DeductiveRule::new(concept.clone(), premises).expect("the rule compiles")
+    }
+
     #[dialog_common::test]
     async fn it_queries_asserted_facts() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -582,7 +606,7 @@ mod tests {
         ])
         .unwrap();
 
-        let rule = DeductiveRule::from(&adult_conclusion);
+        let rule = stated(&adult_conclusion);
 
         let mut registry = RuleRegistry::new();
         registry.register(rule.clone())?;
@@ -615,7 +639,7 @@ mod tests {
             ),
         )])
         .unwrap();
-        let rule = DeductiveRule::from(&concept);
+        let rule = stated(&concept);
 
         // Test with RuleRegistry + TestEnv
         let mut registry = RuleRegistry::new();
@@ -643,7 +667,7 @@ mod tests {
         )])
         .unwrap();
 
-        let adult_rule = DeductiveRule::from(&adult_concept);
+        let adult_rule = stated(&adult_concept);
 
         let mut registry = RuleRegistry::new();
         registry.register(adult_rule.clone())?;
@@ -968,7 +992,7 @@ mod tests {
             AttributeDescriptor::new(the!("book/title"), "", Cardinality::One, Some(Type::String)),
         )])
         .unwrap();
-        let rule = DeductiveRule::from(&unrelated);
+        let rule = stated(&unrelated);
         registry.register(rule).unwrap();
 
         // Person's cache should be untouched (same ConceptRules, shared Arc)
