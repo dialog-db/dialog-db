@@ -369,7 +369,6 @@ mod tests {
 
     use super::*;
     use crate::Term;
-    use crate::attribute::query::AttributeQuery;
     use crate::attribute::{AttributeDescriptor, Cardinality, The, Type};
     use crate::the;
 
@@ -392,14 +391,12 @@ mod tests {
         let premises = sources
             .iter()
             .map(|(field, source)| {
-                AttributeQuery::new(
-                    Term::from(source.parse::<The>().expect("an attribute")),
+                crate::premise::reading(
+                    source.parse::<The>().expect("an attribute"),
                     Term::var("this"),
                     Term::var(*field),
-                    Term::blank(),
                     None,
                 )
-                .into()
             })
             .collect();
         DeductiveRule::new(concept.clone(), premises).expect("the rule compiles")

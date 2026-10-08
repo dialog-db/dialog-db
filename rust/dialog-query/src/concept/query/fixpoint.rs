@@ -1553,16 +1553,12 @@ mod tests {
     fn ancestor_rules(concept: &ConceptDescriptor) -> Vec<DeductiveRule> {
         let base = DeductiveRule::new(
             concept.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("family/parent")),
-                    Term::<Entity>::var("this"),
-                    Term::var("ancestor"),
-                    Term::blank(),
-                    Some(Cardinality::Many),
-                )
-                .into(),
-            ],
+            vec![crate::premise::reading(
+                the!("family/parent"),
+                Term::<Entity>::var("this"),
+                Term::var("ancestor"),
+                Some(Cardinality::Many),
+            )],
         )
         .expect("base rule compiles");
 
@@ -1572,14 +1568,12 @@ mod tests {
         let step = DeductiveRule::new(
             concept.clone(),
             vec![
-                AttributeQuery::new(
-                    Term::from(the!("family/parent")),
+                crate::premise::reading(
+                    the!("family/parent"),
                     Term::<Entity>::var("this"),
                     Term::var("p"),
-                    Term::blank(),
                     Some(Cardinality::Many),
-                )
-                .into(),
+                ),
                 Premise::Assert(Proposition::Concept(ConceptQuery {
                     terms,
                     predicate: concept.clone(),
@@ -1789,14 +1783,12 @@ mod tests {
         let odd_rule = DeductiveRule::new(
             odd.clone(),
             vec![
-                AttributeQuery::new(
-                    Term::from(the!("graph/node")),
+                crate::premise::reading(
+                    the!("graph/node"),
                     Term::<Entity>::var("this"),
                     Term::var("name"),
-                    Term::blank(),
                     Some(Cardinality::One),
-                )
-                .into(),
+                ),
                 Premise::Unless(Negation(Proposition::Concept(ConceptQuery {
                     terms: negated,
                     predicate: even.clone(),
@@ -1872,7 +1864,10 @@ mod tests {
                 .into(),
             ],
         )?;
-        assert!(rule.try_this().is_none(), "a raw scan has no content address");
+        assert!(
+            rule.try_this().is_none(),
+            "a raw scan has no content address"
+        );
         let mut registry = RuleRegistry::new();
         assert!(matches!(
             registry.register(rule),
@@ -2180,16 +2175,12 @@ mod tests {
         )])?;
         let direct = DeductiveRule::new(
             list.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("list/next")),
-                    Term::<Entity>::var("this"),
-                    Term::var("next"),
-                    Term::blank(),
-                    Some(Cardinality::Many),
-                )
-                .into(),
-            ],
+            vec![crate::premise::reading(
+                the!("list/next"),
+                Term::<Entity>::var("this"),
+                Term::var("next"),
+                Some(Cardinality::Many),
+            )],
         )?;
         let mut step_terms = Parameters::new();
         step_terms.insert("this".to_string(), Term::<Any>::var("hop"));
@@ -2197,14 +2188,12 @@ mod tests {
         let transitive = DeductiveRule::new(
             list.clone(),
             vec![
-                AttributeQuery::new(
-                    Term::from(the!("list/next")),
+                crate::premise::reading(
+                    the!("list/next"),
                     Term::<Entity>::var("this"),
                     Term::var("hop"),
-                    Term::blank(),
                     Some(Cardinality::Many),
-                )
-                .into(),
+                ),
                 Premise::Assert(Proposition::Concept(ConceptQuery {
                     terms: step_terms,
                     predicate: list.clone(),
@@ -2231,14 +2220,12 @@ mod tests {
                     terms: link_terms,
                     predicate: list.clone(),
                 })),
-                AttributeQuery::new(
-                    Term::from(the!("meta/name")),
+                crate::premise::reading(
+                    the!("meta/name"),
                     Term::<Entity>::var("to"),
                     Term::var("name"),
-                    Term::blank(),
                     Some(Cardinality::One),
-                )
-                .into(),
+                ),
             ],
         )?;
 
@@ -2318,16 +2305,12 @@ mod tests {
         )])?;
         let base = DeductiveRule::new(
             person.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("meta/name")),
-                    Term::<Entity>::var("this"),
-                    Term::var("name"),
-                    Term::blank(),
-                    Some(Cardinality::One),
-                )
-                .into(),
-            ],
+            vec![crate::premise::reading(
+                the!("meta/name"),
+                Term::<Entity>::var("this"),
+                Term::var("name"),
+                Some(Cardinality::One),
+            )],
         )?;
         let mut self_terms = Parameters::new();
         self_terms.insert("this".to_string(), Term::<Any>::var("this"));
@@ -2415,14 +2398,12 @@ mod tests {
         let rule = DeductiveRule::new(
             tautology.clone(),
             vec![
-                AttributeQuery::new(
-                    Term::from(the!("meta/name")),
+                crate::premise::reading(
+                    the!("meta/name"),
                     Term::<Entity>::var("this"),
                     Term::var("name"),
-                    Term::blank(),
                     Some(Cardinality::One),
-                )
-                .into(),
+                ),
                 Premise::Assert(Proposition::Concept(ConceptQuery {
                     terms: self_terms,
                     predicate: tautology.clone(),
@@ -2493,16 +2474,12 @@ mod tests {
         )])?;
         let parent_rule = DeductiveRule::new(
             parent.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("family/father")),
-                    Term::<Entity>::var("this"),
-                    Term::var("parent"),
-                    Term::blank(),
-                    Some(Cardinality::One),
-                )
-                .into(),
-            ],
+            vec![crate::premise::reading(
+                the!("family/father"),
+                Term::<Entity>::var("this"),
+                Term::var("parent"),
+                Some(Cardinality::One),
+            )],
         )?;
 
         // grandfather(this, g) :- father(z, g), parent(this, z).
@@ -2525,14 +2502,12 @@ mod tests {
                     terms: parent_terms,
                     predicate: parent.clone(),
                 })),
-                AttributeQuery::new(
-                    Term::from(the!("family/father")),
+                crate::premise::reading(
+                    the!("family/father"),
                     Term::<Entity>::var("z"),
                     Term::var("grandfather"),
-                    Term::blank(),
                     Some(Cardinality::One),
-                )
-                .into(),
+                ),
             ],
         )?;
 
@@ -2548,16 +2523,12 @@ mod tests {
         )])?;
         let ancestor_base = DeductiveRule::new(
             ancestor.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("family/father")),
-                    Term::<Entity>::var("this"),
-                    Term::var("ancestor"),
-                    Term::blank(),
-                    Some(Cardinality::One),
-                )
-                .into(),
-            ],
+            vec![crate::premise::reading(
+                the!("family/father"),
+                Term::<Entity>::var("this"),
+                Term::var("ancestor"),
+                Some(Cardinality::One),
+            )],
         )?;
         let mut step_terms = Parameters::new();
         step_terms.insert("this".to_string(), Term::<Any>::var("f"));
@@ -2565,14 +2536,12 @@ mod tests {
         let ancestor_step = DeductiveRule::new(
             ancestor.clone(),
             vec![
-                AttributeQuery::new(
-                    Term::from(the!("family/father")),
+                crate::premise::reading(
+                    the!("family/father"),
                     Term::<Entity>::var("this"),
                     Term::var("f"),
-                    Term::blank(),
                     Some(Cardinality::One),
-                )
-                .into(),
+                ),
                 Premise::Assert(Proposition::Concept(ConceptQuery {
                     terms: step_terms,
                     predicate: ancestor.clone(),
@@ -2664,7 +2633,6 @@ mod derived_edge_tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::attribute::query::AttributeQuery;
     use crate::attribute::{AttributeDescriptor, Cardinality, Type};
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
@@ -2690,16 +2658,12 @@ mod derived_edge_tests {
     fn edge_rule(concept: &ConceptDescriptor) -> DeductiveRule {
         DeductiveRule::new(
             concept.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("family/parent")),
-                    Term::<Entity>::var("this"),
-                    Term::var("parent"),
-                    Term::blank(),
-                    Some(Cardinality::Many),
-                )
-                .into(),
-            ],
+            vec![crate::premise::reading(
+                the!("family/parent"),
+                Term::<Entity>::var("this"),
+                Term::var("parent"),
+                Some(Cardinality::Many),
+            )],
         )
         .expect("edge rule compiles")
     }

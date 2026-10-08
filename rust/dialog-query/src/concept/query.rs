@@ -2942,14 +2942,12 @@ mod tests {
             .expect("a concept")
         };
         let scan = |the: &str, value: &str| -> Premise {
-            AttributeQuery::new(
-                Term::from(the.parse::<crate::The>().expect("a selector")),
+            crate::premise::reading(
+                the.parse::<crate::The>().expect("a selector"),
                 Term::<Entity>::var("this"),
                 Term::var(value),
-                Term::blank(),
                 Some(Cardinality::One),
             )
-            .into()
         };
         let odd = DeductiveRule::new(relation("graph/odd"), vec![scan("graph/node", "name")])?;
         let even = DeductiveRule::new(relation("graph/even"), vec![scan("graph/odd", "name")])?;
@@ -2958,15 +2956,15 @@ mod tests {
             relation("graph/lonely"),
             vec![
                 scan("graph/tag", "name"),
-                Premise::Unless(Negation(Proposition::Attribute(Box::new(
-                    AttributeQuery::new(
-                        Term::from(the!("graph/odd")),
-                        Term::<Entity>::var("this"),
-                        Term::blank(),
-                        Term::blank(),
-                        None,
-                    ),
-                )))),
+                match crate::premise::reading(
+                    the!("graph/odd"),
+                    Term::<Entity>::var("this"),
+                    Term::blank(),
+                    None,
+                ) {
+                    Premise::Assert(read) => Premise::Unless(Negation(read)),
+                    other => other,
+                },
             ],
         )?;
         let mut registry = RuleRegistry::new();

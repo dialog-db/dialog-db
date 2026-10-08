@@ -23,7 +23,6 @@ mod tests {
     use crate::Attribute;
     use crate::Match;
     use crate::artifact::{Entity, Value};
-    use crate::attribute::query::AttributeQuery;
     use crate::formula::Like;
     use crate::query::Output;
     use crate::rule::When;
@@ -329,22 +328,18 @@ mod tests {
         let employee_from_stuff = DeductiveRule::new(
             employee_predicate,
             vec![
-                AttributeQuery::new(
-                    Term::from(the!("stuff/name")),
+                crate::premise::reading(
+                    the!("stuff/name"),
                     Term::var("this"),
                     Term::var("name"),
-                    Term::blank(),
                     None,
-                )
-                .into(),
-                AttributeQuery::new(
-                    Term::from(the!("stuff/role")),
+                ),
+                crate::premise::reading(
+                    the!("stuff/role"),
                     Term::var("this"),
                     Term::var("job"),
-                    Term::blank(),
                     None,
-                )
-                .into(),
+                ),
             ],
         )?;
 
@@ -460,11 +455,10 @@ mod tests {
                     name: employee.name.clone(),
                     role: employee.job,
                 },
-                AttributeQuery::new(
-                    Term::from(the!("stuff/name")),
+                crate::premise::reading(
+                    the!("stuff/name"),
                     employee.this,
                     employee.name.clone().into(),
-                    Term::blank(),
                     None,
                 ),
             )
