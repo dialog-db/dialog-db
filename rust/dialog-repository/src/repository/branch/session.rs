@@ -1,4 +1,5 @@
 use dialog_effects::blob::Read as BlobRead;
+use std::cell::Cell;
 use std::collections::HashSet;
 
 use dialog_artifacts::history::Edition;
@@ -805,22 +806,36 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // and every staged write, so a read elects it under `last` and
         // ranks it with the rest under any other policy, until the
         // session takes it back.
-        let pending = self.pending_edition();
+        // The edition the next commit mints, found only for a read that
+        // meets an overlay or staged row: it reads the first line's
+        // revision.
+        let minted = Cell::new(None);
+        let pending = || {
+            minted.get().unwrap_or_else(|| {
+                let edition = self.pending_edition();
+                minted.set(Some(edition));
+                edition
+            })
+        };
         // Past every line's head, not only the first's: a join reads
         // lines of different lengths, and an overlay row is newer than
-        // every committed row of every line it is read beside.
-        let session = self
-            .sources
-            .iter()
-            .filter_map(|source| source.as_ref().revision())
-            .map(|revision| revision.edition.successor())
-            .fold(pending, |newest, edition| newest.max(edition))
-            .successor();
+        // every committed row of every line it is read beside. Found
+        // only for a read that meets an overlay row, since it reads
+        // every line's revision.
+        let mut session = None;
         for (source, line) in self.sources.iter().zip(&format.lines) {
             let rows = source.as_ref().overlay().select(&input, &line.manifest);
             if rows.is_empty() {
                 continue;
             }
+            let session = *session.get_or_insert_with(|| {
+                self.sources
+                    .iter()
+                    .filter_map(|source| source.as_ref().revision())
+                    .map(|revision| revision.edition.successor())
+                    .fold(pending(), |newest, edition| newest.max(edition))
+                    .successor()
+            });
             let rows: ArtifactStream<'a> = Box::pin(stream::iter(
                 rows.into_iter()
                     .map(move |fact| Ok(ArtifactView::pending(fact, session))),
@@ -866,6 +881,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
                 .flat_map(|cell| cell.held.iter().chain(cell.succeeded.iter()))
                 .map(|fact| sort_key(fact, &manifest))
                 .collect();
+            let pending = pending();
             let rows: ArtifactStream<'a> = Box::pin(stream::iter(
                 rows.into_iter()
                     .map(move |fact| Ok(ArtifactView::pending(fact, pending))),
@@ -881,12 +897,19 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
             }
         }
 
-        let streams: Vec<ArtifactStream<'a>> = sessions
-            .into_iter()
-            .chain(staged)
-            .chain(lines)
-            .chain(changes)
-            .collect();
+        // Most reads meet the lines alone, and take their streams as
+        // they are.
+        let streams: Vec<ArtifactStream<'a>> =
+            if sessions.is_empty() && staged.is_empty() && changes.is_empty() {
+                lines
+            } else {
+                sessions
+                    .into_iter()
+                    .chain(staged)
+                    .chain(lines)
+                    .chain(changes)
+                    .collect()
+            };
         Ok(merge_grouped(streams, manifest, format.keys))
     }
 }
