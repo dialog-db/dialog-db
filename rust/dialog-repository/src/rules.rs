@@ -42,7 +42,7 @@ use dialog_artifacts::{
     Artifact, ArtifactSelector, Attribute, Changes, Entity, Statement, Update, Value,
 };
 use dialog_query::concept::descriptor::ConceptDescriptor;
-use dialog_query::concept::query::{ConceptRules, Exact, PlanCache};
+use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::formula::revision::{RevisionParentQuery, RevisionQuery};
 use dialog_query::rule::statement::{Reach, derives_entities};
@@ -455,10 +455,11 @@ pub(crate) struct LayerRoots {
 
 #[derive(Debug, Default)]
 struct RuleCacheInner {
-    /// Which rule entities derive an attribute, as of a branch head.
-    /// Keyed by the attribute's `on:` entity and tagged with the head
-    /// it was scanned at, so a head advance (commit/pull) re-scans it.
-    derived: HashMap<Entity, (Revision, Vec<Entity>)>,
+    /// Which rule entities derive an attribute, each with the standing
+    /// of the commit installing it, as of a branch head. Keyed by the
+    /// attribute's `on:` entity and tagged with the head it was scanned
+    /// at, so a head advance (commit/pull) re-scans it.
+    derived: HashMap<Entity, (Revision, Vec<(Entity, Installed)>)>,
     /// A rule's head re-spelled onto an attribute concept, keyed by
     /// (rule entity, attribute concept entity). Both halves are
     /// content-addressed, so an entry is never stale.
@@ -535,9 +536,10 @@ impl RuleCache {
         Self::default()
     }
 
-    /// Cached committed rule entities deriving the attribute `on` if
-    /// scanned at `head`; `None` if absent or stale.
-    pub(crate) fn derived(&self, on: &Entity, head: &Revision) -> Option<Vec<Entity>> {
+    /// Cached committed rule entities deriving the attribute `on`, each
+    /// with when it was installed, if scanned at `head`; `None` if
+    /// absent or stale.
+    pub(crate) fn derived(&self, on: &Entity, head: &Revision) -> Option<Vec<(Entity, Installed)>> {
         let inner = self.inner.read();
         match inner.derived.get(on) {
             Some((scanned_at, entities)) if scanned_at == head => Some(entities.clone()),
@@ -546,7 +548,12 @@ impl RuleCache {
     }
 
     /// Record the committed rule entities deriving `on` at `head`.
-    pub(crate) fn record_derived(&self, on: Entity, head: Revision, entities: Vec<Entity>) {
+    pub(crate) fn record_derived(
+        &self,
+        on: Entity,
+        head: Revision,
+        entities: Vec<(Entity, Installed)>,
+    ) {
         self.inner.write().derived.insert(on, (head, entities));
     }
 

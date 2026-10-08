@@ -321,7 +321,11 @@ impl RuleRegistry {
             .collect();
         order.sort();
         let mut registered = self.registered.write().map_err(poisoned)?;
-        let base = registered.values().copied().max().map_or(0, |last| last + 1);
+        let base = registered
+            .values()
+            .copied()
+            .max()
+            .map_or(0, |last| last + 1);
         for (theirs, identity) in order {
             registered.entry(identity).or_insert(base + theirs);
         }

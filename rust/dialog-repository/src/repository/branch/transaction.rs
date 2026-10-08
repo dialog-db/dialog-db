@@ -6,6 +6,8 @@ mod invariants;
 mod migration;
 #[cfg(test)]
 mod oracle;
+#[cfg(test)]
+mod quarantine;
 pub(crate) use induce::induction_ignores;
 mod query;
 mod succession;

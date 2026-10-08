@@ -4,11 +4,11 @@ use std::collections::HashSet;
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, ArtifactView, ArtifactViewStream as _, Changes,
-    DialogArtifactsError, Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey,
-    Speculation, Statement, sort_key,
+    Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Changes, DialogArtifactsError,
+    Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey, Speculation, Statement,
+    sort_key,
 };
-use dialog_artifacts::{Attribute, LoadBlob};
+use dialog_artifacts::{Attribute, LoadBlob, Standing};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
@@ -17,14 +17,14 @@ use dialog_effects::memory::Resolve;
 use dialog_query::attribute::AttributeDescriptor;
 use dialog_query::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use dialog_query::concept::query::fixpoint::Continuation;
-use dialog_query::concept::query::{ConceptRules, Exact, PlanCache};
+use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use dialog_query::recall::{BodyMemo, Memo};
 use dialog_query::rule::statement::on_entity;
 use dialog_query::session::ProgramAnalysis;
 use dialog_query::source::SelectRules;
-use dialog_query::{DeductiveRule, Negation, Premise, Proposition};
+use dialog_query::{Claim, DeductiveRule, Negation, Premise, Proposition};
 use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest, PersistentNode};
 use futures_util::future::try_join_all;
 use futures_util::{TryStreamExt as _, stream};
@@ -1023,7 +1023,7 @@ impl Index {
 /// reads, as a session's are. The layer is per query, so it is read
 /// fresh and records no demand; a body that does not hydrate is
 /// skipped, as an overlay's is.
-fn staged_rules(layer: &Staged, index: Index, key: &Entity) -> Vec<DeductiveRule> {
+fn staged_rules(layer: &Staged, index: Index, key: &Entity) -> Vec<(DeductiveRule, Installed)> {
     let entities = rule_entities(layer.scan(&index.selector(key)));
     let mut rules = Vec::with_capacity(entities.len());
     for rule_entity in entities {
@@ -1031,7 +1031,7 @@ fn staged_rules(layer: &Staged, index: Index, key: &Entity) -> Vec<DeductiveRule
             && let Ok(rule) = hydrate(&bytes)
             && rule.stored_as(&rule_entity)
         {
-            rules.push(rule);
+            rules.push((rule, Installed::Pending));
         }
     }
     rules
@@ -1048,6 +1048,21 @@ impl<'a> QueryEnv<'a> {
         source: &Source,
         selector: ArtifactSelector<Constrained>,
     ) -> Result<Vec<Artifact>, DialogArtifactsError> {
+        Ok(self
+            .select_tree_standing(source, selector)
+            .await?
+            .into_iter()
+            .map(|(artifact, _)| artifact)
+            .collect())
+    }
+
+    /// [`select_tree`](Self::select_tree), each artifact with the
+    /// standing of the commit that wrote it.
+    async fn select_tree_standing(
+        &self,
+        source: &Source,
+        selector: ArtifactSelector<Constrained>,
+    ) -> Result<Vec<(Artifact, Standing)>, DialogArtifactsError> {
         // Rule-discovery reads are demand too: a rule committed
         // later for a subscribed concept lands in this range and
         // must re-trigger the subscription. Recorded as *rule*
@@ -1057,11 +1072,27 @@ impl<'a> QueryEnv<'a> {
         self.read_rules(&selector, manifest);
         // Rule bodies are hydrated from the full artifact, so this read
         // genuinely needs owned rows; it is head-cached, not per-query hot.
-        select_from_source(source.as_ref(), self.env, selector)
+        let rows = select_from_source(source.as_ref(), self.env, selector)
             .await?
-            .owned()
-            .try_collect()
-            .await
+            .try_collect::<Vec<_>>()
+            .await?;
+        let mut artifacts = Vec::with_capacity(rows.len());
+        for row in rows {
+            let artifact = match row.to_owned() {
+                Ok(artifact) => artifact,
+                Err(DialogArtifactsError::CorruptEntry(reason)) => {
+                    tracing::warn!(%reason, "ignoring corrupt stored row");
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let standing = Standing {
+                version: row.standing(),
+                cause: Claim::from(artifact.clone()).cause().clone(),
+            };
+            artifacts.push((artifact, standing));
+        }
+        Ok(artifacts)
     }
 
     /// The rules under `index` at `key` held in `source`'s session
@@ -1075,7 +1106,7 @@ impl<'a> QueryEnv<'a> {
         index: Index,
         key: &Entity,
         manifest: &Manifest,
-    ) -> Result<Vec<DeductiveRule>, EvaluationError> {
+    ) -> Result<Vec<(DeductiveRule, Installed)>, EvaluationError> {
         let overlay = source.as_ref().overlay();
         let conclusions = index.selector(key);
         self.read_rules(&conclusions, manifest);
@@ -1092,21 +1123,22 @@ impl<'a> QueryEnv<'a> {
             // commit.
             let rule = hydrate(&bytes)?;
             if rule.stored_as(&rule_entity) {
-                rules.push(rule);
+                rules.push((rule, Installed::Pending));
             }
         }
         Ok(rules)
     }
 
-    /// The committed rule entities under `index` at `key` on `source`:
-    /// discovery alone, no body read. Cached per (key, head); a head
-    /// move (commit/pull) re-scans.
+    /// The committed rule entities under `index` at `key` on `source`,
+    /// each with the standing of the commit indexing it: discovery
+    /// alone, no body read. Cached per (key, head); a head move
+    /// (commit/pull) re-scans.
     async fn durable_rule_entities(
         &self,
         source: &Source,
         index: Index,
         key: &Entity,
-    ) -> Result<Vec<Entity>, EvaluationError> {
+    ) -> Result<Vec<(Entity, Installed)>, EvaluationError> {
         let cache = source.as_ref().rule_cache();
         let head = source.as_ref().revision();
         let discovered = head.as_ref().and_then(|h| match index {
@@ -1137,10 +1169,13 @@ impl<'a> QueryEnv<'a> {
             }
         }
         let claims = self
-            .select_tree(source, index.selector(key))
+            .select_tree_standing(source, index.selector(key))
             .await
             .map_err(|e| EvaluationError::Store(format!("rule index lookup: {e:?}")))?;
-        let entities = rule_entities(claims);
+        let entities: Vec<(Entity, Installed)> = claims
+            .into_iter()
+            .map(|(claim, standing)| (claim.of, Installed::Committed(standing)))
+            .collect();
         if let Some(head) = head.clone() {
             match index {
                 Index::Deriving => cache.record_derived(key.clone(), head, entities.clone()),
@@ -1154,7 +1189,7 @@ impl<'a> QueryEnv<'a> {
         source: &Source,
         index: Index,
         key: &Entity,
-    ) -> Result<Vec<DeductiveRule>, EvaluationError> {
+    ) -> Result<Vec<(DeductiveRule, Installed)>, EvaluationError> {
         let cache = source.as_ref().rule_cache();
         let rule_entities = self.durable_rule_entities(source, index, key).await?;
 
@@ -1165,28 +1200,30 @@ impl<'a> QueryEnv<'a> {
         // rules must not pay N sequential round trips (blocks already
         // in flight join through the env's `Hydrate` flight).
         let cache = &cache;
-        let rules = try_join_all(rule_entities.into_iter().map(|rule_entity| async move {
-            if let Some(body) = cache.body(&rule_entity) {
-                return Ok::<_, EvaluationError>(Some(body));
-            }
-            let source_claims = self
-                .select_tree(source, source_selector(&rule_entity))
-                .await
-                .map_err(|e| EvaluationError::Store(format!("rule source lookup: {e:?}")))?;
-            let Some(bytes) = source_bytes(source_claims) else {
-                return Ok(None);
-            };
-            let body = hydrate(&bytes)?;
-            // A body under an entity it does not hash to is forged,
-            // corrupt, or stored by an earlier release
-            // (`Branch::upgrade_rules` re-installs those): inert, as at
-            // commit.
-            if !body.stored_as(&rule_entity) {
-                return Ok(None);
-            }
-            cache.record_body(rule_entity, body.clone());
-            Ok(Some(body))
-        }))
+        let rules = try_join_all(rule_entities.into_iter().map(
+            |(rule_entity, installed)| async move {
+                if let Some(body) = cache.body(&rule_entity) {
+                    return Ok::<_, EvaluationError>(Some((body, installed)));
+                }
+                let source_claims = self
+                    .select_tree(source, source_selector(&rule_entity))
+                    .await
+                    .map_err(|e| EvaluationError::Store(format!("rule source lookup: {e:?}")))?;
+                let Some(bytes) = source_bytes(source_claims) else {
+                    return Ok(None);
+                };
+                let body = hydrate(&bytes)?;
+                // A body under an entity it does not hash to is forged,
+                // corrupt, or stored by an earlier release
+                // (`Branch::upgrade_rules` re-installs those): inert, as at
+                // commit.
+                if !body.stored_as(&rule_entity) {
+                    return Ok(None);
+                }
+                cache.record_body(rule_entity, body.clone());
+                Ok(Some((body, installed)))
+            },
+        ))
         .await?;
         Ok(rules.into_iter().flatten().collect())
     }
@@ -1319,21 +1356,25 @@ impl<'a> QueryEnv<'a> {
     /// Every rule under `index` at `key`, unioned across layers: each
     /// line's durable layer (committed, head-cached) and session
     /// overlay, the per-query overlay, and the staged layers, the last
-    /// three read fresh.
+    /// three read fresh. Each rule comes with when it was installed: a
+    /// committed rule at the standing of the commit indexing it, any
+    /// other as pending, newer than every commit.
     #[tracing::instrument(skip_all, name = "resolve_rules")]
     async fn resolve_rules(
         &self,
         index: Index,
         key: &Entity,
-    ) -> Result<Vec<DeductiveRule>, EvaluationError> {
-        let mut rules: Vec<DeductiveRule> = Vec::new();
+    ) -> Result<Vec<(DeductiveRule, Installed)>, EvaluationError> {
+        let mut rules: Vec<(DeductiveRule, Installed)> = Vec::new();
         let manifest = &self.format().await?.manifest;
         for source in &self.sources {
             rules.extend(self.durable_rules(source, index, key).await?);
             rules.extend(self.session_rules(source, index, key, manifest)?);
         }
         rules.extend(match index {
-            Index::Deriving => overlay_rules_deriving(&self.changes, key),
+            Index::Deriving => overlay_rules_deriving(&self.changes, key)
+                .into_iter()
+                .map(|rule| (rule, Installed::Pending)),
         });
         for layer in &self.layers {
             rules.extend(staged_rules(layer, index, key));
@@ -1469,10 +1510,10 @@ impl<'a> QueryEnv<'a> {
                 let Some(on) = derives_keys(&single).into_iter().next() else {
                     continue;
                 };
-                for rule in self.resolve_rules(Index::Deriving, &on).await? {
+                for (rule, installed) in self.resolve_rules(Index::Deriving, &on).await? {
                     if let Some(head) = self.head_for(&rule, &on)? {
                         note(&head);
-                        bundle.install(head);
+                        bundle.install_at(head, installed);
                     }
                 }
             }
@@ -1516,7 +1557,12 @@ impl<'a> QueryEnv<'a> {
             let builtins = builtin_deriving(&entity);
             let mut rules = builtins.clone();
             for on in derives_keys(&attribute) {
-                rules.extend(self.resolve_rules(Index::Deriving, &on).await?);
+                rules.extend(
+                    self.resolve_rules(Index::Deriving, &on)
+                        .await?
+                        .into_iter()
+                        .map(|(rule, _)| rule),
+                );
             }
             // A field whose policy is not the plain stored read is read
             // through its attribute concept whether or not a rule
