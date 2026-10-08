@@ -102,22 +102,21 @@ impl From<FormulaQuery> for Premise {
 /// notation, where a raw attribute scan has no spelling.
 #[cfg(test)]
 pub(crate) fn reading(
-    the: crate::attribute::The,
+    the: crate::The,
     this: crate::Term<crate::Entity>,
-    is: crate::Term<crate::types::Any>,
-    cardinality: Option<crate::attribute::Cardinality>,
+    is: crate::Term<crate::Any>,
+    cardinality: Option<crate::Cardinality>,
 ) -> Premise {
-    let field =
-        crate::ConceptFieldDescriptor::required(crate::attribute::AttributeDescriptor::new(
-            the,
-            "",
-            cardinality.unwrap_or(crate::attribute::Cardinality::Many),
-            None,
-        ));
+    let field = crate::ConceptFieldDescriptor::required(crate::AttributeDescriptor::new(
+        the,
+        "",
+        cardinality.unwrap_or(crate::Cardinality::Many),
+        None,
+    ));
     let mut terms = Parameters::new();
     terms.insert("this".to_string(), this.into());
     terms.insert(crate::ConceptDescriptor::VALUE.to_string(), is);
-    Premise::Assert(Proposition::Concept(crate::concept::query::ConceptQuery {
+    Premise::Assert(Proposition::Concept(crate::ConceptQuery {
         predicate: crate::ConceptDescriptor::of_attribute(&field),
         terms,
     }))

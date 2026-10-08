@@ -73,6 +73,14 @@ pub fn derives_attr() -> Attribute {
     the!("dialog.rule/derives").into()
 }
 
+/// The `dialog.rule/quarantined` attribute: a rule the program analysis
+/// sets aside, valued with the concept whose cycle it closed. Never
+/// stored: a branch answers it from the rules its layers hold, so it
+/// moves as rules are installed and retracted.
+pub fn quarantined_attr() -> Attribute {
+    the!("dialog.rule/quarantined").into()
+}
+
 /// The `on:<domain>/<name>` trigger-index entity for an attribute.
 /// Derivable from a runtime instruction alone — no schema lookup —
 /// which is what keeps dispatch probing cheap.

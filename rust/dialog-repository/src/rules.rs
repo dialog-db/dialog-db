@@ -46,6 +46,7 @@ use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::formula::revision::{RevisionParentQuery, RevisionQuery};
 use dialog_query::rule::statement::{Reach, derives_entities};
+use dialog_query::session::Quarantine;
 use dialog_query::type_system::Type as Kind;
 use dialog_query::types::Any;
 use dialog_query::{
@@ -63,7 +64,8 @@ use crate::{Revision, schema};
 // rule types themselves; this module re-uses them for its selectors,
 // caches, and dispatch probing.
 pub(crate) use dialog_query::rule::statement::{
-    conclusion_attr, derives_attr, head_entities, on_attr, reads_attr, source_attr,
+    conclusion_attr, derives_attr, head_entities, on_attr, quarantined_attr, reads_attr,
+    source_attr,
 };
 
 /// The `dialog.concept/transient` marker attribute. A concept carrying it
@@ -492,6 +494,9 @@ struct RuleCacheInner {
     /// that descriptor's implicit rule, which binds its field names, and
     /// descriptors differing only in field names share an identity.
     bundles: HashMap<Entity, Bundle>,
+    /// Every rule the program analysis sets aside over the layers at
+    /// these roots, with the rule-discovery reads finding them.
+    quarantined: Option<(LayerRoots, Vec<Quarantine>, Vec<RuleRead>)>,
     /// A selecting concept's rule and covering rule, keyed by the
     /// concept, the attributes it reads as derived and the one source
     /// rule deriving them (if one). Pure functions of their key, so
@@ -569,6 +574,30 @@ impl RuleCache {
     /// Record the head of `rule` re-spelled onto `attribute`.
     pub(crate) fn record_head(&self, rule: Entity, attribute: Entity, head: DeductiveRule) {
         self.inner.write().heads.insert((rule, attribute), head);
+    }
+
+    /// Every rule set aside over layers at `roots`, if recorded at
+    /// exactly those roots, with the reads that found them.
+    pub(crate) fn quarantined(
+        &self,
+        roots: &LayerRoots,
+    ) -> Option<(Vec<Quarantine>, Vec<RuleRead>)> {
+        match &self.inner.read().quarantined {
+            Some((at, quarantined, reads)) if at == roots => {
+                Some((quarantined.clone(), reads.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Record every rule set aside over layers at `roots`.
+    pub(crate) fn record_quarantined(
+        &self,
+        roots: LayerRoots,
+        quarantined: Vec<Quarantine>,
+        reads: Vec<RuleRead>,
+    ) {
+        self.inner.write().quarantined = Some((roots, quarantined, reads));
     }
 
     /// The rule set assembled for `descriptor` over layers at `roots`,

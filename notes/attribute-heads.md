@@ -110,15 +110,25 @@ recursive component as the rule, so it would read a set the fixpoint
 is still deriving. A merge of rule sets each fine on its own can close
 such a cycle, so the program is never refused. The analysis
 *quarantines* one rule of the cycle instead, and evaluation leaves it
-out (`ProgramAnalysis::quarantined`). It takes the cycle's plainest
-absence test, an `unless` or an optional read before a ranked election
-before `last`, and sets aside the rule inside the cycle deriving what
-the test reads: the test then keeps the meaning it had over everything
-outside the cycle, which is the meaning it had before the cycle
-formed. When the test's own rule derives what it tests, that rule goes.
-Among equals, the greatest identity. The choice depends on the rules
-alone, so every replica quarantines the same rules, and a quarantine
-lifts once a rule of the cycle is retracted. Outside a component
+out (`ProgramAnalysis::quarantined`). It sets aside the rule of the
+cycle installed last: every read was well defined before it arrived.
+A committed rule is ordered by the commit indexing it (edition, then
+version hash, the order a `last` election uses), and an uncommitted
+one is newer than every commit, so replicas holding the same history
+set aside the same rule however the rules reached them. Among rules
+installed together it takes the cycle's plainest absence test, an
+`unless` or an optional read before a ranked election before `last`,
+and sets aside the rule inside the cycle deriving what the test reads,
+so the test keeps the meaning it had over everything outside the
+cycle; when the test's own rule derives what it tests, that rule goes.
+Then the greatest identity. A quarantine lifts once a rule of the
+cycle is retracted.
+
+A branch answers `dialog.rule/quarantined` from the same analysis, run
+over every rule its layers hold: one row per rule set aside, valued
+with the concept it concludes. It is never stored, since it is a
+function of the rules and their history, and storing it would let two
+replicas write conflicting answers. Outside a component
 nothing changes: the negation holds when the fact is absent, the
 optional read sees absence, the election picks the best candidate of a
 relation derived in full.

@@ -1492,6 +1492,7 @@ impl Display for ConceptQuery {
 
 #[cfg(test)]
 mod tests {
+    use crate::premise::reading;
     mod entry_form {
         #[cfg(target_arch = "wasm32")]
         wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -2942,7 +2943,7 @@ mod tests {
             .expect("a concept")
         };
         let scan = |the: &str, value: &str| -> Premise {
-            crate::premise::reading(
+            reading(
                 the.parse::<crate::The>().expect("a selector"),
                 Term::<Entity>::var("this"),
                 Term::var(value),
@@ -2956,7 +2957,7 @@ mod tests {
             relation("graph/lonely"),
             vec![
                 scan("graph/tag", "name"),
-                match crate::premise::reading(
+                match reading(
                     the!("graph/odd"),
                     Term::<Entity>::var("this"),
                     Term::blank(),

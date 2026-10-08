@@ -52,9 +52,10 @@ Fixed on this branch, each with its test now passing:
 | 5: absence tests inside a cycle | Stratified negation and elections (an election negates the better candidates), with quarantine instead of the cycle policy: the analysis sets aside the rule inside the cycle that derives what the cycle's plainest absence test reads, so the test keeps its meaning over everything outside the cycle. Deterministic over the rule set; lifts when a rule of the cycle is retracted; listed by `ProgramAnalysis::quarantined`. Pinned with the sentinel case (`a_ranked_default_inside_a_cycle_still_elects`). |
 | Oracle findings | A reference election, written apart from the engine, checks the tree, the transaction's settlement and every read over generated histories of writes and pulls across three replicas. It found three ways a transaction read differently from what its commit left: a value succeeded and written back, an `all` write of a held value, and a held value a write refreshes. Each is fixed and pinned by name. |
 
-Open, each needing a decision:
+| 10: field names in identity | A concept premise's field names are renamed by structure (`#0`, `#1`, ... in the order of the attributes they read) before the rule is hashed, so the name a premise binds a field under does not distinguish a rule. A rule whose premises have no canonical spelling (a raw attribute scan) has no identity and is refused, registered or installed. |
+| Quarantine order | The rule of a cycle installed last is set aside: a committed rule by the commit indexing it, an uncommitted one newer than every commit, a registered one by registration. The plainest-absence-test rule breaks ties among rules installed together. Pinned on one branch in both orders and across two replicas installing concurrently. A query reads the set-aside rules as `dialog.rule/quarantined`. |
 
-- **10, field names in identity.** Not blocking.
+Nothing is open.
 
 ## Decided since the first review
 

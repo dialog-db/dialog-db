@@ -8,7 +8,7 @@ use dialog_artifacts::{
     Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey, Speculation, Statement,
     sort_key,
 };
-use dialog_artifacts::{Attribute, LoadBlob, Standing};
+use dialog_artifacts::{Attribute, LoadBlob, Standing, Value};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
@@ -22,13 +22,13 @@ use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use dialog_query::recall::{BodyMemo, Memo};
 use dialog_query::rule::statement::on_entity;
-use dialog_query::session::ProgramAnalysis;
+use dialog_query::session::{ProgramAnalysis, Quarantine};
 use dialog_query::source::SelectRules;
 use dialog_query::{Claim, DeductiveRule, Negation, Premise, Proposition};
 use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest, PersistentNode};
 use futures_util::future::try_join_all;
 use futures_util::{TryStreamExt as _, stream};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::OnceCell;
 
 use crate::CommitError;
@@ -41,7 +41,8 @@ use crate::repository::{CellSettlement, ReadObservation};
 use crate::rules::{
     LayerRoots, RuleRead, Selecting, assemble, builtin, builtin_derives, builtin_deriving,
     conclusion_attr, derives_attr, derives_keys, derives_selector, has_overlay_rules, head_onto,
-    hydrate, overlay_rules_deriving, rule_entities, source_attr, source_bytes, source_selector,
+    hydrate, overlay_rules_deriving, quarantined_attr, rule_entities, source_attr, source_bytes,
+    source_selector,
 };
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
@@ -745,6 +746,9 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         &self,
         input: ArtifactSelector<Constrained>,
     ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
+        if input.attribute() == Some(&*QUARANTINED) {
+            return Box::pin(self.select_quarantined(input)).await;
+        }
         let format = self.format().await?;
         let manifest = format.manifest.clone();
         self.record_demand(&input, &manifest);
@@ -1254,19 +1258,7 @@ impl Provider<SelectRules> for QueryEnv<'_> {
         // or from a line's session overlay, which moves without moving its
         // root. A query recording what it reads reuses the set as well,
         // and records the rule reads that assembled it as its own.
-        let roots = LayerRoots {
-            lines: self
-                .sources
-                .iter()
-                .map(|source| source.as_ref().root())
-                .collect(),
-            overlays: self
-                .sources
-                .iter()
-                .map(|source| source.as_ref().overlay().revision())
-                .collect(),
-            staged: self.layers.iter().map(Staged::generation).collect(),
-        };
+        let roots = self.layer_roots();
         let cache = self
             .sources
             .first()
@@ -1330,6 +1322,186 @@ fn relation_concept(field: &ConceptFieldDescriptor) -> Entity {
         field.descriptor().clone().without_select(),
     ))
     .this()
+}
+
+/// The `dialog.rule/quarantined` attribute, compared on every select.
+static QUARANTINED: LazyLock<Attribute> = LazyLock::new(quarantined_attr);
+
+impl<'a> QueryEnv<'a> {
+    /// The roots of the layers this query reads rules from.
+    fn layer_roots(&self) -> LayerRoots {
+        LayerRoots {
+            lines: self
+                .sources
+                .iter()
+                .map(|source| source.as_ref().root())
+                .collect(),
+            overlays: self
+                .sources
+                .iter()
+                .map(|source| source.as_ref().overlay().revision())
+                .collect(),
+            staged: self.layers.iter().map(Staged::generation).collect(),
+        }
+    }
+
+    /// `dialog.rule/quarantined` rows: one per rule the program analysis
+    /// sets aside, of the rule and valued with the concept whose cycle
+    /// it closed, narrowed by the selector's entity and value. Nothing
+    /// stored under the attribute is read: the rows are the analysis's,
+    /// answered over every rule the layers hold.
+    async fn select_quarantined(
+        &self,
+        input: ArtifactSelector<Constrained>,
+    ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
+        let quarantined = self
+            .quarantined()
+            .await
+            .map_err(|error| DialogArtifactsError::Storage(format!("quarantine: {error}")))?;
+        let rows: Vec<Artifact> = quarantined
+            .into_iter()
+            .map(|quarantine| Artifact {
+                the: QUARANTINED.clone(),
+                of: quarantine.rule,
+                is: Value::Entity(quarantine.concept),
+                cause: None,
+            })
+            .filter(|row| {
+                input.entity().is_none_or(|of| *of == row.of)
+                    && input.value().is_none_or(|is| *is == row.is)
+            })
+            .collect();
+        Ok(Box::pin(stream::iter(
+            rows.into_iter().map(|row| Ok(row.into())),
+        )))
+    }
+
+    /// Every rule the program analysis sets aside, over every deductive
+    /// rule the layers hold, sorted by rule and concept. Kept per layer
+    /// roots like an assembled rule set, and recorded as rule demand, so
+    /// a subscription re-evaluates when a rule is installed or retracted.
+    async fn quarantined(&self) -> Result<Vec<Quarantine>, EvaluationError> {
+        let roots = self.layer_roots();
+        let cache = self
+            .sources
+            .first()
+            .map(|source| source.as_ref().rule_cache())
+            .filter(|_| !has_overlay_rules(&self.changes));
+        if let Some((quarantined, reads)) =
+            cache.as_ref().and_then(|cache| cache.quarantined(&roots))
+        {
+            if let Some(demand) = &self.demand {
+                for (selector, manifest) in &reads {
+                    demand.record_rules(selector, manifest);
+                }
+            }
+            return Ok(quarantined);
+        }
+        let first_read = self
+            .reads
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .len();
+
+        // Each attribute some rule concludes roots an analysis; a cycle
+        // lies in the closure of every attribute on it, so the union
+        // covers every cycle once.
+        let mut seen: HashSet<Entity> = HashSet::new();
+        let mut concluded: Vec<ConceptDescriptor> = Vec::new();
+        for rule in self.every_rule().await? {
+            for (_, field) in rule.conclusion().with().iter() {
+                let descriptor = ConceptDescriptor::of_attribute(field);
+                if seen.insert(descriptor.this()) {
+                    concluded.push(descriptor);
+                }
+            }
+        }
+        // The analysis reads premises and never plans.
+        let plan_cache = PlanCache::default();
+        let mut quarantined: Vec<Quarantine> = Vec::new();
+        for descriptor in &concluded {
+            let bundle = self.resolve_bundle(descriptor, plan_cache.clone()).await?;
+            let analysis = self.program_analysis(descriptor, &bundle).await?;
+            for quarantine in analysis.quarantined() {
+                if !quarantined.contains(quarantine) {
+                    quarantined.push(quarantine.clone());
+                }
+            }
+        }
+        quarantined.sort_by(|a, b| (&a.rule, &a.concept).cmp(&(&b.rule, &b.concept)));
+
+        if let Some(cache) = cache {
+            let reads = self
+                .reads
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .get(first_read..)
+                .map(<[_]>::to_vec)
+                .unwrap_or_default();
+            cache.record_quarantined(roots, quarantined.clone(), reads);
+        }
+        Ok(quarantined)
+    }
+
+    /// Every deductive rule the layers hold, once each: each line's
+    /// committed rules and session overlay, the staged layers and the
+    /// per-query changes. A body under an entity it does not hash to is
+    /// inert, as at resolution.
+    async fn every_rule(&self) -> Result<Vec<DeductiveRule>, EvaluationError> {
+        let attribute = source_attr();
+        let selector = ArtifactSelector::new().the(attribute.clone());
+        let manifest = &self.format().await?.manifest;
+        let mut bodies: Vec<(Entity, Vec<u8>)> = Vec::new();
+        let mut take = |artifacts: Vec<Artifact>| {
+            for artifact in artifacts {
+                if let Value::Bytes(bytes) = artifact.is {
+                    bodies.push((artifact.of, bytes));
+                }
+            }
+        };
+        for source in &self.sources {
+            take(
+                self.select_tree(source, selector.clone())
+                    .await
+                    .map_err(|e| EvaluationError::Store(format!("rule source scan: {e:?}")))?,
+            );
+            self.read_rules(&selector, manifest);
+            take(source.as_ref().overlay().scan(&selector));
+        }
+        for layer in &self.layers {
+            take(layer.scan(&selector));
+        }
+        for (entity, changed, change) in self.changes.iter() {
+            if *changed == attribute
+                && let dialog_artifacts::Change::Assert(Value::Bytes(bytes), _) = change
+            {
+                bodies.push((entity.clone(), bytes.clone()));
+            }
+        }
+
+        let cache = self
+            .sources
+            .first()
+            .map(|source| source.as_ref().rule_cache());
+        let mut rules: Vec<DeductiveRule> = Vec::new();
+        let mut seen: HashSet<Entity> = HashSet::new();
+        for (entity, bytes) in bodies {
+            if !seen.insert(entity.clone()) {
+                continue;
+            }
+            let cached = cache.as_ref().and_then(|cache| cache.body(&entity));
+            let rule = match cached {
+                Some(rule) => rule,
+                // Inductive rules share the attribute and do not decode.
+                None => match hydrate(&bytes) {
+                    Ok(rule) if rule.stored_as(&entity) => rule,
+                    _ => continue,
+                },
+            };
+            rules.push(rule);
+        }
+        Ok(rules)
+    }
 }
 
 impl BodyMemo for QueryEnv<'_> {

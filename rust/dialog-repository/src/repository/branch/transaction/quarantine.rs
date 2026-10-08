@@ -145,7 +145,10 @@ async fn it_sets_aside_the_negating_rule_installed_last() -> Result<()> {
         Vec::<bool>::new(),
         "the negating rule is set aside"
     );
-    assert_eq!(read(&branch, &operator, &alice, "q").await?, Vec::<bool>::new());
+    assert_eq!(
+        read(&branch, &operator, &alice, "q").await?,
+        Vec::<bool>::new()
+    );
     Ok(())
 }
 
@@ -186,6 +189,63 @@ async fn replicas_installing_a_cycle_concurrently_set_aside_the_same_rule() -> R
     assert!(
         on_a == (vec![true], vec![]) || on_a == (vec![], vec![]),
         "exactly one rule of the cycle is set aside: {on_a:?}"
+    );
+    Ok(())
+}
+
+/// The rules `branch` sets aside, read as `dialog.rule/quarantined`.
+async fn quarantined(branch: &Branch, operator: &Operator) -> Result<Vec<Entity>> {
+    let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+        "concept": { "the": "dialog.rule/quarantined", "as": "Entity" }
+    }}))?;
+    let mut terms = Parameters::new();
+    terms.insert("this".to_string(), Term::<Any>::var("this"));
+    terms.insert("concept".to_string(), Term::<Any>::var("concept"));
+    let rows = branch
+        .select(ConceptQuery { predicate, terms })
+        .perform(operator)
+        .try_vec()
+        .await?;
+    let mut rules: Vec<Entity> = rows
+        .iter()
+        .map(|row| row.get::<Entity>("this"))
+        .collect::<Result<_, _>>()?;
+    rules.sort();
+    Ok(rules)
+}
+
+/// A query reads which rules are set aside: none while the rules are
+/// well defined, the rule installed last once it closes the cycle, and
+/// none again once that rule is retracted.
+#[dialog_common::test]
+async fn it_reads_the_rules_it_sets_aside() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    seeded(&branch, &operator).await?;
+
+    install(&branch, &operator, negating()?).await?;
+    assert_eq!(quarantined(&branch, &operator).await?, Vec::<Entity>::new());
+
+    let closing = closing()?;
+    install(&branch, &operator, closing.clone()).await?;
+    assert_eq!(
+        quarantined(&branch, &operator).await?,
+        vec![closing.this()],
+        "the closing rule is read as set aside"
+    );
+
+    branch
+        .transaction()
+        .retract(&closing)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    assert_eq!(
+        quarantined(&branch, &operator).await?,
+        Vec::<Entity>::new(),
+        "retracting the closing rule lifts its quarantine"
     );
     Ok(())
 }

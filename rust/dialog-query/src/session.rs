@@ -11,6 +11,7 @@ pub use rule_registry::*;
 
 #[cfg(test)]
 mod tests {
+    use crate::premise::reading;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -70,9 +71,9 @@ mod tests {
             .map(|(name, field)| {
                 let relation = field.the().to_string();
                 let (domain, attribute) = relation.split_once('/').expect("a relation");
-                crate::premise::reading(
+                reading(
                     format!("{domain}/stated-{attribute}")
-                        .parse::<crate::attribute::The>()
+                        .parse::<crate::The>()
                         .expect("an attribute"),
                     Term::var("this"),
                     Term::var(name),
@@ -352,13 +353,13 @@ mod tests {
         let employee_from_stuff = DeductiveRule::new(
             employee_predicate,
             vec![
-                crate::premise::reading(
+                reading(
                     the!("stuff/name"),
                     Term::var("this"),
                     Term::var("name"),
                     None,
                 ),
-                crate::premise::reading(
+                reading(
                     the!("stuff/role"),
                     Term::var("this"),
                     Term::var("job"),
@@ -479,7 +480,7 @@ mod tests {
                     name: employee.name.clone(),
                     role: employee.job,
                 },
-                crate::premise::reading(
+                reading(
                     the!("stuff/name"),
                     employee.this,
                     employee.name.clone().into(),

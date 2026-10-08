@@ -156,24 +156,39 @@ are each fine can close such a cycle, so the program is never refused.
 Instead the program analysis *quarantines* one rule of the cycle, and
 evaluation leaves it out:
 
-- It takes the cycle's plainest absence test: an `unless` or an
-  optional read first, then a ranked election, then `last`.
-- It sets aside the rule inside the cycle that derives what that test
-  reads, so the test keeps the meaning it had over everything outside
-  the cycle, the meaning it had before the cycle formed. When the
-  test's own rule derives what it tests, that rule is set aside.
-- Among equals, the greatest rule identity.
+- It sets aside the rule of the cycle installed last. Every read was
+  well defined before that rule arrived, so setting it aside keeps
+  them as they were. A committed rule is ordered by the commit that
+  indexed it (edition, then version hash, as a `last` election orders
+  claims); a rule not yet committed (a session's, a transaction's, a
+  query's own) is newer than every commit. A `RuleRegistry` orders
+  rules by registration.
+- Among rules installed together, it takes the cycle's plainest
+  absence test (an `unless` or an optional read first, then a ranked
+  election, then `last`) and sets aside the rule inside the cycle that
+  derives what that test reads; when the test's own rule derives what
+  it tests, that rule.
+- Then the greatest rule identity.
 
-The choice depends on the rules alone, so every replica holding the
-same rules quarantines the same ones, and a quarantine lifts by itself
-once a rule of the cycle is retracted. A plain recursion under `all`,
-such as an ancestor closure, is positive and unaffected.
+The order comes from the commits, which every replica sees the same,
+so replicas holding the same history quarantine the same rule, however
+the rules reached them. A quarantine lifts by itself once a rule of
+the cycle is retracted. A plain recursion under `all`, such as an
+ancestor closure, is positive and unaffected.
 
 What this changes for you:
 
+- A query reads the rules a branch sets aside as
+  `dialog.rule/quarantined`: one row per rule, of the rule's identity,
+  valued with the concept it concludes. It is never stored; the branch
+  answers it from the rules its layers hold (committed, session,
+  staged and the query's own), so it changes as rules are installed
+  and retracted. Facts written under the attribute are not read.
 - `ProgramAnalysis::quarantined()` lists the rules set aside, each with
   the concept it concludes and the cycle it closed.
-  `ConceptRules::without` is how a bundle leaves them out.
+  `ConceptRules::without` is how a bundle leaves them out, and
+  `ConceptRules::install_at` installs a rule with when it was
+  installed (`Installed`).
 - A recursive rule that reads its own relation under `last`, or under
   any choosing policy, is quarantined: recursion through an election
   is not expressible. Read the relation under `all` inside the
@@ -201,7 +216,7 @@ every query answering and every answer a stratified one, and reports
 what it set aside.
 
 What is guaranteed: every program evaluates; evaluation is
-deterministic and independent of arrival order; what a query returns
+deterministic, and replicas with the same history agree; what a query returns
 is the stratified answer of the program minus the quarantined rules.
 What is not: that a rule's derived set only grows as rules land. A
 negation can lose derivations when a rule starts deriving what it
@@ -264,10 +279,18 @@ What this changes for you:
   installed before the index existed, which keep resolving.
 - A rule's identity is the hash of its canonical spelling, not of the
   bytes you wrote: variables are renamed by structure and premises are
-  ordered. Two authors writing one rule under different names install
-  one rule. A body stored under any other entity, the older byte-hash
-  identity included, is inert on every read and at commit until
+  ordered. The field names a premise binds a concept's fields under
+  are renamed by structure too, so two premises reading the same
+  attributes under different field names are one premise. Two authors
+  writing one rule under different names install one rule. A body
+  stored under any other entity, the older byte-hash identity
+  included, is inert on every read and at commit until
   `Branch::upgrade_rules` re-installs it (see below).
+- Every rule has an identity, including one a program registers with a
+  `RuleRegistry`: a rule whose premises cannot be spelled canonically
+  (a raw `AttributeQuery` scan) is refused
+  (`EvaluationError::RuleWithoutIdentity`). Write the premise as a
+  concept or attribute read, as an installed rule would.
 - The dependency graph, the fixpoint and the registry key an attribute
   concept by its relation, so every read of a relation, under any type
   or policy, meets the rules deriving it.

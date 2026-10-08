@@ -404,6 +404,7 @@ impl Provider<SelectRules> for RuleRegistry {
 
 #[cfg(test)]
 mod tests {
+    use crate::premise::reading;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -431,7 +432,7 @@ mod tests {
         let premises = sources
             .iter()
             .map(|(field, source)| {
-                crate::premise::reading(
+                reading(
                     source.parse::<The>().expect("an attribute"),
                     Term::var("this"),
                     Term::var(*field),

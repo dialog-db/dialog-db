@@ -1517,6 +1517,7 @@ impl Continuation {
 
 #[cfg(test)]
 mod tests {
+    use crate::premise::reading;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -1553,7 +1554,7 @@ mod tests {
     fn ancestor_rules(concept: &ConceptDescriptor) -> Vec<DeductiveRule> {
         let base = DeductiveRule::new(
             concept.clone(),
-            vec![crate::premise::reading(
+            vec![reading(
                 the!("family/parent"),
                 Term::<Entity>::var("this"),
                 Term::var("ancestor"),
@@ -1568,7 +1569,7 @@ mod tests {
         let step = DeductiveRule::new(
             concept.clone(),
             vec![
-                crate::premise::reading(
+                reading(
                     the!("family/parent"),
                     Term::<Entity>::var("this"),
                     Term::var("p"),
@@ -1783,7 +1784,7 @@ mod tests {
         let odd_rule = DeductiveRule::new(
             odd.clone(),
             vec![
-                crate::premise::reading(
+                reading(
                     the!("graph/node"),
                     Term::<Entity>::var("this"),
                     Term::var("name"),
@@ -2175,7 +2176,7 @@ mod tests {
         )])?;
         let direct = DeductiveRule::new(
             list.clone(),
-            vec![crate::premise::reading(
+            vec![reading(
                 the!("list/next"),
                 Term::<Entity>::var("this"),
                 Term::var("next"),
@@ -2188,7 +2189,7 @@ mod tests {
         let transitive = DeductiveRule::new(
             list.clone(),
             vec![
-                crate::premise::reading(
+                reading(
                     the!("list/next"),
                     Term::<Entity>::var("this"),
                     Term::var("hop"),
@@ -2220,7 +2221,7 @@ mod tests {
                     terms: link_terms,
                     predicate: list.clone(),
                 })),
-                crate::premise::reading(
+                reading(
                     the!("meta/name"),
                     Term::<Entity>::var("to"),
                     Term::var("name"),
@@ -2305,7 +2306,7 @@ mod tests {
         )])?;
         let base = DeductiveRule::new(
             person.clone(),
-            vec![crate::premise::reading(
+            vec![reading(
                 the!("meta/name"),
                 Term::<Entity>::var("this"),
                 Term::var("name"),
@@ -2398,7 +2399,7 @@ mod tests {
         let rule = DeductiveRule::new(
             tautology.clone(),
             vec![
-                crate::premise::reading(
+                reading(
                     the!("meta/name"),
                     Term::<Entity>::var("this"),
                     Term::var("name"),
@@ -2474,7 +2475,7 @@ mod tests {
         )])?;
         let parent_rule = DeductiveRule::new(
             parent.clone(),
-            vec![crate::premise::reading(
+            vec![reading(
                 the!("family/father"),
                 Term::<Entity>::var("this"),
                 Term::var("parent"),
@@ -2502,7 +2503,7 @@ mod tests {
                     terms: parent_terms,
                     predicate: parent.clone(),
                 })),
-                crate::premise::reading(
+                reading(
                     the!("family/father"),
                     Term::<Entity>::var("z"),
                     Term::var("grandfather"),
@@ -2523,7 +2524,7 @@ mod tests {
         )])?;
         let ancestor_base = DeductiveRule::new(
             ancestor.clone(),
-            vec![crate::premise::reading(
+            vec![reading(
                 the!("family/father"),
                 Term::<Entity>::var("this"),
                 Term::var("ancestor"),
@@ -2536,7 +2537,7 @@ mod tests {
         let ancestor_step = DeductiveRule::new(
             ancestor.clone(),
             vec![
-                crate::premise::reading(
+                reading(
                     the!("family/father"),
                     Term::<Entity>::var("this"),
                     Term::var("f"),
@@ -2629,6 +2630,7 @@ mod tests {
 /// rule.
 #[cfg(test)]
 mod derived_edge_tests {
+    use crate::premise::reading;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -2658,7 +2660,7 @@ mod derived_edge_tests {
     fn edge_rule(concept: &ConceptDescriptor) -> DeductiveRule {
         DeductiveRule::new(
             concept.clone(),
-            vec![crate::premise::reading(
+            vec![reading(
                 the!("family/parent"),
                 Term::<Entity>::var("this"),
                 Term::var("parent"),
