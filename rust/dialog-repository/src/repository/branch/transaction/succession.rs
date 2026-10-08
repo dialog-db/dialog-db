@@ -499,9 +499,10 @@ struct Cell {
     live: Vec<Candidate>,
     line: Vec<Value>,
     settled: Vec<Change>,
-    /// A value written while the cell held no live claim of it, as one
-    /// written back after its retraction: the transaction's row, not
-    /// the line's, is the one a read sees.
+    /// A value a write asserted, rather than settling to nothing: one
+    /// written back after its retraction, or a held claim the write did
+    /// not elect, whose version the commit refreshes. The transaction's
+    /// row, not the line's, is the one a read sees.
     restaged: Vec<Value>,
 }
 
@@ -520,19 +521,16 @@ impl Cell {
         }
     }
 
-    /// [`write`](Self::write), noting a value the write stages afresh.
+    /// [`write`](Self::write), noting a value the write asserts.
     fn stage(
         &mut self,
         change: &Change,
         derived: &[Candidate],
         edition: Edition,
     ) -> Result<Vec<Change>, CommitError> {
-        let held = matches!(change, Change::Assert(value, _)
-            if self.live.iter().any(|claim| claim.claim && claim.value == *value));
         let written = self.write(change, derived, edition)?;
         if let Change::Assert(value, _) = change
             && !written.is_empty()
-            && !held
             && !self.restaged.contains(value)
         {
             self.restaged.push(value.clone());
