@@ -1665,9 +1665,11 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
     Ok(())
 }
 
-/// Re-asserting a value that already stands is a no-op, as re-replacing
-/// one is: the indexes and history are untouched and the standing claim
-/// keeps its version. A different value is still added beside it.
+/// A writer re-asserting a value it already claims is a no-op, as
+/// re-replacing one is: the indexes and history are untouched and the
+/// standing claim keeps its version. A different value is still added
+/// beside it, and another writer's claim of the same value still counts
+/// (`it_covers_every_observed_claim_of_a_retracted_value`).
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn it_ignores_a_reassert_of_a_standing_value() -> Result<()> {

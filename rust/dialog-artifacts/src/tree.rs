@@ -1428,12 +1428,22 @@ where
                     None
                 };
 
-                // Cardinality-many no-op, the counterpart of `Replace`'s:
-                // the identical claim already stands, so nothing changes in
-                // the indexes and no history is recorded. Without this a
-                // re-assert of a standing value restamped the datum and
-                // minted a revision whose facts read exactly as before.
-                if standing.is_some() {
+                // A writer re-asserting a claim it already holds is a no-op,
+                // the counterpart of `Replace`'s: nothing changes in the
+                // indexes and no history is recorded. Without this every
+                // re-run of the same writes restamped the datum and minted
+                // a revision whose facts read exactly as before.
+                //
+                // Only the writer's OWN standing claim counts. Another
+                // writer's claim of the same value is still collapsed in
+                // below, so a later retraction covers every writer's claim
+                // it observed (see `it_covers_every_observed_claim_of_a_
+                // retracted_value`).
+                if let (Some(standing), Some(version)) = (&standing, &version)
+                    && standing
+                        .versions()
+                        .any(|claimed| claimed.origin == version.origin)
+                {
                     continue;
                 }
                 changed = true;
@@ -1457,6 +1467,15 @@ where
 
                 let mut datum = Datum::for_artifact(&artifact);
                 datum.version = version;
+                // Same-value claims from other writers share this key, so
+                // the standing claims collapse into the new datum rather
+                // than being overwritten. A later retraction covers the
+                // whole set — an insert-overwrite here silently orphaned
+                // the earlier claim, which could then resurrect the fact
+                // through a merge.
+                if let Some(standing) = &standing {
+                    datum.absorb_versions(standing.versions());
+                }
                 let added = State::Added(datum);
                 transient = transient
                     .write_all(
