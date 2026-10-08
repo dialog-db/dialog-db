@@ -36,6 +36,7 @@ use dialog_query::{
 };
 use dialog_storage::provider::storage::VolatileSpace;
 use std::collections::BTreeSet;
+use std::env;
 
 type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
 
@@ -90,13 +91,13 @@ fn elect(policy: &Policy, entries: &[Entry]) -> Option<usize> {
 /// a choosing policy, the claim the policy elects is succeeded unless it
 /// holds the value written; the value written stands as staged.
 fn write(policy: &Policy, value: u64, entries: &mut Vec<Entry>) {
-    if *policy != Policy::All {
-        if let Some(elected) = elect(policy, entries) {
-            if entries[elected].0 == value {
-                return;
-            }
-            entries.remove(elected);
+    if *policy != Policy::All
+        && let Some(elected) = elect(policy, entries)
+    {
+        if entries[elected].0 == value {
+            return;
         }
+        entries.remove(elected);
     }
     entries.retain(|entry| entry.0 != value);
     entries.push((value, Stand::Staged));
@@ -404,7 +405,7 @@ async fn replay(seed: u64, steps: usize) -> Result<()> {
 /// number of seeds.
 #[dialog_common::test]
 async fn a_wide_sweep_agrees_with_the_reference() -> Result<()> {
-    let Some(seeds) = std::env::var("DIALOG_ORACLE_SWEEP")
+    let Some(seeds) = env::var("DIALOG_ORACLE_SWEEP")
         .ok()
         .and_then(|seeds| seeds.parse::<u64>().ok())
     else {

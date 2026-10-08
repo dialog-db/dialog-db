@@ -1945,13 +1945,17 @@ mod tests {
         Ok(())
     }
 
-    /// A set-widened read inside the component yields the absent row
-    /// as well as the present ones. `tree/label(x) := inherited ??
-    /// own :- tree/parent(x) = p, tree/label(p) = ?inherited,
-    /// tree/tag(x) = own` labels a child with its parent's label and,
-    /// under the cycle policy, with its own tag too: `c`, under `b`
-    /// under the unlabelled root `a`, carries both `b`'s label and its
-    /// own, whatever order the rounds derived them in.
+    /// A cycle the analysis cannot quarantine keeps the in-component
+    /// readings: a set-widened read inside the component yields the
+    /// absent row as well as the present ones. `tree/label(x) :=
+    /// inherited ?? own :- tree/parent(x) = p, tree/label(p) =
+    /// ?inherited, tree/tag(x) = own` is built in code and has no
+    /// content address, so there is no identity to set it aside by: it
+    /// labels a child with its parent's label and with its own tag too.
+    /// `c`, under `b` under the unlabelled root `a`, carries both `b`'s
+    /// label and its own, whatever order the rounds derived them in. A
+    /// stored rule always has an identity, so a repository never meets
+    /// this case.
     #[dialog_common::test]
     async fn it_reads_an_optional_inside_the_component_as_absent_too() -> anyhow::Result<()> {
         use crate::constraint::{Coalesce, Constraint};
@@ -2024,9 +2028,11 @@ mod tests {
             ],
         )?;
 
+        assert!(rule.try_this().is_none(), "the rule has no content address");
         let mut registry = RuleRegistry::new();
         registry.register(rule)?;
         let analysis = registry.analysis()?;
+        assert!(analysis.quarantined().is_empty(), "nothing to set aside by");
         assert_eq!(
             analysis
                 .absences()

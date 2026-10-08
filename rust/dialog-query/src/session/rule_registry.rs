@@ -365,7 +365,7 @@ mod tests {
     use super::*;
     use crate::Term;
     use crate::attribute::query::AttributeQuery;
-    use crate::attribute::{AttributeDescriptor, Cardinality, Type};
+    use crate::attribute::{AttributeDescriptor, Cardinality, The, Type};
     use crate::the;
 
     fn person_concept() -> ConceptDescriptor {
@@ -388,11 +388,7 @@ mod tests {
             .iter()
             .map(|(field, source)| {
                 AttributeQuery::new(
-                    Term::from(
-                        source
-                            .parse::<crate::attribute::The>()
-                            .expect("an attribute"),
-                    ),
+                    Term::from(source.parse::<The>().expect("an attribute")),
                     Term::var("this"),
                     Term::var(*field),
                     Term::blank(),

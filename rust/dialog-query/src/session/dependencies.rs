@@ -27,13 +27,18 @@
 //! each fine on its own can close such a cycle, so it is never refused
 //! at install: the analysis *quarantines* a rule of the cycle instead
 //! ([`ProgramAnalysis::quarantined`]), and evaluation leaves it out.
-//! The rule chosen is one whose reads in the cycle are all positive,
-//! when one exists: the rule that fed a negation back into itself,
-//! rather than the negation, which keeps the meaning it had before the
-//! cycle formed. Among equals, the greatest identity, an order every
-//! replica shares. The choice depends on the rules alone, so every
+//! The rule chosen is the one inside the cycle deriving what the
+//! cycle's plainest absence test reads (an `unless` or an optional
+//! read before a ranked election before `last`): the test then keeps
+//! the meaning it had over everything outside the cycle, which is the
+//! meaning it had before the cycle formed. When the test's own rule
+//! derives what it tests, that rule is chosen. Among equals, the
+//! greatest identity, an order every replica shares. The choice depends on the rules alone, so every
 //! replica holding the same rules quarantines the same ones, and a
 //! quarantine lifts by itself once a rule of the cycle is retracted.
+//! A rule is set aside by its content address; a rule built in code
+//! that has none, which a stored rule never is, cannot be, and its
+//! cycle stays, reported by [`ProgramAnalysis::absences`].
 //! An aggregating edge inside a component remains a violation: a fold
 //! has no deterministic reading over a set still growing. A deductive
 //! rule refuses `reduce` at compile time, so the violation is
