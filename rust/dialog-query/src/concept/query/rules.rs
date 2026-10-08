@@ -26,12 +26,28 @@ use crate::premise::Premise;
 use crate::recall::Recall;
 use crate::rule::compile_internal;
 use crate::rule::deductive::Origin;
-use crate::selection::Match;
+use crate::selection::{Match, Standing};
 use crate::session::{ProgramAnalysis, Quarantine};
 use crate::term::Term;
 use crate::types::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+
+/// When a rule was installed, in the order the program analysis sets
+/// rules aside: the newest rule of a cycle goes first, since the rules
+/// before it evaluated without one.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Installed {
+    /// Built into the engine, or installed with no record of when: the
+    /// oldest.
+    Builtin,
+    /// The n-th rule an in-memory registry took.
+    Registered(u64),
+    /// Committed, at the standing of the commit that installed it.
+    Committed(Standing),
+    /// Asserted but not yet committed: newer than every committed rule.
+    Pending,
+}
 
 /// All rules for a single concept, with adornment-keyed plan caching.
 ///
@@ -46,6 +62,9 @@ pub struct ConceptRules {
     /// implicit scan whose plans the descriptor memoizes.
     selecting: bool,
     installed: Vec<DeductiveRule>,
+    /// When each installed rule was installed, beside it: the newest
+    /// install of the rule wherever it was found.
+    installs: Vec<Installed>,
     plans: Arc<RwLock<HashMap<Adornment, Arc<Disjunction>>>>,
     /// Cross-query cache of planned per-rule [`Conjunction`]s, keyed by
     /// content-addressed `(rule, adornment)`. Shared from the owning
@@ -117,6 +136,7 @@ impl ConceptRules {
             implicit,
             selecting,
             installed: Vec::new(),
+            installs: Vec::new(),
             plans: Arc::new(RwLock::new(HashMap::new())),
             plan_cache,
             recursion: None,
@@ -242,6 +262,13 @@ impl ConceptRules {
     /// Install a rule deriving this concept, once: a rule already
     /// installed under the same identity is not installed twice.
     pub fn install(&mut self, rule: DeductiveRule) {
+        self.install_at(rule, Installed::Builtin);
+    }
+
+    /// [`install`](Self::install), recording when the rule was
+    /// installed: the program analysis sets the newest rule of a cycle
+    /// aside first. A rule installed again keeps its newest install.
+    pub fn install_at(&mut self, rule: DeductiveRule, installed: Installed) {
         // A caller binds the head by this concept's field names, and
         // a rule concluding the same attributes under other names is
         // re-headed onto them first. A rule whose fields do not pair
@@ -250,8 +277,13 @@ impl ConceptRules {
             Ok(Some(respelled)) => respelled,
             _ => rule,
         };
-        if !self.installed.iter().any(|known| known.same(&rule)) {
+        if let Some(position) = self.installed.iter().position(|known| known.same(&rule)) {
+            if self.installs[position] < installed {
+                self.installs[position] = installed;
+            }
+        } else {
             self.installed.push(rule);
+            self.installs.push(installed);
             self.plans.write().unwrap().clear();
         }
     }
@@ -264,10 +296,20 @@ impl ConceptRules {
             return self;
         }
         let before = self.installed.len();
-        self.installed.retain(|rule| {
-            rule.try_this()
-                .is_none_or(|this| !quarantined.iter().any(|set_aside| set_aside.rule == this))
-        });
+        let kept: Vec<bool> = self
+            .installed
+            .iter()
+            .map(|rule| {
+                rule.try_this()
+                    .is_none_or(|this| !quarantined.iter().any(|set_aside| set_aside.rule == this))
+            })
+            .collect();
+        let mut keep = kept.iter();
+        self.installed
+            .retain(|_| *keep.next().expect("one verdict per rule"));
+        let mut keep = kept.iter();
+        self.installs
+            .retain(|_| *keep.next().expect("one verdict per rule"));
         if self.installed.len() != before {
             self.plans = Arc::new(RwLock::new(HashMap::new()));
             self.exact = None;
@@ -278,6 +320,12 @@ impl ConceptRules {
     /// The explicitly installed rules (does not include the implicit rule).
     pub fn installed(&self) -> &[DeductiveRule] {
         &self.installed
+    }
+
+    /// When each of [`installed`](Self::installed) was installed, in the
+    /// same order.
+    pub fn installs(&self) -> &[Installed] {
+        &self.installs
     }
 
     /// Every rule for this concept: the implicit rule (derived from
@@ -306,8 +354,8 @@ impl ConceptRules {
     /// rule is the same in both (it is derived from the concept descriptor)
     /// so only the `installed` set is merged.
     pub fn extend(&mut self, other: &ConceptRules) {
-        for rule in &other.installed {
-            self.install(rule.clone());
+        for (rule, installed) in other.installed.iter().zip(&other.installs) {
+            self.install_at(rule.clone(), installed.clone());
         }
     }
 

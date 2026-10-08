@@ -3,7 +3,7 @@ use crate::Entity;
 use crate::EvaluationError;
 use crate::attribute::Relation;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
-use crate::concept::query::{ConceptRules, Exact, PlanCache};
+use crate::concept::query::{ConceptRules, Exact, Installed, PlanCache};
 use crate::rule::deductive::DeductiveRule;
 use crate::rule::statement::Reach;
 use crate::source::SelectRules;
@@ -38,6 +38,9 @@ pub struct RuleRegistry {
     /// declares its own type, cardinality and policy over it. Every
     /// rule here is attribute-headed.
     heads: Arc<RwLock<HashMap<Entity, Vec<DeductiveRule>>>>,
+    /// The order rules were registered in, by each head's identity: what
+    /// the program analysis sets the newest rule of a cycle aside by.
+    registered: Arc<RwLock<HashMap<Entity, u64>>>,
     /// Bundles assembled per queried concept, keyed by the concept's
     /// entity and cleared whenever the rule set changes.
     bundles: Arc<RwLock<HashMap<Entity, ConceptRules>>>,
@@ -112,15 +115,32 @@ impl RuleRegistry {
             .heads()
             .map_err(|error| EvaluationError::Store(error.to_string()))?;
         let mut index = self.heads.write().map_err(poisoned)?;
+        let mut registered = self.registered.write().map_err(poisoned)?;
+        let order = registered.len() as u64;
         for head in heads {
+            if let Some(identity) = head.rule.try_this() {
+                registered.entry(identity).or_insert(order);
+            }
             let key = relation_key(&head.field);
             let rules = index.entry(key).or_default();
             if !rules.iter().any(|existing| existing.same(&head.rule)) {
                 rules.push(head.rule);
             }
         }
+        drop(registered);
         drop(index);
         self.invalidate()
+    }
+
+    /// When `rule` was registered: the order the analysis sets rules
+    /// aside in.
+    fn installed(&self, rule: &DeductiveRule) -> Result<Installed, EvaluationError> {
+        let registered = self.registered.read().map_err(poisoned)?;
+        Ok(rule
+            .try_this()
+            .and_then(|identity| registered.get(&identity).copied())
+            .map(Installed::Registered)
+            .unwrap_or(Installed::Builtin))
     }
 
     /// Whether some registered rule derives the attribute of `field`.
@@ -167,7 +187,7 @@ impl RuleRegistry {
             for key in relation_keys(field) {
                 if let Some(rules) = index.get(&key) {
                     for rule in rules {
-                        bundle.install(reading_derived(rule, &derived)?);
+                        bundle.install_at(reading_derived(rule, &derived)?, self.installed(rule)?);
                     }
                 }
             }
@@ -290,6 +310,22 @@ impl RuleRegistry {
         }
         drop(ours);
         drop(theirs);
+        // Rules merged in register after ours, in the order they were
+        // registered there.
+        let mut order: Vec<(u64, Entity)> = other
+            .registered
+            .read()
+            .map_err(poisoned)?
+            .iter()
+            .map(|(identity, order)| (*order, identity.clone()))
+            .collect();
+        order.sort();
+        let mut registered = self.registered.write().map_err(poisoned)?;
+        let base = registered.values().copied().max().map_or(0, |last| last + 1);
+        for (theirs, identity) in order {
+            registered.entry(identity).or_insert(base + theirs);
+        }
+        drop(registered);
         self.invalidate()
     }
 
@@ -319,7 +355,7 @@ impl RuleRegistry {
             let Some(first) = rules.first() else { continue };
             let mut bundle = ConceptRules::new(first.conclusion());
             for rule in rules {
-                bundle.install(reading_derived(rule, &derived)?);
+                bundle.install_at(reading_derived(rule, &derived)?, self.installed(rule)?);
             }
             entries.push((key, bundle));
         }

@@ -12,7 +12,7 @@ mod plan_cache;
 pub mod rules;
 
 pub use plan_cache::PlanCache;
-pub use rules::{ConceptRules, Exact};
+pub use rules::{ConceptRules, Exact, Installed};
 
 use std::fmt;
 

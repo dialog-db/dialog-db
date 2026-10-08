@@ -60,7 +60,7 @@
 use crate::Entity;
 use crate::attribute::AttributeDescriptor;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
-use crate::concept::query::ConceptRules;
+use crate::concept::query::{ConceptRules, Installed};
 use crate::error::EvaluationError;
 use crate::negation::Negation;
 use crate::premise::Premise;
@@ -330,10 +330,11 @@ pub enum Closure {
 }
 
 /// One rule's dependency edges: the identity it can be quarantined by
-/// (`None` for a concept's implicit rule), the node it concludes, and
-/// the nodes its body reads.
+/// (`None` for a concept's implicit rule), when it was installed, the
+/// node it concludes, and the nodes its body reads.
 struct RuleEdges {
     rule: Option<Entity>,
+    installed: Installed,
     concept: Entity,
     edges: Vec<(Entity, Polarity)>,
 }
@@ -533,8 +534,13 @@ impl ProgramAnalysis {
                     out.push((node, polarity));
                     pending.push_back(target);
                 }
+                let installed = position
+                    .checked_sub(implicit)
+                    .and_then(|index| bundle.installs().get(index).cloned())
+                    .unwrap_or(Installed::Builtin);
                 rules.push(RuleEdges {
                     rule: (position >= implicit).then(|| rule.try_this()).flatten(),
+                    installed,
                     concept: entity.clone(),
                     edges: out,
                 });
@@ -600,18 +606,33 @@ impl ProgramAnalysis {
                         &b.owner,
                     ))
                 });
-            let chosen = test.and_then(|test| {
-                let deriving: Vec<&Entity> = feeding
-                    .iter()
-                    .filter(|(_, rule)| rule.concept == test.target)
-                    .map(|(id, _)| id)
-                    .collect();
-                match &test.owner {
-                    Some(owner) if deriving.contains(&owner) => Some(owner.clone()),
-                    _ => deriving.into_iter().max().cloned(),
-                }
-            });
-            let chosen = chosen.or_else(|| feeding.iter().map(|(id, _)| id).max().cloned());
+            // The newest rule feeding the cycle: the rules installed before
+            // it evaluated without one. Among rules of one install, the
+            // one the test would lose: its own rule when it derives what
+            // it tests, else the rule deriving what it reads. Then the
+            // greatest identity.
+            let preferred = |id: &Entity, rule: &RuleEdges| -> bool {
+                test.as_ref().is_some_and(|test| {
+                    let derives = feeding.iter().any(|(owner, rule)| {
+                        Some(owner) == test.owner.as_ref() && rule.concept == test.target
+                    });
+                    if derives {
+                        test.owner.as_ref() == Some(id)
+                    } else {
+                        rule.concept == test.target
+                    }
+                })
+            };
+            let chosen = feeding
+                .iter()
+                .max_by(|(a, rule_a), (b, rule_b)| {
+                    (&rule_a.installed, preferred(a, rule_a), a).cmp(&(
+                        &rule_b.installed,
+                        preferred(b, rule_b),
+                        b,
+                    ))
+                })
+                .map(|(id, _)| id.clone());
             let Some(rule) = chosen else {
                 // A cycle with no rule to set aside: it stays, and its
                 // absence tests are reported.
@@ -1012,22 +1033,23 @@ mod tests {
     }
 
     /// "A merge can close a cycle through a negation; the analysis
-    /// quarantines a rule of it instead of refusing the program."
-    /// `a := b` and `b := c, unless a`: the rule set aside is the one
-    /// deriving what the negation reads, `a := b`, so `unless a` keeps
-    /// the meaning it had over everything outside the cycle. Nothing is
+    /// quarantines a rule of it instead of refusing the program", the
+    /// newest, since the rules before it evaluated without one. `b := c,
+    /// unless a` registered, then `a := b`, which closes the cycle: `a :=
+    /// b` is set aside, so `unless a` keeps the meaning it had. Nothing is
     /// left recursive, nothing is reported as an absence test, and the
-    /// bundle of `a` comes without the rule.
+    /// bundle of `a` comes without the rule. Registered the other way
+    /// round, the negating rule is the newest and goes.
     #[dialog_common::test]
-    fn it_quarantines_the_rule_deriving_what_a_negation_reads_in_its_cycle() {
+    fn it_quarantines_the_newest_rule_of_a_cycle_through_a_negation() {
         let a = collection("aaa");
         let b = collection("bbb");
         let c = collection("ccc");
         let closing = rule(&a, &[&b], &[]);
         let negating = rule(&b, &[&c], &[&a]);
         let mut registry = RuleRegistry::new();
-        registry.register(closing.clone()).unwrap();
         registry.register(negating.clone()).unwrap();
+        registry.register(closing.clone()).unwrap();
 
         let analysis = registry.analysis().unwrap();
         let mut cycle = vec![ProgramAnalysis::node(&a), ProgramAnalysis::node(&b)];
@@ -1051,28 +1073,21 @@ mod tests {
             1,
             "the negating rule stays"
         );
-    }
 
-    /// "Every replica holding the same rules quarantines the same ones."
-    /// Two rules that each negate the other, registered in either order,
-    /// lead to the same single quarantine.
-    #[dialog_common::test]
-    fn it_quarantines_the_same_rule_whatever_order_the_rules_arrive_in() {
-        let a = collection("aaa");
-        let b = collection("bbb");
-        let c = collection("ccc");
-        let first = rule(&a, &[&c], &[&b]);
-        let second = rule(&b, &[&c], &[&a]);
-        let mut forward = RuleRegistry::new();
-        forward.register(first.clone()).unwrap();
-        forward.register(second.clone()).unwrap();
-        let mut backward = RuleRegistry::new();
-        backward.register(second).unwrap();
-        backward.register(first).unwrap();
-
-        let quarantined = forward.analysis().unwrap().quarantined().to_vec();
-        assert_eq!(quarantined.len(), 1, "one rule breaks the cycle");
-        assert_eq!(backward.analysis().unwrap().quarantined(), &quarantined[..]);
+        let mut reversed = RuleRegistry::new();
+        reversed.register(closing).unwrap();
+        reversed.register(negating.clone()).unwrap();
+        assert_eq!(
+            reversed
+                .analysis()
+                .unwrap()
+                .quarantined()
+                .iter()
+                .map(|set_aside| set_aside.rule.clone())
+                .collect::<Vec<_>>(),
+            vec![negating.this()],
+            "registered last, the negating rule goes"
+        );
     }
 
     /// "A quarantine lifts by itself once a rule of the cycle is
