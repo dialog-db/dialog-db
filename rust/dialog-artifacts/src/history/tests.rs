@@ -1734,7 +1734,10 @@ async fn it_ignores_a_reassert_of_a_standing_value() -> Result<()> {
 
     // A different value is still a change, added beside the first.
     assert!(apply(&mut tree, &store, third, Instruction::Assert(tag("wasm"))).await?);
-    assert_eq!(tree.select_data(store.clone(), &entity, &the).await?.len(), 2);
+    assert_eq!(
+        tree.select_data(store.clone(), &entity, &the).await?.len(),
+        2
+    );
 
     Ok(())
 }
