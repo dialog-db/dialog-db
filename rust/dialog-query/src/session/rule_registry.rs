@@ -103,6 +103,11 @@ impl RuleRegistry {
     /// through recursion) are checked by
     /// [`validate`](Self::validate) and at query time, never here.
     pub fn register(&mut self, rule: DeductiveRule) -> Result<(), EvaluationError> {
+        if rule.try_this().is_none() {
+            return Err(EvaluationError::RuleWithoutIdentity {
+                concept: rule.conclusion().this().to_string(),
+            });
+        }
         let heads = rule
             .heads()
             .map_err(|error| EvaluationError::Store(error.to_string()))?;

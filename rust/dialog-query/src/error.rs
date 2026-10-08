@@ -708,6 +708,35 @@ pub enum EvaluationError {
         aggregated: String,
     },
 
+    /// A rule with no content address: its body uses a premise the
+    /// formal notation cannot express, such as a raw attribute scan, so
+    /// it can be neither stored nor set aside by the program analysis.
+    /// Every installed rule is written in the formal notation.
+    #[error(
+        "A rule concluding {concept} has no content address: write its body in the formal \
+         notation to install it"
+    )]
+    RuleWithoutIdentity {
+        /// The concept the rule concludes.
+        concept: String,
+    },
+
+    /// A dependency cycle reads itself through an absence test (a
+    /// negation, an optional read or an election) and has no rule the
+    /// analysis could set aside. Unreachable for installed rules, which
+    /// all have a content address; kept so such a cycle fails loudly
+    /// rather than evaluating to something no rule says.
+    #[error(
+        "{concept} reads {target} inside the same dependency cycle through an absence test, \
+         and the cycle has no rule to set aside"
+    )]
+    AbsenceThroughRecursion {
+        /// The concept whose rule tests absence in its own cycle.
+        concept: String,
+        /// The concept tested, inside the same cycle.
+        target: String,
+    },
+
     /// A recursive concept's semi-naive fixpoint did not converge
     /// within the round cap. A round derives at least one new row,
     /// so purely fact-driven recursion terminates well under the

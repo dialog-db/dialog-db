@@ -30,11 +30,9 @@
 //! runs. When the concept is a member of the same component the test
 //! has no stratified meaning, and the program analysis quarantines a
 //! rule of the cycle ([`ProgramAnalysis::quarantined`]) so no
-//! component evaluated here holds one. The in-component readings
-//! below (a negated premise holds; a set-widened read also yields the
-//! absent row) remain only for a cycle with no rule to set aside,
-//! which [`ProgramAnalysis::absences`] reports. A fold inside a
-//! component has no reading at all and stays refused
+//! component evaluated here holds one; a cycle with no rule to set
+//! aside fails with [`EvaluationError::AbsenceThroughRecursion`]. A
+//! fold inside a component has no reading at all and stays refused
 //! ([`ProgramAnalysis::check`]).
 //!
 //! Goal-directed (magic-set) filtering of the component's answer
@@ -243,22 +241,12 @@ pub fn join(
 
 /// A component member's rule split into its in-component concept
 /// premises (the *recursive occurrences*, evaluated from the answer
-/// table), the in-component reads it makes as absent under the cycle
-/// policy (bound `Absent` once their entity is known), and everything
-/// else (the *base premises*, evaluated top-down). A negated
-/// in-component premise holds under the policy and appears nowhere.
-/// A rule with set-widened in-component reads is split once per way
-/// of reading each as present or absent, so the variants together
-/// derive what the policy says.
+/// table) and everything else (the *base premises*, evaluated
+/// top-down).
 struct SplitRule {
     rule: DeductiveRule,
     occurrences: Vec<ConceptQuery>,
-    absent: Vec<ConceptQuery>,
     base: Vec<Premise>,
-    /// Whether the rule had an in-component premise the cycle policy
-    /// removed (a negation) or reads as absent: its own plan would
-    /// evaluate that premise, so the split evaluates the base instead.
-    reduced: bool,
 }
 
 /// A component member: its descriptor (for row projection) and its
@@ -268,37 +256,32 @@ struct Member {
     rules: Vec<SplitRule>,
 }
 
-/// How a premise reads a concept in the same cycle as the root, when
-/// it reads one.
-enum Reading<'p> {
-    /// An ordinary premise: an occurrence joined from the answer table.
-    Positive(&'p ConceptQuery),
-    /// A set-widened premise: joined from the table and, under the
-    /// cycle policy, also read as absent.
-    Optional(&'p ConceptQuery),
-    /// A negated premise: it holds under the cycle policy, so the rule
-    /// evaluates without it.
-    Negated,
-}
-
-/// Whether the premise applies a concept in the same cycle as
-/// `root`, and how, when so.
+/// The premise's in-component occurrence, when it reads a concept in
+/// the same cycle as `root`: an ordinary premise, joined from the
+/// answer table. A negation or an optional read of such a concept
+/// tests for absence in a set the cycle is still deriving, which the
+/// program analysis quarantines a rule over; one left is an error.
 fn in_component<'p>(
     premise: &'p Premise,
     analysis: &ProgramAnalysis,
     root: &Entity,
-) -> Option<Reading<'p>> {
-    let (query, reading) = match premise {
-        Premise::Assert(Proposition::Concept(query)) if query.widens() => {
-            (query, Reading::Optional(query))
-        }
-        Premise::Assert(Proposition::Concept(query)) => (query, Reading::Positive(query)),
-        Premise::Unless(Negation(Proposition::Concept(query))) => (query, Reading::Negated),
-        _ => return None,
+) -> Result<Option<&'p ConceptQuery>, EvaluationError> {
+    let (query, absence) = match premise {
+        Premise::Assert(Proposition::Concept(query)) => (query, query.widens()),
+        Premise::Unless(Negation(Proposition::Concept(query))) => (query, true),
+        _ => return Ok(None),
     };
-    analysis
-        .in_same_cycle(root, &ProgramAnalysis::node(&query.predicate))
-        .then_some(reading)
+    let target = ProgramAnalysis::node(&query.predicate);
+    if !analysis.in_same_cycle(root, &target) {
+        return Ok(None);
+    }
+    if absence {
+        return Err(EvaluationError::AbsenceThroughRecursion {
+            concept: root.to_string(),
+            target: target.to_string(),
+        });
+    }
+    Ok(Some(query))
 }
 
 /// Bind one recursive occurrence's terms from a table row, as
@@ -337,34 +320,6 @@ pub(crate) fn cite(matched: &mut Match, terms: &Parameters, row: &Row, standing:
         {
             matched.cite_variable_standing(name, standing.clone());
         }
-    }
-}
-
-/// Bind one in-component read as absent under the cycle policy:
-/// every named term but the entity's binds `Absent`. Returns `false`
-/// when a term is already bound present (the combination is a
-/// non-match).
-fn bind_absent(matched: &mut Match, reading: &ConceptQuery) -> bool {
-    for (param, term) in reading.terms.iter() {
-        if param == "this" {
-            continue;
-        }
-        if let Term::Variable { name: Some(_), .. } = term
-            && matched.bind_absent(term).is_err()
-        {
-            return false;
-        }
-    }
-    true
-}
-
-/// Whether an in-component read's entity is known in `scope`: a
-/// constant, or a variable something bound.
-fn entity_known(reading: &ConceptQuery, scope: &Environment) -> bool {
-    match reading.terms.get("this") {
-        Some(Term::Constant(_)) => true,
-        Some(term) => term.name().is_some_and(|name| scope.contains(name)),
-        None => false,
     }
 }
 
@@ -461,48 +416,26 @@ where
         let bundle = Provider::<SelectRules>::execute(env, descriptor.clone()).await?;
         let mut rules = Vec::new();
         for rule in bundle.rules() {
-            let mut positive = Vec::new();
-            let mut optional = Vec::new();
+            let mut occurrences = Vec::new();
             let mut base = Vec::new();
-            let mut negated = false;
             for premise in rule.analysis().premises() {
-                match in_component(premise, analysis, &root_entity) {
-                    Some(Reading::Positive(query) | Reading::Optional(query)) => {
+                match in_component(premise, analysis, &root_entity)? {
+                    Some(query) => {
                         // An occurrence names the concept under the
                         // premise's spelling; the table holds the
                         // concept's rows under its canonical one.
                         let query = query.clone().canonical();
                         queue.push(query.predicate.clone());
-                        if query.widens() {
-                            optional.push(query);
-                        } else {
-                            positive.push(query);
-                        }
+                        occurrences.push(query);
                     }
-                    Some(Reading::Negated) => negated = true,
                     None => base.push(premise.clone()),
                 }
             }
-            // One variant per way of reading each set-widened
-            // in-component premise: from the table, or as absent.
-            for mask in 0..(1usize << optional.len()) {
-                let mut occurrences = positive.clone();
-                let mut absent = Vec::new();
-                for (index, query) in optional.iter().enumerate() {
-                    if mask & (1 << index) == 0 {
-                        occurrences.push(query.clone());
-                    } else {
-                        absent.push(query.clone());
-                    }
-                }
-                rules.push(SplitRule {
-                    rule: rule.clone(),
-                    occurrences,
-                    reduced: negated || !absent.is_empty(),
-                    absent,
-                    base: base.clone(),
-                });
-            }
+            rules.push(SplitRule {
+                rule: rule.clone(),
+                occurrences,
+                base,
+            });
         }
         members.insert(entity, Member { descriptor, rules });
     }
@@ -510,8 +443,8 @@ where
 }
 
 /// Evaluate one rule with the given occurrence-and-source bindings:
-/// join the `rest` premises and the rule's absent reads sideways and
-/// return every projected conclusion row.
+/// join the `rest` premises sideways and return every projected
+/// conclusion row.
 async fn collect_rule_rows<'a, Env>(
     member: &Member,
     split: &SplitRule,
@@ -543,9 +476,9 @@ where
 
 /// Join `partials`, bound as `scope` says, through the rest of a
 /// rule's body, in the order the bindings allow: a base premise as
-/// soon as its inputs are bound; an absent read as soon as its entity
-/// is; and a positive occurrence (an index into the split's, read
-/// from `totals`) once nothing else can run, preferring one that
+/// soon as its inputs are bound, and a positive occurrence (an index
+/// into the split's, read from `totals`) once nothing else can run,
+/// preferring one that
 /// shares a variable with what is bound. So a rule with several
 /// occurrences joins them through the premises that connect them,
 /// rather than pairing every row of one table with every row of
@@ -567,9 +500,8 @@ where
     Env: crate::Scope<'a>,
 {
     let types = &split.rule.analysis().types;
-    let mut absents: Vec<&ConceptQuery> = split.absent.iter().collect();
     let mut stage = 0usize;
-    while !base.is_empty() || !siblings.is_empty() || !absents.is_empty() {
+    while !base.is_empty() || !siblings.is_empty() {
         let (ready, later): (Vec<Premise>, Vec<Premise>) = base
             .into_iter()
             .partition(|premise| premise.feasible(&scope).is_ok());
@@ -598,13 +530,6 @@ where
             }
             partials = next;
             scope.extend(&plan.binds);
-        } else if let Some(index) = absents
-            .iter()
-            .position(|reading| entity_known(reading, &scope))
-        {
-            let reading = absents.remove(index);
-            partials.retain_mut(|partial| bind_absent(partial, reading));
-            add_terms(&mut scope, reading);
         } else if !siblings.is_empty() {
             let connected = siblings.iter().position(|index| {
                 split.occurrences[*index]
@@ -625,10 +550,6 @@ where
             }
             partials = next;
             add_terms(&mut scope, occurrence);
-        } else if base.is_empty() {
-            // Only absent reads remain, of entities nothing binds:
-            // there is no entity to read as absent, so no row.
-            return Ok(Vec::new());
         } else {
             return Err(EvaluationError::Planning {
                 message: format!(
@@ -807,10 +728,7 @@ where
     let members = discover(root, analysis, env).await?;
 
     // Seed round: rules with no recursive occurrence evaluate fully
-    // top-down. A rule the cycle policy reduced, by removing a negation
-    // or reading a premise as absent, joins its base premises instead,
-    // since its own plan would evaluate the premise. A reducing
-    // seed rule folds its body first — the stratification check
+    // top-down. A reducing seed rule folds its body first — the stratification check
     // guarantees its concept premises all sit below the component, so
     // the folded inputs are complete before the fixpoint begins. (A
     // reducing rule *with* an in-component occurrence never reaches
@@ -819,25 +737,6 @@ where
     for member in members.values() {
         for split in &member.rules {
             if !split.occurrences.is_empty() {
-                continue;
-            }
-            if split.reduced {
-                let rows = collect_rule_rows(
-                    member,
-                    split,
-                    split.base.clone(),
-                    Match::new(),
-                    &Environment::new(),
-                    env,
-                )
-                .await?;
-                for answer in rows {
-                    table.insert(
-                        &ProgramAnalysis::node(&member.descriptor),
-                        answer.row,
-                        answer.standing,
-                    );
-                }
                 continue;
             }
             let plan = split.rule.plan(&Environment::new());
@@ -1945,42 +1844,12 @@ mod tests {
         Ok(())
     }
 
-    /// A cycle the analysis cannot quarantine keeps the in-component
-    /// readings: a set-widened read inside the component yields the
-    /// absent row as well as the present ones. `tree/label(x) :=
-    /// inherited ?? own :- tree/parent(x) = p, tree/label(p) =
-    /// ?inherited, tree/tag(x) = own` is built in code and has no
-    /// content address, so there is no identity to set it aside by: it
-    /// labels a child with its parent's label and with its own tag too.
-    /// `c`, under `b` under the unlabelled root `a`, carries both `b`'s
-    /// label and its own, whatever order the rounds derived them in. A
-    /// stored rule always has an identity, so a repository never meets
-    /// this case.
+    /// "Every installed rule is written in the formal notation." A rule
+    /// whose body scans an attribute raw has no content address: it
+    /// could be neither stored nor set aside by the program analysis,
+    /// so the registry refuses it.
     #[dialog_common::test]
-    async fn it_reads_an_optional_inside_the_component_as_absent_too() -> anyhow::Result<()> {
-        use crate::constraint::{Coalesce, Constraint};
-        use crate::session::Absence;
-        use crate::type_system::Type as Kind;
-
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-
-        let a = Entity::new()?;
-        let b = Entity::new()?;
-        let c = Entity::new()?;
-        branch
-            .transaction()
-            .assert(the!("tree/parent").of(b.clone()).is(a.clone()))
-            .assert(the!("tree/parent").of(c.clone()).is(b.clone()))
-            .assert(the!("tree/tag").of(a.clone()).is("A".to_string()))
-            .assert(the!("tree/tag").of(b.clone()).is("B".to_string()))
-            .assert(the!("tree/tag").of(c.clone()).is("C".to_string()))
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-
+    fn it_refuses_a_rule_with_no_content_address() -> anyhow::Result<()> {
         let label = ConceptDescriptor::try_from(vec![(
             "label",
             AttributeDescriptor::new(
@@ -1990,71 +1859,28 @@ mod tests {
                 Some(Type::String),
             ),
         )])?;
-        let mut inherited = Parameters::new();
-        inherited.insert("this".to_string(), Term::<Any>::var("p"));
-        inherited.insert(
-            "label".to_string(),
-            Term::<Any>::typed_var("inherited", Kind::from(Type::String).optional()),
-        );
         let rule = DeductiveRule::new(
             label.clone(),
             vec![
                 AttributeQuery::new(
-                    Term::from(the!("tree/parent")),
-                    Term::<Entity>::var("this"),
-                    Term::var("p"),
-                    Term::blank(),
-                    Some(Cardinality::One),
-                )
-                .into(),
-                Premise::Assert(Proposition::Concept(ConceptQuery {
-                    terms: inherited,
-                    predicate: label.clone(),
-                })),
-                AttributeQuery::new(
                     Term::from(the!("tree/tag")),
                     Term::<Entity>::var("this"),
-                    Term::var("own"),
+                    Term::var("label"),
                     Term::blank(),
                     Some(Cardinality::One),
                 )
-                .into(),
-                Constraint::Coalesce(Coalesce::new(
-                    Term::var("inherited"),
-                    Term::var("own"),
-                    Term::var("label"),
-                ))
                 .into(),
             ],
         )?;
-
-        assert!(rule.try_this().is_none(), "the rule has no content address");
+        assert!(rule.try_this().is_none(), "a raw scan has no content address");
         let mut registry = RuleRegistry::new();
-        registry.register(rule)?;
-        let analysis = registry.analysis()?;
-        assert!(analysis.quarantined().is_empty(), "nothing to set aside by");
-        assert_eq!(
-            analysis
-                .absences()
-                .iter()
-                .map(|absence| absence.absence)
-                .collect::<Vec<_>>(),
-            vec![Absence::Optional],
-            "the analysis reports the set-widened read the policy governs"
-        );
-
-        let source = TestEnv::new(&branch, &operator, registry);
-        let mut expected = vec![
-            (Value::Entity(b.clone()), Value::String("B".into())),
-            (Value::Entity(c.clone()), Value::String("C".into())),
-            (Value::Entity(c.clone()), Value::String("B".into())),
-        ];
-        expected.sort_by_key(|pair| format!("{pair:?}"));
-        assert_eq!(
-            pairs_of(&source, &label, "label").await?,
-            expected,
-            "the root has no parent and no label; b's own tag is its only candidate; \
-             c carries its own tag by the absent read and b's label by the present one"
+        assert!(matches!(
+            registry.register(rule),
+            Err(EvaluationError::RuleWithoutIdentity { .. })
+        ));
+        assert!(
+            registry.acquire(&label)?.installed().is_empty(),
+            "nothing was installed"
         );
         Ok(())
     }
