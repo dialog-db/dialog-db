@@ -748,7 +748,16 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         let format = self.format().await?;
         let manifest = format.manifest.clone();
         self.record_demand(&input, &manifest);
-        let mut streams: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.sources.len() + 1);
+        // One fact can reach the merge from more than one stream: a value
+        // the line holds that the session overlay or a staged write holds
+        // too. The merge keeps the first stream's row of such a fact, so
+        // the streams go in by precedence, newest standing first: the
+        // session overlays, the staged writes, the lines, and the
+        // per-query changes, which stand at no version.
+        let mut sessions: Vec<ArtifactStream<'a>> = Vec::new();
+        let mut staged: Vec<ArtifactStream<'a>> = Vec::new();
+        let mut lines: Vec<ArtifactStream<'a>> = Vec::with_capacity(self.sources.len());
+        let mut changes: Vec<ArtifactStream<'a>> = Vec::new();
 
         // The choosing writes this read meets, settled cell by cell:
         // the line's claims they succeed, or succeed and write back, are
@@ -780,7 +789,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
             if !succeeded.is_empty() {
                 hidden = hidden.facts(hidden_in(&line.manifest));
             }
-            streams.push(filter_hidden(raw, hidden, line.manifest.clone()));
+            lines.push(filter_hidden(raw, hidden, line.manifest.clone()));
         }
 
         // Each line's session overlay, read live. Filtered by the
@@ -812,7 +821,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
                 rows.into_iter()
                     .map(move |fact| Ok(ArtifactView::pending(fact, session))),
             ));
-            streams.push(filter_hidden(
+            sessions.push(filter_hidden(
                 rows,
                 line.staged.clone(),
                 line.manifest.clone(),
@@ -830,7 +839,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // flows through `merge_grouped`'s passthrough arm.
         let overlay = self.changes.select(&input, &manifest);
         if !overlay.is_empty() {
-            streams.push(Box::pin(stream::iter(
+            changes.push(Box::pin(stream::iter(
                 overlay.into_iter().map(|fact| Ok(fact.into())),
             )));
         }
@@ -858,9 +867,9 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
                     .map(move |fact| Ok(ArtifactView::pending(fact, pending))),
             ));
             if held.is_empty() {
-                streams.push(rows);
+                staged.push(rows);
             } else {
-                streams.push(filter_hidden(
+                staged.push(filter_hidden(
                     rows,
                     Hidden::default().facts(Arc::new(held)),
                     manifest.clone(),
@@ -868,6 +877,12 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
             }
         }
 
+        let streams: Vec<ArtifactStream<'a>> = sessions
+            .into_iter()
+            .chain(staged)
+            .chain(lines)
+            .chain(changes)
+            .collect();
         Ok(merge_grouped(streams, manifest, format.keys))
     }
 }

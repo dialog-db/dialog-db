@@ -408,6 +408,78 @@ async fn every_election_agrees_with_the_reference() -> Result<()> {
 }
 
 #[dialog_common::test]
+async fn scratch_pulled_history() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let a = repo.branch("a").open().perform(&operator).await?;
+    let b = repo.branch("b").open().perform(&operator).await?;
+    let c = repo.branch("c").open().perform(&operator).await?;
+    let p: Entity = "id:p".parse()?;
+    fn writes<'b>(
+        branch: &'b Branch,
+        p: &Entity,
+        writes: Vec<(u64, Policy)>,
+    ) -> super::Transaction<&'b Branch> {
+        let mut transaction = branch.transaction();
+        for (value, policy) in &writes {
+            transaction = transaction.assert(salary(p, *value, policy));
+        }
+        transaction
+    }
+    let commit = |branch, list| writes(branch, &p, list);
+    let show = |label: &'static str, entries: Vec<Entry>| {
+        eprintln!(
+            "SCRATCH {label}: {:?}",
+            entries
+                .iter()
+                .map(|(value, stand)| match stand {
+                    Stand::Line(standing) => (*value, standing.version.map(|v| v.0)),
+                    Stand::Staged => (*value, None),
+                })
+                .collect::<Vec<_>>()
+        );
+    };
+    commit(&a, vec![(3, Policy::Max)]).commit().publish().perform(&operator).await?;
+    commit(&b, vec![(5, Policy::All)]).commit().publish().perform(&operator).await?;
+    b.pull().from(&a).perform(&operator).await?;
+    commit(&b, vec![(4, Policy::Max), (5, Policy::All)]).commit().publish().perform(&operator).await?;
+    commit(&a, vec![(5, Policy::Min), (2, Policy::Min)]).commit().publish().perform(&operator).await?;
+    show("a after min 5, min 2", line(&a, &operator, &p).await?);
+    c.pull().from(&b).perform(&operator).await?;
+    show("c after pulling b", line(&c, &operator, &p).await?);
+    commit(&b, vec![(6, Policy::Max)]).commit().publish().perform(&operator).await?;
+    c.pull().from(&a).perform(&operator).await?;
+    show("c after pulling a", line(&c, &operator, &p).await?);
+    let transaction = commit(&c, vec![(2, Policy::All)]);
+    for policy in &POLICIES {
+        let rows = salaries(
+            transaction
+                .query()
+                .select(salary_query(&p, policy))
+                .perform(&operator)
+                .try_vec()
+                .await?,
+        )?;
+        eprintln!("SCRATCH c tx {policy:?}: {rows:?}");
+    }
+    eprintln!("SCRATCH c head {:?}", c.revision().map(|r| r.edition));
+    transaction.commit().publish().perform(&operator).await?;
+    show("c after committing all 2", line(&c, &operator, &p).await?);
+    let rows = salaries(c.select(salary_query(&p, &Policy::Last)).perform(&operator).try_vec().await?)?;
+    eprintln!("SCRATCH c after commit last: {rows:?}");
+    // The same on a fresh branch, no pulls.
+    let d = repo.branch("d").open().perform(&operator).await?;
+    commit(&d, vec![(2, Policy::All)]).commit().publish().perform(&operator).await?;
+    commit(&d, vec![(5, Policy::All)]).commit().publish().perform(&operator).await?;
+    let transaction = commit(&d, vec![(2, Policy::All)]);
+    let rows = salaries(transaction.query().select(salary_query(&p, &Policy::Last)).perform(&operator).try_vec().await?)?;
+    eprintln!("SCRATCH d tx last: {rows:?}");
+    transaction.commit().publish().perform(&operator).await?;
+    show("d after committing all 2", line(&d, &operator, &p).await?);
+    Ok(())
+}
+
+#[dialog_common::test]
 async fn scratch_all_write_beside_two_claims() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
