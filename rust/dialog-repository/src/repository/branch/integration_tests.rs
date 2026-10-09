@@ -1543,7 +1543,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
 #[cfg(not(feature = "web-integration-tests"))]
 #[dialog_common::test]
 async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Result<()> {
-    use dialog_query::attribute::The;
+    use dialog_query::attribute::Relation;
     use dialog_query::{AttributeQuery, Term, the};
 
     let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
@@ -1614,7 +1614,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .await?;
 
     let query = AttributeQuery::from(
-        Term::<The>::from(the!("doc/body"))
+        Term::<Relation>::from(the!("doc/body"))
             .of(Term::<dialog_artifacts::Entity>::var("e"))
             .is(Term::<String>::var("v")),
     );

@@ -525,11 +525,11 @@ mod tests {
         // query time, not persisted. Confirm by raw attribute lookup
         // through the branch's underlying claim stream.
         use dialog_query::AttributeQuery;
-        use dialog_query::attribute::The;
+        use dialog_query::attribute::Relation;
         let profile_facts: Vec<dialog_query::Claim> = branch
             .query()
             .select(AttributeQuery::from(
-                Term::<The>::from(the!("dialog.session/profile"))
+                Term::<Relation>::from(the!("dialog.session/profile"))
                     .of(Term::<Entity>::var("e"))
                     .is(Term::<Entity>::var("v")),
             ))

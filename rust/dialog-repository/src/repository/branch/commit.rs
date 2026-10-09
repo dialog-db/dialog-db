@@ -1238,7 +1238,7 @@ mod history_tests {
                 matches!(
                     result,
                     Err(crate::CommitError::Artifact(
-                        DialogArtifactsError::ReservedAttribute(_)
+                        DialogArtifactsError::ReservedRelation(_)
                     ))
                 ),
                 "writes to the reserved namespace must be refused: {result:?}"

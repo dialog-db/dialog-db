@@ -2075,8 +2075,8 @@ mod tests {
             let alice: Entity = "id:alice".parse()?;
             let bob: Entity = "id:bob".parse()?;
             let charlie: Entity = "id:charlie".parse()?;
-            let name_attr = "test/name".parse::<dialog_artifacts::Attribute>()?;
-            let role_attr = "test/role".parse::<dialog_artifacts::Attribute>()?;
+            let name_attr = "test/name".parse::<dialog_artifacts::Relation>()?;
+            let role_attr = "test/role".parse::<dialog_artifacts::Relation>()?;
 
             // Mix of:
             //   - same entity, multiple attrs
@@ -2090,7 +2090,7 @@ mod tests {
             //     (alice, role). If `sort_key` mistakenly ordered VAE
             //     output by entity it would flip these two, and this
             //     test would catch it.
-            let facts: Vec<(Entity, dialog_artifacts::Attribute, Value)> = vec![
+            let facts: Vec<(Entity, dialog_artifacts::Relation, Value)> = vec![
                 (
                     alice.clone(),
                     name_attr.clone(),

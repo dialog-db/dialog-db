@@ -27,7 +27,7 @@ use dialog_capability::Provider;
 use futures_util::TryStreamExt as _;
 
 use crate::artifact::Artifact;
-use crate::attribute::The;
+use crate::attribute::Relation;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::concept::query::ConceptQuery;
 use crate::error::EvaluationError;
@@ -153,7 +153,7 @@ where
 /// `fact`: one naming it, or one over a variable attribute, which
 /// reads any.
 fn reads_attribute(rule: &DeductiveRule, fact: &Artifact) -> bool {
-    let attribute = Value::from(The::from(fact.the.clone()));
+    let attribute = Value::from(Relation::from(fact.the.clone()));
     rule.analysis().premises().any(|premise| {
         let the = match premise {
             Premise::Assert(Proposition::Attribute(query)) => query.the(),
@@ -217,7 +217,7 @@ where
                     &mut scope,
                     the.as_constant(),
                     the.name(),
-                    Value::from(The::from(fact.the.clone())),
+                    Value::from(Relation::from(fact.the.clone())),
                 ) {
                     continue;
                 }

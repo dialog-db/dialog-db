@@ -17,7 +17,7 @@ use std::str::FromStr;
 use anyhow::Result;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTree;
-use dialog_artifacts::{Artifact, ArtifactSelector, Attribute, Changes, Entity, Value};
+use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Relation, Value};
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
@@ -250,7 +250,7 @@ where
     /// Point lookup: the value of `(entity, stuff/name)`.
     pub async fn point_get(&self, entity: &str) -> Result<Option<Value>> {
         let selector = ArtifactSelector::new()
-            .the(Attribute::from_str(NAME_ATTRIBUTE)?)
+            .the(Relation::from_str(NAME_ATTRIBUTE)?)
             .of(Entity::from_str(entity)?);
         Ok(self
             .scan_pairs(selector)
@@ -261,7 +261,7 @@ where
 
     /// Attribute scan: every `stuff/name` fact.
     pub async fn attribute_scan(&self) -> Result<usize> {
-        let selector = ArtifactSelector::new().the(Attribute::from_str(NAME_ATTRIBUTE)?);
+        let selector = ArtifactSelector::new().the(Relation::from_str(NAME_ATTRIBUTE)?);
         Ok(self.scan_pairs(selector).await?.len())
     }
 
@@ -270,10 +270,10 @@ where
     /// `query_join` engine benchmark.
     pub async fn join(&self) -> Result<usize> {
         let names = self
-            .scan_pairs(ArtifactSelector::new().the(Attribute::from_str(NAME_ATTRIBUTE)?))
+            .scan_pairs(ArtifactSelector::new().the(Relation::from_str(NAME_ATTRIBUTE)?))
             .await?;
         let roles = self
-            .scan_pairs(ArtifactSelector::new().the(Attribute::from_str(ROLE_ATTRIBUTE)?))
+            .scan_pairs(ArtifactSelector::new().the(Relation::from_str(ROLE_ATTRIBUTE)?))
             .await?;
         let names_by_entity: std::collections::HashMap<String, Value> = names.into_iter().collect();
         Ok(roles
@@ -285,7 +285,7 @@ where
     /// The current title of a post (point read of a superseded pair).
     pub async fn se_title(&self, post: &str) -> Result<Option<Value>> {
         let selector = ArtifactSelector::new()
-            .the(Attribute::from_str("se.post/title")?)
+            .the(Relation::from_str("se.post/title")?)
             .of(Entity::from_str(post)?);
         Ok(self.collect(selector).await?.pop().map(|found| found.is))
     }
@@ -293,7 +293,7 @@ where
     /// All entities whose `se.post/kind` is `kind` (a VAE-indexed lookup).
     pub async fn se_by_kind(&self, kind: &str) -> Result<usize> {
         let selector = ArtifactSelector::new()
-            .the(Attribute::from_str("se.post/kind")?)
+            .the(Relation::from_str("se.post/kind")?)
             .is(Value::String(kind.to_owned()));
         Ok(self.collect(selector).await?.len())
     }

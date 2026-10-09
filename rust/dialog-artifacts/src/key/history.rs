@@ -53,7 +53,7 @@ use crate::artifacts::encode_bytes;
 use crate::history::{EDITION_LENGTH, ORIGIN_LENGTH, VERSION_LENGTH, Version};
 use crate::key::value_payload;
 use crate::key::varkey::{KeyParts, ValuePayload, build_key};
-use crate::{Attribute, Entity, Key, ValueDataType};
+use crate::{Entity, Key, Relation, ValueDataType};
 
 /// The leading tag byte of history region keys
 pub const HISTORY_KEY_TAG: u8 = 3;
@@ -89,7 +89,7 @@ const VERSION_OFFSET: usize = 1;
 pub fn history_key(
     version: &Version,
     of: &Entity,
-    the: &Attribute,
+    the: &Relation,
     value: &crate::Value,
     manifest: &Manifest,
 ) -> Key {
@@ -98,7 +98,7 @@ pub fn history_key(
 
 /// The key at which the coverage entry mirroring a covering record is
 /// stored: the same layout as [`history_key`] under [`COVERAGE_KEY_TAG`].
-pub fn coverage_key(version: &Version, of: &Entity, the: &Attribute, value: &crate::Value) -> Key {
+pub fn coverage_key(version: &Version, of: &Entity, the: &Relation, value: &crate::Value) -> Key {
     // Coverage stays value-free: it matches claims by VERSION, never by
     // content, so the key carries the whole-value hash rather than the value.
     // That is what keeps "every deletion or replacement since the sync base"
@@ -153,7 +153,7 @@ fn tagged_parts(
     tag: u8,
     version: &Version,
     of: &Entity,
-    the: &Attribute,
+    the: &Relation,
     value_type: ValueDataType,
     value: ValuePayload,
 ) -> KeyParts {
@@ -171,7 +171,7 @@ fn tagged_key(
     tag: u8,
     version: &Version,
     of: &Entity,
-    the: &Attribute,
+    the: &Relation,
     value: &crate::Value,
     manifest: &Manifest,
 ) -> Key {
@@ -191,7 +191,7 @@ fn tagged_key(
 /// Every component is lossless now, so the range is exact on
 /// `(version, entity, attribute)`: it brackets the value tail alone. Readers
 /// no longer need to re-check the entity and attribute of each hit.
-pub fn history_claim_range(version: &Version, of: &Entity, the: &Attribute) -> (Key, Key) {
+pub fn history_claim_range(version: &Version, of: &Entity, the: &Relation) -> (Key, Key) {
     let mut min = Vec::new();
     min.push(HISTORY_KEY_TAG);
     min.extend_from_slice(&version_prefix(version));
@@ -302,7 +302,7 @@ mod tests {
     #[test]
     fn it_parses_coverage_keys_for_every_value_type() -> anyhow::Result<()> {
         let of = Entity::from_str("test:sensor")?;
-        let the = Attribute::from_str("sensor/reading")?;
+        let the = Relation::from_str("sensor/reading")?;
         for value in [
             crate::Value::UnsignedInt(5),
             crate::Value::SignedInt(-5),
@@ -311,7 +311,7 @@ mod tests {
             crate::Value::String("text".into()),
             crate::Value::Bytes(vec![1, 2, 3]),
             crate::Value::Entity(Entity::from_str("test:other")?),
-            crate::Value::Symbol(Attribute::from_str("some/symbol")?),
+            crate::Value::Symbol(Relation::from_str("some/symbol")?),
             crate::Value::Record(vec![9, 9]),
         ] {
             let key = coverage_key(&version(2, 7), &of, &the, &value);
@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn it_separates_coverage_keys_of_distinct_covered_values() -> anyhow::Result<()> {
         let of = Entity::from_str("test:task")?;
-        let the = Attribute::from_str("task/label")?;
+        let the = Relation::from_str("task/label")?;
         let at = version(3, 9);
         let left = coverage_key(&at, &of, &the, &crate::Value::String("urgent".into()));
         let right = coverage_key(&at, &of, &the, &crate::Value::String("blocked".into()));
@@ -351,7 +351,7 @@ mod tests {
     fn it_contains_high_origins_in_the_history_region_range() -> anyhow::Result<()> {
         use crate::history::{Edition, Origin};
         let of = Entity::from_str("test:entity")?;
-        let the = Attribute::from_str("test/attribute")?;
+        let the = Relation::from_str("test/attribute")?;
         let high = Version::new(Origin::from([0xFF; 32]), Edition::new(1));
         let key = history_key(
             &high,
@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn it_brackets_one_version() -> anyhow::Result<()> {
         let of = Entity::from_str("test:entity")?;
-        let the = Attribute::from_str("test/attribute")?;
+        let the = Relation::from_str("test/attribute")?;
         let key = |version: &Version| {
             history_key(
                 version,
@@ -407,7 +407,7 @@ mod tests {
     fn it_brackets_keys_with_long_entities() -> anyhow::Result<()> {
         let subject = version(4, 8);
         let (min, max) = history_version_range(&subject);
-        let the = Attribute::from_str("test/attribute")?;
+        let the = Relation::from_str("test/attribute")?;
         for length in [1usize, 64, 512, 4096] {
             let of = Entity::from_str(&format!("test:{}", "e".repeat(length)))?;
             let key = history_key(
@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn it_bounds_the_highest_version() -> anyhow::Result<()> {
         let of = Entity::from_str("test:entity")?;
-        let the = Attribute::from_str("test/attribute")?;
+        let the = Relation::from_str("test/attribute")?;
         use crate::history::{Edition, Origin};
         let highest = Version::new(Origin::from([0xFF; 32]), Edition::from_key_bytes([0xFF; 8]));
         let (min, max) = history_version_range(&highest);
@@ -456,7 +456,7 @@ mod tests {
         let of = Entity::from_str(&format!("test:{}", "e".repeat(120)))?;
         // At the attribute cap (64 bytes), which the fixed-width key
         // truncated to its 57-byte raw head.
-        let the = Attribute::from_str(&format!("{}/{}", "n".repeat(31), "p".repeat(32)))?;
+        let the = Relation::from_str(&format!("{}/{}", "n".repeat(31), "p".repeat(32)))?;
         let value = crate::Value::String("value".into());
         let key = history_key(
             &version(1, 7),
@@ -481,7 +481,7 @@ mod tests {
         let shared = "test:".to_string() + &"e".repeat(120);
         let left = Entity::from_str(&(shared.clone() + "a"))?;
         let right = Entity::from_str(&(shared + "b"))?;
-        let the = Attribute::from_str("test/attribute")?;
+        let the = Relation::from_str("test/attribute")?;
         let value = crate::Value::String("value".into());
         let at = version(1, 7);
 
@@ -506,7 +506,7 @@ mod tests {
     #[test]
     fn it_recovers_the_version_and_clusters_by_origin() -> anyhow::Result<()> {
         let of = Entity::from_str("test:entity")?;
-        let the = Attribute::from_str("test/attribute")?;
+        let the = Relation::from_str("test/attribute")?;
         let value = crate::Value::String("value".into());
 
         // One writer's records order by edition within its span.
@@ -560,7 +560,7 @@ mod tests {
         let shared = "test:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let left = Entity::from_str(&format!("{shared}left"))?;
         let right = Entity::from_str(&format!("{shared}right"))?;
-        let the = Attribute::from_str("test/attribute")?;
+        let the = Relation::from_str("test/attribute")?;
         let left_key = history_key(
             &version,
             &left,
@@ -582,8 +582,8 @@ mod tests {
         // both of these to the same raw head.
         let head = "test/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let of = Entity::from_str("test:entity")?;
-        let first = Attribute::from_str(&format!("{head}x"))?;
-        let second = Attribute::from_str(&format!("{head}y"))?;
+        let first = Relation::from_str(&format!("{head}x"))?;
+        let second = Relation::from_str(&format!("{head}y"))?;
         let first_key = history_key(
             &version,
             &of,

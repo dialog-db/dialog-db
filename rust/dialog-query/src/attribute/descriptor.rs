@@ -1,6 +1,6 @@
 use crate::Parameters;
-use crate::artifact::{ArtifactsAttribute, Entity, Value};
-use crate::attribute::The;
+use crate::artifact::{ArtifactsRelation, Entity, Value};
+use crate::attribute::Relation;
 use crate::attribute::query::AttributeQuery;
 use crate::error::{FieldTypeError, TypeError};
 use crate::schema::Cardinality;
@@ -22,15 +22,15 @@ use std::str::FromStr;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attribution {
     /// The fully-qualified attribute selector.
-    pub the: ArtifactsAttribute,
+    pub the: ArtifactsRelation,
     /// The resolved value for this attribute.
     pub is: Value,
     /// Whether this attribute allows one or many values per entity.
     pub cardinality: Cardinality,
 }
 
-/// What an attribute descriptor selects: one attribute, or every
-/// entry of a keyed collection.
+/// What an attribute's `the` holds: one relation, or every entry of a
+/// keyed collection.
 ///
 /// Dialog stores a collection as facts sharing a domain whose *name*
 /// half is the entry's key — `todo.list/title` for a dictionary
@@ -44,9 +44,9 @@ pub struct Attribution {
 /// is no state to validate.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum Relation {
-    /// One attribute, named in full: `todo.list/title`.
-    Attribute(The),
+pub enum The {
+    /// One relation, named in full: `todo.list/title`.
+    Relation(Relation),
     /// Every entry of one domain, keyed by name.
     Collection {
         /// The domain the entries share, without a trailing separator.
@@ -57,7 +57,7 @@ pub enum Relation {
     },
 }
 
-/// Which half of a domain a [`Relation::Collection`] selects.
+/// Which half of a domain a [`The::Collection`] selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Keyed {
@@ -76,17 +76,17 @@ impl From<Keyed> for NameShape {
     }
 }
 
-impl Relation {
+impl The {
     /// A collection of `domain`, keyed as `keyed`.
     pub fn collection(domain: Symbol, keyed: Keyed) -> Self {
-        Relation::Collection { domain, keyed }
+        The::Collection { domain, keyed }
     }
 
     /// The domain these facts live under.
     pub fn domain(&self) -> &str {
         match self {
-            Relation::Attribute(the) => the.domain(),
-            Relation::Collection { domain, .. } => domain.as_str(),
+            The::Relation(the) => the.domain(),
+            The::Collection { domain, .. } => domain.as_str(),
         }
     }
 
@@ -95,8 +95,8 @@ impl Relation {
     /// part of the selector.
     pub fn name(&self) -> Option<&str> {
         match self {
-            Relation::Attribute(the) => Some(the.name()),
-            Relation::Collection { .. } => None,
+            The::Relation(the) => Some(the.name()),
+            The::Collection { .. } => None,
         }
     }
 
@@ -109,10 +109,10 @@ impl Relation {
     /// The variable is named after the field (`<field>/the`) so two
     /// collection fields on one concept scan independently rather
     /// than unifying on a shared name.
-    pub fn term(&self, field: &str) -> Term<The> {
+    pub fn term(&self, field: &str) -> Term<Relation> {
         match self {
-            Relation::Attribute(the) => Term::Constant(Value::from(the.clone())),
-            Relation::Collection { .. } => Term::<The>::var(Self::attribute_variable(field))
+            The::Relation(the) => Term::Constant(Value::from(the.clone())),
+            The::Collection { .. } => Term::<Relation>::var(Self::attribute_variable(field))
                 .with_kind(
                     self.kind()
                         .expect("a collection is refined by construction"),
@@ -125,8 +125,8 @@ impl Relation {
     /// `None` for a plain attribute, which is selected by constant.
     pub fn kind(&self) -> Option<Kind> {
         match self {
-            Relation::Attribute(_) => None,
-            Relation::Collection { domain, keyed } => Some(
+            The::Relation(_) => None,
+            The::Collection { domain, keyed } => Some(
                 Kind::from(Type::Symbol)
                     .with_prefix(format!("{}/", domain.as_str()))
                     .expect("symbol is textual")
@@ -153,14 +153,14 @@ impl Relation {
     }
 }
 
-impl Relation {
+impl The {
     /// The concrete attribute to write a fact under, when there is
     /// one. A collection has none: its facts are keyed per entry, so
     /// the key has to come from the writer rather than the schema.
-    pub fn attribute(&self) -> Option<ArtifactsAttribute> {
+    pub fn attribute(&self) -> Option<ArtifactsRelation> {
         match self {
-            Relation::Attribute(the) => Some(ArtifactsAttribute::from(the)),
-            Relation::Collection { .. } => None,
+            The::Relation(the) => Some(ArtifactsRelation::from(the)),
+            The::Collection { .. } => None,
         }
     }
 
@@ -168,16 +168,16 @@ impl Relation {
     /// `domain/key`, where the key must have the collection's name
     /// shape — a position for a sequence, a symbol for a dictionary.
     /// A plain attribute ignores the key and is its own entry.
-    pub fn entry(&self, key: &str) -> Result<ArtifactsAttribute, FieldTypeError> {
+    pub fn entry(&self, key: &str) -> Result<ArtifactsRelation, FieldTypeError> {
         match self {
-            Relation::Attribute(the) => Ok(ArtifactsAttribute::from(the)),
-            Relation::Collection { domain, keyed } => {
+            The::Relation(the) => Ok(ArtifactsRelation::from(the)),
+            The::Collection { domain, keyed } => {
                 let mismatch = || FieldTypeError::KeyShape {
                     domain: domain.as_str().to_owned(),
                     key: key.to_owned(),
                     keyed: *keyed,
                 };
-                let attribute = ArtifactsAttribute::try_from(format!("{}/{key}", domain.as_str()))
+                let attribute = ArtifactsRelation::try_from(format!("{}/{key}", domain.as_str()))
                     .map_err(|_| mismatch())?;
                 let (_, name) = attribute.split().map_err(|_| mismatch())?;
                 if name.shape() != NameShape::from(*keyed) {
@@ -189,9 +189,9 @@ impl Relation {
     }
 }
 
-impl From<The> for Relation {
-    fn from(the: The) -> Self {
-        Relation::Attribute(the)
+impl From<Relation> for The {
+    fn from(the: Relation) -> Self {
+        The::Relation(the)
     }
 }
 
@@ -201,11 +201,11 @@ impl From<The> for Relation {
 /// dictionary — the same bracket the declaration form uses. A
 /// bracketed name can never be a stored attribute's name, so the two
 /// forms are disjoint and the spelling round-trips.
-impl Display for Relation {
+impl Display for The {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            Relation::Attribute(the) => write!(f, "{the}"),
-            Relation::Collection { domain, keyed } => {
+            The::Relation(the) => write!(f, "{the}"),
+            The::Collection { domain, keyed } => {
                 write!(f, "{}/{}", domain.as_str(), keyed.bracketed())
             }
         }
@@ -231,17 +231,17 @@ impl Keyed {
     }
 }
 
-impl FromStr for Relation {
-    type Err = <The as FromStr>::Err;
+impl FromStr for The {
+    type Err = <Relation as FromStr>::Err;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         if let Some((domain, name)) = text.split_once('/')
             && let Some(keyed) = Keyed::from_bracketed(name)
             && let Ok(domain) = Symbol::from_str(domain)
         {
-            return Ok(Relation::Collection { domain, keyed });
+            return Ok(The::Collection { domain, keyed });
         }
-        text.parse::<The>().map(Relation::Attribute)
+        text.parse::<Relation>().map(The::Relation)
     }
 }
 
@@ -266,10 +266,10 @@ impl FromStr for Relation {
 #[serde(try_from = "Wire", into = "Wire")]
 pub struct AttributeDescriptor {
     /// The relation read first.
-    the: Relation,
+    the: The,
     /// The relations read after it, in rank order: a candidate from an
     /// earlier relation outranks one from a later.
-    then: Vec<Relation>,
+    then: Vec<The>,
     description: String,
     content_type: Option<Type>,
     /// The values `as` lists, best first: the domain a value is one
@@ -287,7 +287,7 @@ pub struct AttributeDescriptor {
 /// the older spelling of `last` and `all`, read but never written.
 #[derive(Serialize, Deserialize)]
 struct Wire {
-    the: OneOrMany<Relation>,
+    the: OneOrMany<The>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -434,25 +434,20 @@ impl From<AttributeDescriptor> for Wire {
 }
 
 impl AttributeDescriptor {
-    /// Creates a new descriptor from a validated [`The`] selector.
+    /// Creates a new descriptor from a validated [`Relation`] selector.
     pub fn new(
-        the: The,
+        the: Relation,
         description: impl Into<String>,
         cardinality: Cardinality,
         content_type: Option<Type>,
     ) -> Self {
-        Self::over(
-            Relation::Attribute(the),
-            description,
-            cardinality,
-            content_type,
-        )
+        Self::over(The::Relation(the), description, cardinality, content_type)
     }
 
-    /// Creates a descriptor over any [`Relation`] — one attribute, or
+    /// Creates a descriptor over any [`The`] — one attribute, or
     /// every entry of a keyed collection.
     pub fn over(
-        the: Relation,
+        the: The,
         description: impl Into<String>,
         cardinality: Cardinality,
         content_type: Option<Type>,
@@ -469,7 +464,7 @@ impl AttributeDescriptor {
 
     /// This descriptor reading `then` after its relation, in rank
     /// order: a ranked choice by relation, read as `top`.
-    pub fn with_then(mut self, then: Vec<Relation>) -> Self {
+    pub fn with_then(mut self, then: Vec<The>) -> Self {
         self.then = then;
         self.pick = Pick::Top(self.among.clone());
         self
@@ -492,7 +487,7 @@ impl AttributeDescriptor {
     }
 
     /// Every relation this attribute reads, the first ranked highest.
-    pub fn relations(&self) -> impl Iterator<Item = &Relation> {
+    pub fn relations(&self) -> impl Iterator<Item = &The> {
         iter::once(&self.the).chain(self.then.iter())
     }
 
@@ -571,7 +566,7 @@ impl AttributeDescriptor {
     }
 
     /// Returns a relation identifier comprised of the attribute's domain and name.
-    pub fn the(&self) -> &Relation {
+    pub fn the(&self) -> &The {
         &self.the
     }
 
@@ -767,8 +762,8 @@ impl AttributeDescriptor {
         }
 
         let name = match &self.the {
-            Relation::Attribute(the) => the.name(),
-            Relation::Collection { keyed, .. } => match keyed {
+            The::Relation(the) => the.name(),
+            The::Collection { keyed, .. } => match keyed {
                 Keyed::Dictionary => "<dictionary>",
                 Keyed::Sequence => "<sequence>",
             },
@@ -829,9 +824,9 @@ impl From<AttributeDescriptor> for Entity {
 
 /// A descriptor's concrete attribute. Panics for a keyed collection,
 /// which has no single attribute — use
-/// [`Relation::attribute`](Relation::attribute) where that is
+/// [`The::attribute`](Relation::attribute) where that is
 /// possible.
-impl From<&AttributeDescriptor> for ArtifactsAttribute {
+impl From<&AttributeDescriptor> for ArtifactsRelation {
     fn from(descriptor: &AttributeDescriptor) -> Self {
         descriptor
             .the
@@ -840,9 +835,9 @@ impl From<&AttributeDescriptor> for ArtifactsAttribute {
     }
 }
 
-impl From<AttributeDescriptor> for ArtifactsAttribute {
+impl From<AttributeDescriptor> for ArtifactsRelation {
     fn from(descriptor: AttributeDescriptor) -> Self {
-        ArtifactsAttribute::from(&descriptor)
+        ArtifactsRelation::from(&descriptor)
     }
 }
 
@@ -1217,7 +1212,7 @@ mod collection_tests {
 
     fn collection(keyed: Keyed) -> AttributeDescriptor {
         AttributeDescriptor::over(
-            Relation::collection(domain(), keyed),
+            The::collection(domain(), keyed),
             "the list's members",
             Cardinality::Many,
             Some(Type::Entity),
@@ -1228,25 +1223,25 @@ mod collection_tests {
     /// kind bracketed, and either form parses back.
     #[dialog_common::test]
     fn it_spells_and_parses_a_relation() {
-        let sequence = Relation::collection(
+        let sequence = The::collection(
             Symbol::from_str("todo.list").expect("a valid domain"),
             Keyed::Sequence,
         );
         assert_eq!(sequence.to_string(), "todo.list/[position]");
-        let parse = |text: &str| text.parse::<Relation>().expect("a relation parses");
+        let parse = |text: &str| text.parse::<The>().expect("a relation parses");
         assert_eq!(parse("todo.list/[position]"), sequence);
         assert_eq!(
             parse("todo.list/[symbol]"),
-            Relation::collection(
+            The::collection(
                 Symbol::from_str("todo.list").expect("a valid domain"),
                 Keyed::Dictionary
             )
         );
         assert_eq!(
             parse("todo.list/title"),
-            Relation::Attribute(the!("todo.list/title"))
+            The::Relation(the!("todo.list/title"))
         );
-        assert!("todo.list/[list]".parse::<Relation>().is_err());
+        assert!("todo.list/[list]".parse::<The>().is_err());
     }
 
     /// A plain attribute selects itself: the query pins `the` to a

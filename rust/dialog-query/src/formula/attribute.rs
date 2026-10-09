@@ -10,7 +10,7 @@
 //! it admits both name shapes, because a dictionary's keys are
 //! symbols and a sequence's are positions.
 
-use dialog_artifacts::{Attribute, Name};
+use dialog_artifacts::{Name, Relation as ArtifactsRelation};
 
 use crate::Formula;
 use crate::formula::Input;
@@ -20,7 +20,7 @@ use crate::formula::Input;
 #[derive(Debug, Clone, Formula)]
 pub struct AttributeParts {
     /// The attribute, as bound by a scan's `the` slot.
-    pub of: Attribute,
+    pub of: ArtifactsRelation,
     /// The domain half.
     #[output]
     pub domain: String,

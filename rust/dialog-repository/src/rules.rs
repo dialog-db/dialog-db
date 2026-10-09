@@ -39,7 +39,7 @@ use std::sync::{Arc, OnceLock};
 use dialog_artifacts::history::REVISION_ATTRIBUTE;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Changes, Entity, Statement, Update, Value,
+    Artifact, ArtifactSelector, Changes, Entity, Relation, Statement, Update, Value,
 };
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
@@ -72,7 +72,7 @@ pub(crate) use dialog_query::rule::statement::{
 /// is a *command*: facts of it dispatched into a transaction (and heads
 /// of rules concluding it) live for one induction round and are never
 /// committed.
-pub(crate) fn transient_attr() -> Attribute {
+pub(crate) fn transient_attr() -> Relation {
     the!("dialog.concept/transient").into()
 }
 

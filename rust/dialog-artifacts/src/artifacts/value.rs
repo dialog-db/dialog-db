@@ -12,7 +12,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::{Attribute, Cause, DialogArtifactsError, Entity, TypeError, make_reference};
+use crate::{Cause, DialogArtifactsError, Entity, Relation, TypeError, make_reference};
 use base58::{FromBase58, ToBase58};
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -39,7 +39,7 @@ pub enum Value {
     /// TBD structured data (flatbuffers?)
     Record(Vec<u8>),
     /// A symbol type, used to distinguish attributes from other strings
-    Symbol(Attribute),
+    Symbol(Relation),
 }
 
 impl Value {
@@ -181,7 +181,7 @@ impl FromStr for Value {
             "sint" => Value::SignedInt(value.parse().map_err(to_dialog_error)?),
             "float" => Value::Float(value.parse().map_err(to_dialog_error)?),
             "record" => Value::Record(value.from_base58().map_err(to_dialog_error_debug)?),
-            "attribute" => Value::Symbol(Attribute::from_str(value)?),
+            "attribute" => Value::Symbol(Relation::from_str(value)?),
             _ => {
                 return Err(DialogArtifactsError::InvalidValue(
                     "Value part of serialized string is empty".into(),
@@ -250,7 +250,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
             // threshold must round-trip, not panic.
             ValueDataType::Record => Value::Record(value),
             ValueDataType::Symbol => match String::from_utf8(value) {
-                Ok(value) => Value::Symbol(Attribute::try_from(
+                Ok(value) => Value::Symbol(Relation::try_from(
                     value.split('\u{0000}').take(1).collect::<String>(),
                 )?),
                 Err(error) => {
@@ -263,7 +263,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
     }
 }
 
-impl TryFrom<Value> for Attribute {
+impl TryFrom<Value> for Relation {
     type Error = TypeError;
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
@@ -640,8 +640,8 @@ impl From<f32> for Value {
     }
 }
 
-impl From<Attribute> for Value {
-    fn from(value: Attribute) -> Self {
+impl From<Relation> for Value {
+    fn from(value: Relation) -> Self {
         Value::Symbol(value)
     }
 }
@@ -667,7 +667,7 @@ impl PartialEq<Value> for Entity {
     }
 }
 
-impl PartialEq<Value> for Attribute {
+impl PartialEq<Value> for Relation {
     fn eq(&self, other: &Value) -> bool {
         match other {
             Value::Symbol(attr) => self == attr,

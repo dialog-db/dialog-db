@@ -67,8 +67,8 @@ use crate::repository::branch::blob::index_store;
 use crate::repository::source::SourceRef;
 use crate::{Branch, CommitError, Index, RemoteSite};
 use dialog_artifacts::{
-    Artifact, Asset, Attribute, BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity,
-    Instruction, Value,
+    Artifact, Asset, BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity, Instruction,
+    Relation, Value,
 };
 use dialog_capability::access::{Certificate as _, Delegation as _};
 use dialog_capability::{ANY_SUBJECT, Fork, Provider};
@@ -147,7 +147,7 @@ impl<'a> Delegations<'a> {
 /// One fact on the delegation's entity.
 fn field(entity: &Entity, attribute: &str, value: Value) -> Result<Artifact, DialogArtifactsError> {
     Ok(Artifact {
-        the: Attribute::try_from(attribute.to_string())?,
+        the: Relation::try_from(attribute.to_string())?,
         of: entity.clone(),
         is: value,
         cause: None,
@@ -824,7 +824,7 @@ mod tests {
             matches!(
                 result,
                 Err(CommitError::Artifact(
-                    DialogArtifactsError::ReservedAttribute(_)
+                    DialogArtifactsError::ReservedRelation(_)
                 ))
             ),
             "application commits must not write dialog.ucan facts"

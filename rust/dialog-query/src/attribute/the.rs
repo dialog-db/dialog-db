@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::{self, FromStr};
 
-use crate::artifact::ArtifactsAttribute;
+use crate::artifact::ArtifactsRelation;
 use crate::artifact::{ArtifactTypeError, Entity, Value};
 use crate::attribute::expression::dynamic::DynamicAttributeExpressionBuilder;
 use crate::error::{InvalidIdentifier, OwnedInvalidIdentifier};
@@ -17,7 +17,7 @@ pub const MAX_RELATION_LENGTH: usize = 64;
 /// being established. The domain scopes the relation to a specific problem
 /// area; the name identifies the specific association within that domain.
 ///
-/// This is a transparent wrapper over [`ArtifactsAttribute`] that adds
+/// This is a transparent wrapper over [`ArtifactsRelation`] that adds
 /// stricter validation (lowercase, kebab-case, etc.) on construction.
 ///
 /// Validates on construction:
@@ -31,9 +31,9 @@ pub const MAX_RELATION_LENGTH: usize = 64;
 ///   At least one character.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct The(ArtifactsAttribute);
+pub struct Relation(ArtifactsRelation);
 
-impl The {
+impl Relation {
     /// Validates a relation literal as raw bytes.
     ///
     /// This is a `const fn` returning `Result` so it can be used both at
@@ -166,7 +166,7 @@ impl The {
     }
 }
 
-impl Term<The> {
+impl Term<Relation> {
     /// Begin building a dynamic attribute expression with a variable
     /// attribute. Use this to discover all relations for an entity.
     ///
@@ -195,13 +195,13 @@ impl Term<The> {
     }
 }
 
-impl fmt::Display for The {
+impl fmt::Display for Relation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-impl FromStr for The {
+impl FromStr for Relation {
     type Err = OwnedInvalidIdentifier;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::validate(s).map_err(|e| OwnedInvalidIdentifier {
@@ -209,52 +209,52 @@ impl FromStr for The {
             reason: e.reason,
         })?;
 
-        let attr: ArtifactsAttribute = s.parse().expect("already validated format and length");
+        let attr: ArtifactsRelation = s.parse().expect("already validated format and length");
 
         Ok(Self(attr))
     }
 }
 
-impl From<The> for ArtifactsAttribute {
-    fn from(the: The) -> Self {
+impl From<Relation> for ArtifactsRelation {
+    fn from(the: Relation) -> Self {
         the.0
     }
 }
 
-impl From<&The> for ArtifactsAttribute {
-    fn from(the: &The) -> Self {
+impl From<&Relation> for ArtifactsRelation {
+    fn from(the: &Relation) -> Self {
         the.0.clone()
     }
 }
 
-impl From<The> for Value {
-    fn from(the: The) -> Self {
-        Value::from(ArtifactsAttribute::from(the))
+impl From<Relation> for Value {
+    fn from(the: Relation) -> Self {
+        Value::from(ArtifactsRelation::from(the))
     }
 }
 
-impl From<&The> for Value {
-    fn from(the: &The) -> Self {
-        Value::from(ArtifactsAttribute::from(the))
+impl From<&Relation> for Value {
+    fn from(the: &Relation) -> Self {
+        Value::from(ArtifactsRelation::from(the))
     }
 }
 
-impl From<ArtifactsAttribute> for The {
-    fn from(attr: ArtifactsAttribute) -> Self {
+impl From<ArtifactsRelation> for Relation {
+    fn from(attr: ArtifactsRelation) -> Self {
         Self(attr)
     }
 }
 
-impl TryFrom<Value> for The {
+impl TryFrom<Value> for Relation {
     type Error = ArtifactTypeError;
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
-        let attr = ArtifactsAttribute::try_from(value)?;
+        let attr = ArtifactsRelation::try_from(value)?;
         Ok(Self(attr))
     }
 }
 
-impl Serialize for The {
+impl Serialize for Relation {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -263,7 +263,7 @@ impl Serialize for The {
     }
 }
 
-impl<'de> Deserialize<'de> for The {
+impl<'de> Deserialize<'de> for Relation {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -294,14 +294,16 @@ impl<'de> Deserialize<'de> for The {
 macro_rules! the {
     ($source:literal) => {{
         const _: () = {
-            match $crate::attribute::The::validate($source) {
+            match $crate::attribute::Relation::validate($source) {
                 Ok(()) => {}
-                Err(e) => panic!("{}", e.reason)
+                Err(e) => panic!("{}", e.reason),
             }
         };
         // SAFETY: compile-time validation above guarantees the literal is valid.
-        <$crate::attribute::The as ::std::convert::From<$crate::attribute::ArtifactsAttribute>>::from(
-            <$crate::attribute::ArtifactsAttribute as ::std::str::FromStr>::from_str($source)
+        <$crate::attribute::Relation as ::std::convert::From<
+            $crate::attribute::ArtifactsRelation,
+        >>::from(
+            <$crate::attribute::ArtifactsRelation as ::std::str::FromStr>::from_str($source)
                 .unwrap(),
         )
     }};
@@ -311,7 +313,7 @@ macro_rules! the {
 mod tests {
     use super::*;
 
-    fn parse(s: &str) -> Result<The, OwnedInvalidIdentifier> {
+    fn parse(s: &str) -> Result<Relation, OwnedInvalidIdentifier> {
         s.parse()
     }
 
@@ -371,7 +373,7 @@ mod tests {
         let original = parse("diy.cook/quantity").unwrap();
         let json = serde_json::to_string(&original).unwrap();
         assert_eq!(json, "\"diy.cook/quantity\"");
-        let restored: The = serde_json::from_str(&json).unwrap();
+        let restored: Relation = serde_json::from_str(&json).unwrap();
         assert_eq!(original, restored);
     }
 
@@ -387,14 +389,14 @@ mod tests {
     #[dialog_common::test]
     fn it_converts_to_artifacts_attribute() {
         let the = parse("person/name").unwrap();
-        let attr: ArtifactsAttribute = the.into();
+        let attr: ArtifactsRelation = the.into();
         assert_eq!(attr.to_string(), "person/name");
     }
 
     #[dialog_common::test]
     fn it_converts_from_artifacts_attribute() {
-        let attr: ArtifactsAttribute = "person/name".parse().unwrap();
-        let the = The::from(attr);
+        let attr: ArtifactsRelation = "person/name".parse().unwrap();
+        let the = Relation::from(attr);
         assert_eq!(the.to_string(), "person/name");
     }
 
@@ -502,7 +504,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_serde_invalid_relation() {
-        let result = serde_json::from_str::<The>("\"Person/Name\"");
+        let result = serde_json::from_str::<Relation>("\"Person/Name\"");
         assert!(result.is_err());
     }
 }

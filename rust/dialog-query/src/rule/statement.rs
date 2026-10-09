@@ -21,20 +21,20 @@
 use std::collections::BTreeSet;
 
 use crate::artifact::{Entity, Value};
-use crate::attribute::Relation;
+use crate::attribute::The;
 use crate::rule::{DeductiveRule, InductiveRule, Rule};
 use crate::{Proposition, Statement, Update, the};
-use dialog_artifacts::{Attribute, NameShape, Symbol};
+use dialog_artifacts::{NameShape, Relation as ArtifactsRelation, Symbol};
 
 /// The `dialog.rule/source` body attribute, validated at compile time.
 /// Shared by both rule kinds — hydration dispatches on the decoded
 /// descriptor's head field.
-pub fn source_attr() -> Attribute {
+pub fn source_attr() -> ArtifactsRelation {
     the!("dialog.rule/source").into()
 }
 
 /// The `dialog.rule/conclusion` index attribute, validated at compile time.
-pub fn conclusion_attr() -> Attribute {
+pub fn conclusion_attr() -> ArtifactsRelation {
     the!("dialog.rule/conclusion").into()
 }
 
@@ -42,14 +42,14 @@ pub fn conclusion_attr() -> Attribute {
 /// `dialog.rule/conclusion`, kept separate so deductive resolution never
 /// hydrates (and discards) inductive rules concluding a queried
 /// concept.
-pub fn induces_attr() -> Attribute {
+pub fn induces_attr() -> ArtifactsRelation {
     the!("dialog.rule/induces").into()
 }
 
 /// The `dialog.rule/on` trigger-index attribute: one claim per attribute an
 /// inductive rule's concept premises name, valued `on:<domain>/<name>`.
 /// This is the index commit-time dispatch probes by touched attribute.
-pub fn on_attr() -> Attribute {
+pub fn on_attr() -> ArtifactsRelation {
     the!("dialog.rule/on").into()
 }
 
@@ -60,7 +60,7 @@ pub fn on_attr() -> Attribute {
 /// inductive rules premised on the concepts it (transitively)
 /// supports. Per-rule and derived from the rule's own immutable body,
 /// so an entry is never stale; the closure itself is never stored.
-pub fn reads_attr() -> Attribute {
+pub fn reads_attr() -> ArtifactsRelation {
     the!("dialog.rule/reads").into()
 }
 
@@ -69,7 +69,7 @@ pub fn reads_attr() -> Attribute {
 /// `on:<domain>/<name>`. Resolution probes it per attribute, so a rule
 /// is found by every concept selecting any attribute it derives, not
 /// only by the concept it was written against.
-pub fn derives_attr() -> Attribute {
+pub fn derives_attr() -> ArtifactsRelation {
     the!("dialog.rule/derives").into()
 }
 
@@ -77,14 +77,14 @@ pub fn derives_attr() -> Attribute {
 /// sets aside, valued with the concept whose cycle it closed. Never
 /// stored: a branch answers it from the rules its layers hold, so it
 /// moves as rules are installed and retracted.
-pub fn quarantined_attr() -> Attribute {
+pub fn quarantined_attr() -> ArtifactsRelation {
     the!("dialog.rule/quarantined").into()
 }
 
 /// The `on:<domain>/<name>` trigger-index entity for an attribute.
 /// Derivable from a runtime instruction alone — no schema lookup —
 /// which is what keeps dispatch probing cheap.
-pub fn on_entity(attribute: &Attribute) -> Option<Entity> {
+pub fn on_entity(attribute: &ArtifactsRelation) -> Option<Entity> {
     format!("on:{attribute}").parse().ok()
 }
 
@@ -103,8 +103,8 @@ pub fn on_entity(attribute: &Attribute) -> Option<Entity> {
 /// key, so a rule reading a collection wakes for any member write.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Reach {
-    /// One attribute.
-    Attribute(Attribute),
+    /// One relation.
+    Relation(ArtifactsRelation),
     /// Every attribute of `domain` whose name has `shape`.
     Domain {
         /// The domain the attributes share.
@@ -116,10 +116,10 @@ pub enum Reach {
 
 impl Reach {
     /// The reach of a concept field.
-    pub fn of(relation: &Relation) -> Reach {
+    pub fn of(relation: &The) -> Reach {
         match relation {
-            Relation::Attribute(the) => Reach::Attribute(the.into()),
-            Relation::Collection { domain, keyed } => Reach::Domain {
+            The::Relation(the) => Reach::Relation(the.into()),
+            The::Collection { domain, keyed } => Reach::Domain {
                 domain: domain.clone(),
                 shape: NameShape::from(*keyed),
             },
@@ -136,9 +136,9 @@ impl Reach {
     }
 
     /// Whether `attribute` is inside this reach.
-    pub fn covers(&self, attribute: &Attribute) -> bool {
+    pub fn covers(&self, attribute: &ArtifactsRelation) -> bool {
         match self {
-            Reach::Attribute(the) => the == attribute,
+            Reach::Relation(the) => the == attribute,
             Reach::Domain { domain, shape } => attribute
                 .split()
                 .is_ok_and(|(of, name)| &of == domain && name.shape() == *shape),
@@ -148,7 +148,7 @@ impl Reach {
     /// Whether the two reaches share an attribute.
     pub fn overlaps(&self, other: &Reach) -> bool {
         match (self, other) {
-            (Reach::Attribute(the), other) | (other, Reach::Attribute(the)) => other.covers(the),
+            (Reach::Relation(the), other) | (other, Reach::Relation(the)) => other.covers(the),
             (Reach::Domain { .. }, Reach::Domain { .. }) => self == other,
         }
     }
@@ -156,7 +156,7 @@ impl Reach {
     /// The trigger-index entity a rule is filed under for this reach.
     pub fn on_entity(&self) -> Option<Entity> {
         match self {
-            Reach::Attribute(the) => on_entity(the),
+            Reach::Relation(the) => on_entity(the),
             Reach::Domain { domain, shape } => Self::cover_entity(domain.as_str(), *shape),
         }
     }
@@ -167,7 +167,7 @@ impl Reach {
     /// belongs to are found; a domain half probes its cover key.
     pub fn probes(&self) -> Vec<Entity> {
         match self {
-            Reach::Attribute(the) => {
+            Reach::Relation(the) => {
                 let mut probes = Vec::new();
                 probes.extend(on_entity(the));
                 if let Ok((domain, name)) = the.split() {

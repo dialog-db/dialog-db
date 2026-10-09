@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{Attribute, Entity, Value};
+use crate::{Entity, Relation, Value};
 
 use super::Cause;
 
@@ -39,7 +39,7 @@ mod value_codec {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Claim {
     /// The attribute (predicate) of the claim
-    pub the: Attribute,
+    pub the: Relation,
     /// The entity (subject) of the claim
     pub of: Entity,
     /// The value (object) of the claim

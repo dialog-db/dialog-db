@@ -11,9 +11,9 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::Branch;
 use crate::helpers::test_repo;
 use anyhow::Result;
-use dialog_artifacts::{Attribute, Entity, Pick, Value};
+use dialog_artifacts::{Entity, Pick, Relation as ArtifactsRelation, Value};
 use dialog_peer::helpers::test_session_with_peer;
-use dialog_query::attribute::The;
+use dialog_query::attribute::Relation;
 use dialog_query::query::Output as _;
 use dialog_query::rule::DeductiveRuleDescriptor;
 use dialog_query::types::Any;
@@ -28,7 +28,11 @@ type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
 /// A write of `org/salary` under `policy`.
 fn salary(of: &Entity, value: u32, policy: Pick) -> AttributeStatement {
     AttributeStatement {
-        the: The::from("org/salary".parse::<Attribute>().expect("an attribute")),
+        the: Relation::from(
+            "org/salary"
+                .parse::<ArtifactsRelation>()
+                .expect("an attribute"),
+        ),
         of: of.clone(),
         is: Value::UnsignedInt(value.into()),
         cause: None,
@@ -251,7 +255,7 @@ async fn an_integrated_batch_lands_as_the_same_writes_asserted_in_order() -> Res
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let alice: Entity = "id:alice".parse()?;
-    let the: Attribute = "org/salary".parse()?;
+    let the: ArtifactsRelation = "org/salary".parse()?;
     let mut lines = Vec::new();
     for by_batch in [false, true] {
         let branch = repo
@@ -322,7 +326,7 @@ async fn an_integrated_batch_lands_as_the_same_writes_asserted_in_order() -> Res
 /// A write of `the` under `policy`.
 fn write(the: &str, of: &Entity, value: u32, policy: Pick) -> AttributeStatement {
     AttributeStatement {
-        the: The::from(the.parse::<Attribute>().expect("an attribute")),
+        the: Relation::from(the.parse::<ArtifactsRelation>().expect("an attribute")),
         of: of.clone(),
         is: Value::UnsignedInt(value.into()),
         cause: None,

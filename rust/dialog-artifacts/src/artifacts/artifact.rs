@@ -23,14 +23,14 @@ use crate::{
     make_reference,
 };
 
-use super::{Attribute, Cause, Entity, Value};
+use super::{Cause, Entity, Relation, Value};
 
 /// A [`Artifact`] embodies a datum - a semantic triple - that may be stored in or
 /// retrieved from a [`ArtifactStore`].
 #[derive(Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Artifact {
-    /// The [`Attribute`] of the [`Artifact`]; the predicate of the triple
-    pub the: Attribute,
+    /// The [`Relation`] of the [`Artifact`]; the predicate of the triple
+    pub the: Relation,
     /// The [`Entity`] of the [`Artifact`]; the subject of the triple
     #[serde(
         serialize_with = "dialog_capability::identity::to_utf8",
@@ -545,7 +545,7 @@ impl<S> ArtifactViewStream for S where
 
 /// Extracts the entity and attribute from a key view, decoding the raw UTF-8
 /// key columns.
-fn entity_attribute<K: KeyView>(key: K) -> Result<(Entity, Attribute), DialogArtifactsError> {
+fn entity_attribute<K: KeyView>(key: K) -> Result<(Entity, Relation), DialogArtifactsError> {
     // These bytes came out of the tree: every validation failure here —
     // non-UTF-8 columns, a non-canonical entity, an attribute breaking the
     // attribute invariants — marks a corrupt or foreign-written entry, so it
@@ -553,7 +553,7 @@ fn entity_attribute<K: KeyView>(key: K) -> Result<(Entity, Attribute), DialogArt
     let of = Entity::from_stored(from_utf8(key.entity().raw()).map_err(|error| {
         DialogArtifactsError::CorruptEntry(format!("entity key is not UTF-8: {error}"))
     })?)?;
-    let the = Attribute::from_str(from_utf8(key.attribute().raw()).map_err(|error| {
+    let the = Relation::from_str(from_utf8(key.attribute().raw()).map_err(|error| {
         DialogArtifactsError::CorruptEntry(format!("attribute key is not UTF-8: {error}"))
     })?)
     .map_err(as_corrupt_entry)?;
@@ -589,7 +589,7 @@ fn reconstruct(
     let of = Entity::from_stored(from_utf8(&parts.entity).map_err(|error| {
         DialogArtifactsError::CorruptEntry(format!("entity key is not UTF-8: {error}"))
     })?)?;
-    let the = Attribute::from_str(from_utf8(&parts.attribute).map_err(|error| {
+    let the = Relation::from_str(from_utf8(&parts.attribute).map_err(|error| {
         DialogArtifactsError::CorruptEntry(format!("attribute key is not UTF-8: {error}"))
     })?)
     .map_err(as_corrupt_entry)?;

@@ -40,7 +40,8 @@ use crate::rules::derives_attr;
 use crate::{CommitError, Staged};
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Cause, Change, Changes, Entity, Pick, Select, Value,
+    Artifact, ArtifactSelector, Cause, Change, Changes, Entity, Pick,
+    Relation as ArtifactsRelation, Select, Value,
 };
 use dialog_capability::Provider;
 use dialog_query::attribute::{AttributeDescriptor, Relation, The};
@@ -89,7 +90,7 @@ pub(crate) async fn settle(
     // through the writes before each succession), or the session
     // overlay holds the cell.
     if !staged.holds_rules() {
-        let mut relations: Vec<&Attribute> = Vec::new();
+        let mut relations: Vec<&ArtifactsRelation> = Vec::new();
         let mut unseen = false;
         for (the, of, change) in staged.log() {
             if !change.elects() {
@@ -150,7 +151,7 @@ pub(crate) struct ReadSettlement {
     upto: usize,
     /// Each cell some write under a choosing pick wrote, with its
     /// claims and what its writes settled to.
-    cells: HashMap<(Attribute, Entity), Cell>,
+    cells: HashMap<(ArtifactsRelation, Entity), Cell>,
     /// The settled writes, as the view later writes read the derived
     /// candidates through.
     prefix: Staged,
@@ -240,7 +241,7 @@ impl ReadSettlement {
     /// wrote, which reads as written.
     pub(crate) fn settlement_of(
         &self,
-        key: &(Attribute, Entity),
+        key: &(ArtifactsRelation, Entity),
         layer: &Staged,
     ) -> Option<CellSettlement> {
         let cell = self.cells.get(key)?;
@@ -323,7 +324,7 @@ struct Candidate {
 }
 
 /// Whether some line's session overlay holds a fact of the cell.
-fn overlay_holds(sources: &[Source], the: &Attribute, of: &Entity) -> bool {
+fn overlay_holds(sources: &[Source], the: &ArtifactsRelation, of: &Entity) -> bool {
     let selector = ArtifactSelector::new().the(the.clone()).of(of.clone());
     sources
         .iter()
@@ -334,7 +335,7 @@ fn overlay_holds(sources: &[Source], the: &Attribute, of: &Entity) -> bool {
 /// write can succeed, and the session overlay's rows, which it cannot.
 async fn claims_of(
     view: &QueryEnv<'_>,
-    the: &Attribute,
+    the: &ArtifactsRelation,
     of: &Entity,
 ) -> Result<Vec<Candidate>, CommitError> {
     let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
@@ -365,7 +366,7 @@ async fn claims_of(
 #[cfg(test)]
 pub(crate) async fn stored_claims(
     view: &QueryEnv<'_>,
-    the: &Attribute,
+    the: &ArtifactsRelation,
     of: &Entity,
 ) -> Result<Vec<(Value, Standing)>, CommitError> {
     Ok(claims_of(view, the, of)
@@ -378,9 +379,9 @@ pub(crate) async fn stored_claims(
 
 /// The attribute concept over `the`, under which the rules deriving the
 /// relation are found.
-fn relation_predicate(the: &Attribute) -> ConceptDescriptor {
+fn relation_predicate(the: &ArtifactsRelation) -> ConceptDescriptor {
     let attribute = AttributeDescriptor::over(
-        Relation::Attribute(The::from(the.clone())),
+        The::Relation(Relation::from(the.clone())),
         "",
         Cardinality::Many,
         None,
@@ -395,16 +396,20 @@ fn relation_predicate(the: &Attribute) -> ConceptDescriptor {
 #[derive(Clone, Default)]
 struct Derives {
     /// Whether the line's rules derive the relation, by attribute.
-    line: HashMap<Attribute, bool>,
+    line: HashMap<ArtifactsRelation, bool>,
     /// The `on:` entities of the rules the prefix installed.
     staged: HashSet<Entity>,
     /// The trigger entities each relation probes, by attribute.
-    probes: HashMap<Attribute, Vec<Entity>>,
+    probes: HashMap<ArtifactsRelation, Vec<Entity>>,
 }
 
 impl Derives {
     /// Whether some rule derives `the` at this point of the settlement.
-    async fn at(&mut self, line: &QueryEnv<'_>, the: &Attribute) -> Result<bool, CommitError> {
+    async fn at(
+        &mut self,
+        line: &QueryEnv<'_>,
+        the: &ArtifactsRelation,
+    ) -> Result<bool, CommitError> {
         let known = match self.line.get(the) {
             Some(known) => *known,
             None => {
@@ -422,13 +427,13 @@ impl Derives {
         let probes = self
             .probes
             .entry(the.clone())
-            .or_insert_with(|| Reach::of(&Relation::Attribute(The::from(the.clone()))).probes());
+            .or_insert_with(|| Reach::of(&The::Relation(Relation::from(the.clone()))).probes());
         Ok(probes.iter().any(|probe| self.staged.contains(probe)))
     }
 
     /// Note a write the prefix gained: a `derives` fact names a
     /// relation a rule the prefix installs derives.
-    fn gained(&mut self, the: &Attribute, change: &Change) {
+    fn gained(&mut self, the: &ArtifactsRelation, change: &Change) {
         if *the == derives_attr()
             && let Change::Assert(Value::Entity(on), _) = change
         {
@@ -440,7 +445,7 @@ impl Derives {
 /// Whether some rule `view` knows derives the relation `the` names:
 /// read from the rule index alone, without assembling the relation's
 /// bundle.
-async fn rules_derive(view: &QueryEnv<'_>, the: &Attribute) -> Result<bool, CommitError> {
+async fn rules_derive(view: &QueryEnv<'_>, the: &ArtifactsRelation) -> Result<bool, CommitError> {
     view.rules_derive(the)
         .await
         .map_err(|error| CommitError::Succession(error.to_string()))
@@ -452,7 +457,7 @@ async fn rules_derive(view: &QueryEnv<'_>, the: &Attribute) -> Result<bool, Comm
 /// offers beyond the claims.
 async fn derived_candidates(
     view: &QueryEnv<'_>,
-    the: &Attribute,
+    the: &ArtifactsRelation,
     of: &Entity,
 ) -> Result<Vec<Candidate>, CommitError> {
     let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
@@ -636,9 +641,11 @@ mod tests {
     use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_artifacts::history::Edition;
-    use dialog_artifacts::{ArtifactSelector, Attribute, Change, Entity, Pick, Value};
+    use dialog_artifacts::{
+        ArtifactSelector, Change, Entity, Pick, Relation as ArtifactsRelation, Value,
+    };
     use dialog_peer::helpers::test_session_with_peer;
-    use dialog_query::attribute::The;
+    use dialog_query::attribute::Relation;
     use dialog_query::query::Output as _;
     use dialog_query::rule::DeductiveRuleDescriptor;
     use dialog_query::types::Any;
@@ -684,7 +691,11 @@ mod tests {
     /// reading the relation under that pick writes.
     fn salary(of: &Entity, value: u32) -> AttributeStatement {
         AttributeStatement {
-            the: The::from("org/salary".parse::<Attribute>().expect("an attribute")),
+            the: Relation::from(
+                "org/salary"
+                    .parse::<ArtifactsRelation>()
+                    .expect("an attribute"),
+            ),
             of: of.clone(),
             is: Value::UnsignedInt(value.into()),
             cause: None,

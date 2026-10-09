@@ -149,7 +149,7 @@ impl KeyParts {
     /// The entity and attribute are variable-length, so there is no exact
     /// maximum; a bounded [`MAX_FILLER_BYTE`] filler is used, which dominates
     /// every UTF-8 byte and so every real entity URI and attribute name.
-    /// Attributes are capped at [`ATTRIBUTE_LENGTH`](crate::ATTRIBUTE_LENGTH)
+    /// Attributes are capped at [`RELATION_LENGTH`](crate::ATTRIBUTE_LENGTH)
     /// (64) bytes, so the attribute filler is exact for them; entities are
     /// unbounded, so an entity upper bound is only exact once its true value
     /// or prefix is set.
@@ -244,7 +244,7 @@ pub enum Field {
     /// The entity component.
     Entity,
     /// The attribute component.
-    Attribute,
+    Relation,
 }
 
 /// Borrows a variable-length field's *raw* bytes (its encoded segment with the
@@ -257,10 +257,10 @@ pub enum Field {
 pub fn field(bytes: &[u8], _tag: u8, which: Field) -> &[u8] {
     let index = match (bytes.first().copied(), which) {
         (Some(ENTITY_KEY_TAG), Field::Entity) => 1,
-        (Some(ENTITY_KEY_TAG), Field::Attribute) => 2,
-        (Some(ATTRIBUTE_KEY_TAG), Field::Attribute) => 1,
+        (Some(ENTITY_KEY_TAG), Field::Relation) => 2,
+        (Some(ATTRIBUTE_KEY_TAG), Field::Relation) => 1,
         (Some(ATTRIBUTE_KEY_TAG), Field::Entity) => 2,
-        (Some(VALUE_KEY_TAG), Field::Attribute) => 3,
+        (Some(VALUE_KEY_TAG), Field::Relation) => 3,
         (Some(VALUE_KEY_TAG), Field::Entity) => 4,
         _ => return &[],
     };

@@ -14,9 +14,9 @@ use super::adornment::Adornment;
 use super::fixpoint::Continuation;
 use super::plan_cache::PlanCache;
 use crate::DeductiveRule;
-use crate::artifact::{ArtifactsAttribute, Entity};
+use crate::artifact::{ArtifactsRelation, Entity};
 use crate::attribute::query::AttributeQuery;
-use crate::attribute::{AttributeDescriptor, Relation};
+use crate::attribute::{AttributeDescriptor, The};
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::environment::Environment;
 use crate::parameters::Parameters;
@@ -97,7 +97,7 @@ pub struct Exact {
     /// The covering rule, concluding the selecting concept.
     pub rule: DeductiveRule,
     /// The attributes the rule is the only source of.
-    pub attributes: Vec<ArtifactsAttribute>,
+    pub attributes: Vec<ArtifactsRelation>,
 }
 
 impl ConceptRules {
@@ -238,7 +238,7 @@ impl ConceptRules {
     /// ranks first, which is where a single-relation field puts
     /// everything.
     pub fn ranks(&self, field: &ConceptFieldDescriptor) -> Vec<usize> {
-        let relations: Vec<&Relation> = field.descriptor().relations().collect();
+        let relations: Vec<&The> = field.descriptor().relations().collect();
         let rank_of = |rule: &DeductiveRule| {
             rule.conclusion()
                 .attribute_field()
@@ -438,7 +438,7 @@ impl ConceptRules {
         }
         binds.add(ConceptDescriptor::VALUE);
         if origin.key.is_some() {
-            binds.add(Relation::key_operand(ConceptDescriptor::VALUE));
+            binds.add(The::key_operand(ConceptDescriptor::VALUE));
         }
         let header = Header {
             cost,

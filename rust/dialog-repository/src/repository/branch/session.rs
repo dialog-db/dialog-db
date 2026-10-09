@@ -9,7 +9,7 @@ use dialog_artifacts::{
     Entity, Estimate, Likelihood, Preload, PreloadRequest, Select, SortKey, Speculation, Statement,
     sort_key,
 };
-use dialog_artifacts::{Attribute, LoadBlob, Standing, Value};
+use dialog_artifacts::{LoadBlob, Relation as ArtifactsRelation, Standing, Value};
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::{Buffer, ConditionalSync};
 use dialog_effects::archive::{Get, Put};
@@ -1348,7 +1348,7 @@ fn relation_concept(field: &ConceptFieldDescriptor) -> Entity {
 }
 
 /// The `dialog.rule/quarantined` attribute, compared on every select.
-static QUARANTINED: LazyLock<Attribute> = LazyLock::new(quarantined_attr);
+static QUARANTINED: LazyLock<ArtifactsRelation> = LazyLock::new(quarantined_attr);
 
 impl<'a> QueryEnv<'a> {
     /// The roots of the layers this query reads rules from.
@@ -1609,7 +1609,10 @@ impl<'a> QueryEnv<'a> {
     /// index is read from the key the attribute spells; no concept is
     /// described or hashed and no body is hydrated, which is what a
     /// commit asks once per relation it writes.
-    pub(crate) async fn rules_derive(&self, the: &Attribute) -> Result<bool, EvaluationError> {
+    pub(crate) async fn rules_derive(
+        &self,
+        the: &ArtifactsRelation,
+    ) -> Result<bool, EvaluationError> {
         let Some(on) = on_entity(the) else {
             return Ok(false);
         };
@@ -1743,7 +1746,7 @@ impl<'a> QueryEnv<'a> {
         // one: the concept's exact evaluation while nothing is stored
         // under them. A built-in head, a reducing rule, a second source
         // or a keyed collection rules it out.
-        let mut sole: Option<Option<(DeductiveRule, Vec<dialog_artifacts::Attribute>)>> = None;
+        let mut sole: Option<Option<(DeductiveRule, Vec<dialog_artifacts::Relation>)>> = None;
         for (_, field) in descriptor.with().iter() {
             let attribute = ConceptDescriptor::of_attribute(field);
             // Keyed by the relation's own attribute concept, read under
@@ -1770,7 +1773,7 @@ impl<'a> QueryEnv<'a> {
                     (Some(None), _) | (_, None) => None,
                     _ if !builtins.is_empty() => None,
                     (current, Some(attribute)) => {
-                        let mut found: Option<(DeductiveRule, Vec<dialog_artifacts::Attribute>)> =
+                        let mut found: Option<(DeductiveRule, Vec<dialog_artifacts::Relation>)> =
                             current.clone().flatten();
                         let mut ok = true;
                         for rule in &rules {
@@ -4102,12 +4105,12 @@ mod ordered_relation_tests {
     use crate::helpers::test_repo;
     use dialog_artifacts::position::{Bias, Position, insert};
     use dialog_artifacts::{
-        Artifact, ArtifactSelector, ArtifactViewStream as _, Attribute, Directory, Entity,
-        Sequence, Symbol, Value,
+        Artifact, ArtifactSelector, ArtifactViewStream as _, Directory, Entity,
+        Relation as ArtifactsRelation, Sequence, Symbol, Value,
     };
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::AttributeStatement;
-    use dialog_query::attribute::The;
+    use dialog_query::attribute::Relation;
     use futures_util::TryStreamExt as _;
     use std::ops::RangeBounds;
     use std::str::FromStr as _;
@@ -4122,9 +4125,10 @@ mod ordered_relation_tests {
     /// A membership fact: `[list  test.list/<position>  member]`.
     fn membership(list: &Entity, position: &Position, member: &Entity) -> AttributeStatement {
         let domain = Symbol::from_str("test.list").expect("domain parses");
-        let attribute = Attribute::compose(&domain, position.clone()).expect("attribute fits");
+        let attribute =
+            ArtifactsRelation::compose(&domain, position.clone()).expect("attribute fits");
         AttributeStatement {
-            the: The::from(attribute),
+            the: Relation::from(attribute),
             of: list.clone(),
             is: Value::Entity(member.clone()),
             cause: None,
@@ -4170,11 +4174,11 @@ mod ordered_relation_tests {
         // name shapes (symbols start lowercase, positions uppercase)
         // let one scan serve both.
         let domain = Symbol::from_str("test.list")?;
-        let title = Attribute::compose(&domain, Symbol::from_str("title")?)?;
+        let title = ArtifactsRelation::compose(&domain, Symbol::from_str("title")?)?;
         branch
             .transaction()
             .assert(AttributeStatement {
-                the: The::from(title),
+                the: Relation::from(title),
                 of: list.clone(),
                 is: Value::String("Groceries".into()),
                 cause: None,

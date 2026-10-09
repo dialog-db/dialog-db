@@ -1111,8 +1111,8 @@ mod tests {
 
     use crate::RemoteSite;
     use crate::helpers::test_repo;
-    use dialog_artifacts::{Attribute as ArtifactsAttribute, NameShape, Symbol};
     use dialog_artifacts::{Entity, Value};
+    use dialog_artifacts::{NameShape, Relation as ArtifactsRelation, Symbol};
     use dialog_capability::{Fork, Provider};
     use dialog_common::{ConditionalSend, ConditionalSync};
     use dialog_effects::archive::{Get, Put};
@@ -1120,8 +1120,8 @@ mod tests {
     use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
     use dialog_peer::helpers::test_session_with_peer;
-    use dialog_query::attribute::The;
-    use dialog_query::attribute::{AttributeDescriptor, Keyed, Relation};
+    use dialog_query::attribute::Relation;
+    use dialog_query::attribute::{AttributeDescriptor, Keyed, The};
     use dialog_query::concept::descriptor::ConceptFieldDescriptor;
     use dialog_query::type_system::Type as Kind;
     use dialog_query::types::{Any, Type as ValueType};
@@ -1242,7 +1242,7 @@ mod tests {
     /// A standing query over every `person/name` fact.
     fn names_query() -> AttributeQuery {
         AttributeQuery::from(
-            Term::<The>::from(the!("person/name"))
+            Term::<Relation>::from(the!("person/name"))
                 .of(Term::<Entity>::var("e"))
                 .is(Term::<String>::var("v")),
         )
@@ -1258,7 +1258,7 @@ mod tests {
             .with_name_shape(shape)
             .expect("shapes compose with prefixes");
         AttributeQuery::from(
-            Term::<The>::var("a")
+            Term::<Relation>::var("a")
                 .with_kind(kind)
                 .of(Term::<Entity>::var("e"))
                 .is(Term::<String>::var("v")),
@@ -1736,7 +1736,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -1789,7 +1789,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -1802,7 +1802,7 @@ mod tests {
         subscription.poll(&operator).await?.expect("initial");
 
         // A second ordered member, appended after the first.
-        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(second.of(list.clone()).is("Bread".to_string()))
@@ -1836,7 +1836,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -1878,7 +1878,7 @@ mod tests {
 
     /// A concept whose field is a keyed collection: one field, many
     /// facts, one per ordered member. This is the end-to-end shape —
-    /// the descriptor holds a `Relation::Collection`, its `term()`
+    /// the descriptor holds a `The::Collection`, its `term()`
     /// lowers to a domain scan refined by name shape, and the query
     /// comes back with one conclusion per member, each carrying the
     /// entry as `(key, value)`: the wire form `member: {?key: ?member}`.
@@ -1913,7 +1913,7 @@ mod tests {
         ConceptDescriptor::try_from(vec![(
             "member".to_owned(),
             ConceptFieldDescriptor::required(AttributeDescriptor::over(
-                Relation::collection(
+                The::collection(
                     Symbol::from_str("todo.list").expect("a valid domain"),
                     Keyed::Sequence,
                 ),
@@ -1935,8 +1935,8 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
-        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             // A named field in the same domain: the dictionary half,
@@ -1983,7 +1983,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -1998,7 +1998,7 @@ mod tests {
         let baseline = subscription.recomputes();
 
         // Appending a member is inside the cover: it must arrive.
-        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(second.of(list.clone()).is("Bread".to_string()))
@@ -2049,8 +2049,8 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
-        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -2094,8 +2094,8 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
-        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -2135,7 +2135,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let member = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let member = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(
@@ -2157,7 +2157,7 @@ mod tests {
         let fields = ConceptDescriptor::try_from(vec![(
             "field".to_owned(),
             ConceptFieldDescriptor::required(AttributeDescriptor::over(
-                Relation::collection(
+                The::collection(
                     Symbol::from_str("todo.list").expect("a valid domain"),
                     Keyed::Dictionary,
                 ),
@@ -2210,7 +2210,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let member = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let member = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(
@@ -2226,7 +2226,7 @@ mod tests {
 
         let collection = |keyed: Keyed, description: &str| {
             ConceptFieldDescriptor::required(AttributeDescriptor::over(
-                Relation::collection(
+                The::collection(
                     Symbol::from_str("todo.list").expect("a valid domain"),
                     keyed,
                 ),

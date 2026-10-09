@@ -53,7 +53,7 @@ where
         AttributeKeyPart(varkey::field(
             self.0.as_ref(),
             ENTITY_KEY_TAG,
-            varkey::Field::Attribute,
+            varkey::Field::Relation,
         ))
     }
 

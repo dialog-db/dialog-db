@@ -14,7 +14,7 @@ use dialog_effects::authority::Identify;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_peer::helpers::test_session_with_peer;
-use dialog_query::attribute::The;
+use dialog_query::attribute::Relation;
 use dialog_query::query::Output;
 use dialog_query::{Query, Term, the};
 use dialog_storage::provider::storage::VolatileSpace;
@@ -105,7 +105,7 @@ where
 {
     let mut rows: Vec<String> = layer
         .select(dialog_query::AttributeQuery::from(
-            Term::<The>::from(the!("user/name"))
+            Term::<Relation>::from(the!("user/name"))
                 .of(Term::<Entity>::var("e"))
                 .is(Term::<String>::var("v")),
         ))
@@ -476,7 +476,7 @@ async fn it_surfaces_pending_changes_in_the_transaction_query() -> Result<()> {
         let mut rows: Vec<String> = transaction
             .query()
             .select(dialog_query::AttributeQuery::from(
-                Term::<The>::from(the!("user/name"))
+                Term::<Relation>::from(the!("user/name"))
                     .of(Term::<Entity>::var("e"))
                     .is(Term::<String>::var("v")),
             ))
@@ -561,7 +561,7 @@ async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
         matches!(
             result,
             Err(CommitError::Artifact(
-                dialog_artifacts::DialogArtifactsError::ReservedAttribute(_)
+                dialog_artifacts::DialogArtifactsError::ReservedRelation(_)
             ))
         ),
         "writes to the reserved namespace must be refused: {result:?}"

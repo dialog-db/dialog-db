@@ -4,8 +4,8 @@ use crate::history::Edition;
 use crate::key::value_tail_bytes;
 use crate::selector::Constrained;
 use crate::{
-    Artifact, ArtifactSelector, ArtifactStream, Asset, Attribute, Cause, DialogArtifactsError,
-    Entity, Instruction, Value,
+    Artifact, ArtifactSelector, ArtifactStream, Asset, Cause, DialogArtifactsError, Entity,
+    Instruction, Relation, Value,
 };
 use async_trait::async_trait;
 use dialog_capability::Provider;
@@ -251,10 +251,10 @@ pub trait Update {
     /// other claim of the cell stays. A batch holds one write of a
     /// cell under [`Pick::Last`]: a later one succeeds the earlier
     /// and takes its place.
-    fn associate(&mut self, the: Attribute, of: Entity, is: Value, policy: Pick);
+    fn associate(&mut self, the: Relation, of: Entity, is: Value, policy: Pick);
 
     /// Retract that the `attribute` of `entity` is `value`.
-    fn dissociate(&mut self, the: Attribute, of: Entity, is: Value);
+    fn dissociate(&mut self, the: Relation, of: Entity, is: Value);
 
     /// Store `asset` when this batch commits.
     ///
@@ -288,7 +288,7 @@ pub trait Statement: Sized {
 }
 
 /// The facts of a [`Changes`] batch, by entity and attribute.
-type Facts = HashMap<Entity, HashMap<Attribute, Vec<Change>>>;
+type Facts = HashMap<Entity, HashMap<Relation, Vec<Change>>>;
 
 /// A change a batch makes to the assets its line stores.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -519,7 +519,7 @@ impl Changes {
     /// change)` triple. Use this when you need to inspect the batch
     /// without consuming it — e.g. to extract tombstones from
     /// retracts without cloning the whole structure.
-    pub fn iter(&self) -> impl Iterator<Item = (&Entity, &Attribute, &Change)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&Entity, &Relation, &Change)> {
         self.facts.iter().flat_map(|(entity, attrs)| {
             attrs
                 .iter()
@@ -534,7 +534,7 @@ impl Changes {
     }
 
     /// The cells holding an assertion under a choosing pick, each once.
-    pub fn cells_with_successions(&self) -> Vec<(Attribute, Entity)> {
+    pub fn cells_with_successions(&self) -> Vec<(Relation, Entity)> {
         let mut cells = Vec::new();
         for (entity, attribute, change) in self.iter() {
             if change.elects() {
@@ -551,7 +551,7 @@ impl Changes {
     /// batch. The transactor settles a cell's choosing writes by taking
     /// its changes, deciding what each write succeeds, and putting the
     /// settled changes back with [`put_cell`](Self::put_cell).
-    pub fn take_cell(&mut self, the: &Attribute, of: &Entity) -> Vec<Change> {
+    pub fn take_cell(&mut self, the: &Relation, of: &Entity) -> Vec<Change> {
         let Some(attributes) = self.facts.get_mut(of) else {
             return Vec::new();
         };
@@ -564,7 +564,7 @@ impl Changes {
 
     /// Record `changes` for one cell, after whatever the cell holds, in
     /// the order given.
-    pub fn put_cell(&mut self, the: Attribute, of: Entity, changes: Vec<Change>) {
+    pub fn put_cell(&mut self, the: Relation, of: Entity, changes: Vec<Change>) {
         if changes.is_empty() {
             return;
         }
@@ -628,7 +628,7 @@ impl Changes {
 }
 
 impl Update for Changes {
-    fn associate(&mut self, the: Attribute, of: Entity, is: Value, policy: Pick) {
+    fn associate(&mut self, the: Relation, of: Entity, is: Value, policy: Pick) {
         let cell = self.facts.entry(of).or_default().entry(the).or_default();
         // A write under `last` succeeds the cell's newest claim. The
         // writes of one batch stand at one edition, so the batch's own
@@ -651,7 +651,7 @@ impl Update for Changes {
         cell.push(Change::Assert(is, policy));
     }
 
-    fn dissociate(&mut self, the: Attribute, of: Entity, is: Value) {
+    fn dissociate(&mut self, the: Relation, of: Entity, is: Value) {
         self.facts
             .entry(of)
             .or_default()
@@ -1022,10 +1022,10 @@ mod tests {
     fn bob() -> Entity {
         "id:bob".parse().expect("valid entity")
     }
-    fn name_attr() -> Attribute {
+    fn name_attr() -> Relation {
         "test/name".parse().expect("valid attribute")
     }
-    fn role_attr() -> Attribute {
+    fn role_attr() -> Relation {
         "test/role".parse().expect("valid attribute")
     }
 

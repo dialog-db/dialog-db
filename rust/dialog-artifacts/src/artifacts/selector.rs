@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::str::FromStr as _;
 
-use crate::{Attribute, Entity, Name, NameShape, Symbol, Value};
+use crate::{Entity, Name, NameShape, Relation, Symbol, Value};
 
 /// A marker type that represents a totally open-ended [`ArtifactSelector`]
 #[derive(Clone)]
@@ -52,7 +52,7 @@ where
     State: ArtifactSelectorState,
 {
     entity: Option<Entity>,
-    attribute: Option<Attribute>,
+    attribute: Option<Relation>,
     value: Option<Value>,
 
     /// Prefix bound on the entity URI: selected [`Artifact`]s'
@@ -118,7 +118,7 @@ impl Default for ArtifactSelector<Unconstrained> {
 #[derive(PartialEq, Eq, Hash)]
 struct SelectorIdentity<'a> {
     entity: Option<&'a Entity>,
-    attribute: Option<&'a Attribute>,
+    attribute: Option<&'a Relation>,
     value: Option<Vec<u8>>,
     entity_prefix: Option<&'a str>,
     attribute_prefix: Option<&'a str>,
@@ -235,8 +235,8 @@ where
         self.entity.as_ref()
     }
 
-    /// The [`Attribute`] (or predicate) used in any selected [`Artifact`]s
-    pub fn attribute(&self) -> Option<&Attribute> {
+    /// The [`Relation`] (or predicate) used in any selected [`Artifact`]s
+    pub fn attribute(&self) -> Option<&Relation> {
         self.attribute.as_ref()
     }
 
@@ -280,8 +280,8 @@ where
         self.value_upper.as_ref()
     }
 
-    /// Set the [`Attribute`] field (the predicate) of the [`ArtifactSelector`]
-    pub fn the(self, attribute: Attribute) -> ArtifactSelector<Constrained> {
+    /// Set the [`Relation`] field (the predicate) of the [`ArtifactSelector`]
+    pub fn the(self, attribute: Relation) -> ArtifactSelector<Constrained> {
         ArtifactSelector::<Constrained> {
             attribute: Some(attribute),
             entity: self.entity,
@@ -361,7 +361,7 @@ where
                 .as_deref()
                 .and_then(|prefix| prefix.strip_suffix('/'))
             && let Ok(domain) = Symbol::from_str(domain)
-            && let Ok(composed) = Attribute::compose(&domain, name.clone())
+            && let Ok(composed) = Relation::compose(&domain, name.clone())
         {
             // The domain plus an exact name is an exact attribute — a
             // point lookup rather than a domain-wide scan. (A joint
@@ -531,14 +531,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::ArtifactSelector;
-    use crate::{Attribute, Entity, Value};
+    use crate::{Entity, Relation, Value};
 
     /// A selector's cells keep its entity and attribute bounds and
     /// drop its value bounds; a selector bounding only the value has
     /// none.
     #[dialog_common::test]
     fn it_keeps_the_cell_bounds_alone() {
-        let the: Attribute = "person/name".parse().expect("an attribute");
+        let the: Relation = "person/name".parse().expect("an attribute");
         let of: Entity = "id:alice".parse().expect("an entity");
         let cells = ArtifactSelector::new()
             .the(the.clone())

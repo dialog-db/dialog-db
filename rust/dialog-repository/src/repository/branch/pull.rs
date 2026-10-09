@@ -1967,7 +1967,7 @@ mod history_tests {
     /// where the peer's claim stays put unless a record retires it.
     #[dialog_common::test]
     async fn it_retracts_across_peers_holding_either_contended_claim() -> Result<()> {
-        use dialog_query::attribute::The;
+        use dialog_query::attribute::Relation;
         use dialog_query::query::Output as _;
         use dialog_query::{AttributeQuery, Claim, Term, the};
 
@@ -2004,7 +2004,7 @@ mod history_tests {
                 let rows: Vec<Claim> = branch
                     .query()
                     .select(AttributeQuery::from(
-                        Term::<The>::from(the!("post/title"))
+                        Term::<Relation>::from(the!("post/title"))
                             .of(Term::<dialog_artifacts::Entity>::var("of"))
                             .is(Term::<String>::var("is")),
                     ))
@@ -2100,7 +2100,7 @@ mod history_tests {
     /// direction.
     #[dialog_common::test]
     async fn it_does_not_resurrect_a_deleted_fact_on_pull() -> Result<()> {
-        use dialog_query::attribute::The;
+        use dialog_query::attribute::Relation;
         use dialog_query::query::Output as _;
         use dialog_query::{AttributeQuery, Claim, Term, the};
 
@@ -2135,7 +2135,7 @@ mod history_tests {
                 let rows: Vec<Claim> = branch
                     .query()
                     .select(AttributeQuery::from(
-                        Term::<The>::from(the!("post/title"))
+                        Term::<Relation>::from(the!("post/title"))
                             .of(Term::<dialog_artifacts::Entity>::var("of"))
                             .is(Term::<String>::var("is")),
                     ))
@@ -3945,7 +3945,7 @@ mod history_tests {
             // Every branch performs one pseudo-random write.
             for branch in branches {
                 let of: dialog_artifacts::Entity = entity(next(4)).parse()?;
-                let the: dialog_artifacts::Attribute = "bench/field".parse()?;
+                let the: dialog_artifacts::Relation = "bench/field".parse()?;
                 let is = value(next(3));
                 let artifact = Artifact {
                     the,
@@ -4123,7 +4123,7 @@ mod history_tests {
 
         // Everything is present afterwards.
         let count = |the: &str| {
-            let the: dialog_artifacts::Attribute = the.parse().unwrap();
+            let the: dialog_artifacts::Relation = the.parse().unwrap();
             let us = us.clone();
             let env = &env;
             async move {
@@ -4263,7 +4263,7 @@ mod history_tests {
 
         // Both sides' churn crossed the merge intact.
         let count = |the: &str| {
-            let the: dialog_artifacts::Attribute = the.parse().unwrap();
+            let the: dialog_artifacts::Relation = the.parse().unwrap();
             let us = us.clone();
             let operator = &operator;
             async move {

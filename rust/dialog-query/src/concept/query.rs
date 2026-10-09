@@ -16,8 +16,8 @@ pub use rules::{ConceptRules, Exact, Installed};
 
 use std::fmt;
 
-use crate::artifact::{ArtifactsAttribute, Value};
-use crate::attribute::Relation;
+use crate::artifact::{ArtifactsRelation, Value};
+use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::planner::{Disjunction, Plan};
 use crate::rule::deductive::DeductiveRule;
@@ -128,7 +128,7 @@ fn merge_parameters(
 /// `{"the": <key term>, "is": <value term>}` — a mini fact, in the
 /// slots an attribute query already uses. Internally the pair is two
 /// operands, the field and its key operand
-/// ([`Relation::key_operand`]), and the two forms convert on the
+/// ([`The::key_operand`]), and the two forms convert on the
 /// wire: the entry is what a document holds, the operands are what
 /// the rule binds.
 #[derive(Debug, Clone, PartialEq)]
@@ -172,7 +172,7 @@ impl Serialize for ConceptQuery {
         let mut terms: BTreeMap<&str, Bound> = BTreeMap::new();
         let mut keys: BTreeMap<String, &str> = BTreeMap::new();
         for (name, _) in self.predicate.collections() {
-            keys.insert(Relation::key_operand(name), name);
+            keys.insert(The::key_operand(name), name);
         }
         for (name, term) in self.terms.iter() {
             if let Some(field) = keys.get(name) {
@@ -223,7 +223,7 @@ impl<'de> Deserialize<'de> for ConceptQuery {
             };
             match bound {
                 Bound::Entry { the, is } => {
-                    terms.insert(Relation::key_operand(&name), the);
+                    terms.insert(The::key_operand(&name), the);
                     terms.insert(name, is);
                 }
                 Bound::Term(term) => {
@@ -677,7 +677,7 @@ impl ConceptQuery {
     where
         Env: crate::Scope<'a>,
     {
-        let key_operand = Relation::key_operand(ConceptDescriptor::VALUE);
+        let key_operand = The::key_operand(ConceptDescriptor::VALUE);
         // Under an election the caller's value, bound or constant, is
         // tested against what the election yields, never used to seed
         // the body: seeding would elect among the candidates that happen
@@ -819,7 +819,7 @@ impl ConceptQuery {
                 None => (Election::plain(Pick::Last), Vec::new()),
             };
             let this_term = app.terms.get("this").cloned();
-            let key_operand = Relation::key_operand(ConceptDescriptor::VALUE);
+            let key_operand = The::key_operand(ConceptDescriptor::VALUE);
 
             // The survivors of an election no input row informed: an input
             // binding none of the query's variables asks the same question
@@ -1052,8 +1052,8 @@ impl ConceptQuery {
         if name == ConceptDescriptor::VALUE {
             return self;
         }
-        let key = Relation::key_operand(name);
-        let canonical_key = Relation::key_operand(ConceptDescriptor::VALUE);
+        let key = The::key_operand(name);
+        let canonical_key = The::key_operand(ConceptDescriptor::VALUE);
         let mut terms = Parameters::new();
         for (param, term) in self.terms.iter() {
             let param = if param == name {
@@ -1079,7 +1079,7 @@ impl ConceptQuery {
 /// per attribute is kept on the query's memo, since the facts do not
 /// change within a query and a concept is evaluated many times in one.
 async fn stored_absent<'a, Env>(
-    attributes: &[ArtifactsAttribute],
+    attributes: &[ArtifactsRelation],
     env: &'a Env,
 ) -> Result<bool, EvaluationError>
 where
@@ -1339,7 +1339,7 @@ impl Election {
         rows: Vec<fixpoint::Answer>,
         field: &str,
     ) -> Result<Vec<fixpoint::Answer>, EvaluationError> {
-        let key_operand = Relation::key_operand(field);
+        let key_operand = The::key_operand(field);
         let mut order: Vec<Vec<u8>> = Vec::new();
         let mut groups: HashMap<Vec<u8>, Vec<Entry<fixpoint::Answer>>> = HashMap::new();
         for answer in rows {
@@ -1482,7 +1482,7 @@ mod tests {
         #[cfg(target_arch = "wasm32")]
         wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-        use crate::attribute::{AttributeDescriptor, Keyed, Relation};
+        use crate::attribute::{AttributeDescriptor, Keyed, The};
         use crate::concept::descriptor::ConceptFieldDescriptor;
         use crate::{Cardinality, ConceptDescriptor, ConceptQuery, Term, Type};
         use dialog_artifacts::Symbol;
@@ -1492,7 +1492,7 @@ mod tests {
             ConceptDescriptor::try_from(vec![(
                 "member".to_owned(),
                 ConceptFieldDescriptor::required(AttributeDescriptor::over(
-                    Relation::collection(
+                    The::collection(
                         Symbol::from_str("todo.list").expect("a valid domain"),
                         Keyed::Sequence,
                     ),
@@ -2929,7 +2929,7 @@ mod tests {
         };
         let scan = |the: &str, value: &str| -> Premise {
             reading(
-                the.parse::<crate::The>().expect("a selector"),
+                the.parse::<crate::Relation>().expect("a selector"),
                 Term::<Entity>::var("this"),
                 Term::var(value),
                 Some(Cardinality::One),

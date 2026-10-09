@@ -138,7 +138,7 @@ impl DeductiveRule {
     /// one body. `None` when the body reads no derived relation.
     pub fn reading_derived(
         &self,
-        derived: &dyn Fn(&Relation) -> bool,
+        derived: &dyn Fn(&The) -> bool,
     ) -> Result<Option<Self>, TypeError> {
         if let Some(origin) = self.origin() {
             let Some(source) = origin.rule.reading_derived(derived)? else {
@@ -158,7 +158,7 @@ impl DeductiveRule {
             let Term::Constant(the) = query.the() else {
                 return None;
             };
-            let relation = Relation::from(The::try_from(the.clone()).ok()?);
+            let relation = The::from(Relation::try_from(the.clone()).ok()?);
             if !derived(&relation) {
                 return None;
             }
@@ -368,8 +368,8 @@ impl DeductiveRule {
             let (mine, _) = unpaired.remove(index);
             if mine != name {
                 map.insert(mine.to_string(), name.to_string());
-                if matches!(field.the(), Relation::Collection { .. }) {
-                    map.insert(Relation::key_operand(mine), Relation::key_operand(name));
+                if matches!(field.the(), The::Collection { .. }) {
+                    map.insert(The::key_operand(mine), The::key_operand(name));
                 }
             }
         }
@@ -628,10 +628,10 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
             let mut terms = Parameters::new();
             terms.insert("this".to_string(), Term::<Any>::var("this"));
             terms.insert(ConceptDescriptor::VALUE.to_string(), value.clone());
-            if let Relation::Collection { .. } = field.the() {
+            if let The::Collection { .. } = field.the() {
                 terms.insert(
-                    Relation::key_operand(ConceptDescriptor::VALUE),
-                    Term::var(Relation::key_operand(name)),
+                    The::key_operand(ConceptDescriptor::VALUE),
+                    Term::var(The::key_operand(name)),
                 );
             }
             premises.push(Premise::Assert(Proposition::Concept(ConceptQuery {
@@ -701,14 +701,11 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
         // (`domain/key`) to an internal variable; the author-facing
         // key is its name half, projected onto the field's key
         // operand. One entry, one row, `(key, value)` bound flat.
-        if let Relation::Collection { .. } = field.the() {
+        if let The::Collection { .. } = field.the() {
             let mut parts = Parameters::new();
-            parts.insert(
-                "of".to_string(),
-                Term::var(Relation::attribute_variable(name)),
-            );
+            parts.insert("of".to_string(), Term::var(The::attribute_variable(name)));
             parts.insert("domain".to_string(), Term::blank());
-            parts.insert("name".to_string(), Term::var(Relation::key_operand(name)));
+            parts.insert("name".to_string(), Term::var(The::key_operand(name)));
             premises.push(
                 AttributeParts::apply(parts)
                     .expect("attribute-parts operands are well-formed by construction")
@@ -787,7 +784,7 @@ impl DeductiveRule {
                     !field.is_optional()
                         && field.descriptor().pick().elects()
                         && !field.descriptor().is_chain()
-                        && !matches!(field.the(), Relation::Collection { .. })
+                        && !matches!(field.the(), The::Collection { .. })
                 });
                 if !single || query.widens() {
                     return false;
@@ -852,13 +849,13 @@ impl DeductiveRule {
             }
             shared.push(name);
             kept.insert(mine.to_string());
-            if let Relation::Collection { .. } = field.the() {
-                kept.insert(Relation::key_operand(mine));
+            if let The::Collection { .. } = field.the() {
+                kept.insert(The::key_operand(mine));
             }
             if mine != name {
                 map.insert(mine.to_string(), name.to_string());
-                if let Relation::Collection { .. } = field.the() {
-                    map.insert(Relation::key_operand(mine), Relation::key_operand(name));
+                if let The::Collection { .. } = field.the() {
+                    map.insert(The::key_operand(mine), The::key_operand(name));
                 }
             }
         }
@@ -918,7 +915,7 @@ mod tests {
     use super::*;
     use crate::artifact::{Cause, Entity, Type};
     use crate::attribute::AttributeDescriptor;
-    use crate::attribute::The;
+    use crate::attribute::Relation;
     use crate::attribute::query::AttributeQuery;
     use crate::constraint::{Coalesce, Constraint};
     use crate::proposition::Proposition;
@@ -931,7 +928,7 @@ mod tests {
     /// attribute. Optionality is structural (a `OptionalAttributeQuery`
     /// left-join wrapping a scalar lookup), so this is how a test
     /// makes a variable's inferred kind admit `Nothing`.
-    fn optional_premise(the: Term<The>, is: Term<Any>, cause: Term<Cause>) -> Premise {
+    fn optional_premise(the: Term<Relation>, is: Term<Any>, cause: Term<Cause>) -> Premise {
         OptionalAttributeQuery::new(
             the,
             Term::<Entity>::var("this"),

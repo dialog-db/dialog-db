@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{Attribute, DialogArtifactsError, Entity};
+use crate::{DialogArtifactsError, Entity, Relation};
 
 use super::{
     Claim, History, HistoryKey, REVISION_RECORD_FORMAT, Revision, RevisionRecord, Version,
@@ -65,7 +65,7 @@ impl History for MemoryHistory {
         &self,
         version: &Version,
         of: &Entity,
-        the: &Attribute,
+        the: &Relation,
     ) -> Result<Vec<Claim>, DialogArtifactsError> {
         let (min, max) = HistoryKey::claim_range(version, of, the);
         Ok(self

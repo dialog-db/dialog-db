@@ -62,7 +62,7 @@ use crate::{
 pub(crate) const TAG_LENGTH: usize = 1;
 /// Maximum attribute length in bytes (still capped for the dictionary column
 /// and for filler-based range bounds).
-pub(crate) const ATTRIBUTE_LENGTH: usize = 64;
+pub(crate) const RELATION_LENGTH: usize = 64;
 /// Length of the value data type field in key bytes
 pub(crate) const VALUE_DATA_TYPE_LENGTH: usize = 1;
 
@@ -140,7 +140,7 @@ impl EncodedValue {
 ///
 /// Byte-string types escape and terminate, so their encoding is strictly
 /// longer than the raw bytes; numerics encode at their exact fixed width. A
-/// `Symbol`'s raw form (`Attribute::key_bytes`, fixed-width padded) does NOT
+/// `Symbol`'s raw form (`Relation::key_bytes`, fixed-width padded) does NOT
 /// bound its encoding (the string form), so it reports 0 and never
 /// short-circuits.
 fn encoded_len_lower_bound(value: &Value) -> usize {
@@ -456,7 +456,7 @@ pub trait KeyViewMut: KeyView {
     /// [`KeyView`].
     fn set_entity(self, entity: EntityKeyPart) -> Self;
 
-    /// Set the [`AttributeKeyPart`], altering the [`Attribute`] part of this
+    /// Set the [`AttributeKeyPart`], altering the [`Relation`] part of this
     /// [`KeyView`].
     fn set_attribute(self, attribute: AttributeKeyPart) -> Self;
 
@@ -510,7 +510,7 @@ pub trait KeyView: Sized + Clone {
     /// [`KeyView`].
     fn entity(&self) -> EntityKeyPart<'_>;
 
-    /// Get an [`AttributeKeyPart`] that refers to the [`Attribute`] part of
+    /// Get an [`AttributeKeyPart`] that refers to the [`Relation`] part of
     /// this [`KeyView`].
     fn attribute(&self) -> AttributeKeyPart<'_>;
 
@@ -610,14 +610,14 @@ mod tests {
     use std::str::FromStr;
 
     use super::{AttributeKey, EntityKey, FromKey, KeyView, Manifest, ValueKey, value_payload};
-    use crate::{Artifact, Attribute, Entity, Value, decode_value, key::varkey::ValuePayload};
+    use crate::{Artifact, Entity, Relation, Value, decode_value, key::varkey::ValuePayload};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     fn fact(value: Value) -> Artifact {
         Artifact {
-            the: Attribute::from_str("person/name").unwrap(),
+            the: Relation::from_str("person/name").unwrap(),
             of: Entity::from_str("did:key:z6MkExample").unwrap(),
             is: value,
             cause: None,
@@ -650,7 +650,7 @@ mod tests {
             Value::Float(-0.0),
             Value::Float(1783112056217.0),
             Value::Record(vec![1, 2, 3]),
-            Value::Symbol(Attribute::from_str("open/status")?),
+            Value::Symbol(Relation::from_str("open/status")?),
         ];
         for value in values {
             let fact = fact(value.clone());

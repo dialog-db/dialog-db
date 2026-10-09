@@ -838,7 +838,7 @@ pub enum EstimateError<'a> {
     },
 }
 
-/// Error from validating a relation identifier (`The`).
+/// Error from validating a relation identifier (`Relation`).
 ///
 /// Carries the raw input bytes so it can be produced in `const` context.
 /// The human-readable input is rendered on display.
@@ -879,7 +879,7 @@ impl error::Error for OwnedInvalidIdentifier {}
 
 impl From<OwnedInvalidIdentifier> for DialogArtifactsError {
     fn from(e: OwnedInvalidIdentifier) -> Self {
-        DialogArtifactsError::InvalidAttribute(e.to_string())
+        DialogArtifactsError::InvalidRelation(e.to_string())
     }
 }
 

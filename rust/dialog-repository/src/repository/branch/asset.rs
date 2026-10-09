@@ -298,8 +298,8 @@ mod tests {
     use crate::{Blob, Branch, CommitError};
     use anyhow::Result;
     use dialog_artifacts::{
-        ASSET_SIZE, Artifact, ArtifactSelector, Asset, Attribute, Changes, DialogArtifactsError,
-        Entity, Update as _, Value,
+        ASSET_SIZE, Artifact, ArtifactSelector, Asset, Changes, DialogArtifactsError, Entity,
+        Relation, Update as _, Value,
     };
     use dialog_effects::blob::{BlobError, BlobReader};
     use dialog_peer::helpers::test_session_with_peer;
@@ -315,7 +315,7 @@ mod tests {
         out
     }
 
-    fn avatar() -> Attribute {
+    fn avatar() -> Relation {
         "profile/avatar".parse().expect("valid attribute")
     }
 
@@ -919,7 +919,7 @@ mod tests {
         assert!(matches!(
             refused,
             Err(CommitError::Artifact(
-                DialogArtifactsError::ReservedAttribute(_)
+                DialogArtifactsError::ReservedRelation(_)
             ))
         ));
         Ok(())

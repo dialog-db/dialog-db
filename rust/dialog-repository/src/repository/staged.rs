@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, AssetChange, Attribute, Change, Changes, Entity, Instruction, Pick,
+    Artifact, ArtifactSelector, AssetChange, Change, Changes, Entity, Instruction, Pick, Relation,
     SortKey, Statement, Update, Value, sort_key,
 };
 use dialog_search_tree::Manifest;
@@ -64,14 +64,14 @@ struct State {
     /// Every write in the order the transaction made it, cell by cell:
     /// what the commit applies, so a write that succeeds a claim is
     /// settled against the line and the writes before it, in order.
-    log: Vec<(Attribute, Entity, Change)>,
+    log: Vec<(Relation, Entity, Change)>,
     /// The cells a write under a choosing pick asserted, kept past
     /// their retraction: the cells a read of a range must settle,
     /// found by the range's entity and attribute bounds.
     electing: ElectingCells,
     /// The log's writes by cell, in the order the transaction made
     /// them: what a read settles one cell by.
-    by_cell: HashMap<(Attribute, Entity), Vec<Change>>,
+    by_cell: HashMap<(Relation, Entity), Vec<Change>>,
     /// The settlement of these writes a read or commit made, with what
     /// it observed of the lines. Shared by the clones a query takes; a
     /// write to a shared store detaches its own copy, which keeps
@@ -150,7 +150,7 @@ impl State {
     /// read over the
     /// transaction settles the same way (see
     /// [`succession`](crate::repository::branch::transaction)).
-    fn apply_change(&mut self, the: &Attribute, of: &Entity, change: &Change) {
+    fn apply_change(&mut self, the: &Relation, of: &Entity, change: &Change) {
         // A write that repeats the cell's latest write exactly, value and
         // pick alike, is the same write: the facts already hold the
         // value, the tree would fold the two asserts into one claim, and
@@ -256,7 +256,7 @@ impl Staged {
         // the order of its writes. The cells are taken by entity and
         // attribute instead, each cell's writes in the order they were
         // recorded, so the same batch commits the same tree.
-        let mut writes: Vec<(&Entity, &Attribute, &Change)> = changes.iter().collect();
+        let mut writes: Vec<(&Entity, &Relation, &Change)> = changes.iter().collect();
         writes.sort_by(|(of, the, _), (other_of, other_the, _)| {
             (*of, *the).cmp(&(*other_of, *other_the))
         });
@@ -266,7 +266,7 @@ impl Staged {
     }
 
     /// Apply one write, as [`apply`](Self::apply) does for a batch.
-    pub(crate) fn apply_change(&mut self, the: &Attribute, of: &Entity, change: &Change) {
+    pub(crate) fn apply_change(&mut self, the: &Relation, of: &Entity, change: &Change) {
         Arc::make_mut(&mut self.0).apply_change(the, of, change);
     }
 
@@ -277,7 +277,7 @@ impl Staged {
     }
 
     /// Every write in the order the transaction made it.
-    pub(crate) fn log(&self) -> &[(Attribute, Entity, Change)] {
+    pub(crate) fn log(&self) -> &[(Relation, Entity, Change)] {
         &self.0.log
     }
 
@@ -293,8 +293,8 @@ impl Staged {
     /// what this store reads as over it.
     pub(crate) fn export(&self) -> Changes {
         let mut changes = self.0.assets.clone();
-        let mut cells: Vec<(Attribute, Entity)> = Vec::new();
-        let mut writes: HashMap<(Attribute, Entity), Vec<Change>> = HashMap::new();
+        let mut cells: Vec<(Relation, Entity)> = Vec::new();
+        let mut writes: HashMap<(Relation, Entity), Vec<Change>> = HashMap::new();
         for (the, of, change) in &self.0.log {
             let key = (the.clone(), of.clone());
             if !writes.contains_key(&key) {
@@ -356,13 +356,13 @@ impl Staged {
     pub(crate) fn electing_cells_within(
         &self,
         selector: &ArtifactSelector<Constrained>,
-    ) -> Vec<(Attribute, Entity)> {
+    ) -> Vec<(Relation, Entity)> {
         self.0.electing.within(selector)
     }
 
     /// The writes of one cell, in the order the transaction made them.
     #[cfg(test)]
-    pub(crate) fn writes_of(&self, the: &Attribute, of: &Entity) -> Vec<Change> {
+    pub(crate) fn writes_of(&self, the: &Relation, of: &Entity) -> Vec<Change> {
         self.0
             .by_cell
             .get(&(the.clone(), of.clone()))
@@ -497,7 +497,7 @@ mod tests {
     #[dialog_common::test]
     fn it_finds_electing_cells_by_their_writes_and_keeps_their_settlement() {
         let mut staged = Staged::default();
-        let the: Attribute = "person/name".parse().expect("attribute");
+        let the: Relation = "person/name".parse().expect("attribute");
         let a: Entity = "id:a".parse().expect("entity");
         let b: Entity = "id:b".parse().expect("entity");
         staged.apply_change(
@@ -578,7 +578,7 @@ mod tests {
     #[dialog_common::test]
     fn it_records_a_repeated_write_once() {
         let mut staged = Staged::default();
-        let the: Attribute = "person/name".parse().expect("attribute");
+        let the: Relation = "person/name".parse().expect("attribute");
         let a: Entity = "id:a".parse().expect("entity");
         let write = Change::Assert(Value::String("A".into()), Pick::Last);
         staged.apply_change(&the, &a, &write);

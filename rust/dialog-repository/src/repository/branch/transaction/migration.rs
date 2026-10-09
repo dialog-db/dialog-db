@@ -19,9 +19,9 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::helpers::test_repo;
 use crate::{Branch, Transient};
 use anyhow::Result;
-use dialog_artifacts::{ArtifactSelector, Attribute, Entity, Pick, Value};
+use dialog_artifacts::{ArtifactSelector, Entity, Pick, Relation as ArtifactsRelation, Value};
 use dialog_peer::helpers::test_session_with_peer;
-use dialog_query::attribute::The;
+use dialog_query::attribute::Relation;
 use dialog_query::query::Output as _;
 use dialog_query::rule::{DeductiveRule, InductiveRule};
 use dialog_query::types::Any;
@@ -59,7 +59,7 @@ fn value(json: &Json) -> Value {
 /// A fact as a statement this release writes as stored, under `all`.
 fn statement(the: &str, of: &Entity, is: Value) -> AttributeStatement {
     AttributeStatement {
-        the: The::from(the.parse::<Attribute>().expect("an attribute")),
+        the: Relation::from(the.parse::<ArtifactsRelation>().expect("an attribute")),
         of: of.clone(),
         is,
         cause: None,
