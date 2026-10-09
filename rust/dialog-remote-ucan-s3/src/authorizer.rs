@@ -58,7 +58,7 @@ use std::collections::BTreeMap;
 
 use dialog_capability::{Capability, Constraint, Did, Policy};
 use dialog_did_web::{CachingResolver, PerformingResolver, Resolve, WebResolver};
-use dialog_effects::{archive, blob, memory};
+use dialog_effects::{archive, blob, memory, ticket};
 use dialog_remote_s3::{Address, Permit, S3Credential, S3Error};
 use dialog_ucan_core::invocation::CheckFailed;
 use dialog_ucan_core::promise::Promised;
@@ -277,6 +277,24 @@ macro_rules! dispatch {
             _ => Err(S3Error::Configuration(format!("Unknown command: {:?}", $segments)))
         }
     };
+}
+
+/// The subject a `/ucan/claim` names: the one whose memory holds the
+/// ticket, as its [`ticket::SUBJECT`] argument.
+pub fn claimed_subject(args: &Args) -> Result<Did, S3Error> {
+    match args.get(ticket::SUBJECT) {
+        Some(Promised::String(did)) => did.parse().map_err(|_| {
+            S3Error::Authorization(AuthorizeError::Malformed {
+                detail: format!("claim argument '{}' is not a DID: {did}", ticket::SUBJECT),
+            })
+        }),
+        _ => Err(S3Error::Authorization(AuthorizeError::Malformed {
+            detail: format!(
+                "claim requires a '{}' argument naming a DID",
+                ticket::SUBJECT
+            ),
+        })),
+    }
 }
 
 /// Name the access decision a chain check reached.
@@ -540,6 +558,19 @@ where
         let subject_did = chain.subject();
 
         let command_segments: Vec<&str> = command.0.iter().map(|s| s.as_str()).collect();
+
+        // A claim reads the ticket the named subject holds for the
+        // invocation's own subject: the chain proved who the holder is,
+        // and the holder is the only one whose ticket it reaches.
+        if command_segments.as_slice() == ticket::CLAIM {
+            let capability = ticket::resolve(&claimed_subject(args)?, subject_did);
+            let request = ::dialog_remote_s3::request::S3Request::from(&capability);
+            let authorization = match self.credential.clone() {
+                Some(credential) => request.attest(credential),
+                None => ::dialog_remote_s3::S3Authorization::public(request),
+            };
+            return authorization.redeem(&self.address).await;
+        }
 
         dispatch!(self, subject_did, args, command_segments.as_slice(), {
             ["use", "get", "memory", "cell"]     => dialog_effects::memory::Resolve,
@@ -853,6 +884,67 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    /// A claim is answered with a read of the ticket the named subject
+    /// keeps under the claimant's own DID, never another holder's.
+    #[dialog_common::test]
+    async fn it_authorizes_a_claim_as_a_read_of_the_claimants_ticket() -> anyhow::Result<()> {
+        let holder = Ed25519Signer::import(&[3u8; 32]).await.unwrap();
+        let space = Ed25519Signer::import(&[4u8; 32]).await.unwrap().did();
+
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let credentials = s3::S3Credential::new("access-key-id", "secret-access-key");
+        let authorizer = UcanAuthorizer::new(address, Some(credentials));
+
+        let args = BTreeMap::from([(
+            ticket::SUBJECT.to_string(),
+            Promised::String(space.to_string()),
+        )]);
+        let container = build_self_invocation_container(
+            &holder,
+            ticket::CLAIM.iter().map(|s| s.to_string()).collect(),
+            args,
+        )
+        .await;
+
+        let permit = authorizer.authorize(&container).await?;
+        assert_eq!(permit.method, "GET");
+        assert_eq!(
+            permit.url.path(),
+            format!("/{space}/{}/{}", ticket::SPACE, holder.did())
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_refuses_a_claim_that_names_no_subject() {
+        let holder = Ed25519Signer::import(&[3u8; 32]).await.unwrap();
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let authorizer = UcanAuthorizer::new(address, None);
+        let container = build_self_invocation_container(
+            &holder,
+            ticket::CLAIM.iter().map(|s| s.to_string()).collect(),
+            BTreeMap::new(),
+        )
+        .await;
+
+        let refused = authorizer.authorize(&container).await;
+        assert!(
+            matches!(
+                refused,
+                Err(S3Error::Authorization(AuthorizeError::Malformed { .. }))
+            ),
+            "expected a malformed claim, got {refused:?}"
+        );
     }
 
     /// Build a self-invocation container (issuer == subject, no delegation).

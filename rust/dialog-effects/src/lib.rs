@@ -11,6 +11,7 @@
 //! - [`branch`]: Named lines of revisions (`Branches`, `Branch`, `List`, `Create`, `Delete`)
 //! - [`peer`]: A host's contacts and connections (`Peers`, `AddAddress`, `SetName`, `Find`, `Connect`)
 //! - [`archive`]: Content-addressed archive (`Archive`, `Catalog`, `Get`, `Put`)
+//! - [`ticket`]: Where a subject keeps the delegations it holds for others (`ticket/{holder}`)
 //!
 //! # Example
 //!
@@ -52,6 +53,7 @@ pub mod peer;
 pub mod rejection;
 pub mod space;
 pub mod storage;
+pub mod ticket;
 
 /// Unified prelude re-exporting all effect prelude traits.
 ///

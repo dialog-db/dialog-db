@@ -31,7 +31,8 @@ use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
 use dialog_effects::blob::{self, BlobError, BlobReader};
 use dialog_effects::memory::prelude::MemoryExt as _;
 use dialog_effects::memory::{self, Cell, PublishAttenuation, Space};
-use dialog_remote_ucan_s3::{Args, FromUcanArgs, verify_invocation};
+use dialog_effects::ticket;
+use dialog_remote_ucan_s3::{Args, FromUcanArgs, claimed_subject, verify_invocation};
 use dialog_ucan_core::revocation::RevocationChecker;
 use dialog_ucan_core::{Container, InvocationChain, UnverifiedRevocations};
 use dialog_varsig::AnySignature;
@@ -458,6 +459,7 @@ where
             ["use", "delete", "memory", "cell"] | ["memory", "retract"] => {
                 self.retract(&subject, args).await
             }
+            ["ucan", "claim"] => self.claim(&subject, args).await,
             _ => return Answer::Unsupported,
         };
         match outcome {
@@ -591,6 +593,21 @@ where
             .invoke(memory::Publish::new(payload, bound.when.clone()));
         let version = Provider::<memory::Publish>::execute(&self.provider, capability).await?;
         Ok(Response::versioned(200, render(&version)?, Vec::new()))
+    }
+
+    /// Answer the ticket the subject a claim names holds for `holder`,
+    /// the claim's own subject: the chain proved who the holder is, and
+    /// its own ticket is the only one a claim reaches.
+    async fn claim(&self, holder: &Did, args: &Args) -> Result<Response, Failure>
+    where
+        P: Store,
+    {
+        let capability = ticket::resolve(&claimed_subject(args)?, holder);
+        match Provider::<memory::Resolve>::execute(&self.provider, capability).await {
+            Ok(Some(edition)) => Ok(Response::outcome(200, edition.content)),
+            Ok(None) => Ok(Response::status(404)),
+            Err(error) => Err(Failure::from(error)),
+        }
     }
 
     async fn retract(&self, subject: &Did, args: &Args) -> Result<Response, Failure>
