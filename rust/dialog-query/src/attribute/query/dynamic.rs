@@ -1,7 +1,7 @@
 use crate::Cardinality;
 use crate::Claim;
-use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
-use crate::attribute::The;
+use crate::artifact::{ArtifactSelector, ArtifactsRelation, Constrained};
+use crate::attribute::Relation;
 use crate::environment::Environment;
 use crate::negation::Negation;
 use crate::proposition::Proposition;
@@ -46,7 +46,7 @@ impl DynamicAttributeQuery {
     /// Set-widening (`Absent` on miss) is a semantic-layer construct
     /// realized by [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery).
     pub fn new(
-        the: Term<The>,
+        the: Term<Relation>,
         of: Term<Entity>,
         is: Term<Any>,
         cause: Term<Cause>,
@@ -61,7 +61,7 @@ impl DynamicAttributeQuery {
     }
 
     /// Get the 'the' (attribute) term.
-    pub fn the(&self) -> &Term<The> {
+    pub fn the(&self) -> &Term<Relation> {
         match self {
             DynamicAttributeQuery::All(q) => q.the(),
             DynamicAttributeQuery::Only(q) => q.the(),
@@ -144,8 +144,8 @@ impl DynamicAttributeQuery {
         }
     }
 
-    /// Map `Term<The>` to `Term<ArtifactsAttribute>`.
-    pub fn attribute(&self) -> Term<ArtifactsAttribute> {
+    /// Map `Term<Relation>` to `Term<ArtifactsRelation>`.
+    pub fn attribute(&self) -> Term<ArtifactsRelation> {
         match self {
             DynamicAttributeQuery::All(q) => q.attribute(),
             DynamicAttributeQuery::Only(q) => q.attribute(),

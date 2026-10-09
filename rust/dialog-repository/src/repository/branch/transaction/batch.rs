@@ -1066,13 +1066,13 @@ mod tests {
     /// nothing.
     #[dialog_common::test]
     async fn it_folds_history_across_amends() -> Result<()> {
-        use dialog_artifacts::{Attribute, Changes, Update as _, Value};
+        use dialog_artifacts::{Changes, Relation, Update as _, Value};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let the: Attribute = "note/body".parse()?;
+        let the: Relation = "note/body".parse()?;
         let of = dialog_artifacts::Entity::new()?;
         let replace = |value: &str| {
             let mut changes = Changes::new();

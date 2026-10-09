@@ -1,5 +1,5 @@
 use crate::artifact::{Entity, Value};
-use crate::attribute::The;
+use crate::attribute::Relation;
 use crate::attribute::expression::dynamic::DynamicAttributeExpression;
 use crate::schema::Cardinality;
 use crate::statement::Statement;
@@ -14,7 +14,7 @@ use dialog_artifacts::{Pick, Update};
 /// can convert into this type via `.into()`, enabling heterogeneous
 /// collections (e.g. `Vec<AttributeStatement>`) for concept instances
 /// that contain attributes of different types.
-pub type AttributeStatement = DynamicAttributeExpression<The, Entity, Value>;
+pub type AttributeStatement = DynamicAttributeExpression<Relation, Entity, Value>;
 
 impl Statement for AttributeStatement {
     fn assert(self, update: &mut impl Update) {

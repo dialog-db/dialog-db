@@ -14,8 +14,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Changes, DialogArtifactsError, Entity, Exporter,
-    Instruction, LoadBlob, NameShape, Symbol, Update as _, Value, encode_value_owned,
+    Artifact, ArtifactSelector, Changes, DialogArtifactsError, Entity, Exporter, Instruction,
+    LoadBlob, NameShape, Relation, Symbol, Update as _, Value, encode_value_owned,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
@@ -1212,7 +1212,7 @@ async fn it_can_query_efficiently_by_attribute_and_value() -> Result<()> {
         .perform(&operator)
         .await?;
 
-    let attribute: Attribute = "item/name".parse()?;
+    let attribute: Relation = "item/name".parse()?;
     let (rows, reads, writes) = cold_select(
         &repo,
         ArtifactSelector::new()

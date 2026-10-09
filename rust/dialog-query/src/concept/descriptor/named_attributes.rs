@@ -1,7 +1,7 @@
 use crate::Cardinality;
 use crate::artifact::Type;
 use crate::attribute::AttributeDescriptor;
-use crate::attribute::Relation;
+use crate::attribute::The;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
 use crate::memo::Memo;
@@ -137,7 +137,7 @@ impl ConceptFieldDescriptor {
 
     /// Convenience: what this field selects — one attribute, or every
     /// entry of a keyed collection.
-    pub fn the(&self) -> &Relation {
+    pub fn the(&self) -> &The {
         self.descriptor.the()
     }
 

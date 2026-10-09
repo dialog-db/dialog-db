@@ -1150,7 +1150,7 @@ mod tests {
         .await;
         assert!(matches!(
             refused,
-            Err(DialogArtifactsError::ReservedAttribute(_))
+            Err(DialogArtifactsError::ReservedRelation(_))
         ));
         Ok(())
     }

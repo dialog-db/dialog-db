@@ -21,7 +21,7 @@ use anyhow::Result;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTree;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Entity, Instruction, Value, sort_key,
+    Artifact, ArtifactSelector, Entity, Instruction, Relation, Value, sort_key,
 };
 use dialog_baseline::changes_of;
 use dialog_baseline::repo::{DialogRepo, VolatileRepo};
@@ -41,8 +41,8 @@ fn entity(n: u32) -> Entity {
     Entity::from_str(&format!("entity:fuzz-{n:03}")).expect("valid entity")
 }
 
-fn attribute(n: u32) -> Attribute {
-    Attribute::from_str(&format!("fuzz/attr{n}")).expect("valid attribute")
+fn attribute(n: u32) -> Relation {
+    Relation::from_str(&format!("fuzz/attr{n}")).expect("valid attribute")
 }
 
 /// Values straddling every encoding decision: tiny inline strings, strings

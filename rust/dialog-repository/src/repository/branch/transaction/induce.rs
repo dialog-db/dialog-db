@@ -35,15 +35,15 @@ use std::collections::{BTreeSet, HashMap};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Change, Changes, DialogArtifactsError, Entity,
-    Instruction, Select, Statement, Value,
+    Artifact, ArtifactSelector, Change, Changes, DialogArtifactsError, Entity, Instruction,
+    Relation, Select, Statement, Value,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
-use dialog_query::attribute::Relation;
+use dialog_query::attribute::The;
 use dialog_query::rule::inductive::Polarity;
 use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
@@ -140,8 +140,8 @@ where
         // removal can newly enable a rule only through `unless`, which
         // a seed cannot express).
         let mut assert_rows: Vec<Artifact> = Vec::new();
-        let mut retract_attrs: BTreeSet<Attribute> = BTreeSet::new();
-        let mut replace_attrs: BTreeSet<Attribute> = BTreeSet::new();
+        let mut retract_attrs: BTreeSet<Relation> = BTreeSet::new();
+        let mut replace_attrs: BTreeSet<Relation> = BTreeSet::new();
         for instruction in &stimulus {
             match instruction {
                 Instruction::Assert(a, policy) => {
@@ -163,7 +163,7 @@ where
             .iter()
             .map(|instruction| match instruction {
                 Instruction::Assert(a, _) | Instruction::Retract(a) => {
-                    Reach::Attribute(a.the.clone())
+                    Reach::Relation(a.the.clone())
                 }
             })
             .collect();
@@ -1001,7 +1001,7 @@ async fn fire_seeded<'a>(
                     && !bind_seed(
                         &mut matched,
                         &mut scope,
-                        query.terms.get(&Relation::key_operand(name)),
+                        query.terms.get(&The::key_operand(name)),
                         Value::String(row.the.name().to_owned()),
                     )
                 {
@@ -1097,7 +1097,7 @@ async fn emit_matches<'a>(
             let attribute = match relation.attribute() {
                 Some(attribute) => attribute,
                 None => {
-                    let key = Term::<Any>::var(Relation::key_operand(name));
+                    let key = Term::<Any>::var(The::key_operand(name));
                     let Ok(Binding::Present(Value::String(key))) = matched.lookup(&key) else {
                         continue;
                     };
@@ -3138,11 +3138,11 @@ mod tests {
             .await?;
         branch.refresh(&operator).await?;
 
-        let member: dialog_artifacts::Attribute = "todo.list/N5".parse()?;
+        let member: dialog_artifacts::Relation = "todo.list/N5".parse()?;
         branch
             .transaction()
             .assert(
-                dialog_query::The::from(member)
+                dialog_query::Relation::from(member)
                     .of(list.clone())
                     .is(item.clone()),
             )

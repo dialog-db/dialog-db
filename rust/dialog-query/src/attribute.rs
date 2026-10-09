@@ -13,7 +13,7 @@ pub use query::{AttributeQuery, DynamicAttributeQuery, StaticAttributeQuery};
 pub use statement::*;
 pub use the::*;
 
-pub use crate::artifact::{ArtifactsAttribute, Cause, DialogArtifactsError, Entity, Value};
+pub use crate::artifact::{ArtifactsRelation, Cause, DialogArtifactsError, Entity, Value};
 pub use crate::schema::Cardinality;
 pub use crate::types::{Scalar, Type, Typed};
 pub use crate::{Predicate, Premise, Term};

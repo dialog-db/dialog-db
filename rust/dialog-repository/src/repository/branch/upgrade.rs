@@ -33,14 +33,14 @@
 
 use crate::rules::transient_attr;
 use crate::{Branch, CommitError, RemoteSite, Revision, Transient};
-use dialog_artifacts::{ArtifactSelector, Attribute, Entity, Pick, Value};
+use dialog_artifacts::{ArtifactSelector, Entity, Pick, Relation as ArtifactsRelation, Value};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead, Size as BlobSize};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_query::attribute::The;
+use dialog_query::attribute::Relation;
 use dialog_query::migration::concept_identity_v0;
 use dialog_query::rule::statement::source_attr;
 use dialog_query::rule::{DeductiveRule, InductiveRule};
@@ -226,9 +226,9 @@ impl UpgradeRules<'_> {
 
 /// A rule fact as a statement, under `all`, the pick rule facts are
 /// written under.
-fn statement(the: Attribute, of: Entity, is: Value) -> AttributeStatement {
+fn statement(the: ArtifactsRelation, of: Entity, is: Value) -> AttributeStatement {
     AttributeStatement {
-        the: The::from(the),
+        the: Relation::from(the),
         of,
         is,
         cause: None,

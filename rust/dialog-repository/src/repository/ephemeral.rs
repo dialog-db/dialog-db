@@ -179,7 +179,7 @@ impl Facts {
     }
 
     /// Every held fact at an `(entity, attribute)` cell.
-    pub(crate) fn cell(&self, of: &Entity, the: &dialog_artifacts::Attribute) -> Vec<Artifact> {
+    pub(crate) fn cell(&self, of: &Entity, the: &dialog_artifacts::Relation) -> Vec<Artifact> {
         self.scan(&ArtifactSelector::new().of(of.clone()).the(the.clone()))
     }
 

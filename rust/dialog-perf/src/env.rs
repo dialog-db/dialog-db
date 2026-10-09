@@ -9,7 +9,7 @@
 //! move the same blocks.
 
 use anyhow::Result;
-use dialog_artifacts::{Artifact, Attribute, Changes, Entity, Instruction, Pick, Value};
+use dialog_artifacts::{Artifact, Changes, Entity, Instruction, Pick, Relation, Value};
 use dialog_capability::Subject;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Location;
@@ -179,7 +179,7 @@ pub fn entity(tag: &str, index: usize) -> Entity {
 }
 
 /// The attribute `name` spells.
-pub fn attribute(name: &str) -> Attribute {
+pub fn attribute(name: &str) -> Relation {
     name.parse().expect("a scenario's attribute names parse")
 }
 

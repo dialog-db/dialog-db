@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{ArtifactSelector, Attribute, Entity, NameShape};
+use dialog_artifacts::{ArtifactSelector, Entity, NameShape, Relation};
 
 /// One entry per cell a write under a choosing pick asserted, kept
 /// past its retraction: the cells a read of a range must settle. Kept
@@ -15,8 +15,8 @@ use dialog_artifacts::{ArtifactSelector, Attribute, Entity, NameShape};
 /// entity, and a read settles it whatever value it holds.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ElectingCells {
-    by_attribute: BTreeMap<String, BTreeMap<String, (Attribute, Entity)>>,
-    by_entity: BTreeMap<String, BTreeMap<String, (Attribute, Entity)>>,
+    by_attribute: BTreeMap<String, BTreeMap<String, (Relation, Entity)>>,
+    by_entity: BTreeMap<String, BTreeMap<String, (Relation, Entity)>>,
 }
 
 /// The entries of `map` whose key is `exact`, starts with `prefix`, or
@@ -42,7 +42,7 @@ fn keyed<'m, V>(
 
 impl ElectingCells {
     /// Keep the cell. Returns whether it was not kept before.
-    pub(crate) fn insert(&mut self, the: &Attribute, of: &Entity) -> bool {
+    pub(crate) fn insert(&mut self, the: &Relation, of: &Entity) -> bool {
         let entities = self
             .by_attribute
             .entry(the.as_str().to_owned())
@@ -72,8 +72,8 @@ impl ElectingCells {
     pub(crate) fn within(
         &self,
         selector: &ArtifactSelector<Constrained>,
-    ) -> Vec<(Attribute, Entity)> {
-        let admits_attribute = |the: &Attribute| {
+    ) -> Vec<(Relation, Entity)> {
+        let admits_attribute = |the: &Relation| {
             selector
                 .attribute_name()
                 .is_none_or(|name| the.name() == name.as_str())
@@ -85,11 +85,11 @@ impl ElectingCells {
                         == Some(shape)
                 })
         };
-        let the = selector.attribute().map(Attribute::as_str);
+        let the = selector.attribute().map(Relation::as_str);
         let the_prefix = selector.attribute_prefix();
         let of = selector.entity().map(Entity::as_str);
         let of_prefix = selector.entity_prefix();
-        let cells: Box<dyn Iterator<Item = &(Attribute, Entity)>> =
+        let cells: Box<dyn Iterator<Item = &(Relation, Entity)>> =
             if the.is_some() || the_prefix.is_some() || (of.is_none() && of_prefix.is_none()) {
                 Box::new(
                     keyed(&self.by_attribute, the, the_prefix)
@@ -115,7 +115,7 @@ mod tests {
 
     use super::*;
 
-    fn cell(the: &str, of: &str) -> (Attribute, Entity) {
+    fn cell(the: &str, of: &str) -> (Relation, Entity) {
         (the.parse().expect("attribute"), of.parse().expect("entity"))
     }
 

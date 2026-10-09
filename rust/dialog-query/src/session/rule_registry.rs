@@ -1,7 +1,7 @@
 use super::dependencies::{AggregationViolation, ProgramAnalysis};
 use crate::Entity;
 use crate::EvaluationError;
-use crate::attribute::Relation;
+use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::concept::query::{ConceptRules, Exact, Installed, PlanCache};
 use crate::rule::deductive::DeductiveRule;
@@ -79,7 +79,7 @@ fn reading_derived(
     rule: &DeductiveRule,
     derived: &HashSet<Entity>,
 ) -> Result<DeductiveRule, EvaluationError> {
-    let reads_derived = |relation: &Relation| {
+    let reads_derived = |relation: &The| {
         Reach::of(relation)
             .on_entity()
             .is_some_and(|on| derived.contains(&on))
@@ -410,7 +410,7 @@ mod tests {
 
     use super::*;
     use crate::Term;
-    use crate::attribute::{AttributeDescriptor, Cardinality, The, Type};
+    use crate::attribute::{AttributeDescriptor, Cardinality, Relation, Type};
     use crate::the;
 
     fn person_concept() -> ConceptDescriptor {
@@ -433,7 +433,7 @@ mod tests {
             .iter()
             .map(|(field, source)| {
                 reading(
-                    source.parse::<The>().expect("an attribute"),
+                    source.parse::<Relation>().expect("an attribute"),
                     Term::var("this"),
                     Term::var(*field),
                     None,

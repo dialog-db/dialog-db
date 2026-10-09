@@ -1,7 +1,7 @@
 use crate::Cardinality;
 use crate::Claim;
-use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained, decode_value};
-use crate::attribute::The;
+use crate::artifact::{ArtifactSelector, ArtifactsRelation, Constrained, decode_value};
+use crate::attribute::Relation;
 use crate::attribute::query::pipelined;
 use crate::environment::Environment;
 use crate::formula::number::Numeric;
@@ -31,7 +31,7 @@ use std::pin::Pin;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AttributeQueryAll {
     /// The relation identifier (e.g., "person/name")
-    the: Term<The>,
+    the: Term<Relation>,
     /// The entity
     of: Term<Entity>,
     /// The value
@@ -50,7 +50,7 @@ impl AttributeQueryAll {
     /// semantic-layer construct realized by
     /// [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery), so a `Nothing` bit
     /// on the `is` term's kind is meaningless here and is stripped.
-    pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
+    pub fn new(the: Term<Relation>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         Self::with_source(the, of, is, cause, Term::<Record>::unique())
     }
 
@@ -59,7 +59,7 @@ impl AttributeQueryAll {
     /// Its claim is never cited, so it takes a blank source rather than
     /// minting a unique one: a query resolves one of these per row.
     pub(crate) fn lookup(
-        the: Term<The>,
+        the: Term<Relation>,
         of: Term<Entity>,
         is: Term<Any>,
         cause: Term<Cause>,
@@ -68,7 +68,7 @@ impl AttributeQueryAll {
     }
 
     fn with_source(
-        the: Term<The>,
+        the: Term<Relation>,
         of: Term<Entity>,
         is: Term<Any>,
         cause: Term<Cause>,
@@ -90,7 +90,7 @@ impl AttributeQueryAll {
     }
 
     /// Get the 'the' (attribute) term.
-    pub fn the(&self) -> &Term<The> {
+    pub fn the(&self) -> &Term<Relation> {
         &self.the
     }
 
@@ -145,8 +145,8 @@ impl AttributeQueryAll {
         &self.source
     }
 
-    /// Map `Term<The>` to `Term<ArtifactsAttribute>`.
-    pub fn attribute(&self) -> Term<ArtifactsAttribute> {
+    /// Map `Term<Relation>` to `Term<ArtifactsRelation>`.
+    pub fn attribute(&self) -> Term<ArtifactsRelation> {
         match &self.the {
             Term::Constant(value) => Term::Constant(value.clone()),
             Term::Variable {
@@ -467,7 +467,7 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
 
         match &from.the {
             Term::Constant(the) => {
-                let relation = ArtifactsAttribute::try_from(the.clone()).map_err(|_| {
+                let relation = ArtifactsRelation::try_from(the.clone()).map_err(|_| {
                     EvaluationError::Store("Could not convert value to Attribute".to_string())
                 })?;
                 selector = Some(match selector {
@@ -724,7 +724,7 @@ mod tests {
             .with_prefix("person/")
             .expect("symbol is textual");
         let query = AttributeQueryAll::new(
-            Term::<The>::var("a").with_kind(attribute_kind),
+            Term::<Relation>::var("a").with_kind(attribute_kind),
             Term::<Entity>::var("e"),
             Term::var("v"),
             Term::var("cause"),
@@ -742,7 +742,7 @@ mod tests {
             .with_name_shape(NameShape::Position)
             .expect("shapes compose with prefixes");
         let query = AttributeQueryAll::new(
-            Term::<The>::var("a").with_kind(members_kind),
+            Term::<Relation>::var("a").with_kind(members_kind),
             Term::<Entity>::var("e"),
             Term::var("v"),
             Term::var("cause"),
@@ -1127,7 +1127,7 @@ mod tests {
         // One domain, both name shapes: a dictionary entry and an
         // ordered member. A position name is uppercase, outside the
         // `the!` notation, so it is composed at runtime.
-        let member = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let member = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(
@@ -1149,7 +1149,7 @@ mod tests {
                 .with_name_shape(shape)
                 .expect("shapes compose with prefixes");
             AttributeQueryAll::new(
-                Term::<The>::var("a").with_kind(kind),
+                Term::<Relation>::var("a").with_kind(kind),
                 Term::<Entity>::var("e"),
                 Term::var("v"),
                 Term::var("cause"),
@@ -1183,8 +1183,8 @@ mod tests {
         // One domain, both name shapes: a dictionary entry plus two
         // ordered members. Position names are uppercase, outside the
         // `the!` notation, so they are composed at runtime.
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
-        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(
@@ -1207,8 +1207,8 @@ mod tests {
                 .expect("symbol is textual")
                 .with_name_shape(shape)
                 .expect("shapes compose with prefixes");
-            let term: Term<The> = Term::<The>::var("a").with_kind(kind);
-            let restored: Term<The> = serde_json::from_str(&serde_json::to_string(&term)?)?;
+            let term: Term<Relation> = Term::<Relation>::var("a").with_kind(kind);
+            let restored: Term<Relation> = serde_json::from_str(&serde_json::to_string(&term)?)?;
             assert_eq!(restored, term, "the refined term survives the round trip");
             Ok(AttributeQueryAll::new(
                 restored,
@@ -1251,7 +1251,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let e = Entity::new()?;
-        let symbol = ArtifactsAttribute::try_from("user/name".to_string())?;
+        let symbol = ArtifactsRelation::try_from("user/name".to_string())?;
         branch
             .transaction()
             .assert(the!("tag/kind").of(e.clone()).is(symbol))

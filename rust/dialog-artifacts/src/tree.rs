@@ -575,7 +575,7 @@ pub trait ArtifactTreeExt {
         &self,
         store: S,
         of: &crate::Entity,
-        the: &crate::Attribute,
+        the: &crate::Relation,
     ) -> Result<Vec<Datum>, DialogArtifactsError>
     where
         S: ArchiveReader + Clone;
@@ -586,7 +586,7 @@ pub trait ArtifactTreeExt {
         &self,
         store: S,
         of: &crate::Entity,
-        the: &crate::Attribute,
+        the: &crate::Relation,
     ) -> Result<Vec<Artifact>, DialogArtifactsError>
     where
         S: ArchiveReader + Clone;
@@ -752,7 +752,7 @@ impl ArtifactTreeExt for ArtifactTree {
         &self,
         store: S,
         of: &crate::Entity,
-        the: &crate::Attribute,
+        the: &crate::Relation,
     ) -> Result<Vec<Datum>, DialogArtifactsError>
     where
         S: ArchiveReader + Clone,
@@ -785,7 +785,7 @@ impl ArtifactTreeExt for ArtifactTree {
         &self,
         store: S,
         of: &crate::Entity,
-        the: &crate::Attribute,
+        the: &crate::Relation,
     ) -> Result<Vec<Artifact>, DialogArtifactsError>
     where
         S: ArchiveReader + Clone,
@@ -1391,7 +1391,7 @@ where
                 && !the.starts_with("dialog.rule/")
                 && !the.starts_with("dialog.concept/")
             {
-                return Err(DialogArtifactsError::ReservedAttribute(
+                return Err(DialogArtifactsError::ReservedRelation(
                     artifact.the.to_string(),
                 ));
             }
@@ -1983,8 +1983,8 @@ mod selector_range_tests {
     use super::{apply_prefix_bounds, selector_range};
     use crate::selector::Constrained;
     use crate::{
-        ArtifactSelector, Attribute, AttributeKey, Entity, EntityKey, Key, KeyViewConstruct,
-        KeyViewMut as _, Value, ValueKey,
+        ArtifactSelector, AttributeKey, Entity, EntityKey, Key, KeyViewConstruct, KeyViewMut as _,
+        Relation, Value, ValueKey,
     };
     use dialog_search_tree::Manifest;
 
@@ -2044,8 +2044,8 @@ mod selector_range_tests {
             .expect("valid entity")
     }
 
-    fn attribute() -> Attribute {
-        Attribute::from_str("person/name").expect("valid attribute")
+    fn attribute() -> Relation {
+        Relation::from_str("person/name").expect("valid attribute")
     }
 
     /// Values chosen to straddle every encoding decision the bound

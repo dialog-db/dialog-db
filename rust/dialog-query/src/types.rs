@@ -25,8 +25,8 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 
 use crate::artifact::ArtifactTypeError;
-pub use crate::artifact::{ArtifactsAttribute, Cause, Entity, Type, Value};
-use crate::attribute::The;
+pub use crate::artifact::{ArtifactsRelation, Cause, Entity, Type, Value};
+use crate::attribute::Relation;
 
 /// Trait implemented by type descriptors: named ZSTs that
 /// represent a runtime type at the Rust type level.
@@ -240,8 +240,8 @@ impl_typed!(f64, Float);
 impl_typed!(f32, Float);
 impl_typed!(Vec<u8>, Bytes);
 impl_typed!(Entity, EntityType);
-impl_typed!(ArtifactsAttribute, Symbol);
-impl_typed!(The, Symbol);
+impl_typed!(ArtifactsRelation, Symbol);
+impl_typed!(Relation, Symbol);
 impl_typed!(Cause, Bytes);
 impl_typed!(Value, Any);
 
@@ -278,10 +278,10 @@ impl_scalar!(
     f32,
     f64,
     Entity,
-    ArtifactsAttribute,
+    ArtifactsRelation,
     Vec<u8>,
     Cause,
-    The,
+    Relation,
     RecordBytes
 );
 

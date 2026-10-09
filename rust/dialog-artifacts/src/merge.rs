@@ -61,9 +61,9 @@ use crate::key::varkey::{ValueRef, parse_key, parse_key_ref};
 use crate::tree::ArtifactTree;
 use crate::tree::fetch_spilled;
 use crate::{
-    Attribute, AttributeKey, AttributeKeyPart, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum,
-    ENTITY_KEY_TAG, Entity, EntityKey, EntityKeyPart, FromKey as _, HISTORY_KEY_TAG, Key,
-    KeyViewConstruct, KeyViewMut as _, State, VALUE_KEY_TAG, ValueKey,
+    AttributeKey, AttributeKeyPart, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum, ENTITY_KEY_TAG, Entity,
+    EntityKey, EntityKeyPart, FromKey as _, HISTORY_KEY_TAG, Key, KeyViewConstruct,
+    KeyViewMut as _, Relation, State, VALUE_KEY_TAG, ValueKey,
 };
 
 /// The full key span of one region tag.
@@ -167,7 +167,7 @@ pub fn coverage_range(key: &Key) -> Result<RangeInclusive<Key>, DialogSearchTree
             .map_err(|e| DialogSearchTreeError::Node(format!("entity is not UTF-8: {e}")))?,
     )
     .map_err(|e| decode(&e))?;
-    let the = Attribute::from_str(
+    let the = Relation::from_str(
         from_utf8(&parts.attribute)
             .map_err(|e| DialogSearchTreeError::Node(format!("attribute is not UTF-8: {e}")))?,
     )
@@ -803,7 +803,7 @@ mod screen_tests {
     use crate::ArchiveDelta;
     use crate::history::{Edition, Origin, Version};
     use crate::tree::ArtifactTreeExt as _;
-    use crate::{Artifact, Attribute, Entity, Instruction, Value};
+    use crate::{Artifact, Entity, Instruction, Relation, Value};
     use anyhow::Result;
     use dialog_search_tree::MemoryBlocks;
     use dialog_search_tree::helpers::ObservingBlocks;
@@ -839,7 +839,7 @@ mod screen_tests {
         // the observing backend the screen reads through.
         let observing = ObservingBlocks::new();
         let store = MemoryBlocks::new();
-        let the: Attribute = "task/label".parse()?;
+        let the: Relation = "task/label".parse()?;
         let writer = Version::new(Origin::from([1u8; 32]), Edition::new(0));
         let retractor = Version::new(Origin::from([2u8; 32]), Edition::new(1));
 

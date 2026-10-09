@@ -1,5 +1,5 @@
 use crate::artifact::{Cause, Entity, Value};
-use crate::attribute::The;
+use crate::attribute::Relation;
 use crate::attribute::query::AttributeQuery;
 use crate::attribute::statement::AttributeStatement;
 use crate::negation::Negation;
@@ -39,12 +39,12 @@ impl<T: Typed> IntoTerm for Term<T> {
     }
 }
 
-/// Intermediate builder produced by [`The::of`] or [`Term<The>::of`].
+/// Intermediate builder produced by [`Relation::of`] or [`Term<Relation>::of`].
 /// Call [`.is()`](Self::is) to supply the value and obtain a
 /// [`DynamicAttributeExpression`].
-pub struct DynamicAttributeExpressionBuilder<The, Of> {
-    /// The attribute (concrete or variable).
-    pub the: The,
+pub struct DynamicAttributeExpressionBuilder<T, Of> {
+    /// The relation (concrete or variable).
+    pub the: T,
     /// The entity (or entity term).
     pub of: Of,
 }
@@ -54,8 +54,8 @@ impl<T, Of> DynamicAttributeExpressionBuilder<T, Of> {
     ///
     /// Accepts concrete scalar values (`"Alice"`, `25u32`),
     /// [`Term`] variables (`Term::<String>::var("name")`), and
-    /// [`The`] identifiers or [`Term<The>`] variables for querying
-    /// relations themselves (`Term::<The>::var("relation")`).
+    /// [`Relation`] identifiers or [`Term<Relation>`] variables for querying
+    /// relations themselves (`Term::<Relation>::var("relation")`).
     pub fn is<V: IntoTerm>(self, value: V) -> DynamicAttributeExpression<T, Of, V> {
         DynamicAttributeExpression {
             the: self.the,
@@ -74,14 +74,14 @@ impl<T, Of> DynamicAttributeExpressionBuilder<T, Of> {
 /// All three positions use deferred conversion: raw values are stored
 /// as-is and converted only when needed for queries or statements.
 ///
-/// - [`Statement`] requires `Relation = The`, `Of = Entity`, `Is: Scalar`
+/// - [`Statement`] requires `T = Relation`, `Of = Entity`, `Is: Scalar`
 ///   (all concrete positions).
 /// - [`From<...> for Premise`] requires each position to convert into
 ///   the corresponding [`Term`].
 #[derive(Clone, Debug)]
-pub struct DynamicAttributeExpression<The, Of, Is> {
-    /// The attribute (predicate), concrete or variable.
-    pub the: The,
+pub struct DynamicAttributeExpression<T, Of, Is> {
+    /// The relation (predicate), concrete or variable.
+    pub the: T,
     /// The entity (or entity term).
     pub of: Of,
     /// The value, concrete or a [`Term`] variable.
@@ -96,7 +96,7 @@ pub struct DynamicAttributeExpression<The, Of, Is> {
     pub pick: Option<Pick>,
 }
 
-impl<The, Of, Is> DynamicAttributeExpression<The, Of, Is> {
+impl<T, Of, Is> DynamicAttributeExpression<T, Of, Is> {
     /// Set the cardinality for this expression.
     pub fn cardinality(mut self, cardinality: Cardinality) -> Self {
         self.cardinality = Some(cardinality);
@@ -111,14 +111,14 @@ impl<The, Of, Is> DynamicAttributeExpression<The, Of, Is> {
 }
 
 /// Convert a dynamic expression into an [`AttributeQuery`].
-impl<Relation, Of, Is> From<DynamicAttributeExpression<Relation, Of, Is>> for AttributeQuery
+impl<T, Of, Is> From<DynamicAttributeExpression<T, Of, Is>> for AttributeQuery
 where
-    Relation: Into<Term<The>>,
+    T: Into<Term<Relation>>,
     Of: Into<Term<Entity>>,
     Is: IntoTerm,
     Is::Type: Scalar,
 {
-    fn from(expression: DynamicAttributeExpression<Relation, Of, Is>) -> Self {
+    fn from(expression: DynamicAttributeExpression<T, Of, Is>) -> Self {
         let value: Term<Value> = expression.is.into_term().into();
         AttributeQuery::new(
             expression.the.into(),
@@ -133,9 +133,9 @@ where
     }
 }
 
-impl<Relation, Of, Is> DynamicAttributeExpression<Relation, Of, Is>
+impl<T, Of, Is> DynamicAttributeExpression<T, Of, Is>
 where
-    Relation: Into<Term<The>>,
+    T: Into<Term<Relation>>,
     Of: Into<Term<Entity>>,
     Is: IntoTerm,
     Is::Type: Scalar,
@@ -151,7 +151,7 @@ where
 }
 
 // Statement: requires all three positions to be concrete.
-impl<Is: Scalar> Statement for DynamicAttributeExpression<The, Entity, Is> {
+impl<Is: Scalar> Statement for DynamicAttributeExpression<Relation, Entity, Is> {
     fn assert(self, update: &mut impl Update) {
         let the = self.the;
         let value: Value = self.is.into();
@@ -178,9 +178,9 @@ impl<Is: Scalar> Statement for DynamicAttributeExpression<The, Entity, Is> {
 }
 
 // Not → Premise::Unless (query-level negation).
-impl<Relation, Of, Is> Not for DynamicAttributeExpression<Relation, Of, Is>
+impl<T, Of, Is> Not for DynamicAttributeExpression<T, Of, Is>
 where
-    Relation: Into<Term<The>>,
+    T: Into<Term<Relation>>,
     Of: Into<Term<Entity>>,
     Is: IntoTerm,
     Is::Type: Scalar,
@@ -197,14 +197,14 @@ where
 }
 
 // Into<Premise>: requires all positions to convert to terms.
-impl<Relation, Of, Is> From<DynamicAttributeExpression<Relation, Of, Is>> for Premise
+impl<T, Of, Is> From<DynamicAttributeExpression<T, Of, Is>> for Premise
 where
-    Relation: Into<Term<The>>,
+    T: Into<Term<Relation>>,
     Of: Into<Term<Entity>>,
     Is: IntoTerm,
     Is::Type: Scalar,
 {
-    fn from(expression: DynamicAttributeExpression<Relation, Of, Is>) -> Self {
+    fn from(expression: DynamicAttributeExpression<T, Of, Is>) -> Self {
         let query: AttributeQuery = expression.into();
         Premise::Assert(Proposition::Attribute(Box::new(query)))
     }
@@ -212,10 +212,10 @@ where
 
 /// Convert a fully concrete dynamic expression into an `AttributeStatement`.
 ///
-/// All three positions are concrete types (`The`, `Entity`, `Is: Scalar`),
+/// All three positions are concrete types (`Relation`, `Entity`, `Is: Scalar`),
 /// so no runtime extraction from `Term` is needed.
-impl<Is: Scalar> From<DynamicAttributeExpression<The, Entity, Is>> for AttributeStatement {
-    fn from(expression: DynamicAttributeExpression<The, Entity, Is>) -> Self {
+impl<Is: Scalar> From<DynamicAttributeExpression<Relation, Entity, Is>> for AttributeStatement {
+    fn from(expression: DynamicAttributeExpression<Relation, Entity, Is>) -> Self {
         DynamicAttributeExpression {
             the: expression.the,
             of: expression.of,
@@ -489,7 +489,7 @@ mod tests {
             .await?;
 
         // Use Term::<The>::var to find all relations between alice and bob
-        let premise: Premise = Term::<The>::var("relation")
+        let premise: Premise = Term::<Relation>::var("relation")
             .of(alice.clone())
             .is(bob.clone())
             .into();

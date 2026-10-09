@@ -22,7 +22,7 @@ use dialog_artifacts::Entity;
 use serde::Serialize;
 
 use crate::Cardinality;
-use crate::attribute::{AttributeDescriptor, Keyed, Relation};
+use crate::attribute::{AttributeDescriptor, Keyed, The};
 use crate::concept::descriptor::ConceptDescriptor;
 
 /// The identity the earlier release gave `attribute`, as its
@@ -39,8 +39,8 @@ pub fn attribute_uri_v0(attribute: &AttributeDescriptor) -> String {
         content_type: Option<&'static str>,
     }
     let name = match attribute.the() {
-        Relation::Attribute(the) => the.name(),
-        Relation::Collection { keyed, .. } => match keyed {
+        The::Relation(the) => the.name(),
+        The::Collection { keyed, .. } => match keyed {
             Keyed::Dictionary => "<dictionary>",
             Keyed::Sequence => "<sequence>",
         },

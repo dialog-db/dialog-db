@@ -33,8 +33,8 @@ pub use update::{
     Update, sort_key,
 };
 
-mod attribute;
-pub use attribute::*;
+mod relation;
+pub use relation::*;
 
 mod symbol;
 pub use symbol::*;

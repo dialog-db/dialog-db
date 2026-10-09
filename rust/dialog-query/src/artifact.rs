@@ -1,7 +1,7 @@
 pub use dialog_artifacts::selector::Constrained;
 pub use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute as ArtifactsAttribute, Cause, DialogArtifactsError,
-    Entity, Instruction, NameShape, Select, TypeError as ArtifactTypeError, Value,
+    Artifact, ArtifactSelector, Cause, DialogArtifactsError, Entity, Instruction, NameShape,
+    Relation as ArtifactsRelation, Select, TypeError as ArtifactTypeError, Value,
     ValueDataType as Type, decode_value, encode_value_owned,
 };
 pub use futures_util::stream::Stream;

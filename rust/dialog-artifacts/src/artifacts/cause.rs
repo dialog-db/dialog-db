@@ -18,7 +18,7 @@ use super::{Artifact, Blake3Hash, Value};
 
 /// A [`Cause`] is a reference to an [`Artifact`] that preceded a more recent
 /// version of the same [`Artifact`] (where same implies same [`Entity`] and
-/// same [`Attribute`]).
+/// same [`Relation`]).
 #[repr(transparent)]
 #[derive(
     Clone,

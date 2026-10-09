@@ -10,7 +10,7 @@ use ed25519_dalek::SigningKey;
 use futures_util::TryStreamExt as _;
 
 use crate::tree::{ArtifactTree, ArtifactTreeExt as _, SpillCache};
-use crate::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Value, encode_bytes};
+use crate::{Artifact, DialogArtifactsError, Entity, Instruction, Relation, Value, encode_bytes};
 
 use super::{
     Authority, Causality, CausalityCache, Cause, Claim, Edition, History, HistorySelector,
@@ -35,8 +35,8 @@ fn tree(seed: u8) -> [u8; 32] {
     [seed; 32]
 }
 
-fn name_attribute() -> Attribute {
-    Attribute::from_str("profile/name").unwrap()
+fn name_attribute() -> Relation {
+    Relation::from_str("profile/name").unwrap()
 }
 
 fn name_claim(of: &Entity, value: &str, cause: Cause) -> Claim {
@@ -531,7 +531,7 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = |value: &str| Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -631,7 +631,7 @@ async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
 
     let store = MemoryBlocks::new();
     let entity = Entity::new()?;
-    let the: Attribute = "org/salary".parse()?;
+    let the: Relation = "org/salary".parse()?;
     let salary = |value: u32| Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -767,7 +767,7 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = |value: &str| Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -794,7 +794,7 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
 
     // The middle revision writes TWO claims, so the scan has to return a
     // set rather than a single record.
-    let other: Attribute = "post/slug".parse()?;
+    let other: Relation = "post/slug".parse()?;
     apply(
         &mut tree,
         &store,
@@ -887,7 +887,7 @@ async fn it_selects_records_whose_values_spilled() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/body".parse()?;
+    let the: Relation = "post/body".parse()?;
     // Well above any inline threshold, so the value lands in its own block.
     let body = "x".repeat(4096);
     let version = Version::new(Origin::from([9u8; 32]), Edition::new(0));
@@ -996,7 +996,7 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
         in_flight: Arc::new(AtomicUsize::new(0)),
         peak: Arc::new(AtomicUsize::new(0)),
     };
-    let the: Attribute = "post/body".parse()?;
+    let the: Relation = "post/body".parse()?;
     let version = Version::new(Origin::from([9u8; 32]), Edition::new(0));
     // Well above any inline threshold, so every value lands in its own
     // block; distinct per claim so each is its own fetch.
@@ -1079,7 +1079,7 @@ impl History for CountingHistory<'_> {
         &self,
         version: &Version,
         of: &Entity,
-        the: &Attribute,
+        the: &Relation,
     ) -> Result<Vec<Claim>, DialogArtifactsError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.inner.claims_at(version, of, the).await
@@ -1222,7 +1222,7 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1285,7 +1285,7 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1364,7 +1364,7 @@ async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
     let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
     let big = Value::String("z".repeat(inline_n + 1));
     let entity = Entity::new()?;
-    let the: Attribute = "doc/body".parse()?;
+    let the: Relation = "doc/body".parse()?;
     let doc = |value: Value| Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1420,7 +1420,7 @@ async fn it_ignores_a_retraction_of_a_nonexistent_fact() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1480,7 +1480,7 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1576,7 +1576,7 @@ async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "task/label".parse()?;
+    let the: Relation = "task/label".parse()?;
     let urgent = Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1649,7 +1649,7 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "task/label".parse()?;
+    let the: Relation = "task/label".parse()?;
     let urgent = Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1753,7 +1753,7 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = |value: &str| Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1862,14 +1862,14 @@ async fn it_disambiguates_truncated_history_keys_in_queries() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let head = "test/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let long_x: Attribute = format!("{head}x").parse()?;
-    let long_y: Attribute = format!("{head}y").parse()?;
+    let long_x: Relation = format!("{head}x").parse()?;
+    let long_y: Relation = format!("{head}y").parse()?;
     let shared = "test:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let left: Entity = format!("{shared}left").parse()?;
     let right: Entity = format!("{shared}right").parse()?;
 
     let version = Version::new(Origin::from([7u8; 32]), Edition::new(0));
-    let claim = |of: &Entity, the: &Attribute, value: &str| {
+    let claim = |of: &Entity, the: &Relation, value: &str| {
         Instruction::Assert(
             Artifact {
                 the: the.clone(),
@@ -2402,7 +2402,7 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = |value: &str| Artifact {
         the: the.clone(),
         of: entity.clone(),

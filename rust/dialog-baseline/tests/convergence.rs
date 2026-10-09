@@ -24,7 +24,7 @@ use std::str::FromStr as _;
 
 use anyhow::Result;
 use dialog_artifacts::tree::ArtifactTree;
-use dialog_artifacts::{ArtifactSelector, Attribute, Instruction};
+use dialog_artifacts::{ArtifactSelector, Instruction, Relation};
 use dialog_baseline::repo::{DialogRepo, VolatileRepo};
 use dialog_baseline::se::{SeLog, se_instructions};
 use dialog_common::Blake3Hash as NodeHash;
@@ -94,7 +94,7 @@ async fn facts(repo: &VolatileRepo, log: &SeLog) -> Result<Vec<String>> {
 
     let mut rows = Vec::new();
     for attribute in attributes {
-        let selector = ArtifactSelector::new().the(Attribute::from_str(&attribute)?);
+        let selector = ArtifactSelector::new().the(Relation::from_str(&attribute)?);
         for fact in repo.collect(selector).await? {
             rows.push(format!("{} {} {:?}", fact.the, fact.of, fact.is));
         }

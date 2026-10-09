@@ -6,7 +6,7 @@ use std::iter;
 
 use crate::Binding;
 use crate::Predicate;
-use crate::attribute::{AttributeDescriptor, Attribution, Relation};
+use crate::attribute::{AttributeDescriptor, Attribution, The};
 use crate::concept::query::ConceptQuery;
 use crate::concept::{Concept, Conclusion};
 use crate::error::TypeError;
@@ -173,9 +173,9 @@ impl ConceptDescriptor {
     /// bind and a conclusion carries.
     fn field_operands(name: &str, field: &ConceptFieldDescriptor) -> Vec<String> {
         match field.the() {
-            Relation::Attribute(_) => vec![name.to_string()],
-            Relation::Collection { .. } => {
-                vec![name.to_string(), Relation::key_operand(name)]
+            The::Relation(_) => vec![name.to_string()],
+            The::Collection { .. } => {
+                vec![name.to_string(), The::key_operand(name)]
             }
         }
     }
@@ -534,7 +534,7 @@ impl From<&ConceptDescriptor> for Schema {
         // from the domain.
         for (name, field) in predicate.collections() {
             schema.insert(
-                Relation::key_operand(name),
+                The::key_operand(name),
                 Field {
                     description: format!("The key of an entry of {name}"),
                     content_type: Some(Kind::from(Type::String)),

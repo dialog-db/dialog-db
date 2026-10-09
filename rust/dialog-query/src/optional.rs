@@ -1,4 +1,4 @@
-use crate::attribute::The;
+use crate::attribute::Relation;
 use crate::attribute::query::DynamicAttributeQuery;
 use crate::environment::Environment;
 use crate::query::Application;
@@ -52,7 +52,7 @@ impl OptionalAttributeQuery {
     /// `is` term is scalar; set-widening is declared by this wrapper,
     /// not by the term's kind.
     pub fn new(
-        the: Term<The>,
+        the: Term<Relation>,
         of: Term<Entity>,
         is: Term<Any>,
         cause: Term<Cause>,

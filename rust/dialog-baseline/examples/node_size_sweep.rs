@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{ArtifactSelector, Attribute, Entity, Value};
+use dialog_artifacts::{ArtifactSelector, Entity, Relation, Value};
 use dialog_baseline::metered::{Meter, Tally};
 use dialog_baseline::repo::{DialogRepo, MeteredRepo};
 use dialog_baseline::se::SeLog;
@@ -175,7 +175,7 @@ fn main() -> anyhow::Result<()> {
             let cold = repo.reopen().await?;
             // Force the root fetch that a first query would pay.
             let selector = ArtifactSelector::new()
-                .the(Attribute::from_str("se.post/kind")?)
+                .the(Relation::from_str("se.post/kind")?)
                 .of(Entity::from_str(&titled[0])?);
             repo.collect_from(&cold, selector).await?;
             (tally.reads() - before.0, tally.read_bytes() - before.1)
@@ -186,7 +186,7 @@ fn main() -> anyhow::Result<()> {
             .iter()
             .map(|post| {
                 Ok(ArtifactSelector::new()
-                    .the(Attribute::from_str("se.post/title")?)
+                    .the(Relation::from_str("se.post/title")?)
                     .of(Entity::from_str(post)?))
             })
             .collect::<anyhow::Result<Vec<_>>>()?;
@@ -204,7 +204,7 @@ fn main() -> anyhow::Result<()> {
             "kind lookup (VAE)",
             vec![
                 ArtifactSelector::new()
-                    .the(Attribute::from_str("se.post/kind")?)
+                    .the(Relation::from_str("se.post/kind")?)
                     .is(Value::String("question".into())),
             ],
         )

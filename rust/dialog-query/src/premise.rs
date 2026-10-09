@@ -102,7 +102,7 @@ impl From<FormulaQuery> for Premise {
 /// notation, where a raw attribute scan has no spelling.
 #[cfg(test)]
 pub(crate) fn reading(
-    the: crate::The,
+    the: crate::Relation,
     this: crate::Term<crate::Entity>,
     is: crate::Term<crate::Any>,
     cardinality: Option<crate::Cardinality>,

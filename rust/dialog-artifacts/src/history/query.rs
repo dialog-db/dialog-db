@@ -12,7 +12,7 @@ use crate::tree::{
     ArtifactNodeCache, ArtifactTree, SPILL_LOOKAHEAD, SpillCache, fetch_spilled_cached, spill_cache,
 };
 use crate::{
-    Attribute, DialogArtifactsError, Entity, Key, State, history_claim_range, history_key_version,
+    DialogArtifactsError, Entity, Key, Relation, State, history_claim_range, history_key_version,
     history_region_range, history_version_range,
 };
 
@@ -216,7 +216,7 @@ where
         &self,
         version: &Version,
         of: &Entity,
-        the: &Attribute,
+        the: &Relation,
     ) -> Result<Vec<Claim>, DialogArtifactsError> {
         let (min, max) = history_claim_range(version, of, the);
         let stream = self.tree.stream_range(min..=max, &self.storage);
@@ -260,7 +260,7 @@ where
         // to the entity-ordered index for trees written before records
         // were single-ordered.
         let of = version.entity();
-        let the = Attribute::from_str(REVISION_ATTRIBUTE)?;
+        let the = Relation::from_str(REVISION_ATTRIBUTE)?;
         let candidates = self
             .tree
             .clone()

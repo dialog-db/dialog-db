@@ -56,12 +56,12 @@ pub enum DialogArtifactsError {
 
     /// Raw bytes could not be interpreted as an attribute
     #[error("Invalid attribute: {0}")]
-    InvalidAttribute(String),
+    InvalidRelation(String),
 
     /// The attribute belongs to the reserved `dialog.` namespace, which
     /// only version-control machinery may write
     #[error("Reserved attribute (the dialog. namespace is reserved): {0}")]
-    ReservedAttribute(String),
+    ReservedRelation(String),
 
     /// A batch that changes assets was handed to a target that holds facts
     /// only, such as an ephemeral line or the replica registry. Assets are

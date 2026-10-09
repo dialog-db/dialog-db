@@ -24,10 +24,10 @@ use crate::helpers::test_repo;
 use crate::repository::branch::session::{QueryEnv, QueryLayer};
 use crate::repository::source::Source;
 use anyhow::{Result, anyhow};
-use dialog_artifacts::{Attribute, Entity, Pick, Value};
+use dialog_artifacts::{Entity, Pick, Relation as ArtifactsRelation, Value};
 use dialog_effects::authority::Identify;
 use dialog_peer::helpers::test_session_with_peer;
-use dialog_query::attribute::The;
+use dialog_query::attribute::Relation;
 use dialog_query::query::Output as _;
 use dialog_query::types::Any;
 use dialog_query::{
@@ -128,14 +128,14 @@ fn select_of(policy: &Pick) -> &'static str {
     }
 }
 
-fn salary_attribute() -> Attribute {
+fn salary_attribute() -> ArtifactsRelation {
     "org/salary".parse().expect("an attribute")
 }
 
 /// A write of `org/salary` under `policy`.
 fn salary(of: &Entity, value: u64, policy: &Pick) -> AttributeStatement {
     AttributeStatement {
-        the: The::from(salary_attribute()),
+        the: Relation::from(salary_attribute()),
         of: of.clone(),
         is: Value::UnsignedInt(value.into()),
         cause: None,

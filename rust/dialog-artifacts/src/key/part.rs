@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
-use crate::{Attribute, DialogArtifactsError, Entity};
+use crate::{DialogArtifactsError, Entity, Relation};
 
 /// The empty byte string: the minimum value of any variable-length component.
 const EMPTY: &[u8] = &[];
@@ -37,7 +37,7 @@ impl<'a> From<&'a Entity> for EntityKeyPart<'a> {
     }
 }
 
-/// A wrapper around a slice reference that corresponds to the [`Attribute`]
+/// A wrapper around a slice reference that corresponds to the [`Relation`]
 /// part of a [`KeyType`].
 ///
 /// The slice is the attribute's raw `namespace/predicate` bytes, variable
@@ -57,17 +57,17 @@ impl AttributeKeyPart<'_> {
     }
 }
 
-impl<'a> From<&'a Attribute> for AttributeKeyPart<'a> {
-    fn from(value: &'a Attribute) -> Self {
+impl<'a> From<&'a Relation> for AttributeKeyPart<'a> {
+    fn from(value: &'a Relation) -> Self {
         AttributeKeyPart(value.as_str().as_bytes())
     }
 }
 
-impl<'a> TryFrom<AttributeKeyPart<'a>> for Attribute {
+impl<'a> TryFrom<AttributeKeyPart<'a>> for Relation {
     type Error = DialogArtifactsError;
 
     fn try_from(value: AttributeKeyPart<'a>) -> Result<Self, Self::Error> {
-        Attribute::try_from(value.to_string())
+        Relation::try_from(value.to_string())
     }
 }
 
