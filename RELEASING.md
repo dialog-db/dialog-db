@@ -1,5 +1,9 @@
 # Releasing
 
+Agents follow `.claude/rules/versioning-and-changelog.md` when they change
+the crates, and the `release` skill (`.claude/skills/release/SKILL.md`) when
+they cut a release.
+
 The workspace is released as one version, tagged `v<version>`. Versions
 follow semver over the Rust API and over what a replica stores and syncs;
 while dialog is 0.x, a change that breaks either bumps the minor version
