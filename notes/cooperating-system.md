@@ -94,7 +94,7 @@ runtimes. A space runs one runtime at a time, so its members never run skewed
 versions of it.
 
 **A space boots from cells.** Each space has well-known cells, for example
-`/boot/loader` (the component that implements Dialog DB) and `/boot/wasip3` (a
+`/boot/loader` (the component that implements Dialog DB) and `/boot/wasi` (a
 polyfill, if one is needed). Each cell holds a hash. The host reads the hash and
 fetches the component by `blob::Get`, from the space's archive or from anywhere
 else, such as a cache or an instance already live. The host then instantiates
