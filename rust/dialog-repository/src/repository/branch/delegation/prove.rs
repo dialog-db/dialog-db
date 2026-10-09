@@ -1024,7 +1024,7 @@ mod tests {
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             ))
         };
         let command = Command(vec!["storage".to_string()]).to_string();

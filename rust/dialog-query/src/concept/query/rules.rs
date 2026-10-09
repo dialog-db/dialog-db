@@ -214,7 +214,7 @@ impl ConceptRules {
                 Some(field.descriptor().scan_cardinality()),
             )
             .into();
-            // The scan concludes the relation it reads, policy-free, as
+            // The scan concludes the relation it reads, under no pick, as
             // a head does: the rank of its rows is read off that.
             let conclusion = ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
                 AttributeDescriptor::over(

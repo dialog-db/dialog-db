@@ -63,11 +63,11 @@ async fn a_rule_landing_on_a_subscribed_attribute_wakes_the_subscription() -> an
 
     let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
         "deduce": { "with": {
-            "badge": { "the": "credential/badge", "as": "Text" }
+            "badge": { "the": "credential/badge", "as": "text:" }
         }},
         "when": [{
             "assert": { "with": {
-                "code": { "the": "credential/legacy-code", "as": "Text" }
+                "code": { "the": "credential/legacy-code", "as": "text:" }
             }},
             "where": {
                 "this": { "?": { "name": "this" } },
@@ -129,9 +129,9 @@ async fn a_maintained_fixpoint_keeps_each_row_at_its_newest_surviving_derivation
     let e: Entity = "id:e".parse()?;
     let rule = |from: &str| -> anyhow::Result<_> {
         let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-            "deduce": { "with": { "a": { "the": "x/a", "as": "Text" } } },
+            "deduce": { "with": { "a": { "the": "x/a", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "v": { "the": from, "as": "Text" } } },
+                "assert": { "with": { "v": { "the": from, "as": "text:" } } },
                 "where": { "this": { "?": { "name": "this" } }, "v": { "?": { "name": "a" } } }
             }]
         }))?;

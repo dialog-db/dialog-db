@@ -36,7 +36,7 @@ fn assert_fact(entity: usize, value: &str) -> Instruction {
             is: Value::String(value.to_string()),
             cause: None,
         },
-        dialog_artifacts::Policy::All,
+        dialog_artifacts::Pick::All,
     )
 }
 

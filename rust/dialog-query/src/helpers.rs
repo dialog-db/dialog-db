@@ -696,7 +696,7 @@ where
 
         let instructions: Vec<Instruction> = data
             .into_iter()
-            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All))
+            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
             .collect();
         branch
             .transaction()
@@ -1165,7 +1165,7 @@ where
                     is,
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             ));
         }
 

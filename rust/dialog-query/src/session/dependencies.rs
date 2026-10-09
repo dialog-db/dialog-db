@@ -62,6 +62,7 @@
 //!   fails the queries that touch it (and only those).
 
 use crate::Entity;
+use crate::Pick;
 use crate::attribute::AttributeDescriptor;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::concept::query::{ConceptRules, Installed};
@@ -71,14 +72,13 @@ use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::rule::deductive::DeductiveRule;
 use crate::rule::statement::Reach;
-use crate::schema::Select;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter;
 
 /// Polarity of a dependency edge: whether the rule body references
 /// the concept positively (an ordinary premise), under `unless`,
 /// set-widened, or from a *reducing* rule whose fold must read the
-/// complete relation, or under a choosing policy. A negative, optional
+/// complete relation, or under a choosing pick. A negative, optional
 /// or electing edge inside a dependency cycle is an absence test the
 /// analysis quarantines a rule over; an aggregating one is a
 /// stratification violation.
@@ -97,7 +97,7 @@ pub enum Polarity {
     /// clause: the rule's folds consume the premise's full
     /// relation, so the reference demands a complete lower stratum.
     Aggregating,
-    /// The body reads the relation under a choosing policy: the
+    /// The body reads the relation under a choosing pick: the
     /// candidate it returns, and nothing better, which negates the
     /// better candidates. `ranked` for an explicit ranking (`top`, a
     /// relation chain, `max`, `min`) rather than `last`, the default.
@@ -139,7 +139,7 @@ pub enum Absence {
     Negated,
     /// A set-widened (optional) read.
     Optional,
-    /// A read under a choosing policy.
+    /// A read under a choosing pick.
     Elected,
 }
 
@@ -211,11 +211,11 @@ fn rule_edges(rule: &DeductiveRule) -> Vec<(ConceptDescriptor, Polarity)> {
                     .predicate
                     .attribute_field()
                     .filter(|(_, field)| !field.descriptor().is_chain())
-                    .map(|(_, field)| field.descriptor().select());
+                    .map(|(_, field)| field.descriptor().pick());
                 let polarity = match select {
-                    Some(select) if positive == Polarity::Positive && select.elects() => {
+                    Some(pick) if positive == Polarity::Positive && pick.elects() => {
                         Polarity::Electing {
-                            ranked: select != Select::Last,
+                            ranked: !matches!(pick, Pick::Last),
                         }
                     }
                     _ => positive,
@@ -263,9 +263,9 @@ fn selecting_edges(
         if derived.contains(&ProgramAnalysis::node(&attribute)) {
             let polarity = if field.is_optional() {
                 Polarity::Optional
-            } else if field.descriptor().select().elects() {
+            } else if field.descriptor().pick().elects() {
                 Polarity::Electing {
-                    ranked: field.descriptor().select() != Select::Last,
+                    ranked: !matches!(field.descriptor().pick(), Pick::Last),
                 }
             } else {
                 Polarity::Positive
@@ -750,7 +750,7 @@ impl ProgramAnalysis {
     }
 
     /// The node a concept is analysed as: an attribute concept is its
-    /// relation, `on:<domain>/<name>`, whatever type or policy it reads
+    /// relation, `on:<domain>/<name>`, whatever type or pick it reads
     /// the relation under, since every rule deriving the relation and
     /// every read of it meet there; any other concept is itself.
     pub fn node(concept: &ConceptDescriptor) -> Entity {

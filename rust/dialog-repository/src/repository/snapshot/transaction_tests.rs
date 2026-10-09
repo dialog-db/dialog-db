@@ -550,7 +550,7 @@ async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
     let result = snapshot
         .transaction()
         .integrate(
-            [Instruction::Assert(forged, dialog_artifacts::Policy::All)]
+            [Instruction::Assert(forged, dialog_artifacts::Pick::All)]
                 .into_iter()
                 .collect(),
         )
@@ -612,18 +612,18 @@ async fn it_induces_on_commit() -> Result<()> {
     let increment: InductiveRule = serde_json::from_value(serde_json::json!({
         "description": "Increment a counter on an increment command",
         "assert!": {
-            "with": { "count": { "the": "counter/count", "as": "UnsignedInteger" } }
+            "with": { "count": { "the": "counter/count", "as": "natural:" } }
         },
         "when": [
             {
                 "assert": {
-                    "with": { "counter": { "the": "cmd.increment/counter", "as": "Entity" } }
+                    "with": { "counter": { "the": "cmd.increment/counter", "as": "entity:" } }
                 },
                 "where": { "counter": { "?": { "name": "this" } } }
             },
             {
                 "assert": {
-                    "with": { "count": { "the": "counter/count", "as": "UnsignedInteger" } }
+                    "with": { "count": { "the": "counter/count", "as": "natural:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -716,9 +716,9 @@ async fn it_resolves_rules_pending_in_the_transaction() -> Result<()> {
     let (operator, _, _, _, snapshot) = staged().await?;
     let rule = {
         let json = serde_json::json!({
-            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                "assert": { "with": { "name": { "the": "org/person-name", "as": "text:" } } },
                 "where": {
                     "this": { "?": { "name": "this" } },
                     "name": { "?": { "name": "name" } }
@@ -847,7 +847,7 @@ async fn it_commits_through_a_cold_handle() -> Result<()> {
         .integrate(
             [Instruction::Assert(
                 fact("user:bob", "Bob"),
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]
             .into_iter()
             .collect(),

@@ -839,7 +839,7 @@ where
             continue;
         }
         lag.push(if arriving {
-            Instruction::Assert(fact, dialog_artifacts::Policy::All)
+            Instruction::Assert(fact, dialog_artifacts::Pick::All)
         } else {
             Instruction::Retract(fact)
         });
@@ -1112,8 +1112,8 @@ async fn emit_matches<'a>(
                 Polarity::Retract => {
                     dialog_artifacts::Update::dissociate(&mut head, attribute, this.clone(), value);
                 }
-                // An asserting head writes as the field's policy says: a
-                // set appends, and a choosing policy succeeds the claim
+                // An asserting head writes as the field's pick says: a
+                // set appends, and a choosing pick succeeds the claim
                 // it elects, resolved against the view at commit.
                 Polarity::Assert => {
                     dialog_artifacts::Update::associate(
@@ -1121,7 +1121,7 @@ async fn emit_matches<'a>(
                         attribute,
                         this.clone(),
                         value,
-                        field.descriptor().policy(),
+                        field.descriptor().pick().clone(),
                     );
                 }
             }
@@ -1227,14 +1227,14 @@ mod tests {
             "description": "Increment a counter on an increment command",
             "assert!": {
                 "with": {
-                    "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                    "count": { "the": "counter/count", "as": "natural:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "counter": { "the": "cmd.increment/counter", "as": "Entity" }
+                            "counter": { "the": "cmd.increment/counter", "as": "entity:" }
                         }
                     },
                     "where": {
@@ -1244,7 +1244,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                            "count": { "the": "counter/count", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -1352,14 +1352,14 @@ mod tests {
             "description": "A described task that is not done is open",
             "assert!": {
                 "with": {
-                    "desc": { "the": "task.open/desc", "as": "Text" }
+                    "desc": { "the": "task.open/desc", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "desc": { "the": "task/desc", "as": "Text" }
+                            "desc": { "the": "task/desc", "as": "text:" }
                         }
                     },
                     "where": {
@@ -1372,7 +1372,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "done": { "the": "task/done", "as": "Boolean" }
+                            "done": { "the": "task/done", "as": "boolean:" }
                         }
                     },
                     "where": {
@@ -1446,21 +1446,21 @@ mod tests {
 
         let intermediate: ConceptDescriptor = serde_json::from_value(json!({
             "with": {
-                "target": { "the": "cmd.stage/target", "as": "Entity" }
+                "target": { "the": "cmd.stage/target", "as": "entity:" }
             }
         }))?;
 
         let stage: InductiveRule = serde_json::from_value(json!({
             "assert!": {
                 "with": {
-                    "target": { "the": "cmd.stage/target", "as": "Entity" }
+                    "target": { "the": "cmd.stage/target", "as": "entity:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "target": { "the": "cmd.start/target", "as": "Entity" }
+                            "target": { "the": "cmd.start/target", "as": "entity:" }
                         }
                     },
                     "where": {
@@ -1474,14 +1474,14 @@ mod tests {
         let finish: InductiveRule = serde_json::from_value(json!({
             "assert!": {
                 "with": {
-                    "target": { "the": "result/target", "as": "Entity" }
+                    "target": { "the": "result/target", "as": "entity:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "target": { "the": "cmd.stage/target", "as": "Entity" }
+                            "target": { "the": "cmd.stage/target", "as": "entity:" }
                         }
                     },
                     "where": {
@@ -1544,14 +1544,14 @@ mod tests {
         Ok(serde_json::from_value(json!({
             "assert!": {
                 "with": {
-                    "target": { "the": to, "as": "Entity" }
+                    "target": { "the": to, "as": "entity:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "target": { "the": from, "as": "Entity" }
+                            "target": { "the": from, "as": "entity:" }
                         }
                     },
                     "where": {
@@ -1567,7 +1567,7 @@ mod tests {
     fn transient_target(the: &str) -> Result<Transient> {
         let concept: ConceptDescriptor = serde_json::from_value(json!({
             "with": {
-                "target": { "the": the, "as": "Entity" }
+                "target": { "the": the, "as": "entity:" }
             }
         }))?;
         Ok(Transient(concept.this()))
@@ -1718,19 +1718,19 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let ping: ConceptDescriptor = serde_json::from_value(json!({
-            "with": { "n": { "the": "cmd.ping/n", "as": "UnsignedInteger" } }
+            "with": { "n": { "the": "cmd.ping/n", "as": "natural:" } }
         }))?;
         let pong: ConceptDescriptor = serde_json::from_value(json!({
-            "with": { "n": { "the": "cmd.pong/n", "as": "UnsignedInteger" } }
+            "with": { "n": { "the": "cmd.pong/n", "as": "natural:" } }
         }))?;
 
         let ping_to_pong: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "n": { "the": "cmd.pong/n", "as": "UnsignedInteger" } }
+                "with": { "n": { "the": "cmd.pong/n", "as": "natural:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "n": { "the": "cmd.ping/n", "as": "UnsignedInteger" } }
+                    "with": { "n": { "the": "cmd.ping/n", "as": "natural:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -1740,11 +1740,11 @@ mod tests {
         }))?;
         let pong_to_ping: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "n": { "the": "cmd.ping/n", "as": "UnsignedInteger" } }
+                "with": { "n": { "the": "cmd.ping/n", "as": "natural:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "n": { "the": "cmd.pong/n", "as": "UnsignedInteger" } }
+                    "with": { "n": { "the": "cmd.pong/n", "as": "natural:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -1795,11 +1795,11 @@ mod tests {
         let stamp = |command: &str, result: &str| -> InductiveRule {
             serde_json::from_value(json!({
                 "assert!": {
-                    "with": { "target": { "the": result, "as": "Entity" } }
+                    "with": { "target": { "the": result, "as": "entity:" } }
                 },
                 "when": [{
                     "assert": {
-                        "with": { "target": { "the": command, "as": "Entity" } }
+                        "with": { "target": { "the": command, "as": "entity:" } }
                     },
                     "where": {
                         "this": { "?": { "name": "this" } },
@@ -1863,14 +1863,14 @@ mod tests {
         let consume: InductiveRule = serde_json::from_value(json!({
             "retract!": {
                 "with": {
-                    "body": { "the": "mailbox.message/body", "as": "Text" }
+                    "body": { "the": "mailbox.message/body", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "message": { "the": "cmd.ack/message", "as": "Entity" }
+                            "message": { "the": "cmd.ack/message", "as": "entity:" }
                         }
                     },
                     "where": {
@@ -1880,7 +1880,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "body": { "the": "mailbox.message/body", "as": "Text" }
+                            "body": { "the": "mailbox.message/body", "as": "text:" }
                         }
                     },
                     "where": {
@@ -1959,11 +1959,11 @@ mod tests {
         // actor.status/duty of ?a is ?d  when  shift/duty of ?a is ?d
         let status: DeductiveRule = serde_json::from_value(json!({
             "deduce": {
-                "with": { "duty": { "the": "actor.status/duty", "as": "Text" } }
+                "with": { "duty": { "the": "actor.status/duty", "as": "text:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "duty": { "the": "shift/duty", "as": "Text" } }
+                    "with": { "duty": { "the": "shift/duty", "as": "text:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -1975,14 +1975,14 @@ mod tests {
         // task/note when a message's actor is (derivedly) on duty.
         let notify: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "note": { "the": "task/note", "as": "Text" } }
+                "with": { "note": { "the": "task/note", "as": "text:" } }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "actor": { "the": "inbox.message/actor", "as": "Entity" },
-                            "body": { "the": "inbox.message/body", "as": "Text" }
+                            "actor": { "the": "inbox.message/actor", "as": "entity:" },
+                            "body": { "the": "inbox.message/body", "as": "text:" }
                         }
                     },
                     "where": {
@@ -1993,7 +1993,7 @@ mod tests {
                 },
                 {
                     "assert": {
-                        "with": { "duty": { "the": "actor.status/duty", "as": "Text" } }
+                        "with": { "duty": { "the": "actor.status/duty", "as": "text:" } }
                     },
                     "where": {
                         "this": { "?": { "name": "actor" } },
@@ -2077,11 +2077,11 @@ mod tests {
         let stamp = |result: &str| -> InductiveRule {
             serde_json::from_value(json!({
                 "assert!": {
-                    "with": { "target": { "the": result, "as": "Entity" } }
+                    "with": { "target": { "the": result, "as": "entity:" } }
                 },
                 "when": [{
                     "assert": {
-                        "with": { "target": { "the": "cmd.z/target", "as": "Entity" } }
+                        "with": { "target": { "the": "cmd.z/target", "as": "entity:" } }
                     },
                     "where": {
                         "this": { "?": { "name": "this" } },
@@ -2372,11 +2372,11 @@ mod tests {
 
         let drain: InductiveRule = serde_json::from_value(json!({
             "retract!": {
-                "with": { "body": { "the": "queue.item/body", "as": "Text" } }
+                "with": { "body": { "the": "queue.item/body", "as": "text:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "body": { "the": "queue.item/body", "as": "Text" } }
+                    "with": { "body": { "the": "queue.item/body", "as": "text:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -2429,11 +2429,11 @@ mod tests {
 
         let alert: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "duty": { "the": "alert/duty", "as": "Text" } }
+                "with": { "duty": { "the": "alert/duty", "as": "text:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "duty": { "the": "actor.status/duty", "as": "Text" } }
+                    "with": { "duty": { "the": "actor.status/duty", "as": "text:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -2469,11 +2469,11 @@ mod tests {
         // status becomes derivable over the existing shift fact.
         let status: DeductiveRule = serde_json::from_value(json!({
             "deduce": {
-                "with": { "duty": { "the": "actor.status/duty", "as": "Text" } }
+                "with": { "duty": { "the": "actor.status/duty", "as": "text:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "duty": { "the": "shift/duty", "as": "Text" } }
+                    "with": { "duty": { "the": "shift/duty", "as": "text:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -2502,11 +2502,11 @@ mod tests {
     fn tagger() -> InductiveRule {
         serde_json::from_value(json!({
             "assert!": {
-                "with": { "tag": { "the": "derived/tag", "as": "Text" } }
+                "with": { "tag": { "the": "derived/tag", "as": "text:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "title": { "the": "doc/title", "as": "Text" } }
+                    "with": { "title": { "the": "doc/title", "as": "text:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -2563,7 +2563,7 @@ mod tests {
                     is: Value::String(audience.into()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             ))
         };
 
@@ -2591,7 +2591,7 @@ mod tests {
                     is: Value::String("hello".into()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -2671,7 +2671,7 @@ mod tests {
                     is: Value::String("hello".into()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -2714,12 +2714,12 @@ mod tests {
 
         let pair: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "both": { "the": "derived/both", "as": "Text" } }
+                "with": { "both": { "the": "derived/both", "as": "text:" } }
             },
             "when": [
                 {
                     "assert": {
-                        "with": { "p": { "the": "fact.p/v", "as": "Text" } }
+                        "with": { "p": { "the": "fact.p/v", "as": "text:" } }
                     },
                     "where": {
                         "this": { "?": { "name": "this" } },
@@ -2728,7 +2728,7 @@ mod tests {
                 },
                 {
                     "assert": {
-                        "with": { "q": { "the": "fact.q/v", "as": "Text" } }
+                        "with": { "q": { "the": "fact.q/v", "as": "text:" } }
                     },
                     "where": {
                         "this": { "?": { "name": "this" } },
@@ -2757,7 +2757,7 @@ mod tests {
                     is: Value::String("p".into()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -2816,7 +2816,7 @@ mod tests {
                     is: Value::String("old".into()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -2844,7 +2844,7 @@ mod tests {
                     is: Value::String("new".into()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -2953,11 +2953,11 @@ mod tests {
 
         let stamp: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "target": { "the": "result.carry/target", "as": "Entity" } }
+                "with": { "target": { "the": "result.carry/target", "as": "entity:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "target": { "the": "cmd.carry/target", "as": "Entity" } }
+                    "with": { "target": { "the": "cmd.carry/target", "as": "entity:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -2990,7 +2990,7 @@ mod tests {
                 "member": {
                     "the": { "domain": "todo.list", "keyed": "sequence" },
                     "cardinality": "many",
-                    "as": "Entity"
+                    "as": "entity:"
                 }
             }
         })
@@ -3043,7 +3043,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "list": { "the": "todo.item/list", "as": "Entity" }
+                            "list": { "the": "todo.item/list", "as": "entity:" }
                         }
                     },
                     "where": {
@@ -3111,7 +3111,7 @@ mod tests {
             "description": "Record where a member sits",
             "assert!": {
                 "with": {
-                    "key": { "the": "seen/key", "as": "Text" }
+                    "key": { "the": "seen/key", "as": "text:" }
                 }
             },
             "when": [
@@ -3177,7 +3177,7 @@ mod tests {
                     "entry": {
                         "the": { "domain": "todo.named", "keyed": "dictionary" },
                         "cardinality": "many",
-                        "as": "Entity"
+                        "as": "entity:"
                     }
                 }
             },
@@ -3185,8 +3185,8 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "list": { "the": "todo.item/list", "as": "Entity" },
-                            "name": { "the": "todo.item/name", "as": "Text" }
+                            "list": { "the": "todo.item/list", "as": "entity:" },
+                            "name": { "the": "todo.item/name", "as": "text:" }
                         }
                     },
                     "where": {

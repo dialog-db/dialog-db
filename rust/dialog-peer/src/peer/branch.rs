@@ -999,7 +999,7 @@ mod tests {
                         is: Value::String("Elsewhere".into()),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 )]
                 .into_iter()
                 .collect(),

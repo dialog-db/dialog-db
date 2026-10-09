@@ -97,7 +97,7 @@ impl From<FormulaQuery> for Premise {
 
 /// A premise reading `the` of `this` into `is` as the formal notation
 /// spells it: a concept premise over the attribute concept, read under
-/// `cardinality`'s policy (`all` when none is given). Tests build rules
+/// `cardinality`'s pick (`all` when none is given). Tests build rules
 /// with it, since every installed rule is written in the formal
 /// notation, where a raw attribute scan has no spelling.
 #[cfg(test)]

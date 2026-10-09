@@ -303,7 +303,7 @@ mod tests {
 mod counted {
     use crate::counters::{Counters, since};
     use crate::env::{Env, assert_all, attribute, entity, fact, text};
-    use dialog_artifacts::Policy;
+    use dialog_artifacts::Pick;
     use std::sync::OnceLock;
 
     /// The counting subscriber, installed once for the test process.
@@ -324,7 +324,7 @@ mod counted {
         let before = counters.snapshot(env.tally());
         env.commit(assert_all(
             [fact(&entity("thing", 0), "stuff/name", text("a"))],
-            Policy::All,
+            Pick::All,
         ))
         .await?;
         let moved = since(&before, &counters.snapshot(env.tally()));
@@ -356,7 +356,7 @@ mod counted {
                         text(format!("name {index}")),
                     )
                 });
-                env.commit(assert_all(facts, Policy::Last)).await?;
+                env.commit(assert_all(facts, Pick::Last)).await?;
             }
             heads.push(env.head());
         }

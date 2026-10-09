@@ -29,7 +29,7 @@ pub use asset::*;
 
 mod update;
 pub use update::{
-    AssetChange, Change, ChangeStream, Changes, Contender, Policy, SortKey, Standing, Statement,
+    AssetChange, Change, ChangeStream, Changes, Contender, Pick, SortKey, Standing, Statement,
     Update, sort_key,
 };
 

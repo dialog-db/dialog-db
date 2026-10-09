@@ -24,7 +24,7 @@
 //!
 //! **Absence tests.** A premise that tests for absence (an `unless`
 //! over a concept, a set-widened read of one, or a read under a ranked
-//! policy, which negates the better candidates) has stratified
+//! pick, which negates the better candidates) has stratified
 //! semantics when the concept it reads sits below the component: the
 //! relation is derived in full before the fixpoint runs. When the
 //! concept is a member of the same component the test has no

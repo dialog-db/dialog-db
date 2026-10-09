@@ -21,7 +21,7 @@ use crate::attribute::Relation;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::planner::{Disjunction, Plan};
 use crate::rule::deductive::DeductiveRule;
-use crate::schema::{CONCEPT_OVERHEAD, Select};
+use crate::schema::CONCEPT_OVERHEAD;
 use crate::selection::{Selection, Standing};
 use crate::source::SelectRules;
 use crate::stream::{fork_stream, stream_select};
@@ -30,7 +30,7 @@ use crate::{
     Binding, Cardinality, Environment, EvaluationError, Match, Parameters, Requirement, Schema,
     Term, try_stream,
 };
-use dialog_artifacts::{Policy, encode_value_owned};
+use dialog_artifacts::{Pick, encode_value_owned};
 use dialog_capability::Provider;
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
@@ -518,7 +518,7 @@ impl ConceptQuery {
                     None => fixpoint::evaluate(&app.predicate, analysis, env).await?,
                 };
                 // The component yields its candidates as a set; a read
-                // under a choosing policy elects one of them at the exit,
+                // under a choosing pick elects one of them at the exit,
                 // so a reader outside the component sees one value. Each
                 // row stands as the newest fact any of its derivations
                 // consumed, so under `last` it competes as it would had
@@ -526,7 +526,7 @@ impl ConceptQuery {
                 let table: Vec<fixpoint::Answer> = match app.predicate.attribute_field() {
                     Some((name, field)) => {
                         let election = Election::of(field);
-                        if election.select.elects() {
+                        if election.pick.elects() {
                             election.elect_rows(table.to_vec(), name)?
                         } else {
                             table.to_vec()
@@ -718,7 +718,7 @@ impl ConceptQuery {
                     .map_err(|e| EvaluationError::Store(e.to_string()))
             }));
         }
-        // An attribute concept read under a policy: what the policy
+        // An attribute concept read under a pick: what the pick
         // keeps of an entity's candidates leaves here, elected from the
         // stored row and every derived candidate alike. The candidates
         // for an entity arrive in no particular order, so the election
@@ -816,7 +816,7 @@ impl ConceptQuery {
             let widen = app.widens();
             let (election, ranks) = match app.predicate.attribute_field() {
                 Some((_, field)) => (Election::of(field), rules.ranks(field)),
-                None => (Election::plain(Select::Last), Vec::new()),
+                None => (Election::plain(Pick::Last), Vec::new()),
             };
             let this_term = app.terms.get("this").cloned();
             let key_operand = Relation::key_operand(ConceptDescriptor::VALUE);
@@ -866,8 +866,7 @@ impl ConceptQuery {
                     .collect();
                 order.sort_unstable();
                 let settles = entity.is_some()
-                    && election.select == Select::Top
-                    && election.among.is_empty();
+                    && matches!(&election.pick, Pick::Top(ranked) if ranked.is_empty());
                 let mut candidates: Vec<Candidate> = Vec::new();
                 for (rank, index) in order {
                     if settles && candidates.iter().any(|candidate| candidate.rank < rank) {
@@ -983,16 +982,16 @@ impl ConceptQuery {
 
     /// How this query's rows are elected on their way out, if they
     /// are: the query reads an attribute concept, and either some rule
-    /// contributes rows or the policy is not a plain stored read, so
-    /// several candidates per entity may arrive and the policy decides
-    /// what leaves: one value under a choosing policy, each distinct
+    /// contributes rows or the pick is not a plain stored read, so
+    /// several candidates per entity may arrive and the pick decides
+    /// what leaves: one value under a choosing pick, each distinct
     /// value once under `all`. A `last` or `all` read of a relation
     /// nothing derives is the stored rows as they are, so neither
     /// elects here.
     fn election(&self, rules: &ConceptRules) -> Option<Election> {
         let (_, field) = self.predicate.attribute_field()?;
         let election = Election::of(field);
-        if rules.installed().is_empty() && matches!(election.select, Select::Last | Select::All) {
+        if rules.installed().is_empty() && matches!(election.pick, Pick::Last | Pick::All) {
             return None;
         }
         Some(election)
@@ -1161,30 +1160,20 @@ enum Source {
     Folded,
 }
 
-/// How an attribute concept read elects: the field's policy and, for
+/// How an attribute concept read elects: the field's pick and, for
 /// `top`, the values it ranks among, best first. A `top` over listed
 /// relations ranks each candidate by the relation it came from
 /// instead, which the candidate carries. A write under a choosing
-/// policy runs the same election over the live claims of its cell to
+/// pick runs the same election over the live claims of its cell to
 /// find the one it succeeds ([`Election::elect_claims`]).
 #[derive(Clone, Debug)]
 pub struct Election {
-    select: Select,
-    among: Vec<Value>,
+    pick: Pick,
 }
 
-impl From<&Policy> for Election {
-    fn from(policy: &Policy) -> Self {
-        match policy {
-            Policy::Last => Election::plain(Select::Last),
-            Policy::All => Election::plain(Select::All),
-            Policy::Max => Election::plain(Select::Max),
-            Policy::Min => Election::plain(Select::Min),
-            Policy::Top(among) => Election {
-                select: Select::Top,
-                among: among.clone(),
-            },
-        }
+impl From<&Pick> for Election {
+    fn from(pick: &Pick) -> Self {
+        Election::plain(pick.clone())
     }
 }
 
@@ -1205,35 +1194,32 @@ struct Entry<T> {
 }
 
 /// What an election leaves of one entity's candidates: one for a
-/// choosing policy, every distinct value for `all`.
+/// choosing pick, every distinct value for `all`.
 struct Resolved<T>(Vec<T>);
 
 impl Election {
     /// The election a concept field declares.
     pub(crate) fn of(field: &ConceptFieldDescriptor) -> Self {
-        Election {
-            select: field.descriptor().select(),
-            among: field.descriptor().among().to_vec(),
-        }
+        Election::plain(field.descriptor().pick().clone())
     }
 
-    /// An election under `select` alone, with nothing to rank among.
-    fn plain(select: Select) -> Self {
-        Election {
-            select,
-            among: Vec::new(),
-        }
+    /// An election under `pick`.
+    fn plain(pick: Pick) -> Self {
+        Election { pick }
     }
 
     /// Where an entry stands under `top`: among the listed values when
     /// the field lists any, first best and an unlisted value last; then
     /// by the relation it came from, in the order the field lists them.
     fn rank<T>(&self, entry: &Entry<T>) -> (usize, usize) {
-        (Policy::rank_among(&self.among, &entry.value), entry.rank)
+        (
+            Pick::rank_among(self.pick.ranked(), &entry.value),
+            entry.rank,
+        )
     }
 
     /// Whether `candidate` displaces `incumbent` under a choosing
-    /// policy. `last` takes the newer standing, then the greater
+    /// pick. `last` takes the newer standing, then the greater
     /// value; `top` the better rank, then as `last`; `max` and `min`
     /// the greater or lesser value, then the newer standing.
     fn beats<T>(
@@ -1246,18 +1232,16 @@ impl Election {
         // relation's rank between the listed rank and the standing.
         let mine = (&candidate.value, candidate.standing.as_ref());
         let theirs = (&incumbent.value, incumbent.standing.as_ref());
-        match self.select {
-            Select::Last => Ok(Policy::Last.prefers(mine, theirs)),
-            Select::Max => Ok(Policy::Max.prefers(mine, theirs)),
-            Select::Min => Ok(Policy::Min.prefers(mine, theirs)),
-            Select::Top => {
+        match &self.pick {
+            pick @ (Pick::Last | Pick::Max | Pick::Min) => Ok(pick.prefers(mine, theirs)),
+            Pick::Top(_) => {
                 let (mine_rank, theirs_rank) = (self.rank(candidate), self.rank(incumbent));
                 Ok(mine_rank < theirs_rank
-                    || (mine_rank == theirs_rank && Policy::newer(mine, theirs)))
+                    || (mine_rank == theirs_rank && Pick::newer(mine, theirs)))
             }
-            Select::All => Err(EvaluationError::Store(format!(
+            Pick::All => Err(EvaluationError::Store(format!(
                 "`{}` does not choose among candidates",
-                self.select
+                self.pick
             ))),
         }
     }
@@ -1283,11 +1267,11 @@ impl Election {
         Ok(self.resolve(entries)?.0.into_iter().next())
     }
 
-    /// Resolve one entity's candidates under the policy. `all` keeps
+    /// Resolve one entity's candidates under the pick. `all` keeps
     /// every distinct value, a keyed collection every distinct (value,
-    /// key) pair; a choosing policy keeps the one that beats the rest.
+    /// key) pair; a choosing pick keeps the one that beats the rest.
     fn resolve<T>(&self, entries: Vec<Entry<T>>) -> Result<Resolved<T>, EvaluationError> {
-        if self.select == Select::All {
+        if self.pick.is_set() {
             let mut seen: HashSet<Vec<u8>> = HashSet::new();
             let mut chosen = Vec::new();
             for entry in entries {
@@ -1348,7 +1332,7 @@ fn agrees(
 
 impl Election {
     /// The rows a recursive component yields, elected per entity under
-    /// this policy at the component's exit. The rows are keyed by the
+    /// this pick at the component's exit. The rows are keyed by the
     /// query's field name, `field`, as the fixpoint projects them.
     fn elect_rows(
         &self,
@@ -1391,7 +1375,7 @@ impl Election {
 }
 
 /// The candidates that survive the attribute's election under the
-/// field's policy: one per entity for a choosing policy, every
+/// field's pick: one per entity for a choosing pick, every
 /// distinct value per entity for `all`.
 fn elect(
     candidates: Vec<Candidate>,
@@ -1615,9 +1599,9 @@ mod tests {
     fn it_narrows_a_premise_to_the_fields_it_binds() {
         let descriptor: ConceptDescriptor = serde_json::from_value(serde_json::json!({
             "with": {
-                "name": { "the": "narrow/name", "as": "Text" },
-                "nick": { "the": "narrow/nick", "as": "Text", "optional": true },
-                "mood": { "the": "narrow/mood", "as": "Text", "optional": true }
+                "name": { "the": "narrow/name", "as": "text:" },
+                "nick": { "the": "narrow/nick", "as": "text:", "optional": true },
+                "mood": { "the": "narrow/mood", "as": "text:", "optional": true }
             }
         }))
         .unwrap();
@@ -2782,7 +2766,7 @@ mod tests {
     #[dialog_common::test]
     fn it_validates_concept_query_deserialization() {
         let only_assert = serde_json::json!({ "assert": { "with": {
-            "name": { "the": "person/name", "as": "Text" }
+            "name": { "the": "person/name", "as": "text:" }
         }}});
         assert!(
             serde_json::from_value::<ConceptQuery>(only_assert).is_err(),
@@ -2799,7 +2783,7 @@ mod tests {
         // types in this crate. This keeps wire-format readers tolerant of
         // forward-compatible additions.
         let extra_field = serde_json::json!({
-            "assert": { "with": { "name": { "the": "person/name", "as": "Text" } } },
+            "assert": { "with": { "name": { "the": "person/name", "as": "text:" } } },
             "where": {},
             "stranger": true,
         });
@@ -2840,7 +2824,7 @@ mod tests {
         Ok(pairs)
     }
 
-    /// A policy elects among every stored claim of a cell, not among
+    /// A pick elects among every stored claim of a cell, not among
     /// what a `last` scan would keep: with `org/salary` holding 300 and
     /// then 200, `max` reads 300 and `min` 200 whichever is newer, and
     /// `last` reads the newer, 200. A scan that kept one claim per
@@ -2862,7 +2846,7 @@ mod tests {
         }
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
 
-        let read = async |select: Select| -> anyhow::Result<Vec<u64>> {
+        let read = async |pick: Pick| -> anyhow::Result<Vec<u64>> {
             let predicate = ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
                 AttributeDescriptor::new(
                     "org/salary".parse().expect("a selector"),
@@ -2870,7 +2854,7 @@ mod tests {
                     Cardinality::One,
                     Some(Type::UnsignedInt),
                 )
-                .with_select(select, Vec::new()),
+                .with_pick(pick),
             ));
             let mut terms = Parameters::new();
             terms.insert("this".into(), Term::<Any>::constant(alice.clone()));
@@ -2891,10 +2875,10 @@ mod tests {
             values.sort();
             Ok(values)
         };
-        assert_eq!(read(Select::Max).await?, vec![300]);
-        assert_eq!(read(Select::Min).await?, vec![200]);
-        assert_eq!(read(Select::Last).await?, vec![200]);
-        assert_eq!(read(Select::All).await?, vec![200, 300]);
+        assert_eq!(read(Pick::Max).await?, vec![300]);
+        assert_eq!(read(Pick::Min).await?, vec![200]);
+        assert_eq!(read(Pick::Last).await?, vec![200]);
+        assert_eq!(read(Pick::All).await?, vec![200, 300]);
         Ok(())
     }
 
@@ -3044,12 +3028,12 @@ mod tests {
 
             let rule = compile(serde_json::json!({
                 "deduce": { "with": {
-                    "salary": { "the": "org.dept/salary", "as": "UnsignedInteger", "cardinality": "many" }
+                    "salary": { "the": "org.dept/salary", "as": "natural:", "cardinality": "many" }
                 }},
                 "when": [{
                     "assert": { "with": {
-                        "dept": { "the": "org.employee/dept", "as": "Entity" },
-                        "salary": { "the": "org.employee/salary", "as": "UnsignedInteger" }
+                        "dept": { "the": "org.employee/dept", "as": "entity:" },
+                        "salary": { "the": "org.employee/salary", "as": "natural:" }
                     }},
                     "where": {
                         "this": { "?": { "name": "employee" } },
@@ -3064,7 +3048,7 @@ mod tests {
 
             let read = |select: &str| -> ConceptDescriptor {
                 serde_json::from_value(serde_json::json!({ "with": {
-                    "n": { "the": "org.dept/salary", "as": "UnsignedInteger", "cardinality": "many", "select": select }
+                    "n": { "the": "org.dept/salary", "as": "natural:", "cardinality": "many", "pick": select }
                 }}))
                 .expect("a concept over the relation")
             };
@@ -3131,10 +3115,10 @@ mod tests {
             let status = |the: &str, case: &str| {
                 compile(serde_json::json!({
                     "deduce": { "with": {
-                        "status": { "the": "account/status", "as": "Entity" }
+                        "status": { "the": "account/status", "as": "entity:" }
                     }},
                     "when": [
-                        { "assert": { "with": { "at": { "the": the, "as": "UnsignedInteger" } } },
+                        { "assert": { "with": { "at": { "the": the, "as": "natural:" } } },
                           "where": { "this": { "?": { "name": "this" } }, "at": { "?": { "name": "at" } } } },
                         { "assert": "==", "where": { "this": { "?": { "name": "status" } }, "is": case } }
                     ]
@@ -3220,9 +3204,9 @@ mod tests {
             // Carol's email is derived, not stored: it still outranks
             // her stored phone.
             let legacy = compile(serde_json::json!({
-                "deduce": { "with": { "email": { "the": "user/email", "as": "Text" } } },
+                "deduce": { "with": { "email": { "the": "user/email", "as": "text:" } } },
                 "when": [
-                    { "assert": { "with": { "email": { "the": "user/legacy-email", "as": "Text" } } },
+                    { "assert": { "with": { "email": { "the": "user/legacy-email", "as": "text:" } } },
                       "where": { "this": { "?": { "name": "this" } }, "email": { "?": { "name": "email" } } } }
                 ]
             }));
@@ -3258,7 +3242,7 @@ mod tests {
 
             // The chain read on its own.
             let read: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-                "handle": { "the": ["user/email", "user/phone"], "as": "Text" }
+                "handle": { "the": ["user/email", "user/phone"], "as": "text:" }
             }}))?;
             let mut terms = Parameters::new();
             terms.insert("this".into(), Term::var("who"));
@@ -3278,8 +3262,8 @@ mod tests {
 
             // The chain selected beside another field.
             let contact: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-                "name": { "the": "user/name", "as": "Text" },
-                "handle": { "the": ["user/email", "user/phone"], "as": "Text" }
+                "name": { "the": "user/name", "as": "text:" },
+                "handle": { "the": ["user/email", "user/phone"], "as": "text:" }
             }}))?;
             let mut terms = Parameters::new();
             terms.insert("this".into(), Term::var("who"));
@@ -3301,7 +3285,7 @@ mod tests {
             // The caller's value is a filter on the choice, not a seed
             // of it: Alice's phone is not her handle.
             let read: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-                "handle": { "the": ["user/email", "user/phone"], "as": "Text" }
+                "handle": { "the": ["user/email", "user/phone"], "as": "text:" }
             }}))?;
             let mut terms = Parameters::new();
             terms.insert("this".into(), Term::var("who"));

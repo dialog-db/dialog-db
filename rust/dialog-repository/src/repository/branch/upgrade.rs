@@ -33,7 +33,7 @@
 
 use crate::rules::transient_attr;
 use crate::{Branch, CommitError, RemoteSite, Revision, Transient};
-use dialog_artifacts::{ArtifactSelector, Attribute, Entity, Policy, Value};
+use dialog_artifacts::{ArtifactSelector, Attribute, Entity, Pick, Value};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::{Get, Import, Put};
@@ -224,7 +224,7 @@ impl UpgradeRules<'_> {
     }
 }
 
-/// A rule fact as a statement, under `all`, the policy rule facts are
+/// A rule fact as a statement, under `all`, the pick rule facts are
 /// written under.
 fn statement(the: Attribute, of: Entity, is: Value) -> AttributeStatement {
     AttributeStatement {
@@ -233,6 +233,6 @@ fn statement(the: Attribute, of: Entity, is: Value) -> AttributeStatement {
         is,
         cause: None,
         cardinality: Some(Cardinality::Many),
-        policy: Some(Policy::All),
+        pick: Some(Pick::All),
     }
 }

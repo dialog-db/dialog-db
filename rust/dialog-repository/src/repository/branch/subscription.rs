@@ -2957,7 +2957,7 @@ mod tests {
     fn handle_query() -> ConceptQuery {
         concept_query(
             serde_json::json!({ "with": {
-                "handle": { "the": ["comm/email", "comm/phone"], "as": "Text" }
+                "handle": { "the": ["comm/email", "comm/phone"], "as": "text:" }
             }}),
             &["handle"],
         )
@@ -3297,7 +3297,7 @@ mod tests {
     /// The relation `dept_salary_rule` derives into, read as the set.
     fn dept_salary() -> ConceptDescriptor {
         serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "payroll/salary", "as": "UnsignedInteger", "select": "all" }
+            "salary": { "the": "payroll/salary", "as": "natural:", "pick": "all" }
         }}))
         .expect("descriptor parses")
     }
@@ -3306,7 +3306,7 @@ mod tests {
     fn dept_top() -> ConceptQuery {
         concept_query(
             serde_json::json!({ "with": {
-                "top": { "the": "payroll/salary", "as": "UnsignedInteger", "select": "max" }
+                "top": { "the": "payroll/salary", "as": "natural:", "pick": "max" }
             }}),
             &["top"],
         )
@@ -3593,17 +3593,17 @@ mod tests {
         // payroll/member(dept) := employee, for every employee;
         // payroll/bonus(dept) := bonus, for every employee with one.
         let staffed: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "dept": { "the": "staff/dept", "as": "Entity" }
+            "dept": { "the": "staff/dept", "as": "entity:" }
         }}))?;
         let bonused: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "dept": { "the": "staff/dept", "as": "Entity" },
-            "bonus": { "the": "staff/bonus", "as": "UnsignedInteger" }
+            "dept": { "the": "staff/dept", "as": "entity:" },
+            "bonus": { "the": "staff/bonus", "as": "natural:" }
         }}))?;
         let members: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "member": { "the": "payroll/member", "as": "Entity", "select": "all" }
+            "member": { "the": "payroll/member", "as": "entity:", "pick": "all" }
         }}))?;
         let bonuses: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "bonus": { "the": "payroll/bonus", "as": "UnsignedInteger", "select": "all" }
+            "bonus": { "the": "payroll/bonus", "as": "natural:", "pick": "all" }
         }}))?;
         let member_rule = concept_rule(
             &members,
@@ -3629,9 +3629,9 @@ mod tests {
 
         let stats = concept_query(
             serde_json::json!({ "with": {
-                "member": { "the": "payroll/member", "as": "Entity", "select": "all" },
+                "member": { "the": "payroll/member", "as": "entity:", "pick": "all" },
                 "top": {
-                    "the": "payroll/bonus", "as": "UnsignedInteger", "select": "max",
+                    "the": "payroll/bonus", "as": "natural:", "pick": "max",
                     "optional": true
                 }
             }}),
@@ -4037,7 +4037,7 @@ mod tests {
                 "person/name".parse().expect("attribute"),
                 here.clone(),
                 Value::String(value.into()),
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             );
             changes
         };
@@ -4295,7 +4295,7 @@ mod tests {
                 "sync/status".parse()?,
                 here.clone(),
                 Value::String(status.into()),
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             );
             branch.overlay().assert(changes)?;
             let site = Entity::new()?;
@@ -4375,7 +4375,7 @@ mod tests {
                 "person/name".parse().expect("attribute"),
                 of.clone(),
                 Value::String(is.into()),
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             );
             changes
         };
@@ -4433,7 +4433,7 @@ mod tests {
     /// left as variables: the shape a UI subscribes with.
     fn people_query() -> ConceptQuery {
         serde_json::from_value(serde_json::json!({
-            "assert": { "with": { "name": { "the": "person/name", "as": "Text" } } },
+            "assert": { "with": { "name": { "the": "person/name", "as": "text:" } } },
             "where": {
                 "this": {"?": {"name": "this"}},
                 "name": {"?": {"name": "name"}}

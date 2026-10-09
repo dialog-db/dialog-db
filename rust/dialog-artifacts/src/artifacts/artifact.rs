@@ -453,7 +453,7 @@ impl ArtifactView {
     /// revision) fall to the older rule: the higher cause wins, a caused
     /// row beats an uncaused one, and equal (including absent) causes fall
     /// to the value, the greater winning. This is the order
-    /// [`Policy::prefers`](crate::Policy::prefers) elects by under `last`,
+    /// [`Pick::prefers`](crate::Pick::prefers) elects by under `last`,
     /// in the tree, in a commit's settlement and in a concept read, so
     /// every read of a cell under `last` returns the same claim. Every
     /// tier is deterministic and commutative: folding any set of rows in

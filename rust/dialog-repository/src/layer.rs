@@ -390,7 +390,7 @@ mod tests {
             "test/name".parse()?,
             alice.clone(),
             Value::String("Alice".into()),
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         );
         changes.dissociate(
             "test/name".parse()?,
@@ -439,7 +439,7 @@ mod tests {
             stream::iter(
                 facts
                     .into_iter()
-                    .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All)),
+                    .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All)),
             ),
         )
         .await?;

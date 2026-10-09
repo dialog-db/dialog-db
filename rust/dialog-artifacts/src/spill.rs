@@ -259,7 +259,7 @@ mod tests {
                         is: value.clone(),
                         cause: None,
                     },
-                    crate::Policy::All,
+                    crate::Pick::All,
                 )]),
             )
             .await?;
@@ -300,7 +300,7 @@ mod tests {
             &mut delta,
             stream::iter(vec![Instruction::Assert(
                 artifact.clone(),
-                crate::Policy::All,
+                crate::Pick::All,
             )]),
         )
         .await?;
@@ -365,7 +365,7 @@ mod tests {
                 Some(Version::new(Origin::from([1u8; 32]), Edition::new(0))),
                 stream::iter(vec![Instruction::Assert(
                     artifact.clone(),
-                    crate::Policy::All,
+                    crate::Pick::All,
                 )]),
             )
             .await?;
@@ -422,7 +422,7 @@ mod tests {
                 Some(Version::new(Origin::from([2u8; 32]), Edition::new(0))),
                 stream::iter(vec![Instruction::Assert(
                     artifact.clone(),
-                    crate::Policy::All,
+                    crate::Pick::All,
                 )]),
             )
             .await?;
@@ -464,7 +464,7 @@ mod tests {
                         is: Value::String("Alice".to_string()),
                         cause: None,
                     },
-                    crate::Policy::All,
+                    crate::Pick::All,
                 )]),
             )
             .await?;

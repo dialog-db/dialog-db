@@ -197,7 +197,7 @@ fn entity_facts(index: usize) -> Result<Vec<Instruction>> {
                     is,
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             ))
         })
         .collect()
@@ -212,7 +212,7 @@ fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
             is: Value::String("soak space".into()),
             cause: None,
         },
-        dialog_artifacts::Policy::All,
+        dialog_artifacts::Pick::All,
     )];
     for member in 0..members {
         let of: dialog_artifacts::Entity = format!("member:{member}").parse()?;
@@ -223,7 +223,7 @@ fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
                 is: Value::String(format!("Member {member}")),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         ));
         facts.push(Instruction::Assert(
             Artifact {
@@ -232,7 +232,7 @@ fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
                 is: Value::String(if member == 0 { "owner" } else { "editor" }.into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         ));
     }
     Ok(facts)
@@ -244,8 +244,8 @@ fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
 fn open_card_descriptor() -> Result<ConceptDescriptor> {
     Ok(serde_json::from_value(serde_json::json!({
         "with": {
-            "title": { "the": "open/title", "as": "Text" },
-            "rank": { "the": "open/rank", "as": "Text" }
+            "title": { "the": "open/title", "as": "text:" },
+            "rank": { "the": "open/rank", "as": "text:" }
         }
     }))?)
 }
@@ -258,16 +258,16 @@ fn open_card_rule() -> Result<DeductiveRule> {
     let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
         "deduce": {
             "with": {
-                "title": { "the": "open/title", "as": "Text" },
-                "rank": { "the": "open/rank", "as": "Text" }
+                "title": { "the": "open/title", "as": "text:" },
+                "rank": { "the": "open/rank", "as": "text:" }
             }
         },
         "when": [{
             "assert": {
                 "with": {
-                    "title": { "the": "bug/title", "as": "Text" },
-                    "rank": { "the": "bug/rank", "as": "Text" },
-                    "status": { "the": "bug/status", "as": "Text" }
+                    "title": { "the": "bug/title", "as": "text:" },
+                    "rank": { "the": "bug/rank", "as": "text:" },
+                    "status": { "the": "bug/status", "as": "text:" }
                 }
             },
             "where": {
@@ -294,7 +294,7 @@ fn claim_facts() -> Result<Vec<Instruction>> {
                 is: Value::String("The Joiner".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         ),
         Instruction::Assert(
             Artifact {
@@ -303,7 +303,7 @@ fn claim_facts() -> Result<Vec<Instruction>> {
                 is: Value::String("editor".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         ),
         Instruction::Assert(
             Artifact {
@@ -312,7 +312,7 @@ fn claim_facts() -> Result<Vec<Instruction>> {
                 is: Value::String("2026-09-01".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         ),
     ])
 }

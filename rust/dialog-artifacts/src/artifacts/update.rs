@@ -16,6 +16,7 @@ use futures_util::stream;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::mem::take;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -25,15 +26,15 @@ use std::vec::IntoIter;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Change {
-    /// Assert a value for an entity-attribute pair under a policy: the
-    /// policy the attribute is read under, which says what the write
-    /// succeeds. Under [`Policy::All`] the value is appended. Under any
-    /// other policy the one live claim of the cell the policy elects,
+    /// Assert a value for an entity-attribute pair under a pick: the
+    /// pick the attribute is read under, which says what the write
+    /// succeeds. Under [`Pick::All`] the value is appended. Under any
+    /// other pick the one live claim of the cell the pick elects,
     /// the claim a read under it returns, is retracted beside the
     /// value. Committed as [`Instruction::Assert`], which elects among
     /// the cell's stored claims in the tree write itself; a transactor
     /// settles it first against the candidates the tree cannot see.
-    Assert(Value, Policy),
+    Assert(Value, Pick),
     /// Retract a value from an entity-attribute pair.
     Retract(Value),
 }
@@ -46,20 +47,23 @@ impl Change {
         }
     }
 
-    /// Whether the change is an assertion under a policy that elects:
+    /// Whether the change is an assertion under a pick that elects:
     /// one the transactor or the tree has to settle.
     pub fn elects(&self) -> bool {
         matches!(self, Change::Assert(_, policy) if policy.elects())
     }
 }
 
-/// The policy an attribute is read under, carried by every write
-/// through it. A write under a choosing policy succeeds the claim the
-/// policy elects: the claim a read under the same policy returns. A
-/// set (`all`) appends and succeeds nothing.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Which of a relation's candidates an attribute picks: the newest
+/// (`last`), every one (`all`), the best ranked among listed values
+/// (`top`), the greatest (`max`) or the least (`min`). An attribute is a
+/// relation qualified by a value type and a pick. Every write through
+/// an attribute carries its pick: a write under any pick but `all`
+/// succeeds the claim the pick returns, and a write under `all`
+/// appends and succeeds nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Policy {
+pub enum Pick {
     /// The newest claim.
     Last,
     /// Every claim: a write appends.
@@ -116,13 +120,45 @@ pub(crate) fn value_beats(candidate: &Value, incumbent: &Value) -> bool {
     }
 }
 
-impl Policy {
-    /// Where `value` ranks under this policy: its position among
+impl Display for Pick {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.write_str(self.name())
+    }
+}
+
+impl Pick {
+    /// The pick's name as the notation spells it: `last`, `all`, `top`,
+    /// `max` or `min`.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Pick::Last => "last",
+            Pick::All => "all",
+            Pick::Top(_) => "top",
+            Pick::Max => "max",
+            Pick::Min => "min",
+        }
+    }
+
+    /// Whether the pick returns the whole candidate set (`all`) rather
+    /// than one candidate.
+    pub fn is_set(&self) -> bool {
+        matches!(self, Pick::All)
+    }
+
+    /// The values a `top` ranks, best first; empty for every other pick.
+    pub fn ranked(&self) -> &[Value] {
+        match self {
+            Pick::Top(values) => values,
+            _ => &[],
+        }
+    }
+
+    /// Where `value` ranks under this pick: its position among
     /// the values a `top` lists, best first, an unlisted value last;
-    /// zero under every other policy and under a `top` listing nothing.
+    /// zero under every other pick and under a `top` listing nothing.
     pub fn rank_of(&self, value: &Value) -> usize {
         match self {
-            Policy::Top(among) => Self::rank_among(among, value),
+            Pick::Top(among) => Self::rank_among(among, value),
             _ => 0,
         }
     }
@@ -142,14 +178,14 @@ impl Policy {
 
     /// Whether `candidate` is the newer of two claims: the greater
     /// standing, then the greater value. This is the whole of `last`,
-    /// and what every other policy falls back to among equals.
+    /// and what every other pick falls back to among equals.
     pub fn newer(candidate: Contender<'_>, incumbent: Contender<'_>) -> bool {
         candidate.1 > incumbent.1
             || (candidate.1 == incumbent.1 && value_beats(candidate.0, incumbent.0))
     }
 
-    /// Whether `candidate` displaces `incumbent` under this policy:
-    /// the one a read under the policy returns of the two. `last` takes
+    /// Whether `candidate` displaces `incumbent` under this pick:
+    /// the one a read under the pick returns of the two. `last` takes
     /// the newer; `top` the better rank, then the newer; `max` and `min`
     /// the greater or the lesser value, then the greater standing. This
     /// is the one ordering every election runs on, whether it elects
@@ -157,17 +193,17 @@ impl Policy {
     /// derived candidates in a query.
     pub fn prefers(&self, candidate: Contender<'_>, incumbent: Contender<'_>) -> bool {
         match self {
-            Policy::Last | Policy::All => Self::newer(candidate, incumbent),
-            Policy::Top(_) => {
+            Pick::Last | Pick::All => Self::newer(candidate, incumbent),
+            Pick::Top(_) => {
                 let (mine, theirs) = (self.rank_of(candidate.0), self.rank_of(incumbent.0));
                 mine < theirs || (mine == theirs && Self::newer(candidate, incumbent))
             }
-            Policy::Max | Policy::Min => {
+            Pick::Max | Pick::Min => {
                 let ordering = candidate.0.partial_cmp(incumbent.0).unwrap_or_else(|| {
                     encode_value_owned(candidate.0).cmp(&encode_value_owned(incumbent.0))
                 });
                 let wanted = match self {
-                    Policy::Max => Ordering::Greater,
+                    Pick::Max => Ordering::Greater,
                     _ => Ordering::Less,
                 };
                 ordering == wanted || (ordering.is_eq() && candidate.1 > incumbent.1)
@@ -175,13 +211,13 @@ impl Policy {
         }
     }
 
-    /// Whether a write under this policy elects a claim to succeed:
-    /// every policy but `all`.
+    /// Whether a write under this pick elects a claim to succeed:
+    /// every pick but `all`.
     pub fn elects(&self) -> bool {
-        !matches!(self, Policy::All)
+        !matches!(self, Pick::All)
     }
 
-    /// The claim this policy elects among `claims`, by index: the one
+    /// The claim this pick elects among `claims`, by index: the one
     /// a read under it returns. `None` over no claims, and under `all`,
     /// which elects nothing.
     pub fn elect<'a, I>(&self, claims: I) -> Option<usize>
@@ -208,14 +244,14 @@ impl Policy {
 /// that can later be committed atomically.
 pub trait Update {
     /// Assert that the `attribute` of `entity` is `value`, under
-    /// `policy`: the policy the attribute is read under. Under
-    /// [`Policy::All`] the value is appended beside the cell's claims.
-    /// Under any other policy the one live claim of the cell the
-    /// policy elects is retracted when the batch commits, and every
+    /// `policy`: the pick the attribute is read under. Under
+    /// [`Pick::All`] the value is appended beside the cell's claims.
+    /// Under any other pick the one live claim of the cell the
+    /// pick elects is retracted when the batch commits, and every
     /// other claim of the cell stays. A batch holds one write of a
-    /// cell under [`Policy::Last`]: a later one succeeds the earlier
+    /// cell under [`Pick::Last`]: a later one succeeds the earlier
     /// and takes its place.
-    fn associate(&mut self, the: Attribute, of: Entity, is: Value, policy: Policy);
+    fn associate(&mut self, the: Attribute, of: Entity, is: Value, policy: Pick);
 
     /// Retract that the `attribute` of `entity` is `value`.
     fn dissociate(&mut self, the: Attribute, of: Entity, is: Value);
@@ -433,7 +469,7 @@ impl Changes {
     }
 
     /// Convert to an instruction stream, the form a commit applies. An
-    /// assertion under a choosing policy commits as the instruction of
+    /// assertion under a choosing pick commits as the instruction of
     /// the same shape: the tree elects among the cell's stored claims.
     /// A relation some rule derives has derived candidates the tree
     /// cannot see, so a transaction settles those writes against its
@@ -492,12 +528,12 @@ impl Changes {
     }
 
     /// Whether any cell of this batch holds an assertion under a
-    /// choosing policy, which the transactor has yet to resolve.
+    /// choosing pick, which the transactor has yet to resolve.
     pub fn has_successions(&self) -> bool {
         self.iter().any(|(_, _, change)| change.elects())
     }
 
-    /// The cells holding an assertion under a choosing policy, each once.
+    /// The cells holding an assertion under a choosing pick, each once.
     pub fn cells_with_successions(&self) -> Vec<(Attribute, Entity)> {
         let mut cells = Vec::new();
         for (entity, attribute, change) in self.iter() {
@@ -546,8 +582,8 @@ impl Changes {
     /// commits the batch drains them first with
     /// [`take_assets`](Self::take_assets), and any other caller refuses a
     /// batch that [`has_assets`](Self::has_assets). An assertion carries
-    /// its policy into the instruction: the tree elects among the cell's
-    /// stored claims when it applies one under a choosing policy.
+    /// its pick into the instruction: the tree elects among the cell's
+    /// stored claims when it applies one under a choosing pick.
     ///
     /// The instructions come in entity then attribute order, a cell's
     /// in the order they were recorded. A batch records its facts in a
@@ -592,7 +628,7 @@ impl Changes {
 }
 
 impl Update for Changes {
-    fn associate(&mut self, the: Attribute, of: Entity, is: Value, policy: Policy) {
+    fn associate(&mut self, the: Attribute, of: Entity, is: Value, policy: Pick) {
         let cell = self.facts.entry(of).or_default().entry(the).or_default();
         // A write under `last` succeeds the cell's newest claim. The
         // writes of one batch stand at one edition, so the batch's own
@@ -603,9 +639,9 @@ impl Update for Changes {
         // another assertion of the cell in the batch the two claims
         // stand equal and either may be the one elected, so every write
         // stays, in order, and is replayed as written. Every other
-        // policy elects by value, where the earlier write may stand.
-        if policy == Policy::Last
-            && let Some((Change::Assert(_, Policy::Last), before)) = cell.split_last()
+        // pick elects by value, where the earlier write may stand.
+        if policy == Pick::Last
+            && let Some((Change::Assert(_, Pick::Last), before)) = cell.split_last()
             && before
                 .iter()
                 .all(|change| matches!(change, Change::Retract(_)))
@@ -767,14 +803,14 @@ pub fn sort_key(artifact: &Artifact, manifest: &Manifest) -> SortKey {
 /// Lets a `Changes` value act anywhere a single statement does: e.g.
 /// folding pre-built changes into another transaction, or asserting
 /// a changes-shaped overlay into a query session. `Assert` maps to
-/// `associate` on the target, with its policy; `Retract` maps to
+/// `associate` on the target, with its pick; `Retract` maps to
 /// `dissociate`.
 ///
 /// Retracting a batch inverts its asset changes as it inverts its facts:
 /// an import becomes a discard and a discard an import.
 impl Statement for Changes {
     /// Replay every change into `update` as it was recorded, each
-    /// assertion under its policy, so a batch asserted into another
+    /// assertion under its pick, so a batch asserted into another
     /// keeps what its writes meant.
     fn assert(mut self, update: &mut impl Update) {
         for change in self.take_assets() {
@@ -812,7 +848,7 @@ impl Statement for Changes {
         for instruction in self.into_instructions() {
             match instruction {
                 Instruction::Assert(a, _) => update.dissociate(a.the, a.of, a.is),
-                Instruction::Retract(a) => update.associate(a.the, a.of, a.is, Policy::All),
+                Instruction::Retract(a) => update.associate(a.the, a.of, a.is, Pick::All),
             }
         }
     }
@@ -920,7 +956,7 @@ mod tests {
     /// process to the next.
     #[dialog_common::test]
     fn it_orders_a_batchs_instructions() {
-        use super::{Changes, Instruction, Policy, Value};
+        use super::{Changes, Instruction, Pick, Value};
         let fact = |of: &str, the: &str, is: &str| -> Instruction {
             Instruction::Assert(
                 super::Artifact {
@@ -929,7 +965,7 @@ mod tests {
                     is: Value::String(is.into()),
                     cause: None,
                 },
-                Policy::All,
+                Pick::All,
             )
         };
         let recorded = || {
@@ -1003,19 +1039,19 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
         changes.associate(
             name_attr(),
             alice(),
             Value::String("Ally".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
         changes.associate(
             role_attr(),
             alice(),
             Value::String("admin".into()),
-            crate::Policy::Last,
+            crate::Pick::Last,
         );
         changes.dissociate(name_attr(), bob(), Value::String("Bob".into()));
 
@@ -1031,7 +1067,7 @@ mod tests {
             replaced,
             Some(Change::Assert(
                 Value::String("admin".into()),
-                crate::Policy::Last
+                crate::Pick::Last
             )),
             "a replacement stays a replacement"
         );
@@ -1049,37 +1085,37 @@ mod tests {
             role_attr(),
             alice(),
             Value::String("staff".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
         changes.associate(
             role_attr(),
             alice(),
             Value::String("member".into()),
-            crate::Policy::Last,
+            crate::Pick::Last,
         );
         changes.associate(
             role_attr(),
             alice(),
             Value::String("admin".into()),
-            crate::Policy::Last,
+            crate::Pick::Last,
         );
         changes.associate(
             role_attr(),
             alice(),
             Value::String("owner".into()),
-            crate::Policy::Max,
+            crate::Pick::Max,
         );
         changes.associate(
             role_attr(),
             bob(),
             Value::String("visitor".into()),
-            crate::Policy::Last,
+            crate::Pick::Last,
         );
         changes.associate(
             role_attr(),
             bob(),
             Value::String("guest".into()),
-            crate::Policy::Last,
+            crate::Pick::Last,
         );
 
         let of_alice: Vec<Change> = changes
@@ -1090,10 +1126,10 @@ mod tests {
         assert_eq!(
             of_alice,
             vec![
-                Change::Assert(Value::String("staff".into()), crate::Policy::All),
-                Change::Assert(Value::String("member".into()), crate::Policy::Last),
-                Change::Assert(Value::String("admin".into()), crate::Policy::Last),
-                Change::Assert(Value::String("owner".into()), crate::Policy::Max),
+                Change::Assert(Value::String("staff".into()), crate::Pick::All),
+                Change::Assert(Value::String("member".into()), crate::Pick::Last),
+                Change::Assert(Value::String("admin".into()), crate::Pick::Last),
+                Change::Assert(Value::String("owner".into()), crate::Pick::Max),
             ],
             "staff stands at the batch's edition beside member, so admin may elect either: every write is replayed"
         );
@@ -1106,7 +1142,7 @@ mod tests {
             of_bob,
             vec![Change::Assert(
                 Value::String("guest".into()),
-                crate::Policy::Last
+                crate::Pick::Last
             )]
         );
     }
@@ -1159,7 +1195,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
         changes.import(Asset::new(b"avatar".to_vec()));
 
@@ -1194,7 +1230,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
         batch.import(Asset::new(b"avatar".to_vec()));
 
@@ -1218,7 +1254,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
 
         let bytes = serde_ipld_dagcbor::to_vec(&changes).expect("encode changes");
@@ -1238,7 +1274,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
         changes.dissociate(name_attr(), bob(), Value::String("Bob".into()));
         changes.import(Asset::new(b"avatar".to_vec()));
@@ -1301,7 +1337,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
         source.dissociate(name_attr(), bob(), Value::String("Bob".into()));
 
@@ -1314,7 +1350,7 @@ mod tests {
         assert!(
             instructions
                 .iter()
-                .any(|i| matches!(i, Instruction::Assert(.., crate::Policy::All)))
+                .any(|i| matches!(i, Instruction::Assert(.., crate::Pick::All)))
         );
         assert!(
             instructions
@@ -1330,7 +1366,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
 
         let mut target = Changes::new();
@@ -1364,7 +1400,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
 
         let results = artifacts(&changes, ArtifactSelector::new().the(name_attr())).await;
@@ -1380,7 +1416,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alicia".into()),
-            crate::Policy::Last,
+            crate::Pick::Last,
         );
 
         let results = artifacts(&changes, ArtifactSelector::new().of(alice())).await;
@@ -1395,7 +1431,7 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
         changes.dissociate(name_attr(), bob(), Value::String("Bob".into()));
 
@@ -1414,19 +1450,19 @@ mod tests {
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
         changes.associate(
             name_attr(),
             bob(),
             Value::String("Bob".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
         changes.associate(
             role_attr(),
             alice(),
             Value::String("Engineer".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
 
         // Filter by `the` only
@@ -1464,13 +1500,13 @@ mod tests {
             role_attr(),
             alice(),
             Value::String("Engineer".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
         changes.associate(
             name_attr(),
             alice(),
             Value::String("Alice".into()),
-            crate::Policy::All,
+            crate::Pick::All,
         );
 
         let results = artifacts(&changes, ArtifactSelector::new().of(alice())).await;

@@ -118,7 +118,7 @@ impl DeductiveRuleDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::Select;
+    use crate::Pick;
     use serde_json::json;
 
     #[dialog_common::test]
@@ -130,17 +130,17 @@ mod tests {
                     "name": {
                         "description": "Ingredient name",
                         "the": "diy.cook/ingredient-name",
-                        "as": "Text"
+                        "as": "text:"
                     },
                     "quantity": {
                         "description": "Amount needed",
                         "the": "diy.cook/quantity",
-                        "as": "UnsignedInteger"
+                        "as": "natural:"
                     },
                     "unit": {
                         "description": "Unit of measurement",
                         "the": "diy.cook/unit",
-                        "as": "Text"
+                        "as": "text:"
                     }
                 }
             },
@@ -148,7 +148,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "name": { "the": "diy.cook/ingredient-name", "as": "Text" }
+                            "name": { "the": "diy.cook/ingredient-name", "as": "text:" }
                         }
                     },
                     "where": {
@@ -159,7 +159,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "quantity": { "the": "diy.cook/quantity", "as": "UnsignedInteger" }
+                            "quantity": { "the": "diy.cook/quantity", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -170,7 +170,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "unit": { "the": "diy.cook/unit", "as": "Text" }
+                            "unit": { "the": "diy.cook/unit", "as": "text:" }
                         }
                     },
                     "where": {
@@ -188,13 +188,13 @@ mod tests {
         assert!(def.unless.is_empty());
     }
 
-    /// A rule stored by the release before policies decodes: its
+    /// A rule stored by the release before picks decodes: its
     /// attributes spell `cardinality` and a single `the`, which read as
     /// `last` and `all` over that relation. The bytes are the dag-cbor
     /// of the descriptor as that release wrote it, which is what a
     /// replica holds for every rule a user installed under it.
     #[dialog_common::test]
-    fn it_decodes_a_rule_stored_before_policies() {
+    fn it_decodes_a_rule_stored_before_picks() {
         let legacy = json!({
             "deduce": {
                 "description": "An ingredient",
@@ -203,13 +203,13 @@ mod tests {
                         "description": "Ingredient name",
                         "the": "diy.cook/ingredient-name",
                         "cardinality": "one",
-                        "as": "Text"
+                        "as": "text:"
                     },
                     "tags": {
                         "description": "",
                         "the": "diy.cook/tag",
                         "cardinality": "many",
-                        "as": "Text"
+                        "as": "text:"
                     }
                 }
             },
@@ -220,7 +220,7 @@ mod tests {
                             "name": {
                                 "the": "diy.cook/ingredient-name",
                                 "cardinality": "one",
-                                "as": "Text"
+                                "as": "text:"
                             }
                         }
                     },
@@ -235,7 +235,7 @@ mod tests {
                             "tags": {
                                 "the": "diy.cook/tag",
                                 "cardinality": "many",
-                                "as": "Text"
+                                "as": "text:"
                             }
                         }
                     },
@@ -257,8 +257,8 @@ mod tests {
                 .expect("the field")
         };
         let (name, tags) = (field("name"), field("tags"));
-        assert_eq!(name.descriptor().select(), Select::Last);
-        assert_eq!(tags.descriptor().select(), Select::All);
+        assert_eq!(name.descriptor().pick(), &Pick::Last);
+        assert_eq!(tags.descriptor().pick(), &Pick::All);
         assert_eq!(name.descriptor().cardinality(), crate::Cardinality::One);
         assert_eq!(tags.descriptor().cardinality(), crate::Cardinality::Many);
         // Re-encoded, the rule never writes the older spelling back.
@@ -266,9 +266,9 @@ mod tests {
         let decoded: serde_json::Value =
             serde_ipld_dagcbor::from_slice(&again).expect("the re-encoding is a map");
         assert!(
-            decoded.to_string().contains("\"select\"")
+            decoded.to_string().contains("\"pick\"")
                 || !decoded.to_string().contains("cardinality"),
-            "the branch spells policies as `select`: {decoded}"
+            "the branch spells picks as `pick`: {decoded}"
         );
     }
 
@@ -279,7 +279,7 @@ mod tests {
                 "with": {
                     "quantity": {
                         "the": "diy.cook.doubled-quantity/quantity",
-                        "as": "UnsignedInteger"
+                        "as": "natural:"
                     }
                 }
             },
@@ -287,7 +287,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "is": { "the": "diy.cook/quantity", "as": "UnsignedInteger" }
+                            "is": { "the": "diy.cook/quantity", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -323,16 +323,16 @@ mod tests {
         let json = json!({
             "deduce": {
                 "with": {
-                    "name": { "the": "org.example.employee/name", "as": "Text" },
-                    "role": { "the": "org.example.employee/role", "as": "Text" }
+                    "name": { "the": "org.example.employee/name", "as": "text:" },
+                    "role": { "the": "org.example.employee/role", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "name": { "the": "org.example.person/name", "as": "Text" },
-                            "title": { "the": "org.example.person/title", "as": "Text" }
+                            "name": { "the": "org.example.person/name", "as": "text:" },
+                            "title": { "the": "org.example.person/title", "as": "text:" }
                         }
                     },
                     "where": {
@@ -370,15 +370,15 @@ mod tests {
                 "with": {
                     "attendee": {
                         "the": "diy.planner.safe-meal/attendee",
-                        "as": "Entity"
+                        "as": "entity:"
                     },
                     "recipe": {
                         "the": "diy.planner.safe-meal/recipe",
-                        "as": "Entity"
+                        "as": "entity:"
                     },
                     "occasion": {
                         "the": "diy.planner.safe-meal/occasion",
-                        "as": "Entity"
+                        "as": "entity:"
                     }
                 }
             },
@@ -386,9 +386,9 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "attendee": { "the": "diy.planner/attendee", "as": "Entity" },
-                            "recipe": { "the": "diy.planner/recipe", "as": "Entity" },
-                            "occasion": { "the": "diy.planner/occasion", "as": "Entity" }
+                            "attendee": { "the": "diy.planner/attendee", "as": "entity:" },
+                            "recipe": { "the": "diy.planner/recipe", "as": "entity:" },
+                            "occasion": { "the": "diy.planner/occasion", "as": "entity:" }
                         }
                     },
                     "where": {
@@ -402,8 +402,8 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "person": { "the": "diy.planner/person", "as": "Entity" },
-                            "recipe": { "the": "diy.planner/recipe", "as": "Entity" }
+                            "person": { "the": "diy.planner/person", "as": "entity:" },
+                            "recipe": { "the": "diy.planner/recipe", "as": "entity:" }
                         }
                     },
                     "where": {
@@ -431,14 +431,14 @@ mod tests {
         let json = json!({
             "deduce": {
                 "with": {
-                    "name": { "the": "person/name", "as": "Text" }
+                    "name": { "the": "person/name", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "name": { "the": "person/name", "as": "Text" }
+                            "name": { "the": "person/name", "as": "text:" }
                         }
                     },
                     "where": {
@@ -462,15 +462,15 @@ mod tests {
         let json = json!({
             "deduce": {
                 "with": {
-                    "name": { "the": "person/name", "as": "Text" },
-                    "age": { "the": "person/age", "as": "UnsignedInteger" }
+                    "name": { "the": "person/name", "as": "text:" },
+                    "age": { "the": "person/age", "as": "natural:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "name": { "the": "person/name", "as": "Text" }
+                            "name": { "the": "person/name", "as": "text:" }
                         }
                     },
                     "where": {
@@ -481,7 +481,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "age": { "the": "person/age", "as": "UnsignedInteger" }
+                            "age": { "the": "person/age", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -507,7 +507,7 @@ mod tests {
                 "with": {
                     "quantity": {
                         "the": "diy.cook.doubled-quantity/quantity",
-                        "as": "UnsignedInteger"
+                        "as": "natural:"
                     }
                 }
             },
@@ -515,7 +515,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "is": { "the": "diy.cook/quantity", "as": "UnsignedInteger" }
+                            "is": { "the": "diy.cook/quantity", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -548,15 +548,15 @@ mod tests {
         let json = json!({
             "deduce": {
                 "with": {
-                    "name": { "the": "person/name", "as": "Text" },
-                    "age": { "the": "person/age", "as": "UnsignedInteger" }
+                    "name": { "the": "person/name", "as": "text:" },
+                    "age": { "the": "person/age", "as": "natural:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "name": { "the": "person/name", "as": "Text" }
+                            "name": { "the": "person/name", "as": "text:" }
                         }
                     },
                     "where": {
@@ -578,14 +578,14 @@ mod tests {
             "description": "Find safe meals for attendees",
             "deduce": {
                 "with": {
-                    "name": { "the": "person/name", "as": "Text" }
+                    "name": { "the": "person/name", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "name": { "the": "person/name", "as": "Text" }
+                            "name": { "the": "person/name", "as": "text:" }
                         }
                     },
                     "where": {
@@ -611,15 +611,15 @@ mod tests {
         let json = json!({
             "deduce": {
                 "with": {
-                    "name": { "the": "person/name", "as": "Text" },
-                    "age": { "the": "person/age", "as": "UnsignedInteger" }
+                    "name": { "the": "person/name", "as": "text:" },
+                    "age": { "the": "person/age", "as": "natural:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "name": { "the": "person/name", "as": "Text" }
+                            "name": { "the": "person/name", "as": "text:" }
                         }
                     },
                     "where": {
@@ -630,7 +630,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "age": { "the": "person/age", "as": "UnsignedInteger" }
+                            "age": { "the": "person/age", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -657,15 +657,15 @@ mod tests {
         let json = json!({
             "deduce": {
                 "with": {
-                    "name": { "the": "person/name", "as": "Text" },
-                    "age": { "the": "person/age", "as": "UnsignedInteger" }
+                    "name": { "the": "person/name", "as": "text:" },
+                    "age": { "the": "person/age", "as": "natural:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "name": { "the": "person/name", "as": "Text" }
+                            "name": { "the": "person/name", "as": "text:" }
                         }
                     },
                     "where": {
@@ -676,7 +676,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "age": { "the": "person/age", "as": "UnsignedInteger" }
+                            "age": { "the": "person/age", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -700,7 +700,7 @@ mod tests {
                 "with": {
                     "quantity": {
                         "the": "diy.cook.doubled-quantity/quantity",
-                        "as": "UnsignedInteger"
+                        "as": "natural:"
                     }
                 }
             },
@@ -708,7 +708,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "is": { "the": "diy.cook/quantity", "as": "UnsignedInteger" }
+                            "is": { "the": "diy.cook/quantity", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -752,15 +752,15 @@ mod tests {
         let json = json!({
             "deduce": {
                 "with": {
-                    "name": { "the": "person/name", "as": "Text" },
-                    "age": { "the": "person/age", "as": "UnsignedInteger" }
+                    "name": { "the": "person/name", "as": "text:" },
+                    "age": { "the": "person/age", "as": "natural:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "name": { "the": "person/name", "as": "Text" }
+                            "name": { "the": "person/name", "as": "text:" }
                         }
                     },
                     "where": {
@@ -785,8 +785,8 @@ mod tests {
     fn employee_body(salary_var: &str) -> serde_json::Value {
         json!([{
             "assert": { "with": {
-                "dept": { "the": "org.employee/dept", "as": "Entity" },
-                "salary": { "the": "org.employee/salary", "as": "UnsignedInteger" }
+                "dept": { "the": "org.employee/dept", "as": "entity:" },
+                "salary": { "the": "org.employee/salary", "as": "natural:" }
             }},
             "where": {
                 "this": { "?": { "name": "employee" } },
@@ -801,7 +801,7 @@ mod tests {
     fn dept_total_json() -> serde_json::Value {
         json!({
             "deduce": { "with": {
-                "total": { "the": "org.dept/total", "as": "UnsignedInteger" }
+                "total": { "the": "org.dept/total", "as": "natural:" }
             }},
             "when": employee_body("salary"),
             "reduce": { "total": { "apply": "sum", "of": { "?": { "name": "salary" } } } }
@@ -813,9 +813,9 @@ mod tests {
     #[dialog_common::test]
     fn it_omits_reduce_when_empty() {
         let plain: DeductiveRuleDescriptor = serde_json::from_value(json!({
-            "deduce": { "with": { "name": { "the": "person/name", "as": "Text" } } },
+            "deduce": { "with": { "name": { "the": "person/name", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "name": { "the": "person/name", "as": "Text" } } },
+                "assert": { "with": { "name": { "the": "person/name", "as": "text:" } } },
                 "where": {
                     "this": { "?": { "name": "this" } },
                     "name": { "?": { "name": "name" } }
@@ -853,14 +853,14 @@ mod tests {
         let json = json!({
             "deduce": {
                 "with": {
-                    "name": { "the": "person/name", "as": "Text" }
+                    "name": { "the": "person/name", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "name": { "the": "person/name", "as": "Text" }
+                            "name": { "the": "person/name", "as": "text:" }
                         }
                     },
                     "where": {
@@ -873,7 +873,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "blocked": { "the": "person/blocked", "as": "Boolean" }
+                            "blocked": { "the": "person/blocked", "as": "boolean:" }
                         }
                     },
                     "where": {

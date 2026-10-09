@@ -9,7 +9,7 @@
 //! move the same blocks.
 
 use anyhow::Result;
-use dialog_artifacts::{Artifact, Attribute, Changes, Entity, Instruction, Policy, Value};
+use dialog_artifacts::{Artifact, Attribute, Changes, Entity, Instruction, Pick, Value};
 use dialog_capability::Subject;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::storage::Location;
@@ -199,7 +199,7 @@ pub fn fact(of: &Entity, the: &str, is: Value) -> Artifact {
 }
 
 /// `facts` asserted under `policy`, as one batch.
-pub fn assert_all(facts: impl IntoIterator<Item = Artifact>, policy: Policy) -> Changes {
+pub fn assert_all(facts: impl IntoIterator<Item = Artifact>, policy: Pick) -> Changes {
     facts
         .into_iter()
         .map(|artifact| Instruction::Assert(artifact, policy.clone()))

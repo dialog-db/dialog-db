@@ -470,7 +470,7 @@ where
             branch
                 .commit(stream::iter(vec![Instruction::Assert(
                     asset.fact()?,
-                    dialog_artifacts::Policy::Last,
+                    dialog_artifacts::Pick::Last,
                 )]))
                 .machinery()
                 .perform(env),

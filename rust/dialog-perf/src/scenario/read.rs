@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::{Entity, Policy};
+use dialog_artifacts::{Entity, Pick};
 use dialog_query::query::Output as _;
 use dialog_query::{ConceptConclusion, ConceptDescriptor};
 
@@ -67,7 +67,7 @@ impl Prepared for Point {
 /// `read-point`: `size` entities, then `PROBES` single-entity reads.
 pub async fn point(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
-    seed_stuff(&env, size, Policy::Last).await?;
+    seed_stuff(&env, size, Pick::Last).await?;
     env.reopen().await?;
     Ok(Box::new(Point { env, size }))
 }
@@ -92,7 +92,7 @@ impl Prepared for Scan {
 /// `read-scan`: `size` entities, then one read of every name.
 pub async fn scan(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
-    seed_stuff(&env, size, Policy::Last).await?;
+    seed_stuff(&env, size, Pick::Last).await?;
     env.reopen().await?;
     Ok(Box::new(Scan { env }))
 }
@@ -117,7 +117,7 @@ impl Prepared for Join {
 /// `query-join`: `size` entities, then one read of name and role.
 pub async fn join(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
-    seed_stuff(&env, size, Policy::Last).await?;
+    seed_stuff(&env, size, Pick::Last).await?;
     env.reopen().await?;
     Ok(Box::new(Join { env }))
 }

@@ -97,7 +97,7 @@ impl Statement for Transient {
             transient_attr(),
             self.0,
             Value::Boolean(true),
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         );
     }
 
@@ -821,7 +821,7 @@ pub(crate) fn overlay_rules_deriving(changes: &Changes, on: &Entity) -> Vec<Dedu
 
 /// The head of `rule` deriving the relation indexed by `on`, if it has
 /// one: the head concluding that relation's attribute concept, whatever
-/// type or policy the reader declares over it.
+/// type or pick the reader declares over it.
 pub(crate) fn head_onto(
     rule: &DeductiveRule,
     on: &Entity,

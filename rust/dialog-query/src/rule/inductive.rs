@@ -24,6 +24,7 @@ use crate::negation::Negation;
 use crate::planner::{Conjunction, Planner};
 use crate::premise::Premise;
 use crate::rule::analyzer::AnalyzedRule;
+use crate::rule::body;
 use crate::rule::{Compile, RuleKind, fmt_rule_schema};
 use crate::{Environment, Parameters, Proposition};
 use descriptor::InductiveRuleDescriptor;
@@ -145,7 +146,7 @@ impl InductiveRule {
     /// premises encode to nothing, because `Proposition`'s
     /// formal-notation `Serialize` rejects attribute propositions.
     pub fn try_encode(&self) -> Option<Vec<u8>> {
-        serde_ipld_dagcbor::to_vec(&self.descriptor()).ok()
+        body::encode(&self.descriptor())
     }
 
     /// This rule's content-addressed identity, if it has an encodable
@@ -192,8 +193,7 @@ impl InductiveRule {
     /// bytes. `Err` carries a human-readable reason — either the cbor
     /// decode failed or the decoded descriptor didn't compile.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let descriptor: InductiveRuleDescriptor = serde_ipld_dagcbor::from_slice(bytes)
-            .map_err(|e| format!("dag-cbor decode failed: {e}"))?;
+        let descriptor: InductiveRuleDescriptor = body::decode(bytes)?;
         descriptor.compile().map_err(|e| e.to_string())
     }
 
@@ -334,11 +334,11 @@ mod tests {
     fn it_is_stored_as_its_identity_alone() {
         let descriptor: InductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
             "assert!": {
-                "with": { "tag": { "the": "derived/tag", "as": "Text" } }
+                "with": { "tag": { "the": "derived/tag", "as": "text:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "title": { "the": "doc/title", "as": "Text" } }
+                    "with": { "title": { "the": "doc/title", "as": "text:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },

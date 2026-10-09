@@ -1080,7 +1080,7 @@ mod tests {
                 the.clone(),
                 of.clone(),
                 Value::String(value.into()),
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             );
             changes
         };
