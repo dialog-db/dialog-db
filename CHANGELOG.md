@@ -5,7 +5,16 @@ Entries are grouped by the change a reader has to understand, not by
 commit; each links the pull request that landed it and the note that
 argues it in full. Newest first.
 
+Versions follow [semver](https://semver.org) over two surfaces: the Rust
+API, and what a replica stores and syncs. While dialog is 0.x, a change
+that breaks either one bumps the minor version, and anything else bumps
+the patch. The whole workspace shares one version. `0.1.0` is the commit
+tagged `tonk-2026-10-03`, the last of the date tags. [RELEASING.md](./RELEASING.md)
+says how to cut a release.
+
 ## Unreleased
+
+## 0.2.0 (2026-10-09)
 
 ### Writes succeed the claim the policy elects
 
