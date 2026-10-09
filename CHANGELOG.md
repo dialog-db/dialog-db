@@ -5,15 +5,75 @@ Entries are grouped by the change a reader has to understand, not by
 commit; each links the pull request that landed it and the note that
 argues it in full. Newest first.
 
+Versions follow [semver](https://semver.org) over two surfaces: the Rust
+API, and what a replica stores and syncs. While dialog is 0.x, a change
+that breaks either one bumps the minor version, and anything else bumps
+the patch. The whole workspace shares one version. `0.1.0` is the commit
+tagged `tonk-2026-10-03`, the last of the date tags. [RELEASING.md](./RELEASING.md)
+says how to cut a release.
+
 ## Unreleased
 
-### Writes succeed the claim the policy elects
+## 0.2.0 (2026-10-09)
+
+### Relations, types and picks have one name each
+
+[#592](https://github.com/dialog-db/dialog-db/pull/592),
+[glossary](./notes/glossary.md)
+
+The words the code, the notation and the notes use are now the same. A
+**relation** is the named set of claims `the` denotes. An **attribute**
+is a relation qualified by a value type and a pick. A **pick** is which
+of an entity's claims a read returns. A **type** is named by an entity,
+`text:` rather than `Text`. Stored rule bodies name the format they are
+written in.
+
+What this changes for you:
+
+- `dialog_artifacts::Attribute` is `dialog_artifacts::Relation`.
+  `DialogArtifactsError::InvalidAttribute` and `ReservedAttribute` are
+  `InvalidRelation` and `ReservedRelation`, and `ATTRIBUTE_LENGTH` is
+  `RELATION_LENGTH`.
+- In `dialog_query`, the validated relation name the `the!` macro
+  builds is `Relation` (it was `The`), and what an attribute's `the`
+  holds, one relation or a keyed collection, is the enum `The`
+  (`The::Relation(..)`, `The::Collection { .. }`; it was `Relation`,
+  with an `Attribute` variant). `dialog_query::ArtifactsAttribute` is
+  `ArtifactsRelation`, and `Reach::Attribute` is `Reach::Relation`.
+- One type, `dialog_artifacts::Pick` (`Last`, `All`, `Top(..)`, `Max`,
+  `Min`), replaces both `dialog_artifacts::Policy` and
+  `dialog_query::Select`. `AttributeDescriptor::select()` and
+  `with_select(..)` are `pick()` and `with_pick(..)`;
+  `without_select()` and `select_error()` are `without_pick()` and
+  `pick_error()`. `TypeError::SelectPolicy` is `TypeError::UnfitPick`
+  and `CommitError::Policy` is `CommitError::Succession`.
+- A descriptor writes `pick:` where it wrote `select:`. `select:` is
+  still read.
+- A value type is written as its entity: `text:`, `integer:`,
+  `natural:`, `float:`, `boolean:`, `bytes:`, `entity:`, `symbol:`,
+  `record:`. `Text`, `SignedInteger`, `UnsignedInteger` and the other
+  earlier names are still read and never written. `ValueDataType::uri`,
+  `legacy_name` and `named` convert between them. Its `Display` is
+  unchanged.
+- A stored rule body is `{ format: 1, rule: <descriptor> }`.
+  `dialog_query::rule::body::FORMAT` is the format this release writes.
+  A bare body reads as format 0, and a body in a later format is
+  refused with an error that names its format.
+
+Why: three names (attribute, `The`, `Relation`) were used for the set
+of claims `the` names, and "attribute" also meant the typed, picked
+read of it, so the code could not say which one it meant. Types spelled
+as strings were the one identifier in a descriptor that was not an
+entity. A stored rule body had no way to say what shape it was in, so a
+later release could only guess.
+
+### Writes succeed the claim the pick elects
 
 [#583](https://github.com/dialog-db/dialog-db/pull/583)
 
 A write through an attribute read under `last`, `max`, `min` or `top`
 no longer replaces its cell. It succeeds one claim: the one a read under
-the same policy returns. The tree elects that claim among the cell's
+the same pick returns. The tree elects that claim among the cell's
 stored claims in the same descent that writes the value, retracts it,
 and records the new claim with the elected claim's versions as its
 cause, as a replacement did. Every other claim in the cell stays. Where
@@ -25,7 +85,7 @@ The guarantee this gives is transactional. A transaction is a commit
 that has not been flushed: querying it returns what querying the
 committed result would, every write on top is squashed into that one
 commit, and an assertion succeeds whatever a reader at that point
-would have observed. `all` is the one policy that asserts without
+would have observed. `all` is the one pick that asserts without
 succeeding anything.
 
 What this changes for you:
@@ -37,24 +97,24 @@ What this changes for you:
   `all` read over the same relation can, and will now see it.
 - If the read elects a candidate a rule derives, nothing is retracted:
   a derived candidate is not a claim. The write lands beside it and
-  competes under the policy.
-- Writing a value a read under the policy already returns writes
+  competes under the pick.
+- Writing a value a read under the pick already returns writes
   nothing: the revision's tree does not move. Writing a value the cell
   holds as a claim the read does not return succeeds the claim it does
   return, and folds the commit's version into the held claim, so the
   written value stands past the claim it succeeded and a read returns
   it. Under `last` the write is the newest fact of the cell, as a
   last-writer-wins write is.
-- Every write carries its policy. `Change::Assert(Value, Policy)` and
-  `Instruction::Assert(Artifact, Policy)` are the one write form, beside
+- Every write carries its pick. `Change::Assert(Value, Pick)` and
+  `Instruction::Assert(Artifact, Pick)` are the one write form, beside
   `Retract`; `Change::Replace`, `Instruction::Replace`, `Change::Succeed`
-  and `Instruction::Succeed` are gone. `dialog_artifacts::Policy` is the
-  policy an attribute is read under (`Last`, `All`, `Top(..)`, `Max`,
+  and `Instruction::Succeed` are gone. `dialog_artifacts::Pick` is the
+  pick an attribute is read under (`Last`, `All`, `Top(..)`, `Max`,
   `Min`); `Update::associate` takes it as its fourth argument, and
   `associate_unique` and `succeed` are gone with the variants they
-  wrote. A write under `All` appends; any other policy succeeds the
+  wrote. A write under `All` appends; any other pick succeeds the
   claim a read under it returns. A `Changes` batch serializes each
-  assertion with its policy, a shape older readers do not know. Batches
+  assertion with its pick, a shape older readers do not know. Batches
   are not stored or sent between replicas today, so this bites only
   code that encodes a batch itself.
 - The reset `Replace` performed, retracting every claim of the cell
@@ -111,9 +171,9 @@ What this changes for you:
   transactor and every read alike, so when two replicas' commits meet,
   one commit's writes win every cell they share, never some cells each.
 
-Why: `Replace` encoded one policy, last-writer-wins, in the write path,
+Why: `Replace` encoded one pick, last-writer-wins, in the write path,
 while reads had grown four. A write is a claim that succeeds what the
-attribute currently stands for, and what it stands for is the policy's
+attribute currently stands for, and what it stands for is the pick's
 to say. Making the write follow the read is what lets a relation be
 read one way and written another: declare two attributes over it.
 
@@ -143,7 +203,7 @@ derivation that survives it.
 [`notes/attribute-heads.md`](./notes/attribute-heads.md).
 
 A deductive rule admits `unless` and optional premises. A read under a
-ranked policy (`top`, a relation chain, `max`, `min`) is treated the
+ranked pick (`top`, a relation chain, `max`, `min`) is treated the
 same way: it returns a candidate *and nothing better*, which negates
 the better candidates, so a ranked fallback is an absence test however
 it is spelled. A read under `last` is too outside a cycle; inside one
@@ -194,7 +254,7 @@ What this changes for you:
   cycle the read sees every candidate the fixpoint derives, and its
   readers elect the newest once the cycle is derived in full. A
   notebook positioning a run of inserted blocks from each block's
-  successor relies on this. A read under a ranked policy (`top`, a
+  successor relies on this. A read under a ranked pick (`top`, a
   relation chain, `max`, `min`) inside its own cycle is an absence
   test and is quarantined: a default chain is "this, else the
   default", which has no stratified meaning while "this" is still
@@ -202,7 +262,7 @@ What this changes for you:
   (a node's own value, else its parent's) is the case this rules out;
   lattice-valued recursion could admit it later.
 - `EvaluationError::NegationThroughRecursion` is gone, and the cycle
-  policy that replaced it on this branch is gone too.
+  pick that replaced it on this branch is gone too.
   `ProgramAnalysis::absences()` now lists only what a cycle with no
   rule to set aside still holds.
 - `TypeError::NegationInOpenRule` is gone. It existed on this branch
@@ -228,30 +288,30 @@ What is not: that a rule's derived set only grows as rules land. A
 negation can lose derivations when a rule starts deriving what it
 tests; that is what negation means.
 
-### Selection policies choose members; aggregators are gone from `select`
+### Picks choose members; aggregators are gone from `pick`
 
 [#583](https://github.com/dialog-db/dialog-db/pull/583)
 
-`select` is one of `last`, `all`, `top`, `max`, `min`. Each returns
+`pick` is one of `last`, `all`, `top`, `max`, `min`. Each returns
 members of the candidate set, which is what lets a rule inside a cycle
 read the set and a reader outside read the choice without disagreeing
 about what the relation holds. `sum`, `count`, `count-distinct` and
-`avg` are not policies and have been removed, with the carrier
+`avg` are not picks and have been removed, with the carrier
 distinction (`PolicyInOpenRule`) that existed to fence them. They were
 introduced on this branch and never released. Use `reduce` in a query,
 subscription or inductive rule for folds.
 
-Other changes to policies on the same branch, for a reader who did not
+Other changes to picks on the same branch, for a reader who did not
 follow it:
 
 - An attribute is a relation (what `the` names) read under a type and
-  a policy. Two policies over one relation are two attributes, with
+  a pick. Two picks over one relation are two attributes, with
   distinct identities. A field is a concept slot holding an attribute,
   and can be optional. These are the words the code and the notes use.
-- Cardinality is derived from the policy: `all` is many, every other
-  policy is one. `cardinality: one` and `cardinality: many` are read as
+- Cardinality is derived from the pick: `all` is many, every other
+  pick is one. `cardinality: one` and `cardinality: many` are read as
   the older spellings of `last` and `all`, and never written. Tonk's
-  notation emits `select: all` where it said `many` and nothing where
+  notation emits `pick: all` where it said `many` and nothing where
   it said `one`.
 - A list is a ranked choice. `as: [a, b]` ranks values, `the: [x, y]`
   ranks relations, best first; either implies `top`. With the entity
@@ -299,7 +359,7 @@ What this changes for you:
   concept or attribute read, as an installed rule would.
 - The dependency graph, the fixpoint and the registry key an attribute
   concept by its relation, so every read of a relation, under any type
-  or policy, meets the rules deriving it.
+  or pick, meets the rules deriving it.
 
 Why: whatever is true of an asserted fact must be true of a derived
 one. Asserting `Employee` writes two attribute facts and nothing else;
@@ -310,6 +370,17 @@ deriving it must land in the same place.
 What a replica holds from the release before this branch, and what
 happens to it.
 
+- Types are hashed as entities, so the attribute, concept and rule
+  identities this release computes differ from the earlier release's
+  for every typed attribute, beyond the change picks made.
+  `Branch::upgrade_rules()` re-installs every rule under its identity
+  and moves the transient markers, as below; `dialog_query::migration`
+  still computes the earlier identities from the earlier type names.
+  Nothing is rewritten until the upgrade runs.
+- The earlier release cannot read a descriptor this one writes: it
+  knows `Text`, not `text:`, and it does not know the rule body
+  envelope. A body stored by the earlier release, bare and with the
+  earlier type names, is read by this one.
 - Stored claims are unchanged: a claim is its attribute, entity,
   value and cause, with the versions that carry it. A cell the older
   release wrote through a cardinality-one replacement holds one claim,
@@ -333,35 +404,35 @@ happens to it.
   they stay inert until the upgrade runs again. When to run it, once
   or after every pull, is the embedder's decision.
 - Every attribute and concept identity changes: an attribute's
-  identity hashes the relations it ranks, its policy and its ranked
+  identity hashes the relations it ranks, its pick and its ranked
   values beside its domain, name and type, so two reads of one
-  relation under different policies are two attributes. The upgrade
+  relation under different picks are two attributes. The upgrade
   moves the `dialog.concept/transient` markers keyed by the older
   identities, for the concepts the branch's rules conclude.
   `dialog_query::migration` reproduces the older identities, for an
   application that keyed facts of its own by them.
 - Library YAML in the older spelling parses: `cardinality:` is read as
-  `select: all` for `many` and the default `last` for `one`, and a
-  `select:` beside it wins. tonk's standard libraries carry a seed
+  `pick: all` for `many` and the default `last` for `one`, and a
+  `pick:` beside it wins. tonk's standard libraries carry a seed
   version that is the hash of their text, so a worker on this release
   sees the mismatch on first start, retracts the installed library's
   facts by the provenance it recorded, and installs the new one.
 - The older release cannot read what this one writes. A rule written
   here may list relations or values under `the` or `as`, which the
-  older descriptor refuses, and carries `select`, which the older
+  older descriptor refuses, and carries `pick`, which the older
   descriptor ignores, reading a `max` as `last`. A batch of changes
-  serializes each assertion with its policy. Upgrade every replica of
+  serializes each assertion with its pick. Upgrade every replica of
   a repository together, or upgrade readers before writers: a replica
   on the older release pulls such a branch, but a read that meets a
   rule it cannot decode fails with the decoding error.
 - A descriptor's JSON no longer spells `cardinality`. It writes
-  `select` where the policy says more than the lists imply (a ranked
+  `pick` where the pick says more than the lists imply (a ranked
   `the` or `as` list reads as `top`, a plain attribute as `last`), so
   a plain `last` field carries neither key. A program that told a
-  one-valued field apart by `cardinality: one` reads `select` instead:
-  a field is one-valued unless it says `select: all`. tonk's template
+  one-valued field apart by `cardinality: one` reads `pick` instead:
+  a field is one-valued unless it says `pick: all`. tonk's template
   planner did this; a reader rebuilding a descriptor from stored facts
-  has to keep the policy and the ranked list beside the cardinality,
+  has to keep the pick and the ranked list beside the cardinality,
   or a `top` field comes back as `last`.
 - Programs the older release refused run. `unless` and optional
   premises inside a recursive component were an error

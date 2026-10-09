@@ -10,7 +10,7 @@ use std::str::FromStr as _;
 use anyhow::Result;
 use dialog_artifacts::tree::{ArtifactTree, ArtifactTreeExt as _, spill_cache};
 use dialog_artifacts::{
-    ArchiveDelta, Artifact, ArtifactSelector, ArtifactView, Attribute, Cause, Entity, Instruction,
+    ArchiveDelta, Artifact, ArtifactSelector, ArtifactView, Cause, Entity, Instruction, Relation,
     SortKey, Uri, Value, sort_key,
 };
 use dialog_search_tree::{Manifest, MemoryBlocks};
@@ -58,7 +58,7 @@ async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
     for (at, value) in probe_values().into_iter().enumerate() {
         instructions.push(Instruction::Assert(
             Artifact {
-                the: Attribute::from_str("hardening/value")?,
+                the: Relation::from_str("hardening/value")?,
                 of: entity(at as u32),
                 is: value,
                 cause: if at % 2 == 0 {
@@ -67,7 +67,7 @@ async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
                     None
                 },
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         ));
     }
     index
@@ -83,7 +83,7 @@ async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
         .scan(
             blocks.clone(),
             spill_cache(),
-            ArtifactSelector::new().the(Attribute::from_str("hardening/value")?),
+            ArtifactSelector::new().the(Relation::from_str("hardening/value")?),
         )
         .try_collect()
         .await?;
@@ -108,7 +108,7 @@ async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
 /// change it.
 #[tokio::test]
 async fn it_separates_sort_keys_by_value_identity() -> Result<()> {
-    let the = Attribute::from_str("hardening/value")?;
+    let the = Relation::from_str("hardening/value")?;
     let of = entity(1);
     let artifact = |is: Value| Artifact {
         the: the.clone(),
@@ -191,7 +191,7 @@ async fn it_memoizes_uri_parses_transparently() -> Result<()> {
 /// value layer, and this pins its semantics where they are owned.
 #[tokio::test]
 async fn it_elects_the_higher_cause_in_either_order() -> Result<()> {
-    let attr = Attribute::from_str("person/name").expect("valid attribute");
+    let attr = Relation::from_str("person/name").expect("valid attribute");
     let of = entity(1);
 
     let older = Artifact {
@@ -222,7 +222,7 @@ async fn it_elects_the_higher_cause_in_either_order() -> Result<()> {
 /// order-insensitive; and a caused row must beat an uncaused one.
 #[tokio::test]
 async fn it_breaks_election_ties_deterministically() -> Result<()> {
-    let attr = Attribute::from_str("person/name").expect("valid attribute");
+    let attr = Relation::from_str("person/name").expect("valid attribute");
     let of = entity(2);
 
     let a = Artifact {

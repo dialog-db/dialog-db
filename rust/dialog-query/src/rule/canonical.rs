@@ -41,7 +41,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::iter;
 
-use crate::attribute::Relation;
+use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::concept::query::ConceptQuery;
 use crate::error::TypeError;
@@ -129,8 +129,8 @@ pub(crate) fn canonicalize(
         .iter()
         .map(|(name, field)| {
             let key = match field.the() {
-                Relation::Attribute(_) => None,
-                Relation::Collection { .. } => Some(Relation::key_operand(name)),
+                The::Relation(_) => None,
+                The::Collection { .. } => Some(The::key_operand(name)),
             };
             (name.to_string(), key)
         })
@@ -404,7 +404,7 @@ fn names(classes: &[Vec<String>], rule: &Rule<'_>) -> Rename {
         .collect();
     for (field, key) in &rule.fields {
         if let Some(key) = key {
-            let canonical = Relation::key_operand(&names[field]);
+            let canonical = The::key_operand(&names[field]);
             names.insert(key.clone(), canonical);
         }
     }
@@ -482,7 +482,7 @@ fn unnamed(premise: &Premise) -> Result<Premise, TypeError> {
         for (index, (_, name, field)) in fields.iter().enumerate() {
             let key = format!("#{index}");
             moved.insert(name.to_string(), key.clone());
-            moved.insert(Relation::key_operand(name), Relation::key_operand(&key));
+            moved.insert(The::key_operand(name), The::key_operand(&key));
             renamed.push((key, (*field).clone()));
         }
         let mut terms = Parameters::new();
@@ -569,7 +569,7 @@ mod tests {
 
     /// A concept of one entity-valued field.
     fn head(field: &str, attribute: &str) -> Value {
-        json!({ "with": { field: { "the": attribute, "as": "Entity" } } })
+        json!({ "with": { field: { "the": attribute, "as": "entity:" } } })
     }
 
     /// `of knows is`, each a variable name.

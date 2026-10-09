@@ -1295,7 +1295,7 @@ mod tests {
         let _hash = feature
             .commit(stream::iter(vec![Instruction::Assert(
                 artifact,
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1340,7 +1340,7 @@ mod tests {
                         is: value.clone(),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 ),
                 Instruction::Assert(
                     Artifact {
@@ -1349,7 +1349,7 @@ mod tests {
                         is: value.clone(),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 ),
             ]))
             .perform(&operator)
@@ -1412,7 +1412,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1472,7 +1472,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1539,7 +1539,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1599,7 +1599,7 @@ mod tests {
                     is: Value::String("Existing".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1613,7 +1613,7 @@ mod tests {
                     is: Value::String("New".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1641,7 +1641,7 @@ mod tests {
                     is: Value::String("Main data".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1657,7 +1657,7 @@ mod tests {
                     is: Value::String("feature@example.com".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1734,7 +1734,7 @@ mod tests {
                     is: Value::String("Alice".into()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1782,7 +1782,7 @@ mod tests {
                         is: Value::String(value.into()),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 )]))
                 .perform(&operator)
                 .await?;

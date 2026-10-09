@@ -1,7 +1,7 @@
-//! Invariants the policy-write design claims, pinned as tests.
+//! Invariants the pick-write design claims, pinned as tests.
 //!
 //! Each test states a property `notes/attribute-heads.md` or the
-//! changelog asserts of a write under a choosing policy, and checks it
+//! changelog asserts of a write under a choosing pick, and checks it
 //! the way a caller would. A failing test here is a place where a
 //! transaction does not do what the design says.
 
@@ -11,9 +11,9 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::Branch;
 use crate::helpers::test_repo;
 use anyhow::Result;
-use dialog_artifacts::{Attribute, Entity, Policy, Value};
+use dialog_artifacts::{Entity, Pick, Relation as ArtifactsRelation, Value};
 use dialog_peer::helpers::test_session_with_peer;
-use dialog_query::attribute::The;
+use dialog_query::attribute::Relation;
 use dialog_query::query::Output as _;
 use dialog_query::rule::DeductiveRuleDescriptor;
 use dialog_query::types::Any;
@@ -26,25 +26,29 @@ use dialog_storage::provider::storage::VolatileSpace;
 type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
 
 /// A write of `org/salary` under `policy`.
-fn salary(of: &Entity, value: u32, policy: Policy) -> AttributeStatement {
+fn salary(of: &Entity, value: u32, policy: Pick) -> AttributeStatement {
     AttributeStatement {
-        the: The::from("org/salary".parse::<Attribute>().expect("an attribute")),
+        the: Relation::from(
+            "org/salary"
+                .parse::<ArtifactsRelation>()
+                .expect("an attribute"),
+        ),
         of: of.clone(),
         is: Value::UnsignedInt(value.into()),
         cause: None,
-        cardinality: Some(if policy == Policy::All {
+        cardinality: Some(if policy == Pick::All {
             Cardinality::Many
         } else {
             Cardinality::One
         }),
-        policy: Some(policy),
+        pick: Some(policy),
     }
 }
 
 /// `org/salary` of `of` read under `select`, sorted.
 fn salary_query(of: &Entity, select: &str) -> ConceptQuery {
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": select }
+        "salary": { "the": "org/salary", "as": "natural:", "pick": select }
     }}))
     .expect("a descriptor");
     let mut terms = Parameters::new();
@@ -81,11 +85,11 @@ async fn read_branch(
 fn salary_from_bonus() -> Result<DeductiveRule> {
     let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
         "deduce": { "with": {
-            "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+            "salary": { "the": "org/salary", "as": "natural:" }
         }},
         "when": [{
             "assert": { "with": {
-                "bonus": { "the": "org/bonus", "as": "UnsignedInteger" }
+                "bonus": { "the": "org/bonus", "as": "natural:" }
             }},
             "where": {
                 "this": { "?": { "name": "this" } },
@@ -115,7 +119,7 @@ async fn a_transaction_reads_what_its_commit_leaves_when_a_derived_input_follows
     branch
         .transaction()
         .assert(&salary_from_bonus()?)
-        .assert(salary(&alice, 100, Policy::All))
+        .assert(salary(&alice, 100, Pick::All))
         .commit()
         .publish()
         .perform(&operator)
@@ -124,7 +128,7 @@ async fn a_transaction_reads_what_its_commit_leaves_when_a_derived_input_follows
 
     let transaction = branch
         .transaction()
-        .assert(salary(&alice, 200, Policy::Last))
+        .assert(salary(&alice, 200, Pick::Last))
         .assert(dialog_query::the!("org/bonus").of(alice.clone()).is(500u32));
     let read_all = salaries(
         transaction
@@ -176,7 +180,7 @@ async fn a_last_write_of_a_value_the_cell_holds_reads_back_as_the_newest() -> Re
     for value in [100u32, 200] {
         branch
             .transaction()
-            .assert(salary(&alice, value, Policy::All))
+            .assert(salary(&alice, value, Pick::All))
             .commit()
             .publish()
             .perform(&operator)
@@ -189,7 +193,7 @@ async fn a_last_write_of_a_value_the_cell_holds_reads_back_as_the_newest() -> Re
 
     branch
         .transaction()
-        .assert(salary(&alice, 100, Policy::Last))
+        .assert(salary(&alice, 100, Pick::Last))
         .commit()
         .publish()
         .perform(&operator)
@@ -214,16 +218,14 @@ async fn a_transaction_reads_back_its_own_last_write_of_a_held_value() -> Result
     for value in [100u32, 200] {
         branch
             .transaction()
-            .assert(salary(&alice, value, Policy::All))
+            .assert(salary(&alice, value, Pick::All))
             .commit()
             .publish()
             .perform(&operator)
             .await?;
     }
     let branch = repo.branch("main").open().perform(&operator).await?;
-    let transaction = branch
-        .transaction()
-        .assert(salary(&alice, 100, Policy::Last));
+    let transaction = branch.transaction().assert(salary(&alice, 100, Pick::Last));
     let read = salaries(
         transaction
             .query()
@@ -253,7 +255,7 @@ async fn an_integrated_batch_lands_as_the_same_writes_asserted_in_order() -> Res
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let alice: Entity = "id:alice".parse()?;
-    let the: Attribute = "org/salary".parse()?;
+    let the: ArtifactsRelation = "org/salary".parse()?;
     let mut lines = Vec::new();
     for by_batch in [false, true] {
         let branch = repo
@@ -263,7 +265,7 @@ async fn an_integrated_batch_lands_as_the_same_writes_asserted_in_order() -> Res
             .await?;
         branch
             .transaction()
-            .assert(salary(&alice, 100, Policy::All))
+            .assert(salary(&alice, 100, Pick::All))
             .commit()
             .publish()
             .perform(&operator)
@@ -279,27 +281,27 @@ async fn an_integrated_batch_lands_as_the_same_writes_asserted_in_order() -> Res
                 the.clone(),
                 alice.clone(),
                 Value::UnsignedInt(200),
-                Policy::Last,
+                Pick::Last,
             );
             changes.associate(
                 the.clone(),
                 alice.clone(),
                 Value::UnsignedInt(300),
-                Policy::All,
+                Pick::All,
             );
             changes.associate(
                 the.clone(),
                 alice.clone(),
                 Value::UnsignedInt(400),
-                Policy::Last,
+                Pick::Last,
             );
             branch.transaction().integrate(changes)
         } else {
             branch
                 .transaction()
-                .assert(salary(&alice, 200, Policy::Last))
-                .assert(salary(&alice, 300, Policy::All))
-                .assert(salary(&alice, 400, Policy::Last))
+                .assert(salary(&alice, 200, Pick::Last))
+                .assert(salary(&alice, 300, Pick::All))
+                .assert(salary(&alice, 400, Pick::Last))
         };
         transaction.commit().publish().perform(&operator).await?;
         let branch = repo
@@ -322,18 +324,18 @@ async fn an_integrated_batch_lands_as_the_same_writes_asserted_in_order() -> Res
 }
 
 /// A write of `the` under `policy`.
-fn write(the: &str, of: &Entity, value: u32, policy: Policy) -> AttributeStatement {
+fn write(the: &str, of: &Entity, value: u32, policy: Pick) -> AttributeStatement {
     AttributeStatement {
-        the: The::from(the.parse::<Attribute>().expect("an attribute")),
+        the: Relation::from(the.parse::<ArtifactsRelation>().expect("an attribute")),
         of: of.clone(),
         is: Value::UnsignedInt(value.into()),
         cause: None,
-        cardinality: Some(if policy == Policy::All {
+        cardinality: Some(if policy == Pick::All {
             Cardinality::Many
         } else {
             Cardinality::One
         }),
-        policy: Some(policy),
+        pick: Some(policy),
     }
 }
 
@@ -355,15 +357,13 @@ async fn a_transaction_reads_a_last_write_as_succeeding_the_stored_claim_under_a
     branch
         .transaction()
         .assert(&salary_from_bonus()?)
-        .assert(salary(&alice, 100, Policy::All))
+        .assert(salary(&alice, 100, Pick::All))
         .commit()
         .publish()
         .perform(&operator)
         .await?;
     let branch = repo.branch("main").open().perform(&operator).await?;
-    let transaction = branch
-        .transaction()
-        .assert(salary(&alice, 200, Policy::Last));
+    let transaction = branch.transaction().assert(salary(&alice, 200, Pick::Last));
     let read = salaries(
         transaction
             .query()
@@ -399,8 +399,8 @@ async fn a_write_succeeds_what_a_reader_after_the_earlier_writes_observes() -> R
     branch
         .transaction()
         .assert(&salary_from_bonus()?)
-        .assert(write("org/bonus", &alice, 900, Policy::Last))
-        .assert(salary(&alice, 100, Policy::All))
+        .assert(write("org/bonus", &alice, 900, Pick::Last))
+        .assert(salary(&alice, 100, Pick::All))
         .commit()
         .publish()
         .perform(&operator)
@@ -408,8 +408,8 @@ async fn a_write_succeeds_what_a_reader_after_the_earlier_writes_observes() -> R
     let branch = repo.branch("main").open().perform(&operator).await?;
     branch
         .transaction()
-        .assert(write("org/bonus", &alice, 50, Policy::Last))
-        .assert(salary(&alice, 120, Policy::Max))
+        .assert(write("org/bonus", &alice, 50, Pick::Last))
+        .assert(salary(&alice, 120, Pick::Max))
         .commit()
         .publish()
         .perform(&operator)
@@ -438,14 +438,14 @@ async fn a_transaction_that_retracts_an_overlay_row_reads_what_its_commit_leaves
     let alice: Entity = "id:alice".parse()?;
     branch
         .transaction()
-        .assert(salary(&alice, 300, Policy::Last))
+        .assert(salary(&alice, 300, Pick::Last))
         .commit()
         .publish()
         .perform(&operator)
         .await?;
     let overlay_row = AttributeStatement {
-        policy: None,
-        ..salary(&alice, 500, Policy::All)
+        pick: None,
+        ..salary(&alice, 500, Pick::All)
     };
     branch.overlay().assert(overlay_row.clone())?;
     assert_eq!(
@@ -457,7 +457,7 @@ async fn a_transaction_that_retracts_an_overlay_row_reads_what_its_commit_leaves
         branch
             .transaction()
             .retract(overlay_row)
-            .assert(salary(&alice, 400, Policy::Last));
+            .assert(salary(&alice, 400, Pick::Last));
     let read = salaries(
         transaction
             .query()
@@ -514,9 +514,9 @@ async fn a_last_write_succeeds_the_claim_a_last_read_returns_among_equals() -> R
         let branch = repo.branch(&name).open().perform(&operator).await?;
         branch
             .transaction()
-            .assert(salary(&alice, first, Policy::All))
-            .assert(salary(&alice, second, Policy::All))
-            .assert(salary(&alice, 1, Policy::Last))
+            .assert(salary(&alice, first, Pick::All))
+            .assert(salary(&alice, second, Pick::All))
+            .assert(salary(&alice, 1, Pick::Last))
             .commit()
             .publish()
             .perform(&operator)
@@ -540,7 +540,7 @@ async fn a_last_write_succeeds_the_claim_a_last_read_returns_among_equals() -> R
 /// of 100 succeeds 200 and leaves 100 alone in the cell. The write
 /// finds 100 already held and writes nothing, so 200 stays and `max`
 /// keeps reading it: the held-value shortcut runs before the election,
-/// whatever the policy.
+/// whatever the pick.
 #[dialog_common::test]
 async fn a_max_write_of_a_held_value_succeeds_the_claim_a_max_read_returns() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -549,8 +549,8 @@ async fn a_max_write_of_a_held_value_succeeds_the_claim_a_max_read_returns() -> 
     let alice: Entity = "id:alice".parse()?;
     branch
         .transaction()
-        .assert(salary(&alice, 100, Policy::All))
-        .assert(salary(&alice, 200, Policy::All))
+        .assert(salary(&alice, 100, Pick::All))
+        .assert(salary(&alice, 200, Pick::All))
         .commit()
         .publish()
         .perform(&operator)
@@ -561,7 +561,7 @@ async fn a_max_write_of_a_held_value_succeeds_the_claim_a_max_read_returns() -> 
     );
     branch
         .transaction()
-        .assert(salary(&alice, 100, Policy::Max))
+        .assert(salary(&alice, 100, Pick::Max))
         .commit()
         .publish()
         .perform(&operator)
@@ -588,7 +588,7 @@ async fn an_overlay_row_stands_above_its_own_lines_commits_in_a_join() -> Result
     let alice: Entity = "id:alice".parse()?;
     let a = repo.branch("a").open().perform(&operator).await?;
     a.transaction()
-        .assert(salary(&alice, 1, Policy::All))
+        .assert(salary(&alice, 1, Pick::All))
         .commit()
         .publish()
         .perform(&operator)
@@ -596,14 +596,14 @@ async fn an_overlay_row_stands_above_its_own_lines_commits_in_a_join() -> Result
     let b = repo.branch("b").open().perform(&operator).await?;
     for value in 290..300u32 {
         b.transaction()
-            .assert(write("org/other", &alice, value, Policy::All))
+            .assert(write("org/other", &alice, value, Pick::All))
             .commit()
             .publish()
             .perform(&operator)
             .await?;
     }
     b.transaction()
-        .assert(salary(&alice, 300, Policy::All))
+        .assert(salary(&alice, 300, Pick::All))
         .commit()
         .publish()
         .perform(&operator)
@@ -611,8 +611,8 @@ async fn an_overlay_row_stands_above_its_own_lines_commits_in_a_join() -> Result
     let a = repo.branch("a").open().perform(&operator).await?;
     let b = repo.branch("b").open().perform(&operator).await?;
     b.overlay().assert(AttributeStatement {
-        policy: None,
-        ..salary(&alice, 500, Policy::All)
+        pick: None,
+        ..salary(&alice, 500, Pick::All)
     })?;
     assert_eq!(
         read_branch(&b, &operator, &alice, "last").await?,
@@ -652,7 +652,7 @@ async fn concurrent_last_writes_settle_by_commit_across_every_cell() -> Result<(
         .collect::<Result<_, _>>()?;
     let mut base = a.transaction();
     for person in &people {
-        base = base.assert(salary(person, 1, Policy::Last));
+        base = base.assert(salary(person, 1, Pick::Last));
     }
     base.commit().publish().perform(&operator).await?;
     b.pull().from(&a).perform(&operator).await?;
@@ -667,8 +667,8 @@ async fn concurrent_last_writes_settle_by_commit_across_every_cell() -> Result<(
         } else {
             (200, 100)
         };
-        ours = ours.assert(salary(person, mine + index as u32, Policy::Last));
-        theirs = theirs.assert(salary(person, other + index as u32, Policy::Last));
+        ours = ours.assert(salary(person, mine + index as u32, Pick::Last));
+        theirs = theirs.assert(salary(person, other + index as u32, Pick::Last));
     }
     ours.commit().publish().perform(&operator).await?;
     theirs.commit().publish().perform(&operator).await?;
@@ -733,16 +733,16 @@ async fn a_value_written_back_after_its_succession_reads_as_the_commit_leaves_it
     let alice: Entity = "id:alice".parse()?;
     branch
         .transaction()
-        .assert(salary(&alice, 3, Policy::All))
-        .assert(salary(&alice, 5, Policy::All))
+        .assert(salary(&alice, 3, Pick::All))
+        .assert(salary(&alice, 5, Pick::All))
         .commit()
         .publish()
         .perform(&operator)
         .await?;
     let transaction = branch
         .transaction()
-        .assert(salary(&alice, 4, Policy::Max))
-        .assert(salary(&alice, 5, Policy::All));
+        .assert(salary(&alice, 4, Pick::Max))
+        .assert(salary(&alice, 5, Pick::All));
     let (read, committed) =
         read_through_commit(&branch, transaction, &operator, &alice, "last").await?;
     assert_eq!(
@@ -768,13 +768,13 @@ async fn an_all_write_of_a_held_value_reads_as_the_commit_leaves_it() -> Result<
     for value in [2, 5] {
         branch
             .transaction()
-            .assert(salary(&alice, value, Policy::All))
+            .assert(salary(&alice, value, Pick::All))
             .commit()
             .publish()
             .perform(&operator)
             .await?;
     }
-    let transaction = branch.transaction().assert(salary(&alice, 2, Policy::All));
+    let transaction = branch.transaction().assert(salary(&alice, 2, Pick::All));
     let (read, committed) =
         read_through_commit(&branch, transaction, &operator, &alice, "last").await?;
     assert_eq!(
@@ -801,13 +801,13 @@ async fn a_held_value_a_write_refreshes_reads_as_the_commit_leaves_it() -> Resul
     for value in [6, 1, 2] {
         branch
             .transaction()
-            .assert(salary(&alice, value, Policy::All))
+            .assert(salary(&alice, value, Pick::All))
             .commit()
             .publish()
             .perform(&operator)
             .await?;
     }
-    let transaction = branch.transaction().assert(salary(&alice, 6, Policy::Min));
+    let transaction = branch.transaction().assert(salary(&alice, 6, Pick::Min));
     let (read, committed) =
         read_through_commit(&branch, transaction, &operator, &alice, "last").await?;
     assert_eq!(

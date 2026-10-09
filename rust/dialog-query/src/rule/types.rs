@@ -414,7 +414,7 @@ mod tests {
 
     use super::*;
     use crate::artifact::{Entity, Type as ValueType};
-    use crate::attribute::The;
+    use crate::attribute::Relation;
     use crate::attribute::query::AttributeQuery;
     use crate::error::TypeError;
     use crate::formula::Formula;
@@ -432,7 +432,7 @@ mod tests {
     /// Helper: an optional (set-widening) binding for `?name`, a
     /// `OptionalAttributeQuery` left-join whose schema admits `Nothing` for the
     /// value slot.
-    fn optional_name_premise(the: Term<The>) -> Premise {
+    fn optional_name_premise(the: Term<Relation>) -> Premise {
         OptionalAttributeQuery::new(
             the,
             Term::<Entity>::var("this"),

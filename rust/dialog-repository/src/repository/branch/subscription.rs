@@ -1111,8 +1111,8 @@ mod tests {
 
     use crate::RemoteSite;
     use crate::helpers::test_repo;
-    use dialog_artifacts::{Attribute as ArtifactsAttribute, NameShape, Symbol};
     use dialog_artifacts::{Entity, Value};
+    use dialog_artifacts::{NameShape, Relation as ArtifactsRelation, Symbol};
     use dialog_capability::{Fork, Provider};
     use dialog_common::{ConditionalSend, ConditionalSync};
     use dialog_effects::archive::{Get, Put};
@@ -1120,8 +1120,8 @@ mod tests {
     use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
     use dialog_peer::helpers::test_session_with_peer;
-    use dialog_query::attribute::The;
-    use dialog_query::attribute::{AttributeDescriptor, Keyed, Relation};
+    use dialog_query::attribute::Relation;
+    use dialog_query::attribute::{AttributeDescriptor, Keyed, The};
     use dialog_query::concept::descriptor::ConceptFieldDescriptor;
     use dialog_query::type_system::Type as Kind;
     use dialog_query::types::{Any, Type as ValueType};
@@ -1242,7 +1242,7 @@ mod tests {
     /// A standing query over every `person/name` fact.
     fn names_query() -> AttributeQuery {
         AttributeQuery::from(
-            Term::<The>::from(the!("person/name"))
+            Term::<Relation>::from(the!("person/name"))
                 .of(Term::<Entity>::var("e"))
                 .is(Term::<String>::var("v")),
         )
@@ -1258,7 +1258,7 @@ mod tests {
             .with_name_shape(shape)
             .expect("shapes compose with prefixes");
         AttributeQuery::from(
-            Term::<The>::var("a")
+            Term::<Relation>::var("a")
                 .with_kind(kind)
                 .of(Term::<Entity>::var("e"))
                 .is(Term::<String>::var("v")),
@@ -1736,7 +1736,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -1789,7 +1789,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -1802,7 +1802,7 @@ mod tests {
         subscription.poll(&operator).await?.expect("initial");
 
         // A second ordered member, appended after the first.
-        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(second.of(list.clone()).is("Bread".to_string()))
@@ -1836,7 +1836,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -1878,7 +1878,7 @@ mod tests {
 
     /// A concept whose field is a keyed collection: one field, many
     /// facts, one per ordered member. This is the end-to-end shape —
-    /// the descriptor holds a `Relation::Collection`, its `term()`
+    /// the descriptor holds a `The::Collection`, its `term()`
     /// lowers to a domain scan refined by name shape, and the query
     /// comes back with one conclusion per member, each carrying the
     /// entry as `(key, value)`: the wire form `member: {?key: ?member}`.
@@ -1913,7 +1913,7 @@ mod tests {
         ConceptDescriptor::try_from(vec![(
             "member".to_owned(),
             ConceptFieldDescriptor::required(AttributeDescriptor::over(
-                Relation::collection(
+                The::collection(
                     Symbol::from_str("todo.list").expect("a valid domain"),
                     Keyed::Sequence,
                 ),
@@ -1935,8 +1935,8 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
-        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             // A named field in the same domain: the dictionary half,
@@ -1983,7 +1983,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -1998,7 +1998,7 @@ mod tests {
         let baseline = subscription.recomputes();
 
         // Appending a member is inside the cover: it must arrive.
-        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(second.of(list.clone()).is("Bread".to_string()))
@@ -2049,8 +2049,8 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
-        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -2094,8 +2094,8 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
-        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(first.of(list.clone()).is("Milk".to_string()))
@@ -2135,7 +2135,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let member = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let member = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(
@@ -2157,7 +2157,7 @@ mod tests {
         let fields = ConceptDescriptor::try_from(vec![(
             "field".to_owned(),
             ConceptFieldDescriptor::required(AttributeDescriptor::over(
-                Relation::collection(
+                The::collection(
                     Symbol::from_str("todo.list").expect("a valid domain"),
                     Keyed::Dictionary,
                 ),
@@ -2210,7 +2210,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let list = Entity::new()?;
-        let member = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let member = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(
@@ -2226,7 +2226,7 @@ mod tests {
 
         let collection = |keyed: Keyed, description: &str| {
             ConceptFieldDescriptor::required(AttributeDescriptor::over(
-                Relation::collection(
+                The::collection(
                     Symbol::from_str("todo.list").expect("a valid domain"),
                     keyed,
                 ),
@@ -2957,7 +2957,7 @@ mod tests {
     fn handle_query() -> ConceptQuery {
         concept_query(
             serde_json::json!({ "with": {
-                "handle": { "the": ["comm/email", "comm/phone"], "as": "Text" }
+                "handle": { "the": ["comm/email", "comm/phone"], "as": "text:" }
             }}),
             &["handle"],
         )
@@ -3297,7 +3297,7 @@ mod tests {
     /// The relation `dept_salary_rule` derives into, read as the set.
     fn dept_salary() -> ConceptDescriptor {
         serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "payroll/salary", "as": "UnsignedInteger", "select": "all" }
+            "salary": { "the": "payroll/salary", "as": "natural:", "pick": "all" }
         }}))
         .expect("descriptor parses")
     }
@@ -3306,7 +3306,7 @@ mod tests {
     fn dept_top() -> ConceptQuery {
         concept_query(
             serde_json::json!({ "with": {
-                "top": { "the": "payroll/salary", "as": "UnsignedInteger", "select": "max" }
+                "top": { "the": "payroll/salary", "as": "natural:", "pick": "max" }
             }}),
             &["top"],
         )
@@ -3593,17 +3593,17 @@ mod tests {
         // payroll/member(dept) := employee, for every employee;
         // payroll/bonus(dept) := bonus, for every employee with one.
         let staffed: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "dept": { "the": "staff/dept", "as": "Entity" }
+            "dept": { "the": "staff/dept", "as": "entity:" }
         }}))?;
         let bonused: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "dept": { "the": "staff/dept", "as": "Entity" },
-            "bonus": { "the": "staff/bonus", "as": "UnsignedInteger" }
+            "dept": { "the": "staff/dept", "as": "entity:" },
+            "bonus": { "the": "staff/bonus", "as": "natural:" }
         }}))?;
         let members: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "member": { "the": "payroll/member", "as": "Entity", "select": "all" }
+            "member": { "the": "payroll/member", "as": "entity:", "pick": "all" }
         }}))?;
         let bonuses: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "bonus": { "the": "payroll/bonus", "as": "UnsignedInteger", "select": "all" }
+            "bonus": { "the": "payroll/bonus", "as": "natural:", "pick": "all" }
         }}))?;
         let member_rule = concept_rule(
             &members,
@@ -3629,9 +3629,9 @@ mod tests {
 
         let stats = concept_query(
             serde_json::json!({ "with": {
-                "member": { "the": "payroll/member", "as": "Entity", "select": "all" },
+                "member": { "the": "payroll/member", "as": "entity:", "pick": "all" },
                 "top": {
-                    "the": "payroll/bonus", "as": "UnsignedInteger", "select": "max",
+                    "the": "payroll/bonus", "as": "natural:", "pick": "max",
                     "optional": true
                 }
             }}),
@@ -4037,7 +4037,7 @@ mod tests {
                 "person/name".parse().expect("attribute"),
                 here.clone(),
                 Value::String(value.into()),
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             );
             changes
         };
@@ -4295,7 +4295,7 @@ mod tests {
                 "sync/status".parse()?,
                 here.clone(),
                 Value::String(status.into()),
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             );
             branch.overlay().assert(changes)?;
             let site = Entity::new()?;
@@ -4375,7 +4375,7 @@ mod tests {
                 "person/name".parse().expect("attribute"),
                 of.clone(),
                 Value::String(is.into()),
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             );
             changes
         };
@@ -4433,7 +4433,7 @@ mod tests {
     /// left as variables: the shape a UI subscribes with.
     fn people_query() -> ConceptQuery {
         serde_json::from_value(serde_json::json!({
-            "assert": { "with": { "name": { "the": "person/name", "as": "Text" } } },
+            "assert": { "with": { "name": { "the": "person/name", "as": "text:" } } },
             "where": {
                 "this": {"?": {"name": "this"}},
                 "name": {"?": {"name": "name"}}

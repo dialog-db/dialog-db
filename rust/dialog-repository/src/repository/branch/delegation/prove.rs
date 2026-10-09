@@ -1013,18 +1013,18 @@ mod tests {
         audience: &Did,
         subject: &Did,
     ) -> Result<()> {
-        use dialog_artifacts::{Attribute, Instruction};
+        use dialog_artifacts::{Instruction, Relation};
         use futures_util::stream;
 
         let fact = |attribute: &str, value: &str| -> Result<Instruction> {
             Ok(Instruction::Assert(
                 Artifact {
-                    the: Attribute::try_from(attribute.to_string())?,
+                    the: Relation::try_from(attribute.to_string())?,
                     of: entity.clone(),
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             ))
         };
         let command = Command(vec!["storage".to_string()]).to_string();

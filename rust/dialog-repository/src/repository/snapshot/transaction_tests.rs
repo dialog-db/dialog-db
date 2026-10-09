@@ -14,7 +14,7 @@ use dialog_effects::authority::Identify;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_peer::helpers::test_session_with_peer;
-use dialog_query::attribute::The;
+use dialog_query::attribute::Relation;
 use dialog_query::query::Output;
 use dialog_query::{Query, Term, the};
 use dialog_storage::provider::storage::VolatileSpace;
@@ -105,7 +105,7 @@ where
 {
     let mut rows: Vec<String> = layer
         .select(dialog_query::AttributeQuery::from(
-            Term::<The>::from(the!("user/name"))
+            Term::<Relation>::from(the!("user/name"))
                 .of(Term::<Entity>::var("e"))
                 .is(Term::<String>::var("v")),
         ))
@@ -476,7 +476,7 @@ async fn it_surfaces_pending_changes_in_the_transaction_query() -> Result<()> {
         let mut rows: Vec<String> = transaction
             .query()
             .select(dialog_query::AttributeQuery::from(
-                Term::<The>::from(the!("user/name"))
+                Term::<Relation>::from(the!("user/name"))
                     .of(Term::<Entity>::var("e"))
                     .is(Term::<String>::var("v")),
             ))
@@ -550,7 +550,7 @@ async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
     let result = snapshot
         .transaction()
         .integrate(
-            [Instruction::Assert(forged, dialog_artifacts::Policy::All)]
+            [Instruction::Assert(forged, dialog_artifacts::Pick::All)]
                 .into_iter()
                 .collect(),
         )
@@ -561,7 +561,7 @@ async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
         matches!(
             result,
             Err(CommitError::Artifact(
-                dialog_artifacts::DialogArtifactsError::ReservedAttribute(_)
+                dialog_artifacts::DialogArtifactsError::ReservedRelation(_)
             ))
         ),
         "writes to the reserved namespace must be refused: {result:?}"
@@ -612,18 +612,18 @@ async fn it_induces_on_commit() -> Result<()> {
     let increment: InductiveRule = serde_json::from_value(serde_json::json!({
         "description": "Increment a counter on an increment command",
         "assert!": {
-            "with": { "count": { "the": "counter/count", "as": "UnsignedInteger" } }
+            "with": { "count": { "the": "counter/count", "as": "natural:" } }
         },
         "when": [
             {
                 "assert": {
-                    "with": { "counter": { "the": "cmd.increment/counter", "as": "Entity" } }
+                    "with": { "counter": { "the": "cmd.increment/counter", "as": "entity:" } }
                 },
                 "where": { "counter": { "?": { "name": "this" } } }
             },
             {
                 "assert": {
-                    "with": { "count": { "the": "counter/count", "as": "UnsignedInteger" } }
+                    "with": { "count": { "the": "counter/count", "as": "natural:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -716,9 +716,9 @@ async fn it_resolves_rules_pending_in_the_transaction() -> Result<()> {
     let (operator, _, _, _, snapshot) = staged().await?;
     let rule = {
         let json = serde_json::json!({
-            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                "assert": { "with": { "name": { "the": "org/person-name", "as": "text:" } } },
                 "where": {
                     "this": { "?": { "name": "this" } },
                     "name": { "?": { "name": "name" } }
@@ -847,7 +847,7 @@ async fn it_commits_through_a_cold_handle() -> Result<()> {
         .integrate(
             [Instruction::Assert(
                 fact("user:bob", "Bob"),
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]
             .into_iter()
             .collect(),

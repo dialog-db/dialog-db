@@ -1,9 +1,9 @@
-//! Policy of a claim under a choosing policy, settled at commit and
+//! Succession of a claim under a choosing pick, settled at commit and
 //! in a transaction's own reads.
 //!
 //! A write through an attribute read under `last`, `max`, `min` or
 //! `top` succeeds the claim the attribute stands for: the candidate a
-//! read under the policy would return, over what the write observed.
+//! read under the pick would return, over what the write observed.
 //! That is a transactional guarantee: a write observes the line and
 //! the writes before it in its own transaction, in order, and succeeds
 //! whatever a reader at that point would have observed. A write under
@@ -11,7 +11,7 @@
 //! observes the round view it fired on.
 //!
 //! What a read returns depends on the line and on the rules deriving
-//! the relation, so the statement records a [`Policy`] and the
+//! the relation, so the statement records a [`Pick`] and the
 //! settlement runs here, over the transaction's ordered log: each write
 //! is replayed in order over the claims the line holds for its cell;
 //! a succession elects among the live claims and the candidates rules
@@ -22,7 +22,7 @@
 //! nothing. At commit, a cell no rule derives is left to the tree,
 //! which elects among the cell's stored claims in the descent that
 //! writes the value ([`dialog_artifacts::Instruction::Assert`] under a
-//! choosing [`Policy`]); the
+//! choosing [`Pick`]); the
 //! settlement here is for the cells rules derive, whose candidates the
 //! tree cannot see, and for a transaction's own reads. What a cell's
 //! writes settle to is squashed as one commit's
@@ -40,7 +40,8 @@ use crate::rules::derives_attr;
 use crate::{CommitError, Staged};
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Cause, Change, Changes, Entity, Policy, Select, Value,
+    Artifact, ArtifactSelector, Cause, Change, Changes, Entity, Pick,
+    Relation as ArtifactsRelation, Select, Value,
 };
 use dialog_capability::Provider;
 use dialog_query::attribute::{AttributeDescriptor, Relation, The};
@@ -59,8 +60,8 @@ use std::fmt::Display;
 use std::sync::Arc;
 
 /// Settle a transaction's writes for its commit against `sources`,
-/// read with `overlay`. A write under a choosing policy succeeds the
-/// claim the policy elects. Where no rule is involved and the session
+/// read with `overlay`. A write under a choosing pick succeeds the
+/// claim the pick elects. Where no rule is involved and the session
 /// overlay holds none of the cells, the tree sees every candidate: the
 /// batch passes through as written, and the tree elects in the descent
 /// that lands each write, in the order every election shares. Otherwise
@@ -89,7 +90,7 @@ pub(crate) async fn settle(
     // through the writes before each succession), or the session
     // overlay holds the cell.
     if !staged.holds_rules() {
-        let mut relations: Vec<&Attribute> = Vec::new();
+        let mut relations: Vec<&ArtifactsRelation> = Vec::new();
         let mut unseen = false;
         for (the, of, change) in staged.log() {
             if !change.elects() {
@@ -135,7 +136,7 @@ pub(crate) async fn settle(
 
 /// A transaction's writes settled in the order it made them, as far as
 /// [`upto`](Self::upto): what the commit applies, and what a read of
-/// the transaction sees. Each write under a choosing policy elects
+/// the transaction sees. Each write under a choosing pick elects
 /// among the cell's claims as the line and the writes before it leave
 /// them, and among the candidates rules derive through the line and
 /// the writes before it, already settled. A write under `all` and a
@@ -148,9 +149,9 @@ pub(crate) struct ReadSettlement {
     edition: Edition,
     /// How many of the log's writes are settled.
     upto: usize,
-    /// Each cell some write under a choosing policy wrote, with its
+    /// Each cell some write under a choosing pick wrote, with its
     /// claims and what its writes settled to.
-    cells: HashMap<(Attribute, Entity), Cell>,
+    cells: HashMap<(ArtifactsRelation, Entity), Cell>,
     /// The settled writes, as the view later writes read the derived
     /// candidates through.
     prefix: Staged,
@@ -240,7 +241,7 @@ impl ReadSettlement {
     /// wrote, which reads as written.
     pub(crate) fn settlement_of(
         &self,
-        key: &(Attribute, Entity),
+        key: &(ArtifactsRelation, Entity),
         layer: &Staged,
     ) -> Option<CellSettlement> {
         let cell = self.cells.get(key)?;
@@ -323,7 +324,7 @@ struct Candidate {
 }
 
 /// Whether some line's session overlay holds a fact of the cell.
-fn overlay_holds(sources: &[Source], the: &Attribute, of: &Entity) -> bool {
+fn overlay_holds(sources: &[Source], the: &ArtifactsRelation, of: &Entity) -> bool {
     let selector = ArtifactSelector::new().the(the.clone()).of(of.clone());
     sources
         .iter()
@@ -334,10 +335,10 @@ fn overlay_holds(sources: &[Source], the: &Attribute, of: &Entity) -> bool {
 /// write can succeed, and the session overlay's rows, which it cannot.
 async fn claims_of(
     view: &QueryEnv<'_>,
-    the: &Attribute,
+    the: &ArtifactsRelation,
     of: &Entity,
 ) -> Result<Vec<Candidate>, CommitError> {
-    let failed = |error: &dyn Display| CommitError::Policy(error.to_string());
+    let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
     let selector = ArtifactSelector::new().the(the.clone()).of(of.clone());
     let rows = Provider::<Select<'_>>::execute(view, selector)
         .await
@@ -365,7 +366,7 @@ async fn claims_of(
 #[cfg(test)]
 pub(crate) async fn stored_claims(
     view: &QueryEnv<'_>,
-    the: &Attribute,
+    the: &ArtifactsRelation,
     of: &Entity,
 ) -> Result<Vec<(Value, Standing)>, CommitError> {
     Ok(claims_of(view, the, of)
@@ -378,9 +379,9 @@ pub(crate) async fn stored_claims(
 
 /// The attribute concept over `the`, under which the rules deriving the
 /// relation are found.
-fn relation_predicate(the: &Attribute) -> ConceptDescriptor {
+fn relation_predicate(the: &ArtifactsRelation) -> ConceptDescriptor {
     let attribute = AttributeDescriptor::over(
-        Relation::Attribute(The::from(the.clone())),
+        The::Relation(Relation::from(the.clone())),
         "",
         Cardinality::Many,
         None,
@@ -395,16 +396,20 @@ fn relation_predicate(the: &Attribute) -> ConceptDescriptor {
 #[derive(Clone, Default)]
 struct Derives {
     /// Whether the line's rules derive the relation, by attribute.
-    line: HashMap<Attribute, bool>,
+    line: HashMap<ArtifactsRelation, bool>,
     /// The `on:` entities of the rules the prefix installed.
     staged: HashSet<Entity>,
     /// The trigger entities each relation probes, by attribute.
-    probes: HashMap<Attribute, Vec<Entity>>,
+    probes: HashMap<ArtifactsRelation, Vec<Entity>>,
 }
 
 impl Derives {
     /// Whether some rule derives `the` at this point of the settlement.
-    async fn at(&mut self, line: &QueryEnv<'_>, the: &Attribute) -> Result<bool, CommitError> {
+    async fn at(
+        &mut self,
+        line: &QueryEnv<'_>,
+        the: &ArtifactsRelation,
+    ) -> Result<bool, CommitError> {
         let known = match self.line.get(the) {
             Some(known) => *known,
             None => {
@@ -422,13 +427,13 @@ impl Derives {
         let probes = self
             .probes
             .entry(the.clone())
-            .or_insert_with(|| Reach::of(&Relation::Attribute(The::from(the.clone()))).probes());
+            .or_insert_with(|| Reach::of(&The::Relation(Relation::from(the.clone()))).probes());
         Ok(probes.iter().any(|probe| self.staged.contains(probe)))
     }
 
     /// Note a write the prefix gained: a `derives` fact names a
     /// relation a rule the prefix installs derives.
-    fn gained(&mut self, the: &Attribute, change: &Change) {
+    fn gained(&mut self, the: &ArtifactsRelation, change: &Change) {
         if *the == derives_attr()
             && let Change::Assert(Value::Entity(on), _) = change
         {
@@ -440,10 +445,10 @@ impl Derives {
 /// Whether some rule `view` knows derives the relation `the` names:
 /// read from the rule index alone, without assembling the relation's
 /// bundle.
-async fn rules_derive(view: &QueryEnv<'_>, the: &Attribute) -> Result<bool, CommitError> {
+async fn rules_derive(view: &QueryEnv<'_>, the: &ArtifactsRelation) -> Result<bool, CommitError> {
     view.rules_derive(the)
         .await
-        .map_err(|error| CommitError::Policy(error.to_string()))
+        .map_err(|error| CommitError::Succession(error.to_string()))
 }
 
 /// Every candidate a read of the relation sees for the entity through
@@ -452,10 +457,10 @@ async fn rules_derive(view: &QueryEnv<'_>, the: &Attribute) -> Result<bool, Comm
 /// offers beyond the claims.
 async fn derived_candidates(
     view: &QueryEnv<'_>,
-    the: &Attribute,
+    the: &ArtifactsRelation,
     of: &Entity,
 ) -> Result<Vec<Candidate>, CommitError> {
-    let failed = |error: &dyn Display| CommitError::Policy(error.to_string());
+    let failed = |error: &dyn Display| CommitError::Succession(error.to_string());
     let predicate = relation_predicate(the);
     let rules = Provider::<SelectRules>::execute(view, predicate.clone())
         .await
@@ -548,7 +553,7 @@ impl Cell {
 
     /// Replay one write: an assertion under `all` adds a claim, standing
     /// at the commit's edition, as every write of the transaction does;
-    /// a retraction removes one; an assertion under a choosing policy
+    /// a retraction removes one; an assertion under a choosing pick
     /// elects among the live claims and the derived candidates that are
     /// not claims, retracts the elected claim when it is one and adds
     /// its value, or adds nothing when the cell holds the value already.
@@ -572,7 +577,7 @@ impl Cell {
             claim: true,
         };
         Ok(match change {
-            Change::Assert(value, Policy::All) => {
+            Change::Assert(value, Pick::All) => {
                 self.live.retain(|claim| claim.value != *value);
                 self.live.push(staged(value));
                 vec![change.clone()]
@@ -582,7 +587,7 @@ impl Cell {
                 vec![change.clone()]
             }
             Change::Assert(value, policy) => {
-                // The claim a read under the policy returns, among the
+                // The claim a read under the pick returns, among the
                 // live claims (the written value's own claim included,
                 // when the cell holds it) and the derived candidates.
                 let pool: Vec<(Value, Option<Standing>, (Value, bool))> = self
@@ -601,7 +606,7 @@ impl Cell {
                     .collect();
                 let elected = Election::from(policy)
                     .elect_claims(pool)
-                    .map_err(|error| CommitError::Policy(error.to_string()))?;
+                    .map_err(|error| CommitError::Succession(error.to_string()))?;
                 // The read returns a claim of the written value already:
                 // the write changes nothing. An overlay row or a derived
                 // candidate of the value is not a claim, and the write
@@ -620,7 +625,7 @@ impl Cell {
                 self.live
                     .retain(|claim| !(claim.claim && claim.value == *value));
                 self.live.push(staged(value));
-                settled.push(Change::Assert(value.clone(), Policy::All));
+                settled.push(Change::Assert(value.clone(), Pick::All));
                 settled
             }
         })
@@ -636,9 +641,11 @@ mod tests {
     use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_artifacts::history::Edition;
-    use dialog_artifacts::{ArtifactSelector, Attribute, Change, Entity, Policy, Value};
+    use dialog_artifacts::{
+        ArtifactSelector, Change, Entity, Pick, Relation as ArtifactsRelation, Value,
+    };
     use dialog_peer::helpers::test_session_with_peer;
-    use dialog_query::attribute::The;
+    use dialog_query::attribute::Relation;
     use dialog_query::query::Output as _;
     use dialog_query::rule::DeductiveRuleDescriptor;
     use dialog_query::types::Any;
@@ -658,38 +665,42 @@ mod tests {
         let edition = Edition::from(7u64);
         let mut cell = super::Cell::over(Vec::new());
         for value in [200u32, 300] {
-            let change = Change::Assert(Value::UnsignedInt(value.into()), Policy::Last);
+            let change = Change::Assert(Value::UnsignedInt(value.into()), Pick::Last);
             let written = cell.write(&change, &[], edition)?;
             cell.settled.extend(written);
         }
         assert_eq!(
             cell.settled,
             vec![
-                Change::Assert(Value::UnsignedInt(200), dialog_artifacts::Policy::All),
+                Change::Assert(Value::UnsignedInt(200), dialog_artifacts::Pick::All),
                 Change::Retract(Value::UnsignedInt(200)),
-                Change::Assert(Value::UnsignedInt(300), dialog_artifacts::Policy::All),
+                Change::Assert(Value::UnsignedInt(300), dialog_artifacts::Pick::All),
             ]
         );
         assert_eq!(
             cell.squashed(),
             vec![Change::Assert(
                 Value::UnsignedInt(300),
-                dialog_artifacts::Policy::All
+                dialog_artifacts::Pick::All
             )]
         );
         Ok(())
     }
 
     /// A write of `org/salary` under `max`: the statement a field
-    /// reading the relation under that policy writes.
+    /// reading the relation under that pick writes.
     fn salary(of: &Entity, value: u32) -> AttributeStatement {
         AttributeStatement {
-            the: The::from("org/salary".parse::<Attribute>().expect("an attribute")),
+            the: Relation::from(
+                "org/salary"
+                    .parse::<ArtifactsRelation>()
+                    .expect("an attribute"),
+            ),
             of: of.clone(),
             is: Value::UnsignedInt(value.into()),
             cause: None,
             cardinality: Some(Cardinality::One),
-            policy: Some(Policy::Max),
+            pick: Some(Pick::Max),
         }
     }
 
@@ -726,7 +737,7 @@ mod tests {
         of: &Entity,
     ) -> Result<Vec<u64>> {
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": "max" }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": "max" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(of.clone()));
@@ -852,11 +863,11 @@ mod tests {
         // `org/salary(x) := bonus :- org/bonus(x) = bonus`.
         let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
             "deduce": { "with": {
-                "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+                "salary": { "the": "org/salary", "as": "natural:" }
             }},
             "when": [{
                 "assert": { "with": {
-                    "bonus": { "the": "org/bonus", "as": "UnsignedInteger" }
+                    "bonus": { "the": "org/bonus", "as": "natural:" }
                 }},
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -920,7 +931,7 @@ mod tests {
         select: &str,
     ) -> Result<Vec<u64>> {
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": select }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": select }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(of.clone()));
@@ -942,7 +953,7 @@ mod tests {
     /// overlay.
     fn session_salary(of: &Entity, value: u32) -> AttributeStatement {
         AttributeStatement {
-            policy: None,
+            pick: None,
             ..salary(of, value)
         }
     }
@@ -960,7 +971,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            policy: Some(Policy::Last),
+            pick: Some(Pick::Last),
             ..salary(&alice, value)
         };
         branch
@@ -1063,7 +1074,7 @@ mod tests {
 
     /// A transaction reads the overlay above its own writes, as a read
     /// after its commit will: the overlay row stays the newest fact.
-    /// A transaction's writes under a choosing policy read back through
+    /// A transaction's writes under a choosing pick read back through
     /// the transaction, by entity and over the whole relation, on a line
     /// holding nothing of them; a cell written twice reads as its later
     /// write alone, and a value written back after another reads once.
@@ -1075,7 +1086,7 @@ mod tests {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
         let last = |of: &Entity, value: u32| AttributeStatement {
-            policy: Some(Policy::Last),
+            pick: Some(Pick::Last),
             ..salary(of, value)
         };
         let carol: Entity = "id:carol".parse()?;
@@ -1089,7 +1100,7 @@ mod tests {
             .assert(last(&carol, 30));
 
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": "last" }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": "last" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));
@@ -1136,7 +1147,7 @@ mod tests {
     }
 
     /// A value the line holds, retracted and written back under a
-    /// choosing policy in one transaction, reads through the transaction
+    /// choosing pick in one transaction, reads through the transaction
     /// once, and the commit keeps it; one retracted and replaced reads as
     /// the replacement, and the commit lands that.
     #[dialog_common::test]
@@ -1147,7 +1158,7 @@ mod tests {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
         let last = |of: &Entity, value: u32| AttributeStatement {
-            policy: Some(Policy::Last),
+            pick: Some(Pick::Last),
             ..salary(of, value)
         };
         branch
@@ -1167,7 +1178,7 @@ mod tests {
             .retract(last(&bob, 20))
             .assert(last(&bob, 25));
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": "all" }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": "all" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::var("this"));
@@ -1200,7 +1211,7 @@ mod tests {
     }
 
     /// A commit that installs a rule lands every other cell it writes
-    /// under a choosing policy: one written once, which the tree
+    /// under a choosing pick: one written once, which the tree
     /// settles, and one written twice with one value, which the
     /// transactor settles to a single claim.
     #[dialog_common::test]
@@ -1211,16 +1222,16 @@ mod tests {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
         let last = |of: &Entity, value: u32| AttributeStatement {
-            policy: Some(Policy::Last),
+            pick: Some(Pick::Last),
             ..salary(of, value)
         };
         let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
             "deduce": { "with": {
-                "title": { "the": "org/title", "as": "Text" }
+                "title": { "the": "org/title", "as": "text:" }
             }},
             "when": [{
                 "assert": { "with": {
-                    "level": { "the": "org/level", "as": "Text" }
+                    "level": { "the": "org/level", "as": "text:" }
                 }},
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -1274,7 +1285,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice: Entity = "id:alice".parse()?;
         let last = |of: &Entity, value: u32| AttributeStatement {
-            policy: Some(Policy::Last),
+            pick: Some(Pick::Last),
             ..salary(of, value)
         };
         branch
@@ -1289,7 +1300,7 @@ mod tests {
         let read = |value: u32| {
             let predicate: ConceptDescriptor =
                 serde_json::from_value(serde_json::json!({ "with": {
-                    "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": "all" }
+                    "salary": { "the": "org/salary", "as": "natural:", "pick": "all" }
                 }}))
                 .expect("a descriptor");
             let mut terms = Parameters::new();
@@ -1317,7 +1328,7 @@ mod tests {
         Ok(())
     }
 
-    /// A write under a choosing policy reads, through its transaction,
+    /// A write under a choosing pick reads, through its transaction,
     /// as the commit will leave the cell: the line's claim it succeeds
     /// is gone from an `all` read, and a write of the value the line
     /// holds reads that claim once. A read of another cell settles
@@ -1330,7 +1341,7 @@ mod tests {
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
         let last = |of: &Entity, value: u32| AttributeStatement {
-            policy: Some(Policy::Last),
+            pick: Some(Pick::Last),
             ..salary(of, value)
         };
         branch
@@ -1350,7 +1361,7 @@ mod tests {
         let read = |of: &Entity| {
             let predicate: ConceptDescriptor =
                 serde_json::from_value(serde_json::json!({ "with": {
-                    "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": "all" }
+                    "salary": { "the": "org/salary", "as": "natural:", "pick": "all" }
                 }}))
                 .expect("a descriptor");
             let mut terms = Parameters::new();
@@ -1399,7 +1410,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            policy: Some(Policy::Last),
+            pick: Some(Pick::Last),
             ..salary(&alice, value)
         };
         branch
@@ -1412,7 +1423,7 @@ mod tests {
         branch.overlay().assert(session_salary(&alice, 500))?;
 
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+            "salary": { "the": "org/salary", "as": "natural:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));
@@ -1448,7 +1459,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            policy: Some(Policy::Last),
+            pick: Some(Pick::Last),
             ..salary(&alice, value)
         };
         branch
@@ -1495,11 +1506,11 @@ mod tests {
 
         let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
             "deduce": { "with": {
-                "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+                "salary": { "the": "org/salary", "as": "natural:" }
             }},
             "when": [{
                 "assert": { "with": {
-                    "bonus": { "the": "org/bonus", "as": "UnsignedInteger" }
+                    "bonus": { "the": "org/bonus", "as": "natural:" }
                 }},
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -1538,7 +1549,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            policy: Some(Policy::Last),
+            pick: Some(Pick::Last),
             ..salary(&alice, value)
         };
         branch
@@ -1550,7 +1561,7 @@ mod tests {
             .await?;
 
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+            "salary": { "the": "org/salary", "as": "natural:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));
@@ -1590,11 +1601,11 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
         let last = |value: u32| AttributeStatement {
-            policy: Some(Policy::Last),
+            pick: Some(Pick::Last),
             ..salary(&alice, value)
         };
         let all = |value: u32| AttributeStatement {
-            policy: None,
+            pick: None,
             cardinality: Some(Cardinality::Many),
             ..salary(&alice, value)
         };
@@ -1633,7 +1644,7 @@ mod tests {
         assert_eq!(
             stored(&branch, &operator, &alice).await?,
             vec![150, 200, 300],
-            "the staged claim the policy elected is gone, the others stand"
+            "the staged claim the pick elected is gone, the others stand"
         );
         Ok(())
     }
@@ -1657,7 +1668,7 @@ mod tests {
 
         let transaction = branch.transaction().assert(salary(&alice, 150));
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": "all" }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": "all" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));
@@ -1686,7 +1697,7 @@ mod tests {
 
     /// A write under `last` succeeds the claim a `last` read returns:
     /// of two live claims, the newer. The older stays, as under any
-    /// other policy; a `last` read returns the write afterwards, since
+    /// other pick; a `last` read returns the write afterwards, since
     /// it is newer than both.
     #[dialog_common::test]
     async fn it_succeeds_the_newest_claim_under_last() -> Result<()> {
@@ -1695,7 +1706,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
         let alice = Entity::new()?;
 
-        // Two claims written without a policy, one revision apart, so
+        // Two claims written without a pick, one revision apart, so
         // the second is the newer.
         for value in [100u32, 200] {
             branch
@@ -1709,7 +1720,7 @@ mod tests {
         assert_eq!(stored(&branch, &operator, &alice).await?, vec![100, 200]);
 
         let last = AttributeStatement {
-            policy: Some(Policy::Last),
+            pick: Some(Pick::Last),
             ..salary(&alice, 150)
         };
         branch
@@ -1726,7 +1737,7 @@ mod tests {
         );
 
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+            "salary": { "the": "org/salary", "as": "natural:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));

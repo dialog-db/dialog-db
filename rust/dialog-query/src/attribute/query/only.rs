@@ -2,8 +2,8 @@ use super::all::AttributeQueryAll;
 use super::pipelined;
 use crate::Claim;
 use crate::Value;
-use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
-use crate::attribute::The;
+use crate::artifact::{ArtifactSelector, ArtifactsRelation, Constrained};
+use crate::attribute::Relation;
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
@@ -60,7 +60,7 @@ where
         // term (e.g. an unconstrained entity) never stores a binding,
         // so term lookups cannot recover the fact.
         let claim = candidate.prove(selector.source())?;
-        let attribute = ArtifactsAttribute::try_from(Value::from(claim.the().clone()))?;
+        let attribute = ArtifactsRelation::try_from(Value::from(claim.the().clone()))?;
         let entity = claim.of().clone();
         let value = claim.is().clone();
         let cause_term = selector.cause();
@@ -114,14 +114,14 @@ pub struct AttributeQueryOnly {
 impl AttributeQueryOnly {
     /// Create a new winner-selecting attribute query. Scalar like
     /// every associative-layer lookup: zero rows on miss.
-    pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
+    pub fn new(the: Term<Relation>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         Self {
             query: AttributeQueryAll::new(the, of, is, cause),
         }
     }
 
     /// Get the 'the' (attribute) term.
-    pub fn the(&self) -> &Term<The> {
+    pub fn the(&self) -> &Term<Relation> {
         self.query.the()
     }
 
@@ -160,8 +160,8 @@ impl AttributeQueryOnly {
         self.query.source()
     }
 
-    /// Map `Term<The>` to `Term<ArtifactsAttribute>`.
-    pub fn attribute(&self) -> Term<ArtifactsAttribute> {
+    /// Map `Term<Relation>` to `Term<ArtifactsRelation>`.
+    pub fn attribute(&self) -> Term<ArtifactsRelation> {
         self.query.attribute()
     }
 
@@ -840,7 +840,7 @@ mod tests {
         };
 
         // {of, is} with the LOSER value -- should return nothing.
-        let results = Term::<The>::var("relation")
+        let results = Term::<Relation>::var("relation")
             .of(entity.clone())
             .is(looser.clone())
             .cardinality(Cardinality::One)
@@ -856,7 +856,7 @@ mod tests {
         );
 
         // {of, is} with the WINNER value -- should return the winner.
-        let results = Term::<The>::var("relation")
+        let results = Term::<Relation>::var("relation")
             .of(entity.clone())
             .is(winner.clone())
             .cardinality(Cardinality::One)
@@ -928,7 +928,7 @@ mod tests {
         };
 
         // {is} with the LOSER value -- should return nothing.
-        let results = Term::<The>::var("relation")
+        let results = Term::<Relation>::var("relation")
             .of(Term::var("person"))
             .is(looser.clone())
             .cardinality(Cardinality::One)
@@ -944,7 +944,7 @@ mod tests {
         );
 
         // {is} with the WINNER value -- should return the winner.
-        let results = Term::<The>::var("relation")
+        let results = Term::<Relation>::var("relation")
             .of(Term::var("person"))
             .is(winner.clone())
             .cardinality(Cardinality::One)

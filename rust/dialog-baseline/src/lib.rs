@@ -42,7 +42,7 @@ use std::str::FromStr;
 
 use anyhow::Result;
 use base58::ToBase58;
-use dialog_artifacts::{Artifact, Attribute, Changes, Entity, Instruction, Update as _, Value};
+use dialog_artifacts::{Artifact, Changes, Entity, Instruction, Relation, Update as _, Value};
 use dialog_peer::{Peer, Session};
 use dialog_storage::NativeTempSpace;
 use dialog_storage::provider::storage::VolatileSpace;
@@ -325,13 +325,13 @@ pub(crate) fn artifacts_for(row: &FactRow) -> Result<[Artifact; 2]> {
     let entity = Entity::from_str(&row.entity)?;
     Ok([
         Artifact {
-            the: Attribute::from_str(NAME_ATTRIBUTE)?,
+            the: Relation::from_str(NAME_ATTRIBUTE)?,
             of: entity.clone(),
             is: Value::String(row.name.clone()),
             cause: None,
         },
         Artifact {
-            the: Attribute::from_str(ROLE_ATTRIBUTE)?,
+            the: Relation::from_str(ROLE_ATTRIBUTE)?,
             of: entity,
             is: Value::String(row.role.clone()),
             cause: None,
@@ -345,7 +345,7 @@ pub(crate) fn instructions_for(rows: &[FactRow]) -> Result<Vec<Instruction>> {
     for row in rows {
         instructions.extend(
             artifacts_for(row)?
-                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All)),
+                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All)),
         );
     }
     Ok(instructions)

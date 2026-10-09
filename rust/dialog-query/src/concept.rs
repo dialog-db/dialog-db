@@ -174,7 +174,7 @@ where
             ),
             cause: None,
             cardinality: Some(descriptor.cardinality()),
-            policy: Some(descriptor.policy()),
+            pick: Some(descriptor.pick().clone()),
         };
         buf.push(expr);
     }
@@ -252,7 +252,7 @@ where
                 ),
                 cause: None,
                 cardinality: Some(descriptor.cardinality()),
-                policy: Some(descriptor.policy()),
+                pick: Some(descriptor.pick().clone()),
             };
             buf.push(expr);
         }
@@ -393,7 +393,7 @@ mod tests {
     use super::*;
     use crate::AttributeStatement;
     use crate::Query;
-    use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Value};
+    use crate::artifact::{ArtifactSelector, ArtifactsRelation, Value};
     use crate::query::Output;
 
     use crate::Concept;
@@ -806,8 +806,8 @@ mod tests {
             .await?;
 
         // Verify Alice exists
-        let name_attr: ArtifactsAttribute = "person/name".parse()?;
-        let age_attr: ArtifactsAttribute = "person/age".parse()?;
+        let name_attr: ArtifactsRelation = "person/name".parse()?;
+        let age_attr: ArtifactsRelation = "person/age".parse()?;
 
         let name_facts: Vec<_> = branch
             .claims()

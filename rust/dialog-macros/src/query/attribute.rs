@@ -225,7 +225,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 static DESCRIPTOR: std::sync::OnceLock<dialog_query::AttributeDescriptor> = std::sync::OnceLock::new();
                 DESCRIPTOR.get_or_init(|| {
                     let the = format!("{}/{}", #domain_expr, #attr_name_lit)
-                        .parse::<dialog_query::The>()
+                        .parse::<dialog_query::Relation>()
                         .expect("attribute selector must be valid");
                     dialog_query::AttributeDescriptor::new(
                         the,
@@ -270,9 +270,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
             /// Returns the attribute identifier. A derived attribute
             /// always names one attribute — the keyed-collection
             /// relation has no derive path.
-            pub fn the() -> dialog_query::The {
+            pub fn the() -> dialog_query::Relation {
                 match Self::descriptor().the() {
-                    dialog_query::Relation::Attribute(the) => the.clone(),
+                    dialog_query::The::Relation(the) => the.clone(),
                     _ => unreachable!("a derived attribute names one relation"),
                 }
             }

@@ -8,7 +8,7 @@ use crate::helpers::test_repo;
 use dialog_artifacts::Entity;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::rule::DeductiveRuleDescriptor;
-use dialog_query::{Attribute, Concept, Query, The};
+use dialog_query::{Attribute, Concept, Query, Relation};
 
 /// A badge number (`credential/badge`).
 #[derive(Attribute, Clone, PartialEq)]
@@ -63,11 +63,11 @@ async fn a_rule_landing_on_a_subscribed_attribute_wakes_the_subscription() -> an
 
     let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
         "deduce": { "with": {
-            "badge": { "the": "credential/badge", "as": "Text" }
+            "badge": { "the": "credential/badge", "as": "text:" }
         }},
         "when": [{
             "assert": { "with": {
-                "code": { "the": "credential/legacy-code", "as": "Text" }
+                "code": { "the": "credential/legacy-code", "as": "text:" }
             }},
             "where": {
                 "this": { "?": { "name": "this" } },
@@ -129,9 +129,9 @@ async fn a_maintained_fixpoint_keeps_each_row_at_its_newest_surviving_derivation
     let e: Entity = "id:e".parse()?;
     let rule = |from: &str| -> anyhow::Result<_> {
         let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-            "deduce": { "with": { "a": { "the": "x/a", "as": "Text" } } },
+            "deduce": { "with": { "a": { "the": "x/a", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "v": { "the": from, "as": "Text" } } },
+                "assert": { "with": { "v": { "the": from, "as": "text:" } } },
                 "where": { "this": { "?": { "name": "this" } }, "v": { "?": { "name": "a" } } }
             }]
         }))?;
@@ -139,7 +139,7 @@ async fn a_maintained_fixpoint_keeps_each_row_at_its_newest_surviving_derivation
     };
     let source = |attribute: &str, value: &str| {
         attribute
-            .parse::<The>()
+            .parse::<Relation>()
             .expect("attribute")
             .of(e.clone())
             .is(value.to_string())

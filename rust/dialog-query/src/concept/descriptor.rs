@@ -6,7 +6,7 @@ use std::iter;
 
 use crate::Binding;
 use crate::Predicate;
-use crate::attribute::{AttributeDescriptor, Attribution, Relation};
+use crate::attribute::{AttributeDescriptor, Attribution, The};
 use crate::concept::query::ConceptQuery;
 use crate::concept::{Concept, Conclusion};
 use crate::error::TypeError;
@@ -173,9 +173,9 @@ impl ConceptDescriptor {
     /// bind and a conclusion carries.
     fn field_operands(name: &str, field: &ConceptFieldDescriptor) -> Vec<String> {
         match field.the() {
-            Relation::Attribute(_) => vec![name.to_string()],
-            Relation::Collection { .. } => {
-                vec![name.to_string(), Relation::key_operand(name)]
+            The::Relation(_) => vec![name.to_string()],
+            The::Collection { .. } => {
+                vec![name.to_string(), The::key_operand(name)]
             }
         }
     }
@@ -534,7 +534,7 @@ impl From<&ConceptDescriptor> for Schema {
         // from the domain.
         for (name, field) in predicate.collections() {
             schema.insert(
-                Relation::key_operand(name),
+                The::key_operand(name),
                 Field {
                     description: format!("The key of an entry of {name}"),
                     content_type: Some(Kind::from(Type::String)),
@@ -600,7 +600,7 @@ impl Statement for ConceptStatement {
                 attribution.the,
                 self.this.clone(),
                 attribution.is,
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             );
         }
     }
@@ -960,7 +960,7 @@ mod tests {
         assert_eq!(name_attr["the"], "user/name");
         assert_eq!(name_attr["description"], "User's name");
         assert!(name_attr.get("cardinality").is_none());
-        assert_eq!(name_attr["as"], "Text");
+        assert_eq!(name_attr["as"], "text:");
 
         let age_attr = with_obj["age"]
             .as_object()
@@ -968,7 +968,7 @@ mod tests {
         assert_eq!(age_attr["the"], "user/age");
         assert_eq!(age_attr["description"], "User's age");
         assert!(age_attr.get("cardinality").is_none());
-        assert_eq!(age_attr["as"], "UnsignedInteger");
+        assert_eq!(age_attr["as"], "natural:");
     }
 
     #[dialog_common::test]
@@ -978,12 +978,12 @@ mod tests {
                 "email": {
                     "the": "person/email",
                     "description": "Person's email address",
-                    "as": "Text"
+                    "as": "text:"
                 },
                 "active": {
                     "the": "person/active",
                     "description": "Whether person is active",
-                    "as": "Boolean"
+                    "as": "boolean:"
                 }
             }
         }"#;
@@ -1027,7 +1027,7 @@ mod tests {
                 "name": {
                     "the": "user/name",
                     "description": "User's name",
-                    "as": "Text"
+                    "as": "text:"
                 }
             }
         }"#;
@@ -1139,7 +1139,7 @@ mod tests {
     "id": {
       "the": "product/id",
       "description": "Product ID",
-      "as": "UnsignedInteger"
+      "as": "natural:"
     }
   }
 }"#;
@@ -1415,12 +1415,12 @@ mod tests {
                     "the": "diy.cook/quantity",
                     "description": "How much of this ingredient",
                     "cardinality": "one",
-                    "as": "UnsignedInteger"
+                    "as": "natural:"
                 },
                 "name": {
                     "the": "diy.cook/ingredient-name",
                     "description": "Name of the ingredient",
-                    "as": "Text"
+                    "as": "text:"
                 }
             }
         }"#;
@@ -1446,7 +1446,7 @@ mod tests {
         let with = reparsed["with"].as_object().expect("Should have 'with'");
         assert_eq!(with["quantity"]["the"], "diy.cook/quantity");
         assert_eq!(with["name"]["the"], "diy.cook/ingredient-name");
-        assert_eq!(with["name"]["as"], "Text");
+        assert_eq!(with["name"]["as"], "text:");
     }
 
     /// Validates that a minimal schema-conformant fixture (only required fields)
@@ -1490,7 +1490,7 @@ mod tests {
             "name": {
                 "the": "user/name",
                 "description": "User's name",
-                "as": "Text"
+                "as": "text:"
             }
         }"#;
 
@@ -1529,7 +1529,7 @@ mod tests {
             "with": {
                 "name": {
                     "description": "Missing the field",
-                    "as": "Text"
+                    "as": "text:"
                 }
             }
         }"#;
@@ -1560,7 +1560,7 @@ mod tests {
             "with": {
                 "name": {
                     "the": "invalid",
-                    "as": "Text"
+                    "as": "text:"
                 }
             }
         }"#;
@@ -1620,7 +1620,7 @@ mod tests {
     fn it_rejects_all_optional_concept_at_parse() {
         let json = r#"{
             "with": {
-                "bio": { "the": "user/bio", "as": "Text", "optional": true }
+                "bio": { "the": "user/bio", "as": "text:", "optional": true }
             }
         }"#;
 
@@ -1636,8 +1636,8 @@ mod tests {
     fn it_accepts_optional_field() {
         let json = r#"{
             "with": {
-                "name": { "the": "user/name", "as": "Text" },
-                "bio": { "the": "user/bio", "as": "Text", "optional": true }
+                "name": { "the": "user/name", "as": "text:" },
+                "bio": { "the": "user/bio", "as": "text:", "optional": true }
             }
         }"#;
 
@@ -1667,7 +1667,7 @@ mod tests {
     fn it_validates_optional_field_on_parse() {
         let json = r#"{
             "with": {
-                "name": { "the": "user/name", "as": "Text" },
+                "name": { "the": "user/name", "as": "text:" },
                 "bio": { "the": "invalid", "optional": true }
             }
         }"#;
@@ -1986,10 +1986,10 @@ mod tests {
 
         let optional = serde_json::json!({
             "with": {
-                "name": { "the": "person/name", "as": "Text" },
+                "name": { "the": "person/name", "as": "text:" },
                 "manager": {
                     "the": "person/manager",
-                    "as": "Entity",
+                    "as": "entity:",
                     "optional": true,
                     "conforms": target,
                 }
@@ -2002,10 +2002,10 @@ mod tests {
 
         let non_entity = serde_json::json!({
             "with": {
-                "name": { "the": "person/name", "as": "Text" },
+                "name": { "the": "person/name", "as": "text:" },
                 "manager": {
                     "the": "person/manager",
-                    "as": "Text",
+                    "as": "text:",
                     "conforms": target,
                 }
             }

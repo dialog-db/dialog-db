@@ -45,7 +45,7 @@ use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, AttributeKey, Cause, Changes, DialogArtifactsError, Entity,
-    EntityKey, Instruction, Key, KeyViewConstruct, Policy, SortKey, Standing, Statement, Update,
+    EntityKey, Instruction, Key, KeyViewConstruct, Pick, SortKey, Standing, Statement, Update,
     ValueKey, sort_key,
 };
 use dialog_common::Blake3Hash;
@@ -179,7 +179,7 @@ impl Facts {
     }
 
     /// Every held fact at an `(entity, attribute)` cell.
-    pub(crate) fn cell(&self, of: &Entity, the: &dialog_artifacts::Attribute) -> Vec<Artifact> {
+    pub(crate) fn cell(&self, of: &Entity, the: &dialog_artifacts::Relation) -> Vec<Artifact> {
         self.scan(&ArtifactSelector::new().of(of.clone()).the(the.clone()))
     }
 
@@ -271,9 +271,9 @@ impl State {
 
     fn apply(&mut self, instruction: Instruction, delta: &mut Delta) {
         match instruction {
-            Instruction::Assert(fact, Policy::All) => self.insert(fact, delta),
-            // A write under a choosing policy among transients: the claim
-            // the policy elects of the cell gives way to the value.
+            Instruction::Assert(fact, Pick::All) => self.insert(fact, delta),
+            // A write under a choosing pick among transients: the claim
+            // the pick elects of the cell gives way to the value.
             // Transients carry no version, so the election orders them by
             // cause, then value.
             Instruction::Assert(fact, policy) => {
@@ -425,7 +425,7 @@ impl Ephemeral {
                 fact.the.clone(),
                 fact.of.clone(),
                 fact.is.clone(),
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             );
         }
         changes
@@ -587,7 +587,7 @@ mod tests {
                 self.0.the,
                 self.0.of,
                 self.0.is,
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             );
         }
 
@@ -633,7 +633,7 @@ mod tests {
         assert_eq!(line.len(), 1);
 
         // A second value accumulates; a write under `last` succeeds the
-        // one transient the policy elects and leaves the other.
+        // one transient the pick elects and leaves the other.
         line.assert(
             the!("person/name")
                 .of("id:a".parse().unwrap())
@@ -646,7 +646,7 @@ mod tests {
             "person/name".parse().unwrap(),
             "id:a".parse().unwrap(),
             Value::String("C".into()),
-            dialog_artifacts::Policy::Last,
+            dialog_artifacts::Pick::Last,
         );
         let succeeded = line.apply(changes).unwrap().expect("the write mints");
         assert_eq!(succeeded.retracted.len(), 1);

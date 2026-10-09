@@ -234,7 +234,7 @@ pub enum TypeError {
     /// fold withdraws its previous result when a fact arrives, and
     /// inside a cycle has no deterministic reading at all, so it
     /// belongs to the closed places: a query, a subscription, an
-    /// inductive rule. An attribute's `select` policy chooses among
+    /// inductive rule. An attribute's `pick` chooses among
     /// the candidates every rule adds to instead.
     #[error("Rule {rule} is deductive and folds: a deductive rule admits no `reduce`")]
     ReduceInOpenRule {
@@ -242,13 +242,13 @@ pub enum TypeError {
         rule: Box<Rule>,
     },
 
-    /// A concept field declares a `select` policy its attribute cannot
-    /// read under.
+    /// A concept field declares a `pick` its attribute cannot read
+    /// under.
     #[error("Attribute {the} cannot be read as declared: {reason}")]
-    SelectPolicy {
+    UnfitPick {
         /// The attribute's selector.
         the: String,
-        /// Why the policy does not fit.
+        /// Why the pick does not fit.
         reason: String,
     },
 
@@ -838,7 +838,7 @@ pub enum EstimateError<'a> {
     },
 }
 
-/// Error from validating a relation identifier (`The`).
+/// Error from validating a relation identifier (`Relation`).
 ///
 /// Carries the raw input bytes so it can be produced in `const` context.
 /// The human-readable input is rendered on display.
@@ -879,7 +879,7 @@ impl error::Error for OwnedInvalidIdentifier {}
 
 impl From<OwnedInvalidIdentifier> for DialogArtifactsError {
     fn from(e: OwnedInvalidIdentifier) -> Self {
-        DialogArtifactsError::InvalidAttribute(e.to_string())
+        DialogArtifactsError::InvalidRelation(e.to_string())
     }
 }
 

@@ -326,7 +326,7 @@ mod tests {
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -352,7 +352,7 @@ mod tests {
         let _hash = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 artifact,
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -466,7 +466,7 @@ mod tests {
                     is: Value::String("Alice".into()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             ),
             Instruction::Assert(
                 Artifact {
@@ -475,7 +475,7 @@ mod tests {
                     is: Value::String("alice@example.com".into()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             ),
             Instruction::Assert(
                 Artifact {
@@ -484,7 +484,7 @@ mod tests {
                     is: Value::String("Bob".into()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             ),
         ];
 
@@ -533,7 +533,7 @@ mod tests {
                     is: Value::String("Alice".into()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             ),
             Instruction::Assert(
                 Artifact {
@@ -542,7 +542,7 @@ mod tests {
                     is: Value::String("Bob".into()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             ),
             Instruction::Assert(
                 Artifact {
@@ -551,7 +551,7 @@ mod tests {
                     is: Value::String("alice@example.com".into()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             ),
         ];
 
@@ -616,7 +616,7 @@ mod tests {
         branch
             .commit(stream::iter(vec![Instruction::Assert(
                 artifact.clone(),
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -2075,8 +2075,8 @@ mod tests {
             let alice: Entity = "id:alice".parse()?;
             let bob: Entity = "id:bob".parse()?;
             let charlie: Entity = "id:charlie".parse()?;
-            let name_attr = "test/name".parse::<dialog_artifacts::Attribute>()?;
-            let role_attr = "test/role".parse::<dialog_artifacts::Attribute>()?;
+            let name_attr = "test/name".parse::<dialog_artifacts::Relation>()?;
+            let role_attr = "test/role".parse::<dialog_artifacts::Relation>()?;
 
             // Mix of:
             //   - same entity, multiple attrs
@@ -2090,7 +2090,7 @@ mod tests {
             //     (alice, role). If `sort_key` mistakenly ordered VAE
             //     output by entity it would flip these two, and this
             //     test would catch it.
-            let facts: Vec<(Entity, dialog_artifacts::Attribute, Value)> = vec![
+            let facts: Vec<(Entity, dialog_artifacts::Relation, Value)> = vec![
                 (
                     alice.clone(),
                     name_attr.clone(),
@@ -2135,12 +2135,7 @@ mod tests {
             // both the branch commit and the overlay query from clones.
             let mut changes = Changes::new();
             for (e, a, v) in &facts {
-                changes.associate(
-                    a.clone(),
-                    e.clone(),
-                    v.clone(),
-                    dialog_artifacts::Policy::All,
-                );
+                changes.associate(a.clone(), e.clone(), v.clone(), dialog_artifacts::Pick::All);
             }
 
             // Commit a clone to the branch (Changes itself is a Statement now).

@@ -73,7 +73,7 @@ mod tests {
                 let (domain, attribute) = relation.split_once('/').expect("a relation");
                 reading(
                     format!("{domain}/stated-{attribute}")
-                        .parse::<crate::The>()
+                        .parse::<crate::Relation>()
                         .expect("an attribute"),
                     Term::var("this"),
                     Term::var(name),

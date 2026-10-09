@@ -19,9 +19,9 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use crate::helpers::test_repo;
 use crate::{Branch, Transient};
 use anyhow::Result;
-use dialog_artifacts::{ArtifactSelector, Attribute, Entity, Policy, Value};
+use dialog_artifacts::{ArtifactSelector, Entity, Pick, Relation as ArtifactsRelation, Value};
 use dialog_peer::helpers::test_session_with_peer;
-use dialog_query::attribute::The;
+use dialog_query::attribute::Relation;
 use dialog_query::query::Output as _;
 use dialog_query::rule::{DeductiveRule, InductiveRule};
 use dialog_query::types::Any;
@@ -59,12 +59,12 @@ fn value(json: &Json) -> Value {
 /// A fact as a statement this release writes as stored, under `all`.
 fn statement(the: &str, of: &Entity, is: Value) -> AttributeStatement {
     AttributeStatement {
-        the: The::from(the.parse::<Attribute>().expect("an attribute")),
+        the: Relation::from(the.parse::<ArtifactsRelation>().expect("an attribute")),
         of: of.clone(),
         is,
         cause: None,
         cardinality: Some(Cardinality::Many),
-        policy: Some(Policy::All),
+        pick: Some(Pick::All),
     }
 }
 
@@ -174,7 +174,7 @@ async fn salary(
     select: &str,
 ) -> Result<Vec<u64>> {
     let predicate: ConceptDescriptor = serde_json::from_value(json!({ "with": {
-        "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": select }
+        "salary": { "the": "org/salary", "as": "natural:", "pick": select }
     }}))?;
     let mut terms = Parameters::new();
     terms.insert("this".to_string(), Term::<Any>::constant(of.clone()));
@@ -192,14 +192,14 @@ async fn salary(
     Ok(read)
 }
 
-fn unsigned(the: &str, of: &Entity, value: u32, policy: Policy) -> AttributeStatement {
+fn unsigned(the: &str, of: &Entity, value: u32, policy: Pick) -> AttributeStatement {
     AttributeStatement {
-        cardinality: Some(if policy == Policy::All {
+        cardinality: Some(if policy == Pick::All {
             Cardinality::Many
         } else {
             Cardinality::One
         }),
-        policy: Some(policy),
+        pick: Some(policy),
         ..statement(the, of, Value::UnsignedInt(value.into()))
     }
 }
@@ -218,7 +218,7 @@ async fn a_rule_the_previous_release_installed_derives_once_upgraded() -> Result
     commit(
         &branch,
         &operator,
-        unsigned("org/bonus", &alice, 500, Policy::All),
+        unsigned("org/bonus", &alice, 500, Pick::All),
     )
     .await?;
     assert_eq!(
@@ -265,12 +265,7 @@ async fn concurrent_upgrades_converge() -> Result<()> {
     let alice: Entity = "id:alice".parse()?;
     let a = repo.branch("a").open().perform(&operator).await?;
     install(&a, &operator, installed_by_main("salary_from_bonus")).await?;
-    commit(
-        &a,
-        &operator,
-        unsigned("org/bonus", &alice, 500, Policy::All),
-    )
-    .await?;
+    commit(&a, &operator, unsigned("org/bonus", &alice, 500, Pick::All)).await?;
     let b = repo.branch("b").open().perform(&operator).await?;
     b.pull().from(&a).perform(&operator).await?;
     b.refresh(&operator).await?;
@@ -322,7 +317,7 @@ async fn a_rule_reintroduced_by_the_previous_release_is_inert_until_the_next_upg
     commit(
         &branch,
         &operator,
-        unsigned("org/bonus", &alice, 500, Policy::All),
+        unsigned("org/bonus", &alice, 500, Pick::All),
     )
     .await?;
     assert_eq!(
@@ -384,11 +379,11 @@ async fn a_rule_the_previous_release_installed_feeds_induction_once_upgraded() -
     upgrade(&branch, &operator).await?;
     let paid: InductiveRule = serde_json::from_value(json!({
         "assert!": {
-            "with": { "paid": { "the": "derived/paid", "as": "UnsignedInteger" } }
+            "with": { "paid": { "the": "derived/paid", "as": "natural:" } }
         },
         "when": [{
             "assert": {
-                "with": { "salary": { "the": "org/salary", "as": "UnsignedInteger" } }
+                "with": { "salary": { "the": "org/salary", "as": "natural:" } }
             },
             "where": {
                 "this": { "?": { "name": "this" } },
@@ -407,7 +402,7 @@ async fn a_rule_the_previous_release_installed_feeds_induction_once_upgraded() -
     commit(
         &branch,
         &operator,
-        unsigned("org/bonus", &alice, 500, Policy::All),
+        unsigned("org/bonus", &alice, 500, Pick::All),
     )
     .await?;
     assert_eq!(
@@ -434,20 +429,20 @@ async fn a_choosing_write_beside_an_upgraded_rule() -> Result<()> {
     commit(
         &branch,
         &operator,
-        unsigned("org/salary", &alice, 100, Policy::All),
+        unsigned("org/salary", &alice, 100, Pick::All),
     )
     .await?;
     commit(
         &branch,
         &operator,
-        unsigned("org/bonus", &alice, 500, Policy::All),
+        unsigned("org/bonus", &alice, 500, Pick::All),
     )
     .await?;
     assert_eq!(salary(&branch, &operator, &alice, "max").await?, vec![500]);
     commit(
         &branch,
         &operator,
-        unsigned("org/salary", &alice, 200, Policy::Max),
+        unsigned("org/salary", &alice, 200, Pick::Max),
     )
     .await?;
     assert_eq!(
@@ -474,7 +469,7 @@ async fn retracting_an_upgraded_rule_uninstalls_it() -> Result<()> {
     commit(
         &branch,
         &operator,
-        unsigned("org/bonus", &alice, 500, Policy::All),
+        unsigned("org/bonus", &alice, 500, Pick::All),
     )
     .await?;
     assert_eq!(salary(&branch, &operator, &alice, "all").await?, vec![500]);
@@ -512,9 +507,9 @@ async fn a_concept_the_previous_release_marked_transient_stays_transient_once_up
         .parse()?;
     let rule = |from: &str, to: &str| -> Result<InductiveRule> {
         Ok(serde_json::from_value(json!({
-            "assert!": { "with": { "target": { "the": to, "as": "Entity" } } },
+            "assert!": { "with": { "target": { "the": to, "as": "entity:" } } },
             "when": [{
-                "assert": { "with": { "target": { "the": from, "as": "Entity" } } },
+                "assert": { "with": { "target": { "the": from, "as": "entity:" } } },
                 "where": {
                     "this": { "?": { "name": "this" } },
                     "target": { "?": { "name": "target" } }
@@ -643,7 +638,7 @@ async fn rule_facts_under_an_entity_that_is_not_their_address_derive_nothing() -
     commit(
         &branch,
         &operator,
-        unsigned("org/bonus", &alice, 500, Policy::All),
+        unsigned("org/bonus", &alice, 500, Pick::All),
     )
     .await?;
     assert_eq!(

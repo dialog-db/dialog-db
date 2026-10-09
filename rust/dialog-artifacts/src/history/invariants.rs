@@ -1,10 +1,10 @@
-//! Invariants the policy-write design claims of the tree, pinned as
+//! Invariants the pick-write design claims of the tree, pinned as
 //! tests. A failing test here is a place where a batch does not land
 //! as the design says it does.
 
 use crate::ArchiveDelta;
 use crate::tree::{ArtifactTree, ArtifactTreeExt as _, SpillCache};
-use crate::{Artifact, Attribute, Changes, Entity, Instruction, Policy, Update as _, Value};
+use crate::{Artifact, Changes, Entity, Instruction, Pick, Relation, Update as _, Value};
 use anyhow::Result;
 use dialog_search_tree::MemoryBlocks;
 use futures_util::{TryStreamExt as _, stream};
@@ -38,7 +38,7 @@ async fn held(
     tree: &ArtifactTree,
     store: &MemoryBlocks,
     of: &Entity,
-    the: &Attribute,
+    the: &Relation,
 ) -> Result<Vec<u128>> {
     let selector = crate::ArtifactSelector::new()
         .of(of.clone())
@@ -71,7 +71,7 @@ async fn held(
 async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Result<()> {
     let store = MemoryBlocks::new();
     let entity = Entity::new()?;
-    let the: Attribute = "org/salary".parse()?;
+    let the: Relation = "org/salary".parse()?;
     let salary = |value: u32| Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -83,7 +83,7 @@ async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Resul
         &mut tree,
         &store,
         version(0),
-        vec![Instruction::Assert(salary(100), Policy::All)],
+        vec![Instruction::Assert(salary(100), Pick::All)],
     )
     .await?;
 
@@ -95,9 +95,9 @@ async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Resul
         &store,
         version(1),
         vec![
-            Instruction::Assert(salary(200), Policy::Last),
-            Instruction::Assert(salary(300), Policy::All),
-            Instruction::Assert(salary(400), Policy::Last),
+            Instruction::Assert(salary(200), Pick::Last),
+            Instruction::Assert(salary(300), Pick::All),
+            Instruction::Assert(salary(400), Pick::Last),
         ],
     )
     .await?;
@@ -114,19 +114,19 @@ async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Resul
         the.clone(),
         entity.clone(),
         Value::UnsignedInt(200),
-        Policy::Last,
+        Pick::Last,
     );
     changes.associate(
         the.clone(),
         entity.clone(),
         Value::UnsignedInt(300),
-        Policy::All,
+        Pick::All,
     );
     changes.associate(
         the.clone(),
         entity.clone(),
         Value::UnsignedInt(400),
-        Policy::Last,
+        Pick::Last,
     );
     let mut by_batch = tree.clone();
     let mut delta = ArchiveDelta::zero();
@@ -153,7 +153,7 @@ async fn a_batch_lands_a_cells_writes_in_the_order_they_were_recorded() -> Resul
 async fn a_claim_succeeded_within_its_own_batch_leaves_no_standing_record() -> Result<()> {
     let store = MemoryBlocks::new();
     let entity = Entity::new()?;
-    let the: Attribute = "org/salary".parse()?;
+    let the: Relation = "org/salary".parse()?;
     let salary = |value: u32| Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -165,7 +165,7 @@ async fn a_claim_succeeded_within_its_own_batch_leaves_no_standing_record() -> R
         &mut tree,
         &store,
         version(0),
-        vec![Instruction::Assert(salary(100), Policy::All)],
+        vec![Instruction::Assert(salary(100), Pick::All)],
     )
     .await?;
     apply(
@@ -173,8 +173,8 @@ async fn a_claim_succeeded_within_its_own_batch_leaves_no_standing_record() -> R
         &store,
         version(1),
         vec![
-            Instruction::Assert(salary(150), Policy::Max),
-            Instruction::Assert(salary(120), Policy::Max),
+            Instruction::Assert(salary(150), Pick::Max),
+            Instruction::Assert(salary(120), Pick::Max),
         ],
     )
     .await?;

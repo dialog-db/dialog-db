@@ -6,7 +6,7 @@ use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::sync::Arc;
 
 use crate::{
-    Artifact, Attribute, DialogArtifactsError, Entity, Statement, Update, Value, make_reference,
+    Artifact, DialogArtifactsError, Entity, Relation, Statement, Update, Value, make_reference,
 };
 
 /// The attribute recording that a branch holds an asset: the fact
@@ -92,7 +92,7 @@ impl Asset {
     /// The fact recording that a branch holds this asset.
     pub fn fact(&self) -> Result<Artifact, DialogArtifactsError> {
         Ok(Artifact {
-            the: ASSET_SIZE.parse::<Attribute>()?,
+            the: ASSET_SIZE.parse::<Relation>()?,
             of: self.entity()?,
             is: Value::UnsignedInt(self.size as u128),
             cause: None,

@@ -383,7 +383,7 @@ mod tests {
                     is: Value::String(name.into()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]),
         )
         .await?;

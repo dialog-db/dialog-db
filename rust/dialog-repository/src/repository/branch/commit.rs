@@ -871,7 +871,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             )]))
             .perform(&operator)
             .await?;
@@ -884,7 +884,7 @@ mod tests {
                     is: Value::String("Bob".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             )]))
             .perform(&operator)
             .await?;
@@ -918,7 +918,7 @@ mod tests {
 
         let instructions = stream::iter(vec![Instruction::Assert(
             artifact.clone(),
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]);
 
         let revision = branch.commit(instructions).perform(&operator).await?;
@@ -980,7 +980,7 @@ mod tests {
                     is: Value::String("Alice".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -995,7 +995,7 @@ mod tests {
                     is: Value::String("Bob".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await;
@@ -1019,7 +1019,7 @@ mod tests {
                     is: Value::String("Bob".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1082,7 +1082,7 @@ mod history_tests {
         let first = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1092,7 +1092,7 @@ mod history_tests {
         let second = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hi"),
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             )]))
             .perform(&operator)
             .await?;
@@ -1152,7 +1152,7 @@ mod history_tests {
         let third = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hello"),
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             )]))
             .perform(&operator)
             .await?;
@@ -1180,7 +1180,7 @@ mod history_tests {
         let revision = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1226,8 +1226,8 @@ mod history_tests {
             cause: None,
         };
         for instruction in [
-            Instruction::Assert(forged.clone(), dialog_artifacts::Policy::All),
-            Instruction::Assert(forged.clone(), dialog_artifacts::Policy::Last),
+            Instruction::Assert(forged.clone(), dialog_artifacts::Pick::All),
+            Instruction::Assert(forged.clone(), dialog_artifacts::Pick::Last),
             Instruction::Retract(forged),
         ] {
             let result = branch
@@ -1238,7 +1238,7 @@ mod history_tests {
                 matches!(
                     result,
                     Err(crate::CommitError::Artifact(
-                        DialogArtifactsError::ReservedAttribute(_)
+                        DialogArtifactsError::ReservedRelation(_)
                     ))
                 ),
                 "writes to the reserved namespace must be refused: {result:?}"
@@ -1260,7 +1260,7 @@ mod history_tests {
         let first = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1310,7 +1310,7 @@ mod history_tests {
         let first = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1351,7 +1351,7 @@ mod history_tests {
         let seed = repo.branch("main").open().perform(&operator).await?;
         seed.commit(stream::iter(vec![Instruction::Assert(
             title("post:1", "Hej"),
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1374,7 +1374,7 @@ mod history_tests {
         let raced = reasserter
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             )]))
             .perform(&operator)
             .await;
@@ -1416,7 +1416,7 @@ mod history_tests {
         let revision = branch
             .commit(stream::iter(vec![Instruction::Assert(
                 title("post:1", "Hej"),
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;

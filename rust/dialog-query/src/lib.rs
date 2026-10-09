@@ -127,9 +127,8 @@ pub use reduce::{Aggregator, Reduce, ReduceEntry, ReduceSpec};
 pub use resolver::*;
 pub use rule::*;
 pub use schema::*;
-// The field policy, over the artifacts selector a glob above also
-// carries under that name.
-pub use schema::Select;
+// The pick a field reads under, from the artifacts crate.
+pub use dialog_artifacts::Pick;
 pub use scope::*;
 pub use selection::*;
 pub use session::*;

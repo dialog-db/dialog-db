@@ -30,7 +30,7 @@
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use dialog_artifacts::{Artifact, Attribute, Entity, Instruction, Value};
+use dialog_artifacts::{Artifact, Entity, Instruction, Relation, Value};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -352,15 +352,15 @@ pub fn se_instructions(commit: &[SeFact]) -> Result<Vec<Instruction>> {
     let mut instructions = Vec::with_capacity(commit.len());
     for fact in commit {
         let artifact = Artifact {
-            the: Attribute::from_str(&fact.the)?,
+            the: Relation::from_str(&fact.the)?,
             of: Entity::from_str(&fact.of)?,
             is: fact.value.to_dialog()?,
             cause: None,
         };
         instructions.push(if is_multi_valued(&fact.the) {
-            Instruction::Assert(artifact, dialog_artifacts::Policy::All)
+            Instruction::Assert(artifact, dialog_artifacts::Pick::All)
         } else {
-            Instruction::Assert(artifact, dialog_artifacts::Policy::Last)
+            Instruction::Assert(artifact, dialog_artifacts::Pick::Last)
         });
     }
     Ok(instructions)

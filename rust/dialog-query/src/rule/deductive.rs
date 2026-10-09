@@ -24,6 +24,7 @@ pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
 use crate::reduce::{Reduce, ReduceEntry, ReduceSpec};
 use crate::rule::analyzer::AnalyzedRule;
+use crate::rule::body;
 use crate::rule::{Compile, RuleKind, compile_internal, compile_rule, fmt_rule_schema};
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
@@ -137,7 +138,7 @@ impl DeductiveRule {
     /// one body. `None` when the body reads no derived relation.
     pub fn reading_derived(
         &self,
-        derived: &dyn Fn(&Relation) -> bool,
+        derived: &dyn Fn(&The) -> bool,
     ) -> Result<Option<Self>, TypeError> {
         if let Some(origin) = self.origin() {
             let Some(source) = origin.rule.reading_derived(derived)? else {
@@ -157,7 +158,7 @@ impl DeductiveRule {
             let Term::Constant(the) = query.the() else {
                 return None;
             };
-            let relation = Relation::from(The::try_from(the.clone()).ok()?);
+            let relation = The::from(Relation::try_from(the.clone()).ok()?);
             if !derived(&relation) {
                 return None;
             }
@@ -367,8 +368,8 @@ impl DeductiveRule {
             let (mine, _) = unpaired.remove(index);
             if mine != name {
                 map.insert(mine.to_string(), name.to_string());
-                if matches!(field.the(), Relation::Collection { .. }) {
-                    map.insert(Relation::key_operand(mine), Relation::key_operand(name));
+                if matches!(field.the(), The::Collection { .. }) {
+                    map.insert(The::key_operand(mine), The::key_operand(name));
                 }
             }
         }
@@ -444,7 +445,7 @@ impl DeductiveRule {
     /// needed. This is the same encoding dialog content-addresses with
     /// elsewhere.
     pub fn try_encode(&self) -> Option<Vec<u8>> {
-        serde_ipld_dagcbor::to_vec(&self.descriptor()).ok()
+        body::encode(&self.descriptor())
     }
 
     /// This rule's content-addressed identity, if it has an encodable
@@ -538,8 +539,7 @@ impl DeductiveRule {
     /// bytes. `Err` carries a human-readable reason — either the cbor
     /// decode failed or the decoded descriptor didn't compile.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let descriptor: DeductiveRuleDescriptor = serde_ipld_dagcbor::from_slice(bytes)
-            .map_err(|e| format!("dag-cbor decode failed: {e}"))?;
+        let descriptor: DeductiveRuleDescriptor = body::decode(bytes)?;
         descriptor.compile().map_err(|e| e.to_string())
     }
 }
@@ -628,10 +628,10 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
             let mut terms = Parameters::new();
             terms.insert("this".to_string(), Term::<Any>::var("this"));
             terms.insert(ConceptDescriptor::VALUE.to_string(), value.clone());
-            if let Relation::Collection { .. } = field.the() {
+            if let The::Collection { .. } = field.the() {
                 terms.insert(
-                    Relation::key_operand(ConceptDescriptor::VALUE),
-                    Term::var(Relation::key_operand(name)),
+                    The::key_operand(ConceptDescriptor::VALUE),
+                    Term::var(The::key_operand(name)),
                 );
             }
             premises.push(Premise::Assert(Proposition::Concept(ConceptQuery {
@@ -673,8 +673,8 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
             None => Term::var(name),
         };
 
-        // The scan reads under the policy's scan arity: one claim for
-        // `last`, every claim for a policy that elects among them.
+        // The scan reads under the pick's scan arity: one claim for
+        // `last`, every claim for a pick that elects among them.
         let scanned = Some(field.descriptor().scan_cardinality());
         let premise: Premise = if field.is_optional() {
             OptionalAttributeQuery::new(
@@ -701,14 +701,11 @@ fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> 
         // (`domain/key`) to an internal variable; the author-facing
         // key is its name half, projected onto the field's key
         // operand. One entry, one row, `(key, value)` bound flat.
-        if let Relation::Collection { .. } = field.the() {
+        if let The::Collection { .. } = field.the() {
             let mut parts = Parameters::new();
-            parts.insert(
-                "of".to_string(),
-                Term::var(Relation::attribute_variable(name)),
-            );
+            parts.insert("of".to_string(), Term::var(The::attribute_variable(name)));
             parts.insert("domain".to_string(), Term::blank());
-            parts.insert("name".to_string(), Term::var(Relation::key_operand(name)));
+            parts.insert("name".to_string(), Term::var(The::key_operand(name)));
             premises.push(
                 AttributeParts::apply(parts)
                     .expect("attribute-parts operands are well-formed by construction")
@@ -757,7 +754,7 @@ impl DeductiveRule {
 
     /// Whether the body binds at most one row per `this`. Every premise
     /// it asserts reads a concept of an entity already determined (`this`,
-    /// or a value an earlier such read bound) under a choosing policy for
+    /// or a value an earlier such read bound) under a choosing pick for
     /// every field, so each read yields one row; a negation adds none.
     /// Anything else (a formula, an `all` read, a read keyed by another
     /// variable) may yield several, and the body is not single-valued.
@@ -785,9 +782,9 @@ impl DeductiveRule {
                 }
                 let single = query.predicate.with().iter().all(|(_, field)| {
                     !field.is_optional()
-                        && field.descriptor().select().elects()
+                        && field.descriptor().pick().elects()
                         && !field.descriptor().is_chain()
-                        && !matches!(field.the(), Relation::Collection { .. })
+                        && !matches!(field.the(), The::Collection { .. })
                 });
                 if !single || query.widens() {
                     return false;
@@ -852,13 +849,13 @@ impl DeductiveRule {
             }
             shared.push(name);
             kept.insert(mine.to_string());
-            if let Relation::Collection { .. } = field.the() {
-                kept.insert(Relation::key_operand(mine));
+            if let The::Collection { .. } = field.the() {
+                kept.insert(The::key_operand(mine));
             }
             if mine != name {
                 map.insert(mine.to_string(), name.to_string());
-                if let Relation::Collection { .. } = field.the() {
-                    map.insert(Relation::key_operand(mine), Relation::key_operand(name));
+                if let The::Collection { .. } = field.the() {
+                    map.insert(The::key_operand(mine), The::key_operand(name));
                 }
             }
         }
@@ -918,7 +915,7 @@ mod tests {
     use super::*;
     use crate::artifact::{Cause, Entity, Type};
     use crate::attribute::AttributeDescriptor;
-    use crate::attribute::The;
+    use crate::attribute::Relation;
     use crate::attribute::query::AttributeQuery;
     use crate::constraint::{Coalesce, Constraint};
     use crate::proposition::Proposition;
@@ -931,7 +928,7 @@ mod tests {
     /// attribute. Optionality is structural (a `OptionalAttributeQuery`
     /// left-join wrapping a scalar lookup), so this is how a test
     /// makes a variable's inferred kind admit `Nothing`.
-    fn optional_premise(the: Term<The>, is: Term<Any>, cause: Term<Cause>) -> Premise {
+    fn optional_premise(the: Term<Relation>, is: Term<Any>, cause: Term<Cause>) -> Premise {
         OptionalAttributeQuery::new(
             the,
             Term::<Entity>::var("this"),
@@ -1052,10 +1049,10 @@ mod tests {
     fn it_is_stored_as_its_identity_alone() {
         use serde_json::json;
         let json = json!({
-            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "text:" } } },
             "when": [
                 {
-                    "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                    "assert": { "with": { "name": { "the": "org/person-name", "as": "text:" } } },
                     "where": {
                         "this": { "?": { "name": "this" } },
                         "name": { "?": { "name": "name" } }
@@ -1085,10 +1082,10 @@ mod tests {
     fn it_has_a_deterministic_content_addressed_identity() {
         use serde_json::json;
         let json = json!({
-            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "text:" } } },
             "when": [
                 {
-                    "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                    "assert": { "with": { "name": { "the": "org/person-name", "as": "text:" } } },
                     "where": {
                         "this": { "?": { "name": "this" } },
                         "name": { "?": { "name": "name" } }
@@ -1622,8 +1619,8 @@ mod tests {
 
     /// A `reduce` block is refused in a deductive rule: a fold
     /// withdraws its previous result when a fact arrives and has no
-    /// reading inside a dependency cycle. The attribute's `select`
-    /// policy chooses among the candidates instead.
+    /// reading inside a dependency cycle. The attribute's `pick`
+    /// chooses among the candidates instead.
     #[dialog_common::test]
     fn it_refuses_reduce_in_a_deductive_rule() {
         use crate::reduce::{Aggregator, ReduceSpec};
@@ -2097,14 +2094,14 @@ mod tests {
     #[dialog_common::test]
     fn a_body_keyed_by_this_under_last_is_single_valued() {
         let rule = compiled(serde_json::json!({
-            "deduce": { "with": { "title": { "the": "member/title", "as": "Text" } } },
+            "deduce": { "with": { "title": { "the": "member/title", "as": "text:" } } },
             "when": [
                 {
-                    "assert": { "with": { "group": { "the": "member/group", "as": "Entity" } } },
+                    "assert": { "with": { "group": { "the": "member/group", "as": "entity:" } } },
                     "where": { "this": { "?": { "name": "this" } }, "group": { "?": { "name": "group" } } }
                 },
                 {
-                    "assert": { "with": { "name": { "the": "group/name", "as": "Text" } } },
+                    "assert": { "with": { "name": { "the": "group/name", "as": "text:" } } },
                     "where": { "this": { "?": { "name": "group" } }, "name": { "?": { "name": "title" } } }
                 }
             ]
@@ -2117,11 +2114,11 @@ mod tests {
     #[dialog_common::test]
     fn a_body_keyed_by_another_entity_is_not_single_valued() {
         let rule = compiled(serde_json::json!({
-            "deduce": { "with": { "role": { "the": "member/role", "as": "Text" } } },
+            "deduce": { "with": { "role": { "the": "member/role", "as": "text:" } } },
             "when": [{
                 "assert": { "with": {
-                    "person": { "the": "membership/person", "as": "Entity" },
-                    "role": { "the": "membership/role", "as": "Text" }
+                    "person": { "the": "membership/person", "as": "entity:" },
+                    "role": { "the": "membership/role", "as": "text:" }
                 }},
                 "where": {
                     "this": { "?": { "name": "membership" } },
@@ -2137,9 +2134,9 @@ mod tests {
     #[dialog_common::test]
     fn a_body_reading_under_all_is_not_single_valued() {
         let rule = compiled(serde_json::json!({
-            "deduce": { "with": { "tag": { "the": "item/label", "as": "Text" } } },
+            "deduce": { "with": { "tag": { "the": "item/label", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "tag": { "the": "item/tag", "as": "Text", "select": "all" } } },
+                "assert": { "with": { "tag": { "the": "item/tag", "as": "text:", "pick": "all" } } },
                 "where": { "this": { "?": { "name": "this" } }, "tag": { "?": { "name": "tag" } } }
             }]
         }));

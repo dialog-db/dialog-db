@@ -85,7 +85,7 @@ Provides modeling primitives for describing a domain: attributes, concepts, rule
 
 #### Attributes
 
-An attribute is a relation elevated with domain-specific invariants. It extends the `domain/name` identifier with a value type and cardinality, specifying what kind of values the association admits and how many.
+An attribute is a relation qualified by a value type and a pick. It extends the `domain/name` identifier with what kind of values the relation is read as and which of an entity's claims a read returns. A Rust-declared attribute picks by its cardinality: `last` for one, `all` for many.
 
 An attribute is defined as a newtype wrapping a value type. The **domain** is derived from the enclosing module name (underscores become hyphens), and the **name** from the struct name (converted to kebab-case):
 

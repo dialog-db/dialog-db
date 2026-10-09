@@ -29,12 +29,12 @@ pub use asset::*;
 
 mod update;
 pub use update::{
-    AssetChange, Change, ChangeStream, Changes, Contender, Policy, SortKey, Standing, Statement,
+    AssetChange, Change, ChangeStream, Changes, Contender, Pick, SortKey, Standing, Statement,
     Update, sort_key,
 };
 
-mod attribute;
-pub use attribute::*;
+mod relation;
+pub use relation::*;
 
 mod symbol;
 pub use symbol::*;

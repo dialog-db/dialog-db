@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::Policy;
+use dialog_artifacts::Pick;
 use dialog_query::{ConceptConclusion, ConceptQuery};
 use dialog_repository::{Delta, Subscription};
 
@@ -36,7 +36,7 @@ impl Prepared for Repoll {
                     text("yes"),
                 )
             });
-            self.env.commit(assert_all(facts, Policy::Last)).await?;
+            self.env.commit(assert_all(facts, Pick::Last)).await?;
             let delta = self.subscription.poll(&self.env.operator).await?;
             let (asserted, retracted) = delta
                 .as_ref()

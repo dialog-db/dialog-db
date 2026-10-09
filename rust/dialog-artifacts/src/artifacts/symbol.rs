@@ -13,9 +13,9 @@
 //!   (see [`crate::position`]) — starts with an uppercase major.
 //!
 //! The `/` byte is reserved and cannot appear within either shape.
-//! Joint length validation against the [`ATTRIBUTE_LENGTH`] budget
+//! Joint length validation against the [`RELATION_LENGTH`] budget
 //! happens at the layer that composes the halves into an attribute
-//! ([`crate::Attribute::compose`]), not here.
+//! ([`crate::Relation::compose`]), not here.
 
 use std::{
     fmt::{Display, Formatter, Result as FmtResult},
@@ -25,15 +25,15 @@ use std::{
 use ::serde::{Deserialize, Serialize};
 
 use crate::position::Position;
-use crate::{ATTRIBUTE_LENGTH, DialogArtifactsError};
+use crate::{DialogArtifactsError, RELATION_LENGTH};
 
 /// Maximum length in bytes for a single [`Symbol`].
 ///
 /// One byte less than the full attribute slot, reserving room for the
 /// delimiter when a symbol is joined with a name into an attribute.
-/// The joint budget (`domain + 1 + name <= ATTRIBUTE_LENGTH`) is
+/// The joint budget (`domain + 1 + name <= RELATION_LENGTH`) is
 /// enforced at the attribute composition site.
-pub const MAX_SYMBOL_LENGTH: usize = ATTRIBUTE_LENGTH - 1;
+pub const MAX_SYMBOL_LENGTH: usize = RELATION_LENGTH - 1;
 
 /// A validated identifier with a restricted character set.
 ///
@@ -101,7 +101,7 @@ impl TryFrom<String> for Symbol {
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Symbol::validate(&value).map_err(|reason| {
-            DialogArtifactsError::InvalidAttribute(format!("Invalid symbol \"{value}\": {reason}"))
+            DialogArtifactsError::InvalidRelation(format!("Invalid symbol \"{value}\": {reason}"))
         })?;
         Ok(Self(value))
     }
@@ -184,11 +184,11 @@ impl TryFrom<&str> for Name {
             Some(first) if first.is_ascii_uppercase() => Position::try_from(value)
                 .map(Name::Position)
                 .map_err(|error| {
-                    DialogArtifactsError::InvalidAttribute(format!(
+                    DialogArtifactsError::InvalidRelation(format!(
                         "Invalid position name \"{value}\": {error}"
                     ))
                 }),
-            _ => Err(DialogArtifactsError::InvalidAttribute(format!(
+            _ => Err(DialogArtifactsError::InvalidRelation(format!(
                 "Name must start with a letter (lowercase for a symbol, \
                  uppercase for a position), but got \"{value}\""
             ))),
@@ -255,7 +255,7 @@ impl NameShape {
     /// machinery shares (scan bounds and per-key filters must agree
     /// on the same class); it admits strings the strict [`Name`]
     /// vocabulary rejects, and callers owing strictness re-check
-    /// via [`Name::try_from`] / [`crate::Attribute::split`].
+    /// via [`Name::try_from`] / [`crate::Relation::split`].
     pub fn classify(first: u8) -> Option<NameShape> {
         if first.is_ascii_uppercase() {
             Some(NameShape::Position)

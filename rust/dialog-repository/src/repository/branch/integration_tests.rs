@@ -125,7 +125,7 @@ async fn it_pushes_to_s3_remote(s3: S3Address) -> Result<()> {
     branch
         .commit(stream::iter(vec![Instruction::Assert(
             artifact,
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -150,7 +150,7 @@ async fn it_fetches_from_s3_remote(s3: S3Address) -> Result<()> {
     branch
         .commit(stream::iter(vec![Instruction::Assert(
             artifact,
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -183,7 +183,7 @@ async fn it_push_and_pull_roundtrip(s3: S3Address) -> Result<()> {
     branch
         .commit(stream::iter(vec![Instruction::Assert(
             artifact,
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -260,7 +260,7 @@ async fn it_fails_over_to_an_address_that_answers(s3: S3Address) -> Result<()> {
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -358,7 +358,7 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
                     is: Value::String(format!("{i:04}{}", "x".repeat(inline_n))),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )
         })
         .collect();
@@ -582,7 +582,7 @@ async fn it_ships_an_imported_asset_on_push_and_hydrates_on_read(s3: S3Address) 
         attachment,
         document.clone(),
         Value::Entity(content.clone()),
-        dialog_artifacts::Policy::Last,
+        dialog_artifacts::Pick::Last,
     );
     branch_a
         .transaction()
@@ -658,7 +658,7 @@ async fn it_ships_an_imported_asset_on_push_and_hydrates_on_read(s3: S3Address) 
         "doc/cover".parse()?,
         "doc:2".parse::<Entity>()?,
         Value::Entity(content.clone()),
-        dialog_artifacts::Policy::Last,
+        dialog_artifacts::Pick::Last,
     );
     branch_b
         .transaction()
@@ -766,7 +766,7 @@ async fn it_ships_a_spill_of_a_retracted_assets_bytes(s3: S3Address) -> Result<(
         body,
         document.clone(),
         Value::Bytes(payload.clone()),
-        dialog_artifacts::Policy::Last,
+        dialog_artifacts::Pick::Last,
     );
 
     branch_a
@@ -1290,7 +1290,7 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
     branch_a
         .commit(stream::iter(vec![Instruction::Assert(
             artifact,
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator_a)
         .await?;
@@ -1458,7 +1458,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
     branch_a
         .commit(stream::iter(vec![Instruction::Assert(
             artifact.clone(),
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator_a)
         .await?;
@@ -1543,7 +1543,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
 #[cfg(not(feature = "web-integration-tests"))]
 #[dialog_common::test]
 async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Result<()> {
-    use dialog_query::attribute::The;
+    use dialog_query::attribute::Relation;
     use dialog_query::{AttributeQuery, Term, the};
 
     let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
@@ -1614,7 +1614,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .await?;
 
     let query = AttributeQuery::from(
-        Term::<The>::from(the!("doc/body"))
+        Term::<Relation>::from(the!("doc/body"))
             .of(Term::<dialog_artifacts::Entity>::var("e"))
             .is(Term::<String>::var("v")),
     );
@@ -1634,7 +1634,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
                 is: Value::String(body.clone()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator_a)
         .await?;
@@ -1670,7 +1670,7 @@ async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> Result<()> {
     branch
         .commit(stream::iter(vec![Instruction::Assert(
             artifact,
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1704,7 +1704,7 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
             artifact,
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1769,7 +1769,7 @@ async fn it_reads_what_a_one_off_pull_brought(s3: S3Address) -> Result<()> {
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1822,7 +1822,7 @@ async fn it_merges_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<()> 
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1849,7 +1849,7 @@ async fn it_merges_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<()> 
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1861,7 +1861,7 @@ async fn it_merges_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<()> 
                 is: Value::String("Carol".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .merge()
         .perform(&profile)
@@ -1908,7 +1908,7 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
             fact.clone(),
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1939,7 +1939,7 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
     alice_branch
         .commit(stream::iter(vec![Instruction::Assert(
             unrelated,
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2035,7 +2035,7 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
                         is: Value::String(format!("resident-{batch}-{i}")),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 )
             })
             .collect();
@@ -2081,7 +2081,7 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&env)
         .await?;
@@ -2129,7 +2129,7 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
                         is: Value::String(format!("resident-{batch}-{i}")),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 )
             })
             .collect();
@@ -2141,7 +2141,7 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
                     is: Value::String(big.clone()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             ));
         }
         alice_branch
@@ -2270,7 +2270,7 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
                 is: Value::String("Bridge".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2548,7 +2548,7 @@ async fn it_leaves_an_aborted_push_closure_complete(s3: S3Address) -> Result<()>
                     is: Value::String(format!("resident-{i}")),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )
         })
         .collect();
@@ -2613,7 +2613,7 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
                         is: Value::String(format!("resident-{batch}-{i}")),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 )
             })
             .collect();
@@ -2673,7 +2673,7 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
                 is: Value::String("Bridge".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2730,7 +2730,7 @@ async fn it_forwards_content_adopted_through_a_local_upstream(s3: S3Address) -> 
                         is: Value::String(format!("resident-{batch}-{i}")),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 )
             })
             .collect();
@@ -2859,7 +2859,7 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2894,7 +2894,7 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -3398,7 +3398,7 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&alice_operator)
         .await?;
@@ -3569,7 +3569,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&alice_operator)
         .await?;
@@ -3644,7 +3644,7 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&bob_operator)
         .await?;
@@ -3722,7 +3722,7 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> Result<()> {
                 is: Value::String("UCAN User".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -3770,7 +3770,7 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -3902,7 +3902,7 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> Result<()> {
                 is: Value::String("Delegated Push".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -3971,7 +3971,7 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
                 is: Value::String("Alice Delegated".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&alice_operator)
         .await?;
@@ -4077,7 +4077,7 @@ async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) 
             is: Value::String("downloaded on demand".repeat(64)),
             cause: None,
         },
-        dialog_artifacts::Policy::All,
+        dialog_artifacts::Pick::All,
     )];
     branch_a
         .commit(stream::iter(facts))
@@ -4262,7 +4262,7 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
     branch_a
         .commit(stream::iter(vec![Instruction::Assert(
             retracted.clone(),
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator_a)
         .await?;
@@ -4308,7 +4308,7 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
                 is: Value::String("site B novelty".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator_b)
         .await?;
@@ -4584,7 +4584,7 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
                         is: Value::String(format!("resident-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 )
             })
             .collect();
@@ -4706,7 +4706,7 @@ async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
                         is: Value::String(format!("resident-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 )
             })
             .collect();
@@ -4754,7 +4754,7 @@ async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
                     is: Value::String(format!("ours-{i}").repeat(24)),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )
         })
         .collect();
@@ -4847,7 +4847,7 @@ async fn it_downloads_one_block_at_a_time_over_ucan(ucan: UcanS3Address) -> Resu
                         is: Value::String(format!("resident-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 )
             })
             .collect();
@@ -4963,7 +4963,7 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
                         is: Value::String(format!("resident-{round}-{i}").repeat(24)),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 )
             })
             .collect();
@@ -5024,7 +5024,7 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
                     is: Value::String(format!("ours-{i}").repeat(24)),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )
         })
         .collect();
@@ -5248,7 +5248,7 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
                     is: Value::String(format!("device-{i}").repeat(24)),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )
         })
         .collect();
@@ -5449,7 +5449,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
                         is: Value::String(format!("resident-{i:04}").repeat(16)),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 )
             })
             .collect();
@@ -5479,7 +5479,7 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
         const OWN_FACTS: usize = 16;
         branch
             .commit(stream::iter((0..OWN_FACTS).map(|i| {
-                Instruction::Assert(facts(i), dialog_artifacts::Policy::All)
+                Instruction::Assert(facts(i), dialog_artifacts::Pick::All)
             })))
             .perform(&operator)
             .await?;
@@ -5808,7 +5808,7 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -5840,7 +5840,7 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
                 is: Value::String("Alice again".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -5861,7 +5861,7 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -5920,7 +5920,7 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
                 is: Value::String("Alice".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -5948,7 +5948,7 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
                 is: Value::String("Alice again".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -5968,7 +5968,7 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
                 is: Value::String("Bob".into()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -6032,7 +6032,7 @@ async fn it_hydrates_a_spill_a_legacy_remote_holds_as_a_block(s3: S3Address) -> 
                 is: value.clone(),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator_a)
         .await?;

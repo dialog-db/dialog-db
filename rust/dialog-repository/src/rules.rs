@@ -39,7 +39,7 @@ use std::sync::{Arc, OnceLock};
 use dialog_artifacts::history::REVISION_ATTRIBUTE;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Changes, Entity, Statement, Update, Value,
+    Artifact, ArtifactSelector, Changes, Entity, Relation, Statement, Update, Value,
 };
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
@@ -72,7 +72,7 @@ pub(crate) use dialog_query::rule::statement::{
 /// is a *command*: facts of it dispatched into a transaction (and heads
 /// of rules concluding it) live for one induction round and are never
 /// committed.
-pub(crate) fn transient_attr() -> Attribute {
+pub(crate) fn transient_attr() -> Relation {
     the!("dialog.concept/transient").into()
 }
 
@@ -97,7 +97,7 @@ impl Statement for Transient {
             transient_attr(),
             self.0,
             Value::Boolean(true),
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         );
     }
 
@@ -821,7 +821,7 @@ pub(crate) fn overlay_rules_deriving(changes: &Changes, on: &Entity) -> Vec<Dedu
 
 /// The head of `rule` deriving the relation indexed by `on`, if it has
 /// one: the head concluding that relation's attribute concept, whatever
-/// type or policy the reader declares over it.
+/// type or pick the reader declares over it.
 pub(crate) fn head_onto(
     rule: &DeductiveRule,
     on: &Entity,

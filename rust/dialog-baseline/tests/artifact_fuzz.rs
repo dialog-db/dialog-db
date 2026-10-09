@@ -21,7 +21,7 @@ use anyhow::Result;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTree;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Entity, Instruction, Value, sort_key,
+    Artifact, ArtifactSelector, Entity, Instruction, Relation, Value, sort_key,
 };
 use dialog_baseline::changes_of;
 use dialog_baseline::repo::{DialogRepo, VolatileRepo};
@@ -41,8 +41,8 @@ fn entity(n: u32) -> Entity {
     Entity::from_str(&format!("entity:fuzz-{n:03}")).expect("valid entity")
 }
 
-fn attribute(n: u32) -> Attribute {
-    Attribute::from_str(&format!("fuzz/attr{n}")).expect("valid attribute")
+fn attribute(n: u32) -> Relation {
+    Relation::from_str(&format!("fuzz/attr{n}")).expect("valid attribute")
 }
 
 /// Values straddling every encoding decision: tiny inline strings, strings
@@ -83,7 +83,7 @@ fn generate(seed: u64, op_count: usize) -> Vec<Instruction> {
                     cause: None,
                 };
                 live.push(artifact.clone());
-                Instruction::Assert(artifact, dialog_artifacts::Policy::All)
+                Instruction::Assert(artifact, dialog_artifacts::Pick::All)
             }
             // Replace: cardinality-one supersession (cause chains from the
             // superseded fact — the ordering-sensitive path).
@@ -104,10 +104,10 @@ fn generate(seed: u64, op_count: usize) -> Vec<Instruction> {
                 if held <= 1 {
                     live.retain(|held| !(held.the == the && held.of == of));
                     live.push(artifact.clone());
-                    Instruction::Assert(artifact, dialog_artifacts::Policy::Last)
+                    Instruction::Assert(artifact, dialog_artifacts::Pick::Last)
                 } else {
                     live.push(artifact.clone());
-                    Instruction::Assert(artifact, dialog_artifacts::Policy::All)
+                    Instruction::Assert(artifact, dialog_artifacts::Pick::All)
                 }
             }
             // Retract a real fact when one exists...

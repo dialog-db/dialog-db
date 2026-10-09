@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::Policy;
+use dialog_artifacts::Pick;
 use dialog_query::ConceptDescriptor;
 
 use crate::env::{Env, assert_all, concept, entity, fact, text};
@@ -176,20 +176,20 @@ pub fn spec(name: &str) -> Option<Spec> {
 /// The `stuff` population: `stuff/name` and `stuff/role` per entity.
 fn stuff() -> ConceptDescriptor {
     concept(serde_json::json!({ "with": {
-        "name": { "the": "stuff/name", "as": "Text" },
-        "role": { "the": "stuff/role", "as": "Text" }
+        "name": { "the": "stuff/name", "as": "text:" },
+        "role": { "the": "stuff/role", "as": "text:" }
     }}))
 }
 
 /// The `stuff/name` field alone.
 fn stuff_name() -> ConceptDescriptor {
     concept(serde_json::json!({ "with": {
-        "name": { "the": "stuff/name", "as": "Text" }
+        "name": { "the": "stuff/name", "as": "text:" }
     }}))
 }
 
 /// Commit `count` stuff entities, their two facts under `policy`.
-async fn seed_stuff(env: &Env, count: usize, policy: Policy) -> Result<()> {
+async fn seed_stuff(env: &Env, count: usize, policy: Pick) -> Result<()> {
     let facts = (0..count).flat_map(|index| {
         let this = entity("stuff", index);
         [

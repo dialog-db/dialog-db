@@ -17,7 +17,7 @@ use futures_util::TryStreamExt;
 
 use crate::Binding;
 use crate::artifact::Value;
-use crate::attribute::Relation;
+use crate::attribute::The;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::concept::query::ConceptQuery;
 use crate::error::EvaluationError;
@@ -216,7 +216,7 @@ impl Recall {
             Term::<Any>::var(ConceptDescriptor::VALUE),
         );
         if self.key.is_some() {
-            let key = Relation::key_operand(ConceptDescriptor::VALUE);
+            let key = The::key_operand(ConceptDescriptor::VALUE);
             terms.insert(key.clone(), Term::<Any>::var(&key));
         }
         ConceptQuery {
@@ -238,7 +238,7 @@ impl Recall {
     {
         let this_term = Term::<Any>::var("this");
         let value_term = Term::<Any>::var(ConceptDescriptor::VALUE);
-        let key_term = Term::<Any>::var(Relation::key_operand(ConceptDescriptor::VALUE));
+        let key_term = Term::<Any>::var(The::key_operand(ConceptDescriptor::VALUE));
         try_stream! {
             for await input in selection {
                 let input = input?;

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Revision;
 use crate::{
-    Artifact, Attribute, Datum, DialogArtifactsError, Entity, Key, State, Value,
+    Artifact, Datum, DialogArtifactsError, Entity, Key, Relation, State, Value,
     key::{EncodedValue, artifact_index_keys_with},
 };
 use dialog_search_tree::Manifest;
@@ -23,7 +23,7 @@ use super::{Edition, Origin, REVISION_ATTRIBUTE, Version, verify_issuer_signatur
 ///
 /// The attribute lives in the reserved `dialog.` namespace: user
 /// instructions cannot write it (see
-/// [`ReservedAttribute`](DialogArtifactsError::ReservedAttribute)), so at
+/// [`ReservedRelation`](DialogArtifactsError::ReservedAttribute)), so at
 /// the library level lineage cannot be corrupted through the ordinary
 /// write path. Against a hostile peer crafting records on the wire, the
 /// record carries the issuer's signature over every other field, and it
@@ -150,7 +150,7 @@ impl RevisionRecord {
     /// entity under [`REVISION_ATTRIBUTE`], valued with the encoded record
     pub fn to_artifact(&self, version: &Version) -> Result<Artifact, DialogArtifactsError> {
         Ok(Artifact {
-            the: Attribute::try_from(REVISION_ATTRIBUTE.to_string())?,
+            the: Relation::try_from(REVISION_ATTRIBUTE.to_string())?,
             of: version.entity(),
             is: Value::Record(self.to_bytes()?),
             cause: None,

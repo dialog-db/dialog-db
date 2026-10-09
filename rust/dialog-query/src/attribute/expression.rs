@@ -1,4 +1,4 @@
-/// Dynamic (untyped) attribute expressions using `The` identifiers.
+/// Dynamic (untyped) attribute expressions using `Relation` identifiers.
 pub mod dynamic;
 /// Typed attribute expressions using `Attribute` types.
 pub mod typed;

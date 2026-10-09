@@ -33,8 +33,8 @@ async fn member_rows(
     select: &str,
 ) -> anyhow::Result<Vec<(Value, Value)>> {
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "group": { "the": "member/group", "as": "Entity", "select": select },
-        "role": { "the": "member/role", "as": "Text", "select": select }
+        "group": { "the": "member/group", "as": "entity:", "pick": select },
+        "role": { "the": "member/role", "as": "text:", "pick": select }
     }}))?;
     let mut terms = Parameters::new();
     terms.insert("this".into(), Term::<Any>::constant(of.clone()));
@@ -62,14 +62,14 @@ async fn member_rows(
 fn member_rule() -> anyhow::Result<DeductiveRule> {
     compile(serde_json::json!({
         "deduce": { "with": {
-            "group": { "the": "member/group", "as": "Entity" },
-            "role": { "the": "member/role", "as": "Text" }
+            "group": { "the": "member/group", "as": "entity:" },
+            "role": { "the": "member/role", "as": "text:" }
         }},
         "when": [{
             "assert": { "with": {
-                "person": { "the": "membership/person", "as": "Entity" },
-                "group": { "the": "membership/group", "as": "Entity" },
-                "role": { "the": "membership/role", "as": "Text" }
+                "person": { "the": "membership/person", "as": "entity:" },
+                "group": { "the": "membership/group", "as": "entity:" },
+                "role": { "the": "membership/role", "as": "text:" }
             }},
             "where": {
                 "this": { "?": { "name": "membership" } },
@@ -183,7 +183,7 @@ async fn a_concept_read_under_last_elects_one_value_per_attribute() -> anyhow::R
 /// attributes, and the per-attribute election "the moment a fact lands
 /// under one of those attributes". Storing a `member/role` of *bob*
 /// says nothing about alice, so alice's rows must not change. Under
-/// the default policy, `last`, they do: the covering rule yields the
+/// the default pick, `last`, they do: the covering rule yields the
 /// body's two rows (no election runs on that path for a multi-field
 /// concept), and the election yields one row, the right one under
 /// attribute heads (see `a_concept_read_under_last_elects_one_value_per_attribute`).
@@ -246,20 +246,20 @@ async fn a_negation_inside_a_cycle_still_sees_stored_facts() -> anyhow::Result<(
         .await?;
 
     let p = compile(serde_json::json!({
-        "deduce": { "with": { "p": { "the": "x/p", "as": "Text" } } },
+        "deduce": { "with": { "p": { "the": "x/p", "as": "text:" } } },
         "when": [{
-            "assert": { "with": { "q": { "the": "x/q", "as": "Text" } } },
+            "assert": { "with": { "q": { "the": "x/q", "as": "text:" } } },
             "where": { "this": { "?": { "name": "this" } }, "q": { "?": { "name": "p" } } }
         }],
         "unless": [{
-            "assert": { "with": { "r": { "the": "x/r", "as": "Text" } } },
+            "assert": { "with": { "r": { "the": "x/r", "as": "text:" } } },
             "where": { "this": { "?": { "name": "this" } } }
         }]
     }))?;
     let r = compile(serde_json::json!({
-        "deduce": { "with": { "r": { "the": "x/r", "as": "Text" } } },
+        "deduce": { "with": { "r": { "the": "x/r", "as": "text:" } } },
         "when": [{
-            "assert": { "with": { "p": { "the": "x/p", "as": "Text" } } },
+            "assert": { "with": { "p": { "the": "x/p", "as": "text:" } } },
             "where": { "this": { "?": { "name": "this" } }, "p": { "?": { "name": "r" } } }
         }]
     }))?;
@@ -269,7 +269,7 @@ async fn a_negation_inside_a_cycle_still_sees_stored_facts() -> anyhow::Result<(
     let source = TestEnv::new(&branch, &operator, registry);
 
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "p": { "the": "x/p", "as": "Text" }
+        "p": { "the": "x/p", "as": "text:" }
     }}))?;
     let mut terms = Parameters::new();
     terms.insert("this".into(), Term::var("who"));
@@ -299,7 +299,7 @@ async fn relation_under(
     select: &str,
 ) -> anyhow::Result<Vec<(Value, Value)>> {
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "value": { "the": the, "as": "Text", "select": select }
+        "value": { "the": the, "as": "text:", "pick": select }
     }}))?;
     let mut terms = Parameters::new();
     terms.insert("this".into(), Term::var("who"));
@@ -348,21 +348,21 @@ async fn a_stratified_negation_keeps_its_meaning_when_another_rule_closes_a_cycl
         .await?;
     let derive = |head: &str, from: &str| {
         compile(serde_json::json!({
-            "deduce": { "with": { "v": { "the": head, "as": "Text" } } },
+            "deduce": { "with": { "v": { "the": head, "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "v": { "the": from, "as": "Text" } } },
+                "assert": { "with": { "v": { "the": from, "as": "text:" } } },
                 "where": { "this": { "?": { "name": "this" } }, "v": { "?": { "name": "v" } } }
             }]
         }))
     };
     let p = compile(serde_json::json!({
-        "deduce": { "with": { "p": { "the": "x/p", "as": "Text" } } },
+        "deduce": { "with": { "p": { "the": "x/p", "as": "text:" } } },
         "when": [{
-            "assert": { "with": { "q": { "the": "x/q", "as": "Text" } } },
+            "assert": { "with": { "q": { "the": "x/q", "as": "text:" } } },
             "where": { "this": { "?": { "name": "this" } }, "q": { "?": { "name": "p" } } }
         }],
         "unless": [{
-            "assert": { "with": { "r": { "the": "x/r", "as": "Text" } } },
+            "assert": { "with": { "r": { "the": "x/r", "as": "text:" } } },
             "where": { "this": { "?": { "name": "this" } } }
         }]
     }))?;
@@ -401,7 +401,7 @@ async fn a_stratified_negation_keeps_its_meaning_when_another_rule_closes_a_cycl
 /// the election as the absence test it is and quarantines that rule,
 /// the one deriving what the choice reads. (Before, the choice read its
 /// candidate set inside the cycle, `{"set", "none"}` for `b`, and
-/// flagged `b` too: the cycle policy reached through a policy.)
+/// flagged `b` too: the cycle policy reached through a pick.)
 #[dialog_common::test]
 async fn a_ranked_default_inside_a_cycle_still_elects() -> anyhow::Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -420,18 +420,18 @@ async fn a_ranked_default_inside_a_cycle_still_elects() -> anyhow::Result<()> {
         .await?;
 
     let default = compile(serde_json::json!({
-        "deduce": { "with": { "default": { "the": "x/default", "as": "Text" } } },
+        "deduce": { "with": { "default": { "the": "x/default", "as": "text:" } } },
         "when": [{
-            "assert": { "with": { "item": { "the": "x/item", "as": "Text" } } },
+            "assert": { "with": { "item": { "the": "x/item", "as": "text:" } } },
             "where": { "this": { "?": { "name": "this" } }, "item": { "?": { "name": "default" } } }
         }]
     }))?;
     let flag = compile(serde_json::json!({
-        "deduce": { "with": { "flag": { "the": "x/flag", "as": "Text" } } },
+        "deduce": { "with": { "flag": { "the": "x/flag", "as": "text:" } } },
         "when": [
             {
                 "assert": { "with": {
-                    "status": { "the": ["x/real", "x/default"], "as": "Text" }
+                    "status": { "the": ["x/real", "x/default"], "as": "text:" }
                 }},
                 "where": { "this": { "?": { "name": "this" } }, "status": { "?": { "name": "flag" } } }
             },
@@ -442,11 +442,11 @@ async fn a_ranked_default_inside_a_cycle_still_elects() -> anyhow::Result<()> {
         ]
     }))?;
     let close = compile(serde_json::json!({
-        "deduce": { "with": { "real": { "the": "x/real", "as": "Text" } } },
+        "deduce": { "with": { "real": { "the": "x/real", "as": "text:" } } },
         "when": [{
             "assert": { "with": {
-                "flag": { "the": "x/flag", "as": "Text" },
-                "mirror": { "the": "x/mirror", "as": "Text" }
+                "flag": { "the": "x/flag", "as": "text:" },
+                "mirror": { "the": "x/mirror", "as": "text:" }
             }},
             "where": {
                 "this": { "?": { "name": "this" } },
@@ -480,7 +480,7 @@ async fn a_ranked_default_inside_a_cycle_still_elects() -> anyhow::Result<()> {
 
 /// `ancestor(this, a) :- parent(this, a)` and `ancestor(this, a) :-
 /// parent(this, p), ancestor(p, a)`, read through a field under the
-/// default policy, `last`. The design says election "runs once, over
+/// default pick, `last`. The design says election "runs once, over
 /// the finished fixpoint, where the component's rows leave it" and "a
 /// reader outside the component sees one value". Under `last` the
 /// exit skips the election and every candidate leaves: a reader of a
@@ -502,21 +502,21 @@ async fn a_recursive_relation_read_under_last_yields_one_value_per_entity() -> a
         .perform(&operator)
         .await?;
     let base = compile(serde_json::json!({
-        "deduce": { "with": { "ancestor": { "the": "family/ancestor", "as": "Entity" } } },
+        "deduce": { "with": { "ancestor": { "the": "family/ancestor", "as": "entity:" } } },
         "when": [{
-            "assert": { "with": { "parent": { "the": "family/parent", "as": "Entity" } } },
+            "assert": { "with": { "parent": { "the": "family/parent", "as": "entity:" } } },
             "where": { "this": { "?": { "name": "this" } }, "parent": { "?": { "name": "ancestor" } } }
         }]
     }))?;
     let step = compile(serde_json::json!({
-        "deduce": { "with": { "ancestor": { "the": "family/ancestor", "as": "Entity" } } },
+        "deduce": { "with": { "ancestor": { "the": "family/ancestor", "as": "entity:" } } },
         "when": [
             {
-                "assert": { "with": { "parent": { "the": "family/parent", "as": "Entity" } } },
+                "assert": { "with": { "parent": { "the": "family/parent", "as": "entity:" } } },
                 "where": { "this": { "?": { "name": "this" } }, "parent": { "?": { "name": "p" } } }
             },
             {
-                "assert": { "with": { "ancestor": { "the": "family/ancestor", "as": "Entity" } } },
+                "assert": { "with": { "ancestor": { "the": "family/ancestor", "as": "entity:" } } },
                 "where": { "this": { "?": { "name": "p" } }, "ancestor": { "?": { "name": "ancestor" } } }
             }
         ]
@@ -527,7 +527,7 @@ async fn a_recursive_relation_read_under_last_yields_one_value_per_entity() -> a
     let source = TestEnv::new(&branch, &operator, registry);
 
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "ancestor": { "the": "family/ancestor", "as": "Entity", "select": "last" }
+        "ancestor": { "the": "family/ancestor", "as": "entity:", "pick": "last" }
     }}))?;
     let mut terms = Parameters::new();
     terms.insert("this".into(), Term::<Any>::constant(c.clone()));
@@ -574,9 +574,9 @@ async fn a_derived_value_stands_by_the_fact_that_bound_it_through_a_fixpoint() -
         .await?;
     let derive = |from: &str| {
         compile(serde_json::json!({
-            "deduce": { "with": { "a": { "the": "x/a", "as": "Text" } } },
+            "deduce": { "with": { "a": { "the": "x/a", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "v": { "the": from, "as": "Text" } } },
+                "assert": { "with": { "v": { "the": from, "as": "text:" } } },
                 "where": { "this": { "?": { "name": "this" } }, "v": { "?": { "name": "a" } } }
             }]
         }))
@@ -626,14 +626,14 @@ async fn a_rule_recursing_through_a_last_read_derives_down_the_chain() -> anyhow
     transaction.commit().publish().perform(&operator).await?;
 
     let carry = compile(serde_json::json!({
-        "deduce": { "with": { "label": { "the": "x/label", "as": "Text" } } },
+        "deduce": { "with": { "label": { "the": "x/label", "as": "text:" } } },
         "when": [
             {
-                "assert": { "with": { "next": { "the": "x/next", "as": "Entity", "select": "last" } } },
+                "assert": { "with": { "next": { "the": "x/next", "as": "entity:", "pick": "last" } } },
                 "where": { "this": { "?": { "name": "this" } }, "next": { "?": { "name": "next" } } }
             },
             {
-                "assert": { "with": { "label": { "the": "x/label", "as": "Text", "select": "last" } } },
+                "assert": { "with": { "label": { "the": "x/label", "as": "text:", "pick": "last" } } },
                 "where": { "this": { "?": { "name": "next" } }, "label": { "?": { "name": "label" } } }
             }
         ]
@@ -687,11 +687,11 @@ async fn a_bulk_negation_keys_on_the_variables_each_candidate_binds() -> anyhow:
     transaction.commit().publish().perform(&operator).await?;
 
     let ok = compile(serde_json::json!({
-        "deduce": { "with": { "ok": { "the": "club/ok", "as": "Text" } } },
+        "deduce": { "with": { "ok": { "the": "club/ok", "as": "text:" } } },
         "when": [{
             "assert": { "with": {
-                "name": { "the": "person/name", "as": "Text" },
-                "nickname": { "the": "person/nickname", "as": "Entity", "optional": true }
+                "name": { "the": "person/name", "as": "text:" },
+                "nickname": { "the": "person/nickname", "as": "entity:", "optional": true }
             }},
             "where": {
                 "this": { "?": { "name": "this" } },
@@ -700,7 +700,7 @@ async fn a_bulk_negation_keys_on_the_variables_each_candidate_binds() -> anyhow:
             }
         }],
         "unless": [{
-            "assert": { "with": { "banned": { "the": "club/banned", "as": "Text" } } },
+            "assert": { "with": { "banned": { "the": "club/banned", "as": "text:" } } },
             "where": { "this": { "?": { "name": "nick" } } }
         }]
     }))?;
@@ -722,7 +722,7 @@ async fn a_bulk_negation_keys_on_the_variables_each_candidate_binds() -> anyhow:
 /// value. A cardinality-one attribute premise reads the same cell
 /// through its own election, which breaks the tie by the hash of each
 /// fact instead, so for some value pairs the two reads of one cell
-/// under one policy disagree.
+/// under one pick disagree.
 #[dialog_common::test]
 async fn every_last_read_of_a_cell_elects_the_same_claim() -> anyhow::Result<()> {
     use crate::attribute::query::AttributeQuery;
@@ -771,7 +771,7 @@ async fn every_last_read_of_a_cell_elects_the_same_claim() -> anyhow::Result<()>
             .collect::<Result<_, crate::EvaluationError>>()?;
 
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": "last" }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": "last" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::<Any>::constant(of.clone()));

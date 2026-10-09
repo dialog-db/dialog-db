@@ -12,7 +12,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::{Attribute, Cause, DialogArtifactsError, Entity, TypeError, make_reference};
+use crate::{Cause, DialogArtifactsError, Entity, Relation, TypeError, make_reference};
 use base58::{FromBase58, ToBase58};
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
@@ -39,7 +39,7 @@ pub enum Value {
     /// TBD structured data (flatbuffers?)
     Record(Vec<u8>),
     /// A symbol type, used to distinguish attributes from other strings
-    Symbol(Attribute),
+    Symbol(Relation),
 }
 
 impl Value {
@@ -181,7 +181,7 @@ impl FromStr for Value {
             "sint" => Value::SignedInt(value.parse().map_err(to_dialog_error)?),
             "float" => Value::Float(value.parse().map_err(to_dialog_error)?),
             "record" => Value::Record(value.from_base58().map_err(to_dialog_error_debug)?),
-            "attribute" => Value::Symbol(Attribute::from_str(value)?),
+            "attribute" => Value::Symbol(Relation::from_str(value)?),
             _ => {
                 return Err(DialogArtifactsError::InvalidValue(
                     "Value part of serialized string is empty".into(),
@@ -250,7 +250,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
             // threshold must round-trip, not panic.
             ValueDataType::Record => Value::Record(value),
             ValueDataType::Symbol => match String::from_utf8(value) {
-                Ok(value) => Value::Symbol(Attribute::try_from(
+                Ok(value) => Value::Symbol(Relation::try_from(
                     value.split('\u{0000}').take(1).collect::<String>(),
                 )?),
                 Err(error) => {
@@ -263,7 +263,7 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
     }
 }
 
-impl TryFrom<Value> for Attribute {
+impl TryFrom<Value> for Relation {
     type Error = TypeError;
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
@@ -640,8 +640,8 @@ impl From<f32> for Value {
     }
 }
 
-impl From<Attribute> for Value {
-    fn from(value: Attribute) -> Self {
+impl From<Relation> for Value {
+    fn from(value: Relation) -> Self {
         Value::Symbol(value)
     }
 }
@@ -667,7 +667,7 @@ impl PartialEq<Value> for Entity {
     }
 }
 
-impl PartialEq<Value> for Attribute {
+impl PartialEq<Value> for Relation {
     fn eq(&self, other: &Value) -> bool {
         match other {
             Value::Symbol(attr) => self == attr,
@@ -825,33 +825,113 @@ impl From<Value> for ValueDataType {
 
 /// [`ValueDataType`] embodies all types that are able to be represented
 /// as a [`Value`].
+///
+/// A type is named by an entity: `text:`, `integer:`, `natural:`,
+/// `float:`, `boolean:`, `bytes:`, `entity:`, `symbol:` and `record:`.
+/// That is how it is written wherever it is serialized and what an
+/// attribute's identity hashes. The names the release before type
+/// entities wrote (`Text`, `SignedInteger`, ...) are still read, so
+/// what it stored decodes; see [`ValueDataType::legacy_name`].
 #[repr(u8)]
-#[derive(
-    Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash,
-)]
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ValueDataType {
-    /// A byte buffer
+    /// A byte buffer: `bytes:`
     #[default]
     Bytes = 0,
-    /// An [`Entity`]
+    /// An [`Entity`]: `entity:`
     Entity = 1,
-    /// A boolean
+    /// A boolean: `boolean:`
     Boolean = 2,
-    /// A UTF-8 string
-    #[serde(rename = "Text")]
+    /// A UTF-8 string: `text:`
     String = 3,
-    /// A 128-bit unsigned integer
-    #[serde(rename = "UnsignedInteger")]
+    /// A 128-bit unsigned integer: `natural:`
     UnsignedInt = 4,
-    /// A 128-bit signed integer
-    #[serde(rename = "SignedInteger")]
+    /// A 128-bit signed integer: `integer:`
     SignedInt = 5,
-    /// A floating point number
+    /// A floating point number: `float:`
     Float = 6,
-    /// TBD structured data (flatbuffers?)
+    /// TBD structured data (flatbuffers?): `record:`
     Record = 7,
-    /// A symbol type, used to distinguish attributes from other strings
+    /// A symbol type, used to distinguish attributes from other
+    /// strings: `symbol:`
     Symbol = 8,
+}
+
+impl ValueDataType {
+    /// Every type, in discriminant order.
+    pub const ALL: [ValueDataType; 9] = [
+        ValueDataType::Bytes,
+        ValueDataType::Entity,
+        ValueDataType::Boolean,
+        ValueDataType::String,
+        ValueDataType::UnsignedInt,
+        ValueDataType::SignedInt,
+        ValueDataType::Float,
+        ValueDataType::Record,
+        ValueDataType::Symbol,
+    ];
+
+    /// The entity that names this type, such as `text:`.
+    pub fn uri(&self) -> &'static str {
+        match self {
+            ValueDataType::Bytes => "bytes:",
+            ValueDataType::Entity => "entity:",
+            ValueDataType::Boolean => "boolean:",
+            ValueDataType::String => "text:",
+            ValueDataType::UnsignedInt => "natural:",
+            ValueDataType::SignedInt => "integer:",
+            ValueDataType::Float => "float:",
+            ValueDataType::Record => "record:",
+            ValueDataType::Symbol => "symbol:",
+        }
+    }
+
+    /// The name the release before type entities wrote for this type,
+    /// which identities it computed hash.
+    pub fn legacy_name(&self) -> &'static str {
+        match self {
+            ValueDataType::Bytes => "Bytes",
+            ValueDataType::Entity => "Entity",
+            ValueDataType::Boolean => "Boolean",
+            ValueDataType::String => "Text",
+            ValueDataType::UnsignedInt => "UnsignedInteger",
+            ValueDataType::SignedInt => "SignedInteger",
+            ValueDataType::Float => "Float",
+            ValueDataType::Record => "Record",
+            ValueDataType::Symbol => "Symbol",
+        }
+    }
+
+    /// The type `name` names: its entity (`text:`), or the name the
+    /// release before type entities wrote (`Text`).
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.uri() == name || kind.legacy_name() == name)
+    }
+}
+
+impl Serialize for ValueDataType {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.uri())
+    }
+}
+
+impl<'de> Deserialize<'de> for ValueDataType {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Named;
+        impl de::Visitor<'_> for Named {
+            type Value = ValueDataType;
+            fn expecting(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+                formatter.write_str("a type entity such as `text:`")
+            }
+            fn visit_str<E: de::Error>(self, name: &str) -> Result<ValueDataType, E> {
+                ValueDataType::named(name)
+                    .ok_or_else(|| E::custom(format!("`{name}` names no type")))
+            }
+        }
+        deserializer.deserialize_str(Named)
+    }
 }
 
 impl ValueDataType {

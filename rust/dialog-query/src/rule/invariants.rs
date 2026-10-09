@@ -21,7 +21,7 @@ fn compile(json: Value) -> DeductiveRule {
 /// A premise over `social/knows`, its field called `field`.
 fn knows_as(field: &str, of: &str, is: &str) -> Value {
     json!({
-        "assert": { "with": { field: { "the": "social/knows", "as": "Entity" } } },
+        "assert": { "with": { field: { "the": "social/knows", "as": "entity:" } } },
         "where": {
             "this": { "?": { "name": of } },
             field: { "?": { "name": is } }
@@ -31,7 +31,7 @@ fn knows_as(field: &str, of: &str, is: &str) -> Value {
 
 fn friend_rule(when: Vec<Value>) -> DeductiveRule {
     compile(json!({
-        "deduce": { "with": { "friend": { "the": "social/friend", "as": "Entity" } } },
+        "deduce": { "with": { "friend": { "the": "social/friend", "as": "entity:" } } },
         "when": when,
     }))
 }
@@ -51,7 +51,7 @@ fn a_rule_the_previous_release_stored_is_inert_under_its_byte_hash() {
                     "description": "",
                     "the": "social/friend",
                     "cardinality": "one",
-                    "as": "Entity"
+                    "as": "entity:"
                 }
             }
         },
@@ -61,7 +61,7 @@ fn a_rule_the_previous_release_stored_is_inert_under_its_byte_hash() {
                     "description": "",
                     "the": "social/knows",
                     "cardinality": "one",
-                    "as": "Entity"
+                    "as": "entity:"
                 }
             }},
             "where": {
@@ -117,13 +117,13 @@ fn a_premise_field_name_does_not_distinguish_a_rule() {
 fn a_plan_is_cached_by_the_working_spelling_it_was_planned_for() {
     let head = |a: &str, b: &str| {
         json!({ "with": {
-            a: { "the": "x/attr1", "as": "Entity" },
-            b: { "the": "x/attr2", "as": "Entity" }
+            a: { "the": "x/attr1", "as": "entity:" },
+            b: { "the": "x/attr2", "as": "entity:" }
         }})
     };
     let premise = |the: &str, field: &str, var: &str| {
         json!({
-            "assert": { "with": { field: { "the": the, "as": "Entity" } } },
+            "assert": { "with": { field: { "the": the, "as": "entity:" } } },
             "where": { "this": { "?": { "name": "this" } }, field: { "?": { "name": var } } }
         })
     };

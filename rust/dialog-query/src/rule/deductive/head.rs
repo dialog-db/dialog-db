@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use super::rename::{Rename, fresh_name, rename_premises, variables};
-use crate::attribute::Relation;
+use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::constraint::{Constraint, TypeOf};
 use crate::error::TypeError;
@@ -95,9 +95,9 @@ impl DeductiveRule {
                 }
                 map.insert(name.to_string(), value.clone());
             }
-            if let Relation::Collection { .. } = field.the() {
-                let key = Relation::key_operand(name);
-                let target = Relation::key_operand(&value);
+            if let The::Collection { .. } = field.the() {
+                let key = The::key_operand(name);
+                let target = The::key_operand(&value);
                 if key != target {
                     if taken.contains(&target) {
                         map.insert(target.clone(), fresh_name(&target, &taken, &map));
@@ -106,10 +106,10 @@ impl DeductiveRule {
                 }
             }
 
-            // The head derives into the relation, whatever policy the
+            // The head derives into the relation, whatever pick the
             // field it came from reads it under.
             let relation =
-                ConceptFieldDescriptor::required(field.descriptor().clone().without_select());
+                ConceptFieldDescriptor::required(field.descriptor().clone().without_pick());
             let conclusion = ConceptDescriptor::of_attribute(&relation);
             let mut body = rename_premises(&premises, &map)?;
             // An optional head field derives a value only where the
@@ -154,8 +154,8 @@ impl DeductiveRule {
                         rule.with_origin(Origin {
                             rule: self.clone(),
                             value: name.to_string(),
-                            key: matches!(field.the(), Relation::Collection { .. })
-                                .then(|| Relation::key_operand(name)),
+                            key: matches!(field.the(), The::Collection { .. })
+                                .then(|| The::key_operand(name)),
                         })
                     } else {
                         rule

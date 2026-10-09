@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::Result;
 use base58::ToBase58;
-use dialog_artifacts::{Artifact, Attribute, Entity, Value};
+use dialog_artifacts::{Artifact, Entity, Relation, Value};
 use dialog_capability::Subject;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::credential::CredentialError;
@@ -194,11 +194,11 @@ pub async fn test_repo<M: Mode>(
 /// Generate deterministic test data consisting of facts that reference a
 /// specified number of [`Entity`]s.
 pub fn generate_data(entity_count: usize) -> Result<Vec<Artifact>> {
-    let item_id_attribute = Attribute::from_str("item/id")?;
-    let item_name_attribute = Attribute::from_str("item/name")?;
-    let item_pointer_attribute = Attribute::from_str("attribute/pointer")?;
-    let back_reference_attribute = Attribute::from_str("back/reference")?;
-    let parent_attribute = Attribute::from_str("relationship/parentOf")?;
+    let item_id_attribute = Relation::from_str("item/id")?;
+    let item_name_attribute = Relation::from_str("item/name")?;
+    let item_pointer_attribute = Relation::from_str("attribute/pointer")?;
+    let back_reference_attribute = Relation::from_str("back/reference")?;
+    let parent_attribute = Relation::from_str("relationship/parentOf")?;
 
     let mut rng = ChaCha8Rng::from_seed([0u8; 32]);
     let mut data = vec![];

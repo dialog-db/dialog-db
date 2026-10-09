@@ -850,7 +850,7 @@ mod tests {
     /// account's root delegation failed with `Version mismatch` forever.
     #[dialog_common::test]
     async fn it_retains_after_another_handle_moved_the_head() -> Result<()> {
-        use dialog_artifacts::{Attribute, Changes, Entity, Update as _, Value};
+        use dialog_artifacts::{Changes, Entity, Relation, Update as _, Value};
         use dialog_repository::ACCESS_BRANCH;
 
         let (operator, profile) = operator("retain-stale-head").await;
@@ -874,10 +874,10 @@ mod tests {
         for note in ["moved the head", "and again"] {
             let mut moved = Changes::new();
             moved.associate(
-                Attribute::try_from("test.profile/name".to_string())?,
+                Relation::try_from("test.profile/name".to_string())?,
                 Entity::new()?,
                 Value::String(note.to_string()),
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             );
             elsewhere
                 .transaction()

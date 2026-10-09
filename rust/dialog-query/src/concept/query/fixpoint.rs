@@ -24,7 +24,7 @@
 //!
 //! **Absence tests.** A premise that tests for absence (an `unless`
 //! over a concept, a set-widened read of one, or a read under a ranked
-//! policy, which negates the better candidates) has stratified
+//! pick, which negates the better candidates) has stratified
 //! semantics when the concept it reads sits below the component: the
 //! relation is derived in full before the fixpoint runs. When the
 //! concept is a member of the same component the test has no
@@ -44,7 +44,7 @@
 
 use super::ConceptQuery;
 use crate::artifact::Artifact;
-use crate::attribute::The;
+use crate::attribute::Relation;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::EvaluationError;
 use crate::negation::Negation;
@@ -780,7 +780,7 @@ where
 enum BaseSource {
     /// A positive attribute premise: a matching new fact binds its
     /// slots directly. Boxed to keep the variant sizes even.
-    Attribute(Box<(Term<The>, Term<Entity>, Term<Any>)>),
+    Attribute(Box<(Term<Relation>, Term<Entity>, Term<Any>)>),
     /// A positive out-of-component concept premise over an
     /// entity-local target: a new fact's subject binds its `this`
     /// slot (over-approximated; re-derivation settles truth).
@@ -804,13 +804,20 @@ async fn classify_base<'a, Env>(
 where
     Env: crate::Scope<'a>,
 {
-    fn slots(query: &crate::AttributeQuery) -> (Term<The>, Term<Entity>, Term<Any>) {
+    fn slots(query: &crate::AttributeQuery) -> (Term<Relation>, Term<Entity>, Term<Any>) {
         (query.the().clone(), query.of().clone(), query.is().clone())
     }
-    fn any_match(the: &Term<The>, of: &Term<Entity>, is: &Term<Any>, facts: &[Artifact]) -> bool {
+    fn any_match(
+        the: &Term<Relation>,
+        of: &Term<Entity>,
+        is: &Term<Any>,
+        facts: &[Artifact],
+    ) -> bool {
         facts.iter().any(|fact| {
-            constant_admits(the.as_constant(), &Value::from(The::from(fact.the.clone())))
-                && constant_admits(of.as_constant(), &Value::Entity(fact.of.clone()))
+            constant_admits(
+                the.as_constant(),
+                &Value::from(Relation::from(fact.the.clone())),
+            ) && constant_admits(of.as_constant(), &Value::Entity(fact.of.clone()))
                 && constant_admits(is.as_constant(), &fact.is)
         })
     }
@@ -986,7 +993,7 @@ where
                                 &mut scope,
                                 the.as_constant(),
                                 the.name(),
-                                Value::from(The::from(fact.the.clone())),
+                                Value::from(Relation::from(fact.the.clone())),
                             ) && bind_source_slot(
                                 &mut matched,
                                 &mut scope,
@@ -1148,7 +1155,7 @@ where
                             let matches =
                                 pattern_slot(
                                     the,
-                                    Value::from(The::from(fact.the.clone())),
+                                    Value::from(Relation::from(fact.the.clone())),
                                     &operands,
                                     &mut pattern,
                                 ) && pattern_slot(

@@ -27,8 +27,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, Attribute, DialogArtifactsError, Instruction,
-    LoadBlob, Select, Value,
+    Artifact, ArtifactSelector, ArtifactStream, DialogArtifactsError, Instruction, LoadBlob,
+    Relation as ArtifactsRelation, Select, Value,
 };
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Buffer;
@@ -594,7 +594,7 @@ fn parse_value(value_type: &str, raw: &str) -> Option<Value> {
         "integer" => raw.parse().ok().map(Value::SignedInt),
         "float" => raw.parse().ok().map(Value::Float),
         "boolean" => bool::from_str(raw).ok().map(Value::Boolean),
-        "attribute" => Attribute::from_str(raw).ok().map(Value::Symbol),
+        "attribute" => ArtifactsRelation::from_str(raw).ok().map(Value::Symbol),
         _ => None,
     }
 }
@@ -696,7 +696,7 @@ where
 
         let instructions: Vec<Instruction> = data
             .into_iter()
-            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All))
+            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
             .collect();
         branch
             .transaction()
@@ -716,7 +716,7 @@ where
     /// scan so warm-up reads (e.g. the eager root probe inside
     /// `execute`) are excluded from the recorded counts.
     pub async fn run_query(&self, attribute: &str) -> Result<QueryRun> {
-        let the: Attribute = attribute.parse()?;
+        let the: ArtifactsRelation = attribute.parse()?;
         let branch = self
             .repo
             .branch(&self.branch)
@@ -1145,7 +1145,7 @@ where
                 current = Some(row[txn_at].clone());
             }
 
-            let Ok(the) = Attribute::from_str(&row[the_at]) else {
+            let Ok(the) = ArtifactsRelation::from_str(&row[the_at]) else {
                 continue;
             };
             let Ok(of) = Entity::from_str(&row[of_at]) else {
@@ -1165,7 +1165,7 @@ where
                     is,
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             ));
         }
 
@@ -2083,7 +2083,7 @@ mod test {
         let root = *revision.tree.hash();
         // Any constrained selector works here; the catalog it names is the
         // branch's archive index, which is where the tree nodes live.
-        let the: Attribute = "se.post/title".parse()?;
+        let the: ArtifactsRelation = "se.post/title".parse()?;
         let select = branch
             .claims()
             .select(ArtifactSelector::new().the(the))
