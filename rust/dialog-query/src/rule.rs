@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 /// Rule analysis: inference and dependency graph over premises.
 pub mod analyzer;
+pub mod body;
 pub mod canonical;
 /// Deductive rule definitions for deriving new facts.
 pub mod deductive;
@@ -209,7 +210,7 @@ pub(crate) fn compile_rule<T: Compile>(
 /// [`compile_rule`] for a rule the engine writes for itself: a
 /// concept's implicit rule, a selecting or covering rule, a head
 /// split from a source. Such a rule reads a field under whatever
-/// policy the reader declared, which is how the policy reaches the
+/// pick the reader declared, which is how the pick reaches the
 /// evaluation, so the open-rule check that an author's rule passes
 /// does not apply to it.
 pub(crate) fn compile_internal<T: Compile>(

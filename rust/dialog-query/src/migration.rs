@@ -21,9 +21,9 @@ use base58::ToBase58;
 use dialog_artifacts::Entity;
 use serde::Serialize;
 
+use crate::Cardinality;
 use crate::attribute::{AttributeDescriptor, Keyed, Relation};
 use crate::concept::descriptor::ConceptDescriptor;
-use crate::{Cardinality, Type};
 
 /// The identity the earlier release gave `attribute`, as its
 /// `the:<base58>` URI.
@@ -33,8 +33,10 @@ pub fn attribute_uri_v0(attribute: &AttributeDescriptor) -> String {
         domain: &'a str,
         name: &'a str,
         cardinality: Cardinality,
+        /// The type's name before types were entities: `Text`, not
+        /// `text:`.
         #[serde(rename = "type")]
-        content_type: Option<Type>,
+        content_type: Option<&'static str>,
     }
     let name = match attribute.the() {
         Relation::Attribute(the) => the.name(),
@@ -47,7 +49,7 @@ pub fn attribute_uri_v0(attribute: &AttributeDescriptor) -> String {
         domain: attribute.domain(),
         name,
         cardinality: attribute.cardinality(),
-        content_type: attribute.content_type(),
+        content_type: attribute.content_type().map(|kind| kind.legacy_name()),
     })
     .expect("CBOR encoding should not fail");
     format!(

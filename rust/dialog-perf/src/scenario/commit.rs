@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::Policy;
+use dialog_artifacts::Pick;
 
 use super::{Outcome, Prepared, seed_stuff};
 use crate::env::{Env, assert_all, entity, fact, rule, text, var};
@@ -22,7 +22,7 @@ impl Prepared for Batch {
 
     fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
         Box::pin(async move {
-            seed_stuff(&self.env, self.size, Policy::All).await?;
+            seed_stuff(&self.env, self.size, Pick::All).await?;
             Ok(Outcome::from([("facts".into(), 2 * self.size as u64)]))
         })
     }
@@ -53,7 +53,7 @@ impl Prepared for Rows {
                     fact(&this, "stuff/name", text(format!("name-{index}"))),
                     fact(&this, "stuff/role", text(format!("role-{}", index % 8))),
                 ];
-                self.env.commit(assert_all(facts, Policy::All)).await?;
+                self.env.commit(assert_all(facts, Pick::All)).await?;
             }
             Ok(Outcome::from([("commits".into(), self.size as u64)]))
         })
@@ -85,7 +85,7 @@ impl Prepared for Succeed {
                     text(format!("renamed-{index}")),
                 )
             });
-            self.env.commit(assert_all(facts, Policy::Last)).await?;
+            self.env.commit(assert_all(facts, Pick::Last)).await?;
             Ok(Outcome::from([("facts".into(), self.size as u64)]))
         })
     }
@@ -95,7 +95,7 @@ impl Prepared for Succeed {
 /// transaction renaming every one.
 pub async fn succeed(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
-    seed_stuff(&env, size, Policy::Last).await?;
+    seed_stuff(&env, size, Pick::Last).await?;
     env.reopen().await?;
     Ok(Box::new(Succeed { env, size }))
 }
@@ -119,7 +119,7 @@ impl Prepared for Derived {
                     text(format!("stored-{index}")),
                 )
             });
-            self.env.commit(assert_all(facts, Policy::Last)).await?;
+            self.env.commit(assert_all(facts, Pick::Last)).await?;
             Ok(Outcome::from([("facts".into(), self.size as u64)]))
         })
     }
@@ -131,14 +131,14 @@ impl Prepared for Derived {
 pub async fn derived(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
     let copy = rule(serde_json::json!({
-        "deduce": { "with": { "name": { "the": "derived/name", "as": "Text" } } },
+        "deduce": { "with": { "name": { "the": "derived/name", "as": "text:" } } },
         "when": [{
-            "assert": { "with": { "name": { "the": "stuff/name", "as": "Text" } } },
+            "assert": { "with": { "name": { "the": "stuff/name", "as": "text:" } } },
             "where": { "this": var("this"), "name": var("name") }
         }]
     }));
     env.install(&[copy]).await?;
-    seed_stuff(&env, size, Policy::Last).await?;
+    seed_stuff(&env, size, Pick::Last).await?;
     env.reopen().await?;
     Ok(Box::new(Derived { env, size }))
 }

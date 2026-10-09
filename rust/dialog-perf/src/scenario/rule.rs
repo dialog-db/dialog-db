@@ -6,7 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::{Artifact, Entity, Policy, Value};
+use dialog_artifacts::{Artifact, Entity, Pick, Value};
 use dialog_query::{ConceptDescriptor, DeductiveRule};
 
 use super::read::{probe, read};
@@ -16,21 +16,21 @@ use crate::env::{Env, assert_all, concept, entity, fact, rule, text, var};
 /// `member`, derived from `stuff`: title from the name, level from the role.
 fn member() -> ConceptDescriptor {
     concept(serde_json::json!({ "with": {
-        "title": { "the": "member/title", "as": "Text" },
-        "level": { "the": "member/level", "as": "Text" }
+        "title": { "the": "member/title", "as": "text:" },
+        "level": { "the": "member/level", "as": "text:" }
     }}))
 }
 
 fn member_rule() -> DeductiveRule {
     rule(serde_json::json!({
         "deduce": { "with": {
-            "title": { "the": "member/title", "as": "Text" },
-            "level": { "the": "member/level", "as": "Text" }
+            "title": { "the": "member/title", "as": "text:" },
+            "level": { "the": "member/level", "as": "text:" }
         }},
         "when": [{
             "assert": { "with": {
-                "name": { "the": "stuff/name", "as": "Text" },
-                "role": { "the": "stuff/role", "as": "Text" }
+                "name": { "the": "stuff/name", "as": "text:" },
+                "role": { "the": "stuff/role", "as": "text:" }
             }},
             "where": { "this": var("this"), "name": var("title"), "role": var("level") }
         }]
@@ -59,7 +59,7 @@ impl Prepared for Scan {
 pub async fn scan(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
     env.install(&[member_rule()]).await?;
-    seed_stuff(&env, size, Policy::Last).await?;
+    seed_stuff(&env, size, Pick::Last).await?;
     env.reopen().await?;
     Ok(Box::new(Scan { env }))
 }
@@ -87,7 +87,7 @@ impl Prepared for Point {
 pub async fn point(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
     env.install(&[member_rule()]).await?;
-    seed_stuff(&env, size, Policy::Last).await?;
+    seed_stuff(&env, size, Pick::Last).await?;
     env.reopen().await?;
     Ok(Box::new(Point { env, size }))
 }
@@ -97,16 +97,16 @@ const DEPTH: usize = 25;
 
 fn ancestor() -> ConceptDescriptor {
     concept(serde_json::json!({ "with": {
-        "ancestor": { "the": "family/ancestor", "as": "Entity", "select": "all" }
+        "ancestor": { "the": "family/ancestor", "as": "entity:", "pick": "all" }
     }}))
 }
 
 fn ancestor_rules() -> [DeductiveRule; 2] {
     let parent = serde_json::json!({ "with": {
-        "parent": { "the": "family/parent", "as": "Entity" }
+        "parent": { "the": "family/parent", "as": "entity:" }
     }});
     let head = serde_json::json!({ "with": {
-        "ancestor": { "the": "family/ancestor", "as": "Entity", "select": "all" }
+        "ancestor": { "the": "family/ancestor", "as": "entity:", "pick": "all" }
     }});
     let base = rule(serde_json::json!({
         "deduce": head,
@@ -160,7 +160,7 @@ pub async fn recursive(size: usize) -> Result<Box<dyn Prepared>> {
             fact(&child, "family/parent", Value::Entity(parent))
         })
     });
-    env.commit(assert_all(facts, Policy::All)).await?;
+    env.commit(assert_all(facts, Pick::All)).await?;
     env.reopen().await?;
     Ok(Box::new(Recursive { env }))
 }
@@ -196,7 +196,7 @@ pub fn status_rules() -> Vec<DeductiveRule> {
                 "deduce": { "with": { "status": { "the": "account/status", "as": CASES } } },
                 "when": [
                     {
-                        "assert": { "with": { "flag": { "the": flag, "as": "Text" } } },
+                        "assert": { "with": { "flag": { "the": flag, "as": "text:" } } },
                         "where": { "this": var("this"), "flag": var("flag") }
                     },
                     { "assert": "==", "where": { "this": var("status"), "is": case } }
@@ -228,7 +228,7 @@ pub async fn accounts(size: usize) -> Result<Env> {
     let mut env = Env::open().await?;
     env.install(&status_rules()).await?;
     let facts = (0..size).flat_map(account_facts);
-    env.commit(assert_all(facts, Policy::Last)).await?;
+    env.commit(assert_all(facts, Pick::Last)).await?;
     env.reopen().await?;
     Ok(env)
 }
@@ -283,10 +283,10 @@ impl Prepared for Install {
                 .map(|index| {
                     rule(serde_json::json!({
                         "deduce": { "with": {
-                            "name": { "the": format!("derived-{index}/name"), "as": "Text" }
+                            "name": { "the": format!("derived-{index}/name"), "as": "text:" }
                         }},
                         "when": [{
-                            "assert": { "with": { "name": { "the": "stuff/name", "as": "Text" } } },
+                            "assert": { "with": { "name": { "the": "stuff/name", "as": "text:" } } },
                             "where": { "this": var("this"), "name": var("name") }
                         }]
                     }))
@@ -295,7 +295,7 @@ impl Prepared for Install {
             self.env.install(&rules).await?;
             self.env.reopen().await?;
             let last = concept(serde_json::json!({ "with": {
-                "name": { "the": format!("derived-{}/name", self.size - 1), "as": "Text" }
+                "name": { "the": format!("derived-{}/name", self.size - 1), "as": "text:" }
             }}));
             let rows = read(&self.env, &last, &["name"], None).await?;
             Ok(Outcome::from([
@@ -310,7 +310,7 @@ impl Prepared for Install {
 /// `size` rules and the first read of the last one.
 pub async fn install(size: usize) -> Result<Box<dyn Prepared>> {
     let mut env = Env::open().await?;
-    seed_stuff(&env, 100, Policy::Last).await?;
+    seed_stuff(&env, 100, Pick::Last).await?;
     env.reopen().await?;
     Ok(Box::new(Install { env, size }))
 }

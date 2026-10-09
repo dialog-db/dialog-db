@@ -128,7 +128,7 @@ mod tests {
                     is: Value::String("Main data".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -165,7 +165,7 @@ mod tests {
                     is: Value::String("Main data".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;

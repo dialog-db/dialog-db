@@ -33,7 +33,7 @@
     },
     "Attribute": {
       "type": "object",
-      "description": "A relation elevated with domain-specific invariants. An attribute's identity is structural: (the, type, cardinality).",
+      "description": "A relation qualified by a value type and a pick. An attribute's identity is structural: a hash of the relations it reads, its type, its pick and the values its pick ranks.",
       "properties": {
         "description": {
           "type": "string",
@@ -51,9 +51,13 @@
             { "$ref": "#/$defs/Collection" }
           ]
         },
+        "pick": {
+          "$ref": "#/$defs/Pick",
+          "description": "Which of the claims the relation holds for an entity the attribute reads. Defaults to 'last', or to 'top' when 'the' or 'as' is a list."
+        },
         "cardinality": {
           "$ref": "#/$defs/Cardinality",
-          "description": "Cardinality of the attribute. Defaults to 'one' when omitted."
+          "description": "The older spelling of 'pick': 'one' reads as 'last' and 'many' as 'all'. Read, never written; 'pick' wins when both are given."
         },
         "as": {
           "$ref": "#/$defs/Assert",
@@ -72,6 +76,18 @@
       "required": [
         "the"
       ]
+    },
+    "Pick": {
+      "type": "string",
+      "enum": [
+        "last",
+        "all",
+        "top",
+        "max",
+        "min"
+      ],
+      "description": "'last' reads the newest claim; 'all' every claim, as a set; 'top' the best ranked of the values listed in 'as' or the relations listed in 'the'; 'max' and 'min' the greatest or least value of an ordered type. A write under any pick but 'all' succeeds the claim a read under it returns.",
+      "default": "last"
     },
     "Cardinality": {
       "type": "string",
@@ -99,17 +115,17 @@
     "ScalarType": {
       "type": "string",
       "enum": [
-        "Bytes",
-        "Entity",
-        "Boolean",
-        "Text",
-        "UnsignedInteger",
-        "SignedInteger",
-        "Float",
-        "Record",
-        "Symbol"
+        "bytes:",
+        "entity:",
+        "boolean:",
+        "text:",
+        "natural:",
+        "integer:",
+        "float:",
+        "record:",
+        "symbol:"
       ],
-      "description": "Built-in scalar types from the dialog domain. 'Text' is shorthand for 'dialog/Text', etc."
+      "description": "Built-in scalar types, each named by an entity. The names an earlier release wrote ('Text', 'UnsignedInteger', 'SignedInteger', ...) are still read and never written."
     },
     "ConceptRef": {
       "type": "string",

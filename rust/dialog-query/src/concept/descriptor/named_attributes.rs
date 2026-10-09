@@ -32,7 +32,7 @@ fn is_not_optional(optional: &bool) -> bool {
 /// `"optional": true`:
 ///
 /// ```json
-/// { "the": "person/nickname", "as": "Text", "optional": true }
+/// { "the": "person/nickname", "as": "text:", "optional": true }
 /// ```
 ///
 /// A required field omits `optional`, so it is byte-identical to the
@@ -227,8 +227,8 @@ impl NamedAttributes {
             return Err(TypeError::EmptyConcept);
         }
         for field in map.values() {
-            if let Some(reason) = field.descriptor().select_error() {
-                return Err(TypeError::SelectPolicy {
+            if let Some(reason) = field.descriptor().pick_error() {
+                return Err(TypeError::UnfitPick {
                     the: field.the().to_string(),
                     reason,
                 });

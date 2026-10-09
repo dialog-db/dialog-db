@@ -1239,7 +1239,7 @@ mod tests {
                 is: Value::String("Seed".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1265,7 +1265,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1303,7 +1303,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1316,7 +1316,7 @@ mod tests {
                 is: Value::String("dev@test.com".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1387,7 +1387,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1403,7 +1403,7 @@ mod tests {
                     is: Value::String("feature@test.com".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1453,7 +1453,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1475,7 +1475,7 @@ mod tests {
                     is: Value::String("feature@test.com".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -1549,7 +1549,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1594,7 +1594,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1661,7 +1661,7 @@ mod tests {
                         is: Value::String(value.to_string()),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 )]))
                 .perform(&operator)
                 .await?;
@@ -1718,7 +1718,7 @@ mod tests {
                 is: Value::String("Main data".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -1775,7 +1775,7 @@ mod tests {
                         is: Value::String(name.to_string()),
                         cause: None,
                     },
-                    dialog_artifacts::Policy::All,
+                    dialog_artifacts::Pick::All,
                 )]))
                 .perform(&operator)
                 .await?;
@@ -1883,7 +1883,7 @@ mod history_tests {
                 is: Value::String(value.to_string()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )
     }
 
@@ -2240,7 +2240,7 @@ mod history_tests {
                     is: Value::String("Hi".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             )]))
             .perform(&operator)
             .await?;
@@ -2408,7 +2408,7 @@ mod history_tests {
                     is: Value::String("Hi".to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             )]))
             .perform(&operator)
             .await?;
@@ -2616,7 +2616,7 @@ mod history_tests {
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::Last,
+                dialog_artifacts::Pick::Last,
             ))
         };
         main.commit(stream::iter(vec![replace("MainSide")?]))
@@ -2789,7 +2789,7 @@ mod history_tests {
                     is: Value::String(value.to_string()),
                     cause: None,
                 },
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )
         };
 
@@ -2900,7 +2900,7 @@ mod history_tests {
         let bob = repo.branch("bob").open().perform(&operator).await?;
         bob.commit(stream::iter(vec![Instruction::Assert(
             urgent(),
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         )]))
         .perform(&operator)
         .await?;
@@ -2918,7 +2918,7 @@ mod history_tests {
         mallory
             .commit(stream::iter(vec![Instruction::Assert(
                 urgent(),
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             )]))
             .perform(&operator)
             .await?;
@@ -3079,7 +3079,7 @@ mod history_tests {
                 is: Value::String("Bob".to_string()),
                 cause: None,
             },
-            dialog_artifacts::Policy::Last,
+            dialog_artifacts::Pick::Last,
         )]))
         .perform(&operator)
         .await?;
@@ -3954,8 +3954,8 @@ mod history_tests {
                     cause: None,
                 };
                 let instruction = match next(3) {
-                    0 => Instruction::Assert(artifact, dialog_artifacts::Policy::All),
-                    1 => Instruction::Assert(artifact, dialog_artifacts::Policy::Last),
+                    0 => Instruction::Assert(artifact, dialog_artifacts::Pick::All),
+                    1 => Instruction::Assert(artifact, dialog_artifacts::Pick::Last),
                     _ => Instruction::Retract(artifact),
                 };
                 // A retract of an absent fact is a no-op commit; both

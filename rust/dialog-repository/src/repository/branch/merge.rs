@@ -240,7 +240,7 @@ mod tests {
                 is: Value::String(is.to_string()),
                 cause: None,
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         ))
     }
 

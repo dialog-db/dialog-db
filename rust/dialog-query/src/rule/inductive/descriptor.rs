@@ -87,14 +87,14 @@ mod tests {
             "description": "Increment a counter on increment command",
             "assert!": {
                 "with": {
-                    "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                    "count": { "the": "counter/count", "as": "natural:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                            "count": { "the": "counter/count", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -134,14 +134,14 @@ mod tests {
         let json = json!({
             "assert!": {
                 "with": {
-                    "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                    "count": { "the": "counter/count", "as": "natural:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                            "count": { "the": "counter/count", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -171,14 +171,14 @@ mod tests {
             "description": "Promote pending todos that aren't blocked",
             "assert!": {
                 "with": {
-                    "status": { "the": "todo/status", "as": "Text" }
+                    "status": { "the": "todo/status", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "status": { "the": "todo/status", "as": "Text" }
+                            "status": { "the": "todo/status", "as": "text:" }
                         }
                     },
                     "where": {
@@ -191,7 +191,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "blocked": { "the": "todo/blocked", "as": "Boolean" }
+                            "blocked": { "the": "todo/blocked", "as": "boolean:" }
                         }
                     },
                     "where": {
@@ -225,14 +225,14 @@ mod tests {
             "description": "Consume an acked message",
             "retract!": {
                 "with": {
-                    "body": { "the": "mailbox.message/body", "as": "Text" }
+                    "body": { "the": "mailbox.message/body", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "message": { "the": "cmd.ack/message", "as": "Entity" }
+                            "message": { "the": "cmd.ack/message", "as": "entity:" }
                         }
                     },
                     "where": {
@@ -242,7 +242,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "body": { "the": "mailbox.message/body", "as": "Text" }
+                            "body": { "the": "mailbox.message/body", "as": "text:" }
                         }
                     },
                     "where": {
@@ -272,10 +272,10 @@ mod tests {
     #[dialog_common::test]
     fn it_rejects_a_rule_with_both_heads_or_neither() {
         let both = json!({
-            "assert!": { "with": { "n": { "the": "test/n", "as": "Text" } } },
-            "retract!": { "with": { "n": { "the": "test/n", "as": "Text" } } },
+            "assert!": { "with": { "n": { "the": "test/n", "as": "text:" } } },
+            "retract!": { "with": { "n": { "the": "test/n", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "n": { "the": "test/n", "as": "Text" } } },
+                "assert": { "with": { "n": { "the": "test/n", "as": "text:" } } },
                 "where": { "this": { "?": { "name": "this" } }, "n": { "?": { "name": "n" } } }
             }]
         });
@@ -284,7 +284,7 @@ mod tests {
 
         let neither = json!({
             "when": [{
-                "assert": { "with": { "n": { "the": "test/n", "as": "Text" } } },
+                "assert": { "with": { "n": { "the": "test/n", "as": "text:" } } },
                 "where": { "this": { "?": { "name": "this" } }, "n": { "?": { "name": "n" } } }
             }]
         });
@@ -299,14 +299,14 @@ mod tests {
         let json = json!({
             "assert!": {
                 "with": {
-                    "status": { "the": "todo/status", "as": "Text" }
+                    "status": { "the": "todo/status", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "status": { "the": "todo/status", "as": "Text" }
+                            "status": { "the": "todo/status", "as": "text:" }
                         }
                     },
                     "where": {
@@ -319,7 +319,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "blocked": { "the": "todo/blocked", "as": "Boolean" }
+                            "blocked": { "the": "todo/blocked", "as": "boolean:" }
                         }
                     },
                     "where": {
@@ -342,14 +342,14 @@ mod tests {
         let json = json!({
             "assert!": {
                 "with": {
-                    "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                    "count": { "the": "counter/count", "as": "natural:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                            "count": { "the": "counter/count", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -383,15 +383,15 @@ mod tests {
         let json = json!({
             "assert!": {
                 "with": {
-                    "count": { "the": "counter/count", "as": "UnsignedInteger" },
-                    "name": { "the": "counter/name", "as": "Text" }
+                    "count": { "the": "counter/count", "as": "natural:" },
+                    "name": { "the": "counter/name", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                            "count": { "the": "counter/count", "as": "natural:" }
                         }
                     },
                     "where": {

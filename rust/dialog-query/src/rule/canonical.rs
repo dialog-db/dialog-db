@@ -569,7 +569,7 @@ mod tests {
 
     /// A concept of one entity-valued field.
     fn head(field: &str, attribute: &str) -> Value {
-        json!({ "with": { field: { "the": attribute, "as": "Entity" } } })
+        json!({ "with": { field: { "the": attribute, "as": "entity:" } } })
     }
 
     /// `of knows is`, each a variable name.

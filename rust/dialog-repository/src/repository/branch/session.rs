@@ -804,7 +804,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // overlay row is the newest fact of its cell: it stands past
         // the edition the next commit mints, above every committed row
         // and every staged write, so a read elects it under `last` and
-        // ranks it with the rest under any other policy, until the
+        // ranks it with the rest under any other pick, until the
         // session takes it back.
         // The edition the next commit mints, found only for a read that
         // meets an overlay or staged row: it reads the first line's
@@ -1337,12 +1337,12 @@ impl Provider<SelectRules> for QueryEnv<'_> {
 }
 
 /// The entity of the attribute concept of `field`'s relation read
-/// under no policy: what a rule installed before the `derives` index
+/// under no pick: what a rule installed before the `derives` index
 /// concluded, and what a concept's derived fields are keyed by, so a
-/// reader's policy never changes which rules it finds.
+/// reader's pick never changes which rules it finds.
 fn relation_concept(field: &ConceptFieldDescriptor) -> Entity {
     ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
-        field.descriptor().clone().without_select(),
+        field.descriptor().clone().without_pick(),
     ))
     .this()
 }
@@ -1688,10 +1688,10 @@ impl<'a> QueryEnv<'a> {
                 bundle.install(scan);
             }
             // The rules deriving each relation the field reads, found
-            // by the `derives` index, whatever type or policy this read
+            // by the `derives` index, whatever type or pick this read
             // declares over the relation. A rule installed before the
             // index existed concluded the attribute concept of the
-            // relation itself, read under no policy: that is the
+            // relation itself, read under no pick: that is the
             // entity it is found by.
             for relation in field.descriptor().relations() {
                 let single = ConceptDescriptor::of_attribute(&ConceptFieldDescriptor::required(
@@ -1747,7 +1747,7 @@ impl<'a> QueryEnv<'a> {
         for (_, field) in descriptor.with().iter() {
             let attribute = ConceptDescriptor::of_attribute(field);
             // Keyed by the relation's own attribute concept, read under
-            // no policy, which is what a legacy rule concluded.
+            // no pick, which is what a legacy rule concluded.
             let entity = relation_concept(field);
             let builtins = builtin_deriving(&entity);
             let mut rules = builtins.clone();
@@ -1759,7 +1759,7 @@ impl<'a> QueryEnv<'a> {
                         .map(|(rule, _)| rule),
                 );
             }
-            // A field whose policy is not the plain stored read is read
+            // A field whose pick is not the plain stored read is read
             // through its attribute concept whether or not a rule
             // derives it, so its candidates are gathered and elected.
             if !rules.is_empty() || field.descriptor().reads_elected() {
@@ -1985,7 +1985,7 @@ mod rule_tests {
     /// `employee` fact is ever written; rows come only from rules.
     fn employee_descriptor() -> ConceptDescriptor {
         serde_json::from_value(serde_json::json!({
-            "with": { "name": { "the": "org/employee-name", "as": "Text" } }
+            "with": { "name": { "the": "org/employee-name", "as": "text:" } }
         }))
         .expect("employee descriptor parses")
     }
@@ -2000,9 +2000,9 @@ mod rule_tests {
     /// rule body, so a distinct content-addressed identity.
     fn rule_with_person_attr(attr: &str) -> DeductiveRule {
         let json = serde_json::json!({
-            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "name": { "the": attr, "as": "Text" } } },
+                "assert": { "with": { "name": { "the": attr, "as": "text:" } } },
                 "where": {
                     "this": { "?": { "name": "this" } },
                     "name": { "?": { "name": "name" } }
@@ -2047,7 +2047,7 @@ mod rule_tests {
     /// A concept over `org/person-name` under the field `field`.
     fn person_under(field: &str) -> ConceptDescriptor {
         serde_json::from_value(serde_json::json!({
-            "with": { field: { "the": "org/person-name", "as": "Text" } }
+            "with": { field: { "the": "org/person-name", "as": "text:" } }
         }))
         .expect("descriptor parses")
     }
@@ -2094,13 +2094,13 @@ mod rule_tests {
     fn employee_pair_rule() -> DeductiveRule {
         let json = serde_json::json!({
             "deduce": { "with": {
-                "name": { "the": "org/employee-name", "as": "Text" },
-                "role": { "the": "org/employee-role", "as": "Text" }
+                "name": { "the": "org/employee-name", "as": "text:" },
+                "role": { "the": "org/employee-role", "as": "text:" }
             }},
             "when": [{
                 "assert": { "with": {
-                    "name": { "the": "org/person-name", "as": "Text" },
-                    "role": { "the": "org/person-role", "as": "Text" }
+                    "name": { "the": "org/person-name", "as": "text:" },
+                    "role": { "the": "org/person-role", "as": "text:" }
                 }},
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -2117,9 +2117,9 @@ mod rule_tests {
     /// attribute, both under the field `field`.
     fn projection(from: &str, to: &str, field: &str) -> DeductiveRule {
         let json = serde_json::json!({
-            "deduce": { "with": { field: { "the": to, "as": "Text" } } },
+            "deduce": { "with": { field: { "the": to, "as": "text:" } } },
             "when": [{
-                "assert": { "with": { field: { "the": from, "as": "Text" } } },
+                "assert": { "with": { field: { "the": from, "as": "text:" } } },
                 "where": {
                     "this": { "?": { "name": "this" } },
                     field: { "?": { "name": field } }
@@ -2155,7 +2155,7 @@ mod rule_tests {
             .map(|(field, the)| {
                 (
                     field.to_string(),
-                    serde_json::json!({ "the": the, "as": "Text" }),
+                    serde_json::json!({ "the": the, "as": "text:" }),
                 )
             })
             .collect();
@@ -2491,7 +2491,7 @@ mod rule_tests {
     /// rule stores, discovers and hydrates through the `db.rule/*`
     /// rail, and a read of its relation under `max` chooses among the
     /// candidates it derives over committed facts, found by the
-    /// relation whatever policy the read declares over it.
+    /// relation whatever pick the read declares over it.
     #[dialog_common::test]
     async fn it_elects_over_a_relation_a_committed_rule_derives() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -2502,12 +2502,12 @@ mod rule_tests {
         let rule = {
             let json = serde_json::json!({
                 "deduce": { "with": {
-                    "salary": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "all" }
+                    "salary": { "the": "org/dept-salary", "as": "natural:", "pick": "all" }
                 }},
                 "when": [{
                     "assert": { "with": {
-                        "dept": { "the": "org/dept", "as": "Entity" },
-                        "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+                        "dept": { "the": "org/dept", "as": "entity:" },
+                        "salary": { "the": "org/salary", "as": "natural:" }
                     }},
                     "where": {
                         "this": { "?": { "name": "employee" } },
@@ -2521,7 +2521,7 @@ mod rule_tests {
             descriptor.compile().expect("rule compiles")
         };
         let dept_top: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "top": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "max" }
+            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max" }
         }}))?;
 
         let dept: Entity = "id:dept-a".parse()?;
@@ -2573,14 +2573,14 @@ mod rule_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let salary = serde_json::json!({ "with": {
-            "salary": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "all" }
+            "salary": { "the": "org/dept-salary", "as": "natural:", "pick": "all" }
         }});
         let committed: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
             "deduce": salary,
             "when": [{
                 "assert": { "with": {
-                    "dept": { "the": "org/dept", "as": "Entity" },
-                    "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+                    "dept": { "the": "org/dept", "as": "entity:" },
+                    "salary": { "the": "org/salary", "as": "natural:" }
                 }},
                 "where": {
                     "this": { "?": { "name": "employee" } },
@@ -2594,7 +2594,7 @@ mod rule_tests {
             "deduce": salary,
             "when": [{
                 "assert": { "with": {
-                    "flat": { "the": "org/flat-total", "as": "UnsignedInteger" }
+                    "flat": { "the": "org/flat-total", "as": "natural:" }
                 }},
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -2604,7 +2604,7 @@ mod rule_tests {
         }))?;
         let overlay = overlay.compile()?;
         let dept_top: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "top": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "max" }
+            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max" }
         }}))?;
 
         let dept_a: Entity = "id:dept-a".parse()?;
@@ -3388,15 +3388,15 @@ mod rule_tests {
 
         let cases = serde_json::json!(["case:replicated", "case:remote"]);
         let space = serde_json::json!({ "with": {
-            "subject": { "the": "load.space/subject", "as": "Entity" },
+            "subject": { "the": "load.space/subject", "as": "entity:" },
             "presence": { "the": "load.space/presence", "as": cases, "optional": true }
         } });
         let replica = serde_json::json!({ "with": {
-            "subject": { "the": "load.replica/subject", "as": "Entity" },
-            "profile": { "the": "load.replica/profile", "as": "Entity" }
+            "subject": { "the": "load.replica/subject", "as": "entity:" },
+            "profile": { "the": "load.replica/profile", "as": "entity:" }
         } });
         let presence = serde_json::json!({ "with": {
-            "presence": { "the": "load.space/presence", "as": "Entity" }
+            "presence": { "the": "load.space/presence", "as": "entity:" }
         } });
         let remote: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
             "deduce": presence,
@@ -3800,13 +3800,13 @@ mod resolver_tests {
 
         let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
             "deduce": { "with": {
-                "root": { "the": "probe/described-root", "as": "Text" },
-                "kind": { "the": "probe/described-kind", "as": "Text" }
+                "root": { "the": "probe/described-root", "as": "text:" },
+                "kind": { "the": "probe/described-kind", "as": "text:" }
             }},
             "when": [
                 {
                     "assert": { "with": {
-                        "root": { "the": "probe/tree", "as": "Text" }
+                        "root": { "the": "probe/tree", "as": "text:" }
                     }},
                     "where": {
                         "this": { "?": { "name": "this" } },
@@ -4129,7 +4129,7 @@ mod ordered_relation_tests {
             is: Value::Entity(member.clone()),
             cause: None,
             cardinality: None,
-            policy: None,
+            pick: None,
         }
     }
 
@@ -4179,7 +4179,7 @@ mod ordered_relation_tests {
                 is: Value::String("Groceries".into()),
                 cause: None,
                 cardinality: None,
-                policy: None,
+                pick: None,
             })
             .commit()
             .publish()

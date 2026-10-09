@@ -345,7 +345,7 @@ pub(crate) fn instructions_for(rows: &[FactRow]) -> Result<Vec<Instruction>> {
     for row in rows {
         instructions.extend(
             artifacts_for(row)?
-                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All)),
+                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All)),
         );
     }
     Ok(instructions)

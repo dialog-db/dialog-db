@@ -666,9 +666,9 @@ mod tests {
         // employee(this, name) :- person-name(this, name)
         let rule = {
             let json = serde_json::json!({
-                "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+                "deduce": { "with": { "name": { "the": "org/employee-name", "as": "text:" } } },
                 "when": [{
-                    "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                    "assert": { "with": { "name": { "the": "org/person-name", "as": "text:" } } },
                     "where": {
                         "this": { "?": { "name": "this" } },
                         "name": { "?": { "name": "name" } }
@@ -710,7 +710,7 @@ mod tests {
     /// the transaction's query elects over: the pending view reads the
     /// pending candidates under `max` without the rule or the data
     /// being committed. The choice is the query's, read over the
-    /// relation the rule derives into, whatever policy the rule's own
+    /// relation the rule derives into, whatever pick the rule's own
     /// head declared.
     #[dialog_common::test]
     async fn it_elects_over_a_derived_relation_pending_in_the_transaction() -> anyhow::Result<()> {
@@ -725,12 +725,12 @@ mod tests {
         let rule = {
             let json = serde_json::json!({
                 "deduce": { "with": {
-                    "salary": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "all" }
+                    "salary": { "the": "org/dept-salary", "as": "natural:", "pick": "all" }
                 }},
                 "when": [{
                     "assert": { "with": {
-                        "dept": { "the": "org/dept", "as": "Entity" },
-                        "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+                        "dept": { "the": "org/dept", "as": "entity:" },
+                        "salary": { "the": "org/salary", "as": "natural:" }
                     }},
                     "where": {
                         "this": { "?": { "name": "employee" } },
@@ -744,7 +744,7 @@ mod tests {
             descriptor.compile().expect("rule compiles")
         };
         let dept_top: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "top": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "max" }
+            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max" }
         }}))?;
 
         let dept: Entity = "id:dept-a".parse()?;

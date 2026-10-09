@@ -7,6 +7,12 @@
 > [`layered-rule-resolution.md`](./layered-rule-resolution.md) (storage
 > and caches, updated below) and [`inductive-rules.md`](./inductive-rules.md)
 > (the `reads` and `on` indexes this note's `derives` index sits beside).
+>
+> Since this note was written, the policy has been named a **pick**,
+> spelled `pick:` (it was `select:`), and one Rust type,
+> `dialog_artifacts::Pick`, replaced the `Policy` and `Select` the
+> note mentions. Types are named by entities (`text:`, `integer:`,
+> `natural:`, ...). See [`glossary.md`](./glossary.md).
 
 ## The claim
 
@@ -174,7 +180,7 @@ today's cardinalities as two of its values and recency as the default:
 ```yaml
 attribute!: &status
   the: io.gozala.job/status
-  select: top              # last (default) | all | top | max | min
+  pick: top                # last (default) | all | top | max | min
   as:
     - case:suspended
     - case:active
@@ -196,15 +202,15 @@ own.
 
 Three words, used strictly. A **relation** is what `the` names: the
 `(domain, name)` pair facts are stored under, which rules derive into
-and are found by. An **attribute** is a relation read under a type and
-a selection policy; two reads of one relation under different policies
-are two attributes, with distinct identities, and `select` on the
-attribute descriptor is where the engine keeps the policy. A **field**
+and are found by. An **attribute** is a relation qualified by a value
+type and a pick; two reads of one relation under different picks are
+two attributes, with distinct identities, and `pick` on the attribute
+descriptor is where the engine keeps it. A **field**
 is a slot of a concept that holds an attribute, and the slot can be
 optional. Cardinality is the policy's arity, `all` being many and
 every other policy one; `cardinality: one` and `many` are read as the
 older spellings of `last` and `all`, and tonk's notation no longer
-writes them: `select: all` where it said `many`, nothing where it said
+writes them: `pick: all` where it said `many`, nothing where it said
 `one`.
 
 A candidate is a fact: a set read sees each distinct value of the
@@ -633,9 +639,9 @@ counts the bench prints by a block or two between runs.
 - the aggregation half of the stratification analysis, unreachable
   now that deductive rules refuse `reduce`, which still stands in the
   code until removed;
-- a `select` attribute on `#[derive(Attribute)]`, so a Rust-declared
+- a `pick` attribute on `#[derive(Attribute)]`, so a Rust-declared
   concept reads a ranked field as the notation does;
-- policies as rules: a `policy!:` form that lets an author define how
+- picks as rules: a `pick!:` form that lets an author define how
   an attribute chooses among its candidates, beyond the five built
   in;
 - variants, so a listed `as:` domain reads as a tagged type rather

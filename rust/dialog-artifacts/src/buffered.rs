@@ -704,7 +704,7 @@ mod tests {
                 is: Value::String(value.to_string()),
                 cause: None,
             },
-            crate::Policy::All,
+            crate::Pick::All,
         )
     }
 
@@ -716,7 +716,7 @@ mod tests {
                 is: Value::String(value.to_string()),
                 cause: None,
             },
-            crate::Policy::Last,
+            crate::Pick::Last,
         )
     }
 
@@ -1113,7 +1113,7 @@ mod tests {
             .then_apply(
                 &store,
                 Stamp::Amend(asset_version()),
-                stream::iter(vec![Instruction::Assert(asset.fact()?, crate::Policy::All)]),
+                stream::iter(vec![Instruction::Assert(asset.fact()?, crate::Pick::All)]),
                 WriteScope::Machinery,
             )
             .await?;
@@ -1144,7 +1144,7 @@ mod tests {
             &ArtifactTree::empty(),
             &store,
             Some(asset_version()),
-            stream::iter(vec![Instruction::Assert(asset.fact()?, crate::Policy::All)]),
+            stream::iter(vec![Instruction::Assert(asset.fact()?, crate::Pick::All)]),
             WriteScope::Application,
         )
         .await;

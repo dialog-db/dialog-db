@@ -26,16 +26,16 @@ type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
 /// `test/p(x) := base :- test/base(x) = base, unless test/q(x) = true`.
 fn negating() -> Result<DeductiveRule> {
     let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-        "deduce": { "with": { "p": { "the": "test/p", "as": "Boolean" } } },
+        "deduce": { "with": { "p": { "the": "test/p", "as": "boolean:" } } },
         "when": [{
-            "assert": { "with": { "base": { "the": "test/base", "as": "Boolean" } } },
+            "assert": { "with": { "base": { "the": "test/base", "as": "boolean:" } } },
             "where": {
                 "this": { "?": { "name": "this" } },
                 "base": { "?": { "name": "p" } }
             }
         }],
         "unless": [{
-            "assert": { "with": { "q": { "the": "test/q", "as": "Boolean" } } },
+            "assert": { "with": { "q": { "the": "test/q", "as": "boolean:" } } },
             "where": { "this": { "?": { "name": "this" } }, "q": true }
         }]
     }))?;
@@ -45,9 +45,9 @@ fn negating() -> Result<DeductiveRule> {
 /// `test/q(x) := p :- test/p(x) = p`.
 fn closing() -> Result<DeductiveRule> {
     let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
-        "deduce": { "with": { "q": { "the": "test/q", "as": "Boolean" } } },
+        "deduce": { "with": { "q": { "the": "test/q", "as": "boolean:" } } },
         "when": [{
-            "assert": { "with": { "p": { "the": "test/p", "as": "Boolean" } } },
+            "assert": { "with": { "p": { "the": "test/p", "as": "boolean:" } } },
             "where": {
                 "this": { "?": { "name": "this" } },
                 "p": { "?": { "name": "q" } }
@@ -60,7 +60,7 @@ fn closing() -> Result<DeductiveRule> {
 /// The values `branch` reads for `test/<name>` of `of`.
 async fn read(branch: &Branch, operator: &Operator, of: &Entity, name: &str) -> Result<Vec<bool>> {
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        name: { "the": format!("test/{name}"), "as": "Boolean" }
+        name: { "the": format!("test/{name}"), "as": "boolean:" }
     }}))?;
     let mut terms = Parameters::new();
     terms.insert("this".to_string(), Term::<Any>::constant(of.clone()));
@@ -196,7 +196,7 @@ async fn replicas_installing_a_cycle_concurrently_set_aside_the_same_rule() -> R
 /// The rules `branch` sets aside, read as `dialog.rule/quarantined`.
 async fn quarantined(branch: &Branch, operator: &Operator) -> Result<Vec<Entity>> {
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "concept": { "the": "dialog.rule/quarantined", "as": "Entity" }
+        "concept": { "the": "dialog.rule/quarantined", "as": "entity:" }
     }}))?;
     let mut terms = Parameters::new();
     terms.insert("this".to_string(), Term::<Any>::var("this"));

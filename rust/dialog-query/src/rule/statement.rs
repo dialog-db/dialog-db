@@ -266,20 +266,20 @@ impl Statement for &DeductiveRule {
             conclusion_attr(),
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         );
         update.associate(
             source_attr(),
             rule_entity.clone(),
             Value::Bytes(self.encode()),
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         );
         for reads in reads_entities(self) {
             update.associate(
                 reads_attr(),
                 rule_entity.clone(),
                 Value::Entity(reads),
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             );
         }
         for derives in derives_entities(self) {
@@ -287,7 +287,7 @@ impl Statement for &DeductiveRule {
                 derives_attr(),
                 rule_entity.clone(),
                 Value::Entity(derives),
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             );
         }
     }
@@ -335,20 +335,20 @@ impl Statement for &InductiveRule {
             source_attr(),
             rule_entity.clone(),
             Value::Bytes(self.encode()),
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         );
         update.associate(
             induces_attr(),
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         );
         for on in on_entities(self) {
             update.associate(
                 on_attr(),
                 rule_entity.clone(),
                 Value::Entity(on),
-                dialog_artifacts::Policy::All,
+                dialog_artifacts::Pick::All,
             );
         }
     }

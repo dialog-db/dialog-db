@@ -100,7 +100,7 @@ impl<Line> Transaction<Line> {
     ///
     /// Each instruction is replayed as if it had been asserted or
     /// retracted on the transaction directly — `Assert` becomes an
-    /// entry under its policy, `Retract` a retraction entry —
+    /// entry under its pick, `Retract` a retraction entry —
     /// and the batch's asset changes are staged on the transaction.
     /// Useful for callers that build a [`Changes`] independently
     /// (e.g. a reactor accumulating effect outputs across rounds) and

@@ -35,7 +35,7 @@ use std::sync::{Arc, RwLock};
 pub struct RuleRegistry {
     /// The rules deriving each relation, keyed by the relation's
     /// `on:` entity: a rule derives into `(domain, name)`, and a read
-    /// declares its own type, cardinality and policy over it. Every
+    /// declares its own type, cardinality and pick over it. Every
     /// rule here is attribute-headed.
     heads: Arc<RwLock<HashMap<Entity, Vec<DeductiveRule>>>>,
     /// The order rules were registered in, by each head's identity: what
@@ -173,7 +173,7 @@ impl RuleRegistry {
             // caller spelled it: the bundle is built over the canonical
             // spelling every rule deriving it concludes, and the rules
             // are those deriving the field's relation, whatever type,
-            // cardinality or policy the field reads it under.
+            // cardinality or pick the field reads it under.
             let canonical = ConceptDescriptor::of_attribute(field);
             let mut bundle = ConceptRules::new(&canonical);
             for rule in ConceptRules::chain_scans(field) {
@@ -199,7 +199,7 @@ impl RuleRegistry {
         } else {
             let derived = self.derived()?;
             // A field reads through its attribute concept when a rule
-            // derives it, or when its policy is not the plain stored
+            // derives it, or when its pick is not the plain stored
             // read: either way its candidates are gathered and elected.
             let through = |field: &ConceptFieldDescriptor| {
                 field.descriptor().reads_elected()
@@ -375,7 +375,7 @@ impl RuleRegistry {
     /// Callers decide what to do: surface as a warning after an
     /// install, refuse to proceed after a merge, or ignore and let
     /// queries fail individually. The absence tests the cycle
-    /// policy governs are listed by
+    /// pick governs are listed by
     /// [`ProgramAnalysis::absences`] on [`Self::analysis`].
     pub fn validate(&self) -> Result<Vec<AggregationViolation>, EvaluationError> {
         Ok(self.analysis()?.violations().to_vec())

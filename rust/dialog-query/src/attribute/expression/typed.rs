@@ -167,7 +167,7 @@ where
         let the = desc.the().attribute().expect(STATIC_ATTRIBUTE);
         let attr: A = is.into();
         let value = attr.value().clone().into();
-        update.associate(the, of, value, desc.policy());
+        update.associate(the, of, value, desc.pick().clone());
     }
 
     fn retract(self, update: &mut impl Update) {
@@ -201,7 +201,7 @@ where
             is: attr.value().clone().into(),
             cause,
             cardinality: Some(desc.cardinality()),
-            policy: Some(desc.policy()),
+            pick: Some(desc.pick().clone()),
         })
     }
 }
@@ -266,7 +266,7 @@ where
             is: attr.value().clone().into(),
             cause,
             cardinality: Some(desc.cardinality()),
-            policy: Some(desc.policy()),
+            pick: Some(desc.pick().clone()),
         }
     }
 }

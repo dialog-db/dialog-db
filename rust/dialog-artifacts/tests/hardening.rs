@@ -67,7 +67,7 @@ async fn it_derives_sort_keys_identical_to_the_field_path() -> Result<()> {
                     None
                 },
             },
-            dialog_artifacts::Policy::All,
+            dialog_artifacts::Pick::All,
         ));
     }
     index

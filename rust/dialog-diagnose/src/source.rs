@@ -83,7 +83,7 @@ where
         .await?;
     let branch = repository.branch("main").open().perform(&session).await?;
     let changes = artifacts
-        .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All))
+        .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
         .collect::<Vec<_>>()
         .await
         .into_iter()

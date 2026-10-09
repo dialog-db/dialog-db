@@ -865,7 +865,7 @@ mod screen_tests {
                     facts
                         .iter()
                         .cloned()
-                        .map(|artifact| Instruction::Assert(artifact, crate::Policy::All)),
+                        .map(|artifact| Instruction::Assert(artifact, crate::Pick::All)),
                 ),
             )
             .await?;

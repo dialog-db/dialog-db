@@ -9,7 +9,7 @@ use crate::statement::Statement;
 use crate::term::Term;
 use crate::types::{Scalar, Typed};
 use crate::{Claim, Premise, Proposition};
-use dialog_artifacts::{Policy, Update};
+use dialog_artifacts::{Pick, Update};
 use std::ops::Not;
 
 /// Converts a value into a [`Term`], resolving the type unambiguously
@@ -63,7 +63,7 @@ impl<T, Of> DynamicAttributeExpressionBuilder<T, Of> {
             is: value,
             cause: None,
             cardinality: None,
-            policy: None,
+            pick: None,
         }
     }
 }
@@ -89,11 +89,11 @@ pub struct DynamicAttributeExpression<The, Of, Is> {
     /// Provenance/cause for this expression.
     pub cause: Option<Cause>,
     /// Optional cardinality override. When `Some(Cardinality::One)` and
-    /// no policy is spelled, `assert` writes under `last`.
+    /// no pick is spelled, `assert` writes under `last`.
     pub cardinality: Option<Cardinality>,
-    /// The policy `assert` writes under: the one the attribute is read
+    /// The pick `assert` writes under: the one the attribute is read
     /// under. `None` writes by the cardinality alone.
-    pub policy: Option<Policy>,
+    pub pick: Option<Pick>,
 }
 
 impl<The, Of, Is> DynamicAttributeExpression<The, Of, Is> {
@@ -155,17 +155,17 @@ impl<Is: Scalar> Statement for DynamicAttributeExpression<The, Entity, Is> {
     fn assert(self, update: &mut impl Update) {
         let the = self.the;
         let value: Value = self.is.into();
-        match (self.policy, self.cardinality) {
+        match (self.pick, self.cardinality) {
             (Some(policy), _) => {
                 update.associate(the.into(), self.of, value, policy);
             }
-            // A cardinality-one write with no policy spelled is a
+            // A cardinality-one write with no pick spelled is a
             // `last` write.
             (None, Some(Cardinality::One)) => {
-                update.associate(the.into(), self.of, value, Policy::Last);
+                update.associate(the.into(), self.of, value, Pick::Last);
             }
             (None, _) => {
-                update.associate(the.into(), self.of, value, dialog_artifacts::Policy::All);
+                update.associate(the.into(), self.of, value, dialog_artifacts::Pick::All);
             }
         }
     }
@@ -222,7 +222,7 @@ impl<Is: Scalar> From<DynamicAttributeExpression<The, Entity, Is>> for Attribute
             is: expression.is.into(),
             cause: expression.cause,
             cardinality: expression.cardinality,
-            policy: expression.policy,
+            pick: expression.pick,
         }
     }
 }

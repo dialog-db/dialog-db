@@ -1,17 +1,17 @@
 //! A reference election, checked against the engine's.
 //!
-//! The policies are specified here on their own, over a cell's claims
+//! The picks are specified here on their own, over a cell's claims
 //! and their standings, apart from the code that implements them: `last`
 //! takes the newest claim, the greater standing and then the greater
 //! value; `max` and `min` the greater or the lesser value, then the
-//! newer; and a write under a choosing policy succeeds the claim the
-//! policy elects, leaving the cell alone when that claim holds the
+//! newer; and a write under a choosing pick succeeds the claim the
+//! pick elects, leaving the cell alone when that claim holds the
 //! value written. A write under `all` succeeds nothing.
 //!
 //! Generated histories of writes and pulls across three replicas then
 //! check every place the engine elects against the reference: the tree,
 //! which settles a commit's writes; the transaction's own settlement,
-//! which its reads see; and the reads of a branch, under every policy.
+//! which its reads see; and the reads of a branch, under every pick.
 //! Finally the replicas pull from each other until nothing changes, and
 //! must agree.
 
@@ -24,7 +24,7 @@ use crate::helpers::test_repo;
 use crate::repository::branch::session::{QueryEnv, QueryLayer};
 use crate::repository::source::Source;
 use anyhow::{Result, anyhow};
-use dialog_artifacts::{Attribute, Entity, Policy, Value};
+use dialog_artifacts::{Attribute, Entity, Pick, Value};
 use dialog_effects::authority::Identify;
 use dialog_peer::helpers::test_session_with_peer;
 use dialog_query::attribute::The;
@@ -40,8 +40,8 @@ use std::env;
 
 type Operator = dialog_peer::Peer<VolatileSpace, dialog_peer::Session>;
 
-/// The policies a history writes and reads under.
-const POLICIES: [Policy; 4] = [Policy::Last, Policy::Max, Policy::Min, Policy::All];
+/// The picks a history writes and reads under.
+const POLICIES: [Pick; 4] = [Pick::Last, Pick::Max, Pick::Min, Pick::All];
 
 /// Where a claim stands: as the line holds it, or staged by the
 /// transaction, newer than every claim of the line and equal to every
@@ -63,18 +63,18 @@ fn newer(candidate: &Entry, incumbent: &Entry) -> bool {
 
 /// The claim `policy` elects among `entries`, by index. `None` over no
 /// claims and under `all`.
-fn elect(policy: &Policy, entries: &[Entry]) -> Option<usize> {
+fn elect(policy: &Pick, entries: &[Entry]) -> Option<usize> {
     let better = |candidate: &Entry, incumbent: &Entry| match policy {
-        Policy::Last => newer(candidate, incumbent),
-        Policy::Max => {
+        Pick::Last => newer(candidate, incumbent),
+        Pick::Max => {
             candidate.0 > incumbent.0 || (candidate.0 == incumbent.0 && newer(candidate, incumbent))
         }
-        Policy::Min => {
+        Pick::Min => {
             candidate.0 < incumbent.0 || (candidate.0 == incumbent.0 && newer(candidate, incumbent))
         }
         _ => false,
     };
-    if *policy == Policy::All {
+    if *policy == Pick::All {
         return None;
     }
     let mut best: Option<usize> = None;
@@ -88,10 +88,10 @@ fn elect(policy: &Policy, entries: &[Entry]) -> Option<usize> {
 }
 
 /// A write of `value` under `policy` to a cell holding `entries`: under
-/// a choosing policy, the claim the policy elects is succeeded unless it
+/// a choosing pick, the claim the pick elects is succeeded unless it
 /// holds the value written; the value written stands as staged.
-fn write(policy: &Policy, value: u64, entries: &mut Vec<Entry>) {
-    if *policy != Policy::All
+fn write(policy: &Pick, value: u64, entries: &mut Vec<Entry>) {
+    if *policy != Pick::All
         && let Some(elected) = elect(policy, entries)
     {
         if entries[elected].0 == value {
@@ -105,9 +105,9 @@ fn write(policy: &Policy, value: u64, entries: &mut Vec<Entry>) {
 
 /// What a read under `policy` returns for a cell holding `entries`: the
 /// elected value, or every value under `all`, sorted.
-fn read(policy: &Policy, entries: &[Entry]) -> Vec<u64> {
+fn read(policy: &Pick, entries: &[Entry]) -> Vec<u64> {
     match policy {
-        Policy::All => {
+        Pick::All => {
             let mut values: Vec<u64> = entries.iter().map(|entry| entry.0).collect();
             values.sort();
             values
@@ -119,11 +119,11 @@ fn read(policy: &Policy, entries: &[Entry]) -> Vec<u64> {
 }
 
 /// The spelling a concept field selects `policy` under.
-fn select_of(policy: &Policy) -> &'static str {
+fn select_of(policy: &Pick) -> &'static str {
     match policy {
-        Policy::Last => "last",
-        Policy::Max => "max",
-        Policy::Min => "min",
+        Pick::Last => "last",
+        Pick::Max => "max",
+        Pick::Min => "min",
         _ => "all",
     }
 }
@@ -133,25 +133,25 @@ fn salary_attribute() -> Attribute {
 }
 
 /// A write of `org/salary` under `policy`.
-fn salary(of: &Entity, value: u64, policy: &Policy) -> AttributeStatement {
+fn salary(of: &Entity, value: u64, policy: &Pick) -> AttributeStatement {
     AttributeStatement {
         the: The::from(salary_attribute()),
         of: of.clone(),
         is: Value::UnsignedInt(value.into()),
         cause: None,
-        cardinality: Some(if *policy == Policy::All {
+        cardinality: Some(if *policy == Pick::All {
             Cardinality::Many
         } else {
             Cardinality::One
         }),
-        policy: Some(policy.clone()),
+        pick: Some(policy.clone()),
     }
 }
 
 /// `org/salary` of `of` read under `policy`.
-fn salary_query(of: &Entity, policy: &Policy) -> ConceptQuery {
+fn salary_query(of: &Entity, policy: &Pick) -> ConceptQuery {
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "salary": { "the": "org/salary", "as": "UnsignedInteger", "select": select_of(policy) }
+        "salary": { "the": "org/salary", "as": "natural:", "pick": select_of(policy) }
     }}))
     .expect("a descriptor");
     let mut terms = Parameters::new();
@@ -205,7 +205,7 @@ impl Seeded {
     }
 }
 
-/// Every read of every cell on `branch`, under every policy, against
+/// Every read of every cell on `branch`, under every pick, against
 /// the reference over the branch's stored claims.
 async fn check_reads(
     branch: &Branch,
@@ -354,7 +354,7 @@ async fn replay(seed: u64, steps: usize) -> Result<()> {
     }
 
     // The replicas pull from each other until nothing changes, and then
-    // hold the same claims and read the same under every policy.
+    // hold the same claims and read the same under every pick.
     let mut quiesced = false;
     for _ in 0..8 {
         let mut changed = false;
@@ -418,7 +418,7 @@ async fn a_wide_sweep_agrees_with_the_reference() -> Result<()> {
     Ok(())
 }
 
-/// Generated histories of writes under every policy and pulls between
+/// Generated histories of writes under every pick and pulls between
 /// three replicas, each step checked against the reference election.
 #[dialog_common::test]
 async fn every_election_agrees_with_the_reference() -> Result<()> {

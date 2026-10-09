@@ -2,102 +2,112 @@
 
 ## Core Concepts
 
-### Fact
+### Claim (fact)
 
-Atomic, immutable unit of knowledge. It is equivalent to semantic triples in [RDF] and [datom]s in Datomic.
+Atomic, immutable unit of knowledge, equivalent to a semantic triple in [RDF] and a [datom] in Datomic. "Fact" and "claim" name the same thing; the Rust code calls one an `Artifact`.
 
-In dialog facts are present in `{the, of, is, cause}` form that is meant to correspond to how the fact is expressed in natural language: _the_ **color** _of_ **sky** _is_ **blue**.
+A claim has the form `{the, of, is, cause}`, read the way it is said: _the_ **color** _of_ **sky** _is_ **blue**.
 
-> The `cause` field establishes a causal relationship see [cause] for more details.
+> The `cause` field establishes a causal relationship, see [cause] for more details.
 
 #### Entity (of)
 
-Entity is the subject denoted via `of` field. Entities are represented as an arbitrary URI (e.g., `uuid:...`, `did:...`).
+The subject a claim is about, denoted by `of`. An entity is an arbitrary URI (`uuid:...`, `did:...`, `concept:...`).
 
-#### Attribute (the)
+#### Relation (the)
 
-Something that can be asserted about an [entity]. Attribute has a name denoted via `the` field. Attribute names `/` delimited UTF-8 strings e.g. `person/name`, `db.type/uint32`. First component of the attribute name is a [namespace](#namespace).
+The named set of claims a claim belongs to, denoted by `the`: `person/name` is the relation every claim of a person's name belongs to, and _the_ **person/name** _of_ **alice** _is_ **"Alice"** is one member. A relation is a name and nothing more: it says nothing about the type of its values or how many an entity has. Relation names are `domain/name`, at most 64 bytes, in lowercase kebab-case.
 
-##### Namespace
+In Rust a relation is `dialog_artifacts::Relation`, and `dialog_query::Relation` is the same name validated (the `the!` macro builds one at compile time).
 
-First component of the attribute is a namespace. Namespaces serve a similar function to table names in a relational store, without imposing any obligations or limitations, e.g. an entity can have attributes from more than one namespace.
+##### Domain
 
-Namespaces help organize attributes into categories, more importantly, they provide data locality inside the database meaning that attributes sharing namespace will end up collocated making querying them more efficient than if they were scattered across the database.
+The part of a relation name before the `/`. Domains play the role table names play in a relational store, without imposing anything: an entity can be in relations of any number of domains.
 
-Namespaces are meant to make attributes globally unique and it is generally RECOMMENDED to use [reverse domain name](https://en.wikipedia.org/wiki/Reverse_domain_name_notation) notation (e.g., `io.gozala.note`).
+Relations of one domain are stored next to each other, so querying them together is cheaper than querying relations scattered across the database. Domains are meant to make relations globally unique, and it is RECOMMENDED to spell them as [reverse domain names](https://en.wikipedia.org/wiki/Reverse_domain_name_notation) (`io.gozala.note`).
 
 #### Value (is)
 
-Something that does not change e.g. `42`, `"John"`, `true` . Value is denoted via `is` field. A [fact] relates an [entity] to a [value] through an [attribute].
+What a claim relates its entity to, denoted by `is`: `42`, `"John"`, `true`. Values do not change.
 
-Values can be in handful of data types (bytes, entity, boolean, string, integers, floats, records, symbols).
+#### Type
+
+What kind of value a value is. A type is named by an entity:
+
+| Type       | Values                         |
+| ---------- | ------------------------------ |
+| `text:`    | UTF-8 strings                  |
+| `integer:` | signed 128-bit integers        |
+| `natural:` | unsigned 128-bit integers      |
+| `float:`   | 64-bit floating point numbers  |
+| `boolean:` | `true`, `false`                |
+| `bytes:`   | byte buffers                   |
+| `entity:`  | entity URIs                    |
+| `symbol:`  | symbols                        |
+| `record:`  | structured records             |
+
+The names an earlier release used (`Text`, `SignedInteger`, `UnsignedInteger`, ...) are still read; they are never written.
 
 #### Causal Reference (cause)
 
-Causal references ground facts in time and establish partial order between them. At the moment they are represented as hash reference to preceding [fact], but alternative approaches are being actively explored.
+Causal references ground claims in time and establish partial order between them. At the moment they are a hash reference to the preceding [claim], but alternative approaches are being actively explored.
 
-### Relation
+### Attribute
 
-DialogDB's equivalent of a table in relational databases or a document schema in document databases. Relation describes set of attributes that entities can have, establishing relationships across facts. Any entity can have any attribute, relation simply define groups that have semantic meaning. Unlike rigid schemas, relations in DialogDB are composable and applied at query time.
+A relation qualified by a value type and a pick: how a relation is read. `person/name` read as `text:` under `last` is an attribute. Two attributes over one relation, read as different types or under different picks, are two attributes, each with its own identity.
 
-```typescript
-const Employee = relation({
-  role: String,
-  salary: Number,
-  department: Object
-})
+```json
+{ "the": "person/name", "as": "text:" }
+{ "the": "person/email", "as": "text:", "pick": "all" }
+{ "the": "job/status", "as": ["case:suspended", "case:active"] }
 ```
 
-Relations provide type safety and structure while maintaining the flexibility of the underlying fact store. Multiple relations can describe the same entity, enabling different views of the data without migration.
+An attribute's identity is a hash of the relations it reads, its type, its pick and the values its pick ranks.
 
-### Evidence
+#### Pick
 
-DialogDB's equivalent of a table row in relational databases or a document in document databases. Evidence represents a set of facts about an entity that prove a particular relation. When querying the database, you're searching for evidence that supports claimed relations.
+Which of the claims a relation holds for an entity an attribute reads, spelled `pick`:
 
-```typescript
-// Query for evidence of employees with specific role
-Employee({ role: 'Project Manager' }).query({ from: db })
+- `last` (the default): the newest claim;
+- `all`: every claim, as a set;
+- `top`: the best ranked of listed values (`as: [..]`) or relations (`the: [..]`), and a list implies `top`;
+- `max`, `min`: the greatest or least value of an ordered type.
 
-// Create evidence by asserting a relation
-Employee.assert({
-  name: 'Bitdiddle Ben',
-  role: 'Computer wizard',
-  salary: 60_000
-})
-```
+A pick governs writes too: writing through an attribute under any pick but `all` succeeds the claim a read under that pick returns, and `all` adds a claim beside the others. In Rust a pick is `dialog_artifacts::Pick`.
 
-When evidence is added to the database through assertions, the corresponding facts are derived and stored.
+### Concept
+
+DialogDB's equivalent of a table in a relational database or a document schema in a document database: a set of fields an entity can be described by. Any entity can be in any relation; a concept names a group of attributes that has meaning together. Concepts are applied at query time, so several concepts can describe one entity without a migration.
+
+#### Field
+
+A slot of a concept, named locally and holding an attribute: the `name` field of a `person` concept holds the attribute `person/name` read as `text:`. A field is required unless it is marked optional.
+
+### Conclusion
+
+The claims that show an entity is an instance of a concept: one per required field, and those present of the optional ones. Querying a concept searches for conclusions; asserting a concept instance writes the claims its conclusion is made of.
 
 ### Rule
 
-DialogDB's equivalent of views in relational databases. Rules define derived relations by specifying predicates that must be true for the relation to hold. They enable logical inference by creating new relations from existing facts and relations.
+DialogDB's equivalent of a view in a relational database. A rule concludes a concept from premises: when its body holds, the conclusion holds too. A deductive rule's conclusions are derived when read and never stored; an inductive rule asserts (or retracts) its conclusion when its premises become true.
 
-```typescript
-const Manager = relation({
-  subordinate: Object
-}).where(manager => [
-  Employee.match({ this: manager.subordinate }),
-  Manager.relation({ this: manager.this, is: manager.subordinate }),
-])
-```
-
-Rules can be recursive, enabling complex queries like transitive relationships. Unlike materialized views, rules are evaluated at query time, though future versions may support incremental view maintenance for performance.
+Rules can be recursive, enabling queries like transitive relationships.
 
 ### Fact Store
 
-Storage system for facts (semantic triples with causal references). DialogDB implements a fact store that efficiently indexes facts in multiple ways to support diverse query patterns.
+Storage for claims and their causal references. DialogDB indexes claims in several orders to support diverse query patterns.
 
 ## Database Operations
 
 ### Assertion
 
-An atomic [fact] in the database, associating an [entity], [attribute], [value], and a [cause]. Opposite of a [retraction].
+An atomic [claim] in the database, associating an [entity] with a [value] in a [relation], with a [cause]. Opposite of a [retraction].
 
 Assertions are the primary way data enters the system - they create new facts without modifying existing ones, maintaining the immutable, append-only nature of the database.
 
 ### Retraction
 
-An atomic [fact] in the database, dissociating an [entity] from particular [value] of an [attribute]. Opposite of an [assertion].
+An atomic [claim] in the database, dissociating an [entity] from a particular [value] in a [relation]. Opposite of an [assertion].
 
 Rather than removing information, retractions add new information to indicate that facts is no longer true.
 
@@ -266,7 +276,7 @@ The Rust implementation's term for a fact - a semantic triple that may be stored
 
 ### Scalar
 
-The value component of a fact - can be null, boolean, number, string, bytes, attribute, or entity. Scalars represent the concrete data types that can be stored as values in facts, providing a rich type system while maintaining simplicity.
+The value component of a claim: a value of any [type](#type). Scalars represent the concrete data types that can be stored as values in facts, providing a rich type system while maintaining simplicity.
 
 ### Branch Factor
 
@@ -280,12 +290,14 @@ The empty database revision, represented as an IPLD Link for empty byte array. T
 [datom]:https://docs.datomic.com/glossary.html#datom
 
 
-[entity]:#entity_(of)
-[attribute]:#attribute_(of)
-[value]:#value_(is)
-[namespace]:#namespace
-[cause]:#Causal_Reference_(cause)
-[relation]:#Relation
+[claim]:#claim-fact
+[fact]:#claim-fact
+[entity]:#entity-of
+[relation]:#relation-the
+[attribute]:#attribute
+[value]:#value-is
+[domain]:#domain
+[cause]:#causal-reference-cause
 [assertion]:#Assertion
 [retraction]:#Retraction
 [revision]:#Revision

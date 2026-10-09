@@ -44,7 +44,7 @@ use crate::{
     ATTRIBUTE_KEY_TAG, ArchiveDelta, ArchiveReader, Artifact, ArtifactSelector, ArtifactView,
     ArtifactWriter, AttributeKey, AttributeKeyPart, Cause, Datum, DeltaOverlay,
     DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart, Instruction, Key, KeyView,
-    KeyViewConstruct, KeyViewMut, LoadBlob, Policy, SelectorMatch, Standing, State, VALUE_KEY_TAG,
+    KeyViewConstruct, KeyViewMut, LoadBlob, Pick, SelectorMatch, Standing, State, VALUE_KEY_TAG,
     Value, ValueDataType, ValueKey, decode_value_parts, encode_bytes, encode_value_owned,
     key::varkey::{self, KeyRef, ValuePayload, ValueRef, parse_key_ref},
     key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
@@ -527,7 +527,7 @@ pub trait ArtifactTreeExt {
     /// would.
     ///
     /// Each instruction touches all three EAV/AEV/VAE indexes; an
-    /// assertion under a choosing policy additionally scans the
+    /// assertion under a choosing pick additionally scans the
     /// `(entity, attribute)` range to elect the prior it succeeds (and
     /// skips inserting when a same-valued prior is already in place,
     /// the no-op of writing a standing value).
@@ -1315,7 +1315,7 @@ fn fold_record(earlier: &[Version], later: Record) -> Record {
 /// [`ArtifactWriter::read`], which see the batch's own pending writes on both
 /// targets. On the buffered target that means the node buffers are merged into
 /// the scan: an election blind to a buffered prior would leave it live where
-/// the policy would have retired it, and a `Retract` blind to one would cite
+/// the pick would have retired it, and a `Retract` blind to one would cite
 /// nothing and so cover nothing at merge time.
 ///
 /// `storage` loads the tree's nodes and spilled values; a value above the
@@ -1397,7 +1397,7 @@ where
             }
         }
         match instruction {
-            Instruction::Assert(artifact, Policy::All) => {
+            Instruction::Assert(artifact, Pick::All) => {
                 changed = true;
                 // ONE value encode per instruction: the payload feeds all
                 // three index keys, and a spilling value's block bytes and
@@ -1514,7 +1514,7 @@ where
                     }
                 }
 
-                // The elected claim is the one a read under the policy
+                // The elected claim is the one a read under the pick
                 // returns over these priors, the written value's own claim
                 // among them when the cell holds it.
                 let elected = policy.elect(
@@ -1752,7 +1752,7 @@ mod spill_cache_tests {
                 facts
                     .iter()
                     .cloned()
-                    .map(|artifact| Instruction::Assert(artifact, crate::Policy::All)),
+                    .map(|artifact| Instruction::Assert(artifact, crate::Pick::All)),
             ),
         )
         .await?;
@@ -1840,7 +1840,7 @@ mod spill_cache_tests {
             &mut delta,
             stream::iter(vec![Instruction::Assert(
                 artifact.clone(),
-                crate::Policy::All,
+                crate::Pick::All,
             )]),
         )
         .await
@@ -1905,7 +1905,7 @@ mod spill_cache_tests {
             &mut delta,
             stream::iter(vec![Instruction::Assert(
                 artifact.clone(),
-                crate::Policy::All,
+                crate::Pick::All,
             )]),
         )
         .await?;
@@ -2172,7 +2172,7 @@ mod corrupt_row_tests {
                         is: Value::String(of.to_string()),
                         cause: None,
                     },
-                    crate::Policy::All,
+                    crate::Pick::All,
                 )
             })
             .collect();

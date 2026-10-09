@@ -366,7 +366,7 @@ mod tests {
                     is: Value::String(name.into()),
                     cause: None,
                 },
-                crate::Policy::All,
+                crate::Pick::All,
             )]),
         )
         .await?;
