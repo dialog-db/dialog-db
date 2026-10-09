@@ -542,6 +542,7 @@ mod plan_ordering {
                 Plan::Concept(..) => "concept",
                 Plan::Resolver(..) => "resolver",
                 Plan::Negate(..) => "negate",
+                Plan::Recall(..) => "recall",
             })
             .collect()
     }

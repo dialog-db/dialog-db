@@ -1,7 +1,7 @@
 use crate::term::Term;
 use crate::types::Any;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// A name-to-parameter mapping that describes how a premise is applied.
 ///
@@ -15,7 +15,11 @@ use std::collections::HashMap;
 /// information together with the current [`Environment`](crate::Environment)
 /// to decide whether the premise is viable.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct Parameters(HashMap<String, Term<Any>>);
+/// Kept in name order: everything that iterates a query's parameters,
+/// the planner among them, then sees them in one order in every
+/// process, and a plan does not depend on the hash seed the process
+/// drew.
+pub struct Parameters(BTreeMap<String, Term<Any>>);
 impl Parameters {
     /// Create a new empty parameter set
     pub fn new() -> Self {
@@ -33,6 +37,12 @@ impl Parameters {
     /// for any `T: Scalar`.
     pub fn insert(&mut self, name: String, param: Term<Any>) {
         self.0.insert(name, param);
+    }
+
+    /// Removes the parameter binding for the given name, returning it
+    /// when there was one.
+    pub fn remove(&mut self, name: &str) -> Option<Term<Any>> {
+        self.0.remove(name)
     }
 
     /// Checks if a parameter binding exists for the given name.

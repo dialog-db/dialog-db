@@ -1,0 +1,24 @@
+{
+  "scenario": "rule-recursive",
+  "size": 20,
+  "profile": "release",
+  "outcome": {
+    "rows": 6000
+  },
+  "counters": {
+    "archive.get": 5,
+    "archive.get.bytes": 225164,
+    "archive.put": 0,
+    "archive.put.bytes": 0,
+    "span.apply_batch_reusing": 0,
+    "span.buffer_records": 0,
+    "span.commit": 0,
+    "span.hydrate_rule": 2,
+    "span.resolve_bundle": 3,
+    "span.resolve_rules": 3,
+    "span.seal_batch": 0,
+    "span.settle": 0,
+    "span.write_instructions": 0
+  },
+  "instructions": 1231785813
+}

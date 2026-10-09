@@ -17,7 +17,6 @@
 use dialog_baseline::metered::Tally;
 use dialog_baseline::repo::DialogRepo;
 use dialog_baseline::se::{SeLog, se_instructions};
-use futures_util::stream;
 
 fn main() -> anyhow::Result<()> {
     let count: usize = std::env::args()
@@ -42,7 +41,10 @@ fn main() -> anyhow::Result<()> {
         println!("commits  writes  set_bytes  (per-commit in window)");
         for commit in &log.transactions {
             repo.branch()
-                .commit(stream::iter(se_instructions(commit)?))
+                .transaction()
+                .integrate(se_instructions(commit)?.into_iter().collect())
+                .commit()
+                .publish()
                 .perform(repo.operator())
                 .await?;
             committed += 1;

@@ -35,6 +35,7 @@ use crate::premise::Negation;
 use crate::proposition::Proposition;
 use crate::reduce::{ReduceEntry, ReduceSpec};
 use crate::rule::RuleKind;
+use crate::rule::canonical::Identity;
 use crate::rule::types::TypeEnv;
 use crate::type_system::unifier::Context;
 use crate::type_system::{Primitive, Type as Kind};
@@ -186,8 +187,10 @@ impl DependencyGraph {
 pub struct AnalyzedRule {
     /// The rule's conclusion.
     pub conclusion: ConceptDescriptor,
-    /// The premises in their original authored order; planning
-    /// orders a working copy per scope.
+    /// The premises in the rule's canonical spelling (see
+    /// [`canonical`](crate::rule::canonical)): locals renamed by the
+    /// body's structure and premises sorted. Planning orders a working
+    /// copy per scope.
     pub premises: Vec<Premise>,
     /// The rule-wide inferred type environment. Shared via
     /// [`Arc`] across consumers.
@@ -199,6 +202,23 @@ pub struct AnalyzedRule {
     /// field, in field-name order. Empty for a plain rule. The
     /// grouping fields are *derived* wherever evaluation needs them
     /// (the head fields not reduced), never stored.
+    pub reduce: Vec<ReduceEntry>,
+    /// The body as the author spelled it, when it differs from the
+    /// canonical spelling: what the rule encodes to for storage and
+    /// display, so an author reads back their own names.
+    pub authored: Option<Arc<Authored>>,
+    /// The rule's canonical spelling (see
+    /// [`canonical`](crate::rule::canonical)), which its identity
+    /// hashes; `None` for a body the notation cannot express.
+    pub canonical: Option<Arc<Identity>>,
+}
+
+/// A rule body as its author spelled it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Authored {
+    /// The premises in authored order, under authored names.
+    pub premises: Vec<Premise>,
+    /// The reduce entries under authored names.
     pub reduce: Vec<ReduceEntry>,
 }
 
@@ -214,6 +234,8 @@ impl AnalyzedRule {
             types: Arc::new(TypeEnv::new()),
             graph: DependencyGraph::default(),
             reduce: Vec::new(),
+            authored: None,
+            canonical: None,
         }
     }
 
@@ -371,7 +393,23 @@ pub fn analyze_with(
                 declared: Box::new(declared),
             })));
         }
-        types.insert(&field, output);
+        // An attribute concept's relation holds values, never
+        // absences: a fold that may yield `Nothing` there derives no
+        // row for that group, so the value enters as its present
+        // shapes. Any other head keeps the raw output, so the
+        // required-head check below still sees an identity-less
+        // fold's Nothing.
+        let derives_value = conclusion
+            .attribute_field()
+            .is_some_and(|(name, _)| name == field);
+        types.insert(
+            &field,
+            if derives_value {
+                output.required()
+            } else {
+                output
+            },
+        );
         entries.push(entry);
     }
     let types = Arc::new(types);
@@ -446,6 +484,8 @@ pub fn analyze_with(
         types,
         graph,
         reduce: entries,
+        authored: None,
+        canonical: None,
     })
 }
 

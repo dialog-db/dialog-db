@@ -148,15 +148,27 @@ impl InductiveRule {
         serde_ipld_dagcbor::to_vec(&self.descriptor()).ok()
     }
 
-    /// This rule's content-addressed identity, if it has a canonical
-    /// encoding: `rule:<base58(blake3(dag-cbor(descriptor)))>`. The
-    /// `assert!` head field is part of the encoding, so an inductive
-    /// rule never collides with the deductive rule of the same body.
+    /// This rule's content-addressed identity, if it has an encodable
+    /// body: `rule:<base58(blake3(dag-cbor(canonical descriptor)))>`,
+    /// the same for every spelling of the body (see
+    /// [`canonical`](crate::rule::canonical)). The `assert!` head field
+    /// is part of the encoding, so an inductive rule never collides
+    /// with the deductive rule of the same body.
     pub fn try_this(&self) -> Option<Entity> {
         use base58::ToBase58;
-        let hash = blake3::hash(&self.try_encode()?);
+        let canonical = serde_ipld_dagcbor::to_vec(&self.canonical_descriptor()).ok()?;
+        let hash = blake3::hash(&canonical);
         let encoded = hash.as_bytes().as_ref().to_base58();
         format!("rule:{encoded}").parse().ok()
+    }
+
+    /// Whether this rule's body is what was stored under `entity`:
+    /// `entity` is its identity. Bytes stored under any other entity
+    /// are forged, corrupt, or a rule an earlier release stored under
+    /// the hash of its bytes, which stays inert until
+    /// `Branch::upgrade_rules` re-installs it under its identity.
+    pub fn stored_as(&self, entity: &Entity) -> bool {
+        self.try_this().as_ref() == Some(entity)
     }
 
     /// Canonical dag-cbor encoding, panicking if the rule has no
@@ -189,10 +201,35 @@ impl InductiveRule {
     /// lands in the `assert!` or `retract!` field per this rule's
     /// polarity.
     pub fn descriptor(&self) -> InductiveRuleDescriptor {
+        match &self.analysis.authored {
+            Some(authored) => self.describe(&authored.premises),
+            None => self.describe(&self.analysis.premises),
+        }
+    }
+
+    /// This rule in its canonical spelling, whose encoding its
+    /// identity hashes.
+    pub fn canonical_descriptor(&self) -> InductiveRuleDescriptor {
+        match &self.analysis.canonical {
+            Some(identity) => {
+                let mut descriptor = self.describe(&identity.premises);
+                let (assert, retract) = match self.polarity {
+                    Polarity::Assert => (Some(identity.conclusion.clone()), None),
+                    Polarity::Retract => (None, Some(identity.conclusion.clone())),
+                };
+                descriptor.assert = assert;
+                descriptor.retract = retract;
+                descriptor
+            }
+            None => self.describe(&self.analysis.premises),
+        }
+    }
+
+    fn describe(&self, premises: &[Premise]) -> InductiveRuleDescriptor {
         let mut when = Vec::new();
         let mut unless = Vec::new();
 
-        for premise in &self.analysis.premises {
+        for premise in premises {
             match premise {
                 Premise::Assert(proposition) => when.push(proposition.clone()),
                 Premise::Unless(Negation(proposition)) => unless.push(proposition.clone()),
@@ -288,6 +325,38 @@ mod tests {
                 .expect("Sum::apply should succeed")
                 .into(),
         ]
+    }
+
+    /// A rule is stored as its canonical identity and as nothing else,
+    /// not even the hash of its own bytes, the identity an earlier
+    /// release gave it.
+    #[dialog_common::test]
+    fn it_is_stored_as_its_identity_alone() {
+        let descriptor: InductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "tag": { "the": "derived/tag", "as": "Text" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "title": { "the": "doc/title", "as": "Text" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "title": { "?": { "name": "tag" } }
+                }
+            }]
+        }))
+        .expect("descriptor parses");
+        let rule = descriptor.compile().expect("rule compiles");
+        let bytes = blake3::hash(&rule.encode()).as_bytes().to_vec();
+        let legacy: Entity = format!("rule:{}", base58::ToBase58::to_base58(bytes.as_slice()))
+            .parse()
+            .expect("an entity");
+        assert_ne!(legacy, rule.this(), "the byte hash is not the identity");
+        assert!(rule.stored_as(&rule.this()));
+        assert!(!rule.stored_as(&legacy));
+        let other: Entity = "rule:forged".parse().expect("an entity");
+        assert!(!rule.stored_as(&other));
     }
 
     #[dialog_common::test]

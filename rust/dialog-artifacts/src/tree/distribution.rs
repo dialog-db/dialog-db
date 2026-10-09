@@ -359,12 +359,15 @@ mod tests {
         tree.apply(
             blocks,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(Artifact {
-                the: "profile/name".parse()?,
-                of: Entity::new()?,
-                is: Value::String(name.into()),
-                cause: None,
-            })]),
+            stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "profile/name".parse()?,
+                    of: Entity::new()?,
+                    is: Value::String(name.into()),
+                    cause: None,
+                },
+                crate::Policy::All,
+            )]),
         )
         .await?;
         delta.flush_into(blocks);

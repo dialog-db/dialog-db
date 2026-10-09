@@ -61,7 +61,7 @@
 //! [`AnalyzedRule::is_entity_local`]: dialog_query::rule::analyzer::AnalyzedRule::is_entity_local
 
 use dialog_effects::blob::Read as BlobRead;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
@@ -102,12 +102,12 @@ use crate::{Branch, Index, NetworkedIndex, RemoteSite, Revision};
 #[derive(Clone, Debug, Default)]
 pub struct Demand {
     /// Ranges read by fact scans: the query's data demand.
-    facts: Arc<Mutex<Vec<RangeInclusive<Key>>>>,
+    facts: Arc<Mutex<Ranges>>,
     /// Ranges read by rule-discovery scans (`dialog.rule/*`). Kept
     /// apart because a change here can install a rule, which can
     /// affect any row — it invalidates the whole result, not one
     /// entity's slice.
-    rules: Arc<Mutex<Vec<RangeInclusive<Key>>>>,
+    rules: Arc<Mutex<Ranges>>,
     /// The format the recorded ranges are keyed under: the manifest of
     /// the tree the evaluation read. `None` until something is recorded.
     /// Keys checked against the cover are built under it.
@@ -170,22 +170,42 @@ fn selects_head(selector: &ArtifactSelector<Constrained>, metadata: &BTreeSet<En
 /// sorted list of disjoint intervals, so it cannot grow beyond the
 /// number of genuinely distinct demanded regions no matter how many
 /// (nested, repeated) selectors record into it.
-fn record_range(ranges: &Mutex<Vec<RangeInclusive<Key>>>, range: RangeInclusive<Key>) {
+/// Disjoint, sorted ranges, keyed by start: the predecessor of a key
+/// is the one range that can contain it, so recording and checking a
+/// range cost a lookup each, however many an evaluation records.
+type Ranges = BTreeMap<Key, Key>;
+
+fn record_range(ranges: &Mutex<Ranges>, range: RangeInclusive<Key>) {
     let mut ranges = ranges.lock().expect("demand lock");
     let (mut start, mut end) = range.into_inner();
-    // Absorb every existing interval the new one overlaps.
-    let mut merged = Vec::with_capacity(ranges.len() + 1);
-    for existing in ranges.drain(..) {
-        if *existing.start() > end || *existing.end() < start {
-            merged.push(existing);
-        } else {
-            start = start.min(existing.start().clone());
-            end = end.max(existing.end().clone());
+    // The range starting at or before the new one may reach into it.
+    if let Some((existing_start, existing_end)) = ranges.range(..=start.clone()).next_back()
+        && *existing_end >= start
+    {
+        start = existing_start.clone();
+        end = end.max(existing_end.clone());
+        ranges.remove(&start);
+    }
+    // Every range starting inside the new one is absorbed.
+    let absorbed: Vec<Key> = ranges
+        .range(start.clone()..=end.clone())
+        .map(|(existing_start, _)| existing_start.clone())
+        .collect();
+    for existing_start in absorbed {
+        if let Some(existing_end) = ranges.remove(&existing_start) {
+            end = end.max(existing_end);
         }
     }
-    merged.push(start..=end);
-    merged.sort_by(|a, b| a.start().cmp(b.start()));
-    *ranges = merged;
+    ranges.insert(start, end);
+}
+
+fn covers_key(ranges: &Mutex<Ranges>, key: &Key) -> bool {
+    ranges
+        .lock()
+        .expect("demand lock")
+        .range(..=key.clone())
+        .next_back()
+        .is_some_and(|(_, end)| end >= key)
 }
 
 impl Demand {
@@ -267,26 +287,30 @@ impl Demand {
     }
 
     fn covers_facts(&self, key: &Key) -> bool {
-        self.facts
-            .lock()
-            .expect("demand lock")
-            .iter()
-            .any(|range| range.contains(key))
+        covers_key(&self.facts, key)
     }
 
     fn covers_rules(&self, key: &Key) -> bool {
-        self.rules
-            .lock()
-            .expect("demand lock")
-            .iter()
-            .any(|range| range.contains(key))
+        covers_key(&self.rules, key)
     }
 
     /// A snapshot of every recorded range (facts and rules): the
     /// scope a cover-gated tree diff walks.
     pub(crate) fn ranges(&self) -> Vec<RangeInclusive<Key>> {
-        let mut ranges = self.facts.lock().expect("demand lock").clone();
-        ranges.extend(self.rules.lock().expect("demand lock").iter().cloned());
+        let mut ranges: Vec<RangeInclusive<Key>> = self
+            .facts
+            .lock()
+            .expect("demand lock")
+            .iter()
+            .map(|(start, end)| start.clone()..=end.clone())
+            .collect();
+        ranges.extend(
+            self.rules
+                .lock()
+                .expect("demand lock")
+                .iter()
+                .map(|(start, end)| start.clone()..=end.clone()),
+        );
         ranges
     }
 
@@ -882,7 +906,7 @@ where
                 // clone, no generator-local borrows) so the poll
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
-                let query_env: QueryEnv<'a, Env> =
+                let query_env: QueryEnv<'a> =
                     QueryEnv::new(vec![Source::from(self.branch.clone())], overlay, env)
                         .with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
@@ -1001,7 +1025,7 @@ where
             demand.anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let mut query_env: QueryEnv<'a, Env> =
+            let mut query_env: QueryEnv<'a> =
                 QueryEnv::new(vec![Source::from(self.branch.clone())], overlay, env)
                     .with_demand(demand.clone());
             // Recursive concept subscriptions retain their fixpoint
@@ -1061,7 +1085,7 @@ where
                 .anchor_metadata(self.branch.metadata(&operator).branch.this);
             // Named env lifetime: keeps the poll future Send-general
             // on native — see the note on `QueryEnv::branches`.
-            let query_env: QueryEnv<'a, Env> =
+            let query_env: QueryEnv<'a> =
                 QueryEnv::new(vec![Source::from(self.branch.clone())], overlay, env)
                     .with_demand(self.demand.clone())
                     .with_fixpoint(
@@ -1104,7 +1128,7 @@ mod tests {
     use dialog_query::{AttributeQuery, Claim, Term, the};
     use dialog_query::{Cardinality, ConceptDescriptor, ConceptQuery, Output as _};
     use dialog_storage::provider::storage::VolatileSpace;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
     use std::str::FromStr;
 
     /// The head flag flips only for scans that can actually read the
@@ -2623,40 +2647,6 @@ mod tests {
         #[domain("comm")]
         pub struct Phone(pub String);
 
-        /// A contact handle (`contact/handle`) — the variant
-        /// conclusion.
-        #[derive(Attribute, Clone, PartialEq)]
-        #[domain("contact")]
-        pub struct Handle(pub String);
-
-        /// A user with an email address.
-        #[derive(Concept, Debug, Clone, PartialEq)]
-        pub struct WithEmail {
-            /// The user entity.
-            pub this: Entity,
-            /// Their email handle.
-            pub handle: Email,
-        }
-
-        /// A user with a phone number.
-        #[derive(Concept, Debug, Clone, PartialEq)]
-        pub struct WithPhone {
-            /// The user entity.
-            pub this: Entity,
-            /// Their phone handle.
-            pub handle: Phone,
-        }
-
-        /// The preferred way to reach a user: email if they have
-        /// one, otherwise phone.
-        #[derive(Concept, Debug, Clone, PartialEq)]
-        pub struct Contact {
-            /// The user entity.
-            pub this: Entity,
-            /// The winning handle.
-            pub handle: Handle,
-        }
-
         /// An employee's department (`staff/dept`).
         #[derive(Attribute, Clone, PartialEq)]
         #[domain("staff")]
@@ -2671,22 +2661,6 @@ mod tests {
         #[derive(Attribute, Clone, PartialEq)]
         #[domain("staff")]
         pub struct Bonus(pub u32);
-
-        /// A department's total salary (`payroll/total`) — a reduced
-        /// conclusion field.
-        #[derive(Attribute, Clone, PartialEq)]
-        #[domain("payroll")]
-        pub struct Total(pub u32);
-
-        /// How many members contributed a bonus (`payroll/headcount`).
-        #[derive(Attribute, Clone, PartialEq)]
-        #[domain("payroll")]
-        pub struct Headcount(pub u32);
-
-        /// A department's top bonus (`payroll/top-bonus`).
-        #[derive(Attribute, Clone, PartialEq)]
-        #[domain("payroll")]
-        pub struct TopBonus(pub u32);
 
         /// A consumer projection of the department total
         /// (`payroll/report-total`).
@@ -2706,38 +2680,6 @@ mod tests {
             pub salary: Salary,
         }
 
-        /// An employee with an optional bonus.
-        #[derive(Concept, Debug, Clone, PartialEq)]
-        pub struct Bonused {
-            /// The employee entity.
-            pub this: Entity,
-            /// Their department.
-            pub dept: Dept,
-            /// Their bonus, if any.
-            pub bonus: Option<Bonus>,
-        }
-
-        /// A department's folded total: `this` is the department.
-        #[derive(Concept, Debug, Clone, PartialEq)]
-        pub struct DeptTotal {
-            /// The department entity.
-            pub this: Entity,
-            /// Sum of the members' salaries.
-            pub total: Total,
-        }
-
-        /// A department's bonus stats: a required count and an
-        /// optional maximum (absent when nobody has a bonus).
-        #[derive(Concept, Debug, Clone, PartialEq)]
-        pub struct DeptBonus {
-            /// The department entity.
-            pub this: Entity,
-            /// Members with a bonus.
-            pub headcount: Headcount,
-            /// The top bonus, if any member has one.
-            pub top: Option<TopBonus>,
-        }
-
         /// A depth-2 consumer of [`DeptTotal`].
         #[derive(Concept, Debug, Clone, PartialEq)]
         pub struct DeptReport {
@@ -2753,9 +2695,12 @@ mod tests {
         pub struct Parent(pub Entity);
 
         /// An ancestor edge (`family/ancestor`) — the recursive
-        /// conclusion.
+        /// conclusion. Every ancestor is one, so the relation is read
+        /// as a set: under the default `last` a reader outside the
+        /// recursion elects one ancestor.
         #[derive(Attribute, Clone, PartialEq)]
         #[domain("family")]
+        #[cardinality(many)]
         pub struct Ancestor(pub Entity);
 
         /// Direct parenthood.
@@ -2810,44 +2755,6 @@ mod tests {
                 predicate: target.clone(),
             },
         ))
-    }
-
-    /// A *reducing* rule `conclusion :- premises` with a reduce
-    /// clause `field: apply(?input)` per entry, storable as a
-    /// durable rule.
-    fn reducing_rule(
-        conclusion: &dialog_query::ConceptDescriptor,
-        premises: Vec<dialog_query::Premise>,
-        reduce: &[(&str, dialog_query::Aggregator, &str)],
-    ) -> dialog_query::DeductiveRule {
-        let mut clause = BTreeMap::new();
-        for (field, apply, input) in reduce {
-            clause.insert(
-                (*field).to_string(),
-                dialog_query::ReduceSpec {
-                    apply: *apply,
-                    of: Term::<Any>::var(*input),
-                },
-            );
-        }
-        dialog_query::DeductiveRule::with_reduce(conclusion.clone(), premises, clause)
-            .expect("reducing rule compiles")
-    }
-
-    fn negated_concept_premise(
-        target: &dialog_query::ConceptDescriptor,
-        bindings: &[(&str, &str)],
-    ) -> dialog_query::Premise {
-        let mut terms = dialog_query::Parameters::new();
-        for (param, variable) in bindings {
-            terms.insert((*param).to_string(), Term::<Any>::var(*variable));
-        }
-        dialog_query::Premise::Unless(dialog_query::Negation(dialog_query::Proposition::Concept(
-            dialog_query::ConceptQuery {
-                terms,
-                predicate: target.clone(),
-            },
-        )))
     }
 
     /// Piece 1: a derived `Query<C>` subscription over an
@@ -3001,76 +2908,106 @@ mod tests {
         Ok(())
     }
 
-    /// Piece 2, variants: committing a rule re-triggers via the
-    /// rule-discovery range (full recompute — the rule set changed);
-    /// afterwards a fact write that flips a negated variant is
-    /// maintained incrementally through the delta-join.
+    /// A field listing several relations reads them as a ranked
+    /// choice over however many candidates: twenty contacts have a
+    /// phone, seven of them an email as well, and the handle is the
+    /// email where there is one and the phone otherwise. No rule says
+    /// so; the field does, and nothing is negated.
     #[dialog_common::test]
-    async fn it_maintains_variant_negation_flips() -> anyhow::Result<()> {
-        use concepts::{Contact, Email, Handle, Phone, WithEmail, WithPhone};
-        use dialog_query::Query;
+    async fn it_ranks_many_candidates_by_relation() -> anyhow::Result<()> {
+        use concepts::{Email, Phone};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let contact = Contact::descriptor().clone();
-        let email = WithEmail::descriptor().clone();
-        let phone = WithPhone::descriptor().clone();
+        let mut transaction = branch.transaction();
+        let mut expected: Vec<(Entity, String)> = Vec::new();
+        for index in 0..20 {
+            let contact: Entity = format!("id:contact-{index}").parse()?;
+            transaction =
+                transaction.assert(Phone::of(contact.clone()).is(format!("555-{index:04}")));
+            if index % 3 == 0 {
+                transaction =
+                    transaction.assert(Email::of(contact.clone()).is(format!("c{index}@mail")));
+                expected.push((contact, format!("c{index}@mail")));
+            } else {
+                expected.push((contact, format!("555-{index:04}")));
+            }
+        }
+        transaction.commit().publish().perform(&operator).await?;
 
-        let email_rule = concept_rule(
-            &contact,
-            vec![concept_premise(
-                &email,
-                &[("this", "this"), ("handle", "handle")],
-            )],
+        let rows: Vec<dialog_query::ConceptConclusion> = branch
+            .select(handle_query())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        let mut found = handles(&rows);
+        found.sort();
+        expected.sort();
+        assert_eq!(
+            found, expected,
+            "the seven with an email read it, the rest their phone"
         );
-        let phone_rule = concept_rule(
-            &contact,
-            vec![
-                concept_premise(&phone, &[("this", "this"), ("handle", "handle")]),
-                negated_concept_premise(&email, &[("this", "this")]),
-            ],
-        );
+        Ok(())
+    }
+
+    /// `contact/handle` as the notation would declare it: the email,
+    /// else the phone.
+    fn handle_query() -> ConceptQuery {
+        concept_query(
+            serde_json::json!({ "with": {
+                "handle": { "the": ["comm/email", "comm/phone"], "as": "Text" }
+            }}),
+            &["handle"],
+        )
+    }
+
+    /// Project handle rows to comparable `(contact, handle)` pairs.
+    fn handles(rows: &[dialog_query::ConceptConclusion]) -> Vec<(Entity, String)> {
+        rows.iter()
+            .map(|row| {
+                (
+                    row.entity().clone(),
+                    row.get::<String>("handle").expect("a handle"),
+                )
+            })
+            .collect()
+    }
+
+    /// A ranked choice flips as its better relation fills in: Bob's
+    /// handle is his phone until his email arrives, and then it is
+    /// the email, the phone row retracted and the email row asserted
+    /// in one delta. The flip is maintained for the touched entity,
+    /// not recomputed.
+    #[dialog_common::test]
+    async fn it_maintains_a_ranked_choice_flip() -> anyhow::Result<()> {
+        use concepts::{Email, Phone};
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
 
         let bob = Entity::new()?;
-        let transaction = branch
+        branch
             .transaction()
-            .assert(Phone::of(bob.clone()).is("555-0100"));
-        with_rule(transaction, &email_rule)
+            .assert(Phone::of(bob.clone()).is("555-0100"))
             .commit()
             .publish()
             .perform(&operator)
             .await?;
 
-        let mut subscription = branch.subscribe(Query::<Contact>::default());
+        let mut subscription = branch.subscribe(handle_query());
         let initial = subscription.poll(&operator).await?.expect("initial");
-        assert!(
-            initial.asserted.is_empty(),
-            "only the email rule is installed and bob has no email"
-        );
-
-        // Installing the phone rule lands in the rule-discovery
-        // range: recompute.
-        with_rule(branch.transaction(), &phone_rule)
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-
-        let delta = subscription.poll(&operator).await?.expect("rule installed");
         assert_eq!(
-            delta.asserted,
-            vec![Contact {
-                this: bob.clone(),
-                handle: Handle("555-0100".into()),
-            }]
+            handles(&initial.asserted),
+            vec![(bob.clone(), "555-0100".to_string())],
+            "the phone is the handle while there is no email"
         );
-        assert_eq!(subscription.recomputes(), 2, "a rule-set change recomputes");
+        assert_eq!(subscription.recomputes(), 1);
 
-        // An email for bob flips the negated variant: the phone row
-        // retracts and the email row asserts — maintained, not
-        // recomputed.
+        // An email for bob outranks his phone: the phone row retracts
+        // and the email row asserts.
         branch
             .transaction()
             .assert(Email::of(bob.clone()).is("bob@mail"))
@@ -3079,22 +3016,19 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let delta = subscription.poll(&operator).await?.expect("variant flip");
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("the choice flips");
         assert_eq!(
-            delta.asserted,
-            vec![Contact {
-                this: bob.clone(),
-                handle: Handle("bob@mail".into()),
-            }]
+            handles(&delta.asserted),
+            vec![(bob.clone(), "bob@mail".to_string())]
         );
         assert_eq!(
-            delta.retracted,
-            vec![Contact {
-                this: bob.clone(),
-                handle: Handle("555-0100".into()),
-            }]
+            handles(&delta.retracted),
+            vec![(bob.clone(), "555-0100".to_string())]
         );
-        assert_eq!(subscription.recomputes(), 2, "the flip was maintained");
+        assert_eq!(subscription.recomputes(), 1, "the flip was maintained");
         assert_eq!(subscription.maintenances(), 1);
         Ok(())
     }
@@ -3346,42 +3280,75 @@ mod tests {
         Ok(())
     }
 
-    /// The reducing rule shared by the aggregation lifecycle tests:
-    /// `DeptTotal { total: sum(?salary) }` over [`concepts::Staffed`],
-    /// grouped by the department entity.
-    fn dept_total_rule() -> dialog_query::DeductiveRule {
-        use concepts::{DeptTotal, Staffed};
-        use dialog_query::Aggregator;
-        reducing_rule(
-            DeptTotal::descriptor(),
+    /// `payroll/salary(dept) := salary` for every member of the
+    /// department: the relation a query elects over, one candidate per
+    /// distinct salary.
+    fn dept_salary_rule() -> dialog_query::DeductiveRule {
+        use concepts::Staffed;
+        concept_rule(
+            &dept_salary(),
             vec![concept_premise(
                 Staffed::descriptor(),
                 &[("this", "employee"), ("dept", "this"), ("salary", "salary")],
             )],
-            &[("total", Aggregator::Sum, "salary")],
         )
     }
 
-    /// Project folded rows to comparable `(department, total)` pairs.
-    fn totals(rows: &[concepts::DeptTotal]) -> Vec<(Entity, u32)> {
-        let mut pairs: Vec<(Entity, u32)> = rows
+    /// The relation `dept_salary_rule` derives into, read as the set.
+    fn dept_salary() -> ConceptDescriptor {
+        serde_json::from_value(serde_json::json!({ "with": {
+            "salary": { "the": "payroll/salary", "as": "UnsignedInteger", "select": "all" }
+        }}))
+        .expect("descriptor parses")
+    }
+
+    /// `payroll/salary` read under `max`: a department's highest salary.
+    fn dept_top() -> ConceptQuery {
+        concept_query(
+            serde_json::json!({ "with": {
+                "top": { "the": "payroll/salary", "as": "UnsignedInteger", "select": "max" }
+            }}),
+            &["top"],
+        )
+    }
+
+    /// A concept query over `descriptor`, `this` and each named field
+    /// bound to a variable of its own name.
+    fn concept_query(descriptor: serde_json::Value, fields: &[&str]) -> ConceptQuery {
+        let predicate: ConceptDescriptor =
+            serde_json::from_value(descriptor).expect("descriptor parses");
+        let mut terms = dialog_query::Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("this"));
+        for field in fields {
+            terms.insert((*field).to_string(), Term::<Any>::var(*field));
+        }
+        ConceptQuery { predicate, terms }
+    }
+
+    /// Project elected rows to comparable `(department, top)` pairs.
+    fn tops(rows: &[dialog_query::ConceptConclusion]) -> Vec<(Entity, u64)> {
+        let mut pairs: Vec<(Entity, u64)> = rows
             .iter()
-            .map(|row| (row.this.clone(), row.total.0))
+            .map(|row| {
+                (
+                    row.entity().clone(),
+                    row.get::<u64>("top").expect("a top salary"),
+                )
+            })
             .collect();
         pairs.sort();
         pairs
     }
 
-    /// Aggregation lifecycle, assertion side: a subscription over a
-    /// reducing rule's concept re-derives per poll — asserting a
-    /// contributing fact retracts the group's old aggregate row and
-    /// asserts the new one; a fact for a fresh group asserts a new
-    /// row. Every delta comes from a recompute (A3's
-    /// recompute-per-poll model), proven by the counters.
+    /// Election lifecycle, assertion side: a subscription electing over
+    /// a derived relation re-derives per poll. Asserting a candidate
+    /// that wins retracts the group's old elected row and asserts the
+    /// new one; a fact for a fresh group asserts a new row. The
+    /// election is the subscription's read, not a rule's: the rule
+    /// derives one candidate per member, and `max` chooses among them.
     #[dialog_common::test]
-    async fn it_updates_reducing_subscription_on_asserts() -> anyhow::Result<()> {
-        use concepts::{Dept, DeptTotal, Salary, Staffed, Total};
-        use dialog_query::Query;
+    async fn it_updates_an_electing_subscription_on_asserts() -> anyhow::Result<()> {
+        use concepts::{Dept, Salary, Staffed};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -3393,7 +3360,7 @@ mod tests {
         let bob = Entity::new()?;
         let carol = Entity::new()?;
 
-        with_rule(branch.transaction(), &dept_total_rule())
+        with_rule(branch.transaction(), &dept_salary_rule())
             .assert(Staffed {
                 this: alice.clone(),
                 dept: Dept(dept_a.clone()),
@@ -3404,32 +3371,32 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let mut subscription = branch.subscribe(Query::<DeptTotal>::default());
+        let mut subscription = branch.subscribe(dept_top());
         let initial = subscription.poll(&operator).await?.expect("initial");
-        assert_eq!(totals(&initial.asserted), vec![(dept_a.clone(), 100)]);
+        assert_eq!(tops(&initial.asserted), vec![(dept_a.clone(), 100)]);
         assert!(initial.retracted.is_empty());
         assert_eq!(subscription.recomputes(), 1);
 
-        // A second contributor: the old aggregate row is retracted
+        // A second, higher candidate: the old elected row is retracted
         // and the new one asserted in the same delta.
         branch
             .transaction()
             .assert(Staffed {
                 this: bob.clone(),
                 dept: Dept(dept_a.clone()),
-                salary: Salary(50),
+                salary: Salary(150),
             })
             .commit()
             .publish()
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("covered write");
-        assert_eq!(totals(&delta.retracted), vec![(dept_a.clone(), 100)]);
-        assert_eq!(totals(&delta.asserted), vec![(dept_a.clone(), 150)]);
+        assert_eq!(tops(&delta.retracted), vec![(dept_a.clone(), 100)]);
+        assert_eq!(tops(&delta.asserted), vec![(dept_a.clone(), 150)]);
         assert_eq!(
             (subscription.recomputes(), subscription.maintenances()),
             (2, 0),
-            "the aggregate delta comes from a recompute, never per-entity maintenance"
+            "the elected delta comes from a recompute, never per-entity maintenance"
         );
 
         // A fresh group appears without touching the existing one.
@@ -3445,27 +3412,23 @@ mod tests {
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("new group");
-        assert_eq!(totals(&delta.asserted), vec![(dept_b.clone(), 70)]);
+        assert_eq!(tops(&delta.asserted), vec![(dept_b.clone(), 70)]);
         assert!(delta.retracted.is_empty(), "dept-a's row is unchanged");
         assert!(
-            subscription.results().contains(&DeptTotal {
-                this: dept_a.clone(),
-                total: Total(150),
-            }),
+            tops(subscription.results()).contains(&(dept_a.clone(), 150)),
             "the retained result still carries dept-a's row"
         );
         assert_eq!(subscription.recomputes(), 3);
         Ok(())
     }
 
-    /// Aggregation lifecycle, retraction side: retracting a
-    /// contributor updates the group's aggregate; retracting a
-    /// group's last row makes the group's row disappear from the
-    /// subscription.
+    /// Election lifecycle, retraction side: retracting the elected
+    /// candidate hands the group's row to the runner-up; retracting a
+    /// group's last candidate makes the group's row disappear from the
+    /// subscription, since an election over no candidates is no row.
     #[dialog_common::test]
-    async fn it_updates_reducing_subscription_on_retractions() -> anyhow::Result<()> {
-        use concepts::{Dept, DeptTotal, Salary, Staffed};
-        use dialog_query::Query;
+    async fn it_updates_an_electing_subscription_on_retractions() -> anyhow::Result<()> {
+        use concepts::{Dept, Salary, Staffed};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -3480,14 +3443,14 @@ mod tests {
         let bob_row = Staffed {
             this: bob.clone(),
             dept: Dept(dept_a.clone()),
-            salary: Salary(50),
+            salary: Salary(150),
         };
         let carol_row = Staffed {
             this: carol.clone(),
             dept: Dept(dept_b.clone()),
             salary: Salary(70),
         };
-        with_rule(branch.transaction(), &dept_total_rule())
+        with_rule(branch.transaction(), &dept_salary_rule())
             .assert(Staffed {
                 this: alice.clone(),
                 dept: Dept(dept_a.clone()),
@@ -3500,14 +3463,14 @@ mod tests {
             .perform(&operator)
             .await?;
 
-        let mut subscription = branch.subscribe(Query::<DeptTotal>::default());
+        let mut subscription = branch.subscribe(dept_top());
         let initial = subscription.poll(&operator).await?.expect("initial");
         assert_eq!(
-            totals(&initial.asserted),
+            tops(&initial.asserted),
             vec![(dept_a.clone(), 150), (dept_b.clone(), 70)]
         );
 
-        // Retracting one contributor updates the group's fold.
+        // Retracting the winner hands the row to the runner-up.
         branch
             .transaction()
             .retract(bob_row)
@@ -3519,11 +3482,11 @@ mod tests {
             .poll(&operator)
             .await?
             .expect("contributor gone");
-        assert_eq!(totals(&delta.retracted), vec![(dept_a.clone(), 150)]);
-        assert_eq!(totals(&delta.asserted), vec![(dept_a.clone(), 100)]);
+        assert_eq!(tops(&delta.retracted), vec![(dept_a.clone(), 150)]);
+        assert_eq!(tops(&delta.asserted), vec![(dept_a.clone(), 100)]);
 
-        // Retracting the group's last contributor removes the
-        // group's row entirely: no empty groups.
+        // Retracting the group's last candidate removes the group's
+        // row entirely: no empty groups.
         branch
             .transaction()
             .retract(carol_row)
@@ -3532,9 +3495,9 @@ mod tests {
             .perform(&operator)
             .await?;
         let delta = subscription.poll(&operator).await?.expect("group emptied");
-        assert_eq!(totals(&delta.retracted), vec![(dept_b.clone(), 70)]);
+        assert_eq!(tops(&delta.retracted), vec![(dept_b.clone(), 70)]);
         assert!(delta.asserted.is_empty(), "an empty group yields no row");
-        assert_eq!(totals(subscription.results()), vec![(dept_a.clone(), 100)]);
+        assert_eq!(tops(subscription.results()), vec![(dept_a.clone(), 100)]);
         assert_eq!(subscription.maintenances(), 0, "recompute-per-poll");
         Ok(())
     }
@@ -3611,14 +3574,14 @@ mod tests {
         Ok(())
     }
 
-    /// Optional-input `max` across polls: a group's `top` transitions
-    /// Absent -> Present when the first bonus arrives and back when
-    /// it is retracted, while the identity-carrying `count` stays
-    /// present throughout.
+    /// Optional elections across polls: a department's `top` bonus is
+    /// absent while no member has a bonus, present once the first
+    /// arrives, and absent again when it is retracted. The member
+    /// read, over a relation every member contributes to, keeps the
+    /// department's row throughout.
     #[dialog_common::test]
     async fn it_transitions_optional_max_between_present_and_absent() -> anyhow::Result<()> {
-        use concepts::{Bonus, Bonused, Dept, DeptBonus, Headcount, TopBonus};
-        use dialog_query::{Aggregator, Query};
+        use concepts::{Bonus, Dept};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -3627,38 +3590,72 @@ mod tests {
         let dept_a: Entity = "id:dept-a".parse()?;
         let alice = Entity::new()?;
 
-        let rule = reducing_rule(
-            DeptBonus::descriptor(),
+        // payroll/member(dept) := employee, for every employee;
+        // payroll/bonus(dept) := bonus, for every employee with one.
+        let staffed: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "dept": { "the": "staff/dept", "as": "Entity" }
+        }}))?;
+        let bonused: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "dept": { "the": "staff/dept", "as": "Entity" },
+            "bonus": { "the": "staff/bonus", "as": "UnsignedInteger" }
+        }}))?;
+        let members: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "member": { "the": "payroll/member", "as": "Entity", "select": "all" }
+        }}))?;
+        let bonuses: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "bonus": { "the": "payroll/bonus", "as": "UnsignedInteger", "select": "all" }
+        }}))?;
+        let member_rule = concept_rule(
+            &members,
             vec![concept_premise(
-                Bonused::descriptor(),
+                &staffed,
+                &[("this", "member"), ("dept", "this")],
+            )],
+        );
+        let bonus_rule = concept_rule(
+            &bonuses,
+            vec![concept_premise(
+                &bonused,
                 &[("this", "employee"), ("dept", "this"), ("bonus", "bonus")],
             )],
-            &[
-                ("headcount", Aggregator::Count, "bonus"),
-                ("top", Aggregator::Max, "bonus"),
-            ],
         );
-        with_rule(branch.transaction(), &rule)
-            .assert(Bonused {
-                this: alice.clone(),
-                dept: Dept(dept_a.clone()),
-                bonus: None,
-            })
+        let transaction = with_rule(branch.transaction(), &member_rule);
+        with_rule(transaction, &bonus_rule)
+            .assert(Dept::of(alice.clone()).is(dept_a.clone()))
             .commit()
             .publish()
             .perform(&operator)
             .await?;
 
-        let mut subscription = branch.subscribe(Query::<DeptBonus>::default());
+        let stats = concept_query(
+            serde_json::json!({ "with": {
+                "member": { "the": "payroll/member", "as": "Entity", "select": "all" },
+                "top": {
+                    "the": "payroll/bonus", "as": "UnsignedInteger", "select": "max",
+                    "optional": true
+                }
+            }}),
+            &["member", "top"],
+        );
+        let stats_of =
+            |rows: &[dialog_query::ConceptConclusion]| -> Vec<(Entity, Entity, Option<u64>)> {
+                rows.iter()
+                    .map(|row| {
+                        (
+                            row.entity().clone(),
+                            row.get::<Entity>("member").expect("a member"),
+                            row.get::<u64>("top").ok(),
+                        )
+                    })
+                    .collect()
+            };
+
+        let mut subscription = branch.subscribe(stats);
         let initial = subscription.poll(&operator).await?.expect("initial");
         assert_eq!(
-            initial.asserted,
-            vec![DeptBonus {
-                this: dept_a.clone(),
-                headcount: Headcount(0),
-                top: None,
-            }],
-            "an all-absent group binds the identity-less fold Absent"
+            stats_of(&initial.asserted),
+            vec![(dept_a.clone(), alice.clone(), None)],
+            "a department with no bonus has a row, its optional election absent"
         );
 
         // The first bonus flips `top` to Present.
@@ -3671,20 +3668,12 @@ mod tests {
             .await?;
         let delta = subscription.poll(&operator).await?.expect("bonus arrived");
         assert_eq!(
-            delta.retracted,
-            vec![DeptBonus {
-                this: dept_a.clone(),
-                headcount: Headcount(0),
-                top: None,
-            }]
+            stats_of(&delta.retracted),
+            vec![(dept_a.clone(), alice.clone(), None)]
         );
         assert_eq!(
-            delta.asserted,
-            vec![DeptBonus {
-                this: dept_a.clone(),
-                headcount: Headcount(1),
-                top: Some(TopBonus(25)),
-            }]
+            stats_of(&delta.asserted),
+            vec![(dept_a.clone(), alice.clone(), Some(25))]
         );
 
         // Retracting it flips back to Absent.
@@ -3700,23 +3689,21 @@ mod tests {
             .await?
             .expect("bonus retracted");
         assert_eq!(
-            delta.asserted,
-            vec![DeptBonus {
-                this: dept_a.clone(),
-                headcount: Headcount(0),
-                top: None,
-            }]
+            stats_of(&delta.asserted),
+            vec![(dept_a.clone(), alice.clone(), None)]
         );
         assert_eq!(delta.retracted.len(), 1);
         Ok(())
     }
 
-    /// Composition depth 2 under subscriptions: a standing query
-    /// over a *consumer* of the reducing concept updates when the
-    /// base facts change, through both strata.
+    /// Composition depth 2 under subscriptions: a deductive rule reads
+    /// a `max` attribute over a derived relation, so a consumer concept
+    /// projects the department's top salary, and a standing query over
+    /// the consumer updates when the base facts change, through both
+    /// the election and the projection.
     #[dialog_common::test]
     async fn it_updates_depth_two_consumer_subscriptions() -> anyhow::Result<()> {
-        use concepts::{Dept, DeptReport, DeptTotal, ReportTotal, Salary, Staffed};
+        use concepts::{Dept, DeptReport, ReportTotal, Salary, Staffed};
         use dialog_query::Query;
 
         let (operator, profile) = test_session_with_peer().await;
@@ -3727,16 +3714,16 @@ mod tests {
         let alice = Entity::new()?;
         let bob = Entity::new()?;
 
-        // Stratum 0: the reducing rule. Stratum 1: a plain consumer
-        // projecting the folded total.
+        // The rule derives the members' salaries; the consumer reads
+        // their maximum and projects it.
         let consumer = concept_rule(
             DeptReport::descriptor(),
             vec![concept_premise(
-                DeptTotal::descriptor(),
-                &[("this", "this"), ("total", "total")],
+                &dept_top().predicate,
+                &[("this", "this"), ("top", "total")],
             )],
         );
-        let tx = with_rule(branch.transaction(), &dept_total_rule());
+        let tx = with_rule(branch.transaction(), &dept_salary_rule());
         with_rule(tx, &consumer)
             .assert(Staffed {
                 this: alice.clone(),
@@ -3758,14 +3745,14 @@ mod tests {
             }]
         );
 
-        // A base-fact change two strata below the subscribed
-        // concept propagates to the consumer's rows.
+        // A base-fact change two steps below the subscribed concept
+        // propagates to the consumer's rows.
         branch
             .transaction()
             .assert(Staffed {
                 this: bob.clone(),
                 dept: Dept(dept_a.clone()),
-                salary: Salary(50),
+                salary: Salary(150),
             })
             .commit()
             .publish()
@@ -3789,19 +3776,16 @@ mod tests {
         Ok(())
     }
 
-    /// A subscription over a recursive component seeded by a reducing
-    /// rule must stay correct through change in both directions: a new
-    /// contributor REPLACES the group's folded row (which additive
-    /// seeding cannot model naively), and a retraction SHRINKS it
-    /// (which per-row DRed suspicion cannot model naively). Whichever
-    /// path the evaluator takes — the fixpoint guards' recompute
-    /// fallback or maintenance with seed re-folding — the deltas must
-    /// replace the folded rows exactly, through the recursive step
-    /// included. Nothing else exercises this shape end to end.
+    /// A subscription electing over a recursive relation stays correct
+    /// through change in both directions. A child department inherits
+    /// its parent's salaries through a step rule reading the relation
+    /// it derives into, so the component yields each department's
+    /// candidate set and the subscription's `max` chooses at the exit:
+    /// a new winner replaces both departments' elected rows, and
+    /// retracting it hands both back to the runner-up.
     #[dialog_common::test]
-    async fn it_recomputes_recursive_components_seeded_by_reducing_rules() -> anyhow::Result<()> {
-        use concepts::{Dept, DeptTotal, HasParent, Parent, Salary, Staffed, Total};
-        use dialog_query::Query;
+    async fn it_elects_over_a_recursive_relation_at_its_exit() -> anyhow::Result<()> {
+        use concepts::{Dept, HasParent, Parent, Salary, Staffed};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -3813,18 +3797,15 @@ mod tests {
         let bob = Entity::new()?;
 
         // Step rule closing the recursive component: a child
-        // department inherits its parent's total.
+        // department inherits its parent's salaries.
         let step = concept_rule(
-            DeptTotal::descriptor(),
+            &dept_salary(),
             vec![
                 concept_premise(
                     HasParent::descriptor(),
                     &[("this", "this"), ("parent", "p")],
                 ),
-                concept_premise(
-                    DeptTotal::descriptor(),
-                    &[("this", "p"), ("total", "total")],
-                ),
+                concept_premise(&dept_salary(), &[("this", "p"), ("salary", "salary")]),
             ],
         );
 
@@ -3836,29 +3817,29 @@ mod tests {
                 salary: Salary(100),
             })
             .assert(Parent::of(dept_b.clone()).is(dept_a.clone()));
-        with_rule(with_rule(transaction, &dept_total_rule()), &step)
+        with_rule(with_rule(transaction, &dept_salary_rule()), &step)
             .commit()
             .publish()
             .perform(&operator)
             .await?;
 
-        let mut subscription = branch.subscribe(Query::<DeptTotal>::default());
+        let mut subscription = branch.subscribe(dept_top());
         let initial = subscription.poll(&operator).await?.expect("initial");
         assert_eq!(
-            totals(&initial.asserted),
+            tops(&initial.asserted),
             vec![(dept_a.clone(), 100), (dept_b.clone(), 100)],
-            "the fold seeds the fixpoint and the child inherits it"
+            "the child inherits the parent's candidates and the exit elects among them"
         );
         assert_eq!(subscription.recomputes(), 1);
 
-        // Growth: a second contributor flows through the fold AND the
-        // recursive step — via recompute, never additive maintenance.
+        // Growth: a higher candidate flows through the step and the
+        // election.
         branch
             .transaction()
             .assert(Staffed {
                 this: bob.clone(),
                 dept: Dept(dept_a.clone()),
-                salary: Salary(50),
+                salary: Salary(150),
             })
             .commit()
             .publish()
@@ -3866,22 +3847,22 @@ mod tests {
             .await?;
         let delta = subscription.poll(&operator).await?.expect("growth");
         assert_eq!(
-            totals(&delta.asserted),
+            tops(&delta.asserted),
             vec![(dept_a.clone(), 150), (dept_b.clone(), 150)]
         );
         assert_eq!(
-            totals(&delta.retracted),
+            tops(&delta.retracted),
             vec![(dept_a.clone(), 100), (dept_b.clone(), 100)]
         );
 
-        // Shrinkage: a retraction shrinks the group — via recompute,
-        // never DRed.
+        // Shrinkage: retracting the winner hands both rows back to
+        // the runner-up.
         branch
             .transaction()
             .retract(Staffed {
-                this: alice.clone(),
+                this: bob.clone(),
                 dept: Dept(dept_a.clone()),
-                salary: Salary(100),
+                salary: Salary(150),
             })
             .commit()
             .publish()
@@ -3889,19 +3870,16 @@ mod tests {
             .await?;
         let delta = subscription.poll(&operator).await?.expect("shrinkage");
         assert_eq!(
-            totals(&delta.asserted),
-            vec![(dept_a.clone(), 50), (dept_b.clone(), 50)]
+            tops(&delta.asserted),
+            vec![(dept_a.clone(), 100), (dept_b.clone(), 100)]
         );
         assert_eq!(
-            totals(&delta.retracted),
+            tops(&delta.retracted),
             vec![(dept_a.clone(), 150), (dept_b.clone(), 150)]
         );
 
         assert!(
-            subscription.results().contains(&DeptTotal {
-                this: dept_b.clone(),
-                total: Total(50),
-            }),
+            tops(subscription.results()).contains(&(dept_b.clone(), 100)),
             "the retained table carries the recursively derived row"
         );
         Ok(())
@@ -4055,10 +4033,11 @@ mod tests {
         let here = Entity::new()?;
         let status = |value: &str| {
             let mut changes = Changes::new();
-            changes.associate_unique(
+            changes.associate(
                 "person/name".parse().expect("attribute"),
                 here.clone(),
                 Value::String(value.into()),
+                dialog_artifacts::Policy::Last,
             );
             changes
         };
@@ -4312,10 +4291,11 @@ mod tests {
         let here = Entity::new()?;
         for status in ["pending", "settled", "pending", "settled"] {
             let mut changes = Changes::new();
-            changes.associate_unique(
+            changes.associate(
                 "sync/status".parse()?,
                 here.clone(),
                 Value::String(status.into()),
+                dialog_artifacts::Policy::Last,
             );
             branch.overlay().assert(changes)?;
             let site = Entity::new()?;
@@ -4391,10 +4371,11 @@ mod tests {
         let name = |of: &Entity, is: &str| the!("person/name").of(of.clone()).is(is.to_string());
         let rename = |of: &Entity, is: &str| {
             let mut changes = Changes::new();
-            changes.associate_unique(
+            changes.associate(
                 "person/name".parse().expect("attribute"),
                 of.clone(),
                 Value::String(is.into()),
+                dialog_artifacts::Policy::Last,
             );
             changes
         };
@@ -4607,3 +4588,6 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod invariants;

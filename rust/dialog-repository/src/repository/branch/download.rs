@@ -252,12 +252,15 @@ mod tests {
     use futures_util::stream;
 
     fn name(of: &str, is: &str) -> Result<Instruction> {
-        Ok(Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: of.parse()?,
-            is: Value::String(is.to_string()),
-            cause: None,
-        }))
+        Ok(Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: of.parse()?,
+                is: Value::String(is.to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        ))
     }
 
     /// Yields to the executor once, so whatever runs alongside the caller

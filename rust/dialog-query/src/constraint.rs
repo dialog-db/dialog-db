@@ -19,7 +19,8 @@ pub use starts_with::StartsWith;
 pub use type_of::TypeOf;
 
 use crate::selection::Selection;
-use crate::{Environment, Parameters, Schema};
+use crate::types::Any;
+use crate::{Environment, Parameters, Schema, Term};
 use auto_enums::auto_enum;
 use std::fmt::Display;
 
@@ -104,6 +105,46 @@ impl Constraint {
             Constraint::AtMost(c) => c.parameters(),
             Constraint::GreaterThan(c) => c.parameters(),
             Constraint::AtLeast(c) => c.parameters(),
+        }
+    }
+
+    /// This constraint over `terms` instead of its own slots: a slot
+    /// `terms` does not name keeps its current term.
+    pub fn with_parameters(&self, terms: &Parameters) -> Self {
+        let current = self.parameters();
+        let slot = |name: &str| -> Term<Any> {
+            terms
+                .get(name)
+                .or_else(|| current.get(name))
+                .cloned()
+                .unwrap_or_else(Term::blank)
+        };
+        match self {
+            Constraint::Equality(_) => {
+                Constraint::Equality(Equality::new(slot("this"), slot("is")))
+            }
+            Constraint::Coalesce(_) => {
+                Constraint::Coalesce(Coalesce::new(slot("source"), slot("fallback"), slot("is")))
+            }
+            Constraint::TypeOf(c) => Constraint::TypeOf(TypeOf::new(slot("of"), c.is.clone())),
+            Constraint::StartsWith(_) => {
+                let prefix = match slot("prefix") {
+                    Term::Constant(value) => Term::<String>::Constant(value),
+                    Term::Variable {
+                        name: Some(name), ..
+                    } => Term::<String>::var(name),
+                    Term::Variable { name: None, .. } => Term::<String>::blank(),
+                };
+                Constraint::StartsWith(StartsWith::new(slot("of"), prefix))
+            }
+            Constraint::LessThan(_) => {
+                Constraint::LessThan(LessThan::new(slot("of"), slot("with")))
+            }
+            Constraint::AtMost(_) => Constraint::AtMost(AtMost::new(slot("of"), slot("with"))),
+            Constraint::GreaterThan(_) => {
+                Constraint::GreaterThan(GreaterThan::new(slot("of"), slot("with")))
+            }
+            Constraint::AtLeast(_) => Constraint::AtLeast(AtLeast::new(slot("of"), slot("with"))),
         }
     }
 

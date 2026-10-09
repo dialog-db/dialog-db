@@ -877,6 +877,7 @@ mod tests {
                 Attribute::try_from("test.profile/name".to_string())?,
                 Entity::new()?,
                 Value::String(note.to_string()),
+                dialog_artifacts::Policy::All,
             );
             elsewhere
                 .transaction()

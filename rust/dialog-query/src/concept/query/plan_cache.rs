@@ -54,7 +54,7 @@ use std::{cell::RefCell, rc::Rc};
 /// wrong plan, so this is a memory bound, not an invalidation knob.
 const CAPACITY: usize = 4096;
 
-type Key = (Entity, Adornment);
+type Key = (Entity, Vec<u8>, Adornment);
 
 /// A shared, bounded cache of planned rule [`Conjunction`]s keyed by
 /// `(content-addressed rule identity, adornment)`.
@@ -117,7 +117,7 @@ impl PlanCache {
         let Some(identity) = rule.try_this() else {
             return plan();
         };
-        let key = (identity, adornment);
+        let key = (identity, rule.spelling(), adornment);
 
         if let Some(hit) = self.get(&key) {
             return hit;

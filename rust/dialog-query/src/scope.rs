@@ -14,10 +14,14 @@ use dialog_artifacts::{Estimate, LoadBlob, LoadBlock, Preload, Select};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 
+use crate::recall::BodyMemo;
 use crate::source::SelectRules;
 
 /// The full provider bundle premise evaluation requires. Blanket
 /// implemented: any environment providing the effects is a `Scope`.
+/// [`BodyMemo`] is the one non-effect: the per-query memo rule heads
+/// share their body's rows through, which an environment may decline
+/// to keep.
 pub trait Scope<'a>:
     Provider<Select<'a>>
     + Provider<SelectRules>
@@ -25,6 +29,7 @@ pub trait Scope<'a>:
     + Provider<LoadBlob>
     + Provider<Preload>
     + Provider<Estimate>
+    + BodyMemo
     + ConditionalSync
 {
 }
@@ -36,6 +41,7 @@ impl<'a, T> Scope<'a> for T where
         + Provider<LoadBlob>
         + Provider<Preload>
         + Provider<Estimate>
+        + BodyMemo
         + ConditionalSync
 {
 }

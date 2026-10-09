@@ -1,0 +1,25 @@
+{
+  "scenario": "commit-derived",
+  "size": 200,
+  "profile": "release",
+  "outcome": {
+    "facts": 200
+  },
+  "counters": {
+    "archive.get": 7,
+    "archive.get.bytes": 233788,
+    "archive.put": 7,
+    "archive.put.bytes": 335864,
+    "span.apply_batch_reusing": 1,
+    "span.buffer_records": 2,
+    "span.commit": 1,
+    "span.hydrate_rule": 1,
+    "span.resolve_bundle": 600,
+    "span.resolve_rules": 600,
+    "span.seal_batch": 1,
+    "span.settle": 1,
+    "span.settle_cell": 1,
+    "span.write_instructions": 1
+  },
+  "instructions": 355926650
+}

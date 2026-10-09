@@ -861,7 +861,12 @@ mod screen_tests {
                 &store,
                 &mut delta,
                 Some(writer),
-                stream::iter(facts.iter().cloned().map(Instruction::Assert)),
+                stream::iter(
+                    facts
+                        .iter()
+                        .cloned()
+                        .map(|artifact| Instruction::Assert(artifact, crate::Policy::All)),
+                ),
             )
             .await?;
         mirror(&mut delta, &store, &observing);

@@ -22,10 +22,20 @@
 //!    for rule sets that generate unboundedly (e.g. through
 //!    formulas).
 //!
-//! The stratification contract makes this sound: negation inside a
-//! component is rejected before evaluation (see
-//! [`ProgramAnalysis::check`]), so every premise a component member
-//! negates is fully derivable before the component's fixpoint runs.
+//! **Absence tests.** A premise that tests for absence (an `unless`
+//! over a concept, a set-widened read of one, or a read under a ranked
+//! policy, which negates the better candidates) has stratified
+//! semantics when the concept it reads sits below the component: the
+//! relation is derived in full before the fixpoint runs. When the
+//! concept is a member of the same component the test has no
+//! stratified meaning, and the program analysis quarantines a rule of
+//! the cycle ([`ProgramAnalysis::quarantined`]) so no component
+//! evaluated here holds one; a cycle with no rule to set aside fails
+//! with [`EvaluationError::AbsenceThroughRecursion`]. A read under
+//! `last` is not one: inside its component it reads every candidate the
+//! fixpoint has derived, and its readers elect the newest at the exit.
+//! A fold inside a component has no reading at all and stays refused
+//! ([`ProgramAnalysis::check`]).
 //!
 //! Goal-directed (magic-set) filtering of the component's answer
 //! space is future work: this evaluator computes the component's
@@ -39,11 +49,11 @@ use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::EvaluationError;
 use crate::negation::Negation;
 use crate::parameters::Parameters;
-use crate::planner::Planner;
+use crate::planner::{Conjunction, Planner};
 use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::rule::deductive::DeductiveRule;
-use crate::selection::{Binding, Match};
+use crate::selection::{Binding, Match, Standing};
 use crate::session::ProgramAnalysis;
 use crate::source::SelectRules;
 use crate::term::Term;
@@ -53,6 +63,7 @@ use core::fmt;
 use core::{iter, mem};
 use dialog_capability::Provider;
 use futures_util::TryStreamExt;
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
@@ -67,15 +78,29 @@ pub const MAX_ROUNDS: usize = 1000;
 /// to `Absent` (optional fields) are omitted.
 pub type Row = BTreeMap<String, Value>;
 
+/// A derived row and the standing it holds: the newest fact any of its
+/// derivations consumed, as a row a rule derives outside a cycle stands
+/// as the facts it was bound from. `None` for a row no derivation bound
+/// from a fact, as for a value a formula computed.
+#[derive(Debug, Clone)]
+pub struct Answer {
+    /// The derived conclusion.
+    pub row: Row,
+    /// The newest standing among the row's derivations.
+    pub standing: Option<Standing>,
+}
+
 /// Storage for the answers accumulated during a fixpoint run. The
 /// trait is the swap point for bounded-memory (disk-backed)
 /// implementations; the evaluator only ever appends, advances, and
 /// scans.
 pub trait AnswerTable {
-    /// Stage a freshly derived row. Returns `false` when the row is
-    /// already known (in the total or already staged), `true` when
-    /// it is new.
-    fn insert(&mut self, concept: &Entity, row: Row) -> bool;
+    /// Stage a freshly derived row, standing as `standing`. Returns
+    /// `true` when the row is new, or known but now stands newer than
+    /// any earlier derivation of it (the newer standing must reach the
+    /// rows derived from it, so the row re-enters the delta); `false`
+    /// otherwise.
+    fn insert(&mut self, concept: &Entity, row: Row, standing: Option<Standing>) -> bool;
 
     /// End the round: staged rows become the new delta and join the
     /// total. Returns `true` when the new delta is non-empty (the
@@ -84,10 +109,11 @@ pub trait AnswerTable {
 
     /// Every row derived for the concept so far, including the
     /// current delta.
-    fn total(&self, concept: &Entity) -> Vec<Row>;
+    fn total(&self, concept: &Entity) -> Vec<Answer>;
 
-    /// The rows first derived in the previous round.
-    fn delta(&self, concept: &Entity) -> Vec<Row>;
+    /// The rows first derived, or raised to a newer standing, in the
+    /// previous round.
+    fn delta(&self, concept: &Entity) -> Vec<Answer>;
 }
 
 /// In-memory [`AnswerTable`]. [`Value`] has no total order (floats),
@@ -95,9 +121,9 @@ pub trait AnswerTable {
 /// stored in sorted maps for deterministic iteration.
 #[derive(Debug, Default)]
 pub struct InMemoryAnswerTable {
-    total: HashMap<Entity, BTreeMap<Vec<u8>, Row>>,
-    delta: HashMap<Entity, BTreeMap<Vec<u8>, Row>>,
-    staged: HashMap<Entity, BTreeMap<Vec<u8>, Row>>,
+    total: HashMap<Entity, BTreeMap<Vec<u8>, Answer>>,
+    delta: HashMap<Entity, BTreeMap<Vec<u8>, Answer>>,
+    staged: HashMap<Entity, BTreeMap<Vec<u8>, Answer>>,
 }
 
 /// The canonical identity of a row: its dag-cbor bytes. dag-cbor
@@ -108,41 +134,47 @@ fn row_key(row: &Row) -> Vec<u8> {
 }
 
 impl AnswerTable for InMemoryAnswerTable {
-    fn insert(&mut self, concept: &Entity, row: Row) -> bool {
+    fn insert(&mut self, concept: &Entity, row: Row, standing: Option<Standing>) -> bool {
         let key = row_key(&row);
-        if self
-            .total
-            .get(concept)
-            .is_some_and(|rows| rows.contains_key(&key))
+        if let Some(known) = self.total.get(concept).and_then(|rows| rows.get(&key))
+            && known.standing >= standing
         {
             return false;
         }
-        self.staged
-            .entry(concept.clone())
-            .or_default()
-            .insert(key, row)
-            .is_none()
+        match self.staged.entry(concept.clone()).or_default().entry(key) {
+            Entry::Vacant(slot) => {
+                slot.insert(Answer { row, standing });
+                true
+            }
+            Entry::Occupied(mut slot) => {
+                let staged = slot.get_mut();
+                if staged.standing < standing {
+                    staged.standing = standing;
+                }
+                false
+            }
+        }
     }
 
     fn advance(&mut self) -> bool {
         self.delta = mem::take(&mut self.staged);
         for (concept, rows) in &self.delta {
-            self.total
-                .entry(concept.clone())
-                .or_default()
-                .extend(rows.iter().map(|(key, row)| (key.clone(), row.clone())));
+            self.total.entry(concept.clone()).or_default().extend(
+                rows.iter()
+                    .map(|(key, answer)| (key.clone(), answer.clone())),
+            );
         }
         self.delta.values().any(|rows| !rows.is_empty())
     }
 
-    fn total(&self, concept: &Entity) -> Vec<Row> {
+    fn total(&self, concept: &Entity) -> Vec<Answer> {
         self.total
             .get(concept)
             .map(|rows| rows.values().cloned().collect())
             .unwrap_or_default()
     }
 
-    fn delta(&self, concept: &Entity) -> Vec<Row> {
+    fn delta(&self, concept: &Entity) -> Vec<Answer> {
         self.delta
             .get(concept)
             .map(|rows| rows.values().cloned().collect())
@@ -159,6 +191,18 @@ impl InMemoryAnswerTable {
             rows.remove(&row_key(row));
         }
     }
+}
+
+/// The standing a row projected from `matched` holds: that of the fact
+/// which bound the concept's attribute field, when it is an attribute
+/// concept and a fact did, else the newest fact the match cites. This
+/// is how a rule's row stands outside a cycle, so a value stands the
+/// same whether or not its relation is recursive.
+fn standing_of(descriptor: &ConceptDescriptor, matched: &Match) -> Option<Standing> {
+    descriptor
+        .attribute_field()
+        .and_then(|(name, _)| matched.standing_of(name))
+        .or_else(|| matched.standing())
 }
 
 /// Join one caller row against one derived row: bind the caller's
@@ -214,50 +258,80 @@ struct Member {
     rules: Vec<SplitRule>,
 }
 
-/// Whether the premise applies a concept in the same cycle as
-/// `root`, returning the application when so.
+/// The premise's in-component occurrence, when it reads a concept in
+/// the same cycle as `root`: an ordinary premise, joined from the
+/// answer table. A negation or an optional read of such a concept
+/// tests for absence in a set the cycle is still deriving, which the
+/// program analysis quarantines a rule over; one left is an error.
 fn in_component<'p>(
     premise: &'p Premise,
     analysis: &ProgramAnalysis,
     root: &Entity,
-) -> Option<&'p ConceptQuery> {
-    let query = match premise {
-        Premise::Assert(Proposition::Concept(query)) => query,
-        // Negation into the component is rejected by the
-        // stratification check before evaluation begins.
-        Premise::Unless(Negation(Proposition::Concept(query))) => query,
-        _ => return None,
+) -> Result<Option<&'p ConceptQuery>, EvaluationError> {
+    let (query, absence) = match premise {
+        Premise::Assert(Proposition::Concept(query)) => (query, query.widens()),
+        Premise::Unless(Negation(Proposition::Concept(query))) => (query, true),
+        _ => return Ok(None),
     };
-    analysis
-        .in_same_cycle(root, &query.predicate.this())
-        .then_some(query)
+    let target = ProgramAnalysis::node(&query.predicate);
+    if !analysis.in_same_cycle(root, &target) {
+        return Ok(None);
+    }
+    if absence {
+        return Err(EvaluationError::AbsenceThroughRecursion {
+            concept: root.to_string(),
+            target: target.to_string(),
+        });
+    }
+    Ok(Some(query))
 }
 
-/// Bind one recursive occurrence's terms from a table row. Returns
-/// `false` when the row conflicts with the bindings accumulated so
-/// far (the combination is a non-match).
-fn bind_occurrence(matched: &mut Match, occurrence: &ConceptQuery, row: &Row) -> bool {
-    for (param, term) in occurrence.terms.iter() {
-        let Some(value) = row.get(param) else {
-            // The row resolved this operand to Absent (an optional
-            // field); nothing to bind.
+/// Bind one recursive occurrence's terms from a table row, as
+/// [`join`] does: an operand the row lacks is an optional field the
+/// row resolved to `Absent`, and binds so. Every variable the row
+/// binds cites the row's standing, so what a rule derives from it
+/// stands at least as new. Returns `false` when the row conflicts
+/// with the bindings accumulated so far (the combination is a
+/// non-match).
+fn bind_occurrence(matched: &mut Match, occurrence: &ConceptQuery, answer: &Answer) -> bool {
+    match join(matched, &occurrence.terms, &answer.row) {
+        Ok(Some(merged)) => {
+            *matched = merged;
+            if let Some(standing) = &answer.standing {
+                cite(matched, &occurrence.terms, &answer.row, standing);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Cite `standing` for every variable of `terms` that `row` binds,
+/// keeping a newer standing the variable already cites.
+pub(crate) fn cite(matched: &mut Match, terms: &Parameters, row: &Row, standing: &Standing) {
+    for (param, term) in terms.iter() {
+        let Some(name) = term.shared_name() else {
             continue;
         };
-        match term {
-            Term::Variable { name: Some(_), .. } => {
-                if matched.bind(term, value.clone()).is_err() {
-                    return false;
-                }
-            }
-            Term::Constant(expected) => {
-                if expected != value {
-                    return false;
-                }
-            }
-            Term::Variable { name: None, .. } => {}
+        if !row.contains_key(param) {
+            continue;
+        }
+        if matched
+            .standing_of(name)
+            .is_none_or(|held| held < *standing)
+        {
+            matched.cite_variable_standing(name, standing.clone());
         }
     }
-    true
+}
+
+/// Add every named term of a read to `scope`.
+fn add_terms(scope: &mut Environment, reading: &ConceptQuery) {
+    for (_, term) in reading.terms.iter() {
+        if let Some(name) = term.name() {
+            scope.add(name);
+        }
+    }
 }
 
 /// Project a rule's result match into a conclusion [`Row`]: one
@@ -333,11 +407,11 @@ async fn discover<'a, Env>(
 where
     Env: crate::Scope<'a>,
 {
-    let root_entity = root.this();
+    let root_entity = ProgramAnalysis::node(root);
     let mut members: HashMap<Entity, Member> = HashMap::new();
     let mut queue = vec![root.clone()];
     while let Some(descriptor) = queue.pop() {
-        let entity = descriptor.this();
+        let entity = ProgramAnalysis::node(&descriptor);
         if members.contains_key(&entity) || !analysis.in_same_cycle(&root_entity, &entity) {
             continue;
         }
@@ -347,10 +421,14 @@ where
             let mut occurrences = Vec::new();
             let mut base = Vec::new();
             for premise in rule.analysis().premises() {
-                match in_component(premise, analysis, &root_entity) {
+                match in_component(premise, analysis, &root_entity)? {
                     Some(query) => {
+                        // An occurrence names the concept under the
+                        // premise's spelling; the table holds the
+                        // concept's rows under its canonical one.
+                        let query = query.clone().canonical();
                         queue.push(query.predicate.clone());
-                        occurrences.push(query.clone());
+                        occurrences.push(query);
                     }
                     None => base.push(premise.clone()),
                 }
@@ -376,24 +454,136 @@ async fn collect_rule_rows<'a, Env>(
     matched: Match,
     scope: &Environment,
     env: &'a Env,
-) -> Result<Vec<Row>, EvaluationError>
+) -> Result<Vec<Answer>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
-    let results: Vec<Match> = if rest.is_empty() {
-        vec![matched]
-    } else {
-        let plan = Planner::with_types(rest, split.rule.analysis().types.clone())
-            .plan(scope)
-            .map_err(|error| EvaluationError::Planning {
-                message: error.to_string(),
-            })?;
-        plan.evaluate(matched.seed(), env).try_collect().await?
-    };
+    let results = join_rest(
+        member,
+        split,
+        rest,
+        Vec::new(),
+        &[],
+        vec![matched],
+        scope.clone(),
+        &mut HashMap::new(),
+        env,
+    )
+    .await?;
     Ok(results
-        .into_iter()
-        .map(|result| project(&member.descriptor, &result))
+        .iter()
+        .filter_map(|result| answer_complete(&member.descriptor, result))
         .collect())
+}
+
+/// Join `partials`, bound as `scope` says, through the rest of a
+/// rule's body, in the order the bindings allow: a base premise as
+/// soon as its inputs are bound, and a positive occurrence (an index
+/// into the split's, read from `totals`) once nothing else can run,
+/// preferring one that
+/// shares a variable with what is bound. So a rule with several
+/// occurrences joins them through the premises that connect them,
+/// rather than pairing every row of one table with every row of
+/// another and planning the body per pair. `plans` caches each
+/// stage's plan across calls that start from the same scope.
+#[allow(clippy::too_many_arguments)]
+async fn join_rest<'a, Env>(
+    member: &Member,
+    split: &SplitRule,
+    mut base: Vec<Premise>,
+    mut siblings: Vec<usize>,
+    totals: &[Vec<Answer>],
+    mut partials: Vec<Match>,
+    mut scope: Environment,
+    plans: &mut HashMap<usize, Conjunction>,
+    env: &'a Env,
+) -> Result<Vec<Match>, EvaluationError>
+where
+    Env: crate::Scope<'a>,
+{
+    let types = &split.rule.analysis().types;
+    let mut stage = 0usize;
+    while !base.is_empty() || !siblings.is_empty() {
+        let (ready, later): (Vec<Premise>, Vec<Premise>) = base
+            .into_iter()
+            .partition(|premise| premise.feasible(&scope).is_ok());
+        base = later;
+        if !ready.is_empty() {
+            let plan = match plans.get(&stage) {
+                Some(plan) => plan.clone(),
+                None => {
+                    let plan = Planner::with_types(ready, types.clone())
+                        .plan(&scope)
+                        .map_err(|error| EvaluationError::Planning {
+                            message: error.to_string(),
+                        })?;
+                    plans.insert(stage, plan.clone());
+                    plan
+                }
+            };
+            let mut next = Vec::new();
+            for partial in partials {
+                let rows: Vec<Match> = plan
+                    .clone()
+                    .evaluate(partial.seed(), env)
+                    .try_collect()
+                    .await?;
+                next.extend(rows);
+            }
+            partials = next;
+            scope.extend(&plan.binds);
+        } else if !siblings.is_empty() {
+            let connected = siblings.iter().position(|index| {
+                split.occurrences[*index]
+                    .terms
+                    .iter()
+                    .any(|(_, term)| term.name().is_some_and(|name| scope.contains(name)))
+            });
+            let index = siblings.remove(connected.unwrap_or(0));
+            let occurrence = &split.occurrences[index];
+            let mut next = Vec::new();
+            for partial in &partials {
+                for row in &totals[index] {
+                    let mut joined = partial.clone();
+                    if bind_occurrence(&mut joined, occurrence, row) {
+                        next.push(joined);
+                    }
+                }
+            }
+            partials = next;
+            add_terms(&mut scope, occurrence);
+        } else {
+            return Err(EvaluationError::Planning {
+                message: format!(
+                    "premises of a recursive rule for {} cannot be bound",
+                    ProgramAnalysis::node(&member.descriptor)
+                ),
+            });
+        }
+        stage += 1;
+        if partials.is_empty() {
+            break;
+        }
+    }
+    Ok(partials)
+}
+
+/// [`project`], yielding nothing when a required operand is missing:
+/// a fold that bound a required head field `Absent` derived no row.
+pub(crate) fn project_complete(descriptor: &ConceptDescriptor, matched: &Match) -> Option<Row> {
+    let row = project(descriptor, matched);
+    descriptor
+        .required_operands()
+        .all(|operand| row.contains_key(&operand))
+        .then_some(row)
+}
+
+/// [`project_complete`] with the standing the projected row holds.
+fn answer_complete(descriptor: &ConceptDescriptor, matched: &Match) -> Option<Answer> {
+    project_complete(descriptor, matched).map(|row| Answer {
+        row,
+        standing: standing_of(descriptor, matched),
+    })
 }
 
 /// [`collect_rule_rows`], staging every row into the table.
@@ -409,8 +599,12 @@ async fn stage_rule_rows<'a, Env>(
 where
     Env: crate::Scope<'a>,
 {
-    for row in collect_rule_rows(member, split, rest, matched, scope, env).await? {
-        table.insert(&member.descriptor.this(), row);
+    for answer in collect_rule_rows(member, split, rest, matched, scope, env).await? {
+        table.insert(
+            &ProgramAnalysis::node(&member.descriptor),
+            answer.row,
+            answer.standing,
+        );
     }
     Ok(())
 }
@@ -442,58 +636,82 @@ where
                 if split.occurrences.is_empty() {
                     continue;
                 }
+                let totals: Vec<Vec<Answer>> = split
+                    .occurrences
+                    .iter()
+                    .map(|occurrence| table.total(&ProgramAnalysis::node(&occurrence.predicate)))
+                    .collect();
                 for delta_index in 0..split.occurrences.len() {
-                    let choices: Vec<Vec<Row>> = split
-                        .occurrences
-                        .iter()
-                        .enumerate()
-                        .map(|(index, occurrence)| {
-                            let target = occurrence.predicate.this();
-                            if index == delta_index {
-                                table.delta(&target)
-                            } else {
-                                table.total(&target)
-                            }
-                        })
-                        .collect();
-
-                    for combination in Combinations::new(choices.iter().map(Vec::len).collect()) {
-                        let mut matched = Match::new();
-                        let mut scope = Environment::new();
-                        let mut compatible = true;
-                        for (index, (occurrence, row_index)) in
-                            split.occurrences.iter().zip(&combination).enumerate()
-                        {
-                            let row = &choices[index][*row_index];
-                            if !bind_occurrence(&mut matched, occurrence, row) {
-                                compatible = false;
-                                break;
-                            }
-                            for (_, term) in occurrence.terms.iter() {
-                                if let Some(name) = term.name() {
-                                    scope.add(name);
-                                }
-                            }
-                        }
-                        if !compatible {
-                            continue;
-                        }
-                        stage_rule_rows(
-                            member,
-                            split,
-                            split.base.clone(),
-                            matched,
-                            &scope,
-                            table,
-                            env,
-                        )
-                        .await?;
+                    let delta = table.delta(&ProgramAnalysis::node(
+                        &split.occurrences[delta_index].predicate,
+                    ));
+                    if delta.is_empty() {
+                        continue;
+                    }
+                    for answer in
+                        fire_occurrence(member, split, delta_index, &delta, &totals, env).await?
+                    {
+                        table.insert(
+                            &ProgramAnalysis::node(&member.descriptor),
+                            answer.row,
+                            answer.standing,
+                        );
                     }
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Fire `split` once per row of `delta` standing in its `delta_index`th
+/// recursive occurrence, returning the rows it derives. The row is
+/// bound first; the rest of the body joins through [`join_rest`].
+async fn fire_occurrence<'a, Env>(
+    member: &Member,
+    split: &SplitRule,
+    delta_index: usize,
+    delta: &[Answer],
+    totals: &[Vec<Answer>],
+    env: &'a Env,
+) -> Result<Vec<Answer>, EvaluationError>
+where
+    Env: crate::Scope<'a>,
+{
+    let leading = &split.occurrences[delta_index];
+    let mut derived = Vec::new();
+    // The order of stages is the same for every delta row, so a stage's
+    // plan is made once.
+    let mut plans: HashMap<usize, Conjunction> = HashMap::new();
+    for row in delta {
+        let mut matched = Match::new();
+        if !bind_occurrence(&mut matched, leading, row) {
+            continue;
+        }
+        let mut scope = Environment::new();
+        add_terms(&mut scope, leading);
+        let siblings: Vec<usize> = (0..split.occurrences.len())
+            .filter(|index| *index != delta_index)
+            .collect();
+        let complete = join_rest(
+            member,
+            split,
+            split.base.clone(),
+            siblings,
+            totals,
+            vec![matched],
+            scope,
+            &mut plans,
+            env,
+        )
+        .await?;
+        derived.extend(
+            complete
+                .iter()
+                .filter_map(|complete| answer_complete(&member.descriptor, complete)),
+        );
+    }
+    Ok(derived)
 }
 
 /// Compute the full fixpoint of the queried concept's strongly
@@ -504,21 +722,20 @@ pub async fn evaluate_table<'a, Env>(
     analysis: &ProgramAnalysis,
     env: &'a Env,
     table: &mut InMemoryAnswerTable,
-) -> Result<Vec<Row>, EvaluationError>
+) -> Result<Vec<Answer>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
-    let root_entity = root.this();
+    let root_entity = ProgramAnalysis::node(root);
     let members = discover(root, analysis, env).await?;
 
     // Seed round: rules with no recursive occurrence evaluate fully
-    // top-down. A reducing seed rule folds its body first — the
-    // stratification check guarantees its concept premises all sit
-    // below the component, so the folded inputs are complete before
-    // the fixpoint begins. (A reducing rule *with* an in-component
-    // occurrence never reaches evaluation: that occurrence is an
-    // aggregating edge inside its own component, rejected by
-    // [`ProgramAnalysis::check`].)
+    // top-down. A reducing seed rule folds its body first — the stratification check
+    // guarantees its concept premises all sit below the component, so
+    // the folded inputs are complete before the fixpoint begins. (A
+    // reducing rule *with* an in-component occurrence never reaches
+    // evaluation: that occurrence is an aggregating edge inside its
+    // own component, rejected by [`ProgramAnalysis::check`].)
     for member in members.values() {
         for split in &member.rules {
             if !split.occurrences.is_empty() {
@@ -532,8 +749,9 @@ where
             };
             for matched in results {
                 table.insert(
-                    &member.descriptor.this(),
+                    &ProgramAnalysis::node(&member.descriptor),
                     project(&member.descriptor, &matched),
+                    standing_of(&member.descriptor, &matched),
                 );
             }
         }
@@ -550,7 +768,7 @@ pub async fn evaluate<'a, Env>(
     root: &ConceptDescriptor,
     analysis: &ProgramAnalysis,
     env: &'a Env,
-) -> Result<Vec<Row>, EvaluationError>
+) -> Result<Vec<Answer>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
@@ -721,11 +939,11 @@ pub async fn extend<'a, Env>(
     env: &'a Env,
     table: &mut InMemoryAnswerTable,
     additions: &[Artifact],
-) -> Result<Option<Vec<Row>>, EvaluationError>
+) -> Result<Option<Vec<Answer>>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
-    let root_entity = root.this();
+    let root_entity = ProgramAnalysis::node(root);
     let members = discover(root, analysis, env).await?;
     // A reducing seed rule's folded rows are a function of its whole
     // body relation: a new fact *replaces* the group's aggregate row
@@ -814,10 +1032,12 @@ where
                 for (seed_match, seed_scope) in seeds {
                     // Occurrences read the retained totals: the new
                     // fact is the delta position.
-                    let choices: Vec<Vec<Row>> = split
+                    let choices: Vec<Vec<Answer>> = split
                         .occurrences
                         .iter()
-                        .map(|occurrence| table.total(&occurrence.predicate.this()))
+                        .map(|occurrence| {
+                            table.total(&ProgramAnalysis::node(&occurrence.predicate))
+                        })
                         .collect();
                     for combination in Combinations::new(choices.iter().map(Vec::len).collect()) {
                         let mut matched = seed_match.clone();
@@ -884,7 +1104,7 @@ pub async fn retract<'a, Env>(
 where
     Env: crate::Scope<'a>,
 {
-    let root_entity = root.this();
+    let root_entity = ProgramAnalysis::node(root);
     let members = discover(root, analysis, env).await?;
     // A deletion shrinks a reducing seed rule's groups, replacing
     // aggregate rows rather than removing them; DRed's per-row
@@ -976,8 +1196,8 @@ where
             if patterns.is_empty() {
                 continue;
             }
-            let entity = member.descriptor.this();
-            for row in table.total(&entity) {
+            let entity = ProgramAnalysis::node(&member.descriptor);
+            for Answer { row, .. } in table.total(&entity) {
                 let suspect = patterns.iter().any(|pattern| {
                     pattern
                         .iter()
@@ -1004,16 +1224,24 @@ where
                     continue;
                 }
                 for delta_index in 0..split.occurrences.len() {
-                    let choices: Vec<Vec<Row>> = split
+                    let choices: Vec<Vec<Answer>> = split
                         .occurrences
                         .iter()
                         .enumerate()
                         .map(|(index, occurrence)| {
-                            let target = occurrence.predicate.this();
+                            let target = ProgramAnalysis::node(&occurrence.predicate);
                             if index == delta_index {
+                                // Suspicion follows rows, not standings.
                                 frontier
                                     .get(&target)
-                                    .map(|rows| rows.values().cloned().collect())
+                                    .map(|rows| {
+                                        rows.values()
+                                            .map(|row| Answer {
+                                                row: row.clone(),
+                                                standing: None,
+                                            })
+                                            .collect()
+                                    })
                                     .unwrap_or_default()
                             } else {
                                 table.total(&target)
@@ -1050,8 +1278,8 @@ where
                             env,
                         )
                         .await?;
-                        let entity = member.descriptor.this();
-                        for row in rows {
+                        let entity = ProgramAnalysis::node(&member.descriptor);
+                        for Answer { row, .. } in rows {
                             let key = row_key(&row);
                             let known = suspects
                                 .get(&entity)
@@ -1082,14 +1310,14 @@ where
     loop {
         let mut rederived = false;
         for member in members.values() {
-            let entity = member.descriptor.this();
+            let entity = ProgramAnalysis::node(&member.descriptor);
             let Some(rows) = suspects.get(&entity) else {
                 continue;
             };
             let mut survived: Vec<Vec<u8>> = Vec::new();
             for (key, row) in rows {
-                if derivable(member, row, table, env).await? {
-                    table.insert(&entity, row.clone());
+                if let Some(standing) = derivable(member, row, table, env).await? {
+                    table.insert(&entity, row.clone(), standing);
                     survived.push(key.clone());
                     rederived = true;
                 }
@@ -1117,16 +1345,19 @@ where
 /// Whether a suspect row still has a derivation: bind its head
 /// operands into each rule body (occurrences read the current
 /// table, base premises the current store) and check whether any
-/// result projects back to the row.
+/// result projects back to the row. A row that does stands as the
+/// newest of its surviving derivations, which every derivation is
+/// read for: the one it stood by may be the one deleted.
 async fn derivable<'a, Env>(
     member: &Member,
     row: &Row,
     table: &InMemoryAnswerTable,
     env: &'a Env,
-) -> Result<bool, EvaluationError>
+) -> Result<Option<Option<Standing>>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
+    let mut derived: Option<Option<Standing>> = None;
     for split in &member.rules {
         let mut seed = Match::new();
         let mut seed_scope = Environment::new();
@@ -1145,10 +1376,10 @@ where
             continue;
         }
 
-        let choices: Vec<Vec<Row>> = split
+        let choices: Vec<Vec<Answer>> = split
             .occurrences
             .iter()
-            .map(|occurrence| table.total(&occurrence.predicate.this()))
+            .map(|occurrence| table.total(&ProgramAnalysis::node(&occurrence.predicate)))
             .collect();
         let combinations: Vec<Vec<usize>> = if split.occurrences.is_empty() {
             vec![Vec::new()]
@@ -1178,12 +1409,14 @@ where
             }
             let rows =
                 collect_rule_rows(member, split, split.base.clone(), matched, &scope, env).await?;
-            if rows.iter().any(|candidate| candidate == row) {
-                return Ok(true);
+            for candidate in rows {
+                if candidate.row == *row {
+                    derived = Some(derived.flatten().max(candidate.standing));
+                }
             }
         }
     }
-    Ok(false)
+    Ok(derived)
 }
 
 /// A retained fixpoint carried across evaluations by a standing
@@ -1242,7 +1475,7 @@ impl Continuation {
         root: &ConceptDescriptor,
         analysis: &ProgramAnalysis,
         env: &'a Env,
-    ) -> Result<Vec<Row>, EvaluationError>
+    ) -> Result<Vec<Answer>, EvaluationError>
     where
         Env: crate::Scope<'a>,
     {
@@ -1259,7 +1492,7 @@ impl Continuation {
                     None => None,
                     Some(()) => {
                         if self.additions.is_empty() {
-                            let rows = table.total(&root.this());
+                            let rows = table.total(&ProgramAnalysis::node(root));
                             Some((table, rows))
                         } else {
                             extend(root, analysis, env, &mut table, &self.additions)
@@ -1286,13 +1519,13 @@ impl Continuation {
 
 #[cfg(test)]
 mod tests {
+    use crate::premise::reading;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
     use crate::attribute::query::AttributeQuery;
     use crate::attribute::{AttributeDescriptor, Cardinality, Type};
-    use crate::reduce::{Aggregator, ReduceSpec};
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
@@ -1323,16 +1556,12 @@ mod tests {
     fn ancestor_rules(concept: &ConceptDescriptor) -> Vec<DeductiveRule> {
         let base = DeductiveRule::new(
             concept.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("family/parent")),
-                    Term::<Entity>::var("this"),
-                    Term::var("ancestor"),
-                    Term::blank(),
-                    Some(Cardinality::Many),
-                )
-                .into(),
-            ],
+            vec![reading(
+                the!("family/parent"),
+                Term::<Entity>::var("this"),
+                Term::var("ancestor"),
+                Some(Cardinality::Many),
+            )],
         )
         .expect("base rule compiles");
 
@@ -1342,14 +1571,12 @@ mod tests {
         let step = DeductiveRule::new(
             concept.clone(),
             vec![
-                AttributeQuery::new(
-                    Term::from(the!("family/parent")),
+                reading(
+                    the!("family/parent"),
                     Term::<Entity>::var("this"),
                     Term::var("p"),
-                    Term::blank(),
                     Some(Cardinality::Many),
-                )
-                .into(),
+                ),
                 Premise::Assert(Proposition::Concept(ConceptQuery {
                     terms,
                     predicate: concept.clone(),
@@ -1482,13 +1709,186 @@ mod tests {
         Ok(())
     }
 
-    /// Aggregation over a recursive-but-lower-stratum concept: a
-    /// reducing rule counts each person's ancestors. The ancestor
-    /// fixpoint completes first, so the fold sees the full
-    /// transitive closure — including the deduplicated diamond pair
-    /// — not just the direct-parent facts.
+    /// The rows a concept derives, as `(this, field)` pairs sorted for
+    /// comparison, read through a query that leaves both unbound.
+    async fn pairs_of(
+        source: &TestEnv<'_>,
+        concept: &ConceptDescriptor,
+        field: &str,
+    ) -> anyhow::Result<Vec<(Value, Value)>> {
+        let mut terms = Parameters::new();
+        terms.insert("this".to_string(), Term::<Any>::var("who"));
+        terms.insert(field.to_string(), Term::<Any>::var("what"));
+        let premise = Premise::Assert(Proposition::Concept(ConceptQuery {
+            terms,
+            predicate: concept.clone(),
+        }));
+        let plan = Planner::from(vec![premise])
+            .plan(&Environment::new())
+            .expect("plans");
+        let results: Vec<Match> = plan
+            .evaluate(Match::new().seed(), source)
+            .try_collect()
+            .await?;
+        let mut pairs = Vec::new();
+        for matched in results {
+            let who = matched.lookup(&Term::<Any>::var("who"))?.content()?;
+            let what = matched.lookup(&Term::<Any>::var("what"))?.content()?;
+            pairs.push((who, what));
+        }
+        pairs.sort_by_key(|pair| format!("{pair:?}"));
+        Ok(pairs)
+    }
+
+    /// A negation inside a cycle has no stratified reading, so the
+    /// analysis quarantines the rule feeding it back. `graph/odd(x) :=
+    /// n :- graph/node(x) = n, unless graph/even(x)` and `graph/even(x)
+    /// := n :- graph/odd(x) = n`: the rule set aside derives what the
+    /// negation reads, `even`, which then holds nothing, so every node
+    /// is odd, as it was before the cycle formed.
     #[dialog_common::test]
-    async fn it_counts_ancestors_over_the_completed_fixpoint() -> anyhow::Result<()> {
+    async fn it_quarantines_the_rule_feeding_a_negation_back_into_its_cycle() -> anyhow::Result<()>
+    {
+        use crate::session::Closure;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let a = Entity::new()?;
+        let b = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("graph/node").of(a.clone()).is("a".to_string()))
+            .assert(the!("graph/node").of(b.clone()).is("b".to_string()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let relation = |the: &str| -> ConceptDescriptor {
+            ConceptDescriptor::try_from(vec![(
+                "name",
+                AttributeDescriptor::new(
+                    the.parse().expect("a selector"),
+                    "",
+                    Cardinality::One,
+                    Some(Type::String),
+                ),
+            )])
+            .expect("a concept")
+        };
+        let odd = relation("graph/odd");
+        let even = relation("graph/even");
+
+        let mut negated = Parameters::new();
+        negated.insert("this".to_string(), Term::<Any>::var("this"));
+        let odd_rule = DeductiveRule::new(
+            odd.clone(),
+            vec![
+                reading(
+                    the!("graph/node"),
+                    Term::<Entity>::var("this"),
+                    Term::var("name"),
+                    Some(Cardinality::One),
+                ),
+                Premise::Unless(Negation(Proposition::Concept(ConceptQuery {
+                    terms: negated,
+                    predicate: even.clone(),
+                }))),
+            ],
+        )?;
+        let mut read = Parameters::new();
+        read.insert("this".to_string(), Term::<Any>::var("this"));
+        read.insert("name".to_string(), Term::<Any>::var("name"));
+        let even_rule = DeductiveRule::new(
+            even.clone(),
+            vec![Premise::Assert(Proposition::Concept(ConceptQuery {
+                terms: read,
+                predicate: odd.clone(),
+            }))],
+        )?;
+
+        let mut registry = RuleRegistry::new();
+        registry.register(odd_rule)?;
+        registry.register(even_rule.clone())?;
+        let analysis = registry.analysis()?;
+        assert_eq!(analysis.check(&odd)?, Closure::Acyclic);
+        assert_eq!(
+            analysis
+                .quarantined()
+                .iter()
+                .map(|set_aside| set_aside.rule.clone())
+                .collect::<Vec<_>>(),
+            vec![even_rule.this()],
+            "the rule deriving what the negation reads is set aside"
+        );
+
+        let source = TestEnv::new(&branch, &operator, registry);
+        let mut expected = vec![
+            (Value::Entity(a.clone()), Value::String("a".into())),
+            (Value::Entity(b.clone()), Value::String("b".into())),
+        ];
+        expected.sort_by_key(|pair| format!("{pair:?}"));
+        assert_eq!(
+            pairs_of(&source, &odd, "name").await?,
+            expected,
+            "nothing is even, so every node is odd"
+        );
+        assert!(pairs_of(&source, &even, "name").await?.is_empty());
+        Ok(())
+    }
+
+    /// "Every installed rule is written in the formal notation." A rule
+    /// whose body scans an attribute raw has no content address: it
+    /// could be neither stored nor set aside by the program analysis,
+    /// so the registry refuses it.
+    #[dialog_common::test]
+    fn it_refuses_a_rule_with_no_content_address() -> anyhow::Result<()> {
+        let label = ConceptDescriptor::try_from(vec![(
+            "label",
+            AttributeDescriptor::new(
+                the!("tree/label"),
+                "",
+                Cardinality::Many,
+                Some(Type::String),
+            ),
+        )])?;
+        let rule = DeductiveRule::new(
+            label.clone(),
+            vec![
+                AttributeQuery::new(
+                    Term::from(the!("tree/tag")),
+                    Term::<Entity>::var("this"),
+                    Term::var("label"),
+                    Term::blank(),
+                    Some(Cardinality::One),
+                )
+                .into(),
+            ],
+        )?;
+        assert!(
+            rule.try_this().is_none(),
+            "a raw scan has no content address"
+        );
+        let mut registry = RuleRegistry::new();
+        assert!(matches!(
+            registry.register(rule),
+            Err(EvaluationError::RuleWithoutIdentity { .. })
+        ));
+        assert!(
+            registry.acquire(&label)?.installed().is_empty(),
+            "nothing was installed"
+        );
+        Ok(())
+    }
+
+    /// A ranked read of a recursive relation elects at the component's
+    /// exit, over the completed closure: the ancestor domain ranks the
+    /// root first, so every descendant's top ancestor is the root,
+    /// which only the transitive closure reaches for `d`.
+    #[dialog_common::test]
+    async fn it_elects_over_the_completed_fixpoint() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
@@ -1511,56 +1911,27 @@ mod tests {
             .await?;
 
         let ancestor = ancestor_concept();
-        let count = ConceptDescriptor::try_from(vec![(
-            "total",
-            AttributeDescriptor::new(
-                the!("family/ancestors"),
-                "",
-                Cardinality::One,
-                Some(Type::UnsignedInt),
-            ),
-        )])
-        .unwrap();
-        let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Term::<Entity>::var("this").into());
-        terms.insert("ancestor".to_string(), Term::<Any>::var("a"));
-        let mut reduce = BTreeMap::new();
-        reduce.insert(
-            "total".to_string(),
-            ReduceSpec {
-                apply: Aggregator::Count,
-                of: Term::var("a"),
-            },
-        );
-        let count_rule = DeductiveRule::with_reduce(
-            count.clone(),
-            vec![Premise::Assert(Proposition::Concept(ConceptQuery {
-                terms,
-                predicate: ancestor.clone(),
-            }))],
-            reduce,
-        )
-        .expect("the reducing rule compiles");
-
         let mut registry = RuleRegistry::new();
         for rule in ancestor_rules(&ancestor) {
             registry.register(rule)?;
         }
-        registry.register(count_rule)?;
-        assert!(
-            registry.validate()?.is_empty(),
-            "aggregation over the lower stratum is well-stratified"
-        );
         assert!(registry.is_recursive(&ancestor.this())?);
-        assert!(!registry.is_recursive(&count.this())?);
 
+        // The closure's relation read as a ranked choice: the root
+        // outranks everyone, then its children.
+        let ranked: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "top": {
+                "the": "family/ancestor",
+                "as": [a.to_string(), b.to_string(), c.to_string(), d.to_string()]
+            }
+        }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::var("who"));
-        terms.insert("total".to_string(), Term::<Any>::var("total"));
+        terms.insert("top".to_string(), Term::<Any>::var("top"));
         let source = TestEnv::new(&branch, &operator, registry);
         let plan = Planner::from(vec![Premise::Assert(Proposition::Concept(ConceptQuery {
             terms,
-            predicate: count,
+            predicate: ranked,
         }))])
         .plan(&Environment::new())
         .expect("plans");
@@ -1569,153 +1940,23 @@ mod tests {
             .try_collect()
             .await?;
 
-        let mut counts = Vec::new();
+        let mut tops = Vec::new();
         for matched in &results {
-            counts.push((
+            tops.push((
                 matched.lookup(&Term::<Any>::var("who"))?.content()?,
-                matched.lookup(&Term::<Any>::var("total"))?.content()?,
+                matched.lookup(&Term::<Any>::var("top"))?.content()?,
             ));
         }
-        counts.sort_by_key(|pair| format!("{pair:?}"));
+        tops.sort_by_key(|pair| format!("{pair:?}"));
         let mut expected = vec![
-            (Value::Entity(d.clone()), Value::UnsignedInt(3)),
-            (Value::Entity(b.clone()), Value::UnsignedInt(1)),
-            (Value::Entity(c.clone()), Value::UnsignedInt(1)),
+            (Value::Entity(d.clone()), Value::Entity(a.clone())),
+            (Value::Entity(b.clone()), Value::Entity(a.clone())),
+            (Value::Entity(c.clone()), Value::Entity(a.clone())),
         ];
         expected.sort_by_key(|pair| format!("{pair:?}"));
         assert_eq!(
-            counts, expected,
-            "each count folds the completed closure, with the diamond pair deduplicated"
-        );
-        Ok(())
-    }
-
-    /// A reducing rule *inside* a recursive component is legal when
-    /// its own premises all sit below the component (no aggregating
-    /// edge lands in the cycle): it seeds the fixpoint with its
-    /// folded rows, and the recursive rule propagates them.
-    #[dialog_common::test]
-    async fn it_folds_reducing_seed_rules_in_the_fixpoint() -> anyhow::Result<()> {
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-
-        // x stocks two items; y stocks none but franchises from x.
-        let x = Entity::new()?;
-        let y = Entity::new()?;
-        let item_a = Entity::new()?;
-        let item_b = Entity::new()?;
-        branch
-            .transaction()
-            .assert(the!("shop/item").of(x.clone()).is(item_a.clone()))
-            .assert(the!("shop/item").of(x.clone()).is(item_b.clone()))
-            .assert(the!("shop/franchise").of(y.clone()).is(x.clone()))
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-
-        let count = ConceptDescriptor::try_from(vec![(
-            "total",
-            AttributeDescriptor::new(
-                the!("shop/total"),
-                "",
-                Cardinality::One,
-                Some(Type::UnsignedInt),
-            ),
-        )])
-        .unwrap();
-
-        // Seed rule: count a shop's own items (a reducing rule with
-        // no concept premise, so no aggregating edge).
-        let mut reduce = BTreeMap::new();
-        reduce.insert(
-            "total".to_string(),
-            ReduceSpec {
-                apply: Aggregator::Count,
-                of: Term::var("item"),
-            },
-        );
-        let seed_rule = DeductiveRule::with_reduce(
-            count.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("shop/item")),
-                    Term::<Entity>::var("this"),
-                    Term::var("item"),
-                    Term::blank(),
-                    Some(Cardinality::Many),
-                )
-                .into(),
-            ],
-            reduce,
-        )
-        .expect("the reducing seed rule compiles");
-
-        // Step rule: a franchise inherits its parent's total,
-        // closing the recursive component.
-        let mut step_terms = Parameters::new();
-        step_terms.insert("this".to_string(), Term::<Any>::var("p"));
-        step_terms.insert("total".to_string(), Term::<Any>::var("total"));
-        let step_rule = DeductiveRule::new(
-            count.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("shop/franchise")),
-                    Term::<Entity>::var("this"),
-                    Term::var("p"),
-                    Term::blank(),
-                    Some(Cardinality::One),
-                )
-                .into(),
-                Premise::Assert(Proposition::Concept(ConceptQuery {
-                    terms: step_terms,
-                    predicate: count.clone(),
-                })),
-            ],
-        )
-        .expect("the step rule compiles");
-
-        let mut registry = RuleRegistry::new();
-        registry.register(seed_rule)?;
-        registry.register(step_rule)?;
-        assert!(
-            registry.validate()?.is_empty(),
-            "the reducing rule's edges leave the component: stratified"
-        );
-        assert!(registry.is_recursive(&count.this())?);
-
-        let mut terms = Parameters::new();
-        terms.insert("this".to_string(), Term::<Any>::var("shop"));
-        terms.insert("total".to_string(), Term::<Any>::var("total"));
-        let source = TestEnv::new(&branch, &operator, registry);
-        let plan = Planner::from(vec![Premise::Assert(Proposition::Concept(ConceptQuery {
-            terms,
-            predicate: count,
-        }))])
-        .plan(&Environment::new())
-        .expect("plans");
-        let results: Vec<Match> = plan
-            .evaluate(Match::new().seed(), &source)
-            .try_collect()
-            .await?;
-
-        let mut totals = Vec::new();
-        for matched in &results {
-            totals.push((
-                matched.lookup(&Term::<Any>::var("shop"))?.content()?,
-                matched.lookup(&Term::<Any>::var("total"))?.content()?,
-            ));
-        }
-        totals.sort_by_key(|pair| format!("{pair:?}"));
-        let mut expected = vec![
-            (Value::Entity(x.clone()), Value::UnsignedInt(2)),
-            (Value::Entity(y.clone()), Value::UnsignedInt(2)),
-        ];
-        expected.sort_by_key(|pair| format!("{pair:?}"));
-        assert_eq!(
-            totals, expected,
-            "the seed round folded x's items and the fixpoint propagated the row to y"
+            tops, expected,
+            "each top ancestor is elected over the completed closure"
         );
         Ok(())
     }
@@ -1937,16 +2178,12 @@ mod tests {
         )])?;
         let direct = DeductiveRule::new(
             list.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("list/next")),
-                    Term::<Entity>::var("this"),
-                    Term::var("next"),
-                    Term::blank(),
-                    Some(Cardinality::Many),
-                )
-                .into(),
-            ],
+            vec![reading(
+                the!("list/next"),
+                Term::<Entity>::var("this"),
+                Term::var("next"),
+                Some(Cardinality::Many),
+            )],
         )?;
         let mut step_terms = Parameters::new();
         step_terms.insert("this".to_string(), Term::<Any>::var("hop"));
@@ -1954,14 +2191,12 @@ mod tests {
         let transitive = DeductiveRule::new(
             list.clone(),
             vec![
-                AttributeQuery::new(
-                    Term::from(the!("list/next")),
+                reading(
+                    the!("list/next"),
                     Term::<Entity>::var("this"),
                     Term::var("hop"),
-                    Term::blank(),
                     Some(Cardinality::Many),
-                )
-                .into(),
+                ),
                 Premise::Assert(Proposition::Concept(ConceptQuery {
                     terms: step_terms,
                     predicate: list.clone(),
@@ -1969,28 +2204,15 @@ mod tests {
             ],
         )?;
 
-        // Connection { this, to, name }: every reachable node with
-        // its name. Not itself recursive.
-        let connection = ConceptDescriptor::try_from(vec![
-            (
-                "to",
-                AttributeDescriptor::new(
-                    the!("conn/to"),
-                    "",
-                    Cardinality::Many,
-                    Some(Type::Entity),
-                ),
-            ),
-            (
-                "name",
-                AttributeDescriptor::new(
-                    the!("conn/name"),
-                    "",
-                    Cardinality::Many,
-                    Some(Type::String),
-                ),
-            ),
-        ])?;
+        // Connection { this, name }: the name of every reachable node.
+        // Not itself recursive. A single attribute, since a rule
+        // derives one relation per head attribute and a concept
+        // joining `to` with `name` would pair every reachable node
+        // with every reachable name.
+        let connection = ConceptDescriptor::try_from(vec![(
+            "name",
+            AttributeDescriptor::new(the!("conn/name"), "", Cardinality::Many, Some(Type::String)),
+        )])?;
         let mut link_terms = Parameters::new();
         link_terms.insert("this".to_string(), Term::<Any>::var("this"));
         link_terms.insert("next".to_string(), Term::<Any>::var("to"));
@@ -2001,14 +2223,12 @@ mod tests {
                     terms: link_terms,
                     predicate: list.clone(),
                 })),
-                AttributeQuery::new(
-                    Term::from(the!("meta/name")),
+                reading(
+                    the!("meta/name"),
                     Term::<Entity>::var("to"),
                     Term::var("name"),
-                    Term::blank(),
                     Some(Cardinality::One),
-                )
-                .into(),
+                ),
             ],
         )?;
 
@@ -2024,7 +2244,6 @@ mod tests {
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::var("from"));
-        terms.insert("to".to_string(), Term::<Any>::var("to"));
         terms.insert("name".to_string(), Term::<Any>::var("name"));
         let source = TestEnv::new(&branch, &operator, registry);
         let plan = Planner::from(vec![Premise::Assert(Proposition::Concept(ConceptQuery {
@@ -2042,42 +2261,17 @@ mod tests {
         for matched in results {
             connections.push((
                 matched.lookup(&Term::<Any>::var("from"))?.content()?,
-                matched.lookup(&Term::<Any>::var("to"))?.content()?,
                 matched.lookup(&Term::<Any>::var("name"))?.content()?,
             ));
         }
         connections.sort_by_key(|row| format!("{row:?}"));
         let mut expected = vec![
-            (
-                Value::Entity(n0.clone()),
-                Value::Entity(n1.clone()),
-                Value::String("a".into()),
-            ),
-            (
-                Value::Entity(n1.clone()),
-                Value::Entity(n2.clone()),
-                Value::String("b".into()),
-            ),
-            (
-                Value::Entity(n0.clone()),
-                Value::Entity(n2.clone()),
-                Value::String("b".into()),
-            ),
-            (
-                Value::Entity(n2.clone()),
-                Value::Entity(n3.clone()),
-                Value::String("c".into()),
-            ),
-            (
-                Value::Entity(n1.clone()),
-                Value::Entity(n3.clone()),
-                Value::String("c".into()),
-            ),
-            (
-                Value::Entity(n0.clone()),
-                Value::Entity(n3.clone()),
-                Value::String("c".into()),
-            ),
+            (Value::Entity(n0.clone()), Value::String("a".into())),
+            (Value::Entity(n0.clone()), Value::String("b".into())),
+            (Value::Entity(n0.clone()), Value::String("c".into())),
+            (Value::Entity(n1.clone()), Value::String("b".into())),
+            (Value::Entity(n1.clone()), Value::String("c".into())),
+            (Value::Entity(n2.clone()), Value::String("c".into())),
         ];
         expected.sort_by_key(|row| format!("{row:?}"));
         assert_eq!(connections, expected, "every reachable node, named");
@@ -2114,16 +2308,12 @@ mod tests {
         )])?;
         let base = DeductiveRule::new(
             person.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("meta/name")),
-                    Term::<Entity>::var("this"),
-                    Term::var("name"),
-                    Term::blank(),
-                    Some(Cardinality::One),
-                )
-                .into(),
-            ],
+            vec![reading(
+                the!("meta/name"),
+                Term::<Entity>::var("this"),
+                Term::var("name"),
+                Some(Cardinality::One),
+            )],
         )?;
         let mut self_terms = Parameters::new();
         self_terms.insert("this".to_string(), Term::<Any>::var("this"));
@@ -2211,14 +2401,12 @@ mod tests {
         let rule = DeductiveRule::new(
             tautology.clone(),
             vec![
-                AttributeQuery::new(
-                    Term::from(the!("meta/name")),
+                reading(
+                    the!("meta/name"),
                     Term::<Entity>::var("this"),
                     Term::var("name"),
-                    Term::blank(),
                     Some(Cardinality::One),
-                )
-                .into(),
+                ),
                 Premise::Assert(Proposition::Concept(ConceptQuery {
                     terms: self_terms,
                     predicate: tautology.clone(),
@@ -2289,16 +2477,12 @@ mod tests {
         )])?;
         let parent_rule = DeductiveRule::new(
             parent.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("family/father")),
-                    Term::<Entity>::var("this"),
-                    Term::var("parent"),
-                    Term::blank(),
-                    Some(Cardinality::One),
-                )
-                .into(),
-            ],
+            vec![reading(
+                the!("family/father"),
+                Term::<Entity>::var("this"),
+                Term::var("parent"),
+                Some(Cardinality::One),
+            )],
         )?;
 
         // grandfather(this, g) :- father(z, g), parent(this, z).
@@ -2321,14 +2505,12 @@ mod tests {
                     terms: parent_terms,
                     predicate: parent.clone(),
                 })),
-                AttributeQuery::new(
-                    Term::from(the!("family/father")),
+                reading(
+                    the!("family/father"),
                     Term::<Entity>::var("z"),
                     Term::var("grandfather"),
-                    Term::blank(),
                     Some(Cardinality::One),
-                )
-                .into(),
+                ),
             ],
         )?;
 
@@ -2344,16 +2526,12 @@ mod tests {
         )])?;
         let ancestor_base = DeductiveRule::new(
             ancestor.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("family/father")),
-                    Term::<Entity>::var("this"),
-                    Term::var("ancestor"),
-                    Term::blank(),
-                    Some(Cardinality::One),
-                )
-                .into(),
-            ],
+            vec![reading(
+                the!("family/father"),
+                Term::<Entity>::var("this"),
+                Term::var("ancestor"),
+                Some(Cardinality::One),
+            )],
         )?;
         let mut step_terms = Parameters::new();
         step_terms.insert("this".to_string(), Term::<Any>::var("f"));
@@ -2361,14 +2539,12 @@ mod tests {
         let ancestor_step = DeductiveRule::new(
             ancestor.clone(),
             vec![
-                AttributeQuery::new(
-                    Term::from(the!("family/father")),
+                reading(
+                    the!("family/father"),
                     Term::<Entity>::var("this"),
                     Term::var("f"),
-                    Term::blank(),
                     Some(Cardinality::One),
-                )
-                .into(),
+                ),
                 Premise::Assert(Proposition::Concept(ConceptQuery {
                     terms: step_terms,
                     predicate: ancestor.clone(),
@@ -2456,11 +2632,11 @@ mod tests {
 /// rule.
 #[cfg(test)]
 mod derived_edge_tests {
+    use crate::premise::reading;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::attribute::query::AttributeQuery;
     use crate::attribute::{AttributeDescriptor, Cardinality, Type};
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
@@ -2486,16 +2662,12 @@ mod derived_edge_tests {
     fn edge_rule(concept: &ConceptDescriptor) -> DeductiveRule {
         DeductiveRule::new(
             concept.clone(),
-            vec![
-                AttributeQuery::new(
-                    Term::from(the!("family/parent")),
-                    Term::<Entity>::var("this"),
-                    Term::var("parent"),
-                    Term::blank(),
-                    Some(Cardinality::Many),
-                )
-                .into(),
-            ],
+            vec![reading(
+                the!("family/parent"),
+                Term::<Entity>::var("this"),
+                Term::var("parent"),
+                Some(Cardinality::Many),
+            )],
         )
         .expect("edge rule compiles")
     }

@@ -174,12 +174,14 @@ pub enum TypeError {
     /// A rule's conclusion references a required variable that is
     /// bound only by Optional (set-widened) premises: the rule
     /// could produce a row with the conclusion variable in Absent
-    /// state, which a required head cannot accept. Fix by adding
-    /// a required-binding premise for the variable, or by coalescing
-    /// the optional source with a fallback before reaching the head.
+    /// state, which a required head cannot accept. Nothing narrows
+    /// implicitly: the author either coalesces the optional source
+    /// with a fallback, or constrains the variable to a type that
+    /// requires a value, which keeps the rows that have one.
     #[error(
         "Rule {rule}: field \"{variable}\" is optional but the conclusion requires a value. \
-         Use coalesce(...) to provide a fallback, or bind \"{variable}\" from a required premise."
+         Use coalesce(...) to provide a fallback, or constrain \"{variable}\" to a type that \
+         requires a value (a type constraint, or binding it from a required premise)."
     )]
     RequiredHeadFromOptional {
         /// The offending rule.
@@ -224,6 +226,30 @@ pub enum TypeError {
         rule: Box<Rule>,
         /// The conclusion concept's URI.
         concept: String,
+    },
+
+    /// A deductive rule carries a `reduce` block. A deductive rule is
+    /// open: installed as facts, read by any rule installed later,
+    /// resolved against whatever program exists when a query runs. A
+    /// fold withdraws its previous result when a fact arrives, and
+    /// inside a cycle has no deterministic reading at all, so it
+    /// belongs to the closed places: a query, a subscription, an
+    /// inductive rule. An attribute's `select` policy chooses among
+    /// the candidates every rule adds to instead.
+    #[error("Rule {rule} is deductive and folds: a deductive rule admits no `reduce`")]
+    ReduceInOpenRule {
+        /// The offending rule.
+        rule: Box<Rule>,
+    },
+
+    /// A concept field declares a `select` policy its attribute cannot
+    /// read under.
+    #[error("Attribute {the} cannot be read as declared: {reason}")]
+    SelectPolicy {
+        /// The attribute's selector.
+        the: String,
+        /// Why the policy does not fit.
+        reason: String,
     },
 
     /// Type inference over a rule's premises produced a
@@ -659,34 +685,16 @@ pub enum EvaluationError {
     },
 
     /// The queried concept's dependency closure contains a cycle
-    /// through negation: some rule concluding `concept` negates
-    /// `negated` inside the same dependency cycle, so the negation
-    /// reads a set the cycle itself is still deriving. No
-    /// stratified semantics exists for such a program. Rules are
-    /// installed unconditionally (replicas must converge on the
-    /// merged rule set), so this surfaces at query time, on exactly
-    /// the queries whose closure is ill-stratified.
-    #[error(
-        "Negation through recursion: rules for {concept} negate {negated} \
-         inside the same dependency cycle; no stratified semantics exists"
-    )]
-    NegationThroughRecursion {
-        /// The concluding concept whose rule negates into its cycle.
-        concept: String,
-        /// The negated concept inside the same cycle.
-        negated: String,
-    },
-
-    /// The queried concept's dependency closure contains a cycle
     /// through aggregation: some *reducing* rule concluding
     /// `concept` folds over `aggregated` inside the same dependency
     /// cycle, so the fold reads a relation the cycle itself is
     /// still deriving. No stratified semantics exists for such a
-    /// program. Exact sibling of
-    /// [`NegationThroughRecursion`](Self::NegationThroughRecursion):
-    /// rules are installed unconditionally (replicas must converge
-    /// on the merged rule set), so this surfaces at query time, on
-    /// exactly the queries whose closure is ill-stratified.
+    /// program, and a fold has no deterministic reading over a set still
+    /// growing. Rules are installed unconditionally
+    /// (replicas must converge on the merged rule set), so this
+    /// surfaces at query time, on exactly the queries whose closure
+    /// folds in a cycle. A deductive rule refuses `reduce` at compile
+    /// time, so no authored rule reaches it.
     #[error(
         "Aggregation through recursion: rules for {concept} fold over \
          {aggregated} inside the same dependency cycle; no stratified \
@@ -698,6 +706,35 @@ pub enum EvaluationError {
         concept: String,
         /// The aggregated concept inside the same cycle.
         aggregated: String,
+    },
+
+    /// A rule with no content address: its body uses a premise the
+    /// formal notation cannot express, such as a raw attribute scan, so
+    /// it can be neither stored nor set aside by the program analysis.
+    /// Every installed rule is written in the formal notation.
+    #[error(
+        "A rule concluding {concept} has no content address: write its body in the formal \
+         notation to install it"
+    )]
+    RuleWithoutIdentity {
+        /// The concept the rule concludes.
+        concept: String,
+    },
+
+    /// A dependency cycle reads itself through an absence test (a
+    /// negation, an optional read or an election) and has no rule the
+    /// analysis could set aside. Unreachable for installed rules, which
+    /// all have a content address; kept so such a cycle fails loudly
+    /// rather than evaluating to something no rule says.
+    #[error(
+        "{concept} reads {target} inside the same dependency cycle through an absence test, \
+         and the cycle has no rule to set aside"
+    )]
+    AbsenceThroughRecursion {
+        /// The concept whose rule tests absence in its own cycle.
+        concept: String,
+        /// The concept tested, inside the same cycle.
+        target: String,
     },
 
     /// A recursive concept's semi-naive fixpoint did not converge

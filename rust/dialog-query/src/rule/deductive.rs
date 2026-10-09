@@ -1,11 +1,19 @@
 /// Serializable rule descriptor matching the formal notation.
 pub mod descriptor;
+/// A rule's heads, one per attribute.
+pub mod head;
+/// Renaming a body's variables.
+pub(crate) mod rename;
+
+pub use head::Head;
 
 use crate::Formula;
 use crate::artifact::Entity;
-use crate::attribute::Relation;
 use crate::attribute::query::AttributeQuery;
+use crate::attribute::{AttributeDescriptor, Relation, The};
 pub use crate::concept::descriptor::ConceptDescriptor;
+use crate::concept::descriptor::ConceptFieldDescriptor;
+use crate::concept::query::ConceptQuery;
 use crate::error::TypeError;
 use crate::formula::attribute::AttributeParts;
 use crate::memo::Memo;
@@ -16,7 +24,8 @@ pub use crate::planner::{Conjunction, Planner};
 pub use crate::premise::Premise;
 use crate::reduce::{Reduce, ReduceEntry, ReduceSpec};
 use crate::rule::analyzer::AnalyzedRule;
-use crate::rule::{Compile, RuleKind, compile_rule, fmt_rule_schema};
+use crate::rule::{Compile, RuleKind, compile_internal, compile_rule, fmt_rule_schema};
+use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 pub use crate::{Attribute, Cardinality, Parameters, Proposition, Requirement, Value};
@@ -24,7 +33,7 @@ use crate::{Environment, Term};
 use descriptor::DeductiveRuleDescriptor;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::iter;
 use std::sync::Arc;
@@ -45,6 +54,23 @@ pub struct DeductiveRule {
     /// The rule's content-addressed identity, computed on first use:
     /// plan-cache lookups ask for it on every query.
     identity: Memo<Option<Entity>>,
+    /// For a rule re-headed onto one attribute of a source rule's head:
+    /// the source rule and which of its operands this head projects, so
+    /// every head of the source shares one evaluation of its body.
+    origin: Option<Arc<Origin>>,
+}
+
+/// Where a re-headed rule's rows come from: the source rule whose body
+/// it shares, and the body operands its head attribute projects.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Origin {
+    /// The rule this head was split from.
+    pub rule: DeductiveRule,
+    /// The source body's operand for the head attribute's value.
+    pub value: String,
+    /// The source body's operand for the head attribute's key, for a
+    /// keyed collection.
+    pub key: Option<String>,
 }
 impl Compile for DeductiveRule {
     const KIND: RuleKind = RuleKind::Deductive;
@@ -53,6 +79,7 @@ impl Compile for DeductiveRule {
         DeductiveRule {
             analysis: Arc::new(analysis),
             identity: Memo::default(),
+            origin: None,
         }
     }
 
@@ -60,6 +87,7 @@ impl Compile for DeductiveRule {
         DeductiveRule {
             analysis: Arc::new(AnalyzedRule::in_progress(conclusion, premises)),
             identity: Memo::default(),
+            origin: None,
         }
     }
 }
@@ -95,6 +123,102 @@ impl DeductiveRule {
             });
         }
         compile_rule::<Self>(conclusion, premises, reduce.into_iter().collect())
+    }
+
+    /// This rule reading every relation `derived` holds through the
+    /// attribute concept over it wherever the body names the relation
+    /// by an attribute premise with a constant attribute, so the
+    /// premise sees stored and derived candidates alike: under `last`
+    /// where the premise read one value, under `all` where it read
+    /// them all. A negated premise negates the concept, an optional one
+    /// reads it set-widened. A premise whose attribute is a variable
+    /// reads stored facts only. A head split from a source rewrites the
+    /// source and is split from it again, so its heads keep sharing
+    /// one body. `None` when the body reads no derived relation.
+    pub fn reading_derived(
+        &self,
+        derived: &dyn Fn(&Relation) -> bool,
+    ) -> Result<Option<Self>, TypeError> {
+        if let Some(origin) = self.origin() {
+            let Some(source) = origin.rule.reading_derived(derived)? else {
+                return Ok(None);
+            };
+            let mine = self
+                .conclusion()
+                .attribute_field()
+                .map(|(_, field)| field.the().clone());
+            return Ok(source
+                .heads()?
+                .into_iter()
+                .find(|head| Some(head.field.the().clone()) == mine)
+                .map(|head| head.rule));
+        }
+        let read = |query: &AttributeQuery, optional: bool| -> Option<Proposition> {
+            let Term::Constant(the) = query.the() else {
+                return None;
+            };
+            let relation = Relation::from(The::try_from(the.clone()).ok()?);
+            if !derived(&relation) {
+                return None;
+            }
+            let value = if optional {
+                let kind = query
+                    .is()
+                    .kind()
+                    .unwrap_or_else(|| Kind::from(Primitive::ALL))
+                    .optional();
+                match query.is().name() {
+                    Some(name) => Term::<Any>::typed_var(name, kind),
+                    None => Term::blank(),
+                }
+            } else {
+                query.is().clone()
+            };
+            let mut terms = Parameters::new();
+            terms.insert("this".to_string(), query.of().clone().into());
+            terms.insert(ConceptDescriptor::VALUE.to_string(), value);
+            let field = ConceptFieldDescriptor::required(AttributeDescriptor::over(
+                relation,
+                "",
+                query.cardinality(),
+                None,
+            ));
+            Some(Proposition::Concept(ConceptQuery {
+                terms,
+                predicate: ConceptDescriptor::of_attribute(&field),
+            }))
+        };
+        let mut rewritten = false;
+        let premises: Vec<Premise> = self
+            .analysis
+            .premises
+            .iter()
+            .map(|premise| {
+                let replacement = match premise {
+                    Premise::Assert(Proposition::Attribute(query)) => {
+                        read(query, false).map(Premise::Assert)
+                    }
+                    Premise::Assert(Proposition::OptionalAttribute(query)) => {
+                        read(query.query(), true).map(Premise::Assert)
+                    }
+                    Premise::Unless(Negation(Proposition::Attribute(query))) => {
+                        read(query, false).map(|concept| Premise::Unless(Negation(concept)))
+                    }
+                    _ => None,
+                };
+                match replacement {
+                    Some(replacement) => {
+                        rewritten = true;
+                        replacement
+                    }
+                    None => premise.clone(),
+                }
+            })
+            .collect();
+        if !rewritten {
+            return Ok(None);
+        }
+        compile_internal::<Self>(self.conclusion().clone(), premises).map(Some)
     }
 
     /// The checked `reduce` clause entries, in head-field order.
@@ -165,10 +289,126 @@ impl DeductiveRule {
     ///
     /// Reconstructs the `when`/`unless` split from the analyzed premises.
     pub fn descriptor(&self) -> DeductiveRuleDescriptor {
+        match &self.analysis.authored {
+            Some(authored) => self.describe(&authored.premises, &authored.reduce),
+            None => self.describe(&self.analysis.premises, &self.analysis.reduce),
+        }
+    }
+
+    /// This rule in its canonical spelling (see
+    /// [`canonical`](crate::rule::canonical)): locals renamed by the
+    /// body's structure and premises sorted, the same for every way
+    /// of writing the body. Its encoding is what the rule's identity
+    /// hashes.
+    pub fn canonical_descriptor(&self) -> DeductiveRuleDescriptor {
+        match &self.analysis.canonical {
+            Some(identity) => {
+                let (when, unless) = split(&identity.premises);
+                DeductiveRuleDescriptor {
+                    description: None,
+                    deduce: identity.conclusion.clone(),
+                    when,
+                    unless,
+                    reduce: identity.reduce.iter().cloned().collect(),
+                }
+            }
+            None => self.describe(&self.analysis.premises, &self.analysis.reduce),
+        }
+    }
+
+    /// The head's spelling: what the identity leaves out. Two rules of
+    /// one identity under different field names plan and remember
+    /// their bodies under different variables, so what is keyed by
+    /// identity is keyed by this as well. It is each field's name with
+    /// the relation the field reads, and the operands beside them: two
+    /// heads using one set of names for different attributes bind those
+    /// names from different premises, so the names alone do not say
+    /// which plan is theirs.
+    pub fn spelling(&self) -> Vec<u8> {
+        let mut hasher = blake3::Hasher::new();
+        let mut fields: Vec<(String, String)> = self
+            .conclusion()
+            .with()
+            .iter()
+            .map(|(name, field)| (name.to_string(), field.the().to_string()))
+            .collect();
+        fields.sort();
+        for (name, relation) in &fields {
+            for part in [name.as_bytes(), relation.as_bytes()] {
+                hasher.update(&(part.len() as u64).to_be_bytes());
+                hasher.update(part);
+            }
+        }
+        for name in self.conclusion().sorted_operands().iter() {
+            hasher.update(&(name.len() as u64).to_be_bytes());
+            hasher.update(name.as_bytes());
+        }
+        hasher.finalize().as_bytes()[..8].to_vec()
+    }
+
+    /// This rule re-headed onto `target`, a concept of the same
+    /// attributes under other field names: the body's variables
+    /// renamed onto the target's operands, so a caller binding the
+    /// target's names reaches the head. `None` when the fields do not
+    /// pair up one to one by attribute, and `Ok(None)` as well when
+    /// nothing needs renaming.
+    pub fn respelled(&self, target: &ConceptDescriptor) -> Result<Option<Self>, TypeError> {
+        use rename::{Rename, fresh_name, rename_premises, variables};
+
+        let mut unpaired: Vec<(&str, &ConceptFieldDescriptor)> =
+            self.conclusion().with().iter().collect();
+        let mut map = Rename::new();
+        for (name, field) in target.with().iter() {
+            let Some(index) = unpaired.iter().position(|(_, mine)| {
+                same_attribute(mine, field) && mine.is_optional() == field.is_optional()
+            }) else {
+                return Ok(None);
+            };
+            let (mine, _) = unpaired.remove(index);
+            if mine != name {
+                map.insert(mine.to_string(), name.to_string());
+                if matches!(field.the(), Relation::Collection { .. }) {
+                    map.insert(Relation::key_operand(mine), Relation::key_operand(name));
+                }
+            }
+        }
+        if !unpaired.is_empty() || map.is_empty() {
+            return Ok(None);
+        }
+        let premises = &self.analysis.premises;
+        let taken = variables(premises);
+        let targets: BTreeSet<&String> = map.values().collect();
+        let mut aside = Rename::new();
+        for variable in &taken {
+            if targets.contains(variable) && !map.contains_key(variable) {
+                let fresh = fresh_name(variable, &taken, &map);
+                aside.insert(variable.clone(), fresh);
+            }
+        }
+        map.extend(aside);
+        let premises = rename_premises(premises, &map)?;
+        let reduce: BTreeMap<String, ReduceSpec> = self
+            .analysis
+            .reduce
+            .iter()
+            .map(|entry| {
+                let field = map
+                    .get(&entry.field)
+                    .cloned()
+                    .unwrap_or_else(|| entry.field.clone());
+                let mut spec = ReduceSpec::from(entry);
+                spec.of = rename::rename_term(&spec.of, &map);
+                (field, spec)
+            })
+            .collect();
+        Ok(Some(Self::with_reduce(target.clone(), premises, reduce)?))
+    }
+
+    fn describe(&self, premises: &[Premise], reduce: &[ReduceEntry]) -> DeductiveRuleDescriptor {
         let mut when = Vec::new();
         let mut unless = Vec::new();
 
-        for premise in &self.analysis.premises {
+        for premise in premises {
             match premise {
                 Premise::Assert(proposition) => when.push(proposition.clone()),
                 Premise::Unless(Negation(proposition)) => unless.push(proposition.clone()),
@@ -180,9 +420,7 @@ impl DeductiveRule {
             deduce: self.conclusion().clone(),
             when,
             unless,
-            reduce: self
-                .analysis
-                .reduce
+            reduce: reduce
                 .iter()
                 .map(|entry| (entry.field.clone(), ReduceSpec::from(entry)))
                 .collect(),
@@ -209,23 +447,74 @@ impl DeductiveRule {
         serde_ipld_dagcbor::to_vec(&self.descriptor()).ok()
     }
 
-    /// This rule's content-addressed identity, if it has a canonical
-    /// encoding: `rule:<base58(blake3(dag-cbor(descriptor)))>`.
+    /// This rule's content-addressed identity, if it has an encodable
+    /// body: `rule:<base58(blake3(dag-cbor(canonical descriptor)))>`.
     ///
     /// `None` for rules with no encodable body (implicit / attribute-query
     /// rules — see [`try_encode`](Self::try_encode)). A pure function of
-    /// the rule body, stable across compilations, so it is a
-    /// collision-free key for plan caching and the entity a rule's facts
-    /// are stored under.
+    /// the rule's canonical spelling, so two bodies that differ only in
+    /// what their locals are called or in the order of their premises
+    /// are one rule: one entity its facts are stored under, one plan
+    /// cache entry, one body memo.
     pub fn try_this(&self) -> Option<Entity> {
         self.identity
             .get_or_init(|| {
                 use base58::ToBase58;
-                let hash = blake3::hash(&self.try_encode()?);
+                let canonical = serde_ipld_dagcbor::to_vec(&self.canonical_descriptor()).ok()?;
+                let hash = blake3::hash(&canonical);
                 let encoded = hash.as_bytes().as_ref().to_base58();
                 format!("rule:{encoded}").parse().ok()
             })
             .clone()
+    }
+
+    /// Whether this rule's body is what was stored under `entity`:
+    /// `entity` is its identity. Bytes stored under any other entity
+    /// are forged, corrupt, or a rule an earlier release stored under
+    /// the hash of its bytes, which stays inert until
+    /// `Branch::upgrade_rules` re-installs it under its identity.
+    pub fn stored_as(&self, entity: &Entity) -> bool {
+        self.try_this().as_ref() == Some(entity)
+    }
+
+    /// The source this head was split from, when it was.
+    pub fn origin(&self) -> Option<&Origin> {
+        self.origin.as_deref()
+    }
+
+    /// This rule marked as a head split from `origin`.
+    pub(crate) fn with_origin(mut self, origin: Origin) -> Self {
+        self.origin = Some(Arc::new(origin));
+        self
+    }
+
+    /// Bytes identifying this rule within one process: its content
+    /// address when it has one, else the address of its analysis,
+    /// which every clone shares. A memo keyed by this never confuses
+    /// two rules, and a built-in rule without an encodable body still
+    /// has a key.
+    pub fn memo_key(&self) -> Vec<u8> {
+        match self.try_this() {
+            Some(entity) => [entity.to_string().into_bytes(), self.spelling()].concat(),
+            None => (Arc::as_ptr(&self.analysis) as usize)
+                .to_le_bytes()
+                .to_vec(),
+        }
+    }
+
+    /// Whether `other` is this rule: the same content address when both
+    /// have one, else structural equality. Two hydrations of one stored
+    /// body are not always equal, because analysis records its
+    /// narrowings in a hash-map-dependent order, so a rule set
+    /// deduplicates by this rather than by `==`.
+    pub fn same(&self, other: &DeductiveRule) -> bool {
+        if Arc::ptr_eq(&self.analysis, &other.analysis) {
+            return true;
+        }
+        match (self.try_this(), other.try_this()) {
+            (Some(a), Some(b)) => a == b,
+            _ => self == other,
+        }
     }
 
     /// Canonical dag-cbor encoding, panicking if the rule has no
@@ -274,61 +563,91 @@ impl Display for DeductiveRule {
     }
 }
 
-impl DeductiveRule {
-    /// Compile *ordered variants* of a concept: spec-style
-    /// first-to-conform alternatives, each an alternative body for
-    /// the same conclusion.
-    ///
-    /// Variant `k` desugars to a rule whose body is the variant's
-    /// own premises plus one negated premise per *earlier* variant:
-    /// the entity yields variant `k`'s row only when no earlier
-    /// variant matched it. Order is semantic; the returned rules are
-    /// installed together (e.g. via
-    /// [`ConceptRules::install`](crate::ConceptRules)) and their
-    /// disjunction is deterministic per entity because the
-    /// negations make the variants pairwise disjoint.
-    ///
-    /// Every variant must ground the conclusion's required operands
-    /// with its own fields (the ordinary head-grounding contract);
-    /// a variant that doesn't fails compilation like any other rule.
-    pub fn variants(
-        conclusion: ConceptDescriptor,
-        ordered: Vec<ConceptDescriptor>,
-    ) -> Result<Vec<DeductiveRule>, TypeError> {
-        use crate::concept::query::ConceptQuery;
-
-        let mut rules = Vec::new();
-        for (position, variant) in ordered.iter().enumerate() {
-            let mut premises = concept_premises(variant);
-            for earlier in &ordered[..position] {
-                let mut terms = Parameters::new();
-                terms.insert("this".to_string(), Term::<Entity>::var("this").into());
-                premises.push(Premise::Unless(Negation(Proposition::Concept(
-                    ConceptQuery {
-                        terms,
-                        predicate: earlier.clone(),
-                    },
-                ))));
-            }
-            rules.push(DeductiveRule::new(conclusion.clone(), premises)?);
-        }
-        Ok(rules)
-    }
-}
-
 /// Lower a concept's fields into the body premises of its implicit
 /// rule: one scan (or left-join) per field, plus a conjoined target
 /// premise per concept-typed field. Shared by
 /// `From<&ConceptDescriptor>` and [`DeductiveRule::variants`].
 fn concept_premises(concept: &ConceptDescriptor) -> Vec<Premise> {
-    use crate::concept::query::ConceptQuery;
+    selecting_premises(concept, &|_| false)
+}
+
+/// Lower a concept's fields into the body premises of its selecting
+/// rule. A required field whose attribute `derived` says some rule
+/// derives is read through the [attribute
+/// concept](ConceptDescriptor::of_attribute) over it, so the field
+/// sees stored and derived values alike; every other field is a scan
+/// (or left-join) over stored facts, as in the implicit rule.
+///
+/// An optional field over a derived attribute reads the attribute
+/// concept set-widened: the premise's value term admits `Nothing`, and
+/// [`ConceptQuery`](crate::concept::query::ConceptQuery) yields one
+/// `Absent` row for an entity no row matched.
+fn selecting_premises(
+    concept: &ConceptDescriptor,
+    derived: &dyn Fn(&ConceptFieldDescriptor) -> bool,
+) -> Vec<Premise> {
+    let mut premises = Vec::new();
+    for (name, field) in concept.with().iter() {
+        premises.extend(field_premises(name, field, derived(field)));
+    }
+    premises
+}
+
+/// The premises by which a concept's rule reads one field: through the
+/// attribute concept when `derived`, else from stored facts, plus the
+/// key projection of a collection and the conformance of a
+/// concept-typed field.
+fn field_premises(name: &str, field: &ConceptFieldDescriptor, derived: bool) -> Vec<Premise> {
     use crate::type_system::ConceptRef;
 
     let mut premises = Vec::new();
 
     let this = Term::<Entity>::var("this");
 
-    for (name, field) in concept.with().iter() {
+    {
+        if derived {
+            // An optional field reads the attribute concept set-widened:
+            // its value term admits `Nothing`, which the concept query
+            // honours by yielding one `Absent` row where no row matched.
+            let kind = match (
+                field.descriptor().content_type().map(Kind::from),
+                field.conforms(),
+            ) {
+                (Some(kind), Some(target)) => Some(
+                    kind.with_conformance(ConceptRef(target.this().to_string()))
+                        .expect("a conforming field is entity-valued by construction"),
+                ),
+                (kind, _) => kind,
+            };
+            let value = match (kind, field.is_optional()) {
+                (Some(kind), true) => Term::<Any>::typed_var(name, kind.optional()),
+                (Some(kind), false) => Term::<Any>::typed_var(name, kind),
+                (None, true) => Term::<Any>::typed_var(name, Kind::from(Primitive::ANY)),
+                (None, false) => Term::var(name),
+            };
+            let mut terms = Parameters::new();
+            terms.insert("this".to_string(), Term::<Any>::var("this"));
+            terms.insert(ConceptDescriptor::VALUE.to_string(), value.clone());
+            if let Relation::Collection { .. } = field.the() {
+                terms.insert(
+                    Relation::key_operand(ConceptDescriptor::VALUE),
+                    Term::var(Relation::key_operand(name)),
+                );
+            }
+            premises.push(Premise::Assert(Proposition::Concept(ConceptQuery {
+                terms,
+                predicate: ConceptDescriptor::of_attribute(field),
+            })));
+            if let Some(target) = field.conforms() {
+                let mut terms = Parameters::new();
+                terms.insert("this".to_string(), value);
+                premises.push(Premise::Assert(Proposition::Concept(ConceptQuery {
+                    terms,
+                    predicate: target.clone(),
+                })));
+            }
+            return premises;
+        }
         // The value term stays scalar in both cases; the
         // associative layer never carries optionality. A
         // required field lowers to a plain scan (a missing fact
@@ -354,13 +673,16 @@ fn concept_premises(concept: &ConceptDescriptor) -> Vec<Premise> {
             None => Term::var(name),
         };
 
+        // The scan reads under the policy's scan arity: one claim for
+        // `last`, every claim for a policy that elects among them.
+        let scanned = Some(field.descriptor().scan_cardinality());
         let premise: Premise = if field.is_optional() {
             OptionalAttributeQuery::new(
                 field.the().term(name),
                 this.clone(),
                 value.clone(),
                 Term::blank(),
-                Some(field.cardinality()),
+                scanned,
             )
             .into()
         } else {
@@ -369,7 +691,7 @@ fn concept_premises(concept: &ConceptDescriptor) -> Vec<Premise> {
                 this.clone(),
                 value.clone(),
                 Term::blank(),
-                Some(field.cardinality()),
+                scanned,
             )
             .into()
         };
@@ -415,9 +737,180 @@ fn concept_premises(concept: &ConceptDescriptor) -> Vec<Premise> {
 
 impl From<&ConceptDescriptor> for DeductiveRule {
     fn from(concept: &ConceptDescriptor) -> Self {
-        DeductiveRule::new(concept.clone(), concept_premises(concept))
+        compile_internal::<Self>(concept.clone(), concept_premises(concept))
             .expect("Concept should compile")
     }
+}
+
+impl DeductiveRule {
+    /// The rule by which `concept` selects its rows: every required
+    /// field whose attribute `derived` says some rule derives is read
+    /// through the attribute concept over it, and every other field
+    /// from stored facts. With nothing derived this is the concept's
+    /// implicit rule.
+    pub fn selecting(
+        concept: &ConceptDescriptor,
+        derived: &dyn Fn(&ConceptFieldDescriptor) -> bool,
+    ) -> Result<Self, TypeError> {
+        compile_internal::<Self>(concept.clone(), selecting_premises(concept, derived))
+    }
+
+    /// Whether the body binds at most one row per `this`. Every premise
+    /// it asserts reads a concept of an entity already determined (`this`,
+    /// or a value an earlier such read bound) under a choosing policy for
+    /// every field, so each read yields one row; a negation adds none.
+    /// Anything else (a formula, an `all` read, a read keyed by another
+    /// variable) may yield several, and the body is not single-valued.
+    pub fn single_valued(&self) -> bool {
+        let mut determined: BTreeSet<&str> = BTreeSet::from(["this"]);
+        let mut pending: Vec<&ConceptQuery> = Vec::new();
+        for premise in self.analysis().premises() {
+            match premise {
+                Premise::Assert(Proposition::Concept(query)) => pending.push(query),
+                Premise::Unless(_) => {}
+                _ => return false,
+            }
+        }
+        loop {
+            let before = pending.len();
+            let mut index = 0;
+            while index < pending.len() {
+                let query = pending[index];
+                let keyed = query.terms.get("this").is_some_and(|term| {
+                    term.is_constant() || term.name().is_some_and(|name| determined.contains(name))
+                });
+                if !keyed {
+                    index += 1;
+                    continue;
+                }
+                let single = query.predicate.with().iter().all(|(_, field)| {
+                    !field.is_optional()
+                        && field.descriptor().select().elects()
+                        && !field.descriptor().is_chain()
+                        && !matches!(field.the(), Relation::Collection { .. })
+                });
+                if !single || query.widens() {
+                    return false;
+                }
+                for (name, term) in query.terms.iter() {
+                    if name != "this"
+                        && let Some(variable) = term.name()
+                    {
+                        determined.insert(variable);
+                    }
+                }
+                pending.swap_remove(index);
+            }
+            if pending.is_empty() {
+                return true;
+            }
+            if pending.len() == before {
+                return false;
+            }
+        }
+    }
+
+    /// This rule re-headed onto `concept`: its body, with the variables of
+    /// the head fields it shares with the concept renamed to the concept's
+    /// field names, joined with stored scans of the concept's other
+    /// fields. This is the concept's exact evaluation when the rule is
+    /// the only source of those attributes and nothing is stored under
+    /// them. `None` when the heads share no attribute, when a shared
+    /// field is optional on either side (an optional concept field
+    /// admits entities the rule derives nothing for), or when the rule
+    /// folds.
+    pub fn covering(&self, concept: &ConceptDescriptor) -> Result<Option<Self>, TypeError> {
+        use rename::{Rename, fresh_name, rename_premises, variables};
+        use std::collections::BTreeSet;
+
+        if !self.reduce().is_empty() {
+            return Ok(None);
+        }
+        let premises: Vec<Premise> = self.analysis().premises().cloned().collect();
+        let taken = variables(&premises);
+        let targets: BTreeSet<String> = concept.operands().collect();
+
+        let mut map = Rename::new();
+        let mut shared: Vec<&str> = Vec::new();
+        // The rule's own operands that stand for a concept field, under
+        // either name: these are never captured variables.
+        let mut kept: BTreeSet<String> = BTreeSet::from(["this".to_string()]);
+        for (name, field) in concept.with().iter() {
+            let Some((mine, head)) = self
+                .conclusion()
+                .with()
+                .iter()
+                .find(|(_, head)| same_attribute(head, field))
+            else {
+                continue;
+            };
+            // A concept field the rule derives is exact only when it is
+            // required: an optional one admits entities the rule derives
+            // nothing for, which the rule's body never yields.
+            if field.is_optional() || head.is_optional() {
+                return Ok(None);
+            }
+            shared.push(name);
+            kept.insert(mine.to_string());
+            if let Relation::Collection { .. } = field.the() {
+                kept.insert(Relation::key_operand(mine));
+            }
+            if mine != name {
+                map.insert(mine.to_string(), name.to_string());
+                if let Relation::Collection { .. } = field.the() {
+                    map.insert(Relation::key_operand(mine), Relation::key_operand(name));
+                }
+            }
+        }
+        if shared.is_empty() {
+            return Ok(None);
+        }
+        // A body variable named like a concept operand it does not stand
+        // for would be captured: move it aside.
+        for variable in &taken {
+            if targets.contains(variable) && !kept.contains(variable) {
+                let fresh = fresh_name(variable, &taken, &map);
+                map.insert(variable.clone(), fresh);
+            }
+        }
+
+        let mut body = rename_premises(&premises, &map)?;
+        for (name, field) in concept.with().iter() {
+            if shared.contains(&name) {
+                if let Some(target) = field.conforms() {
+                    let mut terms = Parameters::new();
+                    terms.insert("this".to_string(), Term::<Any>::var(name));
+                    body.push(Premise::Assert(Proposition::Concept(ConceptQuery {
+                        terms,
+                        predicate: target.clone(),
+                    })));
+                }
+            } else {
+                body.extend(field_premises(name, field, false));
+            }
+        }
+        compile_internal::<Self>(concept.clone(), body).map(Some)
+    }
+}
+
+/// The premises split into the descriptor's `when` and `unless`.
+fn split(premises: &[Premise]) -> (Vec<Proposition>, Vec<Proposition>) {
+    let mut when = Vec::new();
+    let mut unless = Vec::new();
+    for premise in premises {
+        match premise {
+            Premise::Assert(proposition) => when.push(proposition.clone()),
+            Premise::Unless(Negation(proposition)) => unless.push(proposition.clone()),
+        }
+    }
+    (when, unless)
+}
+
+/// Whether two fields are the same attribute: the same relation,
+/// cardinality and content type, which is what an attribute's identity
+/// hashes.
+pub(crate) fn same_attribute(a: &ConceptFieldDescriptor, b: &ConceptFieldDescriptor) -> bool {
+    a.the() == b.the() && a.cardinality() == b.cardinality() && a.content_type() == b.content_type()
 }
 
 #[cfg(test)]
@@ -427,7 +920,6 @@ mod tests {
     use crate::attribute::AttributeDescriptor;
     use crate::attribute::The;
     use crate::attribute::query::AttributeQuery;
-    use crate::concept::query::ConceptQuery;
     use crate::constraint::{Coalesce, Constraint};
     use crate::proposition::Proposition;
     use crate::rule::analyzer::DependencyGraph;
@@ -551,6 +1043,38 @@ mod tests {
             DependencyGraph::from_premises(&analysis.premises),
             "retained graph must match the premises' dependency graph"
         );
+    }
+
+    /// A rule is stored as its canonical identity and as nothing else,
+    /// not even the hash of its own bytes, the identity an earlier
+    /// release gave it.
+    #[dialog_common::test]
+    fn it_is_stored_as_its_identity_alone() {
+        use serde_json::json;
+        let json = json!({
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+            "when": [
+                {
+                    "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } }
+                    }
+                }
+            ]
+        });
+        let descriptor: DeductiveRuleDescriptor =
+            serde_json::from_value(json).expect("descriptor parses");
+        let rule = descriptor.compile().expect("rule compiles");
+        let bytes = blake3::hash(&rule.encode()).as_bytes().to_vec();
+        let legacy: Entity = format!("rule:{}", base58::ToBase58::to_base58(bytes.as_slice()))
+            .parse()
+            .expect("an entity");
+        assert_ne!(legacy, rule.this(), "the byte hash is not the identity");
+        assert!(rule.stored_as(&rule.this()));
+        assert!(!rule.stored_as(&legacy));
+        let other: Entity = "rule:forged".parse().expect("an entity");
+        assert!(!rule.stored_as(&other));
     }
 
     /// A concept-bodied rule (the storable kind) has a deterministic,
@@ -969,70 +1493,6 @@ mod tests {
         assert_eq!(maybes, 1, "expected one Maybe left-join (nickname)");
     }
 
-    /// Ordered variants desugar to negated premises: variant `k`
-    /// carries one `Unless` per earlier variant, joined on `this`,
-    /// so the first conforming variant wins.
-    #[dialog_common::test]
-    fn variants_desugar_to_ordered_negations() {
-        let conclusion = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(
-                the!("contact/handle"),
-                "",
-                Cardinality::One,
-                Some(Type::String),
-            ),
-        )])
-        .unwrap();
-        let email = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(the!("user/email"), "", Cardinality::One, Some(Type::String)),
-        )])
-        .unwrap();
-        let phone = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(the!("user/phone"), "", Cardinality::One, Some(Type::String)),
-        )])
-        .unwrap();
-
-        let rules = DeductiveRule::variants(conclusion, vec![email.clone(), phone.clone()])
-            .expect("variants compile");
-        assert_eq!(rules.len(), 2);
-
-        let negations = |rule: &DeductiveRule| {
-            rule.analysis()
-                .premises
-                .iter()
-                .filter_map(|premise| match premise {
-                    Premise::Unless(Negation(Proposition::Concept(query))) => Some(query.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
-
-        assert!(
-            negations(&rules[0]).is_empty(),
-            "the first variant negates nothing"
-        );
-
-        let unless = negations(&rules[1]);
-        assert_eq!(unless.len(), 1, "one negation per earlier variant");
-        assert_eq!(
-            unless[0].predicate.this(),
-            email.this(),
-            "the later variant excludes the earlier one"
-        );
-        assert_eq!(
-            unless[0].terms.iter().count(),
-            1,
-            "the negation joins on `this` alone"
-        );
-        assert_eq!(
-            unless[0].terms.get("this").and_then(|term| term.name()),
-            Some("this")
-        );
-    }
-
     /// Entity locality: the implicit rule of a plain concept reads
     /// only `?this`'s facts; concept premises (conforming fields,
     /// variant negations) make a rule non-local.
@@ -1105,43 +1565,14 @@ mod tests {
                 .is_entity_local(),
             "a concept premise reads another entity's facts"
         );
-
-        let conclusion = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(
-                the!("contact/handle"),
-                "",
-                Cardinality::One,
-                Some(Type::String),
-            ),
-        )])
-        .unwrap();
-        let email = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(the!("user/email"), "", Cardinality::One, Some(Type::String)),
-        )])
-        .unwrap();
-        let phone = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(the!("user/phone"), "", Cardinality::One, Some(Type::String)),
-        )])
-        .unwrap();
-        let variants = DeductiveRule::variants(conclusion, vec![email, phone]).unwrap();
-        assert!(
-            variants[0].analysis().is_entity_local(),
-            "the first variant is plain attribute premises"
-        );
-        assert!(
-            !variants[1].analysis().is_entity_local(),
-            "a negated concept premise is non-local"
-        );
     }
 
-    /// A rule that negates its own conclusion concept is a negative
-    /// self-loop: rejected at analysis.
+    /// A deductive rule admits an `unless` premise: outside a
+    /// dependency cycle it is stratified, and a rule closing a cycle
+    /// through it is quarantined, so the rule compiles whatever program
+    /// it later meets.
     #[dialog_common::test]
-    fn it_rejects_self_negating_rule() {
-        use crate::concept::query::ConceptQuery;
+    fn it_admits_negation_in_a_deductive_rule() {
         use crate::negation::Negation;
 
         let conclusion = ConceptDescriptor::try_from(vec![(
@@ -1154,9 +1585,20 @@ mod tests {
             ),
         )])
         .unwrap();
+        let blocked = ConceptDescriptor::try_from(vec![(
+            "blocked",
+            AttributeDescriptor::new(
+                the!("contact/blocked"),
+                "",
+                Cardinality::One,
+                Some(Type::Boolean),
+            ),
+        )])
+        .unwrap();
 
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Entity>::var("this").into());
+        terms.insert("blocked".to_string(), Term::blank());
         let premises = vec![
             AttributeQuery::new(
                 Term::from(the!("user/email")),
@@ -1168,55 +1610,55 @@ mod tests {
             .into(),
             Premise::Unless(Negation(Proposition::Concept(ConceptQuery {
                 terms,
-                predicate: conclusion.clone(),
+                predicate: blocked,
             }))),
         ];
-
-        match DeductiveRule::new(conclusion, premises) {
-            Err(TypeError::SelfNegation { concept, .. }) => {
-                assert!(concept.starts_with("concept:"));
-            }
-            other => panic!("expected SelfNegation, got {other:?}"),
-        }
+        let result = DeductiveRule::new(conclusion, premises);
+        assert!(
+            result.is_ok(),
+            "a deductive rule admits an unless, got {result:?}"
+        );
     }
 
-    /// Negation over *another* concept is a negative IDB edge,
-    /// surfaced by the analysis for the stratification pass.
+    /// A `reduce` block is refused in a deductive rule: a fold
+    /// withdraws its previous result when a fact arrives and has no
+    /// reading inside a dependency cycle. The attribute's `select`
+    /// policy chooses among the candidates instead.
     #[dialog_common::test]
-    fn analysis_surfaces_negative_idb_edges() {
+    fn it_refuses_reduce_in_a_deductive_rule() {
+        use crate::reduce::{Aggregator, ReduceSpec};
+
         let conclusion = ConceptDescriptor::try_from(vec![(
-            "handle",
+            "total",
             AttributeDescriptor::new(
-                the!("contact/handle"),
+                the!("org/total"),
                 "",
                 Cardinality::One,
-                Some(Type::String),
+                Some(Type::UnsignedInt),
             ),
         )])
         .unwrap();
-        let email = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(the!("user/email"), "", Cardinality::One, Some(Type::String)),
-        )])
-        .unwrap();
-        let phone = ConceptDescriptor::try_from(vec![(
-            "handle",
-            AttributeDescriptor::new(the!("user/phone"), "", Cardinality::One, Some(Type::String)),
-        )])
-        .unwrap();
-
-        let rules =
-            DeductiveRule::variants(conclusion, vec![email.clone(), phone]).expect("compiles");
-
-        assert_eq!(
-            rules[0].analysis().negated_concepts().count(),
-            0,
-            "the first variant carries no negative edges"
-        );
-        assert_eq!(
-            rules[1].analysis().negated_concepts().collect::<Vec<_>>(),
-            vec![email.this()],
-            "the later variant's negative edge names the earlier variant"
+        let premises = vec![
+            AttributeQuery::new(
+                Term::from(the!("org/salary")),
+                Term::<Entity>::var("this"),
+                Term::var("salary"),
+                Term::blank(),
+                Some(Cardinality::Many),
+            )
+            .into(),
+        ];
+        let reduce = BTreeMap::from([(
+            "total".to_string(),
+            ReduceSpec {
+                apply: Aggregator::Sum,
+                of: Term::var("salary"),
+            },
+        )]);
+        let result = DeductiveRule::with_reduce(conclusion, premises, reduce);
+        assert!(
+            matches!(result, Err(TypeError::ReduceInOpenRule { .. })),
+            "a deductive rule admits no reduce, got {result:?}"
         );
     }
 
@@ -1642,5 +2084,65 @@ mod tests {
             Err(TypeError::CoalesceTypeMismatch { .. }) => {}
             other => panic!("expected CoalesceTypeMismatch, got {other:?}"),
         }
+    }
+
+    fn compiled(json: serde_json::Value) -> DeductiveRule {
+        let descriptor: DeductiveRuleDescriptor =
+            serde_json::from_value(json).expect("a rule descriptor");
+        descriptor.compile().expect("the rule compiles")
+    }
+
+    /// A body reading fields of `this`, and of an entity a read of `this`
+    /// bound, each under `last`, binds one row per entity.
+    #[dialog_common::test]
+    fn a_body_keyed_by_this_under_last_is_single_valued() {
+        let rule = compiled(serde_json::json!({
+            "deduce": { "with": { "title": { "the": "member/title", "as": "Text" } } },
+            "when": [
+                {
+                    "assert": { "with": { "group": { "the": "member/group", "as": "Entity" } } },
+                    "where": { "this": { "?": { "name": "this" } }, "group": { "?": { "name": "group" } } }
+                },
+                {
+                    "assert": { "with": { "name": { "the": "group/name", "as": "Text" } } },
+                    "where": { "this": { "?": { "name": "group" } }, "name": { "?": { "name": "title" } } }
+                }
+            ]
+        }));
+        assert!(rule.single_valued());
+    }
+
+    /// A body that finds `this` as the value of another entity's field
+    /// binds a row per such entity: several memberships of one person.
+    #[dialog_common::test]
+    fn a_body_keyed_by_another_entity_is_not_single_valued() {
+        let rule = compiled(serde_json::json!({
+            "deduce": { "with": { "role": { "the": "member/role", "as": "Text" } } },
+            "when": [{
+                "assert": { "with": {
+                    "person": { "the": "membership/person", "as": "Entity" },
+                    "role": { "the": "membership/role", "as": "Text" }
+                }},
+                "where": {
+                    "this": { "?": { "name": "membership" } },
+                    "person": { "?": { "name": "this" } },
+                    "role": { "?": { "name": "role" } }
+                }
+            }]
+        }));
+        assert!(!rule.single_valued());
+    }
+
+    /// A read under `all` binds a row per value.
+    #[dialog_common::test]
+    fn a_body_reading_under_all_is_not_single_valued() {
+        let rule = compiled(serde_json::json!({
+            "deduce": { "with": { "tag": { "the": "item/label", "as": "Text" } } },
+            "when": [{
+                "assert": { "with": { "tag": { "the": "item/tag", "as": "Text", "select": "all" } } },
+                "where": { "this": { "?": { "name": "this" } }, "tag": { "?": { "name": "tag" } } }
+            }]
+        }));
+        assert!(!rule.single_valued());
     }
 }

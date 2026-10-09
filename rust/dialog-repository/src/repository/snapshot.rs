@@ -1109,17 +1109,20 @@ mod tests {
 
         let mut facts: Vec<Instruction> = generate_data(20)?
             .into_iter()
-            .map(Instruction::Assert)
+            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Policy::All))
             .collect();
         let large = Value::String(
             "spilled".repeat(dialog_search_tree::Manifest::default().inline_n as usize + 1),
         );
-        facts.push(Instruction::Assert(Artifact {
-            the: "document/body".parse()?,
-            of: "document:large".parse()?,
-            is: large,
-            cause: None,
-        }));
+        facts.push(Instruction::Assert(
+            Artifact {
+                the: "document/body".parse()?,
+                of: "document:large".parse()?,
+                is: large,
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        ));
         branch.commit(stream::iter(facts)).perform(&env).await?;
 
         let blob_bytes = b"snapshot blob".repeat(512);

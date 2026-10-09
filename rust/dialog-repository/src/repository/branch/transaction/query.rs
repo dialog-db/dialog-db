@@ -176,7 +176,7 @@ mod tests {
     use dialog_artifacts::Entity;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::query::Output;
-    use dialog_query::{Concept, Query, Term, the};
+    use dialog_query::{Concept, ConceptDescriptor, Query, Term, the};
 
     mod people {
 
@@ -706,11 +706,14 @@ mod tests {
         Ok(())
     }
 
-    /// An uncommitted *reducing* rule staged on a transaction
-    /// resolves as a transient overlay rule: the pending view folds
-    /// pending facts without the rule or the data being committed.
+    /// An uncommitted rule staged on a transaction derives a relation
+    /// the transaction's query elects over: the pending view reads the
+    /// pending candidates under `max` without the rule or the data
+    /// being committed. The choice is the query's, read over the
+    /// relation the rule derives into, whatever policy the rule's own
+    /// head declared.
     #[dialog_common::test]
-    async fn it_resolves_reducing_rules_pending_in_the_transaction() -> anyhow::Result<()> {
+    async fn it_elects_over_a_derived_relation_pending_in_the_transaction() -> anyhow::Result<()> {
         use dialog_query::rule::DeductiveRuleDescriptor;
         use dialog_query::{ConceptQuery, Parameters};
 
@@ -718,11 +721,11 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        // dept-total(this, total: sum(?salary)) grouped by department.
+        // dept-salary(dept, salary) :- dept(employee, dept), salary(employee, salary)
         let rule = {
             let json = serde_json::json!({
                 "deduce": { "with": {
-                    "total": { "the": "org/dept-total", "as": "UnsignedInteger" }
+                    "salary": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "all" }
                 }},
                 "when": [{
                     "assert": { "with": {
@@ -734,16 +737,15 @@ mod tests {
                         "dept": { "?": { "name": "this" } },
                         "salary": { "?": { "name": "salary" } }
                     }
-                }],
-                "reduce": {
-                    "total": { "apply": "sum", "of": { "?": { "name": "salary" } } }
-                }
+                }]
             });
             let descriptor: DeductiveRuleDescriptor =
                 serde_json::from_value(json).expect("descriptor parses");
-            descriptor.compile().expect("reducing rule compiles")
+            descriptor.compile().expect("rule compiles")
         };
-        let dept_total = rule.conclusion().clone();
+        let dept_top: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "top": { "the": "org/dept-salary", "as": "UnsignedInteger", "select": "max" }
+        }}))?;
 
         let dept: Entity = "id:dept-a".parse()?;
         let alice: Entity = "id:alice".parse()?;
@@ -758,11 +760,11 @@ mod tests {
 
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("dept"));
-        terms.insert("total".into(), Term::var("total"));
+        terms.insert("top".into(), Term::var("top"));
         let rows = tx
             .query()
             .select(ConceptQuery {
-                predicate: dept_total,
+                predicate: dept_top,
                 terms,
             })
             .perform(&operator)
@@ -771,10 +773,10 @@ mod tests {
         assert_eq!(
             rows.len(),
             1,
-            "the pending reducing rule folds pending facts"
+            "the query elects among the pending rule's candidates"
         );
         assert_eq!(*rows[0].entity(), dept);
-        assert_eq!(rows[0].get::<u64>("total")?, 7);
+        assert_eq!(rows[0].get::<u64>("top")?, 4);
 
         Ok(())
     }

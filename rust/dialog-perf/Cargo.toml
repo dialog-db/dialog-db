@@ -1,0 +1,43 @@
+[package]
+name = "dialog-perf"
+description = "The engine's cost matrix: deterministic counters and instruction counts per workload scenario, gated against a checked-in baseline"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Enable integration tests (tests with service provisioning)
+integration-tests = ["dialog-common/integration-tests"]
+# Enable web integration tests
+web-integration-tests = ["dialog-common/web-integration-tests"]
+
+[dependencies]
+dialog-common = { workspace = true }
+
+# Native-only: the harness drives a tokio runtime, spawns itself under
+# valgrind and reads the filesystem. The crate compiles to nothing on
+# wasm32 (see the crate-level cfg in src/lib.rs).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+dialog-artifacts = { workspace = true }
+dialog-capability = { workspace = true }
+dialog-credentials = { workspace = true }
+dialog-effects = { workspace = true }
+dialog-peer = { workspace = true, features = ["helpers"] }
+dialog-query = { workspace = true }
+dialog-repository = { workspace = true }
+dialog-storage = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints.rust]
+# This cfg is used by the dialog_common::test proc macro for wasm inner tests
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(dialog_test_wasm_integration)"] }

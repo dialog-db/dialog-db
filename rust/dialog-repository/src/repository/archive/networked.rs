@@ -96,13 +96,13 @@ impl From<ConnectedReplica> for RemoteFallback {
 /// When the tracked remote failed to load ([`RemoteFallback::Unavailable`]),
 /// local hits still succeed and the first miss fails loudly with the
 /// load failure as context.
-pub struct NetworkedIndex<'a, Env> {
+pub struct NetworkedIndex<'a, Env: ?Sized> {
     local: LocalIndex<'a, Env>,
     remote: RemoteFallback,
     priority: Priority,
 }
 
-impl<Env> Clone for NetworkedIndex<'_, Env> {
+impl<Env: ?Sized> Clone for NetworkedIndex<'_, Env> {
     fn clone(&self) -> Self {
         Self {
             local: self.local.clone(),
@@ -112,7 +112,7 @@ impl<Env> Clone for NetworkedIndex<'_, Env> {
     }
 }
 
-impl<'a, Env> NetworkedIndex<'a, Env> {
+impl<'a, Env: ?Sized> NetworkedIndex<'a, Env> {
     /// Create a networked index. With [`RemoteFallback::Remote`] (or a
     /// `Some(remote)`), reads that miss locally fall back to the remote
     /// and cache the result; see [`RemoteFallback`] for the other modes.
@@ -139,7 +139,7 @@ impl<'a, Env> NetworkedIndex<'a, Env> {
 
 impl<Env> NetworkedIndex<'_, Env>
 where
-    Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
 {
     /// The block stored under `hash`: the local archive's copy, or else the
     /// tracked remote's, hydrated into the local archive as it is read.
@@ -189,14 +189,22 @@ where
             lane,
             priority: self.priority,
         };
-        let hydrated = Provider::<Hydrate>::execute(self.local.env(), request).await?;
+        let hydrated = Provider::<Hydrate>::execute(self.local.env(), request)
+            .await
+            .map_err(|error| {
+                ArchiveError::Storage(format!(
+                    "block {hash} is not in the local archive and could not hydrate on \
+                     lane {lane:?}: {error}"
+                ))
+            })?;
         Ok(hydrated.map(|bytes| Buffer::from(bytes.as_ref().clone())))
     }
 }
 
 impl<Env> NetworkedIndex<'_, Env>
 where
-    Env: Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env:
+        ?Sized + Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync + 'static,
 {
     /// The spilled value stored under `hash`: the local copy (blob store,
     /// then the block catalog for values spilled before they moved to
@@ -216,7 +224,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<LoadBlock> for NetworkedIndex<'_, Env>
 where
-    Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
 {
     async fn execute(
         &self,
@@ -235,7 +243,8 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<LoadBlob> for NetworkedIndex<'_, Env>
 where
-    Env: Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env:
+        ?Sized + Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync + 'static,
 {
     async fn execute(
         &self,

@@ -365,7 +365,6 @@ mod tests {
     use dialog_repository::schema::{ActiveBranch, Branch as BranchConcept, Replica};
     use dialog_repository::{REGISTRY, RepositoryMemoryExt as _, Revision};
     use dialog_storage::provider::storage::VolatileSpace;
-    use futures_util::stream;
 
     /// Mint a real head on `name` by committing nothing to it.
     async fn commit(
@@ -379,8 +378,10 @@ mod tests {
             .perform(operator)
             .await?;
         Ok(branch
-            .commit(stream::iter(Vec::<Instruction>::new()))
+            .transaction()
+            .commit()
             .allow_empty()
+            .publish()
             .perform(operator)
             .await?)
     }
@@ -787,8 +788,10 @@ mod tests {
             .open()
             .perform(&operator)
             .await?
-            .commit(stream::iter(Vec::<Instruction>::new()))
+            .transaction()
+            .commit()
             .allow_empty()
+            .publish()
             .perform(&operator)
             .await?;
         let registry = || Subject::from(did.clone()).branch(REGISTRY).open();
@@ -987,12 +990,22 @@ mod tests {
             .open()
             .perform(&operator)
             .await?
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:elsewhere".parse()?,
-                is: Value::String("Elsewhere".into()),
-                cause: None,
-            })]))
+            .transaction()
+            .integrate(
+                vec![Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse()?,
+                        of: "user:elsewhere".parse()?,
+                        is: Value::String("Elsewhere".into()),
+                        cause: None,
+                    },
+                    dialog_artifacts::Policy::All,
+                )]
+                .into_iter()
+                .collect(),
+            )
+            .commit()
+            .publish()
             .perform(&operator)
             .await?;
 

@@ -102,6 +102,9 @@
               # invokes it once per test against a single shared browser.
               wbg-pool
             ]
+            # The cost matrix (rust/dialog-perf) counts each scenario's
+            # instructions under callgrind; valgrind has no darwin build.
+            ++ lib.optionals stdenv.isLinux [ valgrind ]
           );
 
         developmentEnvVars =
@@ -184,6 +187,14 @@
             command = ''
               export DIALOG_PROGRAM_OPS="''${DIALOG_PROGRAM_OPS:-2000}"
               cargo test -p dialog-search-tree --release --test program
+            '';
+          };
+
+          "perf:gate" = {
+            description = "Engine cost matrix (rust/dialog-perf) under callgrind, gated against perf/baseline";
+            command = ''
+              cargo run -p dialog-perf --release -- sweep --out-dir target/perf-current
+              cargo run -p dialog-perf --release -- compare perf/baseline target/perf-current
             '';
           };
 

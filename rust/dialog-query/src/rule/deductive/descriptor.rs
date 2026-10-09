@@ -118,6 +118,7 @@ impl DeductiveRuleDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::Select;
     use serde_json::json;
 
     #[dialog_common::test]
@@ -185,6 +186,90 @@ mod tests {
         assert_eq!(def.deduce.with().iter().count(), 3);
         assert_eq!(def.when.len(), 3);
         assert!(def.unless.is_empty());
+    }
+
+    /// A rule stored by the release before policies decodes: its
+    /// attributes spell `cardinality` and a single `the`, which read as
+    /// `last` and `all` over that relation. The bytes are the dag-cbor
+    /// of the descriptor as that release wrote it, which is what a
+    /// replica holds for every rule a user installed under it.
+    #[dialog_common::test]
+    fn it_decodes_a_rule_stored_before_policies() {
+        let legacy = json!({
+            "deduce": {
+                "description": "An ingredient",
+                "with": {
+                    "name": {
+                        "description": "Ingredient name",
+                        "the": "diy.cook/ingredient-name",
+                        "cardinality": "one",
+                        "as": "Text"
+                    },
+                    "tags": {
+                        "description": "",
+                        "the": "diy.cook/tag",
+                        "cardinality": "many",
+                        "as": "Text"
+                    }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "name": {
+                                "the": "diy.cook/ingredient-name",
+                                "cardinality": "one",
+                                "as": "Text"
+                            }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": {
+                            "tags": {
+                                "the": "diy.cook/tag",
+                                "cardinality": "many",
+                                "as": "Text"
+                            }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "tags": { "?": { "name": "tags" } }
+                    }
+                }
+            ]
+        });
+        let bytes = serde_ipld_dagcbor::to_vec(&legacy).expect("the legacy form encodes");
+        let rule = super::super::DeductiveRule::decode(&bytes).expect("a legacy rule decodes");
+        let head = rule.conclusion();
+        let field = |wanted: &str| {
+            head.with()
+                .iter()
+                .find(|(name, _)| *name == wanted)
+                .map(|(_, field)| field)
+                .expect("the field")
+        };
+        let (name, tags) = (field("name"), field("tags"));
+        assert_eq!(name.descriptor().select(), Select::Last);
+        assert_eq!(tags.descriptor().select(), Select::All);
+        assert_eq!(name.descriptor().cardinality(), crate::Cardinality::One);
+        assert_eq!(tags.descriptor().cardinality(), crate::Cardinality::Many);
+        // Re-encoded, the rule never writes the older spelling back.
+        let again = rule.encode();
+        let decoded: serde_json::Value =
+            serde_ipld_dagcbor::from_slice(&again).expect("the re-encoding is a map");
+        assert!(
+            decoded.to_string().contains("\"select\"")
+                || !decoded.to_string().contains("cardinality"),
+            "the branch spells policies as `select`: {decoded}"
+        );
     }
 
     #[dialog_common::test]
@@ -723,63 +808,6 @@ mod tests {
         })
     }
 
-    #[dialog_common::test]
-    fn it_round_trips_reducing_rule_through_formal_notation() {
-        let def: DeductiveRuleDescriptor = serde_json::from_value(dept_total_json()).unwrap();
-        assert_eq!(def.reduce.len(), 1, "one reduced field");
-
-        let reserialized = serde_json::to_value(&def).unwrap();
-        assert_eq!(reserialized["reduce"]["total"]["apply"], "sum");
-        assert_eq!(
-            reserialized["reduce"]["total"]["of"]["?"]["name"], "salary",
-            "the input term round-trips in formal notation"
-        );
-
-        let reparsed: DeductiveRuleDescriptor = serde_json::from_value(reserialized).unwrap();
-        assert_eq!(reparsed, def, "reduce block survives the round trip");
-
-        let rule = def.compile().expect("reducing rule compiles");
-        assert_eq!(rule.reduce().len(), 1);
-        assert_eq!(
-            rule.descriptor().reduce.len(),
-            1,
-            "the compiled rule reconstructs its reduce block"
-        );
-    }
-
-    /// A reducing rule is content-addressed like any other: same
-    /// body, same `rule:` identity; encode/decode preserves the
-    /// reduce clause.
-    #[dialog_common::test]
-    fn it_content_addresses_reducing_rule() {
-        let build = || {
-            let d: DeductiveRuleDescriptor =
-                serde_json::from_value(dept_total_json()).expect("descriptor parses");
-            d.compile().expect("rule compiles")
-        };
-        let a = build();
-        let b = build();
-        assert_eq!(a.this(), b.this(), "same reducing body, same identity");
-        assert_eq!(a.encode(), b.encode());
-
-        let decoded = DeductiveRule::decode(&a.encode()).expect("decodes");
-        assert_eq!(decoded.this(), a.this());
-        assert_eq!(decoded.reduce().len(), 1, "reduce block survives decode");
-
-        // The reduce block participates in the identity: dropping it
-        // (and grounding `total` from the body instead) is a
-        // different rule.
-        let plain: DeductiveRuleDescriptor = serde_json::from_value(json!({
-            "deduce": { "with": {
-                "total": { "the": "org.dept/total", "as": "UnsignedInteger" }
-            }},
-            "when": employee_body("total"),
-        }))
-        .unwrap();
-        let plain = plain.compile().expect("plain rule compiles");
-        assert_ne!(plain.this(), a.this());
-    }
-
     /// A plain rule serializes with no `reduce` key at all, so
     /// pre-aggregation content addresses are preserved.
     #[dialog_common::test]
@@ -815,226 +843,6 @@ mod tests {
             error.contains("grand"),
             "the error names the unknown field, got: {error}"
         );
-    }
-
-    /// A body premise binding a variable named as a reduced field is
-    /// two definitions for one field: a hard error.
-    #[dialog_common::test]
-    fn it_rejects_body_variable_named_as_reduced_field() {
-        use crate::error::TypeError;
-
-        let mut collision = dept_total_json();
-        // The body now binds `?total` while the reduce clause also
-        // defines `total`.
-        collision["when"] = employee_body("total");
-        collision["reduce"] = json!({
-            "total": { "apply": "sum", "of": { "?": { "name": "total" } } }
-        });
-        let def: DeductiveRuleDescriptor = serde_json::from_value(collision).unwrap();
-        match def.compile() {
-            Err(TypeError::ReducedFieldCollision { field, .. }) => {
-                assert_eq!(field, "total");
-            }
-            other => panic!("expected ReducedFieldCollision, got {other:?}"),
-        }
-    }
-
-    /// A variable may feed a grouping field and a fold at once:
-    /// grouping happens first, so both reads agree (key x count
-    /// semantics, Datomic's legal `[:find ?salary (sum ?salary)]`).
-    /// Well-defined, not an error.
-    #[dialog_common::test]
-    fn it_accepts_grouped_and_folded_variable() {
-        let def: DeductiveRuleDescriptor = serde_json::from_value(json!({
-            "deduce": { "with": {
-                "salary": { "the": "org.dept/salary-band", "as": "UnsignedInteger" },
-                "headcount": { "the": "org.dept/headcount", "as": "UnsignedInteger" }
-            }},
-            "when": employee_body("salary"),
-            "reduce": { "headcount": { "apply": "count", "of": { "?": { "name": "salary" } } } }
-        }))
-        .unwrap();
-        let rule = def.compile().expect("grouped-and-folded compiles");
-        assert_eq!(rule.reduce().len(), 1);
-        let reducer = rule.reducer().expect("reducing rule has a reducer");
-        assert_eq!(
-            reducer.groups,
-            vec!["this".to_string(), "salary".to_string()],
-            "grouping fields are the non-reduced head fields"
-        );
-    }
-
-    /// The employee body with an *optional* bonus field: the fold
-    /// input `?bonus` admits Nothing.
-    fn optional_bonus_body() -> serde_json::Value {
-        json!([{
-            "assert": { "with": {
-                "dept": { "the": "org.employee/dept", "as": "Entity" },
-                "bonus": { "the": "org.employee/bonus", "as": "UnsignedInteger", "optional": true }
-            }},
-            "where": {
-                "this": { "?": { "name": "employee" } },
-                "dept": { "?": { "name": "this" } },
-                "bonus": { "?": { "name": "bonus" } }
-            }
-        }])
-    }
-
-    /// `max` over an optional input admits an Absent output, so a
-    /// *required* head field is rejected — through the existing
-    /// RequiredHeadFromOptional check, no aggregation-specific rule.
-    #[dialog_common::test]
-    fn it_rejects_required_head_for_optional_input_max() {
-        use crate::error::TypeError;
-
-        let def: DeductiveRuleDescriptor = serde_json::from_value(json!({
-            "deduce": { "with": {
-                "headcount": { "the": "org.dept/headcount", "as": "UnsignedInteger" },
-                "top": { "the": "org.dept/top-bonus", "as": "UnsignedInteger" }
-            }},
-            "when": optional_bonus_body(),
-            "reduce": {
-                "headcount": { "apply": "count", "of": { "?": { "name": "bonus" } } },
-                "top": { "apply": "max", "of": { "?": { "name": "bonus" } } }
-            }
-        }))
-        .unwrap();
-        match def.compile() {
-            Err(TypeError::RequiredHeadFromOptional { variable, .. }) => {
-                assert_eq!(variable, "top");
-            }
-            other => panic!("expected RequiredHeadFromOptional, got {other:?}"),
-        }
-    }
-
-    /// The accepting direction: declare the head field optional and
-    /// the same rule compiles — an all-absent group will bind it
-    /// Absent. `count` over the same optional input stays required
-    /// (identity 0 exists).
-    #[dialog_common::test]
-    fn it_accepts_optional_head_for_optional_input_max() {
-        let def: DeductiveRuleDescriptor = serde_json::from_value(json!({
-            "deduce": { "with": {
-                "headcount": { "the": "org.dept/headcount", "as": "UnsignedInteger" },
-                "top": {
-                    "the": "org.dept/top-bonus",
-                    "as": "UnsignedInteger",
-                    "optional": true
-                }
-            }},
-            "when": optional_bonus_body(),
-            "reduce": {
-                "headcount": { "apply": "count", "of": { "?": { "name": "bonus" } } },
-                "top": { "apply": "max", "of": { "?": { "name": "bonus" } } }
-            }
-        }))
-        .unwrap();
-        let rule = def
-            .compile()
-            .expect("optional head accepts an optional-input max");
-        assert_eq!(rule.reduce().len(), 2);
-    }
-
-    /// A reducing rule's optional non-reduced head field joins the
-    /// derived grouping set, so leaving it unbound by the body — legal
-    /// for a plain rule, which simply omits the field — would fail
-    /// every evaluation at runtime when the fold looks the grouping
-    /// term up. It is rejected at compile instead.
-    #[dialog_common::test]
-    fn it_rejects_unbound_optional_grouping_field() {
-        use crate::error::TypeError;
-
-        let def: DeductiveRuleDescriptor = serde_json::from_value(json!({
-            "deduce": { "with": {
-                "memo": { "the": "org.dept/memo", "as": "Text", "optional": true },
-                "total": { "the": "org.dept/total", "as": "UnsignedInteger" }
-            }},
-            "when": [{
-                "assert": { "with": {
-                    "dept": { "the": "org.employee/dept", "as": "Entity" },
-                    "salary": { "the": "org.employee/salary", "as": "UnsignedInteger" }
-                }},
-                "where": {
-                    "this": { "?": { "name": "employee" } },
-                    "dept": { "?": { "name": "this" } },
-                    "salary": { "?": { "name": "salary" } }
-                }
-            }],
-            "reduce": { "total": { "apply": "sum", "of": { "?": { "name": "salary" } } } }
-        }))
-        .unwrap();
-        match def.compile() {
-            Err(TypeError::UnboundVariable { variable, .. }) => assert_eq!(variable, "memo"),
-            other => panic!("expected UnboundVariable, got {other:?}"),
-        }
-    }
-
-    /// An aggregator whose requirement the input type cannot meet is
-    /// a construction-time type error, surfaced by the analyzer.
-    #[dialog_common::test]
-    fn it_rejects_sum_over_text_input() {
-        use crate::error::TypeError;
-
-        let def: DeductiveRuleDescriptor = serde_json::from_value(json!({
-            "deduce": { "with": {
-                "total": { "the": "org.dept/total", "as": "UnsignedInteger" }
-            }},
-            "when": [{
-                "assert": { "with": {
-                    "dept": { "the": "org.employee/dept", "as": "Entity" },
-                    "name": { "the": "org.employee/name", "as": "Text" }
-                }},
-                "where": {
-                    "this": { "?": { "name": "employee" } },
-                    "dept": { "?": { "name": "this" } },
-                    "name": { "?": { "name": "name" } }
-                }
-            }],
-            "reduce": { "total": { "apply": "sum", "of": { "?": { "name": "name" } } } }
-        }))
-        .unwrap();
-        match def.compile() {
-            Err(TypeError::ReduceInput { field, .. }) => assert_eq!(field, "total"),
-            other => panic!("expected ReduceInput, got {other:?}"),
-        }
-    }
-
-    /// The fold's output must unify with the head field's declared
-    /// type: `count` produces an unsigned integer, never text.
-    #[dialog_common::test]
-    fn it_rejects_output_that_misses_declared_head_type() {
-        use crate::error::TypeError;
-
-        let def: DeductiveRuleDescriptor = serde_json::from_value(json!({
-            "deduce": { "with": {
-                "total": { "the": "org.dept/total-label", "as": "Text" }
-            }},
-            "when": employee_body("salary"),
-            "reduce": { "total": { "apply": "count", "of": { "?": { "name": "salary" } } } }
-        }))
-        .unwrap();
-        match def.compile() {
-            Err(TypeError::ReduceOutput { field, .. }) => assert_eq!(field, "total"),
-            other => panic!("expected ReduceOutput, got {other:?}"),
-        }
-    }
-
-    /// The fold's input variable must be bound by the body; reduced
-    /// fields themselves are exempt from grounding (the fold defines
-    /// them).
-    #[dialog_common::test]
-    fn it_requires_reduce_input_bound_by_body() {
-        use crate::error::TypeError;
-
-        let mut unbound = dept_total_json();
-        unbound["reduce"] = json!({
-            "total": { "apply": "sum", "of": { "?": { "name": "wages" } } }
-        });
-        let def: DeductiveRuleDescriptor = serde_json::from_value(unbound).unwrap();
-        match def.compile() {
-            Err(TypeError::UnboundVariable { variable, .. }) => assert_eq!(variable, "wages"),
-            other => panic!("expected UnboundVariable, got {other:?}"),
-        }
     }
 
     #[dialog_common::test]

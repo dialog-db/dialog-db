@@ -5,12 +5,13 @@ pub mod dependencies;
 /// Registry for deductive rules, indexed by conclusion entity.
 pub mod rule_registry;
 pub use dependencies::{
-    AggregationViolation, Closure, NegationViolation, Polarity, ProgramAnalysis, Violation,
+    Absence, AbsenceInCycle, AggregationViolation, Closure, Polarity, ProgramAnalysis, Quarantine,
 };
 pub use rule_registry::*;
 
 #[cfg(test)]
 mod tests {
+    use crate::premise::reading;
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -23,7 +24,6 @@ mod tests {
     use crate::Attribute;
     use crate::Match;
     use crate::artifact::{Entity, Value};
-    use crate::attribute::query::AttributeQuery;
     use crate::formula::Like;
     use crate::query::Output;
     use crate::rule::When;
@@ -45,7 +45,6 @@ mod tests {
     };
     use dialog_capability::Provider;
     use dialog_peer::helpers::{test_repo, test_session_with_peer};
-    use implicit_attr_test::{Name, Role};
 
     /// Lower a single proposition to its compiled `Plan` for the
     /// given binding scope. Tests that exercise a concept/attribute
@@ -59,6 +58,30 @@ mod tests {
         Planner::from(vec![Premise::Assert(proposition)])
             .plan(&scope)
             .expect("proposition should plan")
+    }
+
+    /// A rule deriving every field of `concept` from a `stated-` attribute
+    /// beside it (`person/name` from `person/stated-name`): a rule in the
+    /// formal notation, as the registry installs, that does not read what
+    /// it derives.
+    fn stated(concept: &ConceptDescriptor) -> DeductiveRule {
+        let premises = concept
+            .with()
+            .iter()
+            .map(|(name, field)| {
+                let relation = field.the().to_string();
+                let (domain, attribute) = relation.split_once('/').expect("a relation");
+                reading(
+                    format!("{domain}/stated-{attribute}")
+                        .parse::<crate::The>()
+                        .expect("an attribute"),
+                    Term::var("this"),
+                    Term::var(name),
+                    None,
+                )
+            })
+            .collect();
+        DeductiveRule::new(concept.clone(), premises).expect("the rule compiles")
     }
 
     #[dialog_common::test]
@@ -330,22 +353,18 @@ mod tests {
         let employee_from_stuff = DeductiveRule::new(
             employee_predicate,
             vec![
-                AttributeQuery::new(
-                    Term::from(the!("stuff/name")),
+                reading(
+                    the!("stuff/name"),
                     Term::var("this"),
                     Term::var("name"),
-                    Term::blank(),
                     None,
-                )
-                .into(),
-                AttributeQuery::new(
-                    Term::from(the!("stuff/role")),
+                ),
+                reading(
+                    the!("stuff/role"),
                     Term::var("this"),
                     Term::var("job"),
-                    Term::blank(),
                     None,
-                )
-                .into(),
+                ),
             ],
         )?;
 
@@ -461,11 +480,10 @@ mod tests {
                     name: employee.name.clone(),
                     role: employee.job,
                 },
-                AttributeQuery::new(
-                    Term::from(the!("stuff/name")),
+                reading(
+                    the!("stuff/name"),
                     employee.this,
                     employee.name.clone().into(),
-                    Term::blank(),
                     None,
                 ),
             )
@@ -589,7 +607,7 @@ mod tests {
         ])
         .unwrap();
 
-        let rule = DeductiveRule::from(&adult_conclusion);
+        let rule = stated(&adult_conclusion);
 
         let mut registry = RuleRegistry::new();
         registry.register(rule.clone())?;
@@ -622,7 +640,7 @@ mod tests {
             ),
         )])
         .unwrap();
-        let rule = DeductiveRule::from(&concept);
+        let rule = stated(&concept);
 
         // Test with RuleRegistry + TestEnv
         let mut registry = RuleRegistry::new();
@@ -650,7 +668,7 @@ mod tests {
         )])
         .unwrap();
 
-        let adult_rule = DeductiveRule::from(&adult_concept);
+        let adult_rule = stated(&adult_concept);
 
         let mut registry = RuleRegistry::new();
         registry.register(adult_rule.clone())?;
@@ -659,16 +677,6 @@ mod tests {
         let _rules = registry.acquire(&adult_concept)?;
 
         Ok(())
-    }
-
-    mod implicit_attr_test {
-        use crate::Attribute;
-
-        #[derive(Attribute, Clone, PartialEq)]
-        pub struct Name(pub String);
-
-        #[derive(Attribute, Clone, PartialEq)]
-        pub struct Role(pub String);
     }
 
     #[dialog_common::test]
@@ -862,119 +870,6 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_common::test]
-    async fn it_infers_implicit_attributes() -> anyhow::Result<()> {
-        #[derive(Clone, Debug, PartialEq, Concept)]
-        pub struct Employee {
-            /// Employee
-            pub this: Entity,
-            /// Employee Name
-            pub name: Name,
-            /// The job title of the employee
-            pub role: Role,
-        }
-
-        #[derive(Clone, Debug, PartialEq, Concept)]
-        pub struct EmployeeWithoutRole {
-            /// Employee
-            pub this: Entity,
-            /// Employee Name
-            pub name: Name,
-        }
-
-        // Define a rule using the clean function API - no manual DeductiveRule construction!
-        fn employee_with_implicit_title(employee: Query<Employee>) -> impl When {
-            // This rule says: "An employee exists when there's stuff with matching attributes"
-            // The premises check for stuff/name and stuff/role matching employee/name and employee/job
-            (
-                employee.role.is(Role("employee".into())),
-                // employee has a name
-                AttributeQuery::new(
-                    Term::from(the!("implicit-attr-test/name")),
-                    employee.this.clone(),
-                    employee.name.clone().into(),
-                    Term::blank(),
-                    None,
-                ),
-                // but does not have role (using ! operator)
-                !AttributeQuery::new(
-                    Term::from(the!("implicit-attr-test/role")),
-                    employee.this.clone(),
-                    Term::blank(),
-                    Term::blank(),
-                    None,
-                ),
-            )
-        }
-
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-
-        // Install the rule using the clean API - no turbofish needed!
-        // The type inference works: Employee is inferred from the function parameter
-        let query_e = Query::<Employee>::default();
-        let concept_e: ConceptDescriptor = Employee::descriptor().clone();
-        let when_e = employee_with_implicit_title(query_e).into_premises();
-        let rule_e = DeductiveRule::new(concept_e, when_e.into_vec()).map_err(|e| {
-            EvaluationError::Planning {
-                message: e.to_string(),
-            }
-        })?;
-        let mut rules = RuleRegistry::new();
-        rules.register(rule_e)?;
-
-        branch
-            .transaction()
-            .assert(Employee {
-                this: Entity::new()?,
-                name: Name("Alice".into()),
-                role: Role("manager".into()),
-            })
-            .assert(EmployeeWithoutRole {
-                this: Entity::new()?,
-                name: Name("Bob".into()),
-            })
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-
-        let session = TestEnv::new(&branch, &operator, rules);
-        // Verify Stuff records exist
-        let employees = Query::<Employee> {
-            this: Term::var("employee"),
-            name: Term::var("name"),
-            role: Term::var("title"),
-        };
-
-        let result = employees.perform(&session).try_vec().await?;
-        assert_eq!(result.len(), 2, "Should have 2 Stuff records");
-
-        // Verify the derived data is correct
-        let mut found_alice = false;
-        let mut found_bob = false;
-
-        for employee in result {
-            match employee.name.value().as_str() {
-                "Alice" => {
-                    assert_eq!(employee.role.value(), "manager");
-                    found_alice = true;
-                }
-                "Bob" => {
-                    assert_eq!(employee.role.value(), "employee");
-                    found_bob = true;
-                }
-                name => panic!("Unexpected employee: {}", name),
-            }
-        }
-
-        assert!(found_alice, "Should find Alice as an employee");
-        assert!(found_bob, "Should find Bob as an employee");
-
-        Ok(())
-    }
-
     // Plan caching tests
     //
     // These tests verify that the adornment-keyed plan cache (inspired by magic
@@ -1098,7 +993,7 @@ mod tests {
             AttributeDescriptor::new(the!("book/title"), "", Cardinality::One, Some(Type::String)),
         )])
         .unwrap();
-        let rule = DeductiveRule::from(&unrelated);
+        let rule = stated(&unrelated);
         registry.register(rule).unwrap();
 
         // Person's cache should be untouched (same ConceptRules, shared Arc)

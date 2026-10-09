@@ -4,6 +4,7 @@ use crate::attribute::AttributeDescriptor;
 use crate::attribute::Relation;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
+use crate::memo::Memo;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -58,6 +59,12 @@ pub struct ConceptFieldDescriptor {
     /// hashing uses only the target's `concept:{hash}` URI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     conforms: Option<Box<ConceptDescriptor>>,
+    /// The attribute concept of this field (see
+    /// [`ConceptDescriptor::of_attribute`]), built on first use. Every
+    /// resolution of a concept asks for it, and for its identity, per
+    /// field; clones share the memo, so the identity is hashed once.
+    #[serde(skip)]
+    attribute: Memo<ConceptDescriptor>,
 }
 
 impl ConceptFieldDescriptor {
@@ -67,6 +74,7 @@ impl ConceptFieldDescriptor {
             descriptor,
             optional: false,
             conforms: None,
+            attribute: Memo::default(),
         }
     }
 
@@ -77,7 +85,15 @@ impl ConceptFieldDescriptor {
             descriptor,
             optional: true,
             conforms: None,
+            attribute: Memo::default(),
         }
+    }
+
+    /// The attribute concept of this field: the single-field concept
+    /// that is the relation of its attribute.
+    pub fn attribute_concept(&self) -> &ConceptDescriptor {
+        self.attribute
+            .get_or_init(|| ConceptDescriptor::attribute_concept(self))
     }
 
     /// A *concept-typed* field: a required, entity-valued attribute
@@ -99,6 +115,7 @@ impl ConceptFieldDescriptor {
             descriptor,
             optional: false,
             conforms: Some(Box::new(target)),
+            attribute: Memo::default(),
         })
     }
 
@@ -210,6 +227,12 @@ impl NamedAttributes {
             return Err(TypeError::EmptyConcept);
         }
         for field in map.values() {
+            if let Some(reason) = field.descriptor().select_error() {
+                return Err(TypeError::SelectPolicy {
+                    the: field.the().to_string(),
+                    reason,
+                });
+            }
             if field.is_optional() && field.the().attribute().is_none() {
                 return Err(TypeError::OptionalCollection {
                     domain: field.domain().to_string(),

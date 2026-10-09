@@ -42,7 +42,7 @@ impl<I: Importer + Unpin + ConditionalSend> Import<'_, I> {
     {
         let instructions = self.importer.filter_map(|result| async {
             match result {
-                Ok(artifact) => Some(Instruction::Assert(artifact)),
+                Ok(artifact) => Some(Instruction::Assert(artifact, dialog_artifacts::Policy::All)),
                 Err(error) => {
                     eprintln!("Skipping incompatible datum: {error}");
                     None

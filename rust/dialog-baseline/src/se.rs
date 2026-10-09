@@ -358,9 +358,9 @@ pub fn se_instructions(commit: &[SeFact]) -> Result<Vec<Instruction>> {
             cause: None,
         };
         instructions.push(if is_multi_valued(&fact.the) {
-            Instruction::Assert(artifact)
+            Instruction::Assert(artifact, dialog_artifacts::Policy::All)
         } else {
-            Instruction::Replace(artifact)
+            Instruction::Assert(artifact, dialog_artifacts::Policy::Last)
         });
     }
     Ok(instructions)

@@ -1,5 +1,8 @@
 use std::str::FromStr;
 
+pub mod metered;
+pub use metered::{Meter, Metered, Tally};
+
 use crate::{
     Allowance, Mode, OpenCredential, Peer, PeerError, PeerSpace, Session, SpaceVaultExt as _,
 };
@@ -98,6 +101,17 @@ pub async fn open_peer<S: PeerSpace>(
         .perform(&test_credential_store())
         .await
         .map_err(|error| PeerError::Open(error.to_string()))?;
+    open_peer_as(storage, location, credential).await
+}
+
+/// [`open_peer`] with the key given: a root peer acting as `credential`,
+/// for a test or measurement that needs the same peer, and so the same
+/// identifiers in everything it writes, from one run to the next.
+pub async fn open_peer_as<S: PeerSpace>(
+    storage: Storage<S>,
+    location: Location,
+    credential: SignerCredential,
+) -> Result<Peer<S>, PeerError> {
     let peer = Peer::new(credential.clone())
         .at(location)
         .space(test_state(&credential.did()))

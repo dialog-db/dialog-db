@@ -3,7 +3,7 @@ use crate::attribute::The;
 use crate::attribute::expression::dynamic::DynamicAttributeExpression;
 use crate::schema::Cardinality;
 use crate::statement::Statement;
-use dialog_artifacts::Update;
+use dialog_artifacts::{Policy, Update};
 
 /// A type-erased, attribute statement.
 ///
@@ -20,12 +20,17 @@ impl Statement for AttributeStatement {
     fn assert(self, update: &mut impl Update) {
         let the = self.the;
         let value = self.is;
-        match self.cardinality {
-            Some(Cardinality::One) => {
-                update.associate_unique(the.into(), self.of, value);
+        match (self.policy, self.cardinality) {
+            (Some(policy), _) => {
+                update.associate(the.into(), self.of, value, policy);
             }
-            _ => {
-                update.associate(the.into(), self.of, value);
+            // A cardinality-one write with no policy spelled is a
+            // `last` write.
+            (None, Some(Cardinality::One)) => {
+                update.associate(the.into(), self.of, value, Policy::Last);
+            }
+            (None, _) => {
+                update.associate(the.into(), self.of, value, dialog_artifacts::Policy::All);
             }
         }
     }

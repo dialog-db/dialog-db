@@ -18,7 +18,7 @@ use dialog_query::attribute::The;
 use dialog_query::query::Output;
 use dialog_query::{Query, Term, the};
 use dialog_storage::provider::storage::VolatileSpace;
-use futures_util::{StreamExt as _, stream};
+use futures_util::StreamExt as _;
 
 use crate::helpers::test_repo;
 use crate::repository::source::SourceRef;
@@ -405,12 +405,6 @@ async fn it_keeps_the_revision_for_a_noop() -> Result<()> {
         .await?;
     assert_eq!(unchanged, base, "retracting an absent fact mints nothing");
 
-    let unchanged = snapshot
-        .commit(stream::iter(Vec::<Instruction>::new()))
-        .perform(&operator)
-        .await?;
-    assert_eq!(unchanged, base);
-
     // `allow_empty` mints anyway: the lineage advances, and the
     // revision's own records still land in the tree.
     let empty = snapshot
@@ -554,7 +548,13 @@ async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
         cause: None,
     };
     let result = snapshot
-        .commit(stream::iter(vec![Instruction::Assert(forged)]))
+        .transaction()
+        .integrate(
+            [Instruction::Assert(forged, dialog_artifacts::Policy::All)]
+                .into_iter()
+                .collect(),
+        )
+        .commit()
         .perform(&operator)
         .await;
     assert!(
@@ -843,9 +843,16 @@ async fn it_commits_through_a_cold_handle() -> Result<()> {
     let (operator, _, repo, _, snapshot) = staged().await?;
     let cold = repo.snapshot(snapshot.revision());
     let minted = cold
-        .commit(stream::iter(vec![Instruction::Assert(fact(
-            "user:bob", "Bob",
-        ))]))
+        .transaction()
+        .integrate(
+            [Instruction::Assert(
+                fact("user:bob", "Bob"),
+                dialog_artifacts::Policy::All,
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .commit()
         .canonicalize()
         .perform(&operator)
         .await?;

@@ -64,6 +64,23 @@ pub fn reads_attr() -> Attribute {
     the!("dialog.rule/reads").into()
 }
 
+/// The `dialog.rule/derives` head index for *deductive* rules: one claim
+/// per attribute the rule's conclusion carries, valued
+/// `on:<domain>/<name>`. Resolution probes it per attribute, so a rule
+/// is found by every concept selecting any attribute it derives, not
+/// only by the concept it was written against.
+pub fn derives_attr() -> Attribute {
+    the!("dialog.rule/derives").into()
+}
+
+/// The `dialog.rule/quarantined` attribute: a rule the program analysis
+/// sets aside, valued with the concept whose cycle it closed. Never
+/// stored: a branch answers it from the rules its layers hold, so it
+/// moves as rules are installed and retracted.
+pub fn quarantined_attr() -> Attribute {
+    the!("dialog.rule/quarantined").into()
+}
+
 /// The `on:<domain>/<name>` trigger-index entity for an attribute.
 /// Derivable from a runtime instruction alone — no schema lookup —
 /// which is what keeps dispatch probing cheap.
@@ -174,8 +191,10 @@ fn premise_trigger_entities<'p>(
     for proposition in propositions {
         if let Proposition::Concept(query) = proposition {
             for (_, field) in query.predicate.with().iter() {
-                if let Some(entity) = Reach::of(field.descriptor().the()).on_entity() {
-                    entities.insert(entity);
+                for relation in field.descriptor().relations() {
+                    if let Some(entity) = Reach::of(relation).on_entity() {
+                        entities.insert(entity);
+                    }
                 }
             }
         }
@@ -201,6 +220,31 @@ pub fn reads_entities(rule: &DeductiveRule) -> BTreeSet<Entity> {
     premise_trigger_entities(descriptor.when.iter().chain(descriptor.unless.iter()))
 }
 
+/// The head-index entities for a deductive rule: one per attribute of
+/// its conclusion. Stored as `dialog.rule/derives` so resolution can
+/// find, for one attribute, every rule deriving it, whatever concept
+/// the rule was written against.
+pub fn derives_entities(rule: &DeductiveRule) -> BTreeSet<Entity> {
+    head_entities(rule.conclusion())
+}
+
+/// The head-index entities of a concept: the reach entity of each of
+/// its attributes, as [`derives_entities`] records them for a rule
+/// concluding it.
+pub fn head_entities(concept: &crate::ConceptDescriptor) -> BTreeSet<Entity> {
+    concept
+        .with()
+        .iter()
+        .flat_map(|(_, field)| {
+            field
+                .descriptor()
+                .relations()
+                .filter_map(|relation| Reach::of(relation).on_entity())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// Asserting a [`DeductiveRule`] installs it as `dialog.rule/*` facts:
 /// the `conclusion` discovery index, the `source` body, and the `reads`
 /// reverse index over the body's attributes that lets commit-time
@@ -222,14 +266,29 @@ impl Statement for &DeductiveRule {
             conclusion_attr(),
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
+            dialog_artifacts::Policy::All,
         );
         update.associate(
             source_attr(),
             rule_entity.clone(),
             Value::Bytes(self.encode()),
+            dialog_artifacts::Policy::All,
         );
         for reads in reads_entities(self) {
-            update.associate(reads_attr(), rule_entity.clone(), Value::Entity(reads));
+            update.associate(
+                reads_attr(),
+                rule_entity.clone(),
+                Value::Entity(reads),
+                dialog_artifacts::Policy::All,
+            );
+        }
+        for derives in derives_entities(self) {
+            update.associate(
+                derives_attr(),
+                rule_entity.clone(),
+                Value::Entity(derives),
+                dialog_artifacts::Policy::All,
+            );
         }
     }
 
@@ -247,6 +306,9 @@ impl Statement for &DeductiveRule {
         );
         for reads in reads_entities(self) {
             update.dissociate(reads_attr(), rule_entity.clone(), Value::Entity(reads));
+        }
+        for derives in derives_entities(self) {
+            update.dissociate(derives_attr(), rule_entity.clone(), Value::Entity(derives));
         }
     }
 }
@@ -273,14 +335,21 @@ impl Statement for &InductiveRule {
             source_attr(),
             rule_entity.clone(),
             Value::Bytes(self.encode()),
+            dialog_artifacts::Policy::All,
         );
         update.associate(
             induces_attr(),
             rule_entity.clone(),
             Value::Entity(self.conclusion().this()),
+            dialog_artifacts::Policy::All,
         );
         for on in on_entities(self) {
-            update.associate(on_attr(), rule_entity.clone(), Value::Entity(on));
+            update.associate(
+                on_attr(),
+                rule_entity.clone(),
+                Value::Entity(on),
+                dialog_artifacts::Policy::All,
+            );
         }
     }
 

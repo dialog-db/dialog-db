@@ -1,10 +1,22 @@
 mod batch;
 mod induce;
+#[cfg(test)]
+mod invariants;
+#[cfg(test)]
+mod migration;
+#[cfg(test)]
+mod oracle;
+#[cfg(test)]
+mod quarantine;
+pub(crate) use induce::induction_ignores;
 mod query;
+mod succession;
 pub use batch::*;
 pub use query::{TransactionQuery, TransactionSelectQuery};
+pub(crate) use succession::ReadSettlement;
 
 use crate::Commit;
+use crate::repository::branch::QueryLayer;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::source::SourceRef;
 use crate::rules::{SharedRuleCache, TriggerFootprint, on_attr, reads_attr};
@@ -87,8 +99,8 @@ impl<Line> Transaction<Line> {
     /// Integrate an external [`Changes`] batch into this transaction.
     ///
     /// Each instruction is replayed as if it had been asserted or
-    /// retracted on the transaction directly — `Assert`/`Replace`
-    /// become additive entries, `Retract` becomes a retraction entry —
+    /// retracted on the transaction directly — `Assert` becomes an
+    /// entry under its policy, `Retract` a retraction entry —
     /// and the batch's asset changes are staged on the transaction.
     /// Useful for callers that build a [`Changes`] independently
     /// (e.g. a reactor accumulating effect outputs across rounds) and
@@ -110,7 +122,7 @@ impl<Line> Transaction<Line> {
     pub fn commit(self) -> TransactionCommit<Line> {
         TransactionCommit {
             line: self.line,
-            changes: self.changes.export(),
+            changes: self.changes.clone(),
             transients: self.transients.export(),
             allow_empty: false,
             canonicalize: false,
@@ -191,7 +203,7 @@ impl Snapshot {
 /// durable batch.
 pub struct TransactionCommit<Line> {
     pub(super) line: Line,
-    pub(super) changes: Changes,
+    pub(super) changes: Staged,
     pub(super) transients: Changes,
     pub(super) allow_empty: bool,
     pub(super) canonicalize: bool,
@@ -238,7 +250,15 @@ impl TransactionCommit<&Snapshot> {
             + 'static,
     {
         let snapshot = self.line;
-        let mut changes = self.changes;
+        let source = SourceRef::Snapshot(snapshot);
+        let operator = Identify.perform(env).await?;
+        let mut changes = Box::pin(succession::settle(
+            vec![source.to_source()],
+            QueryLayer::from(source).overlay(&operator),
+            &self.changes,
+            env,
+        ))
+        .await?;
         // A snapshot commit reports only its revision: the transients
         // induction emitted surface on a staged
         // [`TransactionBatch::induced`] alone.

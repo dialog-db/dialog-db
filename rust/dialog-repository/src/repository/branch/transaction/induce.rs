@@ -46,7 +46,7 @@ use dialog_effects::memory::Resolve;
 use dialog_query::attribute::Relation;
 use dialog_query::rule::inductive::Polarity;
 use dialog_query::rule::statement::Reach;
-use dialog_query::{Any, Binding, Cardinality, Environment, InductiveRule, Match, Term};
+use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
 use crate::repository::branch::QueryLayer;
@@ -144,10 +144,11 @@ where
         let mut replace_attrs: BTreeSet<Attribute> = BTreeSet::new();
         for instruction in &stimulus {
             match instruction {
-                Instruction::Assert(a) => assert_rows.push(a.clone()),
-                Instruction::Replace(a) => {
+                Instruction::Assert(a, policy) => {
                     assert_rows.push(a.clone());
-                    replace_attrs.insert(a.the.clone());
+                    if policy.elects() {
+                        replace_attrs.insert(a.the.clone());
+                    }
                 }
                 Instruction::Retract(a) => {
                     retract_attrs.insert(a.the.clone());
@@ -161,7 +162,7 @@ where
         let mut touched: BTreeSet<Reach> = stimulus
             .iter()
             .map(|instruction| match instruction {
-                Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Retract(a) => {
+                Instruction::Assert(a, _) | Instruction::Retract(a) => {
                     Reach::Attribute(a.the.clone())
                 }
             })
@@ -189,7 +190,7 @@ where
         let mut installed: BTreeSet<Entity> = BTreeSet::new();
         let mut installed_deductive: BTreeSet<Entity> = BTreeSet::new();
         for instruction in &stimulus {
-            if let Instruction::Assert(a) | Instruction::Replace(a) = instruction {
+            if let Instruction::Assert(a, _) = instruction {
                 if a.the == on {
                     installed.insert(a.of.clone());
                 } else if a.the == reads {
@@ -353,9 +354,7 @@ impl OverlayTriggers {
         let mut slice = OverlayTriggers::default();
         for (entity, attribute, change) in changes.iter() {
             if *attribute == on {
-                if let Change::Assert(Value::Entity(key)) | Change::Replace(Value::Entity(key)) =
-                    change
-                {
+                if let Change::Assert(Value::Entity(key), _) = change {
                     slice
                         .on
                         .entry(key.clone())
@@ -363,9 +362,7 @@ impl OverlayTriggers {
                         .push(entity.clone());
                 }
             } else if *attribute == reads {
-                if let Change::Assert(Value::Entity(key)) | Change::Replace(Value::Entity(key)) =
-                    change
-                {
+                if let Change::Assert(Value::Entity(key), _) = change {
                     slice
                         .reads
                         .entry(key.clone())
@@ -374,7 +371,7 @@ impl OverlayTriggers {
                 }
             } else if *attribute == source {
                 match change {
-                    Change::Assert(Value::Bytes(bytes)) | Change::Replace(Value::Bytes(bytes)) => {
+                    Change::Assert(Value::Bytes(bytes), _) => {
                         slice.sources.insert(entity.clone(), bytes.clone());
                     }
                     Change::Retract(_) => {
@@ -384,7 +381,7 @@ impl OverlayTriggers {
                 }
             } else if *attribute == transient {
                 match change {
-                    Change::Assert(_) | Change::Replace(_) => {
+                    Change::Assert(_, _) => {
                         slice.transient.insert(entity.clone());
                     }
                     Change::Retract(_) => {
@@ -608,7 +605,7 @@ impl<'a> Dispatch<'a> {
             .and_then(|bytes| hydrate(&bytes).ok())
             // Content-address check: forged bytes stored under a
             // mismatching entity are inert.
-            .filter(|body| body.try_this() == Some(entity.clone()))
+            .filter(|body| body.stored_as(entity))
             .inspect(|body| {
                 cache.record_body(entity.clone(), body.clone());
             }))
@@ -655,7 +652,7 @@ impl<'a> Dispatch<'a> {
         let Ok(rule) = hydrate_inductive(&bytes) else {
             return Ok(None);
         };
-        if rule.try_this() != Some(entity.clone()) {
+        if !rule.stored_as(entity) {
             return Ok(None);
         }
         cache.record_inductive(entity.clone(), rule.clone());
@@ -830,15 +827,7 @@ where
             .map_err(|error| CommitError::Induction(format!("watermark spilled: {error:?}")))?;
         let fact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)
             .map_err(|error| CommitError::Induction(format!("watermark datum: {error:?}")))?;
-        // Version-control records (which every commit writes) are
-        // excluded from the lag; the carved-out rule and marker
-        // prefixes pass through, so a rule arriving by pull or raw
-        // commit installs at this instant.
-        let the = fact.the.to_string();
-        if the.starts_with("dialog.")
-            && !the.starts_with("dialog.rule/")
-            && !the.starts_with("dialog.concept/")
-        {
+        if induction_ignores(&fact.the.to_string()) {
             continue;
         }
         if !seen.insert((
@@ -850,12 +839,28 @@ where
             continue;
         }
         lag.push(if arriving {
-            Instruction::Assert(fact)
+            Instruction::Assert(fact, dialog_artifacts::Policy::All)
         } else {
             Instruction::Retract(fact)
         });
     }
     Ok(lag)
+}
+
+/// Whether induction drops facts under `the`: version-control records
+/// (which every commit writes) are excluded from the lag, so catching
+/// up over N commits stimulates rules with the *data* those commits
+/// changed, not their bookkeeping. The carved-out rule and marker
+/// prefixes pass through, so a rule arriving by pull or raw commit
+/// installs at this instant.
+///
+/// A commit whose every fact this drops is an inducing instant with an
+/// empty delta; [`Branch::commit`](crate::Branch::commit) carries the
+/// watermark over such a commit on that ground.
+pub(crate) fn induction_ignores(the: &str) -> bool {
+    the.starts_with("dialog.")
+        && !the.starts_with("dialog.rule/")
+        && !the.starts_with("dialog.concept/")
 }
 
 /// Collect the artifacts a selector matches on the line's committed
@@ -889,22 +894,10 @@ where
 }
 
 /// Collect the artifacts a selector matches in the layered view.
-async fn select<'a, Env>(
-    view: &QueryEnv<'a, Env>,
+async fn select<'a>(
+    view: &QueryEnv<'a>,
     selector: ArtifactSelector<Constrained>,
-) -> Result<Vec<Artifact>, CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<Vec<Artifact>, CommitError> {
     let stream = Provider::<Select<'_>>::execute(view, selector)
         .await
         .map_err(|error| CommitError::Induction(format!("dispatch probe: {error}")))?;
@@ -918,25 +911,13 @@ where
 /// Evaluate one rule's body against the frozen round view and emit its
 /// head for every binding: transient heads into `transients`, durable
 /// heads (novelty-checked against the view) into `novelty`.
-async fn fire<'a, Env>(
+async fn fire<'a>(
     rule: &InductiveRule,
     transient_head: bool,
-    view: &QueryEnv<'a, Env>,
+    view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
-) -> Result<(), CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<(), CommitError> {
     let plan = rule.plan(&Environment::new());
     let matches: Vec<Match> = plan
         .evaluate(Match::new().seed(), view)
@@ -978,26 +959,14 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 /// premise (removal-enabled and derived-premise firings take the
 /// full-body path instead), so seeding is complete for this candidate
 /// class while costing the delta's join fan-out, not relation size.
-async fn fire_seeded<'a, Env>(
+async fn fire_seeded<'a>(
     rule: &InductiveRule,
     transient_head: bool,
     rows: &[Artifact],
-    view: &QueryEnv<'a, Env>,
+    view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
-) -> Result<(), CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<(), CommitError> {
     use dialog_query::{Premise, Proposition};
 
     let mut matches: Vec<Match> = Vec::new();
@@ -1098,26 +1067,14 @@ fn bind_seed(
 /// Emit a rule's head for every produced match: transient heads into
 /// `transients`, durable heads (novelty-checked against the frozen
 /// view) into `novelty`.
-async fn emit_matches<'a, Env>(
+async fn emit_matches<'a>(
     rule: &InductiveRule,
     transient_head: bool,
     matches: Vec<Match>,
-    view: &QueryEnv<'a, Env>,
+    view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
-) -> Result<(), CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<(), CommitError> {
     let conclusion = rule.conclusion();
     for matched in matches {
         // The head subject. A rule whose premises leave `this` unbound
@@ -1155,24 +1112,18 @@ where
                 Polarity::Retract => {
                     dialog_artifacts::Update::dissociate(&mut head, attribute, this.clone(), value);
                 }
-                Polarity::Assert => match field.descriptor().cardinality() {
-                    Cardinality::One => {
-                        dialog_artifacts::Update::associate_unique(
-                            &mut head,
-                            attribute,
-                            this.clone(),
-                            value,
-                        );
-                    }
-                    Cardinality::Many => {
-                        dialog_artifacts::Update::associate(
-                            &mut head,
-                            attribute,
-                            this.clone(),
-                            value,
-                        );
-                    }
-                },
+                // An asserting head writes as the field's policy says: a
+                // set appends, and a choosing policy succeeds the claim
+                // it elects, resolved against the view at commit.
+                Polarity::Assert => {
+                    dialog_artifacts::Update::associate(
+                        &mut head,
+                        attribute,
+                        this.clone(),
+                        value,
+                        field.descriptor().policy(),
+                    );
+                }
             }
         }
 
@@ -1180,14 +1131,15 @@ where
             head.assert(transients);
             continue;
         }
+        // A head written by succession elects the claim it succeeds
+        // against the round view, as a transaction's own writes do
+        // against the line at commit.
+        Box::pin(super::succession::resolve_against(view, &mut head)).await?;
         for instruction in head.into_instructions() {
             if is_novel(view, &instruction).await? {
                 match instruction {
-                    Instruction::Assert(a) => {
-                        dialog_artifacts::Update::associate(novelty, a.the, a.of, a.is)
-                    }
-                    Instruction::Replace(a) => {
-                        dialog_artifacts::Update::associate_unique(novelty, a.the, a.of, a.is)
+                    Instruction::Assert(a, policy) => {
+                        dialog_artifacts::Update::associate(novelty, a.the, a.of, a.is, policy)
                     }
                     Instruction::Retract(a) => {
                         dialog_artifacts::Update::dissociate(novelty, a.the, a.of, a.is)
@@ -1206,24 +1158,9 @@ where
 /// re-derives existing state terminates for free. The view is the
 /// frozen round view, so siblings within a round judge novelty against
 /// identical state.
-async fn is_novel<'a, Env>(
-    view: &QueryEnv<'a, Env>,
-    instruction: &Instruction,
-) -> Result<bool, CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<bool, CommitError> {
     let artifact = match instruction {
-        Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Retract(a) => a,
+        Instruction::Assert(a, _) | Instruction::Retract(a) => a,
     };
     let selector = ArtifactSelector::new()
         .the(artifact.the.clone())
@@ -1231,7 +1168,7 @@ where
         .is(artifact.is.clone());
     let present = !select(view, selector).await?.is_empty();
     Ok(match instruction {
-        Instruction::Assert(_) | Instruction::Replace(_) => !present,
+        Instruction::Assert(_, _) => !present,
         Instruction::Retract(_) => present,
     })
 }
@@ -1243,7 +1180,7 @@ mod tests {
 
     use crate::helpers::test_repo;
     use crate::rules::Transient;
-    use crate::{Branch, CommitError, RemoteSite};
+    use crate::{Branch, CommitError, RemoteSite, Revision};
     use anyhow::Result;
     use dialog_artifacts::{ArtifactSelector, Changes, Entity, Instruction, Value};
     use dialog_capability::{Fork, Provider};
@@ -1643,9 +1580,7 @@ mod tests {
             .into_instructions()
             .into_iter()
             .filter_map(|instruction| match instruction {
-                Instruction::Assert(a) | Instruction::Replace(a) => {
-                    Some((a.the.to_string(), a.of, a.is))
-                }
+                Instruction::Assert(a, _) => Some((a.the.to_string(), a.of, a.is)),
                 Instruction::Retract(_) => None,
             })
             .collect();
@@ -2582,6 +2517,127 @@ mod tests {
         .expect("tagger rule compiles")
     }
 
+    /// The induction watermark of a branch, as stored.
+    async fn watermark<Env>(branch: &Branch, env: &Env) -> Result<Option<Revision>>
+    where
+        Env: Provider<Resolve> + ConditionalSync,
+    {
+        let cell = branch.induction_cell();
+        cell.resolve().perform(env).await?;
+        Ok(cell.content())
+    }
+
+    /// A machinery commit writes the reserved records induction drops,
+    /// so it is an inducing instant with an empty delta: the watermark
+    /// follows it when it stood at the head the commit built on. A lag
+    /// an application fact left through the raw path stays where it
+    /// is, and the next inducing instant catches up over both.
+    #[dialog_common::test]
+    async fn it_carries_the_watermark_over_a_machinery_commit() -> Result<()> {
+        use dialog_artifacts::{Artifact, Instruction};
+        use futures_util::stream;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(tagger())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            branch.revision(),
+            "a transaction leaves the watermark at the head"
+        );
+
+        let record = |audience: &str| -> Result<Instruction> {
+            Ok(Instruction::Assert(
+                Artifact {
+                    the: "dialog.ucan/audience".parse()?,
+                    of: "ucan:1".parse()?,
+                    is: Value::String(audience.into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            ))
+        };
+
+        // Reserved records alone: the watermark follows the head.
+        branch
+            .commit(stream::iter(vec![record("did:key:zAlice")?]))
+            .machinery()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            branch.revision(),
+            "a machinery commit carries the watermark to its head"
+        );
+        let carried = branch.revision();
+
+        // An application fact through the raw path lags.
+        let doc: Entity = "doc:1".parse()?;
+        branch
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "doc/title".parse()?,
+                    of: doc.clone(),
+                    is: Value::String("hello".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            carried,
+            "a raw commit of an application fact leaves the watermark behind"
+        );
+
+        // A machinery commit over a lag leaves the lag for the next
+        // inducing instant.
+        branch
+            .commit(stream::iter(vec![record("did:key:zBob")?]))
+            .machinery()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            carried,
+            "a machinery commit does not skip a lag"
+        );
+        assert!(
+            values(&branch, &operator, "derived/tag", &doc)
+                .await?
+                .is_empty(),
+            "nothing induced yet"
+        );
+
+        // The next inducing instant catches up over both commits.
+        branch.induce(&operator).await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "derived/tag", &doc).await?,
+            vec![Value::String("hello".into())],
+            "the lagged fact induces at the next instant"
+        );
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            branch.revision(),
+            "the catch-up carries the watermark to the head"
+        );
+        Ok(())
+    }
+
     /// A raw [`Branch::commit`] bypasses induction — the model of a
     /// pull. The watermark records the lag, and the next inducing
     /// instant ([`Branch::induce`] here) catches up: the rule fires
@@ -2608,12 +2664,15 @@ mod tests {
         // Head advances without induction — the pull surrogate.
         let doc: Entity = "doc:1".parse()?;
         branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "doc/title".parse()?,
-                of: doc.clone(),
-                is: Value::String("hello".into()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "doc/title".parse()?,
+                    of: doc.clone(),
+                    is: Value::String("hello".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2691,12 +2750,15 @@ mod tests {
         // P arrives outside any transaction.
         let subject: Entity = "pair:1".parse()?;
         branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "fact.p/v".parse()?,
-                of: subject.clone(),
-                is: Value::String("p".into()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "fact.p/v".parse()?,
+                    of: subject.clone(),
+                    is: Value::String("p".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2747,12 +2809,15 @@ mod tests {
             .await?;
         branch.refresh(&operator).await?;
         branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "doc/title".parse()?,
-                of: old.clone(),
-                is: Value::String("old".into()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "doc/title".parse()?,
+                    of: old.clone(),
+                    is: Value::String("old".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2772,12 +2837,15 @@ mod tests {
         // up at the next instant.
         let fresh: Entity = "doc:new".parse()?;
         branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "doc/title".parse()?,
-                of: fresh.clone(),
-                is: Value::String("new".into()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "doc/title".parse()?,
+                    of: fresh.clone(),
+                    is: Value::String("new".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;

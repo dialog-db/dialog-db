@@ -17,18 +17,25 @@
 
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::{AnalysisError, TypeError};
+use crate::negation::Negation;
 use crate::planner::Planner;
 use crate::premise::Premise;
+use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
+use crate::rule::analyzer::Authored;
 use crate::{Environment, Type};
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::sync::Arc;
 
 /// Rule analysis: inference and dependency graph over premises.
 pub mod analyzer;
+pub mod canonical;
 /// Deductive rule definitions for deriving new facts.
 pub mod deductive;
 /// Inductive rule definitions (a.k.a. effects).
 pub mod inductive;
+#[cfg(test)]
+mod invariants;
 /// Premises collection type.
 pub mod premises;
 /// Rules as statements: `dialog.rule/*` vocabulary and install-by-assert.
@@ -165,10 +172,58 @@ pub trait Compile: Sized + Into<Rule> {
 /// analysis, plannability, and head grounding, parameterized over an
 /// optional `reduce` clause (`(field, spec)` pairs in head-field
 /// order; empty for a plain rule).
+/// Why `premises` and `reduce` cannot make a deductive rule, if they
+/// cannot: a deductive rule is open, installed as facts and read by
+/// whatever program exists when a query runs, so it admits no
+/// `reduce`: a fold withdraws its result when a fact arrives and has no
+/// reading inside a dependency cycle. An `unless` is admitted: outside
+/// a cycle it is stratified, and a rule closing a cycle through it is
+/// quarantined by the program analysis
+/// ([`ProgramAnalysis::quarantined`](crate::session::ProgramAnalysis::quarantined)). The
+/// check depends on the rule alone, never on the rest of the program,
+/// so no merge of rule sets is ever rejected.
+fn open_rule_error<T: Compile>(
+    conclusion: &ConceptDescriptor,
+    premises: &[Premise],
+    reduce: &[(String, ReduceSpec)],
+) -> Option<TypeError> {
+    // A negated attribute or concept premise asks that a fact be
+    // absent. Outside a dependency cycle that is stratified; a rule
+    // closing a cycle through it is quarantined, so either way the
+    // program evaluates. A fold has no such reading, so it stays out.
+    if !reduce.is_empty() {
+        let rule = Box::new(T::in_progress(conclusion.clone(), premises.to_vec()).into());
+        return Some(TypeError::ReduceInOpenRule { rule });
+    }
+    None
+}
+
 pub(crate) fn compile_rule<T: Compile>(
     conclusion: ConceptDescriptor,
     premises: Vec<Premise>,
     reduce: Vec<(String, ReduceSpec)>,
+) -> Result<T, TypeError> {
+    compile_rule_as::<T>(conclusion, premises, reduce, true)
+}
+
+/// [`compile_rule`] for a rule the engine writes for itself: a
+/// concept's implicit rule, a selecting or covering rule, a head
+/// split from a source. Such a rule reads a field under whatever
+/// policy the reader declared, which is how the policy reaches the
+/// evaluation, so the open-rule check that an author's rule passes
+/// does not apply to it.
+pub(crate) fn compile_internal<T: Compile>(
+    conclusion: ConceptDescriptor,
+    premises: Vec<Premise>,
+) -> Result<T, TypeError> {
+    compile_rule_as::<T>(conclusion, premises, Vec::new(), false)
+}
+
+fn compile_rule_as<T: Compile>(
+    conclusion: ConceptDescriptor,
+    premises: Vec<Premise>,
+    reduce: Vec<(String, ReduceSpec)>,
+    authored: bool,
 ) -> Result<T, TypeError> {
     // A concept with no required (`with`) attributes is
     // unconstructable (see `ConceptDescriptor`'s `TryFrom` /
@@ -180,7 +235,30 @@ pub(crate) fn compile_rule<T: Compile>(
     // Coalesce / reduce checks + dependency graph, all from the
     // premises, before any execution order is chosen. The original
     // premises are kept for the error-path display rule.
+    // A concept premise reads the fields it names and the required
+    // ones: an optional field it leaves out decides nothing, and
+    // selecting it could put the concept on a cycle with the rules
+    // deriving that field (see `ConceptQuery::narrowed`).
+    let premises: Vec<Premise> = premises
+        .into_iter()
+        .map(|premise| match premise {
+            Premise::Assert(Proposition::Concept(query)) => {
+                Premise::Assert(Proposition::Concept(query.narrowed()))
+            }
+            Premise::Unless(Negation(Proposition::Concept(query))) => {
+                Premise::Unless(Negation(Proposition::Concept(query.narrowed())))
+            }
+            other => other,
+        })
+        .collect();
     let display_premises = premises.clone();
+    let authored_reduce = reduce.clone();
+    if authored
+        && matches!(T::KIND, RuleKind::Deductive)
+        && let Some(error) = open_rule_error::<T>(&conclusion, &premises, &reduce)
+    {
+        return Err(error);
+    }
     let analysis = match analyzer::analyze_with(conclusion.clone(), premises, T::KIND, reduce) {
         Ok(analysis) => analysis,
         Err(err) => {
@@ -266,6 +344,52 @@ pub(crate) fn compile_rule<T: Compile>(
             variable,
         });
     }
+
+    // The rule's canonical spelling: locals renamed by the body's
+    // structure and premises sorted, so one body spelled two ways is
+    // one rule to everything keyed by its identity. The head's operands
+    // (`this`, each field and each keyed field's key) are fixed names. The narrowed
+    // premises are canonicalised and analysed again, which is the
+    // same analysis under other names; the authored spelling is kept
+    // for storage and display.
+    let analysis = match canonical::canonicalize(
+        &conclusion,
+        &analysis.premises,
+        &authored_reduce
+            .iter()
+            .map(|(field, _)| {
+                let entry = analysis
+                    .reduce
+                    .iter()
+                    .find(|entry| entry.field == *field)
+                    .expect("an analysed reduce clause keeps every field");
+                (field.clone(), ReduceSpec::from(entry))
+            })
+            .collect::<Vec<_>>(),
+    )? {
+        Some(canonical) => {
+            let respelled = canonical.premises != analysis.premises;
+            let authored = Authored {
+                premises: analysis.premises,
+                reduce: analysis.reduce,
+            };
+            let mut analysis = analyzer::analyze_with(
+                conclusion.clone(),
+                canonical.premises,
+                T::KIND,
+                canonical.reduce,
+            )
+            .map_err(|error| TypeError::TypeInference {
+                reason: format!("canonical spelling fails analysis: {error:?}"),
+            })?;
+            if respelled {
+                analysis.authored = Some(Arc::new(authored));
+            }
+            analysis.canonical = Some(Arc::new(canonical.identity));
+            analysis
+        }
+        None => analysis,
+    };
 
     Ok(T::from_analysis(analysis))
 }

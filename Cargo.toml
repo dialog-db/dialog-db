@@ -39,6 +39,7 @@ members = [
     "rust/dialog-network",
     "rust/dialog-identity",
     "rust/dialog-peer",
+    "rust/dialog-perf",
     "rust/dialog-repository",
     "rust/dialog-soak",
     "rust/dialog-varsig",

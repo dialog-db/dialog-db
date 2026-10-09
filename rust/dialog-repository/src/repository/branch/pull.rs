@@ -1232,12 +1232,15 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:seed".parse()?,
-            is: Value::String("Seed".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:seed".parse()?,
+                is: Value::String("Seed".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -1255,12 +1258,15 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:main".parse()?,
-            is: Value::String("Main data".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: Value::String("Main data".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        )]))
         .perform(&operator)
         .await?;
         let main_revision = main.revision().expect("main should have a revision");
@@ -1290,22 +1296,28 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:main".parse()?,
-            is: Value::String("Main data".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: Value::String("Main data".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        )]))
         .perform(&operator)
         .await?;
 
         let dev = repo.branch("dev").open().perform(&operator).await?;
-        dev.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/email".parse()?,
-            of: "user:dev".parse()?,
-            is: Value::String("dev@test.com".to_string()),
-            cause: None,
-        })]))
+        dev.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/email".parse()?,
+                of: "user:dev".parse()?,
+                is: Value::String("dev@test.com".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -1368,12 +1380,15 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:main".parse()?,
-            is: Value::String("Main data".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: Value::String("Main data".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        )]))
         .perform(&operator)
         .await?;
         let main_revision = main.revision().expect("main should have a revision");
@@ -1381,12 +1396,15 @@ mod tests {
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
         feature
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/email".parse()?,
-                of: "user:feature".parse()?,
-                is: Value::String("feature@test.com".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/email".parse()?,
+                    of: "user:feature".parse()?,
+                    is: Value::String("feature@test.com".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -1428,12 +1446,15 @@ mod tests {
 
         // Upstream `main` has a change to pull in.
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:main".parse()?,
-            is: Value::String("Main data".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: Value::String("Main data".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -1447,12 +1468,15 @@ mod tests {
         // A local commit lands through the *other* handle, advancing the
         // feature head in storage. `feature_pull`'s cache is now stale.
         feature_commit
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/email".parse()?,
-                of: "user:feature".parse()?,
-                is: Value::String("feature@test.com".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/email".parse()?,
+                    of: "user:feature".parse()?,
+                    is: Value::String("feature@test.com".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -1518,12 +1542,15 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:main".parse()?,
-            is: Value::String("Main data".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: Value::String("Main data".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        )]))
         .perform(&operator)
         .await?;
         let main_revision = main.revision().expect("main should have a revision");
@@ -1560,12 +1587,15 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:main".parse()?,
-            is: Value::String("Main data".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: Value::String("Main data".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -1624,12 +1654,15 @@ mod tests {
         for (name, value) in [("main", "Main data"), ("dev", "Dev data")] {
             let source = repo.branch(name).open().perform(&operator).await?;
             source
-                .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                    the: "user/name".parse()?,
-                    of: format!("user:{name}").parse()?,
-                    is: Value::String(value.to_string()),
-                    cause: None,
-                })]))
+                .commit(stream::iter(vec![Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse()?,
+                        of: format!("user:{name}").parse()?,
+                        is: Value::String(value.to_string()),
+                        cause: None,
+                    },
+                    dialog_artifacts::Policy::All,
+                )]))
                 .perform(&operator)
                 .await?;
             sources.push(source);
@@ -1678,12 +1711,15 @@ mod tests {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:main".parse()?,
-            is: Value::String("Main data".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: Value::String("Main data".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -1732,12 +1768,15 @@ mod tests {
         for name in ["main", "dev"] {
             let upstream = repo.branch(name).open().perform(&operator).await?;
             upstream
-                .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                    the: "user/name".parse()?,
-                    of: format!("user:{name}").parse()?,
-                    is: Value::String(name.to_string()),
-                    cause: None,
-                })]))
+                .commit(stream::iter(vec![Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse()?,
+                        of: format!("user:{name}").parse()?,
+                        is: Value::String(name.to_string()),
+                        cause: None,
+                    },
+                    dialog_artifacts::Policy::All,
+                )]))
                 .perform(&operator)
                 .await?;
             feature.pull_from(&upstream).perform(&operator).await?;
@@ -1837,12 +1876,15 @@ mod history_tests {
     }
 
     fn assert_one(the: &str, of: &str, value: &str) -> Instruction {
-        Instruction::Assert(Artifact {
-            the: the.parse().unwrap(),
-            of: of.parse().unwrap(),
-            is: Value::String(value.to_string()),
-            cause: None,
-        })
+        Instruction::Assert(
+            Artifact {
+                the: the.parse().unwrap(),
+                of: of.parse().unwrap(),
+                is: Value::String(value.to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        )
     }
 
     /// Convergence: the same fact asserted concurrently on two branches
@@ -2191,12 +2233,15 @@ mod history_tests {
         // Feature replaces the title: its record's cause lists the version
         // of main's claim, because the pulled data is version-tagged.
         feature
-            .commit(stream::iter(vec![Instruction::Replace(Artifact {
-                the: "post/title".parse()?,
-                of: "post:1".parse()?,
-                is: Value::String("Hi".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "post/title".parse()?,
+                    of: "post:1".parse()?,
+                    is: Value::String("Hi".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::Last,
+            )]))
             .perform(&operator)
             .await?;
         let replacement = feature.revision().expect("feature has a revision");
@@ -2356,12 +2401,15 @@ mod history_tests {
         feature.set_upstream(&main).perform(&operator).await?;
         feature.pull().perform(&operator).await?;
         feature
-            .commit(stream::iter(vec![Instruction::Replace(Artifact {
-                the: "post/title".parse()?,
-                of: "post:1".parse()?,
-                is: Value::String("Hi".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "post/title".parse()?,
+                    of: "post:1".parse()?,
+                    is: Value::String("Hi".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::Last,
+            )]))
             .perform(&operator)
             .await?;
         let ours = feature.revision().expect("feature has a revision");
@@ -2561,12 +2609,15 @@ mod history_tests {
 
         // Both sides replace it, without seeing each other.
         let replace = |value: &str| -> Result<Instruction> {
-            Ok(Instruction::Replace(Artifact {
-                the: "post/title".parse()?,
-                of: "post:1".parse()?,
-                is: Value::String(value.to_string()),
-                cause: None,
-            }))
+            Ok(Instruction::Assert(
+                Artifact {
+                    the: "post/title".parse()?,
+                    of: "post:1".parse()?,
+                    is: Value::String(value.to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::Last,
+            ))
         };
         main.commit(stream::iter(vec![replace("MainSide")?]))
             .perform(&operator)
@@ -2731,12 +2782,15 @@ mod history_tests {
             }
         };
         let label = |value: &str| {
-            Instruction::Assert(Artifact {
-                the: "task/label".parse().unwrap(),
-                of: "task:7".parse().unwrap(),
-                is: Value::String(value.to_string()),
-                cause: None,
-            })
+            Instruction::Assert(
+                Artifact {
+                    the: "task/label".parse().unwrap(),
+                    of: "task:7".parse().unwrap(),
+                    is: Value::String(value.to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            )
         };
 
         // Bob labels the task; everyone syncs it.
@@ -2844,9 +2898,12 @@ mod history_tests {
 
         // Bob labels the task; Alice and Mallory sync it.
         let bob = repo.branch("bob").open().perform(&operator).await?;
-        bob.commit(stream::iter(vec![Instruction::Assert(urgent())]))
-            .perform(&operator)
-            .await?;
+        bob.commit(stream::iter(vec![Instruction::Assert(
+            urgent(),
+            dialog_artifacts::Policy::All,
+        )]))
+        .perform(&operator)
+        .await?;
         for name in ["alice", "mallory"] {
             let b = repo.branch(name).open().perform(&operator).await?;
             b.set_upstream(&bob).perform(&operator).await?;
@@ -2859,7 +2916,10 @@ mod history_tests {
         // Alice pulls it (the same-value contest collapses the two
         // versions into one entry), THEN retracts having observed both.
         mallory
-            .commit(stream::iter(vec![Instruction::Assert(urgent())]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                urgent(),
+                dialog_artifacts::Policy::All,
+            )]))
             .perform(&operator)
             .await?;
         alice.pull().from(&mallory).perform(&operator).await?;
@@ -3012,12 +3072,15 @@ mod history_tests {
         // supersedes names the version of feature's claim.
         let main = repo.branch("main").open().perform(&operator).await?;
         main.pull().from(&feature).perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Replace(Artifact {
-            the: "user/name".parse()?,
-            of: "user:1".parse()?,
-            is: Value::String("Bob".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:1".parse()?,
+                is: Value::String("Bob".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::Last,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -3891,8 +3954,8 @@ mod history_tests {
                     cause: None,
                 };
                 let instruction = match next(3) {
-                    0 => Instruction::Assert(artifact),
-                    1 => Instruction::Replace(artifact),
+                    0 => Instruction::Assert(artifact, dialog_artifacts::Policy::All),
+                    1 => Instruction::Assert(artifact, dialog_artifacts::Policy::Last),
                     _ => Instruction::Retract(artifact),
                 };
                 // A retract of an absent fact is a no-op commit; both

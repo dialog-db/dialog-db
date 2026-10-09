@@ -1,0 +1,23 @@
+{
+  "scenario": "commit-rows",
+  "size": 100,
+  "profile": "release",
+  "outcome": {
+    "commits": 100
+  },
+  "counters": {
+    "archive.get": 8,
+    "archive.get.bytes": 259608,
+    "archive.put": 112,
+    "archive.put.bytes": 3687208,
+    "span.apply_batch_reusing": 100,
+    "span.buffer_records": 200,
+    "span.commit": 100,
+    "span.resolve_bundle": 0,
+    "span.resolve_rules": 0,
+    "span.seal_batch": 100,
+    "span.settle": 100,
+    "span.write_instructions": 100
+  },
+  "instructions": 241327923
+}

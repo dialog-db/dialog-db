@@ -60,7 +60,7 @@ use dialog_storage::provider::FileSystem;
 use dialog_storage::provider::storage::VolatileSpace;
 use dialog_storage::resource::Resource as _;
 use dialog_varsig::{Did, Principal};
-use futures_util::{StreamExt as _, stream};
+use futures_util::StreamExt as _;
 
 use crate::report::{PhaseReport, Report};
 
@@ -190,38 +190,50 @@ fn entity_facts(index: usize) -> Result<Vec<Instruction>> {
     facts
         .into_iter()
         .map(|(the, is)| {
-            Ok(Instruction::Assert(Artifact {
-                the: the.parse()?,
-                of: of.clone(),
-                is,
-                cause: None,
-            }))
+            Ok(Instruction::Assert(
+                Artifact {
+                    the: the.parse()?,
+                    of: of.clone(),
+                    is,
+                    cause: None,
+                },
+                dialog_artifacts::Policy::All,
+            ))
         })
         .collect()
 }
 
 /// The space's metadata and membership facts (what a join probes).
 fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
-    let mut facts = vec![Instruction::Assert(Artifact {
-        the: "db/name".parse()?,
-        of: "id:space".parse()?,
-        is: Value::String("soak space".into()),
-        cause: None,
-    })];
+    let mut facts = vec![Instruction::Assert(
+        Artifact {
+            the: "db/name".parse()?,
+            of: "id:space".parse()?,
+            is: Value::String("soak space".into()),
+            cause: None,
+        },
+        dialog_artifacts::Policy::All,
+    )];
     for member in 0..members {
         let of: dialog_artifacts::Entity = format!("member:{member}").parse()?;
-        facts.push(Instruction::Assert(Artifact {
-            the: "member/name".parse()?,
-            of: of.clone(),
-            is: Value::String(format!("Member {member}")),
-            cause: None,
-        }));
-        facts.push(Instruction::Assert(Artifact {
-            the: "member/role".parse()?,
-            of,
-            is: Value::String(if member == 0 { "owner" } else { "editor" }.into()),
-            cause: None,
-        }));
+        facts.push(Instruction::Assert(
+            Artifact {
+                the: "member/name".parse()?,
+                of: of.clone(),
+                is: Value::String(format!("Member {member}")),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        ));
+        facts.push(Instruction::Assert(
+            Artifact {
+                the: "member/role".parse()?,
+                of,
+                is: Value::String(if member == 0 { "owner" } else { "editor" }.into()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        ));
     }
     Ok(facts)
 }
@@ -275,24 +287,33 @@ fn open_card_rule() -> Result<DeductiveRule> {
 fn claim_facts() -> Result<Vec<Instruction>> {
     let of: dialog_artifacts::Entity = "member:joiner".parse()?;
     Ok(vec![
-        Instruction::Assert(Artifact {
-            the: "member/name".parse()?,
-            of: of.clone(),
-            is: Value::String("The Joiner".into()),
-            cause: None,
-        }),
-        Instruction::Assert(Artifact {
-            the: "member/role".parse()?,
-            of: of.clone(),
-            is: Value::String("editor".into()),
-            cause: None,
-        }),
-        Instruction::Assert(Artifact {
-            the: "member/joined".parse()?,
-            of,
-            is: Value::String("2026-09-01".into()),
-            cause: None,
-        }),
+        Instruction::Assert(
+            Artifact {
+                the: "member/name".parse()?,
+                of: of.clone(),
+                is: Value::String("The Joiner".into()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        ),
+        Instruction::Assert(
+            Artifact {
+                the: "member/role".parse()?,
+                of: of.clone(),
+                is: Value::String("editor".into()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        ),
+        Instruction::Assert(
+            Artifact {
+                the: "member/joined".parse()?,
+                of,
+                is: Value::String("2026-09-01".into()),
+                cause: None,
+            },
+            dialog_artifacts::Policy::All,
+        ),
     ])
 }
 
@@ -490,7 +511,10 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // Seed: metadata first, then the entities spread over the requested
     // number of commits (history depth shapes the head the client adopts).
     branch
-        .commit(stream::iter(meta_facts(scenario.members)?))
+        .transaction()
+        .integrate(meta_facts(scenario.members)?.into_iter().collect())
+        .commit()
+        .publish()
         .perform(&operator)
         .await?;
     // The derived-concept rule ships with the space: its facts live in
@@ -513,7 +537,10 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
             batch.extend(entity_facts(index)?);
         }
         branch
-            .commit(stream::iter(batch))
+            .transaction()
+            .integrate(batch.into_iter().collect())
+            .commit()
+            .publish()
             .perform(&operator)
             .await?;
         seeded = batch_end;
@@ -580,7 +607,10 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
 
     measured("claim", &mut phases, async {
         client
-            .commit(stream::iter(claim_facts()?))
+            .transaction()
+            .integrate(claim_facts()?.into_iter().collect())
+            .commit()
+            .publish()
             .perform(&operator)
             .await?;
         client
@@ -804,7 +834,13 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     for index in scenario.entities..scenario.entities + scenario.entities / 4 {
         seed.extend(entity_facts(index)?);
     }
-    seeded.commit(stream::iter(seed)).perform(&operator).await?;
+    seeded
+        .transaction()
+        .integrate(seed.into_iter().collect())
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
     measured("seeded", &mut phases, async {
         seeded.pull().perform(&operator).await?;
         Ok(())

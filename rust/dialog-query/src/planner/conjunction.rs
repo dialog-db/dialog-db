@@ -1,5 +1,6 @@
 use super::Plan;
 use crate::attribute::query::DynamicAttributeQuery;
+use crate::concept::query::ConceptQuery;
 use crate::selection::{Match, Selection};
 use crate::{Environment, SortOrder, multi_merge_join};
 use core::pin::Pin;
@@ -119,13 +120,17 @@ impl Conjunction {
 
         let mut shared: Option<String> = None;
         for step in &self.steps {
-            let query = match step {
-                Plan::Scan(_, query) => query,
+            let variable = match step {
+                Plan::Scan(_, query) => match query.sort_order() {
+                    SortOrder::On(name) => name,
+                    SortOrder::None => return None,
+                },
+                // An attribute concept read with its entity free yields
+                // its rows sorted on the entity, stored and derived alike
+                // (see `ConceptQuery::evaluate`), so it merges on that
+                // variable like a scan of the attribute would.
+                Plan::Concept(_, query) => MergeInput::relation_variable(query)?,
                 _ => return None,
-            };
-            let variable = match query.sort_order() {
-                SortOrder::On(name) => name,
-                SortOrder::None => return None,
             };
             match &shared {
                 None => shared = Some(variable),
@@ -231,6 +236,19 @@ impl Conjunction {
     where
         Env: crate::Scope<'a>,
     {
+        // Erased at the entry; see `ConceptQuery::evaluate`.
+        self.evaluate_maybe_merge_erased(Box::pin(selection), env, variable)
+    }
+
+    fn evaluate_maybe_merge_erased<'a, Env>(
+        self,
+        selection: Pin<Box<dyn Selection + 'a>>,
+        env: &'a Env,
+        variable: String,
+    ) -> Pin<Box<dyn Selection + 'a>>
+    where
+        Env: crate::Scope<'a>,
+    {
         Box::pin(crate::try_stream! {
             let mut selection = Box::pin(selection.peekable());
 
@@ -250,38 +268,42 @@ impl Conjunction {
                 return;
             }
 
-            let scans: Vec<DynamicAttributeQuery> = self
+            let scans: Vec<MergeInput> = self
                 .steps
                 .iter()
                 .map(|step| match step {
-                    Plan::Scan(_, query) => (**query).clone(),
-                    // merge_variable already proved every step is a Scan.
-                    _ => unreachable!("merge eligibility guarantees every step is a Scan"),
+                    Plan::Scan(_, query) => MergeInput::Scan(query.clone()),
+                    Plan::Concept(_, query) => MergeInput::Relation(query.clone()),
+                    // merge_variable already proved every step merges.
+                    _ => unreachable!("merge eligibility guarantees every step merges"),
                 })
                 .collect();
 
             // What each scan will read given a row's bindings. Every row of
             // a selection shares one binding PATTERN, but the bound VALUES
-            // can differ from row to row, and a value is what decides how
-            // wide a scan's range is: so the merge-versus-fold choice is
-            // made once per distinct set of resolved ranges, and the
-            // consecutive rows that share one are evaluated as a run (the
-            // fold keeps its probe pipelining across the run's rows).
+            // can differ from row to row, and the consecutive rows that
+            // resolve to one set of ranges are evaluated as a run (the
+            // fold keeps its probe pipelining across the run's rows). The
+            // merge-versus-fold choice is made once, on the first row:
+            // how wide a scan's range is follows mostly from which
+            // attribute it reads and which fields pin it, which every row
+            // shares, and estimating every scan's range again for every
+            // row walks the tree about as much as the scan itself would.
             let fingerprint = |row: &Match| -> Vec<Option<ArtifactSelector<Constrained>>> {
-                scans.iter().map(|scan| scan.resolved_selector(row).ok()).collect()
+                scans.iter().map(|scan| scan.resolved_selector(row)).collect()
             };
-            let mut decided: Option<(Vec<Option<ArtifactSelector<Constrained>>>, bool)> = None;
+            let mut decided: Option<bool> = None;
 
             let mut listening = true;
             let mut hinted: HashSet<ArtifactSelector<Constrained>> = HashSet::new();
             while let Some(first) = selection.next().await {
                 let first = first?;
                 let shape = fingerprint(&first);
-                let balanced = match &decided {
-                    Some((known, balanced)) if *known == shape => *balanced,
-                    _ => {
+                let balanced = match decided {
+                    Some(balanced) => balanced,
+                    None => {
                         let balanced = self.scans_balanced_for(&first, env).await;
-                        decided = Some((shape.clone(), balanced));
+                        decided = Some(balanced);
                         balanced
                     }
                 };
@@ -323,7 +345,7 @@ impl Conjunction {
                     // same ranges) is not hinted again.
                     if listening {
                         for scan in &scans {
-                            let Ok(selector) = scan.resolved_selector(&base) else {
+                            let Some(selector) = scan.resolved_selector(&base) else {
                                 continue;
                             };
                             if !hinted.insert(selector.clone()) {
@@ -351,7 +373,14 @@ impl Conjunction {
                         Vec::with_capacity(scans.len());
                     for scan in &scans {
                         let seeded = base.clone().seed();
-                        inputs.push(Box::pin(scan.clone().evaluate(env, seeded)));
+                        inputs.push(match scan {
+                            MergeInput::Scan(scan) => {
+                                Box::pin((**scan).clone().evaluate(env, seeded))
+                            }
+                            MergeInput::Relation(query) => {
+                                Box::pin(query.clone().evaluate(seeded, env))
+                            }
+                        });
                     }
 
                     let variable = variable.clone();
@@ -371,6 +400,43 @@ impl Conjunction {
                 }
             }
         })
+    }
+}
+
+/// One input of an N-way merge: a stored attribute scan, or an attribute
+/// concept read whose rows, stored and derived, arrive sorted on the
+/// entity.
+#[derive(Debug, Clone)]
+enum MergeInput {
+    Scan(Box<DynamicAttributeQuery>),
+    Relation(ConceptQuery),
+}
+
+impl MergeInput {
+    /// The variable an attribute concept read is sorted on: its entity
+    /// term's name, when the read is over an attribute concept with a
+    /// named entity variable. A set-widened read is not an input: it
+    /// yields a row for an entity nothing matched, so it extends the
+    /// other inputs' rows rather than intersecting with them.
+    fn relation_variable(query: &ConceptQuery) -> Option<String> {
+        query.predicate.attribute_field()?;
+        if query.widens() {
+            return None;
+        }
+        query
+            .terms
+            .get("this")
+            .and_then(|term| term.name())
+            .map(str::to_string)
+    }
+
+    /// What this input reads given a row's bindings, for a stored scan;
+    /// a relation resolves nothing ahead of evaluation.
+    fn resolved_selector(&self, row: &Match) -> Option<ArtifactSelector<Constrained>> {
+        match self {
+            MergeInput::Scan(scan) => scan.resolved_selector(row).ok(),
+            MergeInput::Relation(_) => None,
+        }
     }
 }
 
