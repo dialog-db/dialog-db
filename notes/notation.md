@@ -134,20 +134,22 @@ the: io.gozala.person/name
 as: "text:"
 ```
 
-`pick` is one of:
+`pick` is one of these entities:
 
-- `last` (the default): the newest claim;
-- `all`: every claim, as a set;
-- `top`: the best ranked of the values listed in `as` or the relations listed in `the`; a list in either implies `top`;
-- `max`, `min`: the greatest or least value of an ordered type.
+- `last:` (the default): the newest claim;
+- `all:`: every claim, as a set;
+- `top:`: the best ranked of the values listed in `as` or the relations listed in `the`; a list in either implies `top:`;
+- `max:`, `min:`: the greatest or least value of an ordered type.
 
 ```yaml
 the: io.gozala.person/email
 as: "text:"
-pick: all
+pick: "all:"
 ```
 
-`cardinality: one` and `cardinality: many` are the older spellings of `last` and `all`. They are read, never written, and `pick` wins when both are given.
+A pick is an entity for the same reason a type is: it is a name the descriptor refers to, not text, and an attribute's identity hashes it as such. The plain names 0.2 wrote (`all`) are read, never written.
+
+`cardinality: one` and `cardinality: many` are the older spellings of `last:` and `all:`. They are read, never written, and `pick` wins when both are given.
 
 <details>
 <summary>Attribute</summary>
@@ -167,9 +169,9 @@ pick: all
       },
       "pick": {
         "type": "string",
-        "enum": ["last", "all", "top", "max", "min"],
-        "description": "Which of an entity's claims the attribute reads. Defaults to 'last', or to 'top' when 'the' or 'as' is a list.",
-        "default": "last"
+        "enum": ["last:", "all:", "top:", "max:", "min:"],
+        "description": "Which of an entity's claims the attribute reads, named by an entity. Defaults to 'last:', or to 'top:' when 'the' or 'as' is a list. The plain names 0.2 wrote ('all') are read, never written.",
+        "default": "last:"
       },
       "optional": {
         "type": "boolean",
@@ -368,7 +370,7 @@ symbol-named half is a **dictionary**, the position-named half a
     "member": {
       "description": "The list's members, in order",
       "the": { "domain": "todo.list", "keyed": "sequence" },
-      "pick": "all",
+      "pick": "all:",
       "as": "text:"
     }
   }

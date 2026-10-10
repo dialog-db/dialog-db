@@ -14,6 +14,37 @@ says how to cut a release.
 
 ## Unreleased
 
+### Picks are named by entities
+
+[glossary](./notes/glossary.md#pick)
+
+A pick is named by an entity, as a type is: `last:`, `all:`, `top:`,
+`max:`, `min:`.
+
+What this changes for you:
+
+- Descriptors write `"pick": "all:"`, and the 0.2.0 spelling `"all"`
+  is still read. Batches serialize `Pick` the same way.
+- Attribute identities hash the entity, so every attribute, concept
+  and rule identity differs from 0.2.0's.
+- `Pick::uri()` returns the entity. `name()` and `Display` are
+  unchanged.
+- The derive takes `#[pick(last|all|max|min)]`. `#[cardinality(..)]` no
+  longer compiles, and the error names its replacement.
+
+Why: a notation that resolves every bare word needs `pick: all` to name
+something. Doing this before anything ships on 0.2.0 means identities
+change only once.
+
+### Compatibility and migration
+
+- From pre-0.2: unchanged, `Branch::upgrade_rules()` lands on this
+  release's identities.
+- From 0.2.0 (nothing shipped on it): `upgrade_rules()` re-installs its
+  rules but does not move its transient markers.
+- 0.2.0 cannot read descriptors this release writes. Stored claims are
+  not rewritten.
+
 ## 0.2.0 (2026-10-09)
 
 ### Relations, types and picks have one name each

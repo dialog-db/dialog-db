@@ -737,7 +737,7 @@ mod tests {
         of: &Entity,
     ) -> Result<Vec<u64>> {
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": "max" }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": "max:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(of.clone()));
@@ -1100,7 +1100,7 @@ mod tests {
             .assert(last(&carol, 30));
 
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": "last" }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": "last:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));
@@ -1178,7 +1178,7 @@ mod tests {
             .retract(last(&bob, 20))
             .assert(last(&bob, 25));
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": "all" }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": "all:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::var("this"));
@@ -1300,7 +1300,7 @@ mod tests {
         let read = |value: u32| {
             let predicate: ConceptDescriptor =
                 serde_json::from_value(serde_json::json!({ "with": {
-                    "salary": { "the": "org/salary", "as": "natural:", "pick": "all" }
+                    "salary": { "the": "org/salary", "as": "natural:", "pick": "all:" }
                 }}))
                 .expect("a descriptor");
             let mut terms = Parameters::new();
@@ -1361,7 +1361,7 @@ mod tests {
         let read = |of: &Entity| {
             let predicate: ConceptDescriptor =
                 serde_json::from_value(serde_json::json!({ "with": {
-                    "salary": { "the": "org/salary", "as": "natural:", "pick": "all" }
+                    "salary": { "the": "org/salary", "as": "natural:", "pick": "all:" }
                 }}))
                 .expect("a descriptor");
             let mut terms = Parameters::new();
@@ -1668,7 +1668,7 @@ mod tests {
 
         let transaction = branch.transaction().assert(salary(&alice, 150));
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": "all" }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": "all:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));

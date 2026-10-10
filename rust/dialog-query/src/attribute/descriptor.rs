@@ -301,15 +301,20 @@ struct Wire {
     select: Option<PickName>,
 }
 
-/// A pick as the wire spells it: the name alone, the values a `top`
-/// ranks being the `as` list.
+/// A pick as the wire spells it: its entity alone (`all:`), the values
+/// a `top` ranks being the `as` list. The plain name a 0.2 release
+/// wrote (`all`) is still read.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 enum PickName {
+    #[serde(rename = "last:", alias = "last")]
     Last,
+    #[serde(rename = "all:", alias = "all")]
     All,
+    #[serde(rename = "top:", alias = "top")]
     Top,
+    #[serde(rename = "max:", alias = "max")]
     Max,
+    #[serde(rename = "min:", alias = "min")]
     Min,
 }
 
@@ -777,7 +782,7 @@ impl AttributeDescriptor {
                 .map(|relation| relation.to_string())
                 .collect(),
             content_type: self.content_type(),
-            pick: self.pick.name(),
+            pick: self.pick.uri(),
             among: &self.among,
         };
 
@@ -887,7 +892,7 @@ mod tests {
             serde_json::from_value::<AttributeDescriptor>(serde_json::json!({
                 "the": ["user/email", "user/phone"],
                 "as": "text:",
-                "pick": "all"
+                "pick": "all:"
             }))
             .is_err(),
             "a relation chain reads as top only"
@@ -902,8 +907,16 @@ mod tests {
         assert_eq!(many.pick(), &Pick::All, "the older spelling");
         assert_eq!(
             serde_json::to_value(&many).expect("serializes"),
-            serde_json::json!({ "the": "job/tag", "as": "text:", "pick": "all" })
+            serde_json::json!({ "the": "job/tag", "as": "text:", "pick": "all:" })
         );
+        let named: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": "job/tag",
+            "as": "text:",
+            "pick": "all"
+        }))
+        .expect("descriptor parses");
+        assert_eq!(named.pick(), &Pick::All, "the spelling 0.2 wrote");
+        assert_eq!(named.to_uri(), many.to_uri());
         let one: AttributeDescriptor = serde_json::from_value(serde_json::json!({
             "the": "job/tag",
             "as": "text:"
@@ -1014,7 +1027,7 @@ mod tests {
             Some(Type::String),
         );
         let json: serde_json::Value = serde_json::to_value(&attr).unwrap();
-        assert_eq!(json["pick"], "all", "many is spelled as its pick");
+        assert_eq!(json["pick"], "all:", "many is spelled as its pick");
         assert!(json.get("cardinality").is_none(), "{json}");
     }
 

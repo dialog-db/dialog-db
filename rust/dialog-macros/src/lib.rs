@@ -280,7 +280,8 @@ pub fn derive_formula(input: TokenStream) -> TokenStream {
 ///
 /// # Attributes
 ///
-/// - `#[cardinality(many)]` - Marks the attribute as having many values (defaults to One)
+/// - `#[pick(all)]` - The pick the attribute is read under: `last` (the default),
+///   `all`, `max` or `min`
 /// - `#[domain(custom)]` or `#[domain("io.gozala")]` - Override the default domain
 ///   (`#[namespace(...)]` is accepted as a legacy alias)
 ///
@@ -300,7 +301,7 @@ pub fn derive_formula(input: TokenStream) -> TokenStream {
 ///     /// Tags associated with an employee
 ///     #[derive(Clone, PartialEq)]
 ///     // #[derive(Attribute, Clone, PartialEq)]
-///     // #[cardinality(many)]
+///     // #[pick(all)]
 ///     pub struct Tag(pub String);
 /// }
 /// ```
@@ -364,7 +365,7 @@ pub fn derive_formula(input: TokenStream) -> TokenStream {
 /// // Create attribute values
 /// let name = employee::Name("Alice".to_string());
 /// ```
-#[proc_macro_derive(Attribute, attributes(cardinality, domain, namespace))]
+#[proc_macro_derive(Attribute, attributes(pick, cardinality, domain, namespace))]
 pub fn derive_attribute(input: TokenStream) -> TokenStream {
     query::attribute::derive(input)
 }
