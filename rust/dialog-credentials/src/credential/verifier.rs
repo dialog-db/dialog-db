@@ -3,7 +3,7 @@
 use crate::Verifier;
 use dialog_varsig::{Did, Principal};
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use super::constants::{KEY_SIZE, PUBLIC_TAG, PUBLIC_TAG_SIZE, VERIFIER_EXPORT_SIZE};
 use super::export::{CredentialExportError, VerifierCredentialExport};
 
@@ -42,7 +42,7 @@ impl From<VerifierCredential> for Did {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl VerifierCredential {
     /// Export to multicodec-tagged bytes for native storage.
     pub fn export(&self) -> VerifierCredentialExport {
@@ -85,7 +85,10 @@ impl VerifierCredential {
     }
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "es256"))]
+#[cfg(all(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    feature = "es256"
+))]
 mod es256_native {
     use super::CredentialExportError;
     use crate::Es256Verifier;
