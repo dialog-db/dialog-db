@@ -43,6 +43,7 @@ members = [
     "rust/dialog-repository",
     "rust/dialog-soak",
     "rust/dialog-varsig",
+    "rust/merkle-reference",
     "rust/wbg-pool",
 ]
 resolver = "2"
@@ -207,6 +208,10 @@ version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-did-web]
 path = "./rust/dialog-did-web"
+version = "0.3.0-rc.1"
+
+[workspace.dependencies.merkle-reference]
+path = "./rust/merkle-reference"
 version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-encoding]

@@ -1,0 +1,13 @@
+[package]
+name = "merkle-reference"
+description = "Identifiers that are a function of a value, whichever way its parts are stored"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+blake3 = { workspace = true }
+
+[dev-dependencies]
+blake3 = { workspace = true }

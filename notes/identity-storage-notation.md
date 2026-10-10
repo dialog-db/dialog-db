@@ -83,7 +83,7 @@ reference(v : T)     = BLAKE3-keyed(key = reference(T), content_T(v))
   type", "")`.
 
 **Core types**, defined by the crate, keep v1's set:
-- scalars: bytes, text, boolean, integer of any size, and float;
+- scalars: bytes, null, text, boolean, integer of any size, and float;
 - composites: list and map.
 
 Fixed-width integers are not core types.
@@ -173,9 +173,11 @@ Two families of choices:
   [`bijoux`](https://docs.rs/bijoux), from Ink & Switch's Subduction work. Bijou
   is bijective (every integer has exactly one encoding), takes one byte for
   values up to 247, and decodes 2 to 10 times faster than LEB128.
-- **Core integer of any size:** a sign and length prefix, then the minimal
-  big-endian magnitude, with negative magnitudes bit-inverted, as TerminusDB
-  encodes its big integers. Longer numbers sort after shorter ones, so the bytes
+- **Core integer of any size:** a header byte `0x80 + k` for a magnitude of
+  `k < 127` bytes (`0xFF` and then `k − 127` as an integer for longer ones),
+  then the minimal big-endian magnitude, with every byte inverted for a
+  negative integer. It follows TerminusDB's big integers without their padding
+  bit and negative zero. Longer numbers sort after shorter ones, so the bytes
   sort numerically. Canonical form needs one rule: no leading zero byte.
 - **Dialog's `number`** has the one-band encoding as its content:
   - a class byte (−∞, negative, zero, positive, +∞, NaN);
@@ -493,12 +495,14 @@ Each step lands with tests and a perf sweep:
 
 1. **The `merkle-reference` crate**: the core types, `type` as a value, keyed
    references, composites over part references, and the integer of any size,
-   with the v2 spec written beside it. Pinned by tests:
+   with the v2 spec written beside it (`rust/merkle-reference/spec.md`).
+   Pinned by tests:
    - plain bytes equal `blake3(bytes)`;
    - the same bytes under two types give two references;
    - no keyed reference equals the plain hash of its content;
    - a parent's reference is the same with a part embedded or linked;
-   - a part's inclusion proof verifies against its parent's reference;
+   - a part's inclusion proof verifies against its parent's reference, once
+     the verifier exists (not in 0.3.0);
    - the result is the same however a value was built.
 2. **Attribute and concept references.**
 3. **Rule references** over the canonical AST, referencing concepts.
