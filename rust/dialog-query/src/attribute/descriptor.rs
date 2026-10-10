@@ -1465,19 +1465,20 @@ mod collection_tests {
         assert_ne!(listed.reference(), reordered.reference());
     }
 
-    /// Listed numbers are hashed as one-band numbers: a natural and an
-    /// integer of the same number are one value, and the same number
-    /// written as a float is another. The value index still keeps
-    /// naturals and integers apart, so these two attributes share an
-    /// identity while reading different claims until it moves to one band.
+    /// Listed numbers are hashed by value alone: a natural, an integer and
+    /// a float of the same number are one value. The value index still
+    /// keeps them apart, so these attributes share an identity while
+    /// reading different claims until it moves to one band.
     #[dialog_common::test]
-    fn it_hashes_listed_numbers_apart_from_their_band() {
+    fn it_hashes_listed_numbers_by_value_alone() {
         let status = || AttributeDescriptor::new(the!("task/priority"), "", Cardinality::One, None);
         let natural = status().with_domain(vec![Value::UnsignedInt(1), Value::UnsignedInt(2)]);
         let integer = status().with_domain(vec![Value::SignedInt(1), Value::SignedInt(2)]);
         let float = status().with_domain(vec![Value::Float(1.0), Value::Float(2.0)]);
+        let halves = status().with_domain(vec![Value::Float(1.5), Value::Float(2.0)]);
         assert_eq!(natural.reference(), integer.reference());
-        assert_ne!(integer.reference(), float.reference());
+        assert_eq!(integer.reference(), float.reference());
+        assert_ne!(float.reference(), halves.reference());
     }
 
     /// The wire form round-trips, and a stored attribute still reads

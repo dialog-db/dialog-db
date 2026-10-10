@@ -10,12 +10,12 @@
 //! - [`ENTITY`], [`SYMBOL`] and [`RECORD`], whose content is their text or
 //!   bytes.
 //!
-//! A number's identity does not depend on the band the value index keeps it
-//! in today: a natural `5` and an integer `5` are one number, written as an
-//! integer, and `5.0` is another, written as a float. The index still keeps
-//! naturals, integers and floats apart, so until it moves to one band, two
-//! rules whose only difference is a natural against an integer constant in a
-//! slot that declares no type have one identity but read different bands.
+//! A number's identity is its value alone, not the band the value index
+//! keeps it in today or how it was written: a natural `5`, an integer `5` and
+//! a float `5.0` are one number. The index still keeps naturals, integers and
+//! floats apart, so until it moves to one band, two definitions whose only
+//! difference is `5` against `5.0` have one identity but read different
+//! claims.
 
 use merkle_reference::{Refer, Reference, Type};
 
@@ -40,24 +40,25 @@ pub const RECORD: Type = Type::from_reference(Reference::from_hex(
 
 /// The class byte of negative infinity.
 const NEGATIVE_INFINITY: u8 = 0x01;
-/// The class byte of a negative finite number.
-const NEGATIVE: u8 = 0x02;
+/// The class byte of a negative number at least one in magnitude.
+const NEGATIVE_LARGE: u8 = 0x02;
+/// The class byte of a negative number less than one in magnitude.
+const NEGATIVE_SMALL: u8 = 0x03;
 /// The class byte of zero.
-const ZERO: u8 = 0x03;
-/// The class byte of a positive finite number.
-const POSITIVE: u8 = 0x04;
+const ZERO: u8 = 0x04;
+/// The class byte of a positive number less than one.
+const POSITIVE_SMALL: u8 = 0x05;
+/// The class byte of a positive number at least one.
+const POSITIVE_LARGE: u8 = 0x06;
 /// The class byte of positive infinity.
-const POSITIVE_INFINITY: u8 = 0x05;
+const POSITIVE_INFINITY: u8 = 0x07;
 /// The class byte of NaN.
-const NAN: u8 = 0x06;
-/// The last byte of a number written as an integer.
-const AS_INTEGER: u8 = 0x00;
-/// The last byte of a number written as a float.
-const AS_FLOAT: u8 = 0x01;
-/// Added to a number's binary exponent so it is never negative.
-const BIAS: i32 = 1200;
+const NAN: u8 = 0x08;
+/// The exponent magnitudes written in one byte.
+const ONE_BYTE: u32 = 248;
 
-/// A number as it was written.
+/// A number, as a natural, an integer or a float holds it. The three are
+/// one domain: equal numbers have one encoding whichever holds them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Number {
     /// A whole number that is not negative.
@@ -137,26 +138,26 @@ fn float(value: f64) -> Class {
 
 /// Appends a number's one-band encoding to `out`.
 ///
-/// The encoding is:
+/// It follows SQLite4's numeric key encoding with binary digits in place of
+/// decimal ones:
 ///
-/// - a class byte: negative infinity, negative, zero, positive, positive
-///   infinity or NaN, in that order;
-/// - for a finite number other than zero, the power of two of its leading
-///   bit plus 1200, as two big-endian bytes, then the bits after the leading
-///   one in groups of seven, each group shifted left by one with the low bit
-///   set when another group follows, every one of these bytes inverted for
-///   a negative number;
-/// - a last byte, `0` when the number was written as an integer and `1`
-///   when it was written as a float.
+/// - a class byte: negative infinity, negative at least one in magnitude,
+///   negative less than one, zero, positive less than one, positive at least
+///   one, positive infinity, NaN, in that order;
+/// - for a finite number other than zero, the magnitude of the power of two
+///   of its leading bit: `e` itself when the number is at least one, and
+///   `-e - 1` with every byte inverted when it is less than one. The
+///   magnitude takes one byte below 248 and two bytes otherwise, the first
+///   `248 + (m - 248) / 256`, so it has one spelling and sorts as it counts;
+/// - then the bits after the leading one in groups of seven, each group
+///   shifted left by one with the low bit set when another group follows,
+///   and at least one group;
+/// - every byte after the class inverted for a negative number.
 ///
-/// So every number has one encoding, encodings sort as their numbers do with
-/// a number written as an integer just before the same number written as a
-/// float, `-0.0` is `0.0`, and NaN is one value.
+/// So every number has one encoding, whether a natural, an integer or a
+/// float holds it, encodings sort as their numbers do, `-0.0` is `0.0`, and
+/// NaN is one value. Every 128-bit integer has a one-byte exponent.
 pub fn write_number(number: Number, out: &mut Vec<u8>) {
-    let written = match number {
-        Number::Float(_) => AS_FLOAT,
-        Number::Natural(_) | Number::Integer(_) => AS_INTEGER,
-    };
     match number.class() {
         Class::Special(class) => out.push(class),
         Class::Finite(Finite {
@@ -164,9 +165,31 @@ pub fn write_number(number: Number, out: &mut Vec<u8>) {
             exponent,
             mut fraction,
         }) => {
-            out.push(if negative { NEGATIVE } else { POSITIVE });
+            let large = exponent >= 0;
+            out.push(match (negative, large) {
+                (true, true) => NEGATIVE_LARGE,
+                (true, false) => NEGATIVE_SMALL,
+                (false, false) => POSITIVE_SMALL,
+                (false, true) => POSITIVE_LARGE,
+            });
             let start = out.len();
-            out.extend_from_slice(&((exponent + BIAS) as u16).to_be_bytes());
+            let magnitude = if large {
+                exponent.unsigned_abs()
+            } else {
+                exponent.unsigned_abs() - 1
+            };
+            if magnitude < ONE_BYTE {
+                out.push(magnitude as u8);
+            } else {
+                let rest = magnitude - ONE_BYTE;
+                out.push((ONE_BYTE + (rest >> 8)) as u8);
+                out.push((rest & 0xFF) as u8);
+            }
+            if !large {
+                for byte in &mut out[start..] {
+                    *byte = !*byte;
+                }
+            }
             let bits = if fraction == 0 {
                 0
             } else {
@@ -186,7 +209,6 @@ pub fn write_number(number: Number, out: &mut Vec<u8>) {
             }
         }
     }
-    out.push(written);
 }
 
 /// A number's one-band encoding.
@@ -223,6 +245,7 @@ impl Refer for Value {
 mod tests {
     use super::*;
     use crate::{Entity, Relation};
+    use std::cmp::Ordering;
 
     #[test]
     fn it_names_the_value_types() {
@@ -238,29 +261,36 @@ mod tests {
 
     #[test]
     fn it_encodes_numbers_in_one_band() {
-        assert_eq!(number_content(Number::Integer(0)), [0x03, 0x00]);
-        assert_eq!(number_content(Number::Float(0.0)), [0x03, 0x01]);
+        assert_eq!(number_content(Number::Integer(0)), [0x04]);
+        assert_eq!(number_content(Number::Float(-0.0)), [0x04]);
+        assert_eq!(number_content(Number::Integer(1)), [0x06, 0x00, 0x00]);
+        assert_eq!(number_content(Number::Integer(5)), [0x06, 0x02, 0x40]);
+        assert_eq!(number_content(Number::Integer(-1)), [0x02, 0xFF, 0xFF]);
+        assert_eq!(number_content(Number::Float(0.5)), [0x05, 0xFF, 0x00]);
+        assert_eq!(number_content(Number::Float(0.75)), [0x05, 0xFF, 0x80]);
+        // 2^-300: the exponent's magnitude, 299, takes two bytes.
         assert_eq!(
-            number_content(Number::Integer(1)),
-            [0x04, 0x04, 0xB0, 0x00, 0x00]
+            number_content(Number::Float(2f64.powi(-300))),
+            [0x05, !248, !51, 0x00]
         );
+        assert_eq!(number_content(Number::Float(f64::NAN)), [0x08]);
+    }
+
+    #[test]
+    fn it_encodes_a_number_the_same_whatever_holds_it() {
+        for (natural, integer, float) in [
+            (0u128, 0i128, 0.0f64),
+            (5, 5, 5.0),
+            (1 << 100, 1 << 100, 2f64.powi(100)),
+        ] {
+            let content = number_content(Number::Natural(natural));
+            assert_eq!(number_content(Number::Integer(integer)), content);
+            assert_eq!(number_content(Number::Float(float)), content);
+        }
         assert_eq!(
-            number_content(Number::Integer(5)),
-            [0x04, 0x04, 0xB2, 0x40, 0x00]
+            number_content(Number::Integer(-7)),
+            number_content(Number::Float(-7.0))
         );
-        assert_eq!(
-            number_content(Number::Float(5.0)),
-            [0x04, 0x04, 0xB2, 0x40, 0x01]
-        );
-        assert_eq!(
-            number_content(Number::Integer(-1)),
-            [0x02, 0xFB, 0x4F, 0xFF, 0x00]
-        );
-        assert_eq!(
-            number_content(Number::Float(0.5)),
-            [0x04, 0x04, 0xAF, 0x00, 0x01]
-        );
-        assert_eq!(number_content(Number::Float(f64::NAN)), [0x06, 0x01]);
     }
 
     #[test]
@@ -273,16 +303,20 @@ mod tests {
             Number::Integer(-65_537),
             Number::Float(-1.5),
             Number::Integer(-1),
-            Number::Float(-1.0),
+            Number::Float(-0.75),
+            Number::Float(-0.5),
+            Number::Float(-2f64.powi(-300)),
             Number::Float(-f64::MIN_POSITIVE),
             Number::Float(-5e-324),
             Number::Integer(0),
-            Number::Float(0.0),
             Number::Float(5e-324),
             Number::Float(f64::MIN_POSITIVE),
+            Number::Float(2f64.powi(-300)),
+            Number::Float(2f64.powi(-247)),
+            Number::Float(2f64.powi(-2)),
             Number::Float(0.5),
+            Number::Float(0.75),
             Number::Natural(1),
-            Number::Float(1.0),
             Number::Float(1.0 + f64::EPSILON),
             Number::Float(1.5),
             Number::Integer(2),
@@ -294,6 +328,8 @@ mod tests {
             Number::Integer(i128::MAX),
             Number::Float(2f64.powi(127)),
             Number::Natural(u128::MAX),
+            Number::Float(2f64.powi(247)),
+            Number::Float(2f64.powi(248)),
             Number::Float(f64::MAX),
             Number::Float(f64::INFINITY),
             Number::Float(f64::NAN),
@@ -311,26 +347,87 @@ mod tests {
         }
     }
 
+    /// Orders two finite numbers exactly, as a test oracle.
+    fn exact_order(a: Number, b: Number) -> Ordering {
+        fn whole(number: Number) -> Option<i128> {
+            match number {
+                Number::Integer(value) => Some(value),
+                Number::Natural(value) => i128::try_from(value).ok(),
+                Number::Float(_) => None,
+            }
+        }
+        // An integer against a float: compare the integer with the float's
+        // whole part, then the float's fraction against zero.
+        fn against(integer: i128, float: f64) -> Ordering {
+            const TOP: f64 = 170_141_183_460_469_231_731_687_303_715_884_105_728.0;
+            if float >= TOP {
+                return Ordering::Less;
+            }
+            if float < -TOP {
+                return Ordering::Greater;
+            }
+            let truncated = float.trunc();
+            integer
+                .cmp(&(truncated as i128))
+                .then_with(|| 0f64.partial_cmp(&(float - truncated)).unwrap())
+        }
+        match (a, b) {
+            (Number::Float(x), Number::Float(y)) => x.partial_cmp(&y).unwrap(),
+            (Number::Float(x), other) => against(whole(other).unwrap(), x).reverse(),
+            (other, Number::Float(y)) => against(whole(other).unwrap(), y),
+            (x, y) => whole(x).unwrap().cmp(&whole(y).unwrap()),
+        }
+    }
+
     #[test]
-    fn it_identifies_a_number_apart_from_its_band() {
-        // A natural and an integer are one number.
-        assert_eq!(
-            Value::UnsignedInt(5).reference(),
-            Value::SignedInt(5).reference()
-        );
-        // A number written as a float is another.
-        assert_ne!(
-            Value::SignedInt(5).reference(),
-            Value::Float(5.0).reference()
-        );
-        assert_ne!(
-            Value::SignedInt(0).reference(),
-            Value::Float(0.0).reference()
-        );
+    fn it_sorts_integers_and_floats_together_as_their_values() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut numbers = Vec::new();
+        while numbers.len() < 3000 {
+            let bits = next();
+            numbers.push(match bits % 4 {
+                0 => {
+                    let float = f64::from_bits(next());
+                    if !float.is_finite() {
+                        continue;
+                    }
+                    Number::Float(float)
+                }
+                // Floats that are whole numbers, to tie with integers.
+                1 => Number::Float((next() as i64 >> (bits % 60)) as f64),
+                2 => Number::Integer(i128::from(next() as i64) >> (bits % 60)),
+                _ => {
+                    Number::Integer((i128::from(next()) << 64 | i128::from(next())) >> (bits % 120))
+                }
+            });
+        }
+        numbers.sort_by(|a, b| exact_order(*a, *b));
+        for pair in numbers.windows(2) {
+            let (a, b) = (number_content(pair[0]), number_content(pair[1]));
+            match exact_order(pair[0], pair[1]) {
+                Ordering::Equal => assert_eq!(a, b, "{:?} = {:?}", pair[0], pair[1]),
+                _ => assert!(a < b, "{:?} {a:02x?} < {:?} {b:02x?}", pair[0], pair[1]),
+            }
+        }
+    }
+
+    #[test]
+    fn it_identifies_a_number_by_its_value_alone() {
+        // A natural, an integer and a float of one number are one value.
+        let five = Value::SignedInt(5).reference();
+        assert_eq!(Value::UnsignedInt(5).reference(), five);
+        assert_eq!(Value::Float(5.0).reference(), five);
+        assert_ne!(Value::Float(5.5).reference(), five);
         // Negative zero is zero, and NaN is one value.
         assert_eq!(
             Value::Float(-0.0).reference(),
-            Value::Float(0.0).reference()
+            Value::SignedInt(0).reference()
         );
         assert_eq!(
             Value::Float(f64::from_bits(0x7ff8_0000_0000_0001)).reference(),
