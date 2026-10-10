@@ -6,18 +6,18 @@ pub use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Returns the current system time.
 ///
-/// Uses `std::time::SystemTime::now()` on native and `web_time::SystemTime::now().to_std()`
-/// on WASM.
-#[cfg(not(target_arch = "wasm32"))]
+/// Uses `std::time::SystemTime::now()` on native and on WASI, and
+/// `web_time::SystemTime::now().to_std()` in the browser.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub fn now() -> SystemTime {
     SystemTime::now()
 }
 
 /// Returns the current system time.
 ///
-/// Uses `std::time::SystemTime::now()` on native and `web_time::SystemTime::now().to_std()`
-/// on WASM.
-#[cfg(target_arch = "wasm32")]
+/// Uses `std::time::SystemTime::now()` on native and on WASI, and
+/// `web_time::SystemTime::now().to_std()` in the browser.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub fn now() -> SystemTime {
     use web_time::web::SystemTimeExt;
     web_time::SystemTime::now().to_std()
