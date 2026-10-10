@@ -26,6 +26,7 @@ members = [
     "rust/dialog-macros",
     "rust/dialog-diagnose",
     "rust/dialog-encoding",
+    "rust/dialog-numeric",
     "rust/dialog-csv",
     "rust/dialog-query",
     "rust/dialog-search-tree",
@@ -140,6 +141,7 @@ rkyv = "0.8"
 bijoux = { version = "0.3.2", default-features = false, features = ["u64"] }
 rsa = "0.9"
 rusqlite = { version = "0.32", features = ["bundled"] }
+ryu = "1"
 s3s = "0.13"
 serde = "1"
 serde-value = "0.7"
@@ -189,6 +191,7 @@ web-sys = "0.3"
 web-time = "1"
 zerocopy = "0.8"
 zerocopy-derive = "0.8"
+zmij = "1"
 
 [workspace.dependencies.dialog-artifacts]
 path = "./rust/dialog-artifacts"
@@ -208,6 +211,10 @@ version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-did-web]
 path = "./rust/dialog-did-web"
+version = "0.3.0-rc.1"
+
+[workspace.dependencies.dialog-numeric]
+path = "./rust/dialog-numeric"
 version = "0.3.0-rc.1"
 
 [workspace.dependencies.merkle-reference]
