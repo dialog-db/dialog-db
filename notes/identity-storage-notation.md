@@ -241,6 +241,7 @@ section := id:u8 size:bijou content
 | 4 | premises | each premise: its kind, then its operands | yes |
 | 5 | reduce | the folds of an aggregating rule | no |
 | 128 | names | the names the author gave local variables, for display only | no |
+| 129 | order | the order the author wrote premises in, as a permutation of the canonical order, for display only | no |
 
 **Operands point into the tables.** A premise reads a concept by its index in
 the references section and a field by its index in the strings section. Each
@@ -258,16 +259,24 @@ references, a body may embed a part or store only its reference, and the rule's
 reference is the same either way. Concepts read by many rules are linked so they
 are stored once. Scalars and premises are embedded.
 
-**Names live apart.** Identity hashes the canonical labels of local variables,
-which loses the names the author wrote. The names section keeps them, so a
-decoded rule prints as it was written. The section is optional, and nothing
-reads it except display and diagnostics. It works like the WebAssembly name
-section.
+**The authored form lives apart.** Canonicalization throws away two things the
+author wrote: the names of local variables (identity hashes canonical labels),
+and the order of premises (identity sorts them). Two optional sections keep them:
+
+- **names** holds the label each variable had in the source;
+- **order** holds the source position of each premise, as a permutation of the
+  canonical order.
+
+With both, a decoded rule prints as the author wrote it. Nothing reads them
+except display and diagnostics, and they work like the WebAssembly name section.
+Two rules that differ only in names or premise order are one rule with one
+reference. A body stores the authored form of whichever was written first, and a
+later install of the same rule leaves it as it is.
 
 **Compatibility.** An unknown section id below 128 is an error. An unknown id
 of 128 or above is skipped, which is how later versions can add optional data
-without a new format number. The names section (id 128) is the first such
-section.
+without a new format number. The names (128) and order (129) sections are the
+first such sections.
 
 **A canonical layout.** WebAssembly's encoding is not canonical: it allows
 over-long LEB128 and some freedom in section order. Bodies are not hashed, but a
