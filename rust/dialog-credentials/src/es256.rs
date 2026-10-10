@@ -152,7 +152,7 @@ impl Es256SigningKey {
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         {
             let mut seed = [0u8; 32];
-            getrandom::getrandom(&mut seed).map_err(Es256KeyError::Rng)?;
+            dialog_common::random::fill(&mut seed).map_err(Es256KeyError::Rng)?;
             let key = p256::ecdsa::SigningKey::from_slice(&seed)
                 .map_err(|_| Es256KeyError::InvalidSeedLength(seed.len()))?;
             Ok(Self::Native(key))
