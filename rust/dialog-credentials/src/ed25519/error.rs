@@ -32,6 +32,9 @@ pub enum Ed25519KeyError {
     /// re-derive from.
     AgreementKeyUnavailable,
 
+    /// The key is held outside this process: it cannot be exported.
+    External,
+
     /// Random number generation failed (native only).
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     Rng(getrandom::Error),
@@ -56,6 +59,7 @@ impl std::fmt::Display for Ed25519KeyError {
                 f,
                 "no X25519 agreement key available: the signing key was restored without one"
             ),
+            Self::External => write!(f, "the key is held outside this process"),
             #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
             Self::Rng(e) => write!(f, "RNG error: {e}"),
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
