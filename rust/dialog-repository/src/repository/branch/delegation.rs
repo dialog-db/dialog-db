@@ -241,9 +241,9 @@ impl RetainDelegation<'_> {
     {
         let branch = self.branch;
         let store = index_store(branch, env).await;
-        let tree = branch
-            .revision()
-            .map(|revision| Index::from_hash(NodeHash::from(*revision.tree.hash())));
+        let tree = branch.revision().map(|revision| {
+            Index::from_hash_with_cache(NodeHash::from(*revision.tree.hash()), branch.node_cache())
+        });
 
         let mut instructions = Vec::new();
         let mut retained = Vec::new();
@@ -341,7 +341,8 @@ impl RetractDelegation<'_> {
             return Ok(Vec::new());
         };
         let store = index_store(branch, env).await;
-        let tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
+        let tree =
+            Index::from_hash_with_cache(NodeHash::from(*revision.tree.hash()), branch.node_cache());
 
         let mut instructions = Vec::new();
         let mut entries = Vec::new();
