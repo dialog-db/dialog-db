@@ -2319,9 +2319,7 @@ mod kept_hash_tests {
 
     use super::{Novelty, TransientIndex, TransientNode, TransientSegment};
     use crate::distribution::summary::PieceSummary;
-    use crate::{
-        Cache, Delta, Entry, Geometric, Hashed, Manifest, Node, NodeCache, PersistentNode,
-    };
+    use crate::{Delta, Entry, Geometric, Hashed, Manifest, Node, NodeCache, PersistentNode};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -2358,7 +2356,7 @@ mod kept_hash_tests {
     /// nobody asked about stays unhashed.
     #[dialog_common::test]
     fn it_keeps_a_stored_leafs_key_hashes_between_openings() -> Result<()> {
-        let leaf = seal(entries_of(0..8), &Cache::new())?;
+        let leaf = seal(entries_of(0..8), &NodeCache::new())?;
 
         let first = open(&leaf)?;
         assert!(
@@ -2386,7 +2384,7 @@ mod kept_hash_tests {
         let entries = entries_of(0..8);
         let ranked = entries[5].key_hash();
 
-        let opened = open(&seal(entries, &Cache::new())?)?;
+        let opened = open(&seal(entries, &NodeCache::new())?)?;
 
         assert_eq!(opened.entries()[5].known_hash(), Some(ranked));
         assert_eq!(opened.entries()[4].known_hash(), None);
@@ -2397,7 +2395,7 @@ mod kept_hash_tests {
     /// ones its links had, and handing them to whoever opens it.
     #[dialog_common::test]
     fn it_seals_an_index_with_the_hashes_its_separators_had() -> Result<()> {
-        let cache = Cache::new();
+        let cache = NodeCache::new();
         let left = seal(entries_of(0..4), &cache)?.to_link(Vec::new());
         let right = seal(entries_of(4..8), &cache)?.to_link(4u32.to_be_bytes().to_vec());
         let ranked = right.separator.hashed().hash();
@@ -2419,7 +2417,7 @@ mod kept_hash_tests {
     /// its bytes back from storage.
     #[dialog_common::test]
     fn it_keeps_every_node_it_seals_in_the_cache() -> Result<()> {
-        let cache = Cache::new();
+        let cache = NodeCache::new();
         let left = seal(entries_of(0..4), &cache)?;
         let right = seal(entries_of(4..8), &cache)?;
         let index = TransientNode::<[u8; 4], Vec<u8>>::Index(TransientIndex {
@@ -2444,7 +2442,7 @@ mod kept_hash_tests {
     /// it is the same node, and it has whatever it derived since.
     #[dialog_common::test]
     fn it_keeps_the_node_already_held_when_the_same_bytes_are_sealed_again() -> Result<()> {
-        let cache = Cache::new();
+        let cache = NodeCache::new();
         let held = seal(entries_of(0..8), &cache)?;
         let hash = open(&held)?.entries()[1].key_hash();
 
@@ -2461,7 +2459,7 @@ mod kept_hash_tests {
     #[dialog_common::test]
     fn it_keeps_a_piece_summary_under_the_knobs_it_was_built_with() -> Result<()> {
         let manifest = Manifest::default();
-        let leaf = seal(entries_of(0..8), &Cache::new())?;
+        let leaf = seal(entries_of(0..8), &NodeCache::new())?;
         assert!(leaf.summary(&manifest).is_none());
 
         let segment = open(&leaf)?;

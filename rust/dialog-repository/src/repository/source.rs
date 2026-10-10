@@ -330,7 +330,7 @@ impl Caches {
     /// A cold set.
     pub(crate) fn new() -> Self {
         Self {
-            nodes: Cache::new(),
+            nodes: dialog_search_tree::NodeCache::new(),
             spills: spill_cache(),
             rules: Arc::new(RuleCache::new()),
             plans: PlanCache::default(),
