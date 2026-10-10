@@ -23,7 +23,7 @@
 //! use std::str::FromStr;
 //! use dialog_artifacts::tree::{ArtifactTree, ArtifactTreeExt, spill_cache};
 //! use dialog_artifacts::{
-//!     ArchiveDelta, Artifact, ArtifactSelector, Attribute, Entity, Instruction, Value,
+//!     ArchiveDelta, Artifact, ArtifactSelector, Entity, Instruction, Relation, Value,
 //! };
 //! use dialog_search_tree::MemoryBlocks;
 //! use futures_util::{StreamExt, stream};
@@ -37,7 +37,7 @@
 //! // Assert an artifact: the new nodes (and any spilled value) are staged
 //! // in the delta, then written out.
 //! let artifact = Artifact {
-//!     the: Attribute::from_str("profile/name")?,
+//!     the: Relation::from_str("profile/name")?,
 //!     of: Entity::new()?,
 //!     is: Value::String("Foo Bar".into()),
 //!     cause: None,
@@ -48,7 +48,7 @@
 //! delta.flush_into(&blocks);
 //!
 //! // Query the index
-//! let selector = ArtifactSelector::new().the(Attribute::from_str("profile/name")?);
+//! let selector = ArtifactSelector::new().the(Relation::from_str("profile/name")?);
 //! let results = index
 //!     .scan(blocks.clone(), spill_cache(), selector)
 //!     .filter_map(|view| async move { view.ok() })

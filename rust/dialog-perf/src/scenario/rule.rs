@@ -97,7 +97,7 @@ const DEPTH: usize = 25;
 
 fn ancestor() -> ConceptDescriptor {
     concept(serde_json::json!({ "with": {
-        "ancestor": { "the": "family/ancestor", "as": "entity:", "pick": "all" }
+        "ancestor": { "the": "family/ancestor", "as": "entity:", "pick": "all:" }
     }}))
 }
 
@@ -106,7 +106,7 @@ fn ancestor_rules() -> [DeductiveRule; 2] {
         "parent": { "the": "family/parent", "as": "entity:" }
     }});
     let head = serde_json::json!({ "with": {
-        "ancestor": { "the": "family/ancestor", "as": "entity:", "pick": "all" }
+        "ancestor": { "the": "family/ancestor", "as": "entity:", "pick": "all:" }
     }});
     let base = rule(serde_json::json!({
         "deduce": head,

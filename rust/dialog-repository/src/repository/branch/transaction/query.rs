@@ -725,7 +725,7 @@ mod tests {
         let rule = {
             let json = serde_json::json!({
                 "deduce": { "with": {
-                    "salary": { "the": "org/dept-salary", "as": "natural:", "pick": "all" }
+                    "salary": { "the": "org/dept-salary", "as": "natural:", "pick": "all:" }
                 }},
                 "when": [{
                     "assert": { "with": {
@@ -744,7 +744,7 @@ mod tests {
             descriptor.compile().expect("rule compiles")
         };
         let dept_top: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max" }
+            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max:" }
         }}))?;
 
         let dept: Entity = "id:dept-a".parse()?;

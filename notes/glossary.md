@@ -58,7 +58,7 @@ A relation qualified by a value type and a pick: how a relation is read. `person
 
 ```json
 { "the": "person/name", "as": "text:" }
-{ "the": "person/email", "as": "text:", "pick": "all" }
+{ "the": "person/email", "as": "text:", "pick": "all:" }
 { "the": "job/status", "as": ["case:suspended", "case:active"] }
 ```
 
@@ -72,6 +72,8 @@ Which of the claims a relation holds for an entity an attribute reads, spelled `
 - `all`: every claim, as a set;
 - `top`: the best ranked of listed values (`as: [..]`) or relations (`the: [..]`), and a list implies `top`;
 - `max`, `min`: the greatest or least value of an ordered type.
+
+Like a type, each pick is named by an entity, `last:`, `all:`, `top:`, `max:` and `min:`, which is how a descriptor spells it and what an attribute's identity hashes.
 
 A pick governs writes too: writing through an attribute under any pick but `all` succeeds the claim a read under that pick returns, and `all` adds a claim beside the others. In Rust a pick is `dialog_artifacts::Pick`.
 

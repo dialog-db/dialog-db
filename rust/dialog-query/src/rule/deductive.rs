@@ -2136,7 +2136,7 @@ mod tests {
         let rule = compiled(serde_json::json!({
             "deduce": { "with": { "tag": { "the": "item/label", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "tag": { "the": "item/tag", "as": "text:", "pick": "all" } } },
+                "assert": { "with": { "tag": { "the": "item/tag", "as": "text:", "pick": "all:" } } },
                 "where": { "this": { "?": { "name": "this" } }, "tag": { "?": { "name": "tag" } } }
             }]
         }));

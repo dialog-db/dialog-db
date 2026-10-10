@@ -53,11 +53,11 @@
         },
         "pick": {
           "$ref": "#/$defs/Pick",
-          "description": "Which of the claims the relation holds for an entity the attribute reads. Defaults to 'last', or to 'top' when 'the' or 'as' is a list."
+          "description": "Which of the claims the relation holds for an entity the attribute reads. Defaults to 'last:', or to 'top:' when 'the' or 'as' is a list."
         },
         "cardinality": {
           "$ref": "#/$defs/Cardinality",
-          "description": "The older spelling of 'pick': 'one' reads as 'last' and 'many' as 'all'. Read, never written; 'pick' wins when both are given."
+          "description": "The older spelling of 'pick': 'one' reads as 'last:' and 'many' as 'all:'. Read, never written; 'pick' wins when both are given."
         },
         "as": {
           "$ref": "#/$defs/Assert",
@@ -80,14 +80,19 @@
     "Pick": {
       "type": "string",
       "enum": [
+        "last:",
+        "all:",
+        "top:",
+        "max:",
+        "min:",
         "last",
         "all",
         "top",
         "max",
         "min"
       ],
-      "description": "'last' reads the newest claim; 'all' every claim, as a set; 'top' the best ranked of the values listed in 'as' or the relations listed in 'the'; 'max' and 'min' the greatest or least value of an ordered type. A write under any pick but 'all' succeeds the claim a read under it returns.",
-      "default": "last"
+      "description": "Each pick is named by an entity: 'last:' reads the newest claim; 'all:' every claim, as a set; 'top:' the best ranked of the values listed in 'as' or the relations listed in 'the'; 'max:' and 'min:' the greatest or least value of an ordered type. A write under any pick but 'all:' succeeds the claim a read under it returns. The plain names 0.2 wrote ('last', 'all', ...) are read, never written.",
+      "default": "last:"
     },
     "Cardinality": {
       "type": "string",

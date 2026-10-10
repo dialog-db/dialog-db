@@ -61,19 +61,28 @@ impl Change {
 /// an attribute carries its pick: a write under any pick but `all`
 /// succeeds the claim the pick returns, and a write under `all`
 /// appends and succeeds nothing.
+///
+/// Each pick is named by an entity, `last:`, `all:`, `top:`, `max:` or
+/// `min:`, which is what a batch carries and what an attribute's
+/// identity hashes; the plain names an earlier release wrote are still
+/// read.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum Pick {
     /// The newest claim.
+    #[serde(rename = "last:", alias = "last")]
     Last,
     /// Every claim: a write appends.
+    #[serde(rename = "all:", alias = "all")]
     All,
     /// The claim with the greatest value, the newest among equals.
+    #[serde(rename = "max:", alias = "max")]
     Max,
     /// The claim with the least value, the newest among equals.
+    #[serde(rename = "min:", alias = "min")]
     Min,
     /// The claim whose value is listed first, best first; an unlisted
     /// value ranks last, and the newest wins among equals.
+    #[serde(rename = "top:", alias = "top")]
     Top(Vec<Value>),
 }
 
@@ -130,12 +139,19 @@ impl Pick {
     /// The pick's name as the notation spells it: `last`, `all`, `top`,
     /// `max` or `min`.
     pub fn name(&self) -> &'static str {
+        let uri = self.uri();
+        &uri[..uri.len() - 1]
+    }
+
+    /// The entity that names this pick: `last:`, `all:`, `top:`, `max:`
+    /// or `min:`.
+    pub fn uri(&self) -> &'static str {
         match self {
-            Pick::Last => "last",
-            Pick::All => "all",
-            Pick::Top(_) => "top",
-            Pick::Max => "max",
-            Pick::Min => "min",
+            Pick::Last => "last:",
+            Pick::All => "all:",
+            Pick::Top(_) => "top:",
+            Pick::Max => "max:",
+            Pick::Min => "min:",
         }
     }
 

@@ -2700,7 +2700,7 @@ mod tests {
         /// recursion elects one ancestor.
         #[derive(Attribute, Clone, PartialEq)]
         #[domain("family")]
-        #[cardinality(many)]
+        #[pick(all)]
         pub struct Ancestor(pub Entity);
 
         /// Direct parenthood.
@@ -3297,7 +3297,7 @@ mod tests {
     /// The relation `dept_salary_rule` derives into, read as the set.
     fn dept_salary() -> ConceptDescriptor {
         serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "payroll/salary", "as": "natural:", "pick": "all" }
+            "salary": { "the": "payroll/salary", "as": "natural:", "pick": "all:" }
         }}))
         .expect("descriptor parses")
     }
@@ -3306,7 +3306,7 @@ mod tests {
     fn dept_top() -> ConceptQuery {
         concept_query(
             serde_json::json!({ "with": {
-                "top": { "the": "payroll/salary", "as": "natural:", "pick": "max" }
+                "top": { "the": "payroll/salary", "as": "natural:", "pick": "max:" }
             }}),
             &["top"],
         )
@@ -3600,10 +3600,10 @@ mod tests {
             "bonus": { "the": "staff/bonus", "as": "natural:" }
         }}))?;
         let members: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "member": { "the": "payroll/member", "as": "entity:", "pick": "all" }
+            "member": { "the": "payroll/member", "as": "entity:", "pick": "all:" }
         }}))?;
         let bonuses: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "bonus": { "the": "payroll/bonus", "as": "natural:", "pick": "all" }
+            "bonus": { "the": "payroll/bonus", "as": "natural:", "pick": "all:" }
         }}))?;
         let member_rule = concept_rule(
             &members,
@@ -3629,9 +3629,9 @@ mod tests {
 
         let stats = concept_query(
             serde_json::json!({ "with": {
-                "member": { "the": "payroll/member", "as": "entity:", "pick": "all" },
+                "member": { "the": "payroll/member", "as": "entity:", "pick": "all:" },
                 "top": {
-                    "the": "payroll/bonus", "as": "natural:", "pick": "max",
+                    "the": "payroll/bonus", "as": "natural:", "pick": "max:",
                     "optional": true
                 }
             }}),
