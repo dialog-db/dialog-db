@@ -106,14 +106,75 @@ Measured in the `rule-install` perf scenario (100 rules committed, then read bac
 The byte format is not where read time goes, so the storage format is chosen for
 determinism, evolvability and size, and speed comes from not recompiling.
 
-- **Body format 3:** a deterministic binary encoding of the AST, with a format
-  version first, as bodies carry today. A child that has its own identity is
-  stored by reference, so a concept many rules read is stored once.
+- **Body format 3:** a binary encoding modelled on the WebAssembly binary format.
+  It is described below.
 - **Compiled-rule cache keyed by rule reference:** in process first, persistent
   later if it measures. This is what removes the 13%.
 - **Values outside rules** (`Changes` batches, the session-overlay handoff):
   every value carries its type in storage. This fixes integers coming back as
   floats, which is a live bug in tonk's overlay handoff today.
+
+### Body format 3
+
+A body is laid out like a WebAssembly module. The layout below is a sketch; the
+section ids and field order are settled when it is implemented.
+
+```text
+body    := magic version section*
+magic   := 0x00 'd' 'l' 'g'
+version := u32 little endian (3)
+section := id:u8 size:leb128 content
+```
+
+| Id | Section | Content | Required |
+|---|---|---|---|
+| 1 | references | the references the body points to (concepts, attributes, values stored apart), 32 bytes each | when the body references any |
+| 2 | strings | relation names, field names and text constants, each length-prefixed UTF-8 | when the body has any |
+| 3 | head | the conclusion: a concept by reference index, or its fields inline | yes |
+| 4 | premises | each premise: its kind, then its operands | yes |
+| 5 | reduce | the folds of an aggregating rule | no |
+| 0 | names | the names the author gave local variables, for display only | no |
+
+**Operands point into the tables.** A premise reads a concept by its index in
+the references section and a field by its index in the strings section. Each
+reference and name is stored once per body, and decoding does no lookups.
+
+**Schema-driven values.** The schema says what type each slot holds, so a value
+carries no type tag where the slot declares a type. It carries one (a kind byte)
+only where the slot admits any type, which is the notation's boxing rule. That
+keeps bodies smaller than self-describing CBOR, and no value is read as a type
+its spelling resembles.
+
+**Names live apart.** Identity hashes the canonical labels of local variables,
+which loses the names the author wrote. The names section keeps them, so a
+decoded rule prints as it was written. The section is optional, and nothing
+reads it except display and diagnostics. It works like the WebAssembly name
+section.
+
+**Compatibility.** An unknown section id below 128 is an error. An unknown id
+of 128 or above is skipped, which is how later versions can add optional data
+without a new format number. The names section (id 0) is one such optional
+section.
+
+**A canonical subset.** WebAssembly's encoding is not canonical: it allows
+over-long LEB128 and some freedom in section order. Bodies are not hashed, but a
+body should still be a function of its rule, so equal rules store equal bytes and
+dedupe:
+
+- every LEB128 is minimal;
+- sections appear in ascending id order, each at most once, with the names
+  section last;
+- the references and strings tables are sorted and hold no duplicates;
+- premises appear in canonical order (by reference, after labeling).
+
+**What it is not.** A body's indices are local to that body, as a WebAssembly
+module's are. The same concept has a different index in different bodies, so a
+body's bytes are never an identity. The rule's reference is computed from its AST,
+with indices resolved back to references.
+
+**Validation.** Bodies arrive from untrusted peers, so a decoder validates in one
+pass and refuses a malformed body instead of panicking. That means bounds-checked
+sizes, indices within their tables, and every required section present.
 
 ## Notation
 
@@ -164,8 +225,11 @@ Each step lands with tests and a perf sweep:
    - the result is the same however a value was built.
 2. **Attribute and concept references.**
 3. **Rule references** over the canonical AST, referencing concepts.
-4. **Body format 3**, with definitions stored by reference; formats 0 to 2 are
-   still read.
+4. **Body format 3**, the WebAssembly-style layout above, with definitions
+   stored by reference. Formats 0 to 2 are still read. Pinned by a round-trip
+   test, a test that equal rules store equal bytes, and tests that feed the
+   decoder truncated, oversized and out-of-range input. The repo has no fuzzing
+   setup yet; a fuzz target for the decoder would be worth adding with it.
 5. **The compiled-rule cache.**
 6. **The JSON reader and writer** that take types from slots.
 7. **A migration test:** a pre-0.2 fixture (from tonk main) upgrades to 0.3.0
