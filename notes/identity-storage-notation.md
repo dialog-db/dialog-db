@@ -270,8 +270,11 @@ and the order of premises (identity sorts them). Two optional sections keep them
 With both, a decoded rule prints as the author wrote it. Nothing reads them
 except display and diagnostics, and they work like the WebAssembly name section.
 Two rules that differ only in names or premise order are one rule with one
-reference. A body stores the authored form of whichever was written first, and a
-later install of the same rule leaves it as it is.
+reference, so a later install of the same rule can bring a different authored
+form. The preference is that the newest install wins. A body is stored as a
+claim (`dialog.rule/source`), so read under `last`, a re-install replaces the
+authored form and leaves the reference unchanged. This is settled independently
+of the rest of this design.
 
 **Compatibility.** An unknown section id below 128 is an error. An unknown id
 of 128 or above is skipped, which is how later versions can add optional data
