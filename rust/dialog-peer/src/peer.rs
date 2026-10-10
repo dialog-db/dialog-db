@@ -266,9 +266,13 @@ pub(crate) struct Inner {
     /// grant from the peer extends.
     held: Vec<Grant>,
     /// The repository holding this peer's own state, and the replica
-    /// identity every entity it writes derives from: the repository of
-    /// the state branch the peer was given.
+    /// identity every entity it writes derives from, unless `profile`
+    /// names another: the repository of the state branch the peer was
+    /// given.
     home: Did,
+    /// The replica this peer writes as, when it is not `home`: the profile
+    /// of its authority. See `PeerBuilder::profile`.
+    profile: Option<Did>,
     /// Base directory for resolving space names, until the registry
     /// resolves them by fact.
     directory: Directory,
@@ -545,7 +549,7 @@ impl<S: PeerSpace, M: Mode> Peer<S, M> {
     pub(crate) fn assemble(storage: Storage<S>, inner: Inner) -> Self {
         let authority = Authority::new(
             "peer",
-            inner.home.clone(),
+            inner.profile.clone().unwrap_or_else(|| inner.home.clone()),
             inner.credential.signer().clone(),
         );
         let peer = Peer {
@@ -625,7 +629,7 @@ mod tests {
     use super::*;
     use crate::helpers::{
         open_peer, test_credential_store, test_grant, test_peer, test_session_with_peer,
-        test_storage, test_system, unique_name,
+        test_state, test_storage, test_system, unique_name,
     };
     use crate::{ClaimExt as _, OpenCredential};
     use anyhow::Result;
@@ -1015,6 +1019,66 @@ mod tests {
             .perform(&second)
             .await?;
         assert_eq!(proof.proofs().len(), 2, "space -> peer ++ peer -> worker");
+        Ok(())
+    }
+
+    /// A session given a profile writes as that replica: its authority
+    /// names the profile, and its home stays the repository of the branch it
+    /// is given.
+    #[dialog_common::test]
+    async fn it_writes_a_session_as_the_profile_it_is_given() -> Result<()> {
+        use dialog_effects::authority::OperatorExt as _;
+
+        let peer = open_peer(
+            test_storage().await,
+            Location::temp(unique_name("ephemeral")),
+        )
+        .await?;
+        let replica = Ed25519Signer::generate().await?.did();
+
+        let worker = peer
+            .session(b"writer")
+            .space(Repository::from(peer.home().clone()).branch("main"))
+            .profile(replica.clone())
+            .allow(Subject::any())
+            .await?;
+
+        assert_eq!(worker.home(), peer.home());
+        assert_eq!(worker.build_authority(peer.did()).profile(), &replica);
+        let plain = peer
+            .session(b"plain")
+            .space(Repository::from(peer.home().clone()).branch("main"))
+            .allow(Subject::any())
+            .await?;
+        assert_eq!(plain.build_authority(peer.did()).profile(), peer.home());
+        Ok(())
+    }
+
+    /// A peer given a profile writes as that replica, with its own key and
+    /// not as a session: its authority names the profile, and its home
+    /// stays the repository of the branch it is given.
+    #[dialog_common::test]
+    async fn it_writes_a_peer_as_the_profile_it_is_given() -> Result<()> {
+        use dialog_effects::authority::OperatorExt as _;
+
+        let location = Location::temp(unique_name("ephemeral"));
+        let credential = OpenCredential::open(location.name.clone())
+            .at(location.directory.clone())
+            .perform(&test_credential_store())
+            .await?;
+        let replica = Ed25519Signer::generate().await?.did();
+
+        let peer = Peer::new(credential.clone())
+            .at(location)
+            .space(test_state(&credential.did()))
+            .profile(replica.clone())
+            .with(test_storage().await)
+            .grant(test_grant().await)
+            .build()
+            .await?;
+
+        assert_eq!(peer.home(), &credential.did());
+        assert_eq!(peer.build_authority(peer.did()).profile(), &replica);
         Ok(())
     }
 
