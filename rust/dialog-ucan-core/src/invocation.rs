@@ -103,6 +103,12 @@ impl<S: Signature> Invocation<S> {
         self.payload().expiration
     }
 
+    /// Getter for the `issued_at` field.
+    #[must_use]
+    pub const fn issued_at(&self) -> Option<Timestamp> {
+        self.payload().issued_at
+    }
+
     /// Getter for the `meta` field. Returns an empty map when meta is absent.
     #[must_use]
     pub fn meta(&self) -> &BTreeMap<String, Ipld> {
@@ -2335,6 +2341,36 @@ mod tests {
         assert_eq!(range.not_before, Bound::Unbounded);
         assert_eq!(range.expiration, Bound::Included(exp));
         assert!(range.contains(&Timestamp::now()));
+        Ok(())
+    }
+
+    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), tokio::test)]
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
+    async fn it_gives_the_time_an_invocation_was_issued_at() -> TestResult {
+        let subject = test_signer(11).await;
+        let invoker = test_signer(12).await;
+        let issued = Timestamp::now();
+
+        let stamped = InvocationBuilder::new()
+            .issuer(invoker.clone())
+            .audience(&subject)
+            .subject(&subject)
+            .command(vec!["test".to_string()])
+            .proofs(vec![])
+            .issued_at(issued)
+            .try_build()
+            .await?;
+        let unstamped = InvocationBuilder::new()
+            .issuer(invoker.clone())
+            .audience(&subject)
+            .subject(&subject)
+            .command(vec!["test".to_string()])
+            .proofs(vec![])
+            .try_build()
+            .await?;
+
+        assert_eq!(stamped.issued_at(), Some(issued));
+        assert_eq!(unstamped.issued_at(), None);
         Ok(())
     }
 
