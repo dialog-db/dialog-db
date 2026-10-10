@@ -148,6 +148,6 @@ pub(super) async fn derive(
 /// random nonce carries no reuse risk across messages.
 fn random_nonce() -> Result<[u8; 12], SecretError> {
     let mut nonce = [0u8; 12];
-    getrandom::getrandom(&mut nonce).map_err(|e| SecretError::Crypto(e.to_string()))?;
+    dialog_common::random::fill(&mut nonce).map_err(|e| SecretError::Crypto(e.to_string()))?;
     Ok(nonce)
 }

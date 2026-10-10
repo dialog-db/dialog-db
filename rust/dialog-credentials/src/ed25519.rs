@@ -173,7 +173,7 @@ impl Ed25519SigningKey {
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         {
             let mut seed = [0u8; 32];
-            getrandom::getrandom(&mut seed).map_err(Ed25519KeyError::Rng)?;
+            dialog_common::random::fill(&mut seed).map_err(Ed25519KeyError::Rng)?;
             Ok(Self::Native(ed25519_dalek::SigningKey::from_bytes(&seed)))
         }
     }
@@ -443,7 +443,7 @@ impl X25519SecretKey {
     #[allow(clippy::unused_async)] // async is needed on WASM
     pub(crate) async fn ephemeral() -> Result<Self, Ed25519KeyError> {
         let mut secret = [0u8; 32];
-        getrandom::getrandom(&mut secret)
+        dialog_common::random::fill(&mut secret)
             .map_err(|e| Ed25519KeyError::RandomSource(e.to_string()))?;
 
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
