@@ -155,7 +155,12 @@ pub fn catalog() -> Vec<Spec> {
             name: "rule-install",
             size: 100,
             about: "one transaction committing `size` rules, then the first read of the last one: discovery and hydration cold",
-            volatile: false,
+            // Its commit's tree write varies between runs of one binary
+            // (221 M to 232 M instructions on main, 225 M to 234 M on the
+            // pick-entity head, every counter equal, with or without
+            // ASLR), all of it in vector growth in the reshape path.
+            // Gated on counters.
+            volatile: true,
             prepare: |size| Box::pin(rule::install(size)),
         },
         Spec {
