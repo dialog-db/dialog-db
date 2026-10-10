@@ -1,5 +1,5 @@
 [package]
-name = "dialog-numeric"
+name = "dialog-number"
 description = "Dialog's numbers: one exact decimal domain with one canonical, order-preserving encoding"
 edition = "2024"
 version.workspace = true

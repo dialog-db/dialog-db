@@ -38,7 +38,7 @@ What this changes for you:
   returns a `Reference`.
 - `Value::reference()` gives a value's identity. Every number has one
   `number:` type and is identified by its value alone, in the encoding
-  of the new `dialog-numeric` crate (SQLite4's decimal key encoding): a
+  of the new `dialog-number` crate (SQLite4's decimal key encoding): a
   natural `5`, an integer `5` and a float `5.0` are one value, a float
   is the decimal it prints as (`1e23` is 10²³), `-0.0` is `0`, and NaN
   is one value. An attribute's `as:` list hashes values this way.

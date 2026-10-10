@@ -22,7 +22,7 @@ dialog-capability = { workspace = true }
 dialog-effects = { workspace = true }
 dialog-storage = { workspace = true }
 dialog-search-tree = { workspace = true }
-dialog-numeric = { workspace = true }
+dialog-number = { workspace = true }
 merkle-reference = { workspace = true }
 
 anyhow = { workspace = true, optional = true }

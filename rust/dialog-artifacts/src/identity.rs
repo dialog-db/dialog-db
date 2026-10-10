@@ -4,7 +4,7 @@
 //! identity. Dialog's value types are:
 //!
 //! - [`NUMBER`] for every number, whose content is its
-//!   [`dialog_numeric`] encoding: SQLite4's decimal key encoding, the bytes
+//!   [`dialog_number`] encoding: SQLite4's decimal key encoding, the bytes
 //!   the value index will key the number by;
 //! - the core text and boolean of [`merkle_reference`];
 //! - plain bytes, referenced by their BLAKE3 hash like any blob;
@@ -39,7 +39,7 @@ pub const RECORD: Type = Type::from_reference(Reference::from_hex(
     "419cfed454524033b3fc368ea2d718640f0ac99760c033353c4120c822c19589",
 ));
 
-/// A number's identity content: its [`dialog_numeric`] encoding.
+/// A number's identity content: its [`dialog_number`] encoding.
 fn number(encode: impl FnOnce(&mut Vec<u8>)) -> Reference {
     let mut content = Vec::with_capacity(12);
     encode(&mut content);
@@ -54,9 +54,9 @@ impl Value {
             Value::Entity(entity) => ENTITY.refer(entity.as_str().as_bytes()),
             Value::Boolean(value) => value.refer(),
             Value::String(text) => text.refer(),
-            Value::UnsignedInt(value) => number(|out| dialog_numeric::encode_u128(*value, out)),
-            Value::SignedInt(value) => number(|out| dialog_numeric::encode_i128(*value, out)),
-            Value::Float(value) => number(|out| dialog_numeric::encode_f64(*value, out)),
+            Value::UnsignedInt(value) => number(|out| dialog_number::encode_u128(*value, out)),
+            Value::SignedInt(value) => number(|out| dialog_number::encode_i128(*value, out)),
+            Value::Float(value) => number(|out| dialog_number::encode_f64(*value, out)),
             Value::Record(bytes) => RECORD.refer(bytes),
             Value::Symbol(symbol) => SYMBOL.refer(symbol.to_string().as_bytes()),
         }
@@ -87,9 +87,9 @@ mod tests {
     }
 
     #[test]
-    fn it_takes_number_content_from_dialog_numeric() {
+    fn it_takes_number_content_from_dialog_number() {
         let mut content = Vec::new();
-        dialog_numeric::encode_f64(19.99, &mut content);
+        dialog_number::encode_f64(19.99, &mut content);
         assert_eq!(Value::Float(19.99).reference(), NUMBER.refer(&content));
     }
 
