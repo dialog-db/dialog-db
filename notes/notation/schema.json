@@ -631,7 +631,7 @@
       ]
     },
     "Constant": {
-      "description": "A concrete value: string, number, or boolean.",
+      "description": "A concrete value: bare (string, number, boolean, or a list of bytes), or tagged by the entity naming its type.",
       "oneOf": [
         {
           "type": "string"
@@ -644,6 +644,19 @@
         },
         {
           "type": "boolean"
+        },
+        {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0, "maximum": 255 }
+        },
+        {
+          "type": "object",
+          "description": "A tagged constant: one key, the entity naming its type.",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "propertyNames": {
+            "enum": ["text:", "entity:", "symbol:", "integer:", "natural:", "float:", "boolean:", "bytes:", "record:"]
+          }
         }
       ]
     },

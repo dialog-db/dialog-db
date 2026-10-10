@@ -14,6 +14,33 @@ says how to cut a release.
 
 ## Unreleased
 
+### Constants name their type by an entity
+
+[notation](./notes/notation.md#constants)
+
+A value in a binary encoding is written as `{"<type entity>": payload}`:
+`{"text:": "foo:"}`, `{"entity:": "foo:"}`, `{"integer:": 5}`.
+
+What this changes for you:
+
+- Rule bodies and identities: text, an entity and a symbol of the same
+  spelling, or a natural and a signed integer of the same number, are
+  different constants. A committed rule matching text shaped like a URI
+  derives again.
+- Rule bodies are format 2. Formats 0 and 1 are still read, and a
+  constant in a field with a declared type takes that type.
+- `Changes` batches keep each value's type through dag-cbor. Integers
+  used to come back as floats.
+- JSON writes a value bare where the bare form reads back as the same
+  value, and tagged otherwise. It reads both forms.
+- `Value::untagged()` gives the bare form, for encodings that must keep
+  an earlier spelling. `Value::conform(kind)` converts a value to a
+  type that reads it.
+
+Why: an encoding that leaves out a constant's type makes the meaning
+depend on how its spelling looks, and lets two different rules share
+one identity.
+
 ### Picks are named by entities
 
 [glossary](./notes/glossary.md#pick)
@@ -44,6 +71,16 @@ change only once.
   rules but does not move its transient markers.
 - 0.2.0 cannot read descriptors this release writes. Stored claims are
   not rewritten.
+- Rule bodies from 0.2.0 or earlier wrote constants bare. On upgrade,
+  each constant takes its field's declared type. A constant in an
+  untyped field keeps the type its spelling suggests. Text shaped like
+  a URL may come back with its URL normalization (`https://a` becomes
+  `https://a/`).
+- Every rule with a constant, and every attribute with an `as:` list,
+  has a new identity. `upgrade_rules()` re-installs those rules.
+- Values in tonk's dag-cbor and IPLD conversions come out tagged. Use
+  `Value::untagged()` where an identity minted from values has to stay
+  as it was.
 
 ## 0.2.0 (2026-10-09)
 

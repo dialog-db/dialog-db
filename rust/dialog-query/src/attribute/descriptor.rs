@@ -371,9 +371,22 @@ impl TryFrom<Wire> for AttributeDescriptor {
         let (content_type, among) = match wire.content {
             None => (None, Vec::new()),
             Some(As::Kind(kind)) => (Some(kind), Vec::new()),
-            Some(As::Domain(values)) => {
+            Some(As::Domain(mut values)) => {
                 if values.is_empty() {
                     return Err("`as` lists no value".to_string());
+                }
+                // A bare string reads as an entity when it parses as a
+                // URI, so a list of text written bare reads as text and
+                // entities mixed; it is text.
+                if values.iter().any(|value| matches!(value, Value::String(_)))
+                    && values
+                        .iter()
+                        .all(|value| matches!(value, Value::String(_) | Value::Entity(_)))
+                {
+                    values = values
+                        .into_iter()
+                        .map(|value| value.conform(Type::String))
+                        .collect();
                 }
                 let kind = values[0].data_type();
                 if values.iter().any(|value| value.data_type() != kind) {
@@ -849,7 +862,89 @@ impl From<AttributeDescriptor> for ArtifactsRelation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ConceptFieldDescriptor;
     use crate::the;
+
+    fn ranked(values: Vec<Value>, content_type: Type) -> AttributeDescriptor {
+        AttributeDescriptor::new(
+            "job/status".parse().expect("a relation"),
+            "",
+            Cardinality::One,
+            Some(content_type),
+        )
+        .with_domain(values)
+    }
+
+    /// A ranked list keeps the type of each value it lists through dag-cbor,
+    /// alone and as a concept's field, where the field's options are read
+    /// beside it in one map.
+    #[dialog_common::test]
+    fn it_keeps_the_type_of_each_listed_value_through_dag_cbor() {
+        let lists = [
+            (
+                vec![Value::UnsignedInt(1), Value::UnsignedInt(2)],
+                Type::UnsignedInt,
+            ),
+            (
+                vec![Value::SignedInt(1), Value::SignedInt(-2)],
+                Type::SignedInt,
+            ),
+            (
+                vec![
+                    Value::String("https://example.com".into()),
+                    Value::String("foo:".into()),
+                ],
+                Type::String,
+            ),
+        ];
+        for (values, content_type) in lists {
+            let descriptor = ranked(values.clone(), content_type);
+            let bytes = serde_ipld_dagcbor::to_vec(&descriptor).expect("encodes");
+            let decoded: AttributeDescriptor =
+                serde_ipld_dagcbor::from_slice(&bytes).expect("decodes");
+            assert_eq!(decoded.among(), values.as_slice());
+
+            let field = ConceptFieldDescriptor::optional(descriptor);
+            let bytes = serde_ipld_dagcbor::to_vec(&field).expect("encodes");
+            let decoded: ConceptFieldDescriptor =
+                serde_ipld_dagcbor::from_slice(&bytes).expect("decodes");
+            assert_eq!(decoded.descriptor().among(), values.as_slice());
+        }
+    }
+
+    /// A list of text written bare reads as text, though some of its
+    /// entries parse as URIs.
+    #[dialog_common::test]
+    fn it_reads_a_bare_list_of_text_as_text() {
+        let descriptor: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": "page/link",
+            "as": ["https://example.com", "home"]
+        }))
+        .expect("descriptor parses");
+        assert_eq!(descriptor.content_type(), Some(Type::String));
+        assert_eq!(
+            descriptor.among(),
+            &[
+                Value::String("https://example.com/".into()),
+                Value::String("home".into())
+            ]
+        );
+    }
+
+    /// Two attributes that list the same spelling under different types
+    /// are two attributes.
+    #[dialog_common::test]
+    fn it_tells_attributes_apart_by_the_type_of_their_listed_values() {
+        let text = ranked(vec![Value::String("case:active".into())], Type::String);
+        let entity = ranked(
+            vec![Value::Entity("case:active".parse().expect("an entity"))],
+            Type::Entity,
+        );
+        assert_ne!(text.to_uri(), entity.to_uri());
+        let natural = ranked(vec![Value::UnsignedInt(1)], Type::UnsignedInt);
+        let integer = ranked(vec![Value::SignedInt(1)], Type::SignedInt);
+        assert_ne!(natural.to_uri(), integer.to_uri());
+    }
 
     /// A list is a ranked choice: `as: [..]` ranks values, `the: [..]`
     /// ranks relations, and either reads as `top` without saying so.
