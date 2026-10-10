@@ -9,12 +9,15 @@
 
 use thiserror::Error;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use super::constants::{PRIVATE_TAG, PUBLIC_KEY_OFFSET, PUBLIC_TAG, SIGNER_EXPORT_SIZE};
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use super::constants::VERIFIER_EXPORT_SIZE;
-#[cfg(all(not(target_arch = "wasm32"), feature = "es256"))]
+#[cfg(all(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    feature = "es256"
+))]
 use super::constants::{
     ES256_PRIVATE_TAG, ES256_PUBLIC_KEY_OFFSET, ES256_PUBLIC_TAG, ES256_SIGNER_EXPORT_SIZE,
     ES256_VERIFIER_EXPORT_SIZE,
@@ -42,7 +45,7 @@ pub enum CredentialExportError {
 /// On native: variable-length multicodec-tagged bytes (68 bytes for ed25519,
 /// 70 for p256).
 /// On web: JsValue wrapping a CryptoKeyPair.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 #[derive(Debug, Clone)]
 pub struct SignerCredentialExport(pub Vec<u8>);
 
@@ -55,7 +58,7 @@ pub struct SignerCredentialExport(pub JsValue);
 /// On native: variable-length multicodec-tagged bytes (34 bytes for ed25519,
 /// 35 for p256).
 /// On web: JsValue wrapping a Uint8Array of public key bytes.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 #[derive(Debug, Clone)]
 pub struct VerifierCredentialExport(pub Vec<u8>);
 
@@ -72,42 +75,42 @@ pub enum CredentialExport {
     Verifier(VerifierCredentialExport),
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl From<Vec<u8>> for SignerCredentialExport {
     fn from(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl From<SignerCredentialExport> for Vec<u8> {
     fn from(export: SignerCredentialExport) -> Self {
         export.0
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl From<Vec<u8>> for VerifierCredentialExport {
     fn from(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl From<VerifierCredentialExport> for Vec<u8> {
     fn from(export: VerifierCredentialExport) -> Self {
         export.0
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl AsRef<[u8]> for SignerCredentialExport {
     fn as_ref(&self) -> &[u8] {
         &self.0
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl AsRef<[u8]> for VerifierCredentialExport {
     fn as_ref(&self) -> &[u8] {
         &self.0
@@ -115,7 +118,7 @@ impl AsRef<[u8]> for VerifierCredentialExport {
 }
 
 /// Whether these bytes are a signer export for some supported algorithm.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn is_signer_export(bytes: &[u8]) -> bool {
     if bytes.len() == SIGNER_EXPORT_SIZE
         && bytes.starts_with(PRIVATE_TAG)
@@ -134,7 +137,7 @@ fn is_signer_export(bytes: &[u8]) -> bool {
 }
 
 /// Whether these bytes are a verifier export for some supported algorithm.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn is_verifier_export(bytes: &[u8]) -> bool {
     if bytes.len() == VERIFIER_EXPORT_SIZE && bytes.starts_with(PUBLIC_TAG) {
         return true;
@@ -146,7 +149,7 @@ fn is_verifier_export(bytes: &[u8]) -> bool {
     false
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl TryFrom<Vec<u8>> for CredentialExport {
     type Error = CredentialExportError;
 
@@ -164,7 +167,7 @@ impl TryFrom<Vec<u8>> for CredentialExport {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl CredentialExport {
     /// Get the underlying bytes.
     pub fn as_bytes(&self) -> &[u8] {
