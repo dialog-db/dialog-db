@@ -13,7 +13,7 @@ use dialog_search_tree::Manifest;
 use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 use futures_util::stream;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter, Result as FmtResult};
@@ -340,13 +340,6 @@ pub struct Changes {
     assets: BTreeMap<Blake3Hash, AssetChange>,
 }
 
-/// The serialized shape of a [`Changes`] batch that changes assets.
-#[derive(Deserialize)]
-struct ChangesWithAssets {
-    facts: Facts,
-    assets: Vec<AssetChange>,
-}
-
 /// [`ChangesWithAssets`] borrowed from a batch, for encoding without
 /// copying its facts or any asset's bytes.
 #[derive(Serialize)]
@@ -359,14 +352,6 @@ struct ChangesWithAssetsRef<'a> {
 #[derive(Serialize)]
 #[serde(transparent)]
 struct FactsOnly<'a>(&'a Facts);
-
-/// Either serialized shape, for decoding.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum ChangesShape {
-    WithAssets(ChangesWithAssets),
-    FactsOnly(Facts),
-}
 
 impl Serialize for Changes {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -390,22 +375,52 @@ impl<'de> Deserialize<'de> for Changes {
     where
         D: Deserializer<'de>,
     {
-        Ok(match ChangesShape::deserialize(deserializer)? {
-            ChangesShape::WithAssets(ChangesWithAssets { facts, assets }) => {
-                let mut changes = Changes {
-                    facts,
-                    assets: BTreeMap::new(),
-                };
-                for change in assets {
-                    changes.change_asset(change);
+        deserializer.deserialize_map(ChangesVisitor)
+    }
+}
+
+/// Reads either shape of a [`Changes`] batch from its first key: `facts`
+/// or `assets` begin the shape that changes assets, and an entity begins
+/// the fact nesting alone. Neither of those keys is an entity. Reading the
+/// map in place, not through an untagged enum, keeps every value's
+/// encoding in the format's own hands; an untagged enum buffers it, and
+/// the buffer cannot hold a 128-bit integer.
+struct ChangesVisitor;
+
+impl<'de> de::Visitor<'de> for ChangesVisitor {
+    type Value = Changes;
+
+    fn expecting(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        formatter.write_str("a batch of changes")
+    }
+
+    fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Changes, A::Error> {
+        let mut changes = Changes::default();
+        let Some(first) = map.next_key::<String>()? else {
+            return Ok(changes);
+        };
+        if first == "facts" || first == "assets" {
+            let mut key = Some(first);
+            while let Some(name) = key {
+                match name.as_str() {
+                    "facts" => changes.facts = map.next_value()?,
+                    "assets" => {
+                        for change in map.next_value::<Vec<AssetChange>>()? {
+                            changes.change_asset(change);
+                        }
+                    }
+                    other => return Err(de::Error::unknown_field(other, &["facts", "assets"])),
                 }
-                changes
+                key = map.next_key()?;
             }
-            ChangesShape::FactsOnly(facts) => Changes {
-                facts,
-                assets: BTreeMap::new(),
-            },
-        })
+        } else {
+            let entity = Entity::try_from(first).map_err(de::Error::custom)?;
+            changes.facts.insert(entity, map.next_value()?);
+            while let Some((entity, relations)) = map.next_entry()? {
+                changes.facts.insert(entity, relations);
+            }
+        }
+        Ok(changes)
     }
 }
 
@@ -1087,6 +1102,30 @@ mod tests {
             )),
             "a replacement stays a replacement"
         );
+    }
+
+    /// A batch carried as bytes writes the values it was given: an
+    /// integer stays an integer, text shaped like a URI stays text, and a
+    /// symbol stays a symbol.
+    #[dialog_common::test]
+    fn it_round_trips_every_value_type_through_dag_cbor() {
+        let values = [
+            Value::UnsignedInt(5),
+            Value::SignedInt(-5),
+            Value::String("https://example.com".into()),
+            Value::Symbol("person/name".parse().expect("a relation")),
+        ];
+        for value in values {
+            let mut changes = Changes::new();
+            changes.associate(name_attr(), alice(), value.clone(), crate::Pick::Last);
+            let bytes = serde_ipld_dagcbor::to_vec(&changes).expect("encode changes");
+            let decoded: Changes = serde_ipld_dagcbor::from_slice(&bytes).expect("decode changes");
+            let written = decoded
+                .iter()
+                .map(|(_, _, change)| change.value().clone())
+                .next();
+            assert_eq!(written, Some(value));
+        }
     }
 
     /// Two `last` writes of one cell in one batch keep the later alone

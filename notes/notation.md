@@ -500,17 +500,49 @@ An advanced form of composition that goes beyond stitching attributes together. 
     "required": ["?"]
   },
   "Constant": {
-    "description": "A concrete value: string, number, or boolean.",
+    "description": "A concrete value: bare (string, number, boolean, or a list of bytes), or tagged by the entity naming its type.",
     "oneOf": [
       { "type": "string" },
       { "type": "number" },
       { "type": "integer" },
-      { "type": "boolean" }
+      { "type": "boolean" },
+      { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 } },
+      {
+        "type": "object",
+        "description": "A tagged constant: one key, the entity naming its type.",
+        "minProperties": 1,
+        "maxProperties": 1,
+        "propertyNames": {
+          "enum": ["text:", "entity:", "symbol:", "integer:", "natural:", "float:", "boolean:", "bytes:", "record:"]
+        }
+      }
     ]
   }
 }
 </pre>
 </details>
+
+#### Constants
+
+A constant is a value a premise matches exactly. Every constant names its
+type by an entity, as an attribute does: `{"text:": "Alice"}`,
+`{"entity:": "did:web:cdata.earth"}`, `{"integer:": 5}`. That is how a
+stored rule writes each constant, and what its identity hashes, so two rules
+that match the same spelling under different types (the text `foo:` and the
+entity `foo:`) are two rules, and a constant reads back as the type it was
+written as.
+
+JSON may write a constant bare, and writes one bare wherever the bare
+spelling reads back as the same value: `"Alice"`, `5`, `true`. A bare string
+that parses as a URI reads as an entity and any other as text, and a bare
+integer reads as natural unless it is negative. A field that declares its
+type conforms a bare constant to it: `5` under `integer:` is a signed
+integer, and `"home:"` under `text:` is text. The tagged form says which type
+is meant where no field declares one.
+
+```json
+{ "rank": 5, "slug": "home:", "link": { "text:": "https://example.com" } }
+```
 
 #### Variables
 

@@ -51,6 +51,17 @@ pub enum Proposition {
 }
 
 impl Proposition {
+    /// This proposition with its constants conformed to the types its
+    /// fields declare (see [`ConceptQuery::conformed`]). Only a concept
+    /// application has a stored or written form, so only one can carry a
+    /// constant read bare.
+    pub fn conformed(self) -> Self {
+        match self {
+            Proposition::Concept(query) => Proposition::Concept(query.conformed()),
+            other => other,
+        }
+    }
+
     /// Estimate the cost of this application given the current environment.
     /// Each application type knows how to calculate its cost based on what's bound.
     /// Returns None if the application cannot be executed without more constraints.

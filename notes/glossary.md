@@ -147,6 +147,10 @@ Query placeholder that gets bound to values during evaluation, denoted with `?` 
 
 Either a concrete scalar value or a variable in a query. Terms are the building blocks of query patterns - concrete terms match exact values while variable terms match any value and bind it for use elsewhere in the query.
 
+### Constant
+
+A term that is a concrete value. A constant names its type by an entity, as an attribute does: a stored rule writes `{"text:": "Alice"}`, never a bare `"Alice"`, so a constant's identity and meaning do not depend on what its spelling resembles. JSON writes a constant bare where the bare spelling reads back as itself. See [notation](./notation.md#constants).
+
 ### Selector
 
 Basic filter for querying facts, specifying patterns for the `the`, `of`, and/or `is` components. Selectors are the simplest form of query, matching facts directly without complex logic.

@@ -2,19 +2,22 @@
 //! envelope that names the format it is written in.
 //!
 //! ```text
-//! { "format": 1, "rule": { "deduce": ..., "when": [...] } }
+//! { "format": 2, "rule": { "deduce": ..., "when": [...] } }
 //! ```
 //!
-//! A body with no envelope is format 0, the bare descriptor the
-//! release before formats wrote, and is still read. A body in a later
-//! format than this release reads is refused by name rather than read
-//! as something it is not.
+//! Format 2 writes every constant tagged by the entity naming its type
+//! (`{"text:": "foo:"}`), so a constant decodes as the type it was
+//! written as. Format 1 (0.2.0) and format 0 (the bare descriptor the
+//! release before formats wrote) wrote constants bare, and are still
+//! read: a bare constant reads as the first type its payload fits. A
+//! body in a later format than this release reads is refused by name
+//! rather than read as something it is not.
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// The rule body format this release writes.
-pub const FORMAT: u64 = 1;
+pub const FORMAT: u64 = 2;
 
 #[derive(Serialize)]
 struct Envelope<'a, T> {
@@ -97,6 +100,6 @@ mod tests {
         })
         .expect("encodes");
         let error = decode::<Body>(&later).expect_err("a later format is refused");
-        assert!(error.contains("format 2"), "{error}");
+        assert!(error.contains(&format!("format {}", FORMAT + 1)), "{error}");
     }
 }
