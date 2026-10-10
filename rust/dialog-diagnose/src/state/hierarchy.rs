@@ -77,7 +77,7 @@ impl ArtifactsHierarchy {
                 NodeBody::Index(index) => {
                     let links = index.links()?;
                     TreeNode::Branch {
-                        separators: links.iter().map(|link| link.separator.clone()).collect(),
+                        separators: links.iter().map(|link| link.separator.to_vec()).collect(),
                         children: links.iter().map(|link| *link.node.as_bytes()).collect(),
                     }
                 }
@@ -85,10 +85,10 @@ impl ArtifactsHierarchy {
                     let mut entries = Vec::with_capacity(segment.len());
                     let mut keys = segment.keys::<Key>()?;
                     while let Some((at, key)) = keys.next_key()? {
-                        entries.push(Entry {
-                            key: <Key as TreeKey>::try_from_bytes(key)?,
-                            value: into_owned::<State<Datum>>(segment.value_at(at)?)?,
-                        });
+                        entries.push(Entry::new(
+                            <Key as TreeKey>::try_from_bytes(key)?,
+                            into_owned::<State<Datum>>(segment.value_at(at)?)?,
+                        ));
                     }
                     TreeNode::Segment { entries }
                 }
