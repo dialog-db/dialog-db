@@ -88,14 +88,30 @@ reference(v : T)     = BLAKE3-keyed(key = reference(T), content_T(v))
 
 Fixed-width integers are not core types.
 
-**Dialog's types** are values of `type`, so the crate needs nothing to add one:
-- `integer` (i128), `natural` (u128) and `real` (f64), each with its own content
-  encoding (see below);
-- `entity` (text that parses as a URI) and `symbol` (`namespace/name` text);
-- `record`;
-- the AST nodes: attribute, concept, rule, premise and term.
+**Dialog's types** are values of `type`, so the crate needs nothing to add one.
 
-Dialog's type entities (`integer:`, `entity:`, …) name those references.
+Value types, which a stored value or a constant has:
+- `number`: every number, in the one-band encoding (see
+  [Numbers](#numbers-one-band-typed-views));
+- `text`, the crate's core text;
+- `entity` (text that parses as a URI) and `symbol` (`namespace/name` text);
+- `boolean`, `bytes` and `record`.
+
+Views, which an attribute or a slot declares with `as:`:
+- `integer` (whole numbers);
+- `natural` (whole numbers that are not negative);
+- `float` (numbers written as floats).
+
+Views have no values of their own: they select and convert numbers. A view is
+still a type with a reference, so an attribute's identity hashes the view it
+declares.
+
+AST nodes: attribute, concept, rule, premise and term.
+
+**A type is identified by its name:** `reference(T)` is the keyed hash of `T`'s
+name under `reference(type)`. The crate's core types have its own names, and
+dialog's are its type entities (`number:`, `integer:`, `entity:`, …), so a type
+dialog already names by entity keeps that name.
 
 ### Composites hash their parts' references
 
@@ -151,46 +167,48 @@ position-independent and stays out of `hazmat` for computing them.
 A reference is stable only if each type's content is a function of the value.
 Two families of choices:
 
-- **Lengths and counts: bijou.** The bijou encodings ([`bijoux`](https://docs.rs/bijoux)),
-  from Ink & Switch's Subduction work, are bijective: every integer has exactly
-  one encoding, so content is canonical without a "minimal" rule to enforce.
-  Values up to 247 take one byte, they decode 2 to 10 times faster than LEB128,
-  and unsigned ones sort numerically. Bijou has fixed-width families only (up to
-  128 bits), so it encodes lengths, counts and the storage format's integers. It
-  does not encode the core integer of any size.
+- **No lengths in identity.** Each value's content is a whole hash input, and a
+  composite's content is a sequence of 32-byte references, so identity needs no
+  length prefixes. Lengths and counts appear only in storage, which uses bijou:
+  [`bijoux`](https://docs.rs/bijoux), from Ink & Switch's Subduction work. Bijou
+  is bijective (every integer has exactly one encoding), takes one byte for
+  values up to 247, and decodes 2 to 10 times faster than LEB128.
 - **Core integer of any size:** a sign and length prefix, then the minimal
   big-endian magnitude, with negative magnitudes bit-inverted, as TerminusDB
   encodes its big integers. Longer numbers sort after shorter ones, so the bytes
   sort numerically. Canonical form needs one rule: no leading zero byte.
-- **Dialog's fixed-width types use the bytes dialog already writes in index keys
-  (`ordkey.rs`):**
-  - `integer`: 16 bytes, big-endian, sign bit flipped;
-  - `natural`: 16 bytes, big-endian;
-  - `real`: 8 bytes, a negative number with every bit flipped and a non-negative
-    one with only its sign bit flipped, big-endian.
+- **Dialog's `number`** has the one-band encoding as its content:
+  - a class byte (−∞, negative, zero, positive, +∞, NaN);
+  - the power of two of the leading bit;
+  - the remaining bits in 7-bit groups with a continuation bit;
+  - a final byte saying whether the number was written as an integer or a float;
+  - every byte after the class inverted for a negative number.
 
-  The same bytes then serve as a value's index key and as its identity content,
-  so a type has one encoding, and those bytes sort in value order. Up to 64 bytes
-  hash in one compression, so fixed width costs nothing. The storage format can
-  still write values compactly in bijou.
-- **Floats** (dialog's `real`) follow what dialog does today, with one change:
-  - `-0.0` and `0.0` stay distinct, as dialog's equality and hashing already
-    treat them (by bit pattern) and as IEEE 754's total order does;
-  - **NaN collapses to one canonical quiet NaN**, at construction. Today
-    dialog keeps NaN payloads distinct, and a payload can change when a value
-    passes through JavaScript, so the same value could drift to a different
-    identity.
-  - A decimal type, if dialog wants one, can be defined later as its own type
-    without changing the crate. TerminusDB stores arbitrary-precision decimals as
-    continued fractions, which compare in byte order.
-- **Maps** order entries by their keys' encoded bytes; a set of premises, by
-  their references after labeling.
+  These are the bytes the value index will key numbers by once it moves to one
+  band, so a number has one encoding for both identity and index key. Its
+  consequences, the same in both:
+  - `5` and `5.0` differ only in their final byte, so they are two values, and a
+    float view can ask for numbers written as floats;
+  - `-0.0` is `0.0`;
+  - NaN is one value. Today dialog keeps NaN payloads distinct, and a payload can
+    change when a value passes through JavaScript.
+
+  A decimal type, if dialog wants one, can be added later as its own type without
+  changing the crate. TerminusDB stores decimals as the decimal string's digits,
+  which is not canonical.
+- **Maps** order entries by their keys' references; a set of premises, by their
+  references after labeling.
+- **Structs** (AST nodes) are maps from field names to values, with an absent
+  optional field left out. A field added later then changes no existing
+  identity.
 - **Local variables keep the canonical labeling** `rule/canonical.rs` does today,
   which is datalog's counterpart to de Bruijn indices: variables are join points,
   not lexical scopes.
 - **Concept field names stay in identity**, because they are semantic.
 - **Descriptions stay out**, as they are today.
-- **Text** needs a decision on Unicode normalization (see open questions).
+- **Text is hashed as written**, with no Unicode normalization. The database
+  compares text byte for byte, so identity does the same. If two texts are equal
+  in the index, their references are equal, and the reverse.
 
 ### Constants
 
@@ -326,11 +344,13 @@ code:
   enum with 1 variant". That fits a premise or term shape that later gains
   alternatives.
 
-## Numbers: one band, typed views (candidate)
+## Numbers: one band, typed views
 
-This is a direction being assessed, not yet decided. It is recorded here because,
-if taken, it changes what dialog's number types are in the identity design above,
-and the stored-fact migration would have to land in 0.3.0 with everything else.
+**The direction, assumed by the identity design above.** Numbers share one band
+in the value index, in the SQLite4-style encoding below, and dialog's number types
+are views over it. The storage change itself is not part of 0.3.0. 0.3.0 adopts
+the encoding for identity, so that when storage follows, a number's identity
+content and its index key are the same bytes.
 
 **The idea.** Store every number in one band of the value index, so 5 and 5.0
 sort together, and make dialog's number types views over that band:
@@ -393,18 +413,39 @@ perf suite has no numeric scenario today.
 - **Identity.** Dialog's number types become views over one `number` content,
   these bytes, keyed by the view's type reference, consistent with "a type is a
   view over bytes" above.
-- **Migration.** Every stored numeric key (EAV, AEV, VAE, history) is rewritten,
-  and replicas on the old format cannot read the new one. That is the cost, and
-  it is why this has to be decided before 0.3.0.
+- **Migration, gradual.** Node layout versions cannot do it alone: to the tree a
+  key is opaque bytes in one global order, and the encoding changes where a
+  number sorts, so re-encoding a value moves its key. Instead:
+  - the new encoding gets its own type byte, a `number` band beside the old
+    natural, integer and float bands, so the tree's single order is never broken;
+  - new writes go to the new band, and old values stay readable where they are;
+  - typed views read the new band and the old bands until the old bands are
+    empty, which is the alternative below, used only during the transition;
+  - re-encoding happens when a claim is next written, or in a background sweep,
+    and a later release can declare the old bands empty and drop the dual reads.
+
+  Three hazards to design for:
+  - **merge:** a claim one replica moved to the new band and another retracted
+    under its old key must not come back, so merge translates old-band keys to
+    the new encoding before comparing;
+  - **claim identity:** a move carries the claim's version and causal history to
+    its new key, so it is a re-key, not an assert;
+  - **single-valued reads:** a `last` cell may hold one value in an old band and
+    one in the new band. Election already scans a whole cell across value types,
+    but this needs a test.
+
+  The simplest safe start never moves claims: old bands are frozen, a retraction
+  removes the old key, and the dual reads stay until a later release compacts the
+  old bands.
 
 **The alternative**: the same views over today's three bands. An integer view
 scans the natural, integer and float bands, filtering floats to whole ones. It
 needs no storage change, but takes three seeks per lookup and keeps cross-type
 equality in the query layer.
 
-**Next evidence:**
+**Before the storage change** (not in 0.3.0):
 - numeric scenarios in `dialog-perf` (point, narrow range, wide range, mixed
-  types);
+  types), which the suite lacks today;
 - the one-band slot behind dialog's value encoder, measured on them.
 
 ## Notation
@@ -472,21 +513,20 @@ Each step lands with tests and a perf sweep:
    references in one pass. The re-keyed home and template spaces resolve every
    definition.
 
+## Decided
+
+- **`natural`, `integer` and `float` are views** over one `number` value type.
+- **Text is hashed as written**, with no normalization, because the database
+  compares text byte for byte.
+- **Structs are maps from field names**, with absent optional fields left out.
+- **The crate's core float keeps v1's encoding.** Dialog's numbers use `number`,
+  not the core float.
+- **Inclusion proofs:** the structure supports them, but the verifier is not part
+  of 0.3.0.
+- **Types are identified by name**, and dialog's names are its type entities.
+
 ## Open questions
 
-- **`natural` as its own type:** dialog has `natural` (u128) and `integer`
-  (i128) today. Keep both, or have one `integer` and treat non-negativity as a
-  constraint?
-- **Text content:** normalize Unicode (NFC) before hashing, or hash the bytes as
-  written? Normalizing makes visually equal text one value. Not normalizing keeps
-  what the author wrote.
-- **Struct encoding:** a map from field names (self-describing, survives added
-  fields) or a list in fixed field order (smaller)? Field numbers would make
-  renames free, at the cost of a schema mapping names to numbers.
-- **Core float:** v1 has one; dialog's `real` uses its own sortable encoding. The
-  core float could take the same encoding, or stay as v1 wrote it.
-- **Inclusion proofs in 0.3.0:** the structure supports them either way. The
-  question is only whether we build and test the verifier now.
 - **A smaller variant, not adopted:** a part whose encoding is shorter than 32
   bytes could stand in for its own reference, as Ethereum's tries do. That still
   preserves indistinguishability, since the rule depends only on the value. It
