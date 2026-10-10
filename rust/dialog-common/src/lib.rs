@@ -21,11 +21,11 @@ extern crate self as dialog_common;
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {{
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         {
             web_sys::console::log_1(&format!($($arg)*).into());
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         {
             println!($($arg)*);
         }
