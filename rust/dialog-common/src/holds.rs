@@ -1,6 +1,6 @@
 //! Handles an environment keeps on behalf of the code running in it.
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -27,6 +27,35 @@ pub trait Holds {
 
     /// Hold `handle` under `key`, replacing whatever was held there.
     fn hold(&self, key: String, handle: Held);
+
+    /// The handle held under `key`, holding the one `make` builds if there
+    /// is none: how code that must share one handle per environment gets
+    /// it, however many callers ask at once.
+    ///
+    /// An environment that keeps its handles behind a lock answers this
+    /// under that lock, so two callers never each make one. This default
+    /// looks and then holds, which is only as good as the environment's
+    /// callers taking turns.
+    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+        match self.held(key) {
+            Some(held) => held,
+            None => {
+                let handle = make();
+                self.hold(key.to_string(), handle.clone());
+                handle
+            }
+        }
+    }
+}
+
+/// The key code that holds a `T` under `name` holds it under.
+///
+/// The key names `T` by its type id, so two builds of one crate in a
+/// process keep apart instead of each finding the other's handle, which
+/// it could not downcast. A crate's unit tests are such a process
+/// whenever something the tests depend on depends on the crate itself.
+pub fn held_key<T: Any>(name: &str) -> String {
+    format!("{name}:{:?}", TypeId::of::<T>())
 }
 
 /// A map of held handles, for an environment to embed and delegate
@@ -56,6 +85,15 @@ impl Holds for Holdings {
             .unwrap_or_else(|poison| poison.into_inner())
             .insert(key, handle);
     }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+        self.0
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry(key.to_string())
+            .or_insert_with(make)
+            .clone()
+    }
 }
 
 #[cfg(test)]
@@ -63,7 +101,7 @@ mod tests {
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use super::{Holdings, Holds};
+    use super::{Holdings, Holds, held_key};
     use std::sync::Arc;
 
     /// What is held under a key comes back as itself, to the code that
@@ -77,5 +115,38 @@ mod tests {
         let held = shared.held("answer").expect("held");
         assert_eq!(held.downcast_ref::<u32>(), Some(&42));
         assert!(shared.held("missing").is_none());
+    }
+
+    /// Asking for a handle that is not held makes it once: whoever asks
+    /// next, through any clone, gets the one that was made.
+    #[dialog_common::test]
+    fn it_makes_a_handle_once_for_everyone_who_asks() {
+        let holdings = Holdings::default();
+        let shared = holdings.clone();
+
+        let first = holdings.held_or("answer", &|| Arc::new(42u32));
+        let second = shared.held_or("answer", &|| Arc::new(7u32));
+
+        assert_eq!(first.downcast_ref::<u32>(), Some(&42));
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    /// Handles of two types held under one name keep apart, so code never
+    /// finds a handle it cannot downcast under its key.
+    #[dialog_common::test]
+    fn it_keeps_handles_of_different_types_apart() {
+        let holdings = Holdings::default();
+
+        let number = holdings.held_or(&held_key::<u32>("answer"), &|| Arc::new(42u32));
+        let text = holdings.held_or(&held_key::<String>("answer"), &|| {
+            Arc::new("forty-two".to_string())
+        });
+
+        assert_eq!(number.downcast_ref::<u32>(), Some(&42));
+        assert_eq!(
+            text.downcast_ref::<String>().map(String::as_str),
+            Some("forty-two")
+        );
+        assert_eq!(held_key::<u32>("answer"), held_key::<u32>("answer"));
     }
 }
