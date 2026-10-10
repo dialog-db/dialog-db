@@ -213,7 +213,13 @@ where
     revision.context = Some(merged_context.clone());
     revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
-    persist(&branch.archive().index(), &mut delta, env).await?;
+    persist(
+        &branch.archive().index(),
+        &branch.node_cache(),
+        &mut delta,
+        env,
+    )
+    .await?;
     Ok((revision, merged_context))
 }
 
