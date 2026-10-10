@@ -43,27 +43,29 @@ over the AST and nothing else.
 Identities are references in a second version of
 [merkle-reference](https://github.com/Gozala/merkle-reference/blob/main/docs/spec.md),
 implemented as a `merkle-reference` crate in this repository. The crate knows
-nothing about dialog: it defines references, types and canonical content, and
-dialog defines its own types on top of it.
+nothing about dialog: it defines references, a small set of core types and
+canonical content, and dialog defines its own types on top of it.
 
 v2 keeps v1's properties:
-- identity is a function of the value;
-- composite values are identified through their parts;
-- a part's inclusion can be proved.
 
-It changes two things: how a value's type enters its reference, and how much
-hashing a reference takes.
+- identity is a function of the value;
+- a composite value is identified through its parts' references;
+- **a part stored inline and a part stored apart and linked by its reference are
+  indistinguishable**, so any part can be moved out of its parent, or in, without
+  changing the parent's reference, and a part's inclusion can be proved.
+
+It changes how a value's type enters its reference, and it halves the hashing a
+reference takes.
 
 ### A type is a view over bytes
 
 Every value is bytes read under a type, and a type is an encoding of those bytes.
-Text is UTF-8, a natural number is a bijou-encoded integer, and an entity is the
-UTF-8 of a URI that must parse. The type is not a tag byte in the content. It is
-the key the content is hashed under:
+The type is not a tag byte in the content. It is the key the content is hashed
+under:
 
 ```text
 reference(v : bytes) = BLAKE3(v)
-reference(v : T)     = BLAKE3-keyed(key = reference(T), encode_T(v))
+reference(v : T)     = BLAKE3-keyed(key = reference(T), content_T(v))
 ```
 
 - **Plain bytes** hash in BLAKE3's plain mode, so a blob's reference is
@@ -80,79 +82,121 @@ reference(v : T)     = BLAKE3-keyed(key = reference(T), encode_T(v))
   `reference(type)`, which is a constant: `BLAKE3-derive_key("merkle-reference v2
   type", "")`.
 
-The crate defines the core types: bytes, text, boolean, natural, integer, float,
-list, map and struct. Dialog defines its own as values of `type`:
-- entity: text that parses as a URI;
-- symbol: text of the form `namespace/name`;
-- record;
-- the AST nodes: attribute, concept, rule, premise, term.
+**Core types**, defined by the crate, keep v1's set:
+- scalars: bytes, text, boolean, integer of any size, and float;
+- composites: list and map.
 
-Dialog's type entities (`text:`, `entity:`, …) name those references. A type
-dialog adds later needs nothing from the crate.
+Fixed-width integers are not core types.
 
-### Less hashing
+**Dialog's types** are values of `type`, so the crate needs nothing to add one:
+- `integer` (i128), `natural` (u128) and `real` (f64), each with its own content
+  encoding (see below);
+- `entity` (text that parses as a URI) and `symbol` (`namespace/name` text);
+- `record`;
+- the AST nodes: attribute, concept, rule, premise and term.
 
-v1 hashes every value as its own node:
-- a scalar is a fold of a format-tag hash and a content hash;
-- a list folds its elements' references pairwise;
-- a map folds a pair per entry.
+Dialog's type entities (`integer:`, `entity:`, …) name those references.
 
-A rule with a few dozen scalars takes a few hundred small hash calls. v2 takes
-one call per value that has its own identity:
+### Composites hash their parts' references
 
-- **Parts are inlined unless their slot says otherwise.** A struct field, list
-  element or map entry is encoded inline, under the type its schema slot
-  declares, with lengths in bijou. Only a slot typed `reference<T>` holds a
-  32-byte reference instead. A rule's constants, variables and premise shapes are
-  inline. The concepts it reads and the attributes a concept reads are
-  references, because they are definitions in their own right, as in Unison.
-- **One BLAKE3 call per identified value.** Inline parts add bytes, not hash
-  calls. BLAKE3's own chunk tree still makes the content a merkle tree: a 1 KiB
-  chunk is one leaf, and Bao proves a chunk's inclusion.
-- **A slot that admits any type** (`any`) holds the value's type reference, then
-  its inline encoding. The type is identified by reference, as everywhere else,
-  never by a byte code.
+A composite's content is always its parts' references, in order, never their
+inline bytes:
 
-What v2 gives up: an inline part is not a node of the tree, so it has no
-reference inside its parent. Its reference is still computable from its type and
-bytes, and its inclusion is provable at chunk granularity rather than per value.
-A part that needs its own provable identity gets a `reference<T>` slot.
+```text
+content_list(v) = reference(v[0]) ‖ reference(v[1]) ‖ …
+content_map(m)  = reference(k0) ‖ reference(m[k0]) ‖ reference(k1) ‖ …   (keys in order)
+```
+
+A struct (an AST node) is a map from field names to values, or a list in a fixed
+field order. Because the parent depends only on its parts' references:
+
+- **Storage chooses freely** where each part lives. A rule body can embed the
+  concepts it reads or link them by reference, and the rule's reference is the
+  same either way. That is the indistinguishability property.
+- **Proofs are per part.** BLAKE3 hashes the parent's content as a tree of 1 KiB
+  chunks (32 references each). A proof that a part belongs to its parent is the
+  chunk holding the part's reference, plus the chaining values up to the root.
+  Verifying needs the parent's type reference, which is the key. Whether an
+  existing Bao implementation supports keyed mode is to be checked. Otherwise
+  `blake3::hazmat` can verify, because its merges take a `Mode`.
+- **A part shared by many parents is hashed once.** A concept that ten rules read
+  is hashed once and its reference reused.
+
+**Why it is cheaper than v1.** Counting BLAKE3 compressions, each of which hashes
+a 64-byte block:
+
+| | v1 | v2 |
+|---|---|---|
+| Scalar of up to 64 bytes | 2: hash the content, then fold it with the cached hash of its format tag | 1: hash the content keyed by its type |
+| Composite of n parts | about n: n − 1 pairwise folds, plus the tag fold | about n/2: one keyed hash over n × 32 bytes, two references per block, plus one parent per 32 parts |
+
+So v2 roughly halves the hashing while keeping v1's tree semantics: every part
+still has a reference that its parent hashes.
+
+**What I first proposed instead, and dropped.** An earlier draft of this note let
+a part be written inline as bytes, with no reference of its own, to skip hashing
+it. That saved a hash per scalar, but a parent's reference then depended on
+whether a part was inline or linked, which breaks the property above. Every part
+is now referenced.
 
 **Why not fold with BLAKE3's internals.** `blake3::hazmat` (in 1.8.2, our locked
-version) exposes `merge_subtrees_root` with a `Mode`. But a subtree's chaining
-value depends on its input offset (`set_input_offset`), so a part folded that way
-has no reference that holds regardless of position. A concept referenced by two
-rules would hash differently in each. Keyed hashing over inline content and part
-references keeps references position-independent, and stays out of `hazmat`,
-whose own docs warn that it is "hazardous material".
+version) can merge subtrees, but a subtree's chaining value depends on its input
+offset (`set_input_offset`). A part folded that way would have no reference that
+holds regardless of position, so a concept referenced by two rules would hash
+differently in each. Hashing the parts' references as content keeps references
+position-independent and stays out of `hazmat` for computing them.
 
 ### Canonical content
 
-A reference is only stable if `encode_T` is a function of the value:
+A reference is stable only if each type's content is a function of the value.
+Two families of choices:
 
-- **Integers and lengths: bijou.** The bijou encodings ([`bijoux`](https://docs.rs/bijoux)),
+- **Lengths and counts: bijou.** The bijou encodings ([`bijoux`](https://docs.rs/bijoux)),
   from Ink & Switch's Subduction work, are bijective: every integer has exactly
   one encoding, so content is canonical without a "minimal" rule to enforce.
-  Values up to 247 take one byte, and the first byte gives the length. They come
-  in u128 and i128 (zigzag) formats, which dialog's values need, and they decode
-  2 to 10 times faster than LEB128.
-- **Maps and sets** are ordered by their entries' encoded keys; premises, by
-  their encoded bytes after labeling.
-- **Local variables keep the canonical labeling** `rule/canonical.rs` does
-  today, which is datalog's counterpart to de Bruijn indices: variables are join
-  points, not lexical scopes.
+  Values up to 247 take one byte, they decode 2 to 10 times faster than LEB128,
+  and unsigned ones sort numerically. Bijou has fixed-width families only (up to
+  128 bits), so it encodes lengths, counts and the storage format's integers. It
+  does not encode the core integer of any size.
+- **Core integer of any size:** a sign and length prefix, then the minimal
+  big-endian magnitude, with negative magnitudes bit-inverted, as TerminusDB
+  encodes its big integers. Longer numbers sort after shorter ones, so the bytes
+  sort numerically. Canonical form needs one rule: no leading zero byte.
+- **Dialog's fixed-width types use the bytes dialog already writes in index keys
+  (`ordkey.rs`):**
+  - `integer`: 16 bytes, big-endian, sign bit flipped;
+  - `natural`: 16 bytes, big-endian;
+  - `real`: 8 bytes, a negative number with every bit flipped and a non-negative
+    one with only its sign bit flipped, big-endian.
+
+  The same bytes then serve as a value's index key and as its identity content,
+  so a type has one encoding, and those bytes sort in value order. Up to 64 bytes
+  hash in one compression, so fixed width costs nothing. The storage format can
+  still write values compactly in bijou.
+- **Floats** (dialog's `real`) follow what dialog does today, with one change:
+  - `-0.0` and `0.0` stay distinct, as dialog's equality and hashing already
+    treat them (by bit pattern) and as IEEE 754's total order does;
+  - **NaN collapses to one canonical quiet NaN**, at construction. Today
+    dialog keeps NaN payloads distinct, and a payload can change when a value
+    passes through JavaScript, so the same value could drift to a different
+    identity.
+  - A decimal type, if dialog wants one, can be defined later as its own type
+    without changing the crate. TerminusDB stores arbitrary-precision decimals as
+    continued fractions, which compare in byte order.
+- **Maps** order entries by their keys' encoded bytes; a set of premises, by
+  their references after labeling.
+- **Local variables keep the canonical labeling** `rule/canonical.rs` does today,
+  which is datalog's counterpart to de Bruijn indices: variables are join points,
+  not lexical scopes.
 - **Concept field names stay in identity**, because they are semantic.
 - **Descriptions stay out**, as they are today.
-- **Floats and text need a rule:** one NaN, a decision on `-0.0`, and a decision
-  on Unicode normalization. See open questions.
+- **Text** needs a decision on Unicode normalization (see open questions).
 
 ### Constants
 
-A constant's reference is keyed by its type. So the type is part of identity
-whatever the slot declares, and identity tracks meaning even if slot inference
-changes in a later release. Inside a rule, a constant in a typed slot is inline
-and untagged (its type comes from the slot). One in an `any` slot carries its
-type reference.
+A constant's reference is keyed by its type, so the type is part of identity
+whatever the slot declares. Identity therefore tracks meaning even if slot
+inference changes in a later release.
 
 ## Storage
 
@@ -202,11 +246,17 @@ section := id:u8 size:bijou content
 the references section and a field by its index in the strings section. Each
 reference and name is stored once per body, and decoding does no lookups.
 
-**Schema-driven values.** The schema says what type each slot holds, so a value
-carries no type where the slot declares one. In an `any` slot it carries the index
-of its type's reference in the references table. That mirrors identity, which
-names types by reference, and the notation's boxing rule. It keeps bodies smaller
-than self-describing CBOR, and no value is read as a type its spelling resembles.
+**Schema-driven values.** The schema says what type each slot holds, so a stored
+value carries no type where the slot declares one. In an `any` slot it carries
+the index of its type's reference in the references table. That mirrors identity,
+which names types by reference, and the notation's boxing rule. It keeps bodies
+smaller than self-describing CBOR, and no value is read as a type its spelling
+resembles.
+
+**Inline or linked is storage's choice.** Because identity hashes parts'
+references, a body may embed a part or store only its reference, and the rule's
+reference is the same either way. Concepts read by many rules are linked so they
+are stored once. Scalars and premises are embedded.
 
 **Names live apart.** Identity hashes the canonical labels of local variables,
 which loses the names the author wrote. The names section keeps them, so a
@@ -308,11 +358,13 @@ whoever writes it.
 Each step lands with tests and a perf sweep:
 
 1. **The `merkle-reference` crate**: the core types, `type` as a value, keyed
-   references, bijou content and inline/`reference<T>` slots, with the v2 spec
-   written beside it. Pinned by tests:
+   references, composites over part references, and the integer of any size,
+   with the v2 spec written beside it. Pinned by tests:
    - plain bytes equal `blake3(bytes)`;
    - the same bytes under two types give two references;
    - no keyed reference equals the plain hash of its content;
+   - a parent's reference is the same with a part embedded or linked;
+   - a part's inclusion proof verifies against its parent's reference;
    - the result is the same however a value was built.
 2. **Attribute and concept references.**
 3. **Rule references** over the canonical AST, referencing concepts.
@@ -329,18 +381,22 @@ Each step lands with tests and a perf sweep:
 
 ## Open questions
 
-- **Float content:** one canonical NaN; is `-0.0` distinct from `0.0`?
+- **`natural` as its own type:** dialog has `natural` (u128) and `integer`
+  (i128) today. Keep both, or have one `integer` and treat non-negativity as a
+  constraint?
 - **Text content:** normalize Unicode (NFC) before hashing, or hash the bytes as
   written? Normalizing makes visually equal text one value. Not normalizing keeps
   what the author wrote.
-- **Which slots are references:** concepts and attributes, certainly. Formulas?
-  Ranked `as:` lists, which can be long?
-- **Inclusion proofs:** if nothing needs them yet, skip Bao. Chunk-level
-  structure is there either way.
-- **Struct field order inside content:** by field name or by a stable field
-  number? Field numbers make renames free, at the cost of a schema that maps
-  names to numbers.
-- **Signed integers in sorted positions:** bijou's i128 sorts in zigzag order,
-  not numeric order. That does not matter for identity, and index keys keep their
-  own order-preserving encoding, but it does for any sorted section that holds
-  signed integers.
+- **Struct encoding:** a map from field names (self-describing, survives added
+  fields) or a list in fixed field order (smaller)? Field numbers would make
+  renames free, at the cost of a schema mapping names to numbers.
+- **Core float:** v1 has one; dialog's `real` uses its own sortable encoding. The
+  core float could take the same encoding, or stay as v1 wrote it.
+- **Inclusion proofs in 0.3.0:** the structure supports them either way. The
+  question is only whether we build and test the verifier now.
+- **A smaller variant, not adopted:** a part whose encoding is shorter than 32
+  bytes could stand in for its own reference, as Ethereum's tries do. That still
+  preserves indistinguishability, since the rule depends only on the value. It
+  saves the hash of small scalars, but every such part in an `any` slot must then
+  carry its type, and verification gets a second case. Worth measuring after the
+  plain version works.
