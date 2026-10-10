@@ -1061,7 +1061,7 @@ dependencies = [
  "dialog-capability",
  "dialog-common",
  "dialog-effects",
- "dialog-numeric",
+ "dialog-number",
  "dialog-search-tree",
  "dialog-storage",
  "ed25519-dalek",
@@ -1351,7 +1351,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dialog-numeric"
+name = "dialog-number"
 version = "0.3.0-rc.1"
 dependencies = [
  "ryu",

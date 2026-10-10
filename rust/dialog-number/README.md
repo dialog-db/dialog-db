@@ -1,10 +1,10 @@
-# dialog-numeric
+# dialog-number
 
 Dialog's numbers: one exact decimal domain, with one canonical encoding whose
 bytes sort in numeric order.
 
 ```rust
-use dialog_numeric::{decode_i128, encode_f64, encode_i128};
+use dialog_number::{decode_i128, encode_f64, encode_i128};
 
 let mut three = Vec::new();
 encode_i128(3, &mut three);

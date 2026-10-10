@@ -32,7 +32,7 @@
 //! floats are approximations of the numbers they print as.
 //!
 //! ```no_run
-//! use dialog_numeric::{Number, encode_f64, encode_i128};
+//! use dialog_number::{Number, encode_f64, encode_i128};
 //!
 //! let mut three = Vec::new();
 //! encode_i128(3, &mut three);

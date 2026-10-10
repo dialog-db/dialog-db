@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 
-use dialog_numeric::{
+use dialog_number::{
     DecodeError, Number, decode_f64, decode_i128, encode_f64, encode_i128, encode_u128,
 };
 

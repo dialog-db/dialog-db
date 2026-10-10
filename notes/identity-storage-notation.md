@@ -180,7 +180,7 @@ Two families of choices:
   bit and negative zero. Longer numbers sort after shorter ones, so the bytes
   sort numerically. Canonical form needs one rule: no leading zero byte.
 - **Dialog's `number`** has as its content its encoding in the
-  `dialog-numeric` crate, which is SQLite4's decimal key encoding unchanged
+  `dialog-number` crate, which is SQLite4's decimal key encoding unchanged
   (see [Numbers](#numbers-one-band-typed-views) and the crate's README):
   - a class byte holding the sign and the size of the exponent, and the exponent
     itself when it is 0 to 10;
@@ -353,7 +353,7 @@ code:
 ## Numbers: one band, typed views
 
 **The direction, assumed by the identity design above.** Numbers share one band
-in the value index, in SQLite4's decimal key encoding (the `dialog-numeric`
+in the value index, in SQLite4's decimal key encoding (the `dialog-number`
 crate), and dialog's number types are views over it. 0.3.0 adopts the encoding
 for identity, so that when storage follows, a number's identity content and its
 index key are the same bytes.
@@ -624,7 +624,7 @@ Each step lands with tests and a perf sweep:
 - **`natural`, `integer` and `float` are views** over one `number` value type.
 - **3 and 3.0 are one value**, in identity and, once storage follows, in the
   index.
-- **Numbers are decimal** (SQLite4's encoding, the `dialog-numeric` crate): a
+- **Numbers are decimal** (SQLite4's encoding, the `dialog-number` crate): a
   float is its shortest round-trip decimal, and float arithmetic is approximate.
 - **Stored numbers migrate once**, by a deterministic rewrite whose code is kept
   out of the read path.
