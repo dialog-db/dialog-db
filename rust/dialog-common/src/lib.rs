@@ -37,6 +37,8 @@ pub use sync::*;
 
 pub mod as_bytes;
 
+pub mod random;
+
 pub mod time;
 
 mod hash;
