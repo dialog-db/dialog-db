@@ -38,6 +38,7 @@ pub use crate::{Predicate, Premise, Term};
 /// use dialog_query::Descriptor;
 ///
 /// #[derive(dialog_macros::Attribute, Clone)]
+/// #[domain("note")]
 /// #[pick(all)]
 /// pub struct Tag(pub String);
 ///
@@ -487,8 +488,8 @@ mod tests {
 
     #[dialog_common::test]
     fn it_produces_stable_hash() {
-        let hash1 = employee_ident::Name::descriptor().hash();
-        let hash2 = employee_ident::Name::descriptor().hash();
+        let hash1 = employee_ident::Name::descriptor().reference();
+        let hash2 = employee_ident::Name::descriptor().reference();
 
         assert_eq!(
             hash1, hash2,
@@ -498,9 +499,9 @@ mod tests {
 
     #[dialog_common::test]
     fn it_hashes_differently_for_different_attributes() {
-        let name_hash = employee_ident::Name::descriptor().hash();
-        let salary_hash = employee_ident::Salary::descriptor().hash();
-        let job_hash = employee_ident::Job::descriptor().hash();
+        let name_hash = employee_ident::Name::descriptor().reference();
+        let salary_hash = employee_ident::Salary::descriptor().reference();
+        let job_hash = employee_ident::Job::descriptor().reference();
 
         assert_ne!(
             name_hash, salary_hash,
@@ -518,8 +519,8 @@ mod tests {
 
     #[dialog_common::test]
     fn it_hashes_differently_for_different_domains() {
-        let employee_name_hash = employee_ident::Name::descriptor().hash();
-        let person_name_hash = person_ident::Name::descriptor().hash();
+        let employee_name_hash = employee_ident::Name::descriptor().reference();
+        let person_name_hash = person_ident::Name::descriptor().reference();
 
         assert_ne!(
             employee_name_hash, person_name_hash,
@@ -546,7 +547,7 @@ mod tests {
         assert!(parsed_hash.is_some(), "Should be able to parse valid URI");
         assert_eq!(
             parsed_hash.unwrap(),
-            employee_ident::Name::descriptor().hash(),
+            employee_ident::Name::descriptor().reference(),
             "Parsed hash should match original hash"
         );
     }
@@ -571,22 +572,13 @@ mod tests {
 
     #[dialog_common::test]
     fn it_produces_stable_schema_hash() {
-        let schema_hash = employee_ident::Name::descriptor().hash();
-        let trait_hash = employee_ident::Name::descriptor().hash();
+        let schema_hash = employee_ident::Name::descriptor().reference();
+        let trait_hash = employee_ident::Name::descriptor().reference();
 
         assert_eq!(
             schema_hash, trait_hash,
             "Schema hash and trait hash should match"
         );
-    }
-
-    #[dialog_common::test]
-    fn it_encodes_to_cbor() {
-        let cbor1 = employee_ident::Name::descriptor().to_cbor_bytes();
-        let cbor2 = employee_ident::Name::descriptor().to_cbor_bytes();
-
-        assert_eq!(cbor1, cbor2, "CBOR encoding should be deterministic");
-        assert!(!cbor1.is_empty(), "CBOR encoding should not be empty");
     }
 
     #[dialog_common::test]
@@ -606,8 +598,8 @@ mod tests {
         );
 
         assert_eq!(
-            attr1.hash(),
-            attr2.hash(),
+            attr1.reference(),
+            attr2.reference(),
             "Attributes with different descriptions should have the same hash"
         );
 

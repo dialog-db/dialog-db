@@ -69,6 +69,30 @@ impl Reference {
         Self(bytes)
     }
 
+    /// The reference written as 64 lowercase hex digits, as [`Display`]
+    /// prints it. Meant for constants: it panics, at compile time in a
+    /// `const`, on anything else.
+    ///
+    /// [`Display`]: fmt::Display
+    pub const fn from_hex(digits: &str) -> Self {
+        const fn nibble(digit: u8) -> u8 {
+            match digit {
+                b'0'..=b'9' => digit - b'0',
+                b'a'..=b'f' => digit - b'a' + 10,
+                _ => unreachable!(),
+            }
+        }
+        let digits = digits.as_bytes();
+        assert!(digits.len() == 64);
+        let mut bytes = [0u8; 32];
+        let mut index = 0;
+        while index < 32 {
+            bytes[index] = nibble(digits[2 * index]) << 4 | nibble(digits[2 * index + 1]);
+            index += 1;
+        }
+        Self(bytes)
+    }
+
     /// The reference's bytes.
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
@@ -133,38 +157,38 @@ pub struct Type(Reference);
 
 impl Type {
     /// The type of types, whose values are type names.
-    pub const TYPE: Self = Self::from_reference(Reference(hex(
+    pub const TYPE: Self = Self::from_reference(Reference::from_hex(
         "6c1c13119c7904d1293af5aebc87fdaa284de8c36bc9b0d0e7802cd13dbd6c4e",
-    )));
+    ));
     /// The type of null, whose one value has empty content.
-    pub const NULL: Self = Self::from_reference(Reference(hex(
+    pub const NULL: Self = Self::from_reference(Reference::from_hex(
         "63dba2b2bec2ed479d938dd6133eb89f5423b43844b83f39ed208dd3e93fcb02",
-    )));
+    ));
     /// The type of booleans: one byte, `0` or `1`.
-    pub const BOOLEAN: Self = Self::from_reference(Reference(hex(
+    pub const BOOLEAN: Self = Self::from_reference(Reference::from_hex(
         "7f7f177fd3fcde3f4baabe1e2cc39374fbc6a2efad84a0dfdf53f067945e349b",
-    )));
+    ));
     /// The type of integers of any size (see [`Integer`]).
-    pub const INTEGER: Self = Self::from_reference(Reference(hex(
+    pub const INTEGER: Self = Self::from_reference(Reference::from_hex(
         "fdc9909fb1f4f66fb4a878b4a4279bfc1b63e7504860d39ef0cd05fd692d2626",
-    )));
+    ));
     /// The type of floats: an IEEE 754 binary64, little-endian, bit for bit.
-    pub const FLOAT: Self = Self::from_reference(Reference(hex(
+    pub const FLOAT: Self = Self::from_reference(Reference::from_hex(
         "d620bf8e93b9cc079024a551f4d1bb38e4fe2ea0c3cfe03ed2a8ce456161a60b",
-    )));
+    ));
     /// The type of text: UTF-8, as written.
-    pub const TEXT: Self = Self::from_reference(Reference(hex(
+    pub const TEXT: Self = Self::from_reference(Reference::from_hex(
         "51531dc865323c8fc012200946b9e63147ba0bdb4175b0d62568c1dedc479b78",
-    )));
+    ));
     /// The type of lists: the items' references, in order.
-    pub const LIST: Self = Self::from_reference(Reference(hex(
+    pub const LIST: Self = Self::from_reference(Reference::from_hex(
         "684b01901abbcf0ccade0c97ae922b053f02ae46669632680f8aa51ae85b44e8",
-    )));
+    ));
     /// The type of maps: each entry's key reference then value reference,
     /// entries ordered by key reference.
-    pub const MAP: Self = Self::from_reference(Reference(hex(
+    pub const MAP: Self = Self::from_reference(Reference::from_hex(
         "642836d5bd219ed6ad72a31913814819ea3da8f480de93483a7ea5a2821d4d24",
-    )));
+    ));
 
     /// The type of types' key context, from which [`Type::TYPE`] is derived.
     pub const CONTEXT: &'static str = "merkle-reference v2 type";
@@ -237,26 +261,6 @@ impl fmt::Debug for Type {
 /// The reference of `value`.
 pub fn refer<T: Refer + ?Sized>(value: &T) -> Reference {
     value.refer()
-}
-
-/// Decodes 64 hex digits at compile time.
-const fn hex(digits: &str) -> [u8; 32] {
-    const fn nibble(digit: u8) -> u8 {
-        match digit {
-            b'0'..=b'9' => digit - b'0',
-            b'a'..=b'f' => digit - b'a' + 10,
-            _ => unreachable!(),
-        }
-    }
-    let digits = digits.as_bytes();
-    assert!(digits.len() == 64);
-    let mut bytes = [0u8; 32];
-    let mut index = 0;
-    while index < 32 {
-        bytes[index] = nibble(digits[2 * index]) << 4 | nibble(digits[2 * index + 1]);
-        index += 1;
-    }
-    bytes
 }
 
 #[cfg(test)]

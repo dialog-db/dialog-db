@@ -17,6 +17,7 @@ serde_ipld_dagcbor = { workspace = true }
 # Hashing
 blake3 = { workspace = true }
 base58 = { workspace = true }
+merkle-reference = { workspace = true }
 
 # Caching
 sieve-cache = { workspace = true }

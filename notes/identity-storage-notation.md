@@ -206,7 +206,11 @@ Two families of choices:
 - **Local variables keep the canonical labeling** `rule/canonical.rs` does today,
   which is datalog's counterpart to de Bruijn indices: variables are join points,
   not lexical scopes.
-- **Concept field names stay in identity**, because they are semantic.
+- **Concept field names stay out of identity**, as they are today. A concept
+  is its set of attributes: a field name only binds a variable to an
+  attribute, and a rule installed under other names is re-headed by attribute
+  (see `attribute-heads.md`). An earlier draft of this note said the opposite,
+  which was wrong.
 - **Descriptions stay out**, as they are today.
 - **Text is hashed as written**, with no Unicode normalization. The database
   compares text byte for byte, so identity does the same. If two texts are equal
@@ -504,7 +508,30 @@ Each step lands with tests and a perf sweep:
    - a part's inclusion proof verifies against its parent's reference, once
      the verifier exists (not in 0.3.0);
    - the result is the same however a value was built.
-2. **Attribute and concept references.**
+2. **Attribute and concept references.** Done:
+   - a definition's type is named by the scheme of its entity: `the:`,
+     `concept:`, and `rule:` for step 3;
+   - an attribute maps `the` (its relations, best first, as symbols), `as`,
+     `pick` and `among`. The declared type and the pick are hashed as the
+     entities that name them (`text:`, `last:`), as constants are, not as
+     type references: a declared type is a constant, and `bytes:` has no type
+     reference of its own;
+   - a concept maps each attribute's reference to the field's options
+     (`optional`, `conforms` by the target's reference).
+
+   Two things this step surfaced:
+   - **Rules embed whole concept descriptors** in today's identity, in their
+     wire form, which carries attribute descriptions. So a description can
+     change a rule's identity even though it changes no attribute's or
+     concept's. Step 3 fixes this by hashing concepts by reference.
+   - **Identity is ahead of the index for numbers.** A natural and an integer
+     of the same number are one value in identity and two in the index until
+     it moves to one band. Two attributes listing `1` as a natural and as an
+     integer share an identity and read different claims. The same will hold
+     for rule constants in fields that declare no type once step 3 lands. The
+     alternatives were to keep the band in identity (a third written-as
+     value, which bakes the band in and needs another migration to drop) or
+     to make the index read both bands now (the encoding work deferred).
 3. **Rule references** over the canonical AST, referencing concepts.
 4. **Body format 3**, the WebAssembly-style layout above, with definitions
    stored by reference. Formats 0 to 2 are still read. Pinned by a round-trip

@@ -66,6 +66,8 @@ pub use artifacts::*;
 
 pub mod history;
 
+pub mod identity;
+
 mod reference;
 pub use reference::*;
 
