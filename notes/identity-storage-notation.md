@@ -326,6 +326,87 @@ code:
   enum with 1 variant". That fits a premise or term shape that later gains
   alternatives.
 
+## Numbers: one band, typed views (candidate)
+
+This is a direction being assessed, not yet decided. It is recorded here because,
+if taken, it changes what dialog's number types are in the identity design above,
+and the stored-fact migration would have to land in 0.3.0 with everything else.
+
+**The idea.** Store every number in one band of the value index, so 5 and 5.0
+sort together, and make dialog's number types views over that band:
+
+- an integer view matches whole numbers, including whole floats, and binds them
+  as integers;
+- a natural view matches whole numbers that are not negative;
+- a float view matches numbers written as floats;
+- a number view matches all of them.
+
+**How dialog stores numbers today.** Each type has its own band: natural,
+integer, float, each a type byte then a fixed-width payload, the same encodings
+TerminusDB uses. Consequences:
+
+- A query for one type never finds another: integer 5 misses a stored natural 5.
+- JSON already splits integers across bands. A non-negative number decodes as a
+  natural and a negative one as an integer, so an untyped field holds both.
+- A range over a variable that may be any number is not pushed into the scan. The
+  scan reads all of the attribute's values and filters them row by row.
+
+**TerminusDB** (`tdb-succinct`, the typed dictionary `terminusdb-store` uses)
+also keeps one sorted segment per datatype and never compares across types, so
+adopting it would not give these views. Its fixed-width encodings are dialog's.
+Its decimals keep the decimal string's digits, so `0.5` and `0.50` are distinct
+entries. Its encoders run 31 to 280 ns per value, mainly because each call
+allocates.
+
+**One band is viable.** A prototype encoding:
+- writes sign class, then the power of two of the leading bit, then the
+  remaining bits in 7-bit groups with a continuation bit, then one byte saying
+  whether it was written as an integer or a float;
+- inverts the bytes of negative numbers;
+- is the binary counterpart of SQLite4's numeric keys, which share one encoding
+  for integers and floats.
+
+Over 200,000 mixed values (including subnormals, ±infinity, i128 and u128) it
+round-trips exactly, its byte order equals exact numeric order, and whether a
+value is whole can be read from its bytes. Measured against today's bands:
+
+| | Today | One band |
+|---|---|---|
+| Encode / decode | 2–3 ns | 12–36 ns, about 0.3% of a scanned row's cost (~20,000 instructions in `read-scan`) |
+| Small integers, EAV key (front-coded) | 32.1 B | 20.6 B |
+| Timestamps, EAV key | 30.1 B | 23.1 B |
+| Floats, EAV key | 24.1 B | 26.7 B |
+| Integer-view range of 10 (in memory) | 3 seeks, 3.0 µs | 1 seek, 1.7 µs |
+| Integer-view range of 1,250 rows (in memory) | 25 µs | 49 µs, a per-row whole-number check |
+
+The in-memory rows overstate per-row costs relative to dialog, where a row costs
+thousands of instructions and a seek far more. So one band likely wins selective
+lookups and roughly ties wide scans, but that has to be measured in dialog: the
+perf suite has no numeric scenario today.
+
+**What it would decide:**
+
+- **Numeric equality.** 5 and 5.0 are adjacent keys differing only in the final
+  byte. Keeping that byte keeps "written as a float" queryable. Dropping it makes
+  5 and 5.0 one claim, and then a float view could only mean "not whole".
+- **Zero and NaN.** `-0.0` becomes `0`, and NaN is one value.
+- **Identity.** Dialog's number types become views over one `number` content,
+  these bytes, keyed by the view's type reference, consistent with "a type is a
+  view over bytes" above.
+- **Migration.** Every stored numeric key (EAV, AEV, VAE, history) is rewritten,
+  and replicas on the old format cannot read the new one. That is the cost, and
+  it is why this has to be decided before 0.3.0.
+
+**The alternative**: the same views over today's three bands. An integer view
+scans the natural, integer and float bands, filtering floats to whole ones. It
+needs no storage change, but takes three seeks per lookup and keeps cross-type
+equality in the query layer.
+
+**Next evidence:**
+- numeric scenarios in `dialog-perf` (point, narrow range, wide range, mixed
+  types);
+- the one-band slot behind dialog's value encoder, measured on them.
+
 ## Notation
 
 JSON (and tonk's YAML) is a projection of the AST, never hashed, so it can favour
