@@ -100,7 +100,7 @@ Value types, which a stored value or a constant has:
 Views, which an attribute or a slot declares with `as:`:
 - `integer` (whole numbers);
 - `natural` (whole numbers that are not negative);
-- `float` (numbers written as floats).
+- `float` (every number, read as a float).
 
 Views have no values of their own: they select and convert numbers. A view is
 still a type with a reference, so an attribute's identity hashes the view it
@@ -179,18 +179,22 @@ Two families of choices:
   negative integer. It follows TerminusDB's big integers without their padding
   bit and negative zero. Longer numbers sort after shorter ones, so the bytes
   sort numerically. Canonical form needs one rule: no leading zero byte.
-- **Dialog's `number`** has the one-band encoding as its content:
-  - a class byte (−∞, negative, zero, positive, +∞, NaN);
-  - the power of two of the leading bit;
+- **Dialog's `number`** has the one-band encoding as its content, SQLite4's
+  numeric key encoding with binary digits in place of decimal ones:
+  - a class byte (−∞, negative ≥ 1 in magnitude, negative < 1, zero,
+    positive < 1, positive ≥ 1, +∞, NaN), so the exponent's sign is in it;
+  - the magnitude of the power of two of the leading bit, in an
+    order-preserving bijective varint after bijou's: one byte below 248, two
+    bytes otherwise, inverted for a number less than one. Every 128-bit integer
+    has a one-byte exponent;
   - the remaining bits in 7-bit groups with a continuation bit;
-  - a final byte saying whether the number was written as an integer or a float;
   - every byte after the class inverted for a negative number.
 
   These are the bytes the value index will key numbers by once it moves to one
   band, so a number has one encoding for both identity and index key. Its
   consequences, the same in both:
-  - `5` and `5.0` differ only in their final byte, so they are two values, and a
-    float view can ask for numbers written as floats;
+  - `5` and `5.0` are one value, whichever of natural, integer or float holds
+    it, so they join and a retraction of one retracts the other;
   - `-0.0` is `0.0`;
   - NaN is one value. Today dialog keeps NaN payloads distinct, and a payload can
     change when a value passes through JavaScript.
@@ -361,11 +365,13 @@ content and its index key are the same bytes.
 **The idea.** Store every number in one band of the value index, so 5 and 5.0
 sort together, and make dialog's number types views over that band:
 
-- an integer view matches whole numbers, including whole floats, and binds them
-  as integers;
-- a natural view matches whole numbers that are not negative;
-- a float view matches numbers written as floats;
-- a number view matches all of them.
+- an integer view reads every number, and a number with a fraction as its whole
+  part;
+- a natural view reads every number that is not negative, the same way;
+- a float view reads every number as a float;
+- a number view reads all of them as they are.
+
+How views read and write is under [Views read and write](#views-read-and-write).
 
 **How dialog stores numbers today.** Each type has its own band: natural,
 integer, float, each a type byte then a fixed-width payload, the same encodings
@@ -386,8 +392,9 @@ allocates.
 
 **One band is viable.** A prototype encoding:
 - writes sign class, then the power of two of the leading bit, then the
-  remaining bits in 7-bit groups with a continuation bit, then one byte saying
-  whether it was written as an integer or a float;
+  remaining bits in 7-bit groups with a continuation bit (the prototype also
+  ended with a byte saying how the number was written; 0.3.0 drops it, see
+  below);
 - inverts the bytes of negative numbers;
 - is the binary counterpart of SQLite4's numeric keys, which share one encoding
   for integers and floats.
@@ -412,9 +419,10 @@ perf suite has no numeric scenario today.
 
 **What it would decide:**
 
-- **Numeric equality.** 5 and 5.0 are adjacent keys differing only in the final
-  byte. Keeping that byte keeps "written as a float" queryable. Dropping it makes
-  5 and 5.0 one claim, and then a float view could only mean "not whole".
+- **Numeric equality.** Decided: 5 and 5.0 are one value. A trailing byte saying
+  how a number was written would keep "written as a float" queryable, but then
+  5 and 5.0 would not join, and retracting one would leave the other. Those bite
+  users; the written-as distinction is a leftover of Rust's types.
 - **Zero and NaN.** `-0.0` becomes `0`, and NaN is one value.
 - **Identity.** Dialog's number types become views over one `number` content,
   these bytes, keyed by the view's type reference, consistent with "a type is a
@@ -453,6 +461,47 @@ equality in the query layer.
 - numeric scenarios in `dialog-perf` (point, narrow range, wide range, mixed
   types), which the suite lacks today;
 - the one-band slot behind dialog's value encoder, measured on them.
+
+## Views read and write
+
+A view (an attribute's `as:`) is a lens over the one numeric domain. It applies
+when reading and when writing, and two apps may read and write one relation
+through different views.
+
+**Reading:** a view coerces where it can only lose precision, and filters where
+the stored value is outside its range. An integer view reads 34.5 as 34; a
+natural view does not see −3 at all. Coercing −3 to 0 instead would hide a real
+difference, as the write rule below shows.
+
+**Writing:** a write through a view reads the cell first, through the same view,
+as a write under a choosing pick already does to find the claim it succeeds.
+- If the read already yields the value being written, the write is a no-op. A
+  natural-view app writing 34 over a stored 34.5 leaves 34.5.
+- Otherwise the write succeeds the claim with exactly the value asserted. The
+  natural-view app writing 35 stores 35.
+- Under `all`, a write is a no-op when the set read through the view already
+  holds the value, and appends otherwise.
+
+So the store holds only values someone asserted: no write merges its value into
+another's (writing 35 over 34.5 never stores 35.5). This is the existing rule
+that writing a value the cell already holds writes nothing (`succession.rs`),
+with equality judged through the view. A no-op judged on a stale read already
+fails at publish (`batch.rs`).
+
+Each view must satisfy two laws, which make it a well-behaved lens:
+- writing what you read changes nothing (the no-op);
+- reading what you wrote gives it back, so the view's coercion is idempotent on
+  its own values (floor of 35 is 35).
+
+The cost: a view cannot express a change it cannot see. Through a natural view,
+"exactly 34" and "unchanged" are the same write; dropping the half takes a view
+that sees it. That is acceptable only where what the view hides is precision,
+which is why a view filters, rather than coerces, a value outside its range.
+
+**Where it is judged:** for cells no rule derives, the tree elects the claim in
+the descent that applies the write, comparing exact values. The no-op has to be
+judged there too, so the instruction carries the attribute's view. This is a
+storage change, not part of 0.3.0's identity work.
 
 ## Notation
 
@@ -524,10 +573,10 @@ Each step lands with tests and a perf sweep:
      wire form, which carries attribute descriptions. So a description can
      change a rule's identity even though it changes no attribute's or
      concept's. Step 3 fixes this by hashing concepts by reference.
-   - **Identity is ahead of the index for numbers.** A natural and an integer
-     of the same number are one value in identity and two in the index until
-     it moves to one band. Two attributes listing `1` as a natural and as an
-     integer share an identity and read different claims. The same will hold
+   - **Identity is ahead of the index for numbers.** A natural, an integer
+     and a float of the same number are one value in identity and three in
+     the index until it moves to one band. Two attributes listing `1` and
+     `1.0` share an identity and read different claims. The same will hold
      for rule constants in fields that declare no type once step 3 lands. The
      alternatives were to keep the band in identity (a third written-as
      value, which bakes the band in and needs another migration to drop) or
@@ -547,6 +596,10 @@ Each step lands with tests and a perf sweep:
 ## Decided
 
 - **`natural`, `integer` and `float` are views** over one `number` value type.
+- **3 and 3.0 are one value**, in identity and, once storage follows, in the
+  index.
+- **Writes through a view are literal or no-ops**, never merges (see
+  [Views read and write](#views-read-and-write)).
 - **Text is hashed as written**, with no normalization, because the database
   compares text byte for byte.
 - **Structs are maps from field names**, with absent optional fields left out.
