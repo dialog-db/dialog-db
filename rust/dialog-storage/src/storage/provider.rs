@@ -23,7 +23,8 @@
 //! [`Volatile`]: volatile::Volatile
 
 // The filesystem provider is isomorphic: native is backed by `tokio::fs`,
-// the browser by the File System Access API. It compiles on every target.
+// the browser by the File System Access API. It compiles on every target; on
+// WASI, which has no file system, it compiles but never opens.
 pub mod fs;
 pub use fs::*;
 
