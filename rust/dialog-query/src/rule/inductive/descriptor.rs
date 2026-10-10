@@ -58,10 +58,15 @@ impl InductiveRuleDescriptor {
     /// evaluation. Fails unless exactly one of `assert!` / `retract!`
     /// is present.
     pub fn compile(self) -> Result<InductiveRule, TypeError> {
-        let mut premises: Vec<Premise> = self.when.into_iter().map(Premise::Assert).collect();
+        let mut premises: Vec<Premise> = self
+            .when
+            .into_iter()
+            .map(Proposition::conformed)
+            .map(Premise::Assert)
+            .collect();
 
         for proposition in self.unless {
-            premises.push(Premise::Unless(Negation::not(proposition)));
+            premises.push(Premise::Unless(Negation::not(proposition.conformed())));
         }
 
         match (self.assert, self.retract) {

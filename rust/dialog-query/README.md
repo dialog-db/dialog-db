@@ -117,13 +117,13 @@ mod model {
 }
 ```
 
-By default an attribute has **cardinality one**, an entity has at most one value for it. Use `#[cardinality(many)]` when an entity can have multiple values:
+By default an attribute is read under the `last` pick: an entity has one value for it, the newest. Use `#[pick(all)]` when an entity can have multiple values (`#[pick(max)]` and `#[pick(min)]` read the greatest and least):
 
 ```rs
 mod employee {
     /// Skills associated with the employee
     #[derive(Attribute, Clone)]
-    #[cardinality(many)]
+    #[pick(all)]
     pub struct Skill(pub String);  // -> "employee/skill" (many)
 }
 ```

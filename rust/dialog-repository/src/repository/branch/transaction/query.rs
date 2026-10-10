@@ -725,7 +725,7 @@ mod tests {
         let rule = {
             let json = serde_json::json!({
                 "deduce": { "with": {
-                    "salary": { "the": "org/dept-salary", "as": "natural:", "pick": "all" }
+                    "salary": { "the": "org/dept-salary", "as": "natural:", "pick": "all:" }
                 }},
                 "when": [{
                     "assert": { "with": {
@@ -744,7 +744,7 @@ mod tests {
             descriptor.compile().expect("rule compiles")
         };
         let dept_top: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max" }
+            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max:" }
         }}))?;
 
         let dept: Entity = "id:dept-a".parse()?;
@@ -777,6 +777,87 @@ mod tests {
         );
         assert_eq!(*rows[0].entity(), dept);
         assert_eq!(rows[0].get::<u64>("top")?, 4);
+
+        Ok(())
+    }
+
+    /// A committed rule matching a text constant still derives from the
+    /// text it was written to match, whether or not the text is shaped
+    /// like a URI. The rule is read back from the branch, and its
+    /// constant with it.
+    #[dialog_common::test]
+    async fn it_derives_through_a_committed_rule_matching_uri_shaped_text() -> anyhow::Result<()> {
+        use dialog_artifacts::Value;
+        use dialog_query::rule::DeductiveRuleDescriptor;
+        use dialog_query::{ConceptQuery, Parameters, Proposition};
+
+        for (domain, url) in [("plain", "home"), ("uri", "https://example.com")] {
+            let (operator, profile) = test_session_with_peer().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            // home-title(this, title) :- url(this, <url>), title(this, title)
+            let rule = {
+                let mut descriptor: DeductiveRuleDescriptor =
+                    serde_json::from_value(serde_json::json!({
+                        "deduce": { "with": {
+                            "title": { "the": format!("{domain}/home-title"), "as": "text:" }
+                        } },
+                        "when": [{
+                            "assert": { "with": {
+                                "url": { "the": format!("{domain}/url"), "as": "text:" },
+                                "title": { "the": format!("{domain}/title"), "as": "text:" }
+                            } },
+                            "where": {
+                                "this": { "?": { "name": "this" } },
+                                "url": "placeholder",
+                                "title": { "?": { "name": "title" } }
+                            }
+                        }]
+                    }))?;
+                let Some(Proposition::Concept(query)) = descriptor.when.first_mut() else {
+                    panic!("a concept premise");
+                };
+                query
+                    .terms
+                    .insert("url".into(), Term::Constant(Value::String(url.into())));
+                descriptor.compile().expect("rule compiles")
+            };
+            let home = rule.conclusion().clone();
+
+            let page: Entity = "id:page".parse()?;
+            let relation = |name: &str| -> anyhow::Result<dialog_query::Relation> {
+                Ok(format!("{domain}/{name}").parse()?)
+            };
+            branch
+                .transaction()
+                .assert(&rule)
+                .assert(relation("url")?.of(page.clone()).is(url.to_string()))
+                .assert(relation("title")?.of(page.clone()).is("Home".to_string()))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("this"));
+            terms.insert("title".into(), Term::var("title"));
+            let rows = branch
+                .transaction()
+                .query()
+                .select(ConceptQuery {
+                    predicate: home,
+                    terms,
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(
+                rows.len(),
+                1,
+                "the page whose url is the text {url:?} derives"
+            );
+        }
 
         Ok(())
     }

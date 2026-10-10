@@ -16,7 +16,7 @@ pub use rules::{ConceptRules, Exact, Installed};
 
 use std::fmt;
 
-use crate::artifact::{ArtifactsRelation, Value};
+use crate::artifact::{ArtifactsRelation, Type, Value};
 use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::planner::{Disjunction, Plan};
@@ -239,6 +239,39 @@ impl<'de> Deserialize<'de> for ConceptQuery {
 }
 
 impl ConceptQuery {
+    /// This application with each constant conformed to the type its
+    /// field declares (see [`Value::conform`]), and a constant `this` to
+    /// an entity. A constant written bare reads as the first type its
+    /// payload fits, so it may name the field's value under another type,
+    /// which no claim of the field would match.
+    pub fn conformed(mut self) -> Self {
+        let mut conformed = Vec::new();
+        for (name, term) in self.terms.iter() {
+            let Term::Constant(value) = term else {
+                continue;
+            };
+            let kind = if name == "this" {
+                Some(Type::Entity)
+            } else {
+                self.predicate
+                    .with()
+                    .iter()
+                    .find(|(field, _)| field == name)
+                    .and_then(|(_, field)| field.content_type())
+            };
+            if let Some(kind) = kind {
+                let fitted = value.clone().conform(kind);
+                if &fitted != value {
+                    conformed.push((name.clone(), fitted));
+                }
+            }
+        }
+        for (name, value) in conformed {
+            self.terms.insert(name, Term::Constant(value));
+        }
+        self
+    }
+
     /// Estimate the cost of this concept application given the current environment.
     /// A concept is essentially a join over N fact lookups (one per attribute).
     /// Each fact lookup has the form: (this, attribute_i, value_i).

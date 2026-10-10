@@ -18,8 +18,26 @@ use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// All value type representations that may be stored by [`Artifacts`]
-#[derive(Debug, Clone, PartialOrd, Serialize, Deserialize)]
-#[serde(untagged)]
+///
+/// # Serialization
+///
+/// A binary format (one whose serializer is not human readable, such as
+/// dag-cbor) writes a value as a one-entry map from the entity that
+/// names its type to its payload: `{"text:": "foo:"}`,
+/// `{"entity:": "foo:"}`, `{"natural:": 5}`. Those are the bytes a rule
+/// or an attribute hashes into its identity, so two values of different
+/// types never share an identity, and a value decodes as the type it was
+/// written as.
+///
+/// A human-readable format (JSON) writes the bare payload, `"foo:"` or
+/// `5`, wherever it reads back as the same value, and the tagged form
+/// where it would not: text that parses as a URI, a symbol, a
+/// non-negative signed integer and a record. It reads a bare payload as
+/// the first type it fits: a string that parses as a URI is an entity,
+/// other text is text, and an integer is natural unless it is negative.
+/// Every format reads the tagged form, and the bare payloads earlier
+/// releases wrote in binary.
+#[derive(Debug, Clone, PartialOrd)]
 pub enum Value {
     /// A byte buffer
     Bytes(Vec<u8>),
@@ -40,6 +58,269 @@ pub enum Value {
     Record(Vec<u8>),
     /// A symbol type, used to distinguish attributes from other strings
     Symbol(Relation),
+}
+
+/// A value as its bare payload, untagged: how a human-readable format
+/// writes a value, and how every format wrote one before values were
+/// tagged. Variants that share a payload shape share an encoding, so
+/// reading picks the first variant the payload fits.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum Bare<'a> {
+    Bytes(&'a Vec<u8>),
+    Entity(&'a Entity),
+    Boolean(bool),
+    String(&'a String),
+    UnsignedInt(u128),
+    SignedInt(i128),
+    Float(f64),
+    Record(&'a Vec<u8>),
+    Symbol(&'a Relation),
+}
+
+impl Value {
+    fn bare(&self) -> Bare<'_> {
+        match self {
+            Value::Bytes(bytes) => Bare::Bytes(bytes),
+            Value::Entity(entity) => Bare::Entity(entity),
+            Value::Boolean(boolean) => Bare::Boolean(*boolean),
+            Value::String(string) => Bare::String(string),
+            Value::UnsignedInt(natural) => Bare::UnsignedInt(*natural),
+            Value::SignedInt(integer) => Bare::SignedInt(*integer),
+            Value::Float(float) => Bare::Float(*float),
+            Value::Record(record) => Bare::Record(record),
+            Value::Symbol(relation) => Bare::Symbol(relation),
+        }
+    }
+}
+
+impl Value {
+    /// This value as `kind`, where `kind` reads the same spelling or
+    /// number: text as an entity or a symbol when it parses as one, an
+    /// entity as text or a symbol, a natural number as a signed integer
+    /// and back when it fits, bytes as a record and back. Any other value
+    /// is returned as it is.
+    ///
+    /// A bare constant decodes as the first type its payload fits, so a
+    /// constant written bare (by JSON, or by a release before constants
+    /// were tagged) may name the right value under the wrong type; a slot
+    /// that declares its type conforms it.
+    pub fn conform(self, kind: ValueDataType) -> Value {
+        match (self, kind) {
+            (Value::Entity(entity), ValueDataType::String) => Value::String(entity.to_string()),
+            (Value::String(text), ValueDataType::Entity) => match Entity::from_str(&text) {
+                Ok(entity) => Value::Entity(entity),
+                Err(_) => Value::String(text),
+            },
+            (Value::String(text), ValueDataType::Symbol) => match Relation::from_str(&text) {
+                Ok(relation) => Value::Symbol(relation),
+                Err(_) => Value::String(text),
+            },
+            (Value::Entity(entity), ValueDataType::Symbol) => {
+                match Relation::from_str(&entity.to_string()) {
+                    Ok(relation) => Value::Symbol(relation),
+                    Err(_) => Value::Entity(entity),
+                }
+            }
+            (Value::Symbol(relation), ValueDataType::String) => Value::String(relation.to_string()),
+            (Value::UnsignedInt(natural), ValueDataType::SignedInt) => {
+                match i128::try_from(natural) {
+                    Ok(integer) => Value::SignedInt(integer),
+                    Err(_) => Value::UnsignedInt(natural),
+                }
+            }
+            (Value::SignedInt(integer), ValueDataType::UnsignedInt) => {
+                match u128::try_from(integer) {
+                    Ok(natural) => Value::UnsignedInt(natural),
+                    Err(_) => Value::SignedInt(integer),
+                }
+            }
+            (Value::Bytes(bytes), ValueDataType::Record) => Value::Record(bytes),
+            (Value::Record(record), ValueDataType::Bytes) => Value::Bytes(record),
+            (value, _) => value,
+        }
+    }
+
+    /// This value as its bare payload in every format, untagged. Two
+    /// values of different types can share it (the text `foo:` and the
+    /// entity `foo:`), so it suits only an encoding that has to keep the
+    /// spelling earlier releases wrote, such as an identity minted from
+    /// values before they were tagged.
+    pub fn untagged(&self) -> impl Serialize + '_ {
+        self.bare()
+    }
+
+    /// Whether this value's bare payload reads back as this value: the
+    /// first type the payload fits is its own. Text that parses as a URI
+    /// reads back as an entity, a symbol as text, a non-negative signed
+    /// integer as a natural number and a record as bytes.
+    fn reads_back_bare(&self) -> bool {
+        match self {
+            Value::String(text) => Entity::from_str(text).is_err(),
+            Value::SignedInt(integer) => *integer < 0,
+            Value::Symbol(_) | Value::Record(_) => false,
+            Value::Bytes(_)
+            | Value::Entity(_)
+            | Value::Boolean(_)
+            | Value::UnsignedInt(_)
+            | Value::Float(_) => true,
+        }
+    }
+}
+
+impl Serialize for Value {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() && self.reads_back_bare() {
+            return self.bare().serialize(serializer);
+        }
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry(self.data_type().uri(), &self.bare())?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Value {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(ValueVisitor)
+    }
+}
+
+/// An integer payload, read through `deserialize_any`. Reading a `u128`
+/// or an `i128` directly asks for `deserialize_u128` or
+/// `deserialize_i128`, which the buffer serde reads an untagged or
+/// flattened map into does not implement, so a tagged integer inside
+/// one would fail to decode.
+struct Integral(i128);
+
+impl<'de> Deserialize<'de> for Integral {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl de::Visitor<'_> for Visitor {
+            type Value = Integral;
+            fn expecting(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+                formatter.write_str("an integer")
+            }
+            fn visit_u64<E: de::Error>(self, natural: u64) -> Result<Integral, E> {
+                Ok(Integral(natural.into()))
+            }
+            fn visit_i64<E: de::Error>(self, integer: i64) -> Result<Integral, E> {
+                Ok(Integral(integer.into()))
+            }
+            fn visit_u128<E: de::Error>(self, natural: u128) -> Result<Integral, E> {
+                i128::try_from(natural)
+                    .map(Integral)
+                    .map_err(|_| E::custom(format!("{natural} is out of range")))
+            }
+            fn visit_i128<E: de::Error>(self, integer: i128) -> Result<Integral, E> {
+                Ok(Integral(integer))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// Reads a value in its tagged form, or as a bare payload, which it
+/// reads as the first of [`Bare`]'s variants the payload fits: a
+/// sequence of bytes is bytes, a string that parses as a URI is an
+/// entity and any other string is text, and an integer is natural
+/// unless it is negative.
+struct ValueVisitor;
+
+impl<'de> de::Visitor<'de> for ValueVisitor {
+    type Value = Value;
+
+    fn expecting(&self, formatter: &mut Formatter<'_>) -> FmtResult {
+        formatter.write_str("a value, tagged by its type entity or bare")
+    }
+
+    fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let Some(name) = map.next_key::<String>()? else {
+            return Err(de::Error::custom("an empty map names no type"));
+        };
+        let kind = ValueDataType::ALL
+            .into_iter()
+            .find(|kind| kind.uri() == name)
+            .ok_or_else(|| de::Error::custom(format!("`{name}` names no type")))?;
+        let value =
+            match kind {
+                ValueDataType::Bytes => Value::Bytes(map.next_value()?),
+                ValueDataType::Entity => Value::Entity(map.next_value()?),
+                ValueDataType::Boolean => Value::Boolean(map.next_value()?),
+                ValueDataType::String => Value::String(map.next_value()?),
+                ValueDataType::UnsignedInt => {
+                    let Integral(integer) = map.next_value()?;
+                    Value::UnsignedInt(u128::try_from(integer).map_err(|_| {
+                        de::Error::custom(format!("{integer} is not a natural number"))
+                    })?)
+                }
+                ValueDataType::SignedInt => {
+                    let Integral(integer) = map.next_value()?;
+                    Value::SignedInt(integer)
+                }
+                ValueDataType::Float => Value::Float(map.next_value()?),
+                ValueDataType::Record => Value::Record(map.next_value()?),
+                ValueDataType::Symbol => Value::Symbol(map.next_value()?),
+            };
+        if map.next_key::<de::IgnoredAny>()?.is_some() {
+            return Err(de::Error::custom("a tagged value names one type"));
+        }
+        Ok(value)
+    }
+
+    fn visit_str<E: de::Error>(self, text: &str) -> Result<Value, E> {
+        self.visit_string(text.to_owned())
+    }
+
+    fn visit_string<E: de::Error>(self, text: String) -> Result<Value, E> {
+        Ok(match Entity::from_str(&text) {
+            Ok(entity) => Value::Entity(entity),
+            Err(_) => Value::String(text),
+        })
+    }
+
+    fn visit_bool<E: de::Error>(self, boolean: bool) -> Result<Value, E> {
+        Ok(Value::Boolean(boolean))
+    }
+
+    fn visit_u64<E: de::Error>(self, natural: u64) -> Result<Value, E> {
+        Ok(Value::UnsignedInt(natural.into()))
+    }
+
+    fn visit_u128<E: de::Error>(self, natural: u128) -> Result<Value, E> {
+        Ok(Value::UnsignedInt(natural))
+    }
+
+    fn visit_i64<E: de::Error>(self, integer: i64) -> Result<Value, E> {
+        self.visit_i128(integer.into())
+    }
+
+    fn visit_i128<E: de::Error>(self, integer: i128) -> Result<Value, E> {
+        Ok(match u128::try_from(integer) {
+            Ok(natural) => Value::UnsignedInt(natural),
+            Err(_) => Value::SignedInt(integer),
+        })
+    }
+
+    fn visit_f64<E: de::Error>(self, float: f64) -> Result<Value, E> {
+        Ok(Value::Float(float))
+    }
+
+    fn visit_bytes<E: de::Error>(self, bytes: &[u8]) -> Result<Value, E> {
+        Ok(Value::Bytes(bytes.to_vec()))
+    }
+
+    fn visit_byte_buf<E: de::Error>(self, bytes: Vec<u8>) -> Result<Value, E> {
+        Ok(Value::Bytes(bytes))
+    }
+
+    fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(byte) = seq.next_element::<u8>()? {
+            bytes.push(byte);
+        }
+        Ok(Value::Bytes(bytes))
+    }
 }
 
 impl Value {
@@ -1081,6 +1362,176 @@ mod deserialize_tests {
                 matches!(value, Value::Entity(_)),
                 "{uri:?} should decode as an Entity, got {value:?}",
             );
+        }
+    }
+}
+
+/// What a value's encoding keeps of its type. Bare, variants that share
+/// a payload shape share bytes: text and an entity are both strings, a
+/// symbol is a string, a signed and an unsigned integer are both
+/// integers, and bytes and a record are both byte sequences. Tagged by
+/// its type entity, each value decodes as itself and hashes apart from
+/// every value of another type.
+#[cfg(test)]
+mod encoding_tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+
+    fn cbor(value: &Value) -> Vec<u8> {
+        serde_ipld_dagcbor::to_vec(value).expect("encodes")
+    }
+
+    fn round_trip(value: &Value) -> Value {
+        serde_ipld_dagcbor::from_slice(&cbor(value)).expect("decodes")
+    }
+
+    /// Text that is a valid URI comes back as text, not as an entity.
+    #[dialog_common::test]
+    fn it_round_trips_text_shaped_like_a_uri() {
+        let text = Value::String("https://example.com".into());
+        assert_eq!(round_trip(&text), text);
+        let bare = Value::String("foo:".into());
+        assert_eq!(round_trip(&bare), bare);
+    }
+
+    /// A symbol comes back as a symbol, not as text.
+    #[dialog_common::test]
+    fn it_round_trips_a_symbol() {
+        let symbol = Value::Symbol("person/name".parse().expect("a relation"));
+        assert_eq!(round_trip(&symbol), symbol);
+    }
+
+    /// An integer comes back as the integer it was, and a record as a
+    /// record.
+    #[dialog_common::test]
+    fn it_round_trips_integers_and_a_record() {
+        let unsigned = Value::UnsignedInt(5);
+        assert_eq!(round_trip(&unsigned), unsigned);
+        let signed = Value::SignedInt(5);
+        assert_eq!(round_trip(&signed), signed);
+        let record = Value::Record(vec![1, 2, 3]);
+        assert_eq!(round_trip(&record), record);
+    }
+
+    /// A value conforms to a type that reads its spelling or number, and
+    /// stays as it is otherwise.
+    #[dialog_common::test]
+    fn it_conforms_a_value_to_a_type_that_reads_it() {
+        let entity = |uri: &str| Value::Entity(uri.parse().expect("an entity"));
+        assert_eq!(
+            entity("case:active").conform(ValueDataType::String),
+            Value::String("case:active".into())
+        );
+        assert_eq!(
+            Value::String("case:active".into()).conform(ValueDataType::Entity),
+            entity("case:active")
+        );
+        assert_eq!(
+            Value::String("person/name".into()).conform(ValueDataType::Symbol),
+            Value::Symbol("person/name".parse().expect("a relation"))
+        );
+        assert_eq!(
+            Value::UnsignedInt(5).conform(ValueDataType::SignedInt),
+            Value::SignedInt(5)
+        );
+        assert_eq!(
+            Value::SignedInt(-5).conform(ValueDataType::UnsignedInt),
+            Value::SignedInt(-5),
+            "a negative integer is no natural number"
+        );
+        assert_eq!(
+            Value::String("not an entity".into()).conform(ValueDataType::Entity),
+            Value::String("not an entity".into())
+        );
+        assert_eq!(
+            Value::Boolean(true).conform(ValueDataType::String),
+            Value::Boolean(true)
+        );
+    }
+
+    /// Every value survives a round trip through JSON, written bare where
+    /// its bare payload reads back as itself and tagged where it does not.
+    #[dialog_common::test]
+    fn it_round_trips_every_value_through_json() {
+        let cases = [
+            (Value::String("Alice".into()), serde_json::json!("Alice")),
+            (
+                Value::String("https://example.com".into()),
+                serde_json::json!({ "text:": "https://example.com" }),
+            ),
+            (
+                Value::Entity("did:web:cdata.earth".parse().expect("an entity")),
+                serde_json::json!("did:web:cdata.earth"),
+            ),
+            (
+                Value::Symbol("person/name".parse().expect("a relation")),
+                serde_json::json!({ "symbol:": "person/name" }),
+            ),
+            (Value::UnsignedInt(5), serde_json::json!(5)),
+            (Value::SignedInt(-5), serde_json::json!(-5)),
+            (Value::SignedInt(5), serde_json::json!({ "integer:": 5 })),
+            (Value::Float(5.5), serde_json::json!(5.5)),
+            (Value::Boolean(true), serde_json::json!(true)),
+            (Value::Bytes(vec![1, 2]), serde_json::json!([1, 2])),
+            (
+                Value::Record(vec![1, 2]),
+                serde_json::json!({ "record:": [1, 2] }),
+            ),
+        ];
+        for (value, json) in cases {
+            assert_eq!(
+                serde_json::to_value(&value).expect("encodes"),
+                json,
+                "{value:?}"
+            );
+            let decoded: Value = serde_json::from_value(json).expect("decodes");
+            assert_eq!(decoded, value);
+        }
+    }
+
+    /// A value written bare in binary by an earlier release reads as the
+    /// first type its payload fits, as it always did.
+    #[dialog_common::test]
+    fn it_reads_the_bare_payloads_earlier_releases_wrote() {
+        let bare = |value: &Value| serde_ipld_dagcbor::to_vec(&value.untagged()).expect("encodes");
+        let read =
+            |bytes: Vec<u8>| -> Value { serde_ipld_dagcbor::from_slice(&bytes).expect("decodes") };
+        assert_eq!(
+            read(bare(&Value::String("Alice".into()))),
+            Value::String("Alice".into())
+        );
+        assert_eq!(
+            read(bare(&Value::String("did:web:cdata.earth".into()))),
+            Value::Entity("did:web:cdata.earth".parse().expect("an entity"))
+        );
+        assert_eq!(read(bare(&Value::UnsignedInt(5))), Value::UnsignedInt(5));
+        assert_eq!(read(bare(&Value::SignedInt(-5))), Value::SignedInt(-5));
+        assert_eq!(
+            read(bare(&Value::Bytes(vec![1, 2]))),
+            Value::Bytes(vec![1, 2])
+        );
+    }
+
+    /// Values of different types encode to different bytes, so a hash
+    /// over the encoding tells them apart.
+    #[dialog_common::test]
+    fn it_encodes_values_of_different_types_differently() {
+        let pairs = [
+            (
+                Value::String("foo:".into()),
+                Value::Entity("foo:".parse().expect("an entity")),
+            ),
+            (
+                Value::String("person/name".into()),
+                Value::Symbol("person/name".parse().expect("a relation")),
+            ),
+            (Value::UnsignedInt(5), Value::SignedInt(5)),
+            (Value::Bytes(vec![1]), Value::Record(vec![1])),
+        ];
+        for (left, right) in pairs {
+            assert_ne!(cbor(&left), cbor(&right), "{left:?} and {right:?}");
         }
     }
 }

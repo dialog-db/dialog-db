@@ -105,10 +105,15 @@ impl DeductiveRuleDescriptor {
     /// their folds instead — see
     /// [`DeductiveRule::with_reduce`]).
     pub fn compile(self) -> Result<DeductiveRule, TypeError> {
-        let mut premises: Vec<Premise> = self.when.into_iter().map(Premise::Assert).collect();
+        let mut premises: Vec<Premise> = self
+            .when
+            .into_iter()
+            .map(Proposition::conformed)
+            .map(Premise::Assert)
+            .collect();
 
         for proposition in self.unless {
-            premises.push(Premise::Unless(Negation::not(proposition)));
+            premises.push(Premise::Unless(Negation::not(proposition.conformed())));
         }
 
         DeductiveRule::with_reduce(self.deduce, premises, self.reduce)
