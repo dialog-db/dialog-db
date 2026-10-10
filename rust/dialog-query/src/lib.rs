@@ -46,6 +46,8 @@ pub mod formula;
 /// dialog-query, so it can only ever be a dev-dependency here).
 #[cfg(test)]
 pub mod helpers;
+
+pub mod identity;
 /// The identities an earlier release gave attributes and concepts,
 /// for migrating what it stored under them.
 pub mod migration;

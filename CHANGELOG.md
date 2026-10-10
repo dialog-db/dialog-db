@@ -14,6 +14,43 @@ says how to cut a release.
 
 ## Unreleased
 
+### Attributes and concepts are identified by merkle references
+
+[#593](https://github.com/dialog-db/dialog-db/pull/593),
+[identity, storage and notation](./notes/identity-storage-notation.md#identity-merkle-reference-v2),
+[merkle-reference v2](./rust/merkle-reference/spec.md)
+
+An attribute's and a concept's identity is now a merkle reference
+(`merkle-reference`, a new crate in this workspace), not the BLAKE3
+hash of their dag-cbor. A definition is hashed as a map from field
+names under its own type (`the:`, `concept:`), and a concept hashes its
+attributes' and its conformance targets' references, so it is the same
+whether they are embedded or linked. The entities keep their shape,
+`the:<base58>` and `concept:<base58>`, with other digits.
+
+What this changes for you:
+
+- Every attribute and concept identity differs from 0.2.0's and from
+  0.3.0-rc.1's. Rule identities do not change yet.
+- `AttributeDescriptor::hash()` and `ConceptDescriptor::hash()` are
+  `reference()`, returning a `merkle_reference::Reference`.
+  `to_cbor_bytes()` is gone from both. `AttributeDescriptor::parse_uri`
+  returns a `Reference`.
+- `Value::reference()` gives a value's identity: numbers share one
+  `number:` type, so a natural `5` and an integer `5` are one value and
+  `5.0` is another. An attribute's `as:` list hashes values this way.
+  The value index still keeps naturals and integers apart, so until it
+  moves to one band, two attributes that differ only by listing a
+  natural or an integer of the same number share an identity but read
+  different claims.
+- `dialog_artifacts::identity` and `dialog_query::identity` hold the
+  types dialog hashes under.
+
+Why: identity should be a function of what a definition means, cheap
+to compute, and independent of where its parts are stored. This is the
+first step of moving every identity to merkle references in one
+migration.
+
 ### Constants name their type by an entity
 
 [notation](./notes/notation.md#constants)
@@ -78,6 +115,11 @@ change only once.
   `https://a/`).
 - Every rule with a constant, and every attribute with an `as:` list,
   has a new identity. `upgrade_rules()` re-installs those rules.
+- Every attribute and concept has a new identity, from 0.2.0 and from
+  0.3.0-rc.1 alike. Nothing stored is rewritten: definitions recorded
+  under their old entities (tonk's `db.attribute/*` and concept facts)
+  need re-recording under the new ones, as tonk's `upgrade_definitions`
+  does for pre-0.2 replicas.
 - Values in tonk's dag-cbor and IPLD conversions come out tagged. Use
   `Value::untagged()` where an identity minted from values has to stay
   as it was.

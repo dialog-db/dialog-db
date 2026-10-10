@@ -10,7 +10,10 @@ use crate::types::Any;
 use crate::types::Type;
 use dialog_artifacts::{NameShape, Pick, Symbol};
 
+use crate::identity::{self, ATTRIBUTE, field};
 use base58::ToBase58;
+use dialog_artifacts::identity::{ENTITY, SYMBOL};
+use merkle_reference::{Reference, Type as ReferenceType};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::iter;
@@ -744,93 +747,46 @@ impl AttributeDescriptor {
         ))
     }
 
-    /// Encode this attribute descriptor as CBOR for hashing
+    /// The attribute's identity: its merkle reference under
+    /// [`ATTRIBUTE`](crate::identity::ATTRIBUTE).
     ///
-    /// Creates a CBOR-encoded representation with fields:
-    /// - domain: domain
-    /// - name: name
-    /// - cardinality: cardinality
-    /// - type: content_type
-    ///
-    /// Description is excluded from the encoding.
-    pub fn to_cbor_bytes(&self) -> Vec<u8> {
-        use serde::Serialize;
-
-        // `name` carries the attribute's name half for a plain
-        // attribute and the key kind for a collection — the two are
-        // the same slot because they are the same thing: what the
-        // name half of these facts holds. A plain attribute therefore
-        // encodes exactly as it did before collections existed, so
-        // every existing identity is preserved.
-        // An attribute is a relation, or a ranked chain of them, read
-        // under a type or a listed value domain and a pick: all of
-        // it is the identity, and two reads of one relation under
-        // different picks are two attributes.
-        #[derive(Serialize)]
-        struct CborAttributeDescriptor<'a> {
-            domain: &'a str,
-            name: &'a str,
-            #[serde(skip_serializing_if = "Vec::is_empty")]
-            then: Vec<String>,
-            #[serde(rename = "type")]
-            content_type: Option<Type>,
-            pick: &'static str,
-            #[serde(skip_serializing_if = "<[Value]>::is_empty")]
-            among: &'a [Value],
+    /// It maps `the` to the relations the attribute reads, best first, each
+    /// a symbol; `as` to the entity naming its type, when it declares one;
+    /// `pick` to the entity naming its pick; and `among` to the values it
+    /// lists, when it lists any. A collection reads as the symbol its
+    /// relation slot spells, `todo.list/[symbol]`, which no relation can
+    /// spell. The description is not part of it. Two reads of one relation
+    /// under different types or picks are two attributes.
+    pub fn reference(&self) -> Reference {
+        let relations = iter::once(&self.the)
+            .chain(&self.then)
+            .map(|the| SYMBOL.refer(the.to_string().as_bytes()));
+        let mut entries = vec![
+            (field::THE, ReferenceType::LIST.list(relations)),
+            (field::PICK, ENTITY.refer(self.pick.uri().as_bytes())),
+        ];
+        if let Some(content_type) = self.content_type {
+            entries.push((field::AS, ENTITY.refer(content_type.uri().as_bytes())));
         }
-
-        let name = match &self.the {
-            The::Relation(the) => the.name(),
-            The::Collection { keyed, .. } => match keyed {
-                Keyed::Dictionary => "<dictionary>",
-                Keyed::Sequence => "<sequence>",
-            },
-        };
-        let schema = CborAttributeDescriptor {
-            domain: self.domain(),
-            name,
-            then: self
-                .then
-                .iter()
-                .map(|relation| relation.to_string())
-                .collect(),
-            content_type: self.content_type(),
-            pick: self.pick.uri(),
-            among: &self.among,
-        };
-
-        serde_ipld_dagcbor::to_vec(&schema).expect("CBOR encoding should not fail")
+        if !self.among.is_empty() {
+            entries.push((
+                field::AMONG,
+                ReferenceType::LIST.list(self.among.iter().map(Value::reference)),
+            ));
+        }
+        ATTRIBUTE.map(entries)
     }
 
-    /// Compute blake3 hash of this attribute descriptor
-    ///
-    /// Returns a 32-byte blake3 hash of the CBOR-encoded descriptor
-    pub fn hash(&self) -> blake3::Hash {
-        let cbor_bytes = self.to_cbor_bytes();
-        blake3::hash(&cbor_bytes)
-    }
-
-    /// Format this attribute's hash as a URI
-    ///
-    /// Returns a string in the format: `the:{base58(blake3)}`
+    /// The attribute's entity: `the:` followed by its
+    /// [reference](Self::reference) in base58.
     pub fn to_uri(&self) -> String {
-        let encoded = self.hash().as_bytes().as_ref().to_base58();
-        format!("the:{encoded}")
+        format!("the:{}", self.reference().as_bytes().to_base58())
     }
 
-    /// Parse an attribute URI and extract the hash
-    ///
-    /// Expects format: `the:{base58(blake3)}`
-    /// Returns None if the format is invalid
-    pub fn parse_uri(uri: &str) -> Option<blake3::Hash> {
-        let encoded = uri.strip_prefix("the:")?;
-        let bytes = base58::FromBase58::from_base58(encoded).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        Some(blake3::Hash::from(arr))
+    /// The reference an attribute entity, `the:{base58}`, names, or
+    /// `None` if `uri` is not one.
+    pub fn parse_uri(uri: &str) -> Option<Reference> {
+        identity::parse("the:", uri)
     }
 }
 
@@ -1445,21 +1401,83 @@ mod collection_tests {
         let sequence = collection(Keyed::Sequence);
         let dictionary = collection(Keyed::Dictionary);
 
-        assert_ne!(sequence.hash(), dictionary.hash(), "key kinds differ");
         assert_ne!(
-            sequence.hash(),
-            attribute.hash(),
+            sequence.reference(),
+            dictionary.reference(),
+            "key kinds differ"
+        );
+        assert_ne!(
+            sequence.reference(),
+            attribute.reference(),
             "a collection is not an attribute"
         );
 
-        // The encoding a plain attribute produces is the one it
-        // produced before collections existed: domain, name,
-        // cardinality, type — nothing added, nothing reordered.
-        let cbor = attribute.to_cbor_bytes();
-        let decoded: serde_json::Value =
-            serde_ipld_dagcbor::from_slice(&cbor).expect("valid dag-cbor");
-        assert_eq!(decoded["domain"], "todo.list");
-        assert_eq!(decoded["name"], "title");
+        // A collection reads as the symbol its relation slot spells.
+        let symbol = |text: &str| SYMBOL.refer(text.as_bytes());
+        let pick = ENTITY.refer(sequence.pick().uri().as_bytes());
+        let mut entries = vec![
+            (
+                field::THE,
+                ReferenceType::LIST.list([symbol("todo.list/[position]")]),
+            ),
+            (field::PICK, pick),
+        ];
+        if let Some(content_type) = sequence.content_type() {
+            entries.push((field::AS, ENTITY.refer(content_type.uri().as_bytes())));
+        }
+        assert_eq!(sequence.reference(), ATTRIBUTE.map(entries));
+    }
+
+    /// An attribute is referenced as a map from field names under
+    /// `the:`: the relations it reads, its pick, its type, and the values
+    /// it lists. Nothing else, the description included.
+    #[dialog_common::test]
+    fn it_references_an_attribute_by_its_fields() {
+        let attribute = AttributeDescriptor::new(
+            the!("todo.list/title"),
+            "The list's title",
+            Cardinality::One,
+            Some(Type::String),
+        );
+        let expected = ATTRIBUTE.map([
+            (
+                field::THE,
+                ReferenceType::LIST.list([SYMBOL.refer(b"todo.list/title")]),
+            ),
+            (field::PICK, ENTITY.refer(b"last:")),
+            (field::AS, ENTITY.refer(b"text:")),
+        ]);
+        assert_eq!(attribute.reference(), expected);
+        assert_eq!(
+            attribute.to_uri(),
+            format!("the:{}", expected.as_bytes().to_base58())
+        );
+
+        // Listed values enter by their own references, in order.
+        let listed = attribute.clone().with_domain(vec![
+            Value::String("todo".into()),
+            Value::String("done".into()),
+        ]);
+        let reordered = attribute.with_domain(vec![
+            Value::String("done".into()),
+            Value::String("todo".into()),
+        ]);
+        assert_ne!(listed.reference(), reordered.reference());
+    }
+
+    /// Listed numbers are hashed as one-band numbers: a natural and an
+    /// integer of the same number are one value, and the same number
+    /// written as a float is another. The value index still keeps
+    /// naturals and integers apart, so these two attributes share an
+    /// identity while reading different claims until it moves to one band.
+    #[dialog_common::test]
+    fn it_hashes_listed_numbers_apart_from_their_band() {
+        let status = || AttributeDescriptor::new(the!("task/priority"), "", Cardinality::One, None);
+        let natural = status().with_domain(vec![Value::UnsignedInt(1), Value::UnsignedInt(2)]);
+        let integer = status().with_domain(vec![Value::SignedInt(1), Value::SignedInt(2)]);
+        let float = status().with_domain(vec![Value::Float(1.0), Value::Float(2.0)]);
+        assert_eq!(natural.reference(), integer.reference());
+        assert_ne!(integer.reference(), float.reference());
     }
 
     /// The wire form round-trips, and a stored attribute still reads
