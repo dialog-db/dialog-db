@@ -179,15 +179,13 @@ Two families of choices:
   negative integer. It follows TerminusDB's big integers without their padding
   bit and negative zero. Longer numbers sort after shorter ones, so the bytes
   sort numerically. Canonical form needs one rule: no leading zero byte.
-- **Dialog's `number`** has the one-band encoding as its content, SQLite4's
-  numeric key encoding with binary digits in place of decimal ones:
-  - a class byte (−∞, negative ≥ 1 in magnitude, negative < 1, zero,
-    positive < 1, positive ≥ 1, +∞, NaN), so the exponent's sign is in it;
-  - the magnitude of the power of two of the leading bit, in an
-    order-preserving bijective varint after bijou's: one byte below 248, two
-    bytes otherwise, inverted for a number less than one. Every 128-bit integer
-    has a one-byte exponent;
-  - the remaining bits in 7-bit groups with a continuation bit;
+- **Dialog's `number`** has as its content its encoding in the
+  `dialog-numeric` crate, which is SQLite4's decimal key encoding unchanged
+  (see [Numbers](#numbers-one-band-typed-views) and the crate's README):
+  - a class byte holding the sign and the size of the exponent, and the exponent
+    itself when it is 0 to 10;
+  - otherwise the exponent as SQLite4's order-preserving varint;
+  - the base-100 digits, each `2X + 1`, the last `2X`;
   - every byte after the class inverted for a negative number.
 
   These are the bytes the value index will key numbers by once it moves to one
@@ -195,13 +193,11 @@ Two families of choices:
   consequences, the same in both:
   - `5` and `5.0` are one value, whichever of natural, integer or float holds
     it, so they join and a retraction of one retracts the other;
-  - `-0.0` is `0.0`;
-  - NaN is one value. Today dialog keeps NaN payloads distinct, and a payload can
-    change when a value passes through JavaScript.
-
-  A decimal type, if dialog wants one, can be added later as its own type without
-  changing the crate. TerminusDB stores decimals as the decimal string's digits,
-  which is not canonical.
+  - a float is the decimal it prints as (its shortest round-trip decimal): the
+    float `0.1` is `0.1`, and the float `1e23` is 10²³;
+  - integers of any width are exact;
+  - `-0.0` is `0`, and NaN is one value. Today dialog keeps NaN payloads
+    distinct, and a payload can change when a value passes through JavaScript.
 - **Maps** order entries by their keys' references; a set of premises, by their
   references after labeling.
 - **Structs** (AST nodes) are maps from field names to values, with an absent
@@ -357,10 +353,26 @@ code:
 ## Numbers: one band, typed views
 
 **The direction, assumed by the identity design above.** Numbers share one band
-in the value index, in the SQLite4-style encoding below, and dialog's number types
-are views over it. The storage change itself is not part of 0.3.0. 0.3.0 adopts
-the encoding for identity, so that when storage follows, a number's identity
-content and its index key are the same bytes.
+in the value index, in SQLite4's decimal key encoding (the `dialog-numeric`
+crate), and dialog's number types are views over it. 0.3.0 adopts the encoding
+for identity, so that when storage follows, a number's identity content and its
+index key are the same bytes.
+
+**Decimal, not binary (decided).** The prototype below used binary digits, which
+keep every float's exact binary value but cannot hold `0.1`. The crate uses
+decimal digits instead, SQLite4's choice:
+- a float is taken as the decimal it prints as, so JSON text, a JavaScript
+  number and a person's `0.1` are one number, and fixed-point views
+  (`decimal(2)` for money) become possible;
+- what it gives up is a float's binary value (`1e23` is 10²³);
+- arithmetic stays in floats for now, and its results are approximate.
+
+Measured against the binary encoding, integers cost about the same (16–65 ns to
+encode or decode), floats cost more (50–118 ns to encode, 41–85 ns to decode),
+and keys are smaller (a price 3.9 bytes against 10.7). Scans compare bytes and do
+not decode. In WebAssembly the crate adds about 8 KB beside `serde_json`, which
+already brings the float printer and parser it uses. The crate's README has the
+numbers and the view model.
 
 **The idea.** Store every number in one band of the value index, so 5 and 5.0
 sort together, and make dialog's number types views over that band:
@@ -427,16 +439,30 @@ perf suite has no numeric scenario today.
 - **Identity.** Dialog's number types become views over one `number` content,
   these bytes, keyed by the view's type reference, consistent with "a type is a
   view over bytes" above.
-- **Migration, gradual.** Node layout versions cannot do it alone: to the tree a
-  key is opaque bytes in one global order, and the encoding changes where a
-  number sorts, so re-encoding a value moves its key. Instead:
-  - the new encoding gets its own type byte, a `number` band beside the old
-    natural, integer and float bands, so the tree's single order is never broken;
-  - new writes go to the new band, and old values stay readable where they are;
-  - typed views read the new band and the old bands until the old bands are
-    empty, which is the alternative below, used only during the transition;
-  - re-encoding happens when a claim is next written, or in a background sweep,
-    and a later release can declare the old bands empty and drop the dual reads.
+- **Migration, once, outside the read path (decided).** The read path knows only
+  the one band; nobody pays for dual reads. Instead:
+  - a tree in the new encoding carries a critical manifest field (an odd code),
+    so a build that predates it refuses to read the tree rather than misread it.
+    A tree without the field holds the old bands;
+  - migrating a tree rewrites every number into the one band, keeping each
+    claim's version and cause, and sets the field. It is a one-time data
+    migration, done with the 0.3.0 identity migration so users migrate once;
+  - the code that reads the old bands and migrates lives behind a feature (or a
+    separate crate), so only builds that meet old data carry it. A build without
+    it refuses a tree that lacks the field and says why;
+  - migration must be a deterministic function of the tree's contents. Then two
+    replicas that migrate independently produce the same tree, a merge with a
+    peer's unmigrated tree can migrate that tree and the merge base alike before
+    merging, and a claim one side retracted before migrating cannot come back
+    through the other side's migrated copy;
+  - older revisions stay in the old bands, so reading history across the
+    migration needs the migration code too.
+
+  The earlier design here, a transitional version that read both bands and
+  re-encoded claims as they were written, would have made every read pay during
+  the transition, and an "only the new band" version would have needed every
+  replica of a space to finish first, which nothing in a local-first system can
+  guarantee.
 
   Three hazards to design for:
   - **merge:** a claim one replica moved to the new band and another retracted
@@ -598,6 +624,10 @@ Each step lands with tests and a perf sweep:
 - **`natural`, `integer` and `float` are views** over one `number` value type.
 - **3 and 3.0 are one value**, in identity and, once storage follows, in the
   index.
+- **Numbers are decimal** (SQLite4's encoding, the `dialog-numeric` crate): a
+  float is its shortest round-trip decimal, and float arithmetic is approximate.
+- **Stored numbers migrate once**, by a deterministic rewrite whose code is kept
+  out of the read path.
 - **Writes through a view are literal or no-ops**, never merges (see
   [Views read and write](#views-read-and-write)).
 - **Text is hashed as written**, with no normalization, because the database

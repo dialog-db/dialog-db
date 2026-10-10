@@ -1061,6 +1061,7 @@ dependencies = [
  "dialog-capability",
  "dialog-common",
  "dialog-effects",
+ "dialog-numeric",
  "dialog-search-tree",
  "dialog-storage",
  "ed25519-dalek",

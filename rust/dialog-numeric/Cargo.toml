@@ -5,6 +5,7 @@ edition = "2024"
 version.workspace = true
 authors.workspace = true
 license.workspace = true
+readme = "README.md"
 
 [dependencies]
 zmij = { workspace = true }
