@@ -31,7 +31,7 @@ use parking_lot::Mutex;
 
 use crate::helpers::{Counting, test_repo};
 use crate::repository::archive::local::read_all;
-use crate::{Branch, Hydrate, LocalIndex, RemoteSite, Repository, Revision};
+use crate::{Branch, HeldCaches, Hydrate, LocalIndex, RemoteSite, Repository, Revision};
 
 /// The session every test commits and reads through.
 type Operator = Peer<VolatileSpace, Session>;
@@ -136,7 +136,7 @@ async fn cold_select(
     selector: ArtifactSelector<Constrained>,
     operator: &Operator,
 ) -> Result<(Vec<Artifact>, u64, u64)> {
-    crate::HeldCaches::of(operator).release(&repo.did());
+    HeldCaches::of(operator).release(&repo.did());
     let branch = repo.branch("main").load().perform(operator).await?;
     let counting = Counting::new(operator.clone());
     let rows = select(&branch, selector, &counting).await?;
