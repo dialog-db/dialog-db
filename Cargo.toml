@@ -48,7 +48,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0-rc.1"
 authors = ["The Meiosys Project Authors"]
 license = "MPL-2.0"
 edition = "2024"
@@ -191,51 +191,51 @@ zerocopy-derive = "0.8"
 
 [workspace.dependencies.dialog-artifacts]
 path = "./rust/dialog-artifacts"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-capability]
 path = "./rust/dialog-capability"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-common]
 path = "./rust/dialog-common"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-credentials]
 path = "./rust/dialog-credentials"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-did-web]
 path = "./rust/dialog-did-web"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-encoding]
 path = "./rust/dialog-encoding"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-csv]
 path = "./rust/dialog-csv"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-search-tree]
 path = "./rust/dialog-search-tree"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-storage]
 path = "./rust/dialog-storage"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-effects]
 path = "./rust/dialog-effects"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-macros]
 path = "./rust/dialog-macros"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-query]
 path = "./rust/dialog-query"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 # [patch.crates-io]
 # # TODO: https://github.com/gwierzchowski/csv-async/issues/27
@@ -243,44 +243,44 @@ version = "0.2.0"
 
 [workspace.dependencies.dialog-remote-s3]
 path = "./rust/dialog-remote-s3"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-remote-ucan-s3]
 path = "./rust/dialog-remote-ucan-s3"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-remote-ucan]
 path = "./rust/dialog-remote-ucan"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-remote-fs]
 path = "./rust/dialog-remote-fs"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-identity]
 path = "./rust/dialog-identity"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-peer]
 path = "./rust/dialog-peer"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-repository]
 path = "./rust/dialog-repository"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-ucan-core]
 path = "./rust/dialog-ucan-core"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-ucan]
 path = "./rust/dialog-ucan"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-network]
 path = "./rust/dialog-network"
-version = "0.2.0"
+version = "0.3.0-rc.1"
 
 [workspace.dependencies.dialog-varsig]
 path = "./rust/dialog-varsig"
-version = "0.2.0"
+version = "0.3.0-rc.1"
