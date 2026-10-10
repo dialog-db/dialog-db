@@ -81,7 +81,7 @@ impl Nonce {
     /// ```
     pub fn generate_16() -> Result<Nonce, getrandom::Error> {
         let mut buf = [0; 16];
-        getrandom::getrandom(&mut buf)?;
+        dialog_common::random::fill(&mut buf)?;
         Ok(Nonce::Nonce16(buf))
     }
 }
