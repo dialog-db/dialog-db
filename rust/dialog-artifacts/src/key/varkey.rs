@@ -444,6 +444,8 @@ fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
         | ValueDataType::Record
         | ValueDataType::Entity
         | ValueDataType::Symbol => terminated_len(bytes, at),
+        // Rust numeric views type slots, not keys: rejected above.
+        _ => None,
     }
 }
 

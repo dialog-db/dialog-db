@@ -108,6 +108,9 @@ impl Value {
         fn floor(float: f64) -> Option<f64> {
             float.is_finite().then(|| float.floor())
         }
+        if kind.is_view() {
+            return self.viewed_through(kind);
+        }
         Some(match (self, kind) {
             (Value::UnsignedInt(natural), ValueDataType::SignedInt) => {
                 Value::SignedInt(i128::try_from(natural).ok()?)
@@ -131,6 +134,84 @@ impl Value {
         })
     }
 
+    /// This number read through the Rust numeric view `view`: read through
+    /// its storage type, then filtered to its range (`u8:` does not see
+    /// 256) or, for `f32:`, rounded to the nearest single-precision float
+    /// and filtered where a finite number is past its range.
+    fn viewed_through(self, view: ValueDataType) -> Option<Value> {
+        if !self.data_type().is_number() {
+            return Some(self);
+        }
+        let viewed = self.viewed_as(view.storage())?;
+        let fits = match (&viewed, view) {
+            (Value::UnsignedInt(natural), _) => {
+                let bits = match view {
+                    ValueDataType::U8 => 8,
+                    ValueDataType::U16 => 16,
+                    ValueDataType::U32 => 32,
+                    ValueDataType::U64 => 64,
+                    _ => 128,
+                };
+                bits == 128 || *natural < 1u128 << bits
+            }
+            (Value::SignedInt(integer), _) => {
+                let bits = match view {
+                    ValueDataType::I8 => 8,
+                    ValueDataType::I16 => 16,
+                    ValueDataType::I32 => 32,
+                    ValueDataType::I64 => 64,
+                    _ => 128,
+                };
+                bits == 128 || (-(1i128 << (bits - 1))..1i128 << (bits - 1)).contains(integer)
+            }
+            (Value::Float(float), ValueDataType::F32) => {
+                !float.is_finite() || float.abs() <= f64::from(f32::MAX)
+            }
+            _ => true,
+        };
+        if !fits {
+            return None;
+        }
+        Some(match (viewed, view) {
+            (Value::Float(float), ValueDataType::F32) => Value::Float(f64::from(float as f32)),
+            (viewed, _) => viewed,
+        })
+    }
+
+    /// Whether this and `other` are the same number, whatever types hold
+    /// them: the natural 5, the integer 5 and the float 5.0 are one. Values
+    /// that are not both numbers are compared as they are.
+    pub fn same_number(&self, other: &Value) -> bool {
+        fn exact(value: &Value) -> Option<(bool, u128, f64)> {
+            match value {
+                Value::UnsignedInt(natural) => Some((false, *natural, *natural as f64)),
+                Value::SignedInt(integer) => {
+                    Some((*integer < 0, integer.unsigned_abs(), *integer as f64))
+                }
+                _ => None,
+            }
+        }
+        match (self, other) {
+            (Value::Float(a), Value::Float(b)) => a == b || (a.is_nan() && b.is_nan()),
+            (Value::Float(float), whole) | (whole, Value::Float(float)) => match exact(whole) {
+                Some((_, _, approximate)) => {
+                    // A float equals a whole number only if it is that
+                    // number exactly, not merely the nearest float to it.
+                    *float == approximate
+                        && whole.clone().viewed_as(ValueDataType::Float).is_some()
+                        && Value::Float(*float)
+                            .viewed_as(whole.data_type())
+                            .is_some_and(|back| back == *whole)
+                }
+                None => false,
+            },
+            (a, b) => match (exact(a), exact(b)) {
+                (Some((sa, ma, _)), Some((sb, mb, _))) => sa == sb && ma == mb,
+                _ => a == b,
+            },
+        }
+    }
+
     /// This value as `kind`, where `kind` reads the same spelling or
     /// number: text as an entity or a symbol when it parses as one, an
     /// entity as text or a symbol, a natural number as a signed integer
@@ -142,7 +223,7 @@ impl Value {
     /// were tagged) may name the right value under the wrong type; a slot
     /// that declares its type conforms it.
     pub fn conform(self, kind: ValueDataType) -> Value {
-        match (self, kind) {
+        match (self, kind.storage()) {
             (Value::Entity(entity), ValueDataType::String) => Value::String(entity.to_string()),
             (Value::String(text), ValueDataType::Entity) => match Entity::from_str(&text) {
                 Ok(entity) => Value::Entity(entity),
@@ -297,13 +378,18 @@ impl<'de> de::Visitor<'de> for ValueVisitor {
                 ValueDataType::Float => Value::Float(map.next_value()?),
                 ValueDataType::Record => Value::Record(map.next_value()?),
                 ValueDataType::Symbol => Value::Symbol(map.next_value()?),
-                // Any number, read as its bare spelling reads.
-                ValueDataType::Number => {
+                // Any number (`number:`) or one a Rust numeric view holds
+                // (`u8:` .. `f64:`), read as its bare spelling reads and
+                // held in the view's storage type.
+                number => {
                     let value: Value = map.next_value()?;
-                    if !value.data_type().is_number() {
-                        return Err(de::Error::custom(format!("{value:?} is not a number")));
+                    if !number.holds(&value) {
+                        return Err(de::Error::custom(format!(
+                            "{value:?} is not a {}",
+                            number.uri()
+                        )));
                     }
-                    value
+                    value.clone().viewed_as(number).unwrap_or(value)
                 }
             };
         if map.next_key::<de::IgnoredAny>()?.is_some() {
@@ -521,6 +607,19 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
 
     fn try_from((value_data_type, value): (ValueDataType, Vec<u8>)) -> Result<Self, Self::Error> {
         Ok(match value_data_type {
+            // A Rust numeric view's value is held as its storage type.
+            view @ (ValueDataType::U8
+            | ValueDataType::U16
+            | ValueDataType::U32
+            | ValueDataType::U64
+            | ValueDataType::U128
+            | ValueDataType::I8
+            | ValueDataType::I16
+            | ValueDataType::I32
+            | ValueDataType::I64
+            | ValueDataType::I128
+            | ValueDataType::F32
+            | ValueDataType::F64) => return Value::try_from((view.storage(), value)),
             // A key's band, whose bytes are dialog-number's, never a value's
             // raw bytes.
             ValueDataType::Number => {
@@ -1196,11 +1295,38 @@ pub enum ValueDataType {
     /// hold numbers of every type, and the index band a tree whose manifest
     /// sets `value_encoding` to 1 keys every number in.
     Number = 9,
+    /// A natural number that fits in 8 bits: `u8:`. Like every Rust
+    /// numeric type it is a view of [`Number`](Self::Number) (see
+    /// [`Value::viewed_as`]), never a type of a stored value, which is
+    /// held under the view's storage type ([`Self::storage`]).
+    U8 = 10,
+    /// A natural number that fits in 16 bits: `u16:`.
+    U16 = 11,
+    /// A natural number that fits in 32 bits: `u32:`.
+    U32 = 12,
+    /// A natural number that fits in 64 bits: `u64:`.
+    U64 = 13,
+    /// A natural number that fits in 128 bits: `u128:`.
+    U128 = 14,
+    /// An integer that fits in 8 bits: `i8:`.
+    I8 = 15,
+    /// An integer that fits in 16 bits: `i16:`.
+    I16 = 16,
+    /// An integer that fits in 32 bits: `i32:`.
+    I32 = 17,
+    /// An integer that fits in 64 bits: `i64:`.
+    I64 = 18,
+    /// An integer that fits in 128 bits: `i128:`.
+    I128 = 19,
+    /// A number read as the nearest single-precision float: `f32:`.
+    F32 = 20,
+    /// A number read as the nearest double-precision float: `f64:`.
+    F64 = 21,
 }
 
 impl ValueDataType {
     /// Every type, in discriminant order.
-    pub const ALL: [ValueDataType; 10] = [
+    pub const ALL: [ValueDataType; 22] = [
         ValueDataType::Bytes,
         ValueDataType::Entity,
         ValueDataType::Boolean,
@@ -1211,6 +1337,18 @@ impl ValueDataType {
         ValueDataType::Record,
         ValueDataType::Symbol,
         ValueDataType::Number,
+        ValueDataType::U8,
+        ValueDataType::U16,
+        ValueDataType::U32,
+        ValueDataType::U64,
+        ValueDataType::U128,
+        ValueDataType::I8,
+        ValueDataType::I16,
+        ValueDataType::I32,
+        ValueDataType::I64,
+        ValueDataType::I128,
+        ValueDataType::F32,
+        ValueDataType::F64,
     ];
 
     /// The entity that names this type, such as `text:`.
@@ -1226,6 +1364,18 @@ impl ValueDataType {
             ValueDataType::Record => "record:",
             ValueDataType::Symbol => "symbol:",
             ValueDataType::Number => "number:",
+            ValueDataType::U8 => "u8:",
+            ValueDataType::U16 => "u16:",
+            ValueDataType::U32 => "u32:",
+            ValueDataType::U64 => "u64:",
+            ValueDataType::U128 => "u128:",
+            ValueDataType::I8 => "i8:",
+            ValueDataType::I16 => "i16:",
+            ValueDataType::I32 => "i32:",
+            ValueDataType::I64 => "i64:",
+            ValueDataType::I128 => "i128:",
+            ValueDataType::F32 => "f32:",
+            ValueDataType::F64 => "f64:",
         }
     }
 
@@ -1243,6 +1393,18 @@ impl ValueDataType {
             ValueDataType::Record => "Record",
             ValueDataType::Symbol => "Symbol",
             ValueDataType::Number => "Number",
+            ValueDataType::U8 => "U8",
+            ValueDataType::U16 => "U16",
+            ValueDataType::U32 => "U32",
+            ValueDataType::U64 => "U64",
+            ValueDataType::U128 => "U128",
+            ValueDataType::I8 => "I8",
+            ValueDataType::I16 => "I16",
+            ValueDataType::I32 => "I32",
+            ValueDataType::I64 => "I64",
+            ValueDataType::I128 => "I128",
+            ValueDataType::F32 => "F32",
+            ValueDataType::F64 => "F64",
         }
     }
 
@@ -1283,7 +1445,7 @@ impl ValueDataType {
     /// the manifest's `value_encoding`: each type its own band (0), or
     /// every number in the [`Number`](Self::Number) band (1).
     pub fn band(self, value_encoding: u32) -> Self {
-        match self {
+        match self.storage() {
             ValueDataType::UnsignedInt | ValueDataType::SignedInt | ValueDataType::Float
                 if value_encoding == NUMBER_BAND =>
             {
@@ -1293,10 +1455,74 @@ impl ValueDataType {
         }
     }
 
-    /// Whether a value of this type holds `value`: one of its own type, or
-    /// any number where this is [`Number`](Self::Number).
+    /// The type a value of this type is stored as: a Rust numeric view's
+    /// natural, integer or float, and any other type itself.
+    pub fn storage(self) -> Self {
+        match self {
+            ValueDataType::U8
+            | ValueDataType::U16
+            | ValueDataType::U32
+            | ValueDataType::U64
+            | ValueDataType::U128 => ValueDataType::UnsignedInt,
+            ValueDataType::I8
+            | ValueDataType::I16
+            | ValueDataType::I32
+            | ValueDataType::I64
+            | ValueDataType::I128 => ValueDataType::SignedInt,
+            ValueDataType::F32 | ValueDataType::F64 => ValueDataType::Float,
+            other => other,
+        }
+    }
+
+    /// Whether every number this Rust numeric view holds, `other` holds
+    /// too: `u8:` nests in `u16:`, `i16:` and `f32:`; `f32:` in `f64:`.
+    pub fn nests_in(self, other: ValueDataType) -> bool {
+        fn bits(view: ValueDataType) -> u32 {
+            match view {
+                ValueDataType::U8 | ValueDataType::I8 => 8,
+                ValueDataType::U16 | ValueDataType::I16 => 16,
+                ValueDataType::U32 | ValueDataType::I32 | ValueDataType::F32 => 32,
+                ValueDataType::U64 | ValueDataType::I64 | ValueDataType::F64 => 64,
+                _ => 128,
+            }
+        }
+        use ValueDataType::{F32, F64, Float, SignedInt, UnsignedInt};
+        if self == other {
+            return true;
+        }
+        match (self.storage(), other.storage()) {
+            (UnsignedInt, UnsignedInt) | (SignedInt, SignedInt) => bits(self) <= bits(other),
+            (UnsignedInt, SignedInt) => bits(self) < bits(other),
+            (Float, Float) => self == F32 && other == F64,
+            // A float holds a whole number exactly while it fits in its
+            // significand: 24 bits for `f32:`, 53 for `f64:`.
+            (UnsignedInt | SignedInt, Float) => match other {
+                F32 => bits(self) <= 16,
+                F64 => bits(self) <= 32,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Whether this is a Rust numeric view (`u8:` through `f64:`).
+    pub fn is_view(self) -> bool {
+        self.storage() != self
+    }
+
+    /// Whether a value of this type holds `value` exactly: one of its own
+    /// type, any number where this is [`Number`](Self::Number), and for a
+    /// Rust numeric view a number its view reads unchanged, so a write
+    /// through `u8:` takes 255 and refuses 256 and 2.5.
     pub fn holds(self, value: &Value) -> bool {
         let actual = value.data_type();
+        if self.is_view() {
+            return actual.is_number()
+                && value
+                    .clone()
+                    .viewed_as(self)
+                    .is_some_and(|viewed| viewed.same_number(value));
+        }
         actual == self || (self == ValueDataType::Number && actual.is_number())
     }
 
@@ -1308,7 +1534,7 @@ impl ValueDataType {
                 | ValueDataType::SignedInt
                 | ValueDataType::Float
                 | ValueDataType::Number
-        )
+        ) || self.is_view()
     }
 
     /// The smallest [`ValueDataType`] in discriminant order
@@ -1353,6 +1579,7 @@ impl Display for ValueDataType {
             ValueDataType::Record => write!(f, "Record"),
             ValueDataType::Symbol => write!(f, "Symbol"),
             ValueDataType::Number => write!(f, "Number"),
+            view => write!(f, "{}", view.legacy_name()),
         }
     }
 }
@@ -1632,6 +1859,119 @@ mod encoding_tests {
         ];
         for (left, right) in pairs {
             assert_ne!(cbor(&left), cbor(&right), "{left:?} and {right:?}");
+        }
+    }
+}
+
+/// The Rust numeric views read numbers by range and precision: they filter
+/// what is out of range, coerce only where they lose precision, and hold
+/// exactly the numbers they read unchanged.
+#[cfg(test)]
+mod view_tests {
+    #![allow(unexpected_cfgs)]
+
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::*;
+
+    #[dialog_common::test]
+    fn it_reads_numbers_through_rust_numeric_views() {
+        use ValueDataType::*;
+        let cases: [(Value, ValueDataType, Option<Value>); 16] = [
+            (Value::SignedInt(255), U8, Some(Value::UnsignedInt(255))),
+            (Value::UnsignedInt(256), U8, None),
+            (Value::SignedInt(-1), U8, None),
+            (Value::Float(2.7), U8, Some(Value::UnsignedInt(2))),
+            (Value::Float(-2.5), I8, Some(Value::SignedInt(-3))),
+            (Value::SignedInt(-129), I8, None),
+            (Value::SignedInt(-128), I8, Some(Value::SignedInt(-128))),
+            (Value::UnsignedInt(1 << 40), U32, None),
+            (
+                Value::UnsignedInt(u128::MAX),
+                U128,
+                Some(Value::UnsignedInt(u128::MAX)),
+            ),
+            (Value::UnsignedInt(1 << 63), I64, None),
+            (
+                Value::Float(0.1),
+                F32,
+                Some(Value::Float(f64::from(0.1f32))),
+            ),
+            (Value::Float(1e40), F32, None),
+            (
+                Value::Float(f64::INFINITY),
+                F32,
+                Some(Value::Float(f64::INFINITY)),
+            ),
+            (Value::UnsignedInt(3), F64, Some(Value::Float(3.0))),
+            (Value::Float(0.1), F64, Some(Value::Float(0.1))),
+            (
+                Value::String("3".into()),
+                U8,
+                Some(Value::String("3".into())),
+            ),
+        ];
+        for (value, view, expected) in cases {
+            assert_eq!(
+                value.clone().viewed_as(view),
+                expected,
+                "{value:?} as {view}"
+            );
+        }
+    }
+
+    #[dialog_common::test]
+    fn it_writes_only_what_a_view_holds_exactly() {
+        use ValueDataType::*;
+        assert!(U8.holds(&Value::UnsignedInt(255)));
+        assert!(
+            U8.holds(&Value::SignedInt(7)),
+            "an integer 7 is the natural 7"
+        );
+        assert!(!U8.holds(&Value::UnsignedInt(256)));
+        assert!(!U8.holds(&Value::Float(2.5)));
+        assert!(U8.holds(&Value::Float(3.0)), "3.0 is the number 3");
+        assert!(I8.holds(&Value::SignedInt(-128)));
+        assert!(!I8.holds(&Value::SignedInt(128)));
+        assert!(F32.holds(&Value::Float(f64::from(0.1f32))));
+        assert!(!F32.holds(&Value::Float(0.1)), "0.1 is not an f32");
+        assert!(F64.holds(&Value::Float(0.1)));
+        assert!(!U8.holds(&Value::String("3".into())));
+    }
+
+    #[dialog_common::test]
+    fn it_compares_numbers_by_value() {
+        assert!(Value::UnsignedInt(5).same_number(&Value::SignedInt(5)));
+        assert!(Value::SignedInt(5).same_number(&Value::Float(5.0)));
+        assert!(!Value::SignedInt(-5).same_number(&Value::UnsignedInt(5)));
+        assert!(!Value::Float(5.5).same_number(&Value::SignedInt(5)));
+        // The nearest float to 2^60 + 1 is 2^60, not the same number.
+        assert!(!Value::UnsignedInt((1 << 60) + 1).same_number(&Value::Float(2f64.powi(60))));
+        assert!(Value::UnsignedInt(1 << 60).same_number(&Value::Float(2f64.powi(60))));
+    }
+
+    #[dialog_common::test]
+    fn it_nests_views_by_range_and_precision() {
+        use ValueDataType::*;
+        for (inner, outer) in [
+            (U8, U16),
+            (U8, I16),
+            (U16, F32),
+            (U32, F64),
+            (I32, I64),
+            (F32, F64),
+            (U64, U128),
+            (U64, I128),
+        ] {
+            assert!(inner.nests_in(outer), "{inner} in {outer}");
+            assert!(
+                inner == outer || !outer.nests_in(inner),
+                "{outer} not in {inner}"
+            );
+        }
+        for (a, b) in [(U8, I8), (I8, U16), (U32, F32), (U64, F64), (F64, U64)] {
+            assert!(!a.nests_in(b), "{a} not in {b}");
         }
     }
 }

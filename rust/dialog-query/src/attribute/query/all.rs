@@ -728,7 +728,7 @@ mod tests {
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
-    use crate::type_system::{Interval, IntervalBound, NameShape, Refinement};
+    use crate::type_system::{Interval, IntervalBound, NameShape, Refinement, Views};
     use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use std::collections::BTreeSet;
 
@@ -942,6 +942,7 @@ mod tests {
                 prefix: None,
                 conforms: BTreeSet::default(),
                 name_shape: None,
+                views: Views::default(),
                 interval: Some(Box::new(Interval {
                     value_type: Type::String,
                     lower: Some(IntervalBound {
@@ -989,6 +990,7 @@ mod tests {
                 prefix: None,
                 conforms: BTreeSet::default(),
                 name_shape: None,
+                views: Views::default(),
                 interval: Some(Box::new(Interval {
                     value_type: Type::String,
                     lower: Some(IntervalBound {
