@@ -602,6 +602,14 @@ impl AttributeDescriptor {
         self.the.name()
     }
 
+    /// This descriptor with no description: what identity sees.
+    pub(crate) fn without_description(&self) -> Self {
+        Self {
+            description: String::new(),
+            ..self.clone()
+        }
+    }
+
     /// Returns the human-readable description.
     pub fn description(&self) -> &str {
         &self.description

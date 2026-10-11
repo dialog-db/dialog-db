@@ -278,6 +278,17 @@ impl ConceptDescriptor {
         (reference, identity::entity("concept:", reference))
     }
 
+    /// This concept with no descriptions, its own or its attributes':
+    /// what identity sees.
+    pub(crate) fn without_descriptions(&self) -> Self {
+        let fields: Vec<(String, ConceptFieldDescriptor)> = self
+            .with()
+            .iter()
+            .map(|(name, field)| (name.to_string(), field.without_descriptions()))
+            .collect();
+        Self::try_from(fields).unwrap_or_else(|_| self.clone())
+    }
+
     /// The concept's entity: `concept:` followed by its
     /// [reference](Self::reference) in base58. It identifies the concept as a
     /// type, not any of its instances.

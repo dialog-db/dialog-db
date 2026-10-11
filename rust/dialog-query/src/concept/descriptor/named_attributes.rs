@@ -68,6 +68,20 @@ pub struct ConceptFieldDescriptor {
 }
 
 impl ConceptFieldDescriptor {
+    /// This field with no descriptions, its attribute's or a conformance
+    /// target's: what identity sees.
+    pub(crate) fn without_descriptions(&self) -> Self {
+        Self {
+            descriptor: self.descriptor.without_description(),
+            optional: self.optional,
+            conforms: self
+                .conforms
+                .as_ref()
+                .map(|target| Box::new(target.without_descriptions())),
+            attribute: Memo::default(),
+        }
+    }
+
     /// A required concept field wrapping the given attribute descriptor.
     pub fn required(descriptor: AttributeDescriptor) -> Self {
         Self {
