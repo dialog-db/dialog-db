@@ -1354,7 +1354,9 @@ dependencies = [
 name = "dialog-number"
 version = "0.3.0-rc.1"
 dependencies = [
+ "dialog-common",
  "ryu",
+ "wasm-bindgen-test",
  "zmij",
 ]
 
@@ -2928,6 +2930,8 @@ name = "merkle-reference"
 version = "0.3.0-rc.1"
 dependencies = [
  "blake3",
+ "dialog-common",
+ "wasm-bindgen-test",
 ]
 
 [[package]]
