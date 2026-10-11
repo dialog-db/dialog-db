@@ -34,6 +34,11 @@ pub struct ValueBound {
     /// Whether the bound admits numbers of every type, not only its own
     /// (see [`ArtifactSelector::across_numbers`]).
     pub across: bool,
+    /// The bound as a number-band key encodes it. The scan sets it when it
+    /// fits the selector to a tree that keys numbers in one band
+    /// ([`ArtifactSelector::for_manifest`]), so each row is compared with
+    /// these bytes rather than encoding the bound per row; leave it `None`.
+    pub encoded: Option<Vec<u8>>,
 }
 
 /// The basic query system for selecting [`Artifact`]s from an artifact index.
@@ -463,6 +468,7 @@ where
             value,
             inclusive: true,
             across: false,
+            encoded: None,
         })
     }
 
@@ -473,6 +479,7 @@ where
             value,
             inclusive: false,
             across: false,
+            encoded: None,
         })
     }
 
@@ -483,6 +490,7 @@ where
             value,
             inclusive: true,
             across: false,
+            encoded: None,
         })
     }
 
@@ -493,6 +501,7 @@ where
             value,
             inclusive: false,
             across: false,
+            encoded: None,
         })
     }
 
@@ -562,6 +571,18 @@ impl ArtifactSelector<Constrained> {
         if across && manifest.value_encoding != crate::NUMBER_BAND {
             self.value_lower = None;
             self.value_upper = None;
+        }
+        if manifest.value_encoding == crate::NUMBER_BAND {
+            for bound in [&mut self.value_lower, &mut self.value_upper]
+                .into_iter()
+                .flatten()
+                .filter(|bound| bound.value.data_type().is_number())
+            {
+                bound.encoded = Some(crate::encode_key_value_owned(
+                    &bound.value,
+                    crate::NUMBER_BAND,
+                ));
+            }
         }
         self
     }

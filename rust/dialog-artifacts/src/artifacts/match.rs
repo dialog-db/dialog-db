@@ -228,8 +228,11 @@ pub fn match_selector_and_key_ref(
                     if !bound.value.data_type().is_number() {
                         return SelectorMatch::Excluded;
                     }
-                    let order = (*payload)
-                        .cmp(encode_key_value_owned(&bound.value, NUMBER_BAND).as_slice());
+                    let order = match &bound.encoded {
+                        Some(encoded) => (*payload).cmp(encoded.as_slice()),
+                        None => (*payload)
+                            .cmp(encode_key_value_owned(&bound.value, NUMBER_BAND).as_slice()),
+                    };
                     let admitted = match order {
                         Ordering::Equal => bound.inclusive,
                         Ordering::Greater => lower,

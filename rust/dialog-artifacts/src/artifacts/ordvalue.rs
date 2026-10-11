@@ -134,25 +134,13 @@ pub fn decode_value(value_type: ValueDataType, bytes: &[u8]) -> Option<(Value, &
 /// number as an integer, one too large for an integer as a natural, and
 /// any other as a float. The band does not record which type wrote it.
 fn decode_number(bytes: &[u8]) -> Option<(Value, &[u8])> {
-    let len = dialog_number::encoded_len(bytes)?;
-    let (number, rest) = bytes.split_at(len);
-    let value = match dialog_number::decode_i128(number).ok()? {
-        Some(integer) => Value::SignedInt(integer),
-        None => {
-            // Not a whole number an integer holds: a fraction, which
-            // reads as a float without going through `Number`, or a
-            // whole number past `i128::MAX`, which a natural may hold.
-            let float = dialog_number::decode_f64(number).ok()?;
-            match float.fract() == 0.0 && float > 0.0 {
-                true => match dialog_number::Number::decode(number).ok()?.to_u128() {
-                    Some(natural) => Value::UnsignedInt(natural),
-                    None => Value::Float(float),
-                },
-                false => Value::Float(float),
-            }
-        }
+    let (scalar, read) = dialog_number::read_scalar(bytes).ok()?;
+    let value = match scalar {
+        dialog_number::Scalar::Integer(integer) => Value::SignedInt(integer),
+        dialog_number::Scalar::Natural(natural) => Value::UnsignedInt(natural),
+        dialog_number::Scalar::Float(float) => Value::Float(float),
     };
-    Some((value, rest))
+    Some((value, &bytes[read..]))
 }
 
 #[cfg(test)]
