@@ -22,7 +22,10 @@ says how to cut a release.
 
 An attribute's and a concept's identity is now a merkle reference
 (`merkle-reference`, a new crate in this workspace), not the BLAKE3
-hash of their dag-cbor. A definition is hashed as a map from field
+hash of their dag-cbor. Types are named by URI; the crate defines only
+the shapes of composites (`list:`, `map:`, `set:`), and dialog names
+its own scalar types (`text:`, `boolean:`, `number:`, `entity:`,
+`symbol:`, `record:`). A definition is hashed as a map from field
 names under its own type (`the:`, `concept:`), and a concept hashes its
 attributes' and its conformance targets' references, so it is the same
 whether they are embedded or linked. The entities keep their shape,

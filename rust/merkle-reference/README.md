@@ -7,23 +7,6 @@ This is version 2 of [merkle references][v1]. The format is specified in
 [`spec.md`](./spec.md); this README says why it exists, how to use it, and what
 it chose.
 
-```rust
-use merkle_reference::{Bytes, Refer, Reference, Type};
-
-// Core values.
-let text = "hello world".refer();
-let list = vec![1, 2, 3].refer();
-let blob = Bytes(b"raw bytes").refer(); // = BLAKE3("raw bytes")
-
-// A part linked by its reference gives its parent the same reference.
-let parts: Vec<Reference> = vec![1, 2, 3].iter().map(Refer::refer).collect();
-assert_eq!(parts.refer(), list);
-
-// A type of your own: name it, then give its values content.
-let person = Type::named("person:");
-let alice = person.map([("name".refer(), "Alice".refer())]);
-```
-
 ## Why
 
 Content identifiers usually identify how data is *encoded*, not what it *is*: the
@@ -38,8 +21,9 @@ A merkle reference is computed from the value's structure:
 - **Partition-independent.** A part stored inline and a part stored apart,
   linked by its reference, contribute the same thing to their parent. Storage
   can embed or split parts, value by value, without changing any identity.
-- **Provable.** Each part has a reference its parent hashes, so a part's
-  inclusion in a value can be proved with the hashes along the way.
+- **Provable.** Each part has a reference its parent hashes, and a composite's
+  content lines up with BLAKE3's chunk tree, so a part's inclusion, a key's
+  absence from a map, or a slice of a list can be proved Bao-style.
 
 Dialog uses it for the identities of its definitions (attributes, concepts,
 rules) and of its values.
@@ -53,76 +37,134 @@ reference(v : bytes) = BLAKE3(v)
 reference(v : T)     = BLAKE3-keyed(key = reference(T), content_T(v))
 ```
 
-- A type is identified by its name, hashed under the root type, so anyone can
-  define a type by naming it.
-- A composite's content is its parts' references, never their bytes: a list's
-  are its items' references in order, a map's its entries' key and value
-  references ordered by key reference. That is what makes an inline part and a
-  linked part indistinguishable.
-- The core types are null, boolean, integer of any size, float, text, list and
-  map. Everything else, including dialog's own types, is defined by name on top.
+- A type is named by a URI (`text:`, `https://example.com/person`), and its
+  reference is its name's, so anyone can define a type by naming it.
+- The crate defines no scalar types. It defines the three shapes a composite can
+  take, `list:`, `map:` and `set:`, whose content is always the parts'
+  references, never their bytes. That is what makes an inline part and a linked
+  part indistinguishable.
 
 ## Using it
 
-- `Reference`: 32 bytes; `Reference::of_bytes` is the plain BLAKE3 of a blob.
-- `Type`: `Type::named(name)` for your own type, the core types as constants
-  (`Type::TEXT`, `Type::LIST`, …). A type is a hash to derive, so a type you use
-  often is best kept as a constant: `Type::from_reference(Reference::from_hex(…))`,
-  with a test that it equals `Type::named(…)`.
-- `Type::refer(content)` for a scalar of your type, `Type::list(parts)` and
-  `Type::map(entries)` for a composite of your type over its parts' references.
-- `Refer`: implemented for the core Rust types (`str`, `String`, integers but
-  `u8`, `f64`, `bool`, `Vec`, slices, arrays, `BTreeMap`, `HashMap`), for
-  `Bytes(..)` as plain bytes, and for `Reference` itself, which is how a linked
-  part goes into its parent.
-- `Integer`: the core integer of any size, with its canonical content, which
-  also sorts as the integers do.
+```rust
+use std::sync::LazyLock;
+use merkle_reference::{Reference, ToReference, Type};
+
+// Name your types. A type's reference is a hash, so derive it once.
+static TEXT: LazyLock<Type> = LazyLock::new(|| Type::named("text:").unwrap());
+static PERSON: LazyLock<Type> = LazyLock::new(|| Type::named("person:").unwrap());
+
+// Implement `ToReference` for the types you own.
+struct Text(String);
+
+impl ToReference for Text {
+    fn to_reference(&self) -> Reference {
+        TEXT.reference_of(self.0.as_bytes())
+    }
+}
+
+struct Person {
+    name: Text,
+    friends: Vec<Text>,
+}
+
+impl ToReference for Person {
+    fn to_reference(&self) -> Reference {
+        // A struct is a map from field names to values, under its own type.
+        PERSON.map([
+            (TEXT.reference_of(b"name"), self.name.to_reference()),
+            (TEXT.reference_of(b"friends"), self.friends.to_reference()),
+        ])
+    }
+}
+
+// Collections of your types are lists, maps and sets by themselves; a part
+// known only by its reference gives its parent the same reference.
+let friends = vec![Text("Bob".into())];
+let linked: Vec<Reference> = friends.iter().map(ToReference::to_reference).collect();
+assert_eq!(friends.to_reference(), linked.to_reference());
+
+// Raw bytes are their BLAKE3 hash.
+let blob = Reference::hash(b"raw bytes");
+```
+
+- **`Reference`**: 32 bytes. `Reference::hash(bytes)` is the BLAKE3 of a blob;
+  `from_bytes` and `from_hex` wrap existing ones.
+- **`Type`**: `Type::named(uri)` (it refuses a name that is not a URI), the
+  shapes as `Type::LIST`, `Type::MAP` and `Type::SET`, and on any type
+  `reference_of(content)` for a scalar and `list`, `map` and `set` for a
+  composite over its parts' references.
+- **`ToReference`**: implemented for `Reference` itself, for slices, arrays and
+  `Vec`s (lists), `BTreeMap` and `HashMap` (maps), `BTreeSet` and `HashSet`
+  (sets), and through references and smart pointers.
+
+### Your own types
+
+The crate implements `ToReference` for no scalar Rust type, because it defines
+no scalar types: whether `"3"` is text, a symbol or a number is yours to say. You
+implement it for the types you own, and the crate's collections of them follow.
+Rust's orphan rule keeps you from implementing it for a type you do not own,
+such as `str`; wrap one in a newtype, or call your type's `reference_of`
+directly.
+
+Should a project need to give foreign scalars meaning (`str` as its `text:`,
+`u64` as its `number:`), the trait can later take a vocabulary parameter,
+`ToReference<V = ()>`. The orphan rule allows `impl ToReference<MyVocabulary> for
+str` in the project's crate, and today's implementations stay valid, since they
+mean `ToReference<()>`.
 
 The crate depends only on `blake3` and builds for WebAssembly.
 
 ## Choices, and what they cost
 
 **Types key the hash; they are not tagged into the content.** Keyed mode gives
-two guarantees at no extra hashing: the same bytes under two types give unrelated
-references, and no typed reference equals the plain hash of any byte string, so a
-blob can never pass for a typed value. Plain bytes stay plain BLAKE3, so a blob's
-reference is the hash every BLAKE3 tool computes for it.
+the three guarantees with no extra bytes to hash: the same bytes under two types
+give unrelated references, no typed reference equals the plain hash of any byte
+string, and raw bytes stay plain BLAKE3. A type header in the content would make
+content self-describing, but measured, it costs a second compression for scalars
+of 33–64 bytes and about 50 ns per small composite, and padding it to keep map
+entries chunk-aligned costs a second compression on every scalar. Keyed hashing
+is a MAC keyed by the type, so a variant for another hash would use HMAC under
+the same rules.
 
-The alternative is to prefix a type header to the content and hash plainly,
-`H(type ‖ content)`. It would work with any hash function and make hashed
-content self-describing. But a raw blob whose bytes happen to be `type ‖
-content` would then have the same reference as that typed value, unless raw bytes
-also get a header, which gives up `reference(blob) = BLAKE3(blob)`. The keyed
-form is itself an instance of a keyed hash (a MAC keyed by the type), so a
-non-BLAKE3 variant could use HMAC under the same rules.
+**No scalar types.** A hashing crate that fixed what a float or a number is would
+force that choice on everyone; dialog, for one, identifies `3`, `3.0` and the
+float `3.0` as one number, where IEEE 754 bit patterns would not. Two systems
+share scalar references when they agree on scalar type names.
+
+**Three shapes, sets included.** A set is not a map to a dummy value: that would
+double its size and admit values that mean nothing. Dialog needs sets for a
+rule's premises.
 
 **Every part is referenced, even small scalars.** A parent always hashes its
-parts' 32-byte references. Letting short parts stand in for their own references
-would save hashing but needs a second rule everywhere a part is read; it is noted
-in the spec's open questions and not adopted.
+parts' 32-byte references. Letting short parts stand in for themselves would save
+about a third of the hashing of small structs but needs a second rule everywhere
+a part is read; it is an open question in the spec.
 
 **No lengths in identity.** Each content is a whole hash input and a composite is
-a sequence of fixed-size references, so nothing needs a length prefix. Lengths
-belong to storage formats.
+a sequence of fixed-size references.
 
-**Integers of any size; floats as IEEE 754 bit patterns.** The core float keeps
-version 1's encoding, so `-0.0` and NaN payloads are distinct. A user that wants
-numbers to be values rather than bit patterns defines its own type: dialog
-identifies numbers under `number:` with the [`dialog-number`][dialog-number]
-encoding, where `3`, `3.0` and the float `3.0` are one value.
+**Suited to values, not large mutable collections.** Appending to a list is cheap,
+but inserting into the middle of a large map or set rehashes everything after the
+insertion. Definitions and values fit; large collections that change in place
+belong in a structure built for it.
 
-**Hashing cost.** A scalar of up to 64 bytes takes one BLAKE3 compression, and a
-composite of `n` parts about `n / 2`. Version 1 took about twice that, since it
-folded every value with a hash of its format tag.
+## Performance
 
-**Not compatible with version 1.** Every reference differs.
+On one core with `blake3` 1.8: a scalar of up to 64 bytes 56–71 ns, a composite
+of 16 parts about 0.9 µs, of 1000 parts about 10 µs. In dialog, an attribute's
+reference takes about 0.6 µs, and a concept's identity is 25–45% cheaper than the
+dag-cbor-plus-BLAKE3 scheme it replaced.
+
+Composites hand BLAKE3 their content in whole chunks, so it can hash several per
+SIMD pass; feeding it one reference at a time cost over four times as much at a
+thousand parts.
 
 ## Status
 
 - The format is pinned by test vectors in `tests/vectors.rs`, which were also
   derived independently from the spec text with the Python `blake3` package.
-- Verifying inclusion proofs is not implemented yet. The structure supports it:
-  BLAKE3 hashes a parent's content as a tree of 1 KiB chunks of 32 references.
+- Verifying Bao-style proofs is not implemented yet. The spec describes the
+  layout; a keyed-mode verifier can be built on `blake3::hazmat`.
 
 [v1]: https://github.com/Gozala/merkle-reference/blob/main/docs/spec.md
-[dialog-number]: ../dialog-number/README.md

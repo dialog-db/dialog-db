@@ -38,32 +38,32 @@ pub const RULE: Type = Type::from_reference(Reference::from_hex(
     "e7cea1a633767195582d0a3f84a5f2c5f3afd96b5c694dd647e8db1dd8cb5967",
 ));
 
-/// The references of the field names definitions use, kept as constants so
-/// that referencing a definition hashes no name.
+/// The references of the field names definitions use, as `text:`, kept as
+/// constants so that referencing a definition hashes no name.
 pub(crate) mod field {
     use merkle_reference::Reference;
 
     /// `the`: the relations an attribute reads.
     pub(crate) const THE: Reference =
-        Reference::from_hex("540fd5e33f04a1d60ec6428d1944683def720363d734c20424e5ebbcb4b3362b");
+        Reference::from_hex("2314945186ce4ec32ab316d47bda2fcbe07c828d74e5c6bbb64f2bf4b75af4e2");
     /// `as`: the type an attribute declares.
     pub(crate) const AS: Reference =
-        Reference::from_hex("dffdf7dfe887b2a93ce763fce1b75ccc1923a6b402ccf60b5af3f2f010e8663b");
+        Reference::from_hex("2240668c6db6dabfff3e400bbc8376224209b067a2c991917ffde774797181cc");
     /// `pick`: an attribute's pick.
     pub(crate) const PICK: Reference =
-        Reference::from_hex("eff250c4135679f868bdb94b6f43b7c95243b6a65e13bd84f47322404ebe2376");
+        Reference::from_hex("0f0d6b6545c99929aac5463ab8ad362a84bb0ada084aa06500a45ceafcb5d00f");
     /// `among`: the values an attribute lists.
     pub(crate) const AMONG: Reference =
-        Reference::from_hex("08161282b1b26db65a582550106ac655b24a87d8172e3e27ca29c91b0695553b");
+        Reference::from_hex("d1e96125c25fead1a441f04f681c25cb095b08748fbabaf12b044ae4c0f65099");
     /// `optional`: a concept field that may be absent.
     pub(crate) const OPTIONAL: Reference =
-        Reference::from_hex("e750b2ac25dc2861ba3333eaca6c19543f3a6a115d6d63163f3bba6ba7d3f684");
+        Reference::from_hex("01eef36ab3d2ace67169e6676162fcfe9e313b226dcb4b7b892ff75fe99b5524");
     /// `conforms`: the concept a field's value conforms to.
     pub(crate) const CONFORMS: Reference =
-        Reference::from_hex("d784b699c5a4972e135e20506b90742e9d0d78aeae49ab286a19eaf12189cc85");
+        Reference::from_hex("d6199f32e1f4a2425c343376f9c6eed70104bb908225d3ff7aedaa3b180bf829");
     /// The boolean `true`.
     pub(crate) const TRUE: Reference =
-        Reference::from_hex("d24b4fe8353c1bc4a7ef19901d3481e63b31c90b37eb2476ef4b17d479446f4c");
+        Reference::from_hex("e3cb54e243b031b0c67199ce21f399b77d32eebb1e598b5390acff770561a829");
 }
 
 /// The entity `scheme` names a definition by: `scheme` followed by the
@@ -85,13 +85,13 @@ pub(crate) fn parse(scheme: &str, uri: &str) -> Option<Reference> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use merkle_reference::Refer;
+    use dialog_artifacts::identity::{BOOLEAN, TEXT};
 
     #[dialog_common::test]
     fn it_names_the_definition_types() {
-        assert_eq!(Type::named("the:"), ATTRIBUTE);
-        assert_eq!(Type::named("concept:"), CONCEPT);
-        assert_eq!(Type::named("rule:"), RULE);
+        assert_eq!(Type::named("the:"), Ok(ATTRIBUTE));
+        assert_eq!(Type::named("concept:"), Ok(CONCEPT));
+        assert_eq!(Type::named("rule:"), Ok(RULE));
     }
 
     #[dialog_common::test]
@@ -104,14 +104,14 @@ mod tests {
             ("optional", field::OPTIONAL),
             ("conforms", field::CONFORMS),
         ] {
-            assert_eq!(name.refer(), reference, "{name}");
+            assert_eq!(TEXT.reference_of(name.as_bytes()), reference, "{name}");
         }
-        assert_eq!(true.refer(), field::TRUE);
+        assert_eq!(BOOLEAN.reference_of(&[1]), field::TRUE);
     }
 
     #[dialog_common::test]
     fn it_reads_back_the_entity_it_names() {
-        let reference = "x".refer();
+        let reference = TEXT.reference_of(b"x");
         let entity = entity("concept:", reference);
         assert_eq!(parse("concept:", entity.as_str()), Some(reference));
         assert_eq!(parse("the:", entity.as_str()), None);

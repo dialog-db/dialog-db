@@ -11,52 +11,56 @@
 //! the same whichever of the value's parts are stored inline and whichever are
 //! stored apart and linked by their reference.
 //!
-//! A value is bytes read under a [`Type`]. Plain bytes are referenced by their
-//! BLAKE3 hash. A value of any other type is referenced by the BLAKE3 keyed
-//! hash of its content, with the type's own reference as the key, so the same
-//! bytes under two types give two unrelated references. A composite's content
-//! is its parts' references, never their bytes, which is what makes a part
-//! stored inline indistinguishable from a part linked by its reference.
+//! A value is bytes read under a [`Type`]. Raw bytes are referenced by their
+//! BLAKE3 hash ([`Reference::hash`]). A value of any other type is referenced
+//! by the BLAKE3 keyed hash of its content, keyed by the type's own reference,
+//! so the same bytes under two types give two unrelated references. A
+//! composite's content is its parts' references, never their bytes, which is
+//! what makes a part stored inline indistinguishable from a part linked by its
+//! reference.
 //!
-//! The crate defines the core types ([`Type::NULL`], [`Type::BOOLEAN`],
-//! [`Type::INTEGER`], [`Type::FLOAT`], [`Type::TEXT`], [`Type::LIST`] and
-//! [`Type::MAP`]) and nothing else. A user of the crate defines its own types
-//! by name with [`Type::named`], and gives their values content with
-//! [`Type::refer`], [`Type::list`] or [`Type::map`].
+//! Types are named by URI ([`Type::named`]). The crate defines no scalar types
+//! of its own, only the three shapes a composite can take: [`Type::LIST`],
+//! [`Type::MAP`] and [`Type::SET`]. A user of the crate names its own types,
+//! gives their values content with [`Type::reference_of`], [`Type::list`],
+//! [`Type::map`] or [`Type::set`], and implements [`ToReference`] for the
+//! types it owns, so that collections of them reference as lists, maps and
+//! sets.
 //!
 //! ```no_run
-//! use merkle_reference::{Refer, Reference, Type};
+//! use merkle_reference::{Reference, ToReference, Type};
 //!
-//! // A user-defined scalar type: content is whatever bytes the type defines.
-//! let entity = Type::named("entity:");
-//! let alice = entity.refer(b"did:key:alice");
+//! // A scalar type: its content is whatever bytes the type defines.
+//! let text = Type::named("text:").unwrap();
+//! let alice = text.reference_of(b"Alice");
 //!
-//! // The same bytes as text have another reference.
-//! assert_ne!(alice, "did:key:alice".refer());
+//! // The same bytes as another type have another reference.
+//! let entity = Type::named("entity:").unwrap();
+//! assert_ne!(entity.reference_of(b"Alice"), alice);
 //!
-//! // A user-defined struct: a map from field names to values.
-//! let person = Type::named("person:");
-//! let name = "Alice".refer();
-//! let reference = person.map([("name".refer(), name), ("id".refer(), alice)]);
-//! # let _ = reference;
+//! // A struct type: a map from field names to values.
+//! let person = Type::named("person:").unwrap();
+//! let reference = person.map([(text.reference_of(b"name"), alice)]);
+//!
+//! // A linked part gives its parent the same reference as the part itself.
+//! let people = vec![reference].to_reference();
+//! assert_eq!(people, Type::LIST.list([reference]));
 //! ```
 //!
 //! The format is specified in `spec.md` beside this crate.
 
-mod integer;
-mod refer;
+mod to_reference;
 
-pub use integer::{Integer, IntegerError};
-pub use refer::{Bytes, Null, Refer};
+pub use to_reference::ToReference;
 
-use std::fmt;
+use std::{error, fmt};
 
 /// The reference of a value: 32 bytes of BLAKE3 output.
 ///
 /// A value's reference does not depend on how the value is stored, only on
-/// what it is. A [`Reference`] is also a value in its own right in the sense
-/// that it [refers](Refer) to itself: a part known only by its reference
-/// contributes the same reference to its parent as the part itself would.
+/// what it is. A [`Reference`] is also a value in its own right: as a
+/// [`ToReference`] it is itself, which is how a part stored apart goes into
+/// its parent.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Reference([u8; 32]);
 
@@ -64,7 +68,7 @@ impl Reference {
     /// How many bytes a reference has.
     pub const LENGTH: usize = 32;
 
-    /// A reference with the given bytes.
+    /// The reference whose bytes are `bytes`.
     pub const fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
@@ -98,11 +102,12 @@ impl Reference {
         &self.0
     }
 
-    /// The reference of plain bytes: `BLAKE3(bytes)`.
+    /// The reference of raw bytes: `BLAKE3(bytes)`.
     ///
-    /// Bytes are the one type hashed in BLAKE3's plain mode, so a blob's
-    /// reference is its BLAKE3 hash.
-    pub fn of_bytes(bytes: &[u8]) -> Self {
+    /// Raw bytes are the one value hashed in BLAKE3's plain mode, so a blob's
+    /// reference is the hash every BLAKE3 tool computes for it, and no typed
+    /// reference can equal it.
+    pub fn hash(bytes: &[u8]) -> Self {
         Self(*blake3::hash(bytes).as_bytes())
     }
 }
@@ -140,18 +145,40 @@ impl fmt::Debug for Reference {
     }
 }
 
+/// Why a name is not a type's name: a type is named by a URI, which starts
+/// with a scheme (a letter, then letters, digits, `+`, `-` or `.`) and a
+/// colon, and holds no whitespace or control characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidTypeName {
+    /// The name does not start with a URI scheme and a colon.
+    Scheme,
+    /// The name holds whitespace or a control character.
+    Character,
+}
+
+impl fmt::Display for InvalidTypeName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Scheme => "a type name must be a URI, starting with a scheme and a colon",
+            Self::Character => "a type name must hold no whitespace or control characters",
+        })
+    }
+}
+
+impl error::Error for InvalidTypeName {}
+
 /// A type: an encoding of bytes, identified by its own reference.
 ///
 /// The type is not part of a value's content. It is the key the content is
 /// hashed under, so `reference(v : T) = BLAKE3-keyed(reference(T), content)`.
 ///
-/// A type is identified by its name: [`Type::named`] is the reference of the
-/// name as a value of [`Type::TYPE`]. The recursion ends at [`Type::TYPE`],
-/// whose reference is `BLAKE3-derive_key("merkle-reference v2 type", "")`.
+/// A type is named by a URI, and its reference is that name's reference as a
+/// value of [`Type::TYPE`]. The recursion ends at [`Type::TYPE`], whose
+/// reference is `BLAKE3-derive_key("merkle-reference v2 type", "")`.
 ///
 /// Deriving a type's reference takes a hash, so a type used often is best kept
-/// as a constant: [`Type::from_reference`] with the reference
-/// [`Type::named`] gives, pinned by a test.
+/// as a constant: [`Type::from_reference`] with the reference [`Type::named`]
+/// gives, pinned by a test, or a lazily initialized static.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Type(Reference);
 
@@ -160,42 +187,42 @@ impl Type {
     pub const TYPE: Self = Self::from_reference(Reference::from_hex(
         "6c1c13119c7904d1293af5aebc87fdaa284de8c36bc9b0d0e7802cd13dbd6c4e",
     ));
-    /// The type of null, whose one value has empty content.
-    pub const NULL: Self = Self::from_reference(Reference::from_hex(
-        "63dba2b2bec2ed479d938dd6133eb89f5423b43844b83f39ed208dd3e93fcb02",
-    ));
-    /// The type of booleans: one byte, `0` or `1`.
-    pub const BOOLEAN: Self = Self::from_reference(Reference::from_hex(
-        "7f7f177fd3fcde3f4baabe1e2cc39374fbc6a2efad84a0dfdf53f067945e349b",
-    ));
-    /// The type of integers of any size (see [`Integer`]).
-    pub const INTEGER: Self = Self::from_reference(Reference::from_hex(
-        "fdc9909fb1f4f66fb4a878b4a4279bfc1b63e7504860d39ef0cd05fd692d2626",
-    ));
-    /// The type of floats: an IEEE 754 binary64, little-endian, bit for bit.
-    pub const FLOAT: Self = Self::from_reference(Reference::from_hex(
-        "d620bf8e93b9cc079024a551f4d1bb38e4fe2ea0c3cfe03ed2a8ce456161a60b",
-    ));
-    /// The type of text: UTF-8, as written.
-    pub const TEXT: Self = Self::from_reference(Reference::from_hex(
-        "51531dc865323c8fc012200946b9e63147ba0bdb4175b0d62568c1dedc479b78",
-    ));
-    /// The type of lists: the items' references, in order.
+    /// Lists, named `list:`: the items' references, in order.
     pub const LIST: Self = Self::from_reference(Reference::from_hex(
-        "684b01901abbcf0ccade0c97ae922b053f02ae46669632680f8aa51ae85b44e8",
+        "23429cd400159e798e011b09c3542e4991daa3b3c3ffed2483122365bdcb65e5",
     ));
-    /// The type of maps: each entry's key reference then value reference,
+    /// Maps, named `map:`: each entry's key reference then value reference,
     /// entries ordered by key reference.
     pub const MAP: Self = Self::from_reference(Reference::from_hex(
-        "642836d5bd219ed6ad72a31913814819ea3da8f480de93483a7ea5a2821d4d24",
+        "37fcd51f5d47c860cb7799de8e2f394578f43d2d2ae7cc208f356c61059db149",
+    ));
+    /// Sets, named `set:`: the members' references, ordered, each once.
+    pub const SET: Self = Self::from_reference(Reference::from_hex(
+        "07ccc5423568cb7e635819ed3562c9ede113ff165faa9e8c144d3259732456e8",
     ));
 
-    /// The type of types' key context, from which [`Type::TYPE`] is derived.
+    /// The key-derivation context [`Type::TYPE`] is derived from.
     pub const CONTEXT: &'static str = "merkle-reference v2 type";
 
-    /// The type with the given name.
-    pub fn named(name: &str) -> Self {
-        Self(Self::TYPE.refer(name.as_bytes()))
+    /// The type named by the URI `name`.
+    pub fn named(name: &str) -> Result<Self, InvalidTypeName> {
+        let (scheme, _) = name.split_once(':').ok_or(InvalidTypeName::Scheme)?;
+        let mut letters = scheme.bytes();
+        let starts_with_letter = letters
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic());
+        if !starts_with_letter
+            || !letters.all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte))
+        {
+            return Err(InvalidTypeName::Scheme);
+        }
+        if name
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+        {
+            return Err(InvalidTypeName::Character);
+        }
+        Ok(Self(Self::TYPE.reference_of(name.as_bytes())))
     }
 
     /// The type whose reference is `reference`.
@@ -209,7 +236,7 @@ impl Type {
     }
 
     /// The reference of a value of this type whose content is `content`.
-    pub fn refer(&self, content: &[u8]) -> Reference {
+    pub fn reference_of(&self, content: &[u8]) -> Reference {
         Reference(*blake3::keyed_hash(self.key(), content).as_bytes())
     }
 
@@ -282,6 +309,22 @@ impl Type {
         self.list(entries.into_iter().flat_map(|(key, value)| [key, value]))
     }
 
+    /// The reference of a value of this type whose content is `members`'
+    /// references, ordered, each once.
+    ///
+    /// This is the content of a set, and of any type a user defines as an
+    /// unordered collection of distinct parts. The order `members` come in
+    /// does not matter, and a member given twice counts once.
+    pub fn set<I>(&self, members: I) -> Reference
+    where
+        I: IntoIterator<Item = Reference>,
+    {
+        let mut members: Vec<Reference> = members.into_iter().collect();
+        members.sort_unstable();
+        members.dedup();
+        self.list(members)
+    }
+
     fn key(&self) -> &[u8; 32] {
         self.0.as_bytes()
     }
@@ -291,11 +334,6 @@ impl fmt::Debug for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Type({})", self.0)
     }
-}
-
-/// The reference of `value`.
-pub fn refer<T: Refer + ?Sized>(value: &T) -> Reference {
-    value.refer()
 }
 
 #[cfg(test)]
@@ -309,18 +347,30 @@ mod tests {
     }
 
     #[test]
-    fn it_names_the_core_types() {
-        let core = [
-            ("null", Type::NULL),
-            ("boolean", Type::BOOLEAN),
-            ("integer", Type::INTEGER),
-            ("float", Type::FLOAT),
-            ("text", Type::TEXT),
-            ("list", Type::LIST),
-            ("map", Type::MAP),
-        ];
-        for (name, ty) in core {
-            assert_eq!(Type::named(name), ty, "{name}");
+    fn it_names_the_shapes() {
+        for (name, ty) in [
+            ("list:", Type::LIST),
+            ("map:", Type::MAP),
+            ("set:", Type::SET),
+        ] {
+            assert_eq!(Type::named(name), Ok(ty), "{name}");
         }
+    }
+
+    #[test]
+    fn it_names_types_by_uri() {
+        for name in [
+            "text:",
+            "https://example.com/person",
+            "urn:isbn:0451450523",
+            "a+b.c-d:x",
+        ] {
+            assert!(Type::named(name).is_ok(), "{name}");
+        }
+        for name in ["", "text", ":text", "1text:", "te xt:", "-x:"] {
+            assert_eq!(Type::named(name), Err(InvalidTypeName::Scheme), "{name}");
+        }
+        assert_eq!(Type::named("text: x"), Err(InvalidTypeName::Character));
+        assert_eq!(Type::named("text:\n"), Err(InvalidTypeName::Character));
     }
 }
