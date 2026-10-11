@@ -69,6 +69,9 @@ wasm-bindgen-test = { workspace = true }
 
 [features]
 default = []
+# Prototype: every number in one index band (see dialog-artifacts), so a
+# range over any numbers pushes into the scan.
+number-band = ["dialog-artifacts/number-band"]
 # Marker feature so benchmarks (which depend on `BenchEnv` in
 # `src/helpers.rs`) are only built when explicitly requested. The helper
 # itself lives behind `#[cfg(any(test, feature = "helpers"))]` and is

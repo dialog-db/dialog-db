@@ -10,6 +10,11 @@ default = ["csv"]
 debug = []
 helpers = ["dep:anyhow"]
 csv = ["dep:csv-async"]
+# Prototype: store every number in one band of the index, in
+# dialog-number's encoding, instead of one fixed-width band per type.
+# For measuring the storage change only; trees written with it are not
+# readable without it.
+number-band = []
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests

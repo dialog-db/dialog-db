@@ -14,6 +14,8 @@
 
 use std::cmp::Ordering;
 
+#[cfg(feature = "number-band")]
+use crate::encode_value_owned;
 use crate::{
     ArtifactSelector, NameShape, Value, ValueDataType,
     artifacts::selector::Constrained,
@@ -99,7 +101,7 @@ pub fn match_selector_and_key_ref(
     }
 
     if let Some(value) = selector.value() {
-        if value.data_type() != key.value_type {
+        if value.data_type().band() != key.value_type {
             return SelectorMatch::Excluded;
         }
         // Compare by the same encoding the key was built with. Equality never
@@ -213,6 +215,32 @@ pub fn match_selector_and_key_ref(
     // prefix unless the bound extends past it.
     if selector.value_lower().is_some() || selector.value_upper().is_some() {
         match &key.value {
+            #[cfg(feature = "number-band")]
+            ValueRef::Inline(payload) if key.value_type == ValueDataType::SignedInt => {
+                // The number band orders by its bytes, so a bound compares
+                // with the payload as encoded, without decoding the row.
+                if dialog_number::encoded_len(payload) != Some(payload.len()) {
+                    return SelectorMatch::Excluded;
+                }
+                for (bound, lower) in [
+                    (selector.value_lower(), true),
+                    (selector.value_upper(), false),
+                ] {
+                    let Some(bound) = bound else { continue };
+                    if bound.value.data_type().band() != ValueDataType::SignedInt {
+                        return SelectorMatch::Excluded;
+                    }
+                    let order = (*payload).cmp(encode_value_owned(&bound.value).as_slice());
+                    let admitted = match order {
+                        Ordering::Equal => bound.inclusive,
+                        Ordering::Greater => lower,
+                        Ordering::Less => !lower,
+                    };
+                    if !admitted {
+                        return SelectorMatch::Excluded;
+                    }
+                }
+            }
             ValueRef::Inline(payload) => {
                 // An undecodable inline payload is corrupt: fail closed
                 // rather than admit it.
@@ -305,24 +333,34 @@ pub(crate) fn value_predicates_admit(
         }
     }
     if let Some(bound) = selector.value_lower() {
-        if value.data_type() != bound.value.data_type() {
+        if value.data_type().band() != bound.value.data_type().band() {
             return false;
         }
-        match value.partial_cmp(&bound.value) {
+        match order(value, &bound.value) {
             Some(Ordering::Greater) => {}
             Some(Ordering::Equal) if bound.inclusive => {}
             _ => return false,
         }
     }
     if let Some(bound) = selector.value_upper() {
-        if value.data_type() != bound.value.data_type() {
+        if value.data_type().band() != bound.value.data_type().band() {
             return false;
         }
-        match value.partial_cmp(&bound.value) {
+        match order(value, &bound.value) {
             Some(Ordering::Less) => {}
             Some(Ordering::Equal) if bound.inclusive => {}
             _ => return false,
         }
     }
     true
+}
+
+/// How `value` orders against a bound in its band. Numbers in the one
+/// band order by their encoding, across natural, integer and float.
+fn order(value: &Value, bound: &Value) -> Option<Ordering> {
+    #[cfg(feature = "number-band")]
+    if value.data_type().band() == ValueDataType::SignedInt {
+        return Some(encode_value_owned(value).cmp(&encode_value_owned(bound)));
+    }
+    value.partial_cmp(bound)
 }

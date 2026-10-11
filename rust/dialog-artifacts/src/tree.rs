@@ -452,7 +452,7 @@ fn apply_prefix_bounds<K: KeyViewMut>(
         let band = selector
             .value_lower()
             .or(selector.value_upper())
-            .map(|bound| bound.value.data_type())
+            .map(|bound| bound.value.data_type().band())
             .unwrap_or_else(ValueDataType::min);
         let lo = match selector.value_lower() {
             Some(bound) => value_lower_edge(&bound.value, manifest),
@@ -477,6 +477,11 @@ fn apply_prefix_bounds<K: KeyViewMut>(
 /// bound key still parses (an empty payload would let the following key
 /// component slide into the value position and corrupt the range edge).
 fn value_band_min(value_type: ValueDataType) -> Vec<u8> {
+    // The number band's lowest number is NaN.
+    #[cfg(feature = "number-band")]
+    if value_type == ValueDataType::SignedInt {
+        return encode_value_owned(&Value::Float(f64::NAN));
+    }
     match numeric_width(value_type) {
         0 => vec![0x00],
         width => vec![0x00; width],
@@ -491,6 +496,11 @@ fn value_band_min(value_type: ValueDataType) -> Vec<u8> {
 /// band. Used only as a raw range edge; it deliberately does not parse (it
 /// is the last field set on the bound).
 fn value_band_max(value_type: ValueDataType, manifest: &Manifest) -> Vec<u8> {
+    // The number band's highest number is positive infinity.
+    #[cfg(feature = "number-band")]
+    if value_type == ValueDataType::SignedInt {
+        return encode_value_owned(&Value::Float(f64::INFINITY));
+    }
     match numeric_width(value_type) {
         0 => vec![0xFF; manifest.inline_n as usize + 2],
         width => vec![0xFF; width],
@@ -1183,9 +1193,12 @@ pub fn selector_range(
             selector
                 .attribute()
                 .map(|attribute| AttributeKeyPart::from(attribute).raw().to_vec()),
-            selector
-                .value()
-                .map(|value| (value.data_type(), build_value_payload(value, manifest))),
+            selector.value().map(|value| {
+                (
+                    value.data_type().band(),
+                    build_value_payload(value, manifest),
+                )
+            }),
         );
         Key::from(varkey::build_key(&parts))
     };

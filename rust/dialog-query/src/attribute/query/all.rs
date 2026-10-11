@@ -600,7 +600,7 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                         .refinement()
                         .and_then(|refinement| refinement.interval.as_ref())
                     && let Some(data_type) =
-                        single_comparable_type(kind.primitive_part().required())
+                        pushable_type(kind.primitive_part().required(), interval.value_type)
                 {
                     if let Some(bound) = &interval.lower
                         && let Some(value) =
@@ -622,6 +622,24 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
             message: "At least one field must be constrained".to_string(),
         })
     }
+}
+
+/// The type an interval bound is pushed as, if it can be. With every
+/// number in one index band (dialog-artifacts' `number-band` feature), a
+/// kind of numbers alone pushes its literal as written: the band orders
+/// naturals, integers and floats together. Otherwise only a kind of one
+/// comparable type pushes.
+fn pushable_type(primitive: Primitive, literal: Type) -> Option<Type> {
+    #[cfg(feature = "number-band")]
+    if !primitive.is_empty()
+        && primitive.intersect(Primitive::NUMERIC) == Some(primitive)
+        && Primitive::NUMERIC.contains(literal)
+    {
+        return Some(literal);
+    }
+    #[cfg(not(feature = "number-band"))]
+    let _ = literal;
+    single_comparable_type(primitive)
 }
 
 /// The single comparable type a primitive set admits, or `None` when it
