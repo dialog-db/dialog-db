@@ -156,13 +156,17 @@ pub(crate) fn canonicalize(
         .collect();
 
     // The identity reads the premises with their concepts' fields named
-    // by what they read; the working spelling keeps the given names.
+    // by what they read, and without descriptions, which are not part of
+    // any identity and so must not decide the labeling either; the
+    // working spelling keeps the given names and descriptions.
     let given = premises;
     let unnamed: Vec<Premise> = premises
         .iter()
-        .map(unnamed)
+        .map(|premise| unnamed(&without_descriptions(premise)))
         .collect::<Result<_, TypeError>>()?;
     let premises = unnamed.as_slice();
+    let plain = conclusion.without_descriptions();
+    let conclusion = &plain;
 
     let mut atoms = Vec::with_capacity(premises.len() + reduce.len() + fields.len());
     let holed = rename_premises(premises, &holes)?;
@@ -504,6 +508,23 @@ fn unnamed(premise: &Premise) -> Result<Premise, TypeError> {
         }
         other => other.clone(),
     })
+}
+
+/// A premise with its concepts' descriptions dropped.
+fn without_descriptions(premise: &Premise) -> Premise {
+    let strip = |query: &ConceptQuery| ConceptQuery {
+        predicate: query.predicate.without_descriptions(),
+        terms: query.terms.clone(),
+    };
+    match premise {
+        Premise::Assert(Proposition::Concept(query)) => {
+            Premise::Assert(Proposition::Concept(strip(query)))
+        }
+        Premise::Unless(Negation(Proposition::Concept(query))) => {
+            Premise::Unless(Negation(Proposition::Concept(strip(query))))
+        }
+        other => other.clone(),
+    }
 }
 
 /// A premise's encoding: its polarity, then its proposition. `None`
