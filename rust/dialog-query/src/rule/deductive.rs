@@ -16,6 +16,7 @@ use crate::concept::descriptor::ConceptFieldDescriptor;
 use crate::concept::query::ConceptQuery;
 use crate::error::TypeError;
 use crate::formula::attribute::AttributeParts;
+use crate::identity;
 use crate::memo::Memo;
 use crate::negation::Negation;
 use crate::optional::OptionalAttributeQuery;
@@ -25,6 +26,7 @@ pub use crate::premise::Premise;
 use crate::reduce::{Reduce, ReduceEntry, ReduceSpec};
 use crate::rule::analyzer::AnalyzedRule;
 use crate::rule::body;
+use crate::rule::reference;
 use crate::rule::{Compile, RuleKind, compile_internal, compile_rule, fmt_rule_schema};
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
@@ -449,7 +451,8 @@ impl DeductiveRule {
     }
 
     /// This rule's content-addressed identity, if it has an encodable
-    /// body: `rule:<base58(blake3(dag-cbor(canonical descriptor)))>`.
+    /// body: `rule:` and the base58 of the merkle reference of its
+    /// canonical spelling (see [`reference`](crate::rule::reference)).
     ///
     /// `None` for rules with no encodable body (implicit / attribute-query
     /// rules — see [`try_encode`](Self::try_encode)). A pure function of
@@ -460,11 +463,30 @@ impl DeductiveRule {
     pub fn try_this(&self) -> Option<Entity> {
         self.identity
             .get_or_init(|| {
-                use base58::ToBase58;
-                let canonical = serde_ipld_dagcbor::to_vec(&self.canonical_descriptor()).ok()?;
-                let hash = blake3::hash(&canonical);
-                let encoded = hash.as_bytes().as_ref().to_base58();
-                format!("rule:{encoded}").parse().ok()
+                let reference = match &self.analysis.canonical {
+                    Some(identity) => reference::rule(
+                        "deduce",
+                        &identity.conclusion,
+                        &identity.premises,
+                        &identity.reduce,
+                    )?,
+                    // No canonical spelling: the rule as given, which has an
+                    // identity only if every part has a wire form.
+                    None => {
+                        let descriptor = self.canonical_descriptor();
+                        reference::described(
+                            "deduce",
+                            &descriptor.deduce,
+                            &descriptor.when,
+                            &descriptor.unless,
+                            descriptor
+                                .reduce
+                                .iter()
+                                .map(|(name, spec)| (name.as_str(), spec)),
+                        )?
+                    }
+                };
+                Some(identity::entity("rule:", reference))
             })
             .clone()
     }

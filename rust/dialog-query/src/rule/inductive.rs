@@ -20,11 +20,13 @@ pub mod descriptor;
 use crate::artifact::Entity;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
+use crate::identity;
 use crate::negation::Negation;
 use crate::planner::{Conjunction, Planner};
 use crate::premise::Premise;
 use crate::rule::analyzer::AnalyzedRule;
 use crate::rule::body;
+use crate::rule::reference;
 use crate::rule::{Compile, RuleKind, fmt_rule_schema};
 use crate::{Environment, Parameters, Proposition};
 use descriptor::InductiveRuleDescriptor;
@@ -150,17 +152,30 @@ impl InductiveRule {
     }
 
     /// This rule's content-addressed identity, if it has an encodable
-    /// body: `rule:<base58(blake3(dag-cbor(canonical descriptor)))>`,
-    /// the same for every spelling of the body (see
-    /// [`canonical`](crate::rule::canonical)). The `assert!` head field
-    /// is part of the encoding, so an inductive rule never collides
-    /// with the deductive rule of the same body.
+    /// body: `rule:` and the base58 of the merkle reference of its
+    /// canonical spelling (see [`reference`](crate::rule::reference)),
+    /// the same for every spelling of the body. The head is keyed
+    /// `assert!` or `retract!`, so an inductive rule never collides with
+    /// the deductive rule of the same body.
     pub fn try_this(&self) -> Option<Entity> {
-        use base58::ToBase58;
-        let canonical = serde_ipld_dagcbor::to_vec(&self.canonical_descriptor()).ok()?;
-        let hash = blake3::hash(&canonical);
-        let encoded = hash.as_bytes().as_ref().to_base58();
-        format!("rule:{encoded}").parse().ok()
+        let head = match self.polarity {
+            Polarity::Assert => "assert!",
+            Polarity::Retract => "retract!",
+        };
+        let reference = match &self.analysis.canonical {
+            Some(identity) => reference::rule(
+                head,
+                &identity.conclusion,
+                &identity.premises,
+                &identity.reduce,
+            )?,
+            None => {
+                let descriptor = self.canonical_descriptor();
+                let conclusion = descriptor.assert.as_ref().or(descriptor.retract.as_ref())?;
+                reference::described(head, conclusion, &descriptor.when, &descriptor.unless, [])?
+            }
+        };
+        Some(identity::entity("rule:", reference))
     }
 
     /// Whether this rule's body is what was stored under `entity`:

@@ -14,6 +14,36 @@ says how to cut a release.
 
 ## Unreleased
 
+### Rules are identified by merkle references
+
+[#593](https://github.com/dialog-db/dialog-db/pull/593),
+[identity, storage and notation](./notes/identity-storage-notation.md#plan)
+
+A rule's identity is now the merkle reference of its canonical
+spelling under `rule:`, not the BLAKE3 hash of its dag-cbor. The head
+is its concept by reference with each field bound to its canonical
+variable; `when` and `unless` are sets of premises; a concept premise
+is its concept by reference with each binding keyed by the field it
+binds (attribute and options), not by a field name; other premises
+and reduce clauses are their wire form read as a merkle structure,
+with constants identified by value.
+
+What this changes for you:
+
+- Every rule identity differs from 0.2.0's and from 0.3.0-rc.1's.
+  `Branch::upgrade_rules()` re-installs stored rules under the new
+  identities.
+- An attribute's description no longer changes the identity of a rule
+  that uses it, as it did when rules embedded their concepts' wire
+  form.
+- A rule's numeric constants are identified by value: a rule with the
+  constant `5` written as a natural, an integer or a float is one
+  rule.
+
+Why: a rule's identity should depend on what it means, and the
+concepts it uses should enter by reference, so a rule is the same
+whether they are embedded or linked.
+
 ### Attributes and concepts are identified by merkle references
 
 [#593](https://github.com/dialog-db/dialog-db/pull/593),
@@ -34,7 +64,7 @@ whether they are embedded or linked. The entities keep their shape,
 What this changes for you:
 
 - Every attribute and concept identity differs from 0.2.0's and from
-  0.3.0-rc.1's. Rule identities do not change yet.
+  0.3.0-rc.1's. Rule identities change too (see above).
 - `AttributeDescriptor::hash()` and `ConceptDescriptor::hash()` are
   `reference()`, returning a `merkle_reference::Reference`.
   `to_cbor_bytes()` is gone from both. `AttributeDescriptor::parse_uri`
