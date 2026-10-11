@@ -1860,4 +1860,65 @@ mod tests {
         // The attribute descriptor's name is still "reference" (no attribute rename)
         assert_eq!(ref_attr.unwrap().1.name(), Some("reference"));
     }
+
+    /// An attribute declared `as: number:` holds numbers of every type: a
+    /// natural, an integer and a float each write and read back, and text
+    /// does not resolve against it.
+    #[dialog_common::test]
+    async fn it_holds_every_number_type_under_number() -> Result<()> {
+        use crate::attribute::query::all::AttributeQueryAll;
+        use crate::type_system::Type as Kind;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let attribute: crate::AttributeDescriptor =
+            serde_json::from_value(serde_json::json!({ "the": "item/size", "as": "number:" }))?;
+        let written = [
+            Value::UnsignedInt(3),
+            Value::SignedInt(-2),
+            Value::Float(2.5),
+        ];
+        for value in &written {
+            assert!(
+                attribute.resolve(value.clone()).is_ok(),
+                "{value:?} resolves"
+            );
+        }
+        assert!(attribute.resolve(Value::String("3".into())).is_err());
+
+        branch
+            .transaction()
+            .assert(the!("item/size").of(Entity::new()?).is(3u64))
+            .assert(the!("item/size").of(Entity::new()?).is(-2i64))
+            .assert(the!("item/size").of(Entity::new()?).is(2.5f64))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let number = Kind::from(dialog_artifacts::ValueDataType::Number);
+        let query = AttributeQueryAll::new(
+            Term::from(the!("item/size")),
+            Term::<Entity>::var("item"),
+            Term::var("size").with_kind(number),
+            Term::var("cause"),
+        );
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let rows = query.perform(&source).try_vec().await?;
+        // Compared by value: a tree keying numbers in one band does not
+        // record which type wrote a number, so it reads the natural 3 back
+        // as the integer 3.
+        let number = |value: &Value| match value {
+            Value::UnsignedInt(value) => *value as f64,
+            Value::SignedInt(value) => *value as f64,
+            Value::Float(value) => *value,
+            other => panic!("{other:?} is not a number"),
+        };
+        let mut read: Vec<f64> = rows.iter().map(|row| number(row.is())).collect();
+        read.sort_by(f64::total_cmp);
+        assert_eq!(read, vec![-2.0, 2.5, 3.0]);
+        Ok(())
+    }
 }

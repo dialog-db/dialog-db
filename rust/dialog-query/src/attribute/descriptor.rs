@@ -662,7 +662,7 @@ impl AttributeDescriptor {
     /// triple ready for storage.
     pub fn resolve(&self, value: Value) -> Result<Attribution, FieldTypeError> {
         let type_matches = match self.content_type() {
-            Some(expected) => value.data_type() == expected,
+            Some(expected) => expected.holds(&value),
             None => true,
         };
 

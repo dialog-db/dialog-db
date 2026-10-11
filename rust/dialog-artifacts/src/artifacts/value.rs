@@ -297,8 +297,14 @@ impl<'de> de::Visitor<'de> for ValueVisitor {
                 ValueDataType::Float => Value::Float(map.next_value()?),
                 ValueDataType::Record => Value::Record(map.next_value()?),
                 ValueDataType::Symbol => Value::Symbol(map.next_value()?),
-                // An index band, not in `ALL`, so no tag names it.
-                ValueDataType::Number => unreachable!("`number:` is not a value's type"),
+                // Any number, read as its bare spelling reads.
+                ValueDataType::Number => {
+                    let value: Value = map.next_value()?;
+                    if !value.data_type().is_number() {
+                        return Err(de::Error::custom(format!("{value:?} is not a number")));
+                    }
+                    value
+                }
             };
         if map.next_key::<de::IgnoredAny>()?.is_some() {
             return Err(de::Error::custom("a tagged value names one type"));
@@ -1184,15 +1190,17 @@ pub enum ValueDataType {
     /// A symbol type, used to distinguish attributes from other
     /// strings: `symbol:`
     Symbol = 8,
-    /// Not a type of [`Value`] but an index band: the one a tree whose
-    /// manifest sets `value_encoding` to 1 keys every number in, natural,
-    /// integer and float alike, in dialog-number's encoding: `number:`
+    /// Any number, natural, integer or float, as it is: `number:`. The
+    /// other number types are views of it (see [`Value::viewed_as`]). No
+    /// [`Value`] is of this type itself; it is what an attribute declares to
+    /// hold numbers of every type, and the index band a tree whose manifest
+    /// sets `value_encoding` to 1 keys every number in.
     Number = 9,
 }
 
 impl ValueDataType {
     /// Every type, in discriminant order.
-    pub const ALL: [ValueDataType; 9] = [
+    pub const ALL: [ValueDataType; 10] = [
         ValueDataType::Bytes,
         ValueDataType::Entity,
         ValueDataType::Boolean,
@@ -1202,6 +1210,7 @@ impl ValueDataType {
         ValueDataType::Float,
         ValueDataType::Record,
         ValueDataType::Symbol,
+        ValueDataType::Number,
     ];
 
     /// The entity that names this type, such as `text:`.
@@ -1284,6 +1293,13 @@ impl ValueDataType {
         }
     }
 
+    /// Whether a value of this type holds `value`: one of its own type, or
+    /// any number where this is [`Number`](Self::Number).
+    pub fn holds(self, value: &Value) -> bool {
+        let actual = value.data_type();
+        actual == self || (self == ValueDataType::Number && actual.is_number())
+    }
+
     /// Whether this is one of the number types.
     pub fn is_number(self) -> bool {
         matches!(
@@ -1307,6 +1323,9 @@ impl ValueDataType {
 
     /// Check if the given value is of this type.
     pub fn check(&self, value: &Value) -> Result<(), TypeError> {
+        if self.holds(value) {
+            return Ok(());
+        }
         let other = value.data_type();
         self.unify(&other).and(Ok(()))
     }
