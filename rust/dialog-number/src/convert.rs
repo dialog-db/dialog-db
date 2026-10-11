@@ -40,7 +40,18 @@ pub(crate) fn whole(mut magnitude: u128) -> Digits<WHOLE_DIGITS> {
     const CHUNK: u128 = 1_000_000_000_000_000_000;
     let mut buffer = [0u8; WHOLE_DIGITS];
     let mut start = WHOLE_DIGITS;
-    loop {
+    // A magnitude below 10^18 is one chunk, split with 64-bit arithmetic
+    // alone: no 128-bit division for timestamps, counts and sizes.
+    if magnitude < CHUNK {
+        let mut chunk = magnitude as u64;
+        while chunk > 0 {
+            start -= 1;
+            buffer[start] = (chunk % 100) as u8;
+            chunk /= 100;
+        }
+        magnitude = 0;
+    }
+    while magnitude > 0 {
         let mut chunk = (magnitude % CHUNK) as u64;
         magnitude /= CHUNK;
         if magnitude == 0 {
