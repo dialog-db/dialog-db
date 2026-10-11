@@ -760,13 +760,16 @@ impl AttributeDescriptor {
     pub fn reference(&self) -> Reference {
         let relations = iter::once(&self.the)
             .chain(&self.then)
-            .map(|the| SYMBOL.refer(the.to_string().as_bytes()));
+            .map(|the| SYMBOL.reference_of(the.to_string().as_bytes()));
         let mut entries = vec![
             (field::THE, ReferenceType::LIST.list(relations)),
-            (field::PICK, ENTITY.refer(self.pick.uri().as_bytes())),
+            (field::PICK, ENTITY.reference_of(self.pick.uri().as_bytes())),
         ];
         if let Some(content_type) = self.content_type {
-            entries.push((field::AS, ENTITY.refer(content_type.uri().as_bytes())));
+            entries.push((
+                field::AS,
+                ENTITY.reference_of(content_type.uri().as_bytes()),
+            ));
         }
         if !self.among.is_empty() {
             entries.push((
@@ -1413,8 +1416,8 @@ mod collection_tests {
         );
 
         // A collection reads as the symbol its relation slot spells.
-        let symbol = |text: &str| SYMBOL.refer(text.as_bytes());
-        let pick = ENTITY.refer(sequence.pick().uri().as_bytes());
+        let symbol = |text: &str| SYMBOL.reference_of(text.as_bytes());
+        let pick = ENTITY.reference_of(sequence.pick().uri().as_bytes());
         let mut entries = vec![
             (
                 field::THE,
@@ -1423,7 +1426,10 @@ mod collection_tests {
             (field::PICK, pick),
         ];
         if let Some(content_type) = sequence.content_type() {
-            entries.push((field::AS, ENTITY.refer(content_type.uri().as_bytes())));
+            entries.push((
+                field::AS,
+                ENTITY.reference_of(content_type.uri().as_bytes()),
+            ));
         }
         assert_eq!(sequence.reference(), ATTRIBUTE.map(entries));
     }
@@ -1442,10 +1448,10 @@ mod collection_tests {
         let expected = ATTRIBUTE.map([
             (
                 field::THE,
-                ReferenceType::LIST.list([SYMBOL.refer(b"todo.list/title")]),
+                ReferenceType::LIST.list([SYMBOL.reference_of(b"todo.list/title")]),
             ),
-            (field::PICK, ENTITY.refer(b"last:")),
-            (field::AS, ENTITY.refer(b"text:")),
+            (field::PICK, ENTITY.reference_of(b"last:")),
+            (field::AS, ENTITY.reference_of(b"text:")),
         ]);
         assert_eq!(attribute.reference(), expected);
         assert_eq!(

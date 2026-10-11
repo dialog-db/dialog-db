@@ -43,7 +43,7 @@ over the AST and nothing else.
 Identities are references in a second version of
 [merkle-reference](https://github.com/Gozala/merkle-reference/blob/main/docs/spec.md),
 implemented as a `merkle-reference` crate in this repository. The crate knows
-nothing about dialog: it defines references, a small set of core types and
+nothing about dialog: it defines references, the shapes of composites and
 canonical content, and dialog defines its own types on top of it.
 
 v2 keeps v1's properties:
@@ -82,18 +82,21 @@ reference(v : T)     = BLAKE3-keyed(key = reference(T), content_T(v))
   `reference(type)`, which is a constant: `BLAKE3-derive_key("merkle-reference v2
   type", "")`.
 
-**Core types**, defined by the crate, keep v1's set:
-- scalars: bytes, null, text, boolean, integer of any size, and float;
-- composites: list and map.
-
-Fixed-width integers are not core types.
+**Types are named by URI**, and the crate defines no scalar types: only raw
+bytes (plain BLAKE3) and the three shapes of a composite, `list:`, `map:` and
+`set:`. What a scalar is, and how its content is written, belongs to whoever
+names it. (An earlier revision kept v1's scalars as core types; they were
+dropped because a hashing crate that fixes what a number is forces that choice
+on everyone, and dialog's numbers already disagree with IEEE 754 bit patterns.)
+Users plug in their own types by implementing the crate's `ToReference` for
+the types they own; the crate's collections of them follow.
 
 **Dialog's types** are values of `type`, so the crate needs nothing to add one.
 
 Value types, which a stored value or a constant has:
 - `number`: every number, in the one-band encoding (see
   [Numbers](#numbers-one-band-typed-views));
-- `text`, the crate's core text;
+- `text:` (UTF-8 as written) and `boolean:`;
 - `entity` (text that parses as a URI) and `symbol` (`namespace/name` text);
 - `boolean`, `bytes` and `record`.
 
@@ -109,9 +112,9 @@ declares.
 AST nodes: attribute, concept, rule, premise and term.
 
 **A type is identified by its name:** `reference(T)` is the keyed hash of `T`'s
-name under `reference(type)`. The crate's core types have its own names, and
-dialog's are its type entities (`number:`, `integer:`, `entity:`, …), so a type
-dialog already names by entity keeps that name.
+name, a URI, under `reference(type)`. Dialog's names are its type entities
+(`number:`, `integer:`, `entity:`, …), so a type dialog already names by entity
+keeps that name.
 
 ### Composites hash their parts' references
 
@@ -173,12 +176,6 @@ Two families of choices:
   [`bijoux`](https://docs.rs/bijoux), from Ink & Switch's Subduction work. Bijou
   is bijective (every integer has exactly one encoding), takes one byte for
   values up to 247, and decodes 2 to 10 times faster than LEB128.
-- **Core integer of any size:** a header byte `0x80 + k` for a magnitude of
-  `k < 127` bytes (`0xFF` and then `k − 127` as an integer for longer ones),
-  then the minimal big-endian magnitude, with every byte inverted for a
-  negative integer. It follows TerminusDB's big integers without their padding
-  bit and negative zero. Longer numbers sort after shorter ones, so the bytes
-  sort numerically. Canonical form needs one rule: no leading zero byte.
 - **Dialog's `number`** has as its content its encoding in the
   `dialog-number` crate, which is SQLite4's decimal key encoding unchanged
   (see [Numbers](#numbers-one-band-typed-views) and the crate's README):
@@ -572,8 +569,8 @@ whoever writes it.
 
 Each step lands with tests and a perf sweep:
 
-1. **The `merkle-reference` crate**: the core types, `type` as a value, keyed
-   references, composites over part references, and the integer of any size,
+1. **The `merkle-reference` crate**: `type` as a value named by URI, keyed
+   references, and composites (list, map, set) over part references,
    with the v2 spec written beside it (`rust/merkle-reference/spec.md`).
    Pinned by tests:
    - plain bytes equal `blake3(bytes)`;
@@ -633,8 +630,8 @@ Each step lands with tests and a perf sweep:
 - **Text is hashed as written**, with no normalization, because the database
   compares text byte for byte.
 - **Structs are maps from field names**, with absent optional fields left out.
-- **The crate's core float keeps v1's encoding.** Dialog's numbers use `number`,
-  not the core float.
+- **merkle-reference defines no scalars**; types are named by URI, and the
+  shapes are list, map and set. Proofs follow Bao's chunk tree (spec, "Proofs").
 - **Inclusion proofs:** the structure supports them, but the verifier is not part
   of 0.3.0.
 - **Types are identified by name**, and dialog's names are its type entities.

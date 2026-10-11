@@ -6,22 +6,30 @@
 //! - [`NUMBER`] for every number, whose content is its
 //!   [`dialog_number`] encoding: SQLite4's decimal key encoding, the bytes
 //!   the value index will key the number by;
-//! - the core text and boolean of [`merkle_reference`];
-//! - plain bytes, referenced by their BLAKE3 hash like any blob;
+//! - [`TEXT`] (UTF-8, as written) and [`BOOLEAN`] (one byte, `0` or `1`);
+//! - raw bytes, referenced by their BLAKE3 hash like any blob;
 //! - [`ENTITY`], [`SYMBOL`] and [`RECORD`], whose content is their text or
 //!   bytes.
 //!
 //! A number's identity is its value alone, not the band the value index
 //! keeps it in today or how it was written: a natural `5`, an integer `5` and
-//! a float `5.0` are one number, and a float is the decimal it prints as. The index still keeps naturals, integers and
-//! floats apart, so until it moves to one band, two definitions whose only
+//! a float `5.0` are one number, and a float is the decimal it prints as.
+//! The index still keeps naturals, integers and floats apart, so until it moves to one band, two definitions whose only
 //! difference is `5` against `5.0` have one identity but read different
 //! claims.
 
-use merkle_reference::{Refer, Reference, Type};
+use merkle_reference::{Reference, ToReference, Type};
 
 use crate::Value;
 
+/// The type of text, `text:`: UTF-8, as written.
+pub const TEXT: Type = Type::from_reference(Reference::from_hex(
+    "ab31fce38517675ffb0055997c0e925eaa057459986eb71969a3e914bfc06f87",
+));
+/// The type of booleans, `boolean:`: one byte, `0` for false and `1` for true.
+pub const BOOLEAN: Type = Type::from_reference(Reference::from_hex(
+    "e3fa6edd5697f19ac3f931b1476a24405eca6018e4975759db9ac47519ef8b36",
+));
 /// The type of numbers.
 pub const NUMBER: Type = Type::from_reference(Reference::from_hex(
     "d57f5f02d3de4a0acf1ee1e35987e05f83bc7a6330e4bc9bae1e188f3550e89e",
@@ -43,28 +51,28 @@ pub const RECORD: Type = Type::from_reference(Reference::from_hex(
 fn number(encode: impl FnOnce(&mut Vec<u8>)) -> Reference {
     let mut content = Vec::with_capacity(12);
     encode(&mut content);
-    NUMBER.refer(&content)
+    NUMBER.reference_of(&content)
 }
 
 impl Value {
     /// The value's identity: its merkle reference under its value type.
     pub fn reference(&self) -> Reference {
         match self {
-            Value::Bytes(bytes) => Reference::of_bytes(bytes),
-            Value::Entity(entity) => ENTITY.refer(entity.as_str().as_bytes()),
-            Value::Boolean(value) => value.refer(),
-            Value::String(text) => text.refer(),
+            Value::Bytes(bytes) => Reference::hash(bytes),
+            Value::Entity(entity) => ENTITY.reference_of(entity.as_str().as_bytes()),
+            Value::Boolean(value) => BOOLEAN.reference_of(&[u8::from(*value)]),
+            Value::String(text) => TEXT.reference_of(text.as_bytes()),
             Value::UnsignedInt(value) => number(|out| dialog_number::encode_u128(*value, out)),
             Value::SignedInt(value) => number(|out| dialog_number::encode_i128(*value, out)),
             Value::Float(value) => number(|out| dialog_number::encode_f64(*value, out)),
-            Value::Record(bytes) => RECORD.refer(bytes),
-            Value::Symbol(symbol) => SYMBOL.refer(symbol.to_string().as_bytes()),
+            Value::Record(bytes) => RECORD.reference_of(bytes),
+            Value::Symbol(symbol) => SYMBOL.reference_of(symbol.to_string().as_bytes()),
         }
     }
 }
 
-impl Refer for Value {
-    fn refer(&self) -> Reference {
+impl ToReference for Value {
+    fn to_reference(&self) -> Reference {
         self.reference()
     }
 }
@@ -77,12 +85,14 @@ mod tests {
     #[test]
     fn it_names_the_value_types() {
         for (name, ty) in [
+            ("text:", TEXT),
+            ("boolean:", BOOLEAN),
             ("number:", NUMBER),
             ("entity:", ENTITY),
             ("symbol:", SYMBOL),
             ("record:", RECORD),
         ] {
-            assert_eq!(Type::named(name), ty, "{name}");
+            assert_eq!(Type::named(name), Ok(ty), "{name}");
         }
     }
 
@@ -90,7 +100,10 @@ mod tests {
     fn it_takes_number_content_from_dialog_number() {
         let mut content = Vec::new();
         dialog_number::encode_f64(19.99, &mut content);
-        assert_eq!(Value::Float(19.99).reference(), NUMBER.refer(&content));
+        assert_eq!(
+            Value::Float(19.99).reference(),
+            NUMBER.reference_of(&content)
+        );
     }
 
     #[test]
