@@ -181,7 +181,7 @@ fn tagged_key(
     // would make the value unrecoverable: unlike a spilled fact (whose bytes
     // live in the archive under that reference), nothing else carries it.
     let payload = value_payload(value, manifest);
-    let parts = tagged_parts(tag, version, of, the, value.data_type(), payload);
+    let parts = tagged_parts(tag, version, of, the, value.data_type().band(), payload);
     Key::from(build_key(&parts))
 }
 

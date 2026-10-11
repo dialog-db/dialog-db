@@ -134,7 +134,7 @@ pub fn shipment_ref(
 fn asset_ref(key: &Key) -> Option<ShipmentRef> {
     let parts = parse_key_ref(key.as_ref())?;
     if parts.attribute.as_ref() != ASSET_SIZE.as_bytes()
-        || parts.value_type != ValueDataType::UnsignedInt
+        || parts.value_type != ValueDataType::UnsignedInt.band()
     {
         return None;
     }

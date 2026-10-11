@@ -4,7 +4,7 @@
 use std::cmp::Ordering;
 
 use dialog_number::{
-    DecodeError, Number, decode_f64, decode_i128, encode_f64, encode_i128, encode_u128,
+    DecodeError, Number, decode_f64, decode_i128, encode_f64, encode_i128, encode_u128, encoded_len,
 };
 
 fn float(value: f64) -> Vec<u8> {
@@ -139,6 +139,42 @@ fn it_round_trips_every_float() {
     ] {
         assert_eq!(Number::decode(&float(value)).unwrap().to_f64(), value);
     }
+}
+
+/// `encoded_len` finds where a number ends without decoding it, so a key
+/// parser can split a key: it must agree with the decoder on every number,
+/// with whatever follows the number in the key.
+#[test]
+fn it_finds_where_a_number_ends() {
+    let mut next = generator(0x9E37_79B9_7F4A_7C15);
+    let mut values: Vec<Vec<u8>> = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0]
+        .into_iter()
+        .map(float)
+        .collect();
+    for _ in 0..100_000 {
+        let bits = next();
+        values.push(float(f64::from_bits(bits)));
+        values.push(integer(bits as i64 as i128));
+        values.push(integer((i128::from(bits) << 64) | i128::from(next())));
+        values.push(natural(u128::from(bits) << 64 | u128::from(next())));
+        values.push(float((bits % 100_000) as f64 / 100.0));
+    }
+    for bytes in values {
+        let (_, read) = Number::read(&bytes).expect("decodes");
+        assert_eq!(read, bytes.len());
+        for tail in [&[][..], &[0x00], &[0xFF, 0x01], &[0x2A; 3]] {
+            let mut key = bytes.clone();
+            key.extend_from_slice(tail);
+            assert_eq!(
+                encoded_len(&key),
+                Some(read),
+                "{bytes:02x?} then {tail:02x?}"
+            );
+        }
+    }
+    assert_eq!(encoded_len(&[]), None);
+    assert_eq!(encoded_len(&[0x00]), None, "not a class byte");
+    assert_eq!(encoded_len(&[0x18, 0x03]), None, "no last digit");
 }
 
 #[test]

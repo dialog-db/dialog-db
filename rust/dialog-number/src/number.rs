@@ -309,6 +309,35 @@ impl<'a> Head<'a> {
     }
 }
 
+/// How many bytes the number encoded at the start of `bytes` takes, or
+/// `None` if they do not start with one. Allocates nothing.
+///
+/// It reads the class byte, the exponent if the class does not hold it,
+/// then up to the digit that ends the number, without checking the digits:
+/// a key parser finds where a number ends this way on every key it splits.
+pub fn encoded_len(bytes: &[u8]) -> Option<usize> {
+    let class = *bytes.first()?;
+    let negative = match class {
+        NAN | ZERO | NEGATIVE_INFINITY | POSITIVE_INFINITY => return Some(1),
+        NEGATIVE_LARGE..=NEGATIVE_SMALL => true,
+        POSITIVE_SMALL..=POSITIVE_LARGE => false,
+        _ => return None,
+    };
+    let start = match class {
+        NEGATIVE_LARGE | POSITIVE_LARGE => 1 + varint::read(bytes.get(1..)?, negative)?.1,
+        NEGATIVE_SMALL | POSITIVE_SMALL => 1 + varint::read(bytes.get(1..)?, !negative)?.1,
+        _ => 1,
+    };
+    // The last digit's byte is even, and odd once a negative number's
+    // bytes are inverted.
+    let last = u8::from(negative);
+    let end = bytes
+        .get(start..)?
+        .iter()
+        .position(|byte| byte & 1 == last)?;
+    Some(start + end + 1)
+}
+
 /// The integer whose encoding is exactly `bytes`, or `None` if the number
 /// it encodes is not a whole number that fits in an `i128`. Faster than
 /// [`Number::decode`] followed by [`Number::to_i128`]: it allocates nothing.

@@ -429,11 +429,18 @@ fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
         return None;
     }
     match ValueDataType::from(type_byte) {
+        // The one number band: dialog-number's self-delimiting encoding.
+        #[cfg(feature = "number-band")]
+        ValueDataType::UnsignedInt | ValueDataType::SignedInt | ValueDataType::Float => {
+            dialog_number::encoded_len(bytes.get(at..)?)
+        }
         // 128-bit integers: 16 big-endian bytes.
+        #[cfg(not(feature = "number-band"))]
         ValueDataType::UnsignedInt | ValueDataType::SignedInt => Some(16),
         // `f64`: 8 big-endian bytes (the order-preserving `encode_f64`), NOT 16
         // — reading 16 here over-runs the value tail into the following key
         // components, so the key splits into fewer parts than its schema.
+        #[cfg(not(feature = "number-band"))]
         ValueDataType::Float => Some(8),
         // A single byte.
         ValueDataType::Boolean => Some(1),

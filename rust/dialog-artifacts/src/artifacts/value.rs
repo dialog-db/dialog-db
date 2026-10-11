@@ -1216,6 +1216,17 @@ impl<'de> Deserialize<'de> for ValueDataType {
 }
 
 impl ValueDataType {
+    /// The type byte an index key carries for values of this type. With
+    /// the `number-band` feature every number shares the integer band;
+    /// otherwise each type keeps its own.
+    pub fn band(self) -> Self {
+        match self {
+            #[cfg(feature = "number-band")]
+            ValueDataType::UnsignedInt | ValueDataType::Float => ValueDataType::SignedInt,
+            other => other,
+        }
+    }
+
     /// The smallest [`ValueDataType`] in discriminant order
     pub fn min() -> Self {
         ValueDataType::Bytes

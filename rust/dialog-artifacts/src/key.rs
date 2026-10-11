@@ -149,8 +149,13 @@ fn encoded_len_lower_bound(value: &Value) -> usize {
         Value::Record(bytes) => bytes.len(),
         Value::String(string) => string.len(),
         Value::Entity(entity) => entity.as_str().len(),
+        #[cfg(not(feature = "number-band"))]
         Value::UnsignedInt(_) | Value::SignedInt(_) => 16,
+        #[cfg(not(feature = "number-band"))]
         Value::Float(_) => 8,
+        // At least the class byte.
+        #[cfg(feature = "number-band")]
+        Value::UnsignedInt(_) | Value::SignedInt(_) | Value::Float(_) => 1,
         Value::Boolean(_) => 1,
         Value::Symbol(_) => 0,
     }
@@ -183,7 +188,7 @@ pub(crate) fn artifact_index_keys_with(
         tag: ENTITY_KEY_TAG,
         entity: artifact.of.as_str().as_bytes().to_vec(),
         attribute: artifact.the.as_str().as_bytes().to_vec(),
-        value_type: artifact.is.data_type(),
+        value_type: artifact.is.data_type().band(),
         value: payload,
         // The fact orderings carry no version; only history/coverage keys do.
         version: None,
@@ -227,7 +232,7 @@ pub(crate) fn reproject_index_keys(
 pub(crate) fn value_tail_bytes(value: &Value, manifest: &Manifest) -> Vec<u8> {
     let payload = value_payload(value, manifest);
     let mut tail = Vec::with_capacity(1 + payload.slot_bytes().len());
-    tail.push(value.data_type().into());
+    tail.push(value.data_type().band().into());
     tail.extend_from_slice(payload.slot_bytes());
     // A spilled key's whole-value hash trails the key; within a same-
     // `(the, of)` group the components between the value slot and the hash
@@ -494,7 +499,7 @@ pub trait KeyViewMut: KeyView {
         // the fact-building path uses, so a value range narrows to the exact
         // value. The type and payload (with its spill flag) are set together.
         if let Some(value) = selector.value() {
-            key = key.set_value(value.data_type(), value_payload(value, manifest));
+            key = key.set_value(value.data_type().band(), value_payload(value, manifest));
         }
 
         key

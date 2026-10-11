@@ -50,4 +50,4 @@ mod number;
 mod varint;
 
 pub use key::{encode, encode_f64, encode_i128, encode_u128};
-pub use number::{DecodeError, Number, decode_f64, decode_i128};
+pub use number::{DecodeError, Number, decode_f64, decode_i128, encoded_len};
