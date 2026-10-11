@@ -309,6 +309,35 @@ impl<'a> Head<'a> {
     }
 }
 
+/// How many bytes the number encoded at the start of `bytes` takes, or
+/// `None` if they do not start with one. Allocates nothing.
+///
+/// It reads the class byte, the exponent if the class does not hold it,
+/// then up to the digit that ends the number, without checking the digits:
+/// a key parser finds where a number ends this way on every key it splits.
+pub fn encoded_len(bytes: &[u8]) -> Option<usize> {
+    let class = *bytes.first()?;
+    let negative = match class {
+        NAN | ZERO | NEGATIVE_INFINITY | POSITIVE_INFINITY => return Some(1),
+        NEGATIVE_LARGE..=NEGATIVE_SMALL => true,
+        POSITIVE_SMALL..=POSITIVE_LARGE => false,
+        _ => return None,
+    };
+    let start = match class {
+        NEGATIVE_LARGE | POSITIVE_LARGE => 1 + varint::read(bytes.get(1..)?, negative)?.1,
+        NEGATIVE_SMALL | POSITIVE_SMALL => 1 + varint::read(bytes.get(1..)?, !negative)?.1,
+        _ => 1,
+    };
+    // The last digit's byte is even, and odd once a negative number's
+    // bytes are inverted.
+    let last = u8::from(negative);
+    let end = bytes
+        .get(start..)?
+        .iter()
+        .position(|byte| byte & 1 == last)?;
+    Some(start + end + 1)
+}
+
 /// The integer whose encoding is exactly `bytes`, or `None` if the number
 /// it encodes is not a whole number that fits in an `i128`. Faster than
 /// [`Number::decode`] followed by [`Number::to_i128`]: it allocates nothing.
@@ -357,63 +386,178 @@ pub fn decode_i128(bytes: &[u8]) -> Result<Option<i128>, DecodeError> {
 /// for a number of up to 24 base-100 digits.
 pub fn decode_f64(bytes: &[u8]) -> Result<f64, DecodeError> {
     Ok(match Head::decode(bytes)? {
-        Head::Special(Repr::NaN) => f64::NAN,
-        Head::Special(Repr::Infinity { negative: true }) => f64::NEG_INFINITY,
-        Head::Special(Repr::Infinity { negative: false }) => f64::INFINITY,
-        Head::Special(_) => 0.0,
+        Head::Special(special) => special_f64(&special),
         Head::Finite {
             negative,
             exponent,
             digits,
-        } => {
-            // `-0.<digits>e<2 × exponent>`, parsed with correct rounding.
-            const LIMIT: usize = 24;
-            if digits.len() > LIMIT {
-                return Ok(Number::decode(bytes)?.to_f64());
-            }
-            let mut text = [0u8; 3 + 2 * LIMIT + 8];
-            let mut length = 0;
-            if negative {
-                text[length] = b'-';
-                length += 1;
-            }
-            text[length] = b'0';
-            text[length + 1] = b'.';
-            length += 2;
-            for byte in digits {
-                let value = digit(*byte, negative);
-                text[length] = b'0' + value / 10;
-                text[length + 1] = b'0' + value % 10;
-                length += 2;
-            }
-            text[length] = b'e';
-            length += 1;
-            let mut power = 2 * exponent;
-            if power < 0 {
-                text[length] = b'-';
-                length += 1;
-                power = -power;
-            }
-            let mut reversed = [0u8; 8];
-            let mut count = 0;
-            loop {
-                reversed[count] = b'0' + (power % 10) as u8;
-                count += 1;
-                power /= 10;
-                if power == 0 {
-                    break;
-                }
-            }
-            for index in (0..count).rev() {
-                text[length] = reversed[index];
-                length += 1;
-            }
-            str::from_utf8(&text[..length])
-                .ok()
-                .and_then(|text| text.parse().ok())
-                .unwrap_or(f64::NAN)
-        }
+        } => match finite_f64(negative, exponent, digits) {
+            Some(float) => float,
+            None => Number::decode(bytes)?.to_f64(),
+        },
     })
+}
+
+/// A number that is not finite or is zero, as a float.
+fn special_f64(special: &Repr) -> f64 {
+    match special {
+        Repr::NaN => f64::NAN,
+        Repr::Infinity { negative: true } => f64::NEG_INFINITY,
+        Repr::Infinity { negative: false } => f64::INFINITY,
+        _ => 0.0,
+    }
+}
+
+/// The nearest `f64` to `±0.<digits> × 100^exponent`, correctly rounded, or
+/// `None` past 24 base-100 digits.
+fn finite_f64(negative: bool, exponent: i32, digits: &[u8]) -> Option<f64> {
+    // Clinger's fast path: a significand below 2^53 and a power of ten up
+    // to 10^22 are both exact in a float, so one multiplication or division
+    // rounds once, correctly. Prices and measurements take it; a float's
+    // full 17-digit decimal does not, and is parsed below.
+    const EXACT: u64 = 1 << 53;
+    const POWERS: [f64; 23] = [
+        1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+        1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+    ];
+    if digits.len() <= 8 {
+        let mut significand: u64 = 0;
+        for byte in digits {
+            significand = significand * 100 + u64::from(digit(*byte, negative));
+        }
+        let power = 2 * (exponent - digits.len() as i32);
+        if significand <= EXACT && power.unsigned_abs() <= 22 {
+            let magnitude = significand as f64;
+            let scale = POWERS[power.unsigned_abs() as usize];
+            let float = if power >= 0 {
+                magnitude * scale
+            } else {
+                magnitude / scale
+            };
+            return Some(if negative { -float } else { float });
+        }
+    }
+    // `-0.<digits>e<2 × exponent>`, parsed with correct rounding.
+    const LIMIT: usize = 24;
+    if digits.len() > LIMIT {
+        return None;
+    }
+    let mut text = [0u8; 3 + 2 * LIMIT + 8];
+    let mut length = 0;
+    if negative {
+        text[length] = b'-';
+        length += 1;
+    }
+    text[length] = b'0';
+    text[length + 1] = b'.';
+    length += 2;
+    for byte in digits {
+        let value = digit(*byte, negative);
+        text[length] = b'0' + value / 10;
+        text[length + 1] = b'0' + value % 10;
+        length += 2;
+    }
+    text[length] = b'e';
+    length += 1;
+    let mut power = 2 * exponent;
+    if power < 0 {
+        text[length] = b'-';
+        length += 1;
+        power = -power;
+    }
+    let mut reversed = [0u8; 8];
+    let mut count = 0;
+    loop {
+        reversed[count] = b'0' + (power % 10) as u8;
+        count += 1;
+        power /= 10;
+        if power == 0 {
+            break;
+        }
+    }
+    for index in (0..count).rev() {
+        text[length] = reversed[index];
+        length += 1;
+    }
+    Some(
+        str::from_utf8(&text[..length])
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(f64::NAN),
+    )
+}
+
+/// What a number reads back as where nothing records which type wrote it:
+/// see [`read_scalar`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Scalar {
+    /// A whole number an `i128` holds.
+    Integer(i128),
+    /// A whole number past `i128::MAX` that a `u128` holds.
+    Natural(u128),
+    /// Any other number, as the nearest float.
+    Float(f64),
+}
+
+/// Reads the number encoded at the start of `bytes` in one pass, returning
+/// it and how many bytes it took: a whole number as an integer, one too
+/// large for an integer as a natural, and any other as the nearest float.
+/// Allocates nothing for a number of up to 24 base-100 digits.
+pub fn read_scalar(bytes: &[u8]) -> Result<(Scalar, usize), DecodeError> {
+    let (head, read) = Head::read(bytes)?;
+    let scalar = match head {
+        Head::Special(Repr::Zero) => Scalar::Integer(0),
+        Head::Special(special) => Scalar::Float(special_f64(&special)),
+        Head::Finite {
+            negative,
+            exponent,
+            digits,
+        } => match whole_magnitude(negative, exponent, digits) {
+            Some(magnitude) if negative => match 0i128.checked_sub_unsigned(magnitude) {
+                Some(integer) => Scalar::Integer(integer),
+                None => Scalar::Float(float_of(bytes, read, negative, exponent, digits)?),
+            },
+            Some(magnitude) => match i128::try_from(magnitude) {
+                Ok(integer) => Scalar::Integer(integer),
+                Err(_) => Scalar::Natural(magnitude),
+            },
+            None => Scalar::Float(float_of(bytes, read, negative, exponent, digits)?),
+        },
+    };
+    Ok((scalar, read))
+}
+
+/// The float a finite number's encoding names, by the fast path or else
+/// through [`Number`].
+fn float_of(
+    bytes: &[u8],
+    read: usize,
+    negative: bool,
+    exponent: i32,
+    digits: &[u8],
+) -> Result<f64, DecodeError> {
+    match finite_f64(negative, exponent, digits) {
+        Some(float) => Ok(float),
+        None => Ok(Number::decode(&bytes[..read])?.to_f64()),
+    }
+}
+
+/// The magnitude of a whole number that fits in a `u128`, or `None` for a
+/// fraction or a larger number.
+fn whole_magnitude(negative: bool, exponent: i32, digits: &[u8]) -> Option<u128> {
+    if exponent < 0 || digits.len() > exponent as usize {
+        return None;
+    }
+    let mut magnitude: u128 = 0;
+    for byte in digits {
+        magnitude = magnitude
+            .checked_mul(100)?
+            .checked_add(u128::from(digit(*byte, negative)))?;
+    }
+    for _ in digits.len()..exponent as usize {
+        magnitude = magnitude.checked_mul(100)?;
+    }
+    Some(magnitude)
 }
 
 impl From<i128> for Number {

@@ -14,6 +14,46 @@ says how to cut a release.
 
 ## Unreleased
 
+### Attributes can declare `number:` and fixed-width number types
+
+[#593](https://github.com/dialog-db/dialog-db/pull/593),
+[identity, storage and notation](./notes/identity-storage-notation.md#number-types)
+
+An attribute may declare `as: number:`, which holds every number, or a
+fixed-width number type: `natural:8` to `natural:128`, `integer:8` to
+`integer:128`, `float:32` and `float:64`, one for each Rust number.
+`natural:`, `integer:` and `float:` stay as they were, without a width.
+A fixed-width type is a view over the stored number. On read, it coerces
+where it only loses precision and leaves out what it cannot hold:
+through `natural:8`, a stored `9.75` reads as `9`, and `300` and `-1`
+are not rows. A write refuses a value the type cannot hold. Values are
+still stored as naturals, integers and floats, as before.
+
+What this changes for you:
+
+- `#[derive(Attribute)]` on a fixed-width Rust number declares its
+  sized type: `struct Level(u8)` declares `natural:8`, and `f32`
+  declares `float:32`. The identities of these attributes, and of the
+  concepts and rules that use them, differ from those declaring
+  `natural:`, `integer:` or `float:`. `usize` still declares `natural:`,
+  because it has no width common to every target.
+- `Typed::DECLARED` gives the type an attribute over a Rust type
+  declares. `TypeDescriptor::TYPE`, and the kind of a `Term<u8>`, are
+  unchanged.
+- `ValueDataType` gains `Number`, `U8` to `U128`, `I8` to `I128`, `F32`
+  and `F64`. No stored value has these types: they type attributes and
+  query slots. `ValueDataType::holds(&value)` says whether a type admits
+  a value, and `Value::viewed_as(kind)` reads a value through one.
+- The query type system gains `Refinement::views`, sent as `"views"`
+  on the wire.
+- A view reads the same on every target: `float:32` gives one NaN, and
+  rounding to `f32` is pinned bit for bit on native and WebAssembly.
+
+Why: a Rust field of `u8` cannot hold `300`, and an app should be able
+to say so in the schema rather than fail on read. `number:` gives an
+attribute that holds numbers of every type, which JSON already writes
+as naturals, integers and floats.
+
 ### Rules are identified by merkle references
 
 [#593](https://github.com/dialog-db/dialog-db/pull/593),
@@ -155,6 +195,13 @@ change only once.
   under their old entities (tonk's `db.attribute/*` and concept facts)
   need re-recording under the new ones, as tonk's `upgrade_definitions`
   does for pre-0.2 replicas.
+- An attribute derived over a fixed-width Rust number (`u8` to `u128`,
+  `i8` to `i128`, `f32`, `f64`) has a new identity, as do the concepts
+  and rules that use it. Its stored claims are not rewritten, but they
+  read differently: a stored number of another type now reads through
+  the view (a float `9.75` under a `u8` field reads as `9`, where it was
+  no row), and a value the Rust type cannot hold is left out, where it
+  failed the read. 0.2.0 cannot read the sized types.
 - Values in tonk's dag-cbor and IPLD conversions come out tagged. Use
   `Value::untagged()` where an identity minted from values has to stay
   as it was.

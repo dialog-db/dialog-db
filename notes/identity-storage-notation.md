@@ -480,10 +480,71 @@ scans the natural, integer and float bands, filtering floats to whole ones. It
 needs no storage change, but takes three seeks per lookup and keeps cross-type
 equality in the query layer.
 
-**Before the storage change** (not in 0.3.0):
-- numeric scenarios in `dialog-perf` (point, narrow range, wide range, mixed
-  types), which the suite lacks today;
-- the one-band slot behind dialog's value encoder, measured on them.
+**Measured in dialog (the assessment, not in 0.3.0).** A prototype on the
+branch `claude/number-band-prototype` adds the band beside today's bands: a
+critical manifest field picks which band a tree writes and reads, and the
+`dialog-perf` suite gained numeric scenarios. Against the per-type bands, in
+instructions:
+
+| Scenario | One band |
+|---|---|
+| Point lookup | −1% |
+| Scan | +1.0% |
+| Narrow range | +2.1% |
+| Commit | +2.6% |
+| Range over mixed number types | −57% |
+| Wide range | +105% |
+
+- The wide range is an artifact of the scenario: its attributes interleave in
+  the value index, and the scan reads the other attributes' numbers too. The
+  per-type bands hide this because each band holds fewer of them. Scanning by
+  attribute and filtering by value (estimate-based index routing) is the fix,
+  and it is independent of the band.
+- What closed the gap was parsing a key once per row rather than once per
+  component, and the length scan: a scan compares bytes and never decodes.
+- On tonk's real workload, `rule_load` ran 20% fewer instructions with the
+  band. The seed commit makes 4.4 times fewer tree edits, which is not yet
+  explained; capturing it as a `dialog-perf` scenario is the next step.
+- The first tonk run returned no rows for natural fields under the band, until
+  views read every stored number. A band without views silently loses rows.
+
+Conclusion: identity keeps `dialog-number`. The band is viable, and adopting it
+needs numeric equality on `Value`, the type lattice over views (below), writes
+through a view, and the migration.
+
+## Number types
+
+Types an attribute can declare, beside the stored types:
+
+- **`number:`** holds every number, as stored. It types an attribute or a
+  slot, never a stored value or an index key.
+- **Fixed-width types**, one for each Rust number: `natural:8` to
+  `natural:128`, `integer:8` to `integer:128`, `float:32`, `float:64`. They
+  are named by kind and width rather than by Rust's names, so they read as
+  narrowings of the kind.
+- **`natural:`, `integer:` and `float:` stay unbounded.** They are not
+  aliases of the 128- and 64-bit types, so they can hold bignums later
+  without changing identity.
+
+A fixed-width type is a view, read as [Views read and write](#views-read-and-write)
+says: it coerces where it only loses precision (a float through `natural:8`
+truncates, a decimal through `float:32` rounds to nearest), and it leaves out
+what it cannot hold. A write refuses a value outside the type. Until storage
+moves to one band, a view reads the per-type bands and stores in the band of
+its kind.
+
+`#[derive(Attribute)]` declares the type from the Rust field: `u32` declares
+`natural:32`. `usize` declares `natural:`, since its width differs between
+native and WebAssembly and an identity must not.
+
+**Every target reads a view alike.** The `float:32` view gives one NaN, and
+tests pin the bits of each view's result, run on native and in WebAssembly.
+
+**Not yet:** the query type lattice keeps `natural:`, `integer:` and `float:`
+disjoint, so `natural:` does not include `natural:8`. A slot declaring a
+fixed-width type gets no interval pushdown, because the scan has to admit
+rows of every stored type through the view. `Value`'s equality still tells 5
+from 5.0.
 
 ## Views read and write
 
@@ -642,6 +703,10 @@ Each step lands with tests and a perf sweep:
 - **Inclusion proofs:** the structure supports them, but the verifier is not part
   of 0.3.0.
 - **Types are identified by name**, and dialog's names are its type entities.
+- **`number:` is declarable**, and fixed-width number types are named by kind
+  and width (`natural:8`, `integer:64`, `float:32`). `natural:`, `integer:` and
+  `float:` stay unbounded. The derive infers the sized type from the Rust field.
+- **Identity keeps `dialog-number`** after the storage assessment above.
 
 ## Open questions
 

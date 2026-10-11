@@ -64,6 +64,14 @@ pub trait Typed {
     /// The descriptor type that represents this type in the term
     /// system.
     type Descriptor: TypeDescriptor;
+
+    /// The type an attribute holding this Rust type declares. It is
+    /// the descriptor's storage tag, except for the fixed-width
+    /// numbers: a `u8` field declares `natural:8`, so reads see stored
+    /// numbers through the `u8` view and writes refuse what `u8`
+    /// cannot hold. `usize` has no width common to every target, so
+    /// it declares the unbounded `natural:`.
+    const DECLARED: Option<Type> = <Self::Descriptor as TypeDescriptor>::TYPE;
 }
 
 macro_rules! define_descriptor {
@@ -221,23 +229,29 @@ macro_rules! impl_typed {
             type Descriptor = $descriptor;
         }
     };
+    ($rust_type:ty, $descriptor:ty, $declared:expr) => {
+        impl Typed for $rust_type {
+            type Descriptor = $descriptor;
+            const DECLARED: Option<Type> = Some($declared);
+        }
+    };
 }
 
 impl_typed!(String, Text);
 impl_typed!(bool, Boolean);
 impl_typed!(usize, UnsignedInteger);
-impl_typed!(u128, UnsignedInteger);
-impl_typed!(u64, UnsignedInteger);
-impl_typed!(u32, UnsignedInteger);
-impl_typed!(u16, UnsignedInteger);
-impl_typed!(u8, UnsignedInteger);
-impl_typed!(i128, SignedInteger);
-impl_typed!(i64, SignedInteger);
-impl_typed!(i32, SignedInteger);
-impl_typed!(i16, SignedInteger);
-impl_typed!(i8, SignedInteger);
-impl_typed!(f64, Float);
-impl_typed!(f32, Float);
+impl_typed!(u128, UnsignedInteger, Type::U128);
+impl_typed!(u64, UnsignedInteger, Type::U64);
+impl_typed!(u32, UnsignedInteger, Type::U32);
+impl_typed!(u16, UnsignedInteger, Type::U16);
+impl_typed!(u8, UnsignedInteger, Type::U8);
+impl_typed!(i128, SignedInteger, Type::I128);
+impl_typed!(i64, SignedInteger, Type::I64);
+impl_typed!(i32, SignedInteger, Type::I32);
+impl_typed!(i16, SignedInteger, Type::I16);
+impl_typed!(i8, SignedInteger, Type::I8);
+impl_typed!(f64, Float, Type::F64);
+impl_typed!(f32, Float, Type::F32);
 impl_typed!(Vec<u8>, Bytes);
 impl_typed!(Entity, EntityType);
 impl_typed!(ArtifactsRelation, Symbol);
@@ -249,6 +263,7 @@ impl_typed!(Value, Any);
 /// [`OptionalOf<U::Descriptor>`].
 impl<U: Scalar> Typed for Option<U> {
     type Descriptor = OptionalOf<<U as Typed>::Descriptor>;
+    const DECLARED: Option<Type> = <U as Typed>::DECLARED;
 }
 
 /// A concrete type that can be used as a term value with
@@ -267,10 +282,12 @@ macro_rules! impl_scalar {
 impl_scalar!(
     bool,
     String,
+    u8,
     u16,
     u32,
     u64,
     u128,
+    i8,
     i16,
     i32,
     i64,

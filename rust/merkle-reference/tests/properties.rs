@@ -1,6 +1,9 @@
 //! The properties merkle references v2 promise, one test each, with types a
 //! user of the crate would define.
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::LazyLock;
 
@@ -23,14 +26,14 @@ fn plain(bytes: &[u8]) -> Reference {
     Reference::from_bytes(*blake3::hash(bytes).as_bytes())
 }
 
-#[test]
+#[dialog_common::test]
 fn raw_bytes_are_referenced_by_their_blake3_hash() {
     for bytes in [&b""[..], b"hello", &[7u8; 5000]] {
         assert_eq!(Reference::hash(bytes), plain(bytes));
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn the_same_bytes_under_two_types_have_two_references() {
     let content = b"did:key:alice";
     let references = [
@@ -60,7 +63,7 @@ fn the_same_bytes_under_two_types_have_two_references() {
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn no_typed_reference_equals_the_plain_hash_of_its_content() {
     let parts = [Text("a"), Text("b"), Text("c")].map(|text| text.to_reference());
     let list_content: Vec<u8> = parts.iter().flat_map(|part| *part.as_bytes()).collect();
@@ -80,7 +83,7 @@ fn no_typed_reference_equals_the_plain_hash_of_its_content() {
     );
 }
 
-#[test]
+#[dialog_common::test]
 fn a_part_linked_by_its_reference_gives_its_parent_the_same_reference() {
     let inner = vec![Text("1"), Text("2"), Text("3")];
     let mut entry = BTreeMap::new();
@@ -145,7 +148,7 @@ fn a_part_linked_by_its_reference_gives_its_parent_the_same_reference() {
     assert_eq!(embedded, linked);
 }
 
-#[test]
+#[dialog_common::test]
 fn a_value_has_one_reference_however_it_was_built() {
     // Maps: entry order does not matter, nor which map type holds them.
     let pairs = [("b", "2"), ("a", "1"), ("c", "3")];
@@ -186,7 +189,7 @@ fn a_value_has_one_reference_however_it_was_built() {
     assert_eq!(boxed.to_reference(), Text("x").to_reference());
 }
 
-#[test]
+#[dialog_common::test]
 fn a_list_of_any_length_hashes_as_its_concatenated_parts() {
     // Around the stack buffer (32 parts) and the 64 KiB block (2048 parts).
     for count in [0, 1, 31, 32, 33, 2047, 2048, 2049, 4096, 5000] {

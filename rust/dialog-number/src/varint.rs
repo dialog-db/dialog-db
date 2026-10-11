@@ -59,7 +59,7 @@ pub(crate) fn read(bytes: &[u8], inverted: bool) -> Option<(u32, usize)> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn it_round_trips_and_sorts_as_it_counts() {
         let mut values: Vec<u32> = (0..=MAX).step_by(7).collect();
         values.extend([240, 241, 2287, 2288, MAX]);

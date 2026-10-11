@@ -49,6 +49,21 @@ pub fn encode_value_owned(value: &Value) -> Vec<u8> {
 /// bytes, or `None` on malformed input.
 pub fn decode_value(value_type: ValueDataType, bytes: &[u8]) -> Option<(Value, &[u8])> {
     Some(match value_type {
+        // No value is encoded as `number:` itself.
+        ValueDataType::Number => return None,
+        // A sized number type's value is encoded as its storage type.
+        view @ (ValueDataType::U8
+        | ValueDataType::U16
+        | ValueDataType::U32
+        | ValueDataType::U64
+        | ValueDataType::U128
+        | ValueDataType::I8
+        | ValueDataType::I16
+        | ValueDataType::I32
+        | ValueDataType::I64
+        | ValueDataType::I128
+        | ValueDataType::F32
+        | ValueDataType::F64) => return decode_value(view.storage(), bytes),
         ValueDataType::UnsignedInt => {
             let (number, rest) = decode_u128(bytes)?;
             (Value::UnsignedInt(number), rest)

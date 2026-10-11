@@ -443,6 +443,9 @@ fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
         | ValueDataType::Record
         | ValueDataType::Entity
         | ValueDataType::Symbol => terminated_len(bytes, at),
+        // `number:` and the sized number types type slots, not keys: their
+        // bytes are rejected above.
+        _ => None,
     }
 }
 

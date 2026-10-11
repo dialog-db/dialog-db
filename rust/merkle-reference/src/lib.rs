@@ -338,15 +338,18 @@ impl fmt::Debug for Type {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
 
-    #[test]
+    #[dialog_common::test]
     fn it_derives_the_type_of_types_from_its_context() {
         let root = blake3::derive_key(Type::CONTEXT, b"");
         assert_eq!(Type::TYPE.reference(), Reference::from_bytes(root));
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_names_the_shapes() {
         for (name, ty) in [
             ("list:", Type::LIST),
@@ -357,7 +360,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_names_types_by_uri() {
         for name in [
             "text:",

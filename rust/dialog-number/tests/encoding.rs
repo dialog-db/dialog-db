@@ -1,10 +1,14 @@
 //! The encoding's promises: SQLite4's bytes, one encoding per number, byte
 //! order equal to numeric order, and lossless round trips.
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
 use std::cmp::Ordering;
 
 use dialog_number::{
-    DecodeError, Number, decode_f64, decode_i128, encode_f64, encode_i128, encode_u128,
+    DecodeError, Number, Scalar, decode_f64, decode_i128, encode_f64, encode_i128, encode_u128,
+    encoded_len, read_scalar,
 };
 
 fn float(value: f64) -> Vec<u8> {
@@ -36,7 +40,7 @@ fn generator(seed: u64) -> impl FnMut() -> u64 {
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn it_writes_sqlite4s_bytes() {
     // From SQLite4's key encoding note: the exponent (in the class byte for
     // 0 to 10, `0x17 + e`) and the significand bytes. The note's rows for
@@ -82,7 +86,7 @@ fn it_writes_sqlite4s_bytes() {
     assert_eq!(float(-0.00123), [0x14, 0x01, !0x19, !0x3c]);
 }
 
-#[test]
+#[dialog_common::test]
 fn it_encodes_a_number_once_whatever_holds_it() {
     assert_eq!(integer(3), float(3.0));
     assert_eq!(natural(3), float(3.0));
@@ -99,7 +103,7 @@ fn it_encodes_a_number_once_whatever_holds_it() {
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn it_takes_a_float_as_the_decimal_it_prints_as() {
     // The float 1e23 is exactly 99999999999999991611392; as a number it is
     // 10^23, above an integer that lies between the two.
@@ -110,7 +114,7 @@ fn it_takes_a_float_as_the_decimal_it_prints_as() {
     assert_eq!(Number::from(0.1).to_string(), "0.10e0");
 }
 
-#[test]
+#[dialog_common::test]
 fn it_round_trips_every_float() {
     let mut next = generator(0x2545_F491_4F6C_DD1D);
     let mut checked = 0;
@@ -141,7 +145,43 @@ fn it_round_trips_every_float() {
     }
 }
 
-#[test]
+/// `encoded_len` finds where a number ends without decoding it, so a key
+/// parser can split a key: it must agree with the decoder on every number,
+/// with whatever follows the number in the key.
+#[dialog_common::test]
+fn it_finds_where_a_number_ends() {
+    let mut next = generator(0x9E37_79B9_7F4A_7C15);
+    let mut values: Vec<Vec<u8>> = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0]
+        .into_iter()
+        .map(float)
+        .collect();
+    for _ in 0..100_000 {
+        let bits = next();
+        values.push(float(f64::from_bits(bits)));
+        values.push(integer(bits as i64 as i128));
+        values.push(integer((i128::from(bits) << 64) | i128::from(next())));
+        values.push(natural(u128::from(bits) << 64 | u128::from(next())));
+        values.push(float((bits % 100_000) as f64 / 100.0));
+    }
+    for bytes in values {
+        let (_, read) = Number::read(&bytes).expect("decodes");
+        assert_eq!(read, bytes.len());
+        for tail in [&[][..], &[0x00], &[0xFF, 0x01], &[0x2A; 3]] {
+            let mut key = bytes.clone();
+            key.extend_from_slice(tail);
+            assert_eq!(
+                encoded_len(&key),
+                Some(read),
+                "{bytes:02x?} then {tail:02x?}"
+            );
+        }
+    }
+    assert_eq!(encoded_len(&[]), None);
+    assert_eq!(encoded_len(&[0x00]), None, "not a class byte");
+    assert_eq!(encoded_len(&[0x18, 0x03]), None, "no last digit");
+}
+
+#[dialog_common::test]
 fn it_round_trips_every_integer() {
     let mut next = generator(0xD1B5_4A32_D192_ED03);
     for value in [0, 1, -1, 99, 100, -100, i128::MIN, i128::MAX] {
@@ -198,7 +238,7 @@ fn exact(a: Held, b: Held) -> Ordering {
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn it_sorts_numbers_by_value() {
     let mut next = generator(0x94D0_49BB_1331_11EB);
     let mut held = Vec::new();
@@ -228,7 +268,7 @@ fn it_sorts_numbers_by_value() {
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn it_sorts_every_float_by_value() {
     let mut next = generator(0xBF58_476D_1CE4_E5B9);
     let mut floats: Vec<f64> = Vec::new();
@@ -254,7 +294,7 @@ fn it_sorts_every_float_by_value() {
     assert!(float(f64::MAX) < float(f64::INFINITY));
 }
 
-#[test]
+#[dialog_common::test]
 fn it_refuses_bytes_that_are_not_canonical() {
     // 1 with a trailing zero digit: 0.01 00 × 100^1.
     assert_eq!(
@@ -294,4 +334,67 @@ fn it_refuses_bytes_that_are_not_canonical() {
     // Not whole, or too large: no integer.
     assert_eq!(decode_i128(&float(0.5)), Ok(None));
     assert_eq!(decode_i128(&float(1e300)), Ok(None));
+}
+
+/// Short decimals (prices, measurements) decode by multiplying or dividing
+/// an exact significand by an exact power of ten; that must round exactly
+/// as parsing the decimal does.
+#[dialog_common::test]
+fn it_decodes_short_decimals_as_parsing_them_does() {
+    let mut next = generator(0xD1B5_4A32_D192_ED03);
+    for _ in 0..200_000 {
+        let significand = next() % 10_000_000_000_000_000;
+        let places = (next() % 45) as i32 - 22;
+        let text = format!("{significand}e{places}");
+        let value: f64 = text.parse().expect("parses");
+        for value in [value, -value] {
+            assert!(
+                decode_f64(&float(value)).unwrap() == value,
+                "{text} came back as {:e}",
+                decode_f64(&float(value)).unwrap()
+            );
+        }
+    }
+    for cents in 1..100_000u64 {
+        let price = cents as f64 / 100.0;
+        assert!(decode_f64(&float(price)).unwrap() == price, "{price}");
+    }
+}
+
+/// `read_scalar` reads a whole number an `i128` holds as an integer, a
+/// larger one as a natural, and anything else as the float `decode_f64`
+/// gives, taking exactly the number's bytes.
+#[dialog_common::test]
+fn it_reads_a_scalar_as_the_decoders_do() {
+    let mut next = generator(0x94D0_49BB_1331_11EB);
+    let mut cases: Vec<Vec<u8>> = vec![float(f64::NAN), float(f64::INFINITY), float(0.0)];
+    for _ in 0..100_000 {
+        let bits = next();
+        cases.push(float(f64::from_bits(bits)));
+        cases.push(float((bits % 1_000_000) as f64 / 100.0));
+        cases.push(integer(bits as i64 as i128));
+        cases.push(integer(i128::from(bits) << 64 | i128::from(next())));
+        cases.push(natural(u128::MAX - u128::from(bits)));
+    }
+    for bytes in cases {
+        let mut key = bytes.clone();
+        key.extend_from_slice(&[0x00, 0x2A]);
+        let (scalar, read) = read_scalar(&key).expect("reads");
+        assert_eq!(read, bytes.len());
+        match scalar {
+            Scalar::Integer(integer) => assert_eq!(decode_i128(&bytes).unwrap(), Some(integer)),
+            Scalar::Natural(natural) => {
+                assert_eq!(decode_i128(&bytes).unwrap(), None);
+                assert_eq!(Number::decode(&bytes).unwrap().to_u128(), Some(natural));
+            }
+            Scalar::Float(value) => {
+                assert_eq!(decode_i128(&bytes).unwrap(), None);
+                let expected = decode_f64(&bytes).unwrap();
+                assert!(
+                    value == expected || (value.is_nan() && expected.is_nan()),
+                    "{value:e} against {expected:e}"
+                );
+            }
+        }
+    }
 }

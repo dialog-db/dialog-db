@@ -296,11 +296,14 @@ impl AttributeQueryOnly {
                                     // (`CorruptEntry`) is a corrupt tree
                                     // entry: drop the group's yield rather
                                     // than failing the query.
-                                    match materialize_winner(current)? {
+                                    match materialize_winner(current)?.and_then(
+                                        |(winner, standing)| {
+                                            selector.admit(winner).map(|winner| (winner, standing))
+                                        },
+                                    ) {
                                         Some((winner, standing))
-                                            if (value_constraint.is_none()
-                                                || value_constraint.as_ref() == Some(&winner.is))
-                                                && selector.admits(&winner) =>
+                                            if value_constraint.is_none()
+                                                || value_constraint.as_ref() == Some(&winner.is) =>
                                         {
                                             let mut extension = base.clone();
                                             selector.merge(&mut extension, winner, standing)?;
@@ -318,11 +321,12 @@ impl AttributeQueryOnly {
                     // Yield the final group's winner (unless its stored
                     // bytes are corrupt; see the group-close arm above).
                     if let Some(winner) = candidate.take() {
-                        match materialize_winner(winner)? {
+                        match materialize_winner(winner)?.and_then(|(winner, standing)| {
+                            selector.admit(winner).map(|winner| (winner, standing))
+                        }) {
                             Some((winner, standing))
-                                if (value_constraint.is_none()
-                                    || value_constraint.as_ref() == Some(&winner.is))
-                                    && selector.admits(&winner) =>
+                                if value_constraint.is_none()
+                                    || value_constraint.as_ref() == Some(&winner.is) =>
                             {
                                 let mut extension = base.clone();
                                 selector.merge(&mut extension, winner, standing)?;
