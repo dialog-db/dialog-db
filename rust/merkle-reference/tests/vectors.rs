@@ -1,6 +1,9 @@
 //! Reference values pinned so that a change to the format cannot pass
 //! unnoticed. `spec.md` lists the same vectors.
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
 use merkle_reference::{Reference, Type};
 
 fn text(value: &str) -> Reference {
@@ -85,7 +88,7 @@ const PINNED: &[(&str, &str)] = &[
     ),
 ];
 
-#[test]
+#[dialog_common::test]
 fn it_matches_the_pinned_vectors() {
     let computed = vectors();
     assert_eq!(computed.len(), PINNED.len());

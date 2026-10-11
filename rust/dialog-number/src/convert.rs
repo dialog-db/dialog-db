@@ -40,7 +40,18 @@ pub(crate) fn whole(mut magnitude: u128) -> Digits<WHOLE_DIGITS> {
     const CHUNK: u128 = 1_000_000_000_000_000_000;
     let mut buffer = [0u8; WHOLE_DIGITS];
     let mut start = WHOLE_DIGITS;
-    loop {
+    // A magnitude below 10^18 is one chunk, split with 64-bit arithmetic
+    // alone: no 128-bit division for timestamps, counts and sizes.
+    if magnitude < CHUNK {
+        let mut chunk = magnitude as u64;
+        while chunk > 0 {
+            start -= 1;
+            buffer[start] = (chunk % 100) as u8;
+            chunk /= 100;
+        }
+        magnitude = 0;
+    }
+    while magnitude > 0 {
         let mut chunk = (magnitude % CHUNK) as u64;
         magnitude /= CHUNK;
         if magnitude == 0 {
@@ -160,6 +171,9 @@ pub(crate) fn shortest(text: &[u8]) -> Digits<FLOAT_DIGITS> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
 
     fn whole_of(value: u128) -> (i32, Vec<u8>) {
@@ -172,7 +186,7 @@ mod tests {
         (digits.exponent, digits.digits().to_vec())
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_takes_whole_numbers_to_base_100() {
         assert_eq!(whole_of(1), (1, vec![1]));
         assert_eq!(whole_of(10), (1, vec![10]));
@@ -195,7 +209,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_agrees_with_decimal_printing_for_whole_numbers() {
         let mut state = 0x2545_F491_4F6C_DD1Du64;
         for _ in 0..20_000 {
@@ -261,7 +275,7 @@ mod tests {
 
     /// The shortest decimal is unique, so two correct printers agree; this
     /// pins the one in use to `ryu`.
-    #[test]
+    #[dialog_common::test]
     fn it_prints_the_same_shortest_decimal_as_ryu() {
         let mut state = 0x9E37_79B9_7F4A_7C15u64;
         let mut checked = 0;
@@ -287,7 +301,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[dialog_common::test]
     fn it_takes_floats_to_their_shortest_decimal() {
         assert_eq!(float_of(1.0), (1, vec![1]));
         assert_eq!(float_of(3.0), whole_of(3));

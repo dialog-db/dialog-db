@@ -22,7 +22,7 @@
 //!     fn descriptor() -> AttributeDescriptor {
 //!         // Builds descriptor from domain/name with description, type and pick
 //!         AttributeDescriptor::new(/* domain/full-name */, "A person's full name",
-//!             Cardinality::One, <String as Typed>::TYPE).with_pick(Pick::Last)
+//!             Cardinality::One, <String as Typed>::DECLARED).with_pick(Pick::Last)
 //!     }
 //!
 //!     fn value(&self) -> &String { &self.0 }
@@ -231,7 +231,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         the,
                         #description_lit,
                         dialog_query::Cardinality::One,
-                        <<#wrapped_type as dialog_query::Typed>::Descriptor as dialog_query::TypeDescriptor>::TYPE,
+                        <#wrapped_type as dialog_query::Typed>::DECLARED,
                     )
                     .with_pick(#pick)
                 })

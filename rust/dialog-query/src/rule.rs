@@ -574,7 +574,7 @@ mod tests {
         assert_eq!(birthday.domain(), "macro-person");
         assert_eq!(birthday.name(), Some("birthday"));
         assert_eq!(birthday.description(), "Birthday of the person");
-        assert_eq!(birthday.content_type(), Some(Type::UnsignedInt));
+        assert_eq!(birthday.content_type(), Some(Type::U32));
 
         // Test that MacroPerson implements Rule
         let test_match = Query::<MacroPerson> {
