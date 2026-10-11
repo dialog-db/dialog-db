@@ -1446,6 +1446,7 @@ dependencies = [
  "dialog-effects",
  "dialog-macros",
  "dialog-network",
+ "dialog-number",
  "dialog-peer",
  "dialog-repository",
  "dialog-search-tree",
