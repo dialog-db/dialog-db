@@ -46,7 +46,7 @@ use crate::{
     DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart, Instruction, Key, KeyView,
     KeyViewConstruct, KeyViewMut, LoadBlob, Pick, SelectorMatch, Standing, State, VALUE_KEY_TAG,
     Value, ValueDataType, ValueKey, decode_value_parts, encode_bytes, encode_value_owned,
-    key::varkey::{self, KeyRef, ValuePayload, ValueRef, parse_key_ref},
+    key::varkey::{self, KeyLayout, KeyRef, ValuePayload, ValueRef, parse_key_layout},
     key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
     make_reference, match_selector_and_key_ref,
     selector::Constrained,
@@ -942,18 +942,19 @@ impl ArtifactTreeExt for ArtifactTree {
                 // A key that does not parse is corruption; dropping it
                 // silently would make the corrupt entry vanish from results
                 // with no signal.
-                let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
+                let layout = parse_key_layout(raw.key.as_ref()).ok_or_else(|| {
                     DialogArtifactsError::InvalidKey(
                         "scanned entry's key does not parse".to_string(),
                     )
                 })?;
+                let parts = layout.view(raw.key.as_ref());
                 let verdict = match_selector_and_key_ref(&selector, &parts, &manifest);
                 if verdict == SelectorMatch::Excluded || !matches!(raw.value, State::Added(_)) {
                     return Ok(Staged::Skip);
                 }
                 if let ValueRef::Spilled { hash, .. } = &parts.value {
                     let hash = hash.to_vec();
-                    return Ok(Staged::Spilled { raw, verdict, hash });
+                    return Ok(Staged::Spilled { raw, layout, verdict, hash });
                 }
                 // A NeedsValue verdict means some value predicate's answer
                 // lies beyond what the key decides; re-check semantically
@@ -967,7 +968,7 @@ impl ArtifactTreeExt for ArtifactTree {
                 let State::Added(datum) = raw.value else {
                     unreachable!("Added state checked above")
                 };
-                Ok(Staged::Ready(ArtifactView::new(raw.key, datum, None)))
+                Ok(Staged::Ready(ArtifactView::new(raw.key, layout, datum, None)))
             });
             // Stage two: the spilled rows' block fetches, SPILL_LOOKAHEAD in
             // flight, in row order.
@@ -977,8 +978,8 @@ impl ArtifactTreeExt for ArtifactTree {
                     let cache = &cache;
                     let selector = &selector;
                     async move {
-                        let (raw, verdict, hash) = match staged? {
-                            Staged::Spilled { raw, verdict, hash } => (raw, verdict, hash),
+                        let (raw, layout, verdict, hash) = match staged? {
+                            Staged::Spilled { raw, layout, verdict, hash } => (raw, layout, verdict, hash),
                             finished => return Ok(staged_ready(finished)),
                         };
                         let spilled = fetch_spilled_reference(raw_store, cache, &hash).await?;
@@ -986,11 +987,7 @@ impl ArtifactTreeExt for ArtifactTree {
                         // view anyway), so the value predicates can be
                         // answered past the in-key prefix.
                         if verdict == SelectorMatch::NeedsValue {
-                            let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
-                                DialogArtifactsError::InvalidKey(
-                                    "scanned entry's key does not parse".to_string(),
-                                )
-                            })?;
+                            let parts = layout.view(raw.key.as_ref());
                             if !value_predicates_admit(
                                 selector,
                                 &decode_value_parts(&parts, Some(spilled.clone()))?,
@@ -1003,6 +1000,7 @@ impl ArtifactTreeExt for ArtifactTree {
                         };
                         Ok::<_, DialogArtifactsError>(Some(ArtifactView::new(
                             raw.key,
+                            layout,
                             datum,
                             Some(spilled),
                         )))
@@ -1039,17 +1037,17 @@ impl ArtifactTreeExt for ArtifactTree {
             let range = selector_range(&selector, &manifest);
 
             let stream = tree.stream_range_handles(range, &storage);
-            // The two stages of `scan`, reconstructing whole facts: an
-            // inline-valued row is parsed once and materialized here; a
-            // spilled row is parsed again once its block has landed, which
-            // it pays a round trip for anyway.
+            // The two stages of `scan`, reconstructing whole facts: every
+            // row is parsed once, and a spilled row is materialized from
+            // that parse once its block has landed.
             let staged = stream.map(|item| -> Result<Staged<_, Artifact>, DialogArtifactsError> {
                 let raw = item?;
-                let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
+                let layout = parse_key_layout(raw.key.as_ref()).ok_or_else(|| {
                     DialogArtifactsError::InvalidKey(
                         "scanned entry's key does not parse".to_string(),
                     )
                 })?;
+                let parts = layout.view(raw.key.as_ref());
                 let verdict = match_selector_and_key_ref(&selector, &parts, &manifest);
                 if verdict == SelectorMatch::Excluded {
                     return Ok(Staged::Skip);
@@ -1059,7 +1057,7 @@ impl ArtifactTreeExt for ArtifactTree {
                 };
                 if let ValueRef::Spilled { hash, .. } = &parts.value {
                     let hash = hash.to_vec();
-                    return Ok(Staged::Spilled { raw, verdict, hash });
+                    return Ok(Staged::Spilled { raw, layout, verdict, hash });
                 }
                 Ok(match reconstruct(&selector, &parts, datum, None, verdict)? {
                     Some(artifact) => Staged::Ready(artifact),
@@ -1072,16 +1070,12 @@ impl ArtifactTreeExt for ArtifactTree {
                     let cache = &cache;
                     let selector = &selector;
                     async move {
-                        let (raw, verdict, hash) = match staged? {
-                            Staged::Spilled { raw, verdict, hash } => (raw, verdict, hash),
+                        let (raw, layout, verdict, hash) = match staged? {
+                            Staged::Spilled { raw, layout, verdict, hash } => (raw, layout, verdict, hash),
                             finished => return Ok(staged_ready(finished)),
                         };
                         let spilled = fetch_spilled_reference(raw_store, cache, &hash).await?;
-                        let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
-                            DialogArtifactsError::InvalidKey(
-                                "scanned entry's key does not parse".to_string(),
-                            )
-                        })?;
+                        let parts = layout.view(raw.key.as_ref());
                         let State::Added(datum) = &raw.value else {
                             unreachable!("Added state checked above")
                         };
@@ -1112,6 +1106,7 @@ enum Staged<Raw, Ready> {
     Ready(Ready),
     Spilled {
         raw: Raw,
+        layout: KeyLayout,
         verdict: SelectorMatch,
         hash: Vec<u8>,
     },

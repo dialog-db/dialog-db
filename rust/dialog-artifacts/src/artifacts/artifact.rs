@@ -19,7 +19,7 @@ use crate::{
     ATTRIBUTE_KEY_TAG, AttributeKey, Datum, DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, Key,
     KeyView, VALUE_KEY_TAG, ValueKey, decode_value,
     history::{Edition, Version},
-    key::varkey::{self, KeyRef, ValueRef},
+    key::varkey::{self, KeyLayout, KeyRef, ValueRef},
     make_reference,
 };
 
@@ -220,6 +220,9 @@ enum Backing {
     /// no per-row key copy.
     Scanned {
         key: KeyHandle,
+        /// Where the key's components sit, read once when the row was
+        /// scanned, so its fields are read without walking the key again.
+        layout: KeyLayout,
         datum: Datum,
         spilled: Option<Vec<u8>>,
     },
@@ -246,12 +249,19 @@ impl From<Artifact> for ArtifactView {
 }
 
 impl ArtifactView {
-    /// Assembles a view from a scanned entry's key handle, its payload, and
-    /// (for a spilled value) the fetched block bytes.
-    pub(crate) fn new(key: KeyHandle, datum: Datum, spilled: Option<Vec<u8>>) -> Self {
+    /// Assembles a view from a scanned entry's key handle, the layout the
+    /// scan read from it, its payload, and (for a spilled value) the
+    /// fetched block bytes.
+    pub(crate) fn new(
+        key: KeyHandle,
+        layout: KeyLayout,
+        datum: Datum,
+        spilled: Option<Vec<u8>>,
+    ) -> Self {
         Self {
             backing: Backing::Scanned {
                 key,
+                layout,
                 datum,
                 spilled,
             },
@@ -332,17 +342,15 @@ impl ArtifactView {
         }
     }
 
-    /// Parses the key into borrowed components: entity, attribute, value
-    /// type, and value payload, borrowing from the key bytes (owning only an
-    /// escaped entity/attribute). One walk of the key; call this once and
-    /// read every field a consumer needs off the result. Errors for a row
+    /// The key's borrowed components: entity, attribute, value type, and
+    /// value payload, borrowing from the key bytes (owning only an escaped
+    /// entity/attribute). The scan read the key's layout once, so this
+    /// slices the key without walking it again. Errors for a row
     /// backed by an owned [`Artifact`], which has no stored key — the
     /// field accessors below work on both backings.
     pub fn parts(&self) -> Result<KeyRef<'_>, DialogArtifactsError> {
         match &self.backing {
-            Backing::Scanned { key, .. } => varkey::parse_key_ref(key.as_ref()).ok_or_else(|| {
-                DialogArtifactsError::InvalidKey("key did not parse into components".to_string())
-            }),
+            Backing::Scanned { key, layout, .. } => Ok(layout.view(key.as_ref())),
             Backing::Owned { .. } => Err(DialogArtifactsError::InvalidKey(
                 "owned-backed view has no index key to parse".to_string(),
             )),
@@ -668,8 +676,11 @@ mod tests {
             value: ValuePayload::Inline(encode_value_owned(&Value::String(value.into()))),
             version: None,
         };
+        let key = build_key(&parts);
+        let layout = varkey::parse_key_layout(&key).expect("a built key parses");
         ArtifactView::new(
-            KeyHandle::Owned(build_key(&parts)),
+            KeyHandle::Owned(key),
+            layout,
             Datum {
                 cause,
                 blob: None,
