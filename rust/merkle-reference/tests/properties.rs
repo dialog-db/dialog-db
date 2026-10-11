@@ -153,3 +153,22 @@ fn a_float_is_not_an_integer() {
     // are kept. Dialog's numbers do not use it.
     assert_ne!(0f64.refer(), (-0f64).refer());
 }
+
+#[test]
+fn a_list_of_any_length_hashes_as_its_concatenated_parts() {
+    // Around the stack buffer (32 parts) and the 64 KiB block (2048 parts).
+    for count in [0, 1, 31, 32, 33, 2047, 2048, 2049, 4096, 5000] {
+        let parts: Vec<Reference> = (0..count as u32)
+            .map(|index| Reference::of_bytes(&index.to_le_bytes()))
+            .collect();
+        let mut content = Vec::new();
+        for part in &parts {
+            content.extend_from_slice(part.as_bytes());
+        }
+        assert_eq!(
+            Type::LIST.list(parts.iter().copied()),
+            Type::LIST.refer(&content),
+            "{count} parts"
+        );
+    }
+}
