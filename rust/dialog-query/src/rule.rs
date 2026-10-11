@@ -39,6 +39,8 @@ pub mod inductive;
 mod invariants;
 /// Premises collection type.
 pub mod premises;
+
+pub(crate) mod reference;
 /// Rules as statements: `dialog.rule/*` vocabulary and install-by-assert.
 pub mod statement;
 /// Type inference over a rule's premises.

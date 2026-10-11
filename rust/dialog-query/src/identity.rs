@@ -37,6 +37,10 @@ pub const CONCEPT: Type = Type::from_reference(Reference::from_hex(
 pub const RULE: Type = Type::from_reference(Reference::from_hex(
     "e7cea1a633767195582d0a3f84a5f2c5f3afd96b5c694dd647e8db1dd8cb5967",
 ));
+/// The type of the absent value a wire form writes as unit or `None`.
+pub const NULL: Type = Type::from_reference(Reference::from_hex(
+    "345b62212fe549f6acc9e6de9270715fc98bb3d82fd2c0e1291bd84d569208ae",
+));
 
 /// The references of the field names definitions use, as `text:`, kept as
 /// constants so that referencing a definition hashes no name.
@@ -92,6 +96,7 @@ mod tests {
         assert_eq!(Type::named("the:"), Ok(ATTRIBUTE));
         assert_eq!(Type::named("concept:"), Ok(CONCEPT));
         assert_eq!(Type::named("rule:"), Ok(RULE));
+        assert_eq!(Type::named("null:"), Ok(NULL));
     }
 
     #[dialog_common::test]

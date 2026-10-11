@@ -604,7 +604,14 @@ Each step lands with tests and a perf sweep:
      alternatives were to keep the band in identity (a third written-as
      value, which bakes the band in and needs another migration to drop) or
      to make the index read both bands now (the encoding work deferred).
-3. **Rule references** over the canonical AST, referencing concepts.
+3. **Rule references** over the canonical AST, referencing concepts. Done
+   (`rule/reference.rs`): a rule is a map under `rule:` from its head (concept
+   by reference, fields bound to canonical variables), `when` and `unless` as
+   sets, and `reduce`. A concept premise binds by field (attribute and
+   options) rather than by field name. Every other premise is its wire form
+   read as a merkle structure, a constant `{"<type entity>": payload}` taken
+   as its value, so a constant has one identity wherever it appears.
+   Attribute descriptions no longer reach rule identity.
 4. **Body format 3**, the WebAssembly-style layout above, with definitions
    stored by reference. Formats 0 to 2 are still read. Pinned by a round-trip
    test, a test that equal rules store equal bytes, and tests that feed the
