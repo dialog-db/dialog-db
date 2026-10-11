@@ -168,7 +168,7 @@ impl Primitive {
             ValueType::Record => 1 << 8,
             // The index band holding every number: all three number types.
             ValueType::Number => (1 << 2) | (1 << 3) | (1 << 4),
-            // A Rust numeric view is a member of its storage type.
+            // A sized number type is a member of its storage type.
             ValueType::U8 | ValueType::U16 | ValueType::U32 | ValueType::U64 | ValueType::U128 => {
                 1 << 2
             }
@@ -273,9 +273,9 @@ impl From<ValueType> for Primitive {
 }
 
 impl From<ValueType> for Type {
-    /// A Rust numeric view is any number read through the view: its
+    /// A sized number type is any number read through the view: its
     /// membership is every number type, so views over different storage
-    /// types meet (`u16:` and `i8:` read 0 to 127), and the view filters.
+    /// types meet (`natural:16` and `integer:8` read 0 to 127), and the view filters.
     fn from(vt: ValueType) -> Self {
         if vt.is_view() {
             return Type::Refined(Primitive::NUMERIC, Refinement::view(vt));
@@ -383,17 +383,17 @@ pub struct Refinement {
     /// the attribute string alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_shape: Option<NameShape>,
-    /// Rust numeric views (`u8:` .. `f64:`) the value is read through,
+    /// sized number types (`natural:8` .. `float:64`) the value is read through,
     /// all of them: a row is read through each, which filters what is
     /// out of its range and rounds what it reads less precisely, and is
     /// admitted when each holds what it reads. The meet unions the set
-    /// (a `u16:` field joined with an `i8:` one reads 0 to 127), and a
+    /// (a `natural:16` field joined with an `integer:8` one reads 0 to 127), and a
     /// view another in the set nests in is dropped.
     #[serde(default, skip_serializing_if = "Views::is_empty")]
     pub views: Views,
 }
 
-/// A set of Rust numeric views (`u8:` .. `f64:`), one bit each, so a
+/// A set of sized number types (`natural:8` .. `float:64`), one bit each, so a
 /// refinement carrying them stays small.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Views(u16);
@@ -438,7 +438,7 @@ impl<'de> Deserialize<'de> for Views {
         let views = Vec::<ValueType>::deserialize(deserializer)?;
         if let Some(view) = views.iter().find(|view| !view.is_view()) {
             return Err(DeError::custom(format!(
-                "`{}` is not a Rust numeric view",
+                "`{}` is not a sized number type",
                 view.uri()
             )));
         }
@@ -634,7 +634,7 @@ impl Refinement {
     }
 
     /// `views` without the ones another in the set nests in: reading
-    /// through `u8:` already holds whatever `u16:` would.
+    /// through `natural:8` already holds whatever `natural:16` would.
     fn narrowest(views: impl IntoIterator<Item = ValueType>) -> Views {
         let views: Views = views.into_iter().collect();
         views
@@ -1843,7 +1843,7 @@ mod tests {
         assert_eq!(read, old);
     }
 
-    /// A Rust numeric view kind reads a row through the view: it filters
+    /// A sized number type kind reads a row through the view: it filters
     /// what is out of range, and two views meet to the numbers both read.
     #[dialog_common::test]
     fn views_read_rows_by_range() {
@@ -1853,7 +1853,7 @@ mod tests {
         assert_eq!(byte.view(Value::Float(2.7)), Some(Value::UnsignedInt(2)));
         assert_eq!(byte.view(Value::String("5".into())), None);
 
-        // `u16:` and `i8:` together read 0 to 127, which no one view is.
+        // `natural:16` and `integer:8` together read 0 to 127, which no one view is.
         let both = p(ValueType::U16)
             .intersect(&p(ValueType::I8))
             .expect("they overlap");
@@ -1872,7 +1872,7 @@ mod tests {
         assert!(p(ValueType::U16).includes(&p(ValueType::U8)));
         assert!(!p(ValueType::U8).includes(&p(ValueType::U16)));
 
-        // `f32:` rounds what it reads.
+        // `float:32` rounds what it reads.
         assert_eq!(
             p(ValueType::F32).view(Value::Float(0.1)),
             Some(Value::Float(f64::from(0.1f32)))

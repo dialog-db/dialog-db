@@ -1923,14 +1923,14 @@ mod tests {
     }
 
     /// An attribute declared `as: u8:` takes only the numbers a `u8` holds,
-    /// and a `u8:` read filters what is out of its range, whatever wrote it.
+    /// and a `natural:8` read filters what is out of its range, whatever wrote it.
     #[dialog_common::test]
     async fn it_reads_and_writes_through_a_rust_numeric_view() -> Result<()> {
         use crate::attribute::query::all::AttributeQueryAll;
         use crate::type_system::Type as Kind;
 
         let attribute: crate::AttributeDescriptor =
-            serde_json::from_value(serde_json::json!({ "the": "item/level", "as": "u8:" }))?;
+            serde_json::from_value(serde_json::json!({ "the": "item/level", "as": "natural:8" }))?;
         assert!(attribute.resolve(Value::UnsignedInt(255)).is_ok());
         assert!(attribute.resolve(Value::UnsignedInt(256)).is_err());
         assert!(attribute.resolve(Value::Float(2.5)).is_err());
