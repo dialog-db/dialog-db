@@ -300,3 +300,48 @@ pub async fn mixed(size: usize) -> Result<Box<dyn Prepared>> {
     let env = seeded(size).await?;
     Ok(Box::new(Mixed { env, size }))
 }
+
+struct Rows {
+    env: Env,
+    size: usize,
+}
+
+impl Prepared for Rows {
+    fn env(&self) -> &Env {
+        &self.env
+    }
+
+    fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
+        Box::pin(async move {
+            for index in 0..self.size {
+                let this = entity("account", index);
+                let facts = [
+                    fact(
+                        &this,
+                        "account/minted-at",
+                        Value::UnsignedInt(index as u128),
+                    ),
+                    fact(
+                        &this,
+                        "account/registered-at",
+                        Value::UnsignedInt(index as u128),
+                    ),
+                    fact(
+                        &this,
+                        "account/email",
+                        Value::String(format!("account-{index}@example.com")),
+                    ),
+                ];
+                self.env.commit(assert_all(facts, Pick::Last)).await?;
+            }
+            Ok(Outcome::from([("commits".into(), self.size as u64)]))
+        })
+    }
+}
+
+/// `number-rows`: one commit per account, two small natural timestamps
+/// and an email each, the way tonk's profile seed writes them.
+pub async fn rows(size: usize) -> Result<Box<dyn Prepared>> {
+    let env = Env::open().await?;
+    Ok(Box::new(Rows { env, size }))
+}

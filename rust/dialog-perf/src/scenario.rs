@@ -172,6 +172,13 @@ pub fn catalog() -> Vec<Spec> {
             prepare: |size| Box::pin(number::commit(size)),
         },
         Spec {
+            name: "number-rows",
+            size: 300,
+            about: "one commit per account of two small natural timestamps and an email, as tonk's profile seed writes them",
+            volatile: false,
+            prepare: |size| Box::pin(number::rows(size)),
+        },
+        Spec {
             name: "number-point",
             size: 2000,
             about: "two hundred single-item reads of a float price",
