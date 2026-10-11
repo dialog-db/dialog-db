@@ -1,6 +1,7 @@
 //! Numbers in the index: a commit of numeric facts, point reads, a scan,
-//! and value ranges narrow and wide. They measure how numbers are keyed,
-//! so they run with and without dialog-artifacts' `number-band` feature.
+//! and value ranges narrow, wide and across number types. They measure
+//! how numbers are keyed: run them as they are for a band per type, and
+//! with `DIALOG_TREE_VALUE_ENCODING=1` for every number in one band.
 
 use std::future::Future;
 use std::pin::Pin;

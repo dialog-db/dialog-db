@@ -12,12 +12,11 @@
 //! the spill decision (threshold and reference substitution) is applied by the
 //! caller that knows the tree's manifest.
 
-#[cfg(not(feature = "number-band"))]
-use crate::artifacts::ordkey::{encode_f64, encode_i128, encode_u128};
 use crate::{
-    Value, ValueDataType,
+    NUMBER_BAND, Value, ValueDataType,
     artifacts::ordkey::{
         decode_bool, decode_bytes, decode_f64, decode_i128, decode_u128, encode_bool, encode_bytes,
+        encode_f64, encode_i128, encode_u128,
     },
 };
 
@@ -26,17 +25,8 @@ use crate::{
 /// order for values of the same type.
 pub fn encode_value(value: &Value, out: &mut Vec<u8>) {
     match value {
-        #[cfg(feature = "number-band")]
-        Value::UnsignedInt(number) => dialog_number::encode_u128(*number, out),
-        #[cfg(feature = "number-band")]
-        Value::SignedInt(number) => dialog_number::encode_i128(*number, out),
-        #[cfg(feature = "number-band")]
-        Value::Float(number) => dialog_number::encode_f64(*number, out),
-        #[cfg(not(feature = "number-band"))]
         Value::UnsignedInt(number) => encode_u128(*number, out),
-        #[cfg(not(feature = "number-band"))]
         Value::SignedInt(number) => encode_i128(*number, out),
-        #[cfg(not(feature = "number-band"))]
         Value::Float(number) => encode_f64(*number, out),
         Value::Boolean(boolean) => encode_bool(*boolean, out),
         Value::String(string) => encode_bytes(string.as_bytes(), out),
@@ -45,6 +35,31 @@ pub fn encode_value(value: &Value, out: &mut Vec<u8>) {
         Value::Entity(entity) => encode_bytes(entity.as_str().as_bytes(), out),
         Value::Symbol(attribute) => encode_bytes(attribute.to_string().as_bytes(), out),
     }
+}
+
+/// Encodes a [`Value`] as a key under a tree's `value_encoding`: in the
+/// [`Number`](ValueDataType::Number) band a number is its dialog-number
+/// encoding, and everything else is [`encode_value`]'s.
+pub fn encode_key_value(value: &Value, value_encoding: u32, out: &mut Vec<u8>) {
+    match value {
+        Value::UnsignedInt(number) if value_encoding == NUMBER_BAND => {
+            dialog_number::encode_u128(*number, out)
+        }
+        Value::SignedInt(number) if value_encoding == NUMBER_BAND => {
+            dialog_number::encode_i128(*number, out)
+        }
+        Value::Float(number) if value_encoding == NUMBER_BAND => {
+            dialog_number::encode_f64(*number, out)
+        }
+        value => encode_value(value, out),
+    }
+}
+
+/// [`encode_key_value`], as an owned byte vector.
+pub fn encode_key_value_owned(value: &Value, value_encoding: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_key_value(value, value_encoding, &mut out);
+    out
 }
 
 /// The order-preserving encoding of a [`Value`], as an owned byte vector.
@@ -58,16 +73,9 @@ pub fn encode_value_owned(value: &Value) -> Vec<u8> {
 /// `bytes`, reconstructing the [`Value`]. Returns the value and the remaining
 /// bytes, or `None` on malformed input.
 pub fn decode_value(value_type: ValueDataType, bytes: &[u8]) -> Option<(Value, &[u8])> {
-    #[cfg(feature = "number-band")]
-    if matches!(
-        value_type,
-        ValueDataType::UnsignedInt | ValueDataType::SignedInt | ValueDataType::Float
-    ) {
-        return decode_number(value_type, bytes);
-    }
     Some(match value_type {
-        // No value is encoded as `number:` itself.
-        ValueDataType::Number => return None,
+        // The one number band: dialog-number's encoding of any number.
+        ValueDataType::Number => return decode_number(bytes),
         // A sized number type's value is encoded as its storage type.
         view @ (ValueDataType::U8
         | ValueDataType::U16
@@ -122,35 +130,27 @@ pub fn decode_value(value_type: ValueDataType, bytes: &[u8]) -> Option<(Value, &
     })
 }
 
-/// Decodes a number in the one band. The band's own type byte (the
-/// integer one) reads a whole number as an integer, one too large for an
-/// integer as a natural, and any other as a float; a natural or float
-/// asked for by name reads as that type, or not at all.
-#[cfg(feature = "number-band")]
-fn decode_number(value_type: ValueDataType, bytes: &[u8]) -> Option<(Value, &[u8])> {
+/// Decodes a number in the [`Number`](ValueDataType::Number) band: a whole
+/// number as an integer, one too large for an integer as a natural, and
+/// any other as a float. The band does not record which type wrote it.
+fn decode_number(bytes: &[u8]) -> Option<(Value, &[u8])> {
     let len = dialog_number::encoded_len(bytes)?;
     let (number, rest) = bytes.split_at(len);
-    let value = match value_type {
-        ValueDataType::Float => Value::Float(dialog_number::decode_f64(number).ok()?),
-        ValueDataType::UnsignedInt => {
-            Value::UnsignedInt(dialog_number::Number::decode(number).ok()?.to_u128()?)
-        }
-        _ => match dialog_number::decode_i128(number).ok()? {
-            Some(integer) => Value::SignedInt(integer),
-            None => {
-                // Not a whole number an integer holds: a fraction, which
-                // reads as a float without going through `Number`, or a
-                // whole number past `i128::MAX`, which a natural may hold.
-                let float = dialog_number::decode_f64(number).ok()?;
-                match float.fract() == 0.0 && float > 0.0 {
-                    true => match dialog_number::Number::decode(number).ok()?.to_u128() {
-                        Some(natural) => Value::UnsignedInt(natural),
-                        None => Value::Float(float),
-                    },
-                    false => Value::Float(float),
-                }
+    let value = match dialog_number::decode_i128(number).ok()? {
+        Some(integer) => Value::SignedInt(integer),
+        None => {
+            // Not a whole number an integer holds: a fraction, which
+            // reads as a float without going through `Number`, or a
+            // whole number past `i128::MAX`, which a natural may hold.
+            let float = dialog_number::decode_f64(number).ok()?;
+            match float.fract() == 0.0 && float > 0.0 {
+                true => match dialog_number::Number::decode(number).ok()?.to_u128() {
+                    Some(natural) => Value::UnsignedInt(natural),
+                    None => Value::Float(float),
+                },
+                false => Value::Float(float),
             }
-        },
+        }
     };
     Some((value, rest))
 }

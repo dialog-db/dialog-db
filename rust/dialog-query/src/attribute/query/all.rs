@@ -599,7 +599,7 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                     && let Some(interval) = kind
                         .refinement()
                         .and_then(|refinement| refinement.interval.as_ref())
-                    && let Some(data_type) =
+                    && let Some((data_type, across)) =
                         pushable_type(kind.primitive_part().required(), interval.value_type)
                 {
                     if let Some(bound) = &interval.lower
@@ -614,6 +614,9 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                     {
                         selector = Some(push_bound(selector.take(), value, bound.inclusive, false));
                     }
+                    if across {
+                        selector = selector.map(ArtifactSelector::across_numbers);
+                    }
                 }
             }
         }
@@ -624,22 +627,20 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
     }
 }
 
-/// The type an interval bound is pushed as, if it can be. With every
-/// number in one index band (dialog-artifacts' `number-band` feature), a
-/// kind of numbers alone pushes its literal as written: the band orders
-/// naturals, integers and floats together. Otherwise only a kind of one
-/// comparable type pushes.
-fn pushable_type(primitive: Primitive, literal: Type) -> Option<Type> {
-    #[cfg(feature = "number-band")]
-    if !primitive.is_empty()
-        && primitive.intersect(Primitive::NUMERIC) == Some(primitive)
-        && Primitive::NUMERIC.contains(literal)
-    {
-        return Some(literal);
+/// The type an interval bound is pushed as, if it can be, and whether it
+/// spans number types. A kind of one comparable type pushes as that type.
+/// A kind of several number types pushes its literal as written, marked to
+/// admit every number type: a tree keying numbers in one band scans that
+/// range, and one keying each type in its own band scans without it (see
+/// `ArtifactSelector::across_numbers`).
+fn pushable_type(primitive: Primitive, literal: Type) -> Option<(Type, bool)> {
+    if let Some(single) = single_comparable_type(primitive) {
+        return Some((single, false));
     }
-    #[cfg(not(feature = "number-band"))]
-    let _ = literal;
-    single_comparable_type(primitive)
+    let numbers = !primitive.is_empty()
+        && primitive.intersect(Primitive::NUMERIC) == Some(primitive)
+        && Primitive::NUMERIC.contains(literal);
+    numbers.then_some((literal, true))
 }
 
 /// The single comparable type a primitive set admits, or `None` when it
@@ -891,8 +892,10 @@ mod tests {
     }
 
     /// The single-comparable-type gate: a kind admitting several
-    /// types pushes no bound (rows of the other types would be
-    /// silently dropped from the scan), and an unadaptable literal
+    /// number types pushes its bound marked to span them all, which
+    /// only a tree keying numbers in one band scans as a range (one
+    /// with a band per type drops it rather than lose rows of the other
+    /// types); any other multi-type kind, and an unadaptable literal,
     /// pushes no bound (no row of the scanned type satisfies it; the
     /// residual comparison filters every one).
     #[dialog_common::test]
@@ -907,10 +910,10 @@ mod tests {
             Term::var("cause"),
         );
         let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
-        assert!(
-            selector.value_lower().is_none() && selector.value_upper().is_none(),
-            "a kind admitting several numeric types pushes nothing"
-        );
+        let lower = selector.value_lower().expect("the bound is pushed");
+        assert_eq!(lower.value, Value::UnsignedInt(30));
+        assert!(lower.across, "it spans every number type");
+        assert!(selector.value_upper().is_none());
 
         // A String bound on a STRING_LIKE kind narrows the membership
         // to String (a non-numeric literal never adapts, so symbol

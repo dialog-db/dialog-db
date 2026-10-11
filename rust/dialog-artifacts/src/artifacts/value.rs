@@ -1261,6 +1261,9 @@ impl From<Value> for ValueDataType {
     }
 }
 
+/// The manifest `value_encoding` that keys every number in one band.
+pub const NUMBER_BAND: u32 = 1;
+
 /// [`ValueDataType`] embodies all types that are able to be represented
 /// as a [`Value`].
 ///
@@ -1295,8 +1298,10 @@ pub enum ValueDataType {
     Symbol = 8,
     /// Any number, natural, integer or float, as it is: `number:`. The
     /// other number types are views of it (see [`Value::viewed_as`]). No
-    /// [`Value`] is of this type itself, and it never types an index key; it
-    /// is what an attribute declares to hold numbers of every type.
+    /// [`Value`] is of this type itself: it is what an attribute declares to
+    /// hold numbers of every type, and the index band a tree whose manifest
+    /// sets `value_encoding` to [`NUMBER_BAND`] keys every number in, in
+    /// dialog-number's encoding.
     Number = 9,
     /// A natural number that fits in 8 bits: `natural:8`. A sized number
     /// type names its kind and its width; like `natural:`, `integer:` and
@@ -1533,10 +1538,24 @@ impl ValueDataType {
     /// otherwise each type keeps its own.
     pub fn band(self) -> Self {
         match self {
-            #[cfg(feature = "number-band")]
-            ValueDataType::UnsignedInt | ValueDataType::Float => ValueDataType::SignedInt,
+            ValueDataType::UnsignedInt | ValueDataType::SignedInt | ValueDataType::Float
+                if value_encoding == NUMBER_BAND =>
+            {
+                ValueDataType::Number
+            }
             other => other,
         }
+    }
+
+    /// Whether this is one of the number types.
+    pub fn is_number(self) -> bool {
+        matches!(
+            self,
+            ValueDataType::UnsignedInt
+                | ValueDataType::SignedInt
+                | ValueDataType::Float
+                | ValueDataType::Number
+        )
     }
 
     /// The smallest [`ValueDataType`] in discriminant order
@@ -1547,7 +1566,7 @@ impl ValueDataType {
     /// The largest [`ValueDataType`] an index key carries. `number:` and the
     /// sized number types type slots, never keys.
     pub fn max() -> Self {
-        ValueDataType::Symbol
+        ValueDataType::Number
     }
 
     /// Check if the given value is of this type.
@@ -1605,6 +1624,7 @@ impl From<&u8> for ValueDataType {
             6 => ValueDataType::Float,
             7 => ValueDataType::Record,
             8 => ValueDataType::Symbol,
+            9 => ValueDataType::Number,
             // A lossy fallback for infallible callers; the key-parse path
             // rejects unknown discriminants before reaching this (see
             // `varkey::value_payload_len`), so no persisted-byte path relies

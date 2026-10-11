@@ -54,7 +54,7 @@ pub(crate) mod varkey;
 pub const HISTORY_KEY_TAG: u8 = 3;
 
 use crate::{
-    ArtifactSelector, Value, ValueDataType, encode_value_owned, key::varkey::ValuePayload,
+    ArtifactSelector, Value, ValueDataType, encode_key_value_owned, key::varkey::ValuePayload,
     selector::Constrained,
 };
 
@@ -94,6 +94,8 @@ pub(crate) fn value_payload(value: &Value, manifest: &Manifest) -> ValuePayload 
 /// check, and the spill store separately — three to five full passes per
 /// instruction on the write hot path.
 pub(crate) struct EncodedValue {
+    /// The type byte the index keys carry for this value: its band.
+    pub value_type: ValueDataType,
     /// The payload the index keys carry for this value.
     pub payload: ValuePayload,
     /// A spilling value's archive block: its 32-byte reference (the hash the
@@ -107,14 +109,16 @@ impl EncodedValue {
     /// exactly as [`value_payload`] does (it delegates here).
     pub(crate) fn new(value: &Value, manifest: &Manifest) -> Self {
         let inline_n = manifest.inline_n as usize;
+        let value_type = value.data_type().band(manifest.value_encoding);
         // Short-circuit: when a provable lower bound on the encoded length
         // already exceeds the threshold, the value spills without running the
         // full order-preserving encode (which is only needed for its length
         // here — the spilled payload is built from the RAW bytes below).
         if encoded_len_lower_bound(value) <= inline_n {
-            let encoded = encode_value_owned(value);
+            let encoded = encode_key_value_owned(value, manifest.value_encoding);
             if encoded.len() <= inline_n {
                 return Self {
+                    value_type,
                     payload: ValuePayload::Inline(encoded),
                     spill: None,
                 };
@@ -126,6 +130,7 @@ impl EncodedValue {
         crate::encode_bytes(&raw[..take], &mut prefix);
         let reference = crate::make_reference(&raw);
         Self {
+            value_type,
             payload: ValuePayload::Spilled {
                 prefix,
                 hash: reference.to_vec(),
@@ -149,12 +154,8 @@ fn encoded_len_lower_bound(value: &Value) -> usize {
         Value::Record(bytes) => bytes.len(),
         Value::String(string) => string.len(),
         Value::Entity(entity) => entity.as_str().len(),
-        #[cfg(not(feature = "number-band"))]
-        Value::UnsignedInt(_) | Value::SignedInt(_) => 16,
-        #[cfg(not(feature = "number-band"))]
-        Value::Float(_) => 8,
-        // At least the class byte.
-        #[cfg(feature = "number-band")]
+        // A number in the one band takes at least its class byte; the
+        // fixed-width bands' 16 or 8 bytes only bound the others.
         Value::UnsignedInt(_) | Value::SignedInt(_) | Value::Float(_) => 1,
         Value::Boolean(_) => 1,
         Value::Symbol(_) => 0,
@@ -174,7 +175,8 @@ pub(crate) fn artifact_index_keys(
     artifact: &crate::Artifact,
     manifest: &Manifest,
 ) -> (Key, Key, Key) {
-    artifact_index_keys_with(artifact, value_payload(&artifact.is, manifest))
+    let encoded = EncodedValue::new(&artifact.is, manifest);
+    artifact_index_keys_with(artifact, encoded.value_type, encoded.payload)
 }
 
 /// [`artifact_index_keys`] with the value payload already in hand, so a caller
@@ -182,13 +184,14 @@ pub(crate) fn artifact_index_keys(
 /// [`EncodedValue`]) encodes the value exactly once.
 pub(crate) fn artifact_index_keys_with(
     artifact: &crate::Artifact,
+    value_type: ValueDataType,
     payload: ValuePayload,
 ) -> (Key, Key, Key) {
     let mut parts = varkey::KeyParts {
         tag: ENTITY_KEY_TAG,
         entity: artifact.of.as_str().as_bytes().to_vec(),
         attribute: artifact.the.as_str().as_bytes().to_vec(),
-        value_type: artifact.is.data_type().band(),
+        value_type,
         value: payload,
         // The fact orderings carry no version; only history/coverage keys do.
         version: None,
@@ -232,7 +235,7 @@ pub(crate) fn reproject_index_keys(
 pub(crate) fn value_tail_bytes(value: &Value, manifest: &Manifest) -> Vec<u8> {
     let payload = value_payload(value, manifest);
     let mut tail = Vec::with_capacity(1 + payload.slot_bytes().len());
-    tail.push(value.data_type().band().into());
+    tail.push(value.data_type().band(manifest.value_encoding).into());
     tail.extend_from_slice(payload.slot_bytes());
     // A spilled key's whole-value hash trails the key; within a same-
     // `(the, of)` group the components between the value slot and the hash
@@ -499,7 +502,10 @@ pub trait KeyViewMut: KeyView {
         // the fact-building path uses, so a value range narrows to the exact
         // value. The type and payload (with its spill flag) are set together.
         if let Some(value) = selector.value() {
-            key = key.set_value(value.data_type().band(), value_payload(value, manifest));
+            key = key.set_value(
+                value.data_type().band(manifest.value_encoding),
+                value_payload(value, manifest),
+            );
         }
 
         key
