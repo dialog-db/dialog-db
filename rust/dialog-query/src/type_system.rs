@@ -783,6 +783,33 @@ impl Type {
         }
     }
 
+    /// `value` as this type reads it, or `None` when the type does not
+    /// admit it. A number of a type this one does not list is read through
+    /// the number type it does list, as [`Value::viewed_as`] reads it: a
+    /// natural field sees an integer `5` as the natural `5`, and does not
+    /// see `-3`. Every other value is admitted as it is or not at all.
+    pub fn view(&self, value: Value) -> Option<Value> {
+        let primitive = self.primitive_part();
+        let value = if primitive.contains(value.data_type()) || !value.data_type().is_number() {
+            value
+        } else {
+            [
+                ValueType::SignedInt,
+                ValueType::UnsignedInt,
+                ValueType::Float,
+            ]
+            .into_iter()
+            .filter(|number| primitive.contains(*number))
+            .find_map(|number| {
+                value
+                    .clone()
+                    .viewed_as(number)
+                    .filter(|viewed| viewed.data_type() == number)
+            })?
+        };
+        self.admits(&value).then_some(value)
+    }
+
     /// True when the given runtime value inhabits this type: the
     /// value's data type is a member of the primitive part, and the
     /// refinement (if any) admits the value itself.

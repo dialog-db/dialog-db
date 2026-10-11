@@ -95,6 +95,42 @@ impl Value {
 }
 
 impl Value {
+    /// This number read through the number type `kind`, or `None` when the
+    /// view does not see it. Number types are views over one domain of
+    /// numbers: a float view reads every number as a float, an integer view
+    /// reads every number with a fraction as its floor, and a natural view
+    /// reads the numbers that are not negative the same way. A view coerces
+    /// only where it loses precision and filters what is out of its range
+    /// (`notes/identity-storage-notation.md`, Views read and write). A value
+    /// that is not a number, or a `kind` that is not a number type, is
+    /// returned as it is.
+    pub fn viewed_as(self, kind: ValueDataType) -> Option<Value> {
+        fn floor(float: f64) -> Option<f64> {
+            float.is_finite().then(|| float.floor())
+        }
+        Some(match (self, kind) {
+            (Value::UnsignedInt(natural), ValueDataType::SignedInt) => {
+                Value::SignedInt(i128::try_from(natural).ok()?)
+            }
+            (Value::UnsignedInt(natural), ValueDataType::Float) => Value::Float(natural as f64),
+            (Value::SignedInt(integer), ValueDataType::UnsignedInt) => {
+                Value::UnsignedInt(u128::try_from(integer).ok()?)
+            }
+            (Value::SignedInt(integer), ValueDataType::Float) => Value::Float(integer as f64),
+            (Value::Float(float), ValueDataType::SignedInt) => {
+                let whole = floor(float)?;
+                (whole >= i128::MIN as f64 && whole < i128::MAX as f64)
+                    .then_some(Value::SignedInt(whole as i128))?
+            }
+            (Value::Float(float), ValueDataType::UnsignedInt) => {
+                let whole = floor(float)?;
+                (whole >= 0.0 && whole < u128::MAX as f64)
+                    .then_some(Value::UnsignedInt(whole as u128))?
+            }
+            (value, _) => value,
+        })
+    }
+
     /// This value as `kind`, where `kind` reads the same spelling or
     /// number: text as an entity or a symbol when it parses as one, an
     /// entity as text or a symbol, a natural number as a signed integer

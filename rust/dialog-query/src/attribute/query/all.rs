@@ -233,6 +233,16 @@ impl AttributeQueryAll {
     /// never an error. This filter is [`Match::bind`]'s contract:
     /// binding treats a kind mismatch as a violation, on the
     /// premise that scans never feed one.
+    /// `artifact` as this query's typed slots read it, or `None` when they
+    /// do not admit it: a number reaches a slot of another number type
+    /// through its view ([`Kind::view`]).
+    pub(crate) fn admit(&self, mut artifact: Artifact) -> Option<Artifact> {
+        if let Some(kind) = self.is.kind() {
+            artifact.is = kind.view(artifact.is)?;
+        }
+        self.admits(&artifact).then_some(artifact)
+    }
+
     pub(crate) fn admits(&self, artifact: &Artifact) -> bool {
         if let Some(kind) = self.is.kind()
             && !kind.admits(&artifact.is)
@@ -423,9 +433,9 @@ impl AttributeQueryAll {
                     };
                     // Typed `is`/`the` slots filter facts falling
                     // outside their kinds.
-                    if !selector.admits(&artifact) {
+                    let Some(artifact) = selector.admit(artifact) else {
                         continue;
-                    }
+                    };
                     let mut extension = base.clone();
                     selector.merge(&mut extension, artifact, standing)?;
                     yield extension;
