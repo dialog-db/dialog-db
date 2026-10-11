@@ -12,8 +12,6 @@ publish = false
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
 web-integration-tests = ["dialog-common/web-integration-tests"]
-# Measure with every number in one index band (see dialog-artifacts).
-number-band = ["dialog-artifacts/number-band", "dialog-query/number-band"]
 
 [dependencies]
 dialog-common = { workspace = true }

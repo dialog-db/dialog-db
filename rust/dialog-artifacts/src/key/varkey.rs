@@ -190,13 +190,12 @@ impl KeyParts {
             // to escape.
             let mut payload = Vec::with_capacity(if upper { MAX_FILLER + 1 } else { 1 });
             if upper {
-                // A parseable payload dominating every real value of the
-                // maximum type: `MAX_FILLER_BYTE` exceeds every UTF-8 byte,
-                // and real symbol names are UTF-8. (Like the entity/attribute
-                // fillers this is a bounded synthetic maximum; `set_value_*`
-                // replaces it with a real payload, this is only the unset
-                // bound.)
-                encode_bytes(&[MAX_FILLER_BYTE; MAX_FILLER], &mut payload);
+                // The maximum type is the number band, and its largest
+                // number, positive infinity, is a one-byte payload that
+                // parses and sorts with or above every real value in it.
+                // (`set_value_*` replaces it with a real payload; this is
+                // only the unset bound.)
+                dialog_number::encode_f64(f64::INFINITY, &mut payload);
                 (ValueDataType::max(), ValuePayload::Inline(payload))
             } else {
                 // The minimum value type is a terminated-string type, whose
@@ -425,22 +424,17 @@ fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
     // An unknown discriminant is corruption: reject the key rather than
     // guessing a width (`ValueDataType::from` would silently default to
     // Bytes and misparse the tail).
-    if type_byte > u8::from(ValueDataType::Symbol) {
+    if type_byte > u8::from(ValueDataType::Number) {
         return None;
     }
     match ValueDataType::from(type_byte) {
         // The one number band: dialog-number's self-delimiting encoding.
-        #[cfg(feature = "number-band")]
-        ValueDataType::UnsignedInt | ValueDataType::SignedInt | ValueDataType::Float => {
-            dialog_number::encoded_len(bytes.get(at..)?)
-        }
+        ValueDataType::Number => dialog_number::encoded_len(bytes.get(at..)?),
         // 128-bit integers: 16 big-endian bytes.
-        #[cfg(not(feature = "number-band"))]
         ValueDataType::UnsignedInt | ValueDataType::SignedInt => Some(16),
         // `f64`: 8 big-endian bytes (the order-preserving `encode_f64`), NOT 16
         // — reading 16 here over-runs the value tail into the following key
         // components, so the key splits into fewer parts than its schema.
-        #[cfg(not(feature = "number-band"))]
         ValueDataType::Float => Some(8),
         // A single byte.
         ValueDataType::Boolean => Some(1),

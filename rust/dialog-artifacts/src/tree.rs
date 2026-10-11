@@ -52,6 +52,7 @@ use crate::{
     selector::Constrained,
     value_predicates_admit,
 };
+use crate::{NUMBER_BAND, encode_key_value_owned};
 
 pub mod distribution;
 
@@ -341,6 +342,9 @@ fn prefix_upper(prefix: &[u8]) -> Vec<u8> {
 ///   BELOW the full bound bytes.
 /// - A zero float widens across the `-0.0`/`+0.0` encoding cluster.
 fn value_lower_edge(value: &Value, manifest: &Manifest) -> Vec<u8> {
+    if value.data_type().band(manifest.value_encoding) == ValueDataType::Number {
+        return encode_key_value_owned(value, manifest.value_encoding);
+    }
     if let Value::Float(float) = value
         && *float == 0.0
     {
@@ -452,7 +456,7 @@ fn apply_prefix_bounds<K: KeyViewMut>(
         let band = selector
             .value_lower()
             .or(selector.value_upper())
-            .map(|bound| bound.value.data_type().band())
+            .map(|bound| bound.value.data_type().band(manifest.value_encoding))
             .unwrap_or_else(ValueDataType::min);
         let lo = match selector.value_lower() {
             Some(bound) => value_lower_edge(&bound.value, manifest),
@@ -460,6 +464,9 @@ fn apply_prefix_bounds<K: KeyViewMut>(
         };
         let hi = match selector.value_upper() {
             Some(bound) => match &bound.value {
+                value if band == ValueDataType::Number => {
+                    encode_key_value_owned(value, manifest.value_encoding)
+                }
                 Value::Float(float) if *float == 0.0 => encode_value_owned(&Value::Float(0.0)),
                 value => encode_value_owned(value),
             },
@@ -478,9 +485,8 @@ fn apply_prefix_bounds<K: KeyViewMut>(
 /// component slide into the value position and corrupt the range edge).
 fn value_band_min(value_type: ValueDataType) -> Vec<u8> {
     // The number band's lowest number is NaN.
-    #[cfg(feature = "number-band")]
-    if value_type == ValueDataType::SignedInt {
-        return encode_value_owned(&Value::Float(f64::NAN));
+    if value_type == ValueDataType::Number {
+        return encode_key_value_owned(&Value::Float(f64::NAN), NUMBER_BAND);
     }
     match numeric_width(value_type) {
         0 => vec![0x00],
@@ -497,9 +503,8 @@ fn value_band_min(value_type: ValueDataType) -> Vec<u8> {
 /// is the last field set on the bound).
 fn value_band_max(value_type: ValueDataType, manifest: &Manifest) -> Vec<u8> {
     // The number band's highest number is positive infinity.
-    #[cfg(feature = "number-band")]
-    if value_type == ValueDataType::SignedInt {
-        return encode_value_owned(&Value::Float(f64::INFINITY));
+    if value_type == ValueDataType::Number {
+        return encode_key_value_owned(&Value::Float(f64::INFINITY), NUMBER_BAND);
     }
     match numeric_width(value_type) {
         0 => vec![0xFF; manifest.inline_n as usize + 2],
@@ -888,6 +893,7 @@ impl ArtifactTreeExt for ArtifactTree {
         // The range must be built under the manifest the facts were written
         // with, the same requirement `scan` has.
         let manifest = tree.manifest(&storage).await?;
+        let selector = selector.for_manifest(&manifest);
         let range = selector_range(&selector, &manifest);
         // `range_scale` intersects half-open `[lower, upper)`; the selector's
         // range is inclusive, so the upper bound is the successor of the last
@@ -918,6 +924,7 @@ impl ArtifactTreeExt for ArtifactTree {
             // boundary-sized value encodes differently here than in the tree
             // and the scan silently misses it.
             let manifest = tree.manifest(&storage).await?;
+            let selector = selector.for_manifest(&manifest);
             let range = selector_range(&selector, &manifest);
 
             let stream = tree.stream_range_handles(range, &storage);
@@ -1028,6 +1035,7 @@ impl ArtifactTreeExt for ArtifactTree {
             // Both the scan range and the per-entry match must be built under
             // the manifest the stored facts were WRITTEN with — see `scan`.
             let manifest = tree.manifest(&storage).await?;
+            let selector = selector.for_manifest(&manifest);
             let range = selector_range(&selector, &manifest);
 
             let stream = tree.stream_range_handles(range, &storage);
@@ -1195,7 +1203,7 @@ pub fn selector_range(
                 .map(|attribute| AttributeKeyPart::from(attribute).raw().to_vec()),
             selector.value().map(|value| {
                 (
-                    value.data_type().band(),
+                    value.data_type().band(manifest.value_encoding),
                     build_value_payload(value, manifest),
                 )
             }),
@@ -1417,7 +1425,7 @@ where
                 // reference come from the same pass.
                 let encoded = EncodedValue::new(&artifact.is, manifest);
                 let (entity_key, attribute_key, value_key) =
-                    artifact_index_keys_with(&artifact, encoded.payload);
+                    artifact_index_keys_with(&artifact, encoded.value_type, encoded.payload);
 
                 // Persist a spilling value's bytes as a content-addressed
                 // block before recording the fact; the key holds only the
@@ -1606,7 +1614,7 @@ where
                 // cell held it.
                 let encoded = EncodedValue::new(&artifact.is, manifest);
                 let (entity_key, attribute_key, value_key) =
-                    artifact_index_keys_with(&artifact, encoded.payload);
+                    artifact_index_keys_with(&artifact, encoded.value_type, encoded.payload);
                 stage_spilled_value(staged, encoded.spill);
                 let mut datum = Datum::for_artifact(&artifact);
                 datum.version = version;
@@ -1981,6 +1989,9 @@ mod range_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod number_band_tests;
 
 #[cfg(test)]
 mod selector_range_tests {

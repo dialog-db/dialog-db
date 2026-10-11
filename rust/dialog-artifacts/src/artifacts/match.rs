@@ -14,8 +14,6 @@
 
 use std::cmp::Ordering;
 
-#[cfg(feature = "number-band")]
-use crate::encode_value_owned;
 use crate::{
     ArtifactSelector, NameShape, Value, ValueDataType,
     artifacts::selector::Constrained,
@@ -23,6 +21,7 @@ use crate::{
     key::value_payload,
     key::varkey::{KeyRef, ValuePayload, ValueRef},
 };
+use crate::{NUMBER_BAND, encode_key_value_owned};
 use dialog_search_tree::Manifest;
 
 /// The verdict of matching one scanned key against a selector.
@@ -101,7 +100,7 @@ pub fn match_selector_and_key_ref(
     }
 
     if let Some(value) = selector.value() {
-        if value.data_type().band() != key.value_type {
+        if value.data_type().band(manifest.value_encoding) != key.value_type {
             return SelectorMatch::Excluded;
         }
         // Compare by the same encoding the key was built with. Equality never
@@ -215,8 +214,7 @@ pub fn match_selector_and_key_ref(
     // prefix unless the bound extends past it.
     if selector.value_lower().is_some() || selector.value_upper().is_some() {
         match &key.value {
-            #[cfg(feature = "number-band")]
-            ValueRef::Inline(payload) if key.value_type == ValueDataType::SignedInt => {
+            ValueRef::Inline(payload) if key.value_type == ValueDataType::Number => {
                 // The number band orders by its bytes, so a bound compares
                 // with the payload as encoded, without decoding the row.
                 if dialog_number::encoded_len(payload) != Some(payload.len()) {
@@ -227,10 +225,11 @@ pub fn match_selector_and_key_ref(
                     (selector.value_upper(), false),
                 ] {
                     let Some(bound) = bound else { continue };
-                    if bound.value.data_type().band() != ValueDataType::SignedInt {
+                    if !bound.value.data_type().is_number() {
                         return SelectorMatch::Excluded;
                     }
-                    let order = (*payload).cmp(encode_value_owned(&bound.value).as_slice());
+                    let order = (*payload)
+                        .cmp(encode_key_value_owned(&bound.value, NUMBER_BAND).as_slice());
                     let admitted = match order {
                         Ordering::Equal => bound.inclusive,
                         Ordering::Greater => lower,
@@ -333,7 +332,7 @@ pub(crate) fn value_predicates_admit(
         }
     }
     if let Some(bound) = selector.value_lower() {
-        if value.data_type().band() != bound.value.data_type().band() {
+        if !comparable(value, &bound.value) {
             return false;
         }
         match order(value, &bound.value) {
@@ -343,7 +342,7 @@ pub(crate) fn value_predicates_admit(
         }
     }
     if let Some(bound) = selector.value_upper() {
-        if value.data_type().band() != bound.value.data_type().band() {
+        if !comparable(value, &bound.value) {
             return false;
         }
         match order(value, &bound.value) {
@@ -355,12 +354,21 @@ pub(crate) fn value_predicates_admit(
     true
 }
 
-/// How `value` orders against a bound in its band. Numbers in the one
-/// band order by their encoding, across natural, integer and float.
+/// Whether `value` compares with `bound`: values of one type, or two
+/// numbers, which the one band holds together.
+fn comparable(value: &Value, bound: &Value) -> bool {
+    value.data_type() == bound.data_type()
+        || (value.data_type().is_number() && bound.data_type().is_number())
+}
+
+/// How `value` orders against a bound. Numbers order by value across
+/// natural, integer and float, as their one-band encoding does.
 fn order(value: &Value, bound: &Value) -> Option<Ordering> {
-    #[cfg(feature = "number-band")]
-    if value.data_type().band() == ValueDataType::SignedInt {
-        return Some(encode_value_owned(value).cmp(&encode_value_owned(bound)));
+    if value.data_type() != bound.data_type() && value.data_type().is_number() {
+        return Some(
+            encode_key_value_owned(value, NUMBER_BAND)
+                .cmp(&encode_key_value_owned(bound, NUMBER_BAND)),
+        );
     }
     value.partial_cmp(bound)
 }

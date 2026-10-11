@@ -149,7 +149,7 @@ impl EntityKey<Key> {
             .set_entity(EntityKeyPart::from(&fact.of))
             .set_attribute(AttributeKeyPart::from(&fact.the))
             .set_value(
-                fact.is.data_type().band(),
+                fact.is.data_type().band(manifest.value_encoding),
                 value_payload(&fact.is, manifest),
             )
     }

@@ -261,6 +261,8 @@ impl<'de> de::Visitor<'de> for ValueVisitor {
                 ValueDataType::Float => Value::Float(map.next_value()?),
                 ValueDataType::Record => Value::Record(map.next_value()?),
                 ValueDataType::Symbol => Value::Symbol(map.next_value()?),
+                // An index band, not in `ALL`, so no tag names it.
+                ValueDataType::Number => unreachable!("`number:` is not a value's type"),
             };
         if map.next_key::<de::IgnoredAny>()?.is_some() {
             return Err(de::Error::custom("a tagged value names one type"));
@@ -477,6 +479,13 @@ impl TryFrom<(ValueDataType, Vec<u8>)> for Value {
 
     fn try_from((value_data_type, value): (ValueDataType, Vec<u8>)) -> Result<Self, Self::Error> {
         Ok(match value_data_type {
+            // A key's band, whose bytes are dialog-number's, never a value's
+            // raw bytes.
+            ValueDataType::Number => {
+                return Err(DialogArtifactsError::InvalidValue(
+                    "`number:` is an index band, not a value's type".to_string(),
+                ));
+            }
             ValueDataType::Bytes => Value::Bytes(value),
             ValueDataType::Entity => Value::Entity(Entity::try_from(value)?),
             // TODO: How strictly validated must a bool representation be?
@@ -1104,6 +1113,9 @@ impl From<Value> for ValueDataType {
     }
 }
 
+/// The manifest `value_encoding` that keys every number in one band.
+pub const NUMBER_BAND: u32 = 1;
+
 /// [`ValueDataType`] embodies all types that are able to be represented
 /// as a [`Value`].
 ///
@@ -1136,6 +1148,10 @@ pub enum ValueDataType {
     /// A symbol type, used to distinguish attributes from other
     /// strings: `symbol:`
     Symbol = 8,
+    /// Not a type of [`Value`] but an index band: the one a tree whose
+    /// manifest sets `value_encoding` to 1 keys every number in, natural,
+    /// integer and float alike, in dialog-number's encoding: `number:`
+    Number = 9,
 }
 
 impl ValueDataType {
@@ -1164,6 +1180,7 @@ impl ValueDataType {
             ValueDataType::Float => "float:",
             ValueDataType::Record => "record:",
             ValueDataType::Symbol => "symbol:",
+            ValueDataType::Number => "number:",
         }
     }
 
@@ -1180,6 +1197,7 @@ impl ValueDataType {
             ValueDataType::Float => "Float",
             ValueDataType::Record => "Record",
             ValueDataType::Symbol => "Symbol",
+            ValueDataType::Number => "Number",
         }
     }
 
@@ -1216,15 +1234,29 @@ impl<'de> Deserialize<'de> for ValueDataType {
 }
 
 impl ValueDataType {
-    /// The type byte an index key carries for values of this type. With
-    /// the `number-band` feature every number shares the integer band;
-    /// otherwise each type keeps its own.
-    pub fn band(self) -> Self {
+    /// The type byte an index key carries for values of this type, under
+    /// the manifest's `value_encoding`: each type its own band (0), or
+    /// every number in the [`Number`](Self::Number) band (1).
+    pub fn band(self, value_encoding: u32) -> Self {
         match self {
-            #[cfg(feature = "number-band")]
-            ValueDataType::UnsignedInt | ValueDataType::Float => ValueDataType::SignedInt,
+            ValueDataType::UnsignedInt | ValueDataType::SignedInt | ValueDataType::Float
+                if value_encoding == NUMBER_BAND =>
+            {
+                ValueDataType::Number
+            }
             other => other,
         }
+    }
+
+    /// Whether this is one of the number types.
+    pub fn is_number(self) -> bool {
+        matches!(
+            self,
+            ValueDataType::UnsignedInt
+                | ValueDataType::SignedInt
+                | ValueDataType::Float
+                | ValueDataType::Number
+        )
     }
 
     /// The smallest [`ValueDataType`] in discriminant order
@@ -1234,7 +1266,7 @@ impl ValueDataType {
 
     /// The largest [`ValueDataType`] in discriminant order
     pub fn max() -> Self {
-        ValueDataType::Symbol
+        ValueDataType::Number
     }
 
     /// Check if the given value is of this type.
@@ -1265,6 +1297,7 @@ impl Display for ValueDataType {
             ValueDataType::Float => write!(f, "Float"),
             ValueDataType::Record => write!(f, "Record"),
             ValueDataType::Symbol => write!(f, "Symbol"),
+            ValueDataType::Number => write!(f, "Number"),
         }
     }
 }
@@ -1287,6 +1320,7 @@ impl From<&u8> for ValueDataType {
             6 => ValueDataType::Float,
             7 => ValueDataType::Record,
             8 => ValueDataType::Symbol,
+            9 => ValueDataType::Number,
             // A lossy fallback for infallible callers; the key-parse path
             // rejects unknown discriminants before reaching this (see
             // `varkey::value_payload_len`), so no persisted-byte path relies

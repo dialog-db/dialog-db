@@ -181,7 +181,8 @@ impl RevisionRecord {
         // Only the EAV and AEV orderings are written (see above), so the VAE
         // key this builds is dropped.
         let encoded = EncodedValue::new(&artifact.is, manifest);
-        let (entity_key, attribute_key, _) = artifact_index_keys_with(&artifact, encoded.payload);
+        let (entity_key, attribute_key, _) =
+            artifact_index_keys_with(&artifact, encoded.value_type, encoded.payload);
         let mut datum = Datum::for_artifact(&artifact);
         datum.version = Some(version);
         let added = State::Added(datum);

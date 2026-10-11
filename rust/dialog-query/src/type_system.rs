@@ -165,6 +165,8 @@ impl Primitive {
             ValueType::Entity => 1 << 6,
             ValueType::Symbol => 1 << 7,
             ValueType::Record => 1 << 8,
+            // The index band holding every number: all three number types.
+            ValueType::Number => (1 << 2) | (1 << 3) | (1 << 4),
         }
     }
 

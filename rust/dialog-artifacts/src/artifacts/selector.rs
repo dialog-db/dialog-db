@@ -31,6 +31,9 @@ pub struct ValueBound {
     /// Whether the bound is inclusive (`>=` / `<=`) rather than exclusive
     /// (`>` / `<`).
     pub inclusive: bool,
+    /// Whether the bound admits numbers of every type, not only its own
+    /// (see [`ArtifactSelector::across_numbers`]).
+    pub across: bool,
 }
 
 /// The basic query system for selecting [`Artifact`]s from an artifact index.
@@ -459,6 +462,7 @@ where
         self.with_value_lower(ValueBound {
             value,
             inclusive: true,
+            across: false,
         })
     }
 
@@ -468,6 +472,7 @@ where
         self.with_value_lower(ValueBound {
             value,
             inclusive: false,
+            across: false,
         })
     }
 
@@ -477,6 +482,7 @@ where
         self.with_value_upper(ValueBound {
             value,
             inclusive: true,
+            across: false,
         })
     }
 
@@ -486,6 +492,7 @@ where
         self.with_value_upper(ValueBound {
             value,
             inclusive: false,
+            across: false,
         })
     }
 
@@ -525,6 +532,38 @@ where
             value_upper: Some(bound),
             state_type: PhantomData,
         }
+    }
+}
+
+impl ArtifactSelector<Constrained> {
+    /// Let the value bounds admit numbers of every type: a bound of `5`
+    /// admits the natural, the integer and the float alike. A tree that
+    /// keys every number in one band scans the bounded range of it; one
+    /// that keys each type in its own band cannot bound one range across
+    /// them, so it scans without the bounds and leaves them to the caller.
+    pub fn across_numbers(mut self) -> Self {
+        for bound in [&mut self.value_lower, &mut self.value_upper]
+            .into_iter()
+            .flatten()
+        {
+            bound.across = bound.value.data_type().is_number();
+        }
+        self
+    }
+
+    /// This selector as a tree written under `manifest` can scan it: bounds
+    /// across number types are dropped where the tree keys each type in its
+    /// own band.
+    pub fn for_manifest(mut self, manifest: &dialog_search_tree::Manifest) -> Self {
+        let across = [&self.value_lower, &self.value_upper]
+            .into_iter()
+            .flatten()
+            .any(|bound| bound.across);
+        if across && manifest.value_encoding != crate::NUMBER_BAND {
+            self.value_lower = None;
+            self.value_upper = None;
+        }
+        self
     }
 }
 
