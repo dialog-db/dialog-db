@@ -173,6 +173,10 @@ impl Value {
             return None;
         }
         Some(match (viewed, view) {
+            // NaN is one value: narrowing it may keep or drop its payload
+            // depending on the target, so it reads as the canonical NaN on
+            // every target.
+            (Value::Float(float), ValueDataType::F32) if float.is_nan() => Value::Float(f64::NAN),
             (Value::Float(float), ValueDataType::F32) => Value::Float(f64::from(float as f32)),
             (viewed, _) => viewed,
         })
@@ -1915,6 +1919,66 @@ mod view_tests {
         for (value, view, expected) in cases {
             assert_eq!(
                 value.clone().viewed_as(view),
+                expected,
+                "{value:?} as {view}"
+            );
+        }
+    }
+
+    /// Every replica must read a number through a view to the same bytes,
+    /// so the edge cases are pinned as exact bits rather than compared with
+    /// what this target computes: the test runs on wasm32 as well as
+    /// natively, and both must produce these constants.
+    #[dialog_common::test]
+    fn it_views_identically_on_every_target() {
+        use ValueDataType::{F32, F64, I8, I64, U8, U64};
+        fn bits(value: &Option<Value>) -> String {
+            match value {
+                Some(Value::Float(float)) => format!("f{:016x}", float.to_bits()),
+                Some(Value::UnsignedInt(natural)) => format!("u{natural}"),
+                Some(Value::SignedInt(integer)) => format!("i{integer}"),
+                Some(other) => format!("{other:?}"),
+                None => "none".into(),
+            }
+        }
+        let quiet_nan = f64::from_bits(0x7ff8_0000_0000_0001);
+        let cases: [(Value, ValueDataType, &str); 24] = [
+            (Value::Float(255.0), U8, "u255"),
+            (Value::Float(255.999), U8, "u255"),
+            (Value::Float(256.0), U8, "none"),
+            (Value::Float(-0.0), U8, "u0"),
+            (Value::Float(-0.5), U8, "none"),
+            (Value::Float(f64::NAN), U8, "none"),
+            (Value::Float(f64::INFINITY), U8, "none"),
+            (Value::Float(-128.0), I8, "i-128"),
+            (Value::Float(-128.5), I8, "none"),
+            (Value::Float(127.999), I8, "i127"),
+            (Value::Float(128.0), I8, "none"),
+            (Value::SignedInt(-129), I8, "none"),
+            (
+                Value::UnsignedInt(u64::MAX as u128),
+                U64,
+                "u18446744073709551615",
+            ),
+            (Value::Float(18_446_744_073_709_551_616.0), U64, "none"),
+            (
+                Value::Float(-9_223_372_036_854_775_808.0),
+                I64,
+                "i-9223372036854775808",
+            ),
+            (Value::Float(1e-45), F32, "f36a0000000000000"),
+            (Value::Float(f64::from(f32::MAX)), F32, "f47efffffe0000000"),
+            (Value::Float(3.402_823_7e38), F32, "none"),
+            (Value::Float(0.1), F32, "f3fb99999a0000000"),
+            (Value::Float(-0.0), F32, "f8000000000000000"),
+            (Value::Float(quiet_nan), F32, "f7ff8000000000000"),
+            (Value::Float(f64::NEG_INFINITY), F32, "ffff0000000000000"),
+            (Value::UnsignedInt(16_777_217), F32, "f4170000000000000"),
+            (Value::SignedInt(-3), F64, "fc008000000000000"),
+        ];
+        for (value, view, expected) in cases {
+            assert_eq!(
+                bits(&value.clone().viewed_as(view)),
                 expected,
                 "{value:?} as {view}"
             );

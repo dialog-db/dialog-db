@@ -1,6 +1,9 @@
 //! The encoding's promises: SQLite4's bytes, one encoding per number, byte
 //! order equal to numeric order, and lossless round trips.
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
 use std::cmp::Ordering;
 
 use dialog_number::{
@@ -37,7 +40,7 @@ fn generator(seed: u64) -> impl FnMut() -> u64 {
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn it_writes_sqlite4s_bytes() {
     // From SQLite4's key encoding note: the exponent (in the class byte for
     // 0 to 10, `0x17 + e`) and the significand bytes. The note's rows for
@@ -83,7 +86,7 @@ fn it_writes_sqlite4s_bytes() {
     assert_eq!(float(-0.00123), [0x14, 0x01, !0x19, !0x3c]);
 }
 
-#[test]
+#[dialog_common::test]
 fn it_encodes_a_number_once_whatever_holds_it() {
     assert_eq!(integer(3), float(3.0));
     assert_eq!(natural(3), float(3.0));
@@ -100,7 +103,7 @@ fn it_encodes_a_number_once_whatever_holds_it() {
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn it_takes_a_float_as_the_decimal_it_prints_as() {
     // The float 1e23 is exactly 99999999999999991611392; as a number it is
     // 10^23, above an integer that lies between the two.
@@ -111,7 +114,7 @@ fn it_takes_a_float_as_the_decimal_it_prints_as() {
     assert_eq!(Number::from(0.1).to_string(), "0.10e0");
 }
 
-#[test]
+#[dialog_common::test]
 fn it_round_trips_every_float() {
     let mut next = generator(0x2545_F491_4F6C_DD1D);
     let mut checked = 0;
@@ -145,7 +148,7 @@ fn it_round_trips_every_float() {
 /// `encoded_len` finds where a number ends without decoding it, so a key
 /// parser can split a key: it must agree with the decoder on every number,
 /// with whatever follows the number in the key.
-#[test]
+#[dialog_common::test]
 fn it_finds_where_a_number_ends() {
     let mut next = generator(0x9E37_79B9_7F4A_7C15);
     let mut values: Vec<Vec<u8>> = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.0]
@@ -178,7 +181,7 @@ fn it_finds_where_a_number_ends() {
     assert_eq!(encoded_len(&[0x18, 0x03]), None, "no last digit");
 }
 
-#[test]
+#[dialog_common::test]
 fn it_round_trips_every_integer() {
     let mut next = generator(0xD1B5_4A32_D192_ED03);
     for value in [0, 1, -1, 99, 100, -100, i128::MIN, i128::MAX] {
@@ -235,7 +238,7 @@ fn exact(a: Held, b: Held) -> Ordering {
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn it_sorts_numbers_by_value() {
     let mut next = generator(0x94D0_49BB_1331_11EB);
     let mut held = Vec::new();
@@ -265,7 +268,7 @@ fn it_sorts_numbers_by_value() {
     }
 }
 
-#[test]
+#[dialog_common::test]
 fn it_sorts_every_float_by_value() {
     let mut next = generator(0xBF58_476D_1CE4_E5B9);
     let mut floats: Vec<f64> = Vec::new();
@@ -291,7 +294,7 @@ fn it_sorts_every_float_by_value() {
     assert!(float(f64::MAX) < float(f64::INFINITY));
 }
 
-#[test]
+#[dialog_common::test]
 fn it_refuses_bytes_that_are_not_canonical() {
     // 1 with a trailing zero digit: 0.01 00 × 100^1.
     assert_eq!(
@@ -336,7 +339,7 @@ fn it_refuses_bytes_that_are_not_canonical() {
 /// Short decimals (prices, measurements) decode by multiplying or dividing
 /// an exact significand by an exact power of ten; that must round exactly
 /// as parsing the decimal does.
-#[test]
+#[dialog_common::test]
 fn it_decodes_short_decimals_as_parsing_them_does() {
     let mut next = generator(0xD1B5_4A32_D192_ED03);
     for _ in 0..200_000 {
@@ -361,7 +364,7 @@ fn it_decodes_short_decimals_as_parsing_them_does() {
 /// `read_scalar` reads a whole number an `i128` holds as an integer, a
 /// larger one as a natural, and anything else as the float `decode_f64`
 /// gives, taking exactly the number's bytes.
-#[test]
+#[dialog_common::test]
 fn it_reads_a_scalar_as_the_decoders_do() {
     let mut next = generator(0x94D0_49BB_1331_11EB);
     let mut cases: Vec<Vec<u8>> = vec![float(f64::NAN), float(f64::INFINITY), float(0.0)];
