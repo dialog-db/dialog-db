@@ -55,6 +55,7 @@ use crate::{
 use crate::{NUMBER_BAND, encode_key_value_owned};
 
 pub mod distribution;
+pub mod rekey;
 
 /// The concrete search-tree type the artifact indexes use.
 ///

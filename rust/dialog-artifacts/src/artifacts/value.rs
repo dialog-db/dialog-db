@@ -1261,8 +1261,7 @@ impl From<Value> for ValueDataType {
     }
 }
 
-/// The manifest `value_encoding` that keys every number in one band.
-pub const NUMBER_BAND: u32 = 1;
+pub use dialog_search_tree::NUMBER_BAND;
 
 /// [`ValueDataType`] embodies all types that are able to be represented
 /// as a [`Value`].
@@ -1533,11 +1532,12 @@ impl ValueDataType {
         ) || self.is_view()
     }
 
-    /// The type byte an index key carries for values of this type. With
-    /// the `number-band` feature every number shares the integer band;
-    /// otherwise each type keeps its own.
-    pub fn band(self) -> Self {
-        match self {
+    /// The type byte an index key carries for values of this type under a
+    /// tree's `value_encoding`: in the [`NUMBER_BAND`] every number is keyed
+    /// as [`Number`](Self::Number); otherwise each number type keeps its own
+    /// band. A sized number type is keyed as its storage type's band.
+    pub fn band(self, value_encoding: u32) -> Self {
+        match self.storage() {
             ValueDataType::UnsignedInt | ValueDataType::SignedInt | ValueDataType::Float
                 if value_encoding == NUMBER_BAND =>
             {
@@ -1545,17 +1545,6 @@ impl ValueDataType {
             }
             other => other,
         }
-    }
-
-    /// Whether this is one of the number types.
-    pub fn is_number(self) -> bool {
-        matches!(
-            self,
-            ValueDataType::UnsignedInt
-                | ValueDataType::SignedInt
-                | ValueDataType::Float
-                | ValueDataType::Number
-        )
     }
 
     /// The smallest [`ValueDataType`] in discriminant order

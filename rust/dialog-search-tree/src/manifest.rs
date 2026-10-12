@@ -64,6 +64,12 @@ mod code {
     }
 }
 
+/// The `value_encoding` under which every number is keyed in one band, in
+/// dialog-number's encoding. A new tree is created under it; a tree whose
+/// manifest leaves `value_encoding` at 0 keys each number type in its own
+/// band, and is read only to be rewritten under this one.
+pub const NUMBER_BAND: u32 = 1;
+
 /// The format parameters of a tree, carried by every node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
@@ -421,13 +427,12 @@ impl Default for Manifest {
                         "DIALOG_TREE_ANCHOR_SELECTOR",
                         table.anchor_selector,
                     ),
-                    // `DIALOG_TREE_VALUE_ENCODING=1` creates fresh trees with
-                    // every number in one band, so the perf suite measures
-                    // both encodings from one binary.
-                    value_encoding: env_override(
-                        "DIALOG_TREE_VALUE_ENCODING",
-                        table.value_encoding,
-                    ),
+                    // A fresh tree keys every number in one band. The table
+                    // default stays 0, which is what a manifest written
+                    // before the band means by the field's absence;
+                    // `DIALOG_TREE_VALUE_ENCODING=0` creates per-type-band
+                    // trees, so the perf suite measures both from one binary.
+                    value_encoding: env_override("DIALOG_TREE_VALUE_ENCODING", NUMBER_BAND),
                     ..table
                 }
             })

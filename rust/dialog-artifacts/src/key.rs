@@ -679,14 +679,22 @@ mod tests {
                     .unwrap_or_else(|| panic!("key must parse: {value:?}"));
                 assert_eq!(parts.entity.as_ref(), fact.of.as_str().as_bytes());
                 assert_eq!(parts.attribute.as_ref(), fact.the.as_str().as_bytes());
-                assert_eq!(parts.value_type, value.data_type());
+                assert_eq!(
+                    parts.value_type,
+                    value.data_type().band(Manifest::default().value_encoding)
+                );
                 let ValueRef::Inline(payload) = parts.value else {
                     panic!("small values stay inline: {value:?}");
                 };
                 let (decoded, rest) =
                     decode_value(parts.value_type, payload).expect("payload decodes");
                 assert!(rest.is_empty(), "payload is exactly one value: {value:?}");
-                assert_eq!(decoded, value, "value round-trips through the key");
+                // A number in the band reads back as the narrowest type
+                // that holds it, so `-0.0` reads as the natural `0`.
+                assert!(
+                    decoded == value || decoded.same_number(&value),
+                    "value round-trips through the key: {value:?} read as {decoded:?}"
+                );
             }
         }
         Ok(())
@@ -790,7 +798,10 @@ mod tests {
         let projected: ValueKey<crate::Key> = FromKey::from_key(&eav);
         assert_eq!(projected.value_payload(), vae.value_payload());
         assert_eq!(projected.value_is_spilled(), vae.value_is_spilled());
-        assert_eq!(projected.value_type(), value.data_type());
+        assert_eq!(
+            projected.value_type(),
+            value.data_type().band(Manifest::default().value_encoding)
+        );
         Ok(())
     }
 

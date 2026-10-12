@@ -92,8 +92,8 @@ fn mixed() -> Vec<Value> {
 }
 
 /// In the band a number does not record the type that wrote it: a whole
-/// number reads back as an integer, and every key carries the band's type
-/// byte.
+/// number reads back as a natural when it is not negative, as an integer
+/// when it is, and every key carries the band's type byte.
 #[dialog_common::test]
 async fn it_keys_every_number_in_one_band() -> anyhow::Result<()> {
     let (tree, store) = tree(NUMBER_BAND, sizes(&mixed())?).await?;
@@ -103,8 +103,8 @@ async fn it_keys_every_number_in_one_band() -> anyhow::Result<()> {
         vec![
             Value::SignedInt(-2),
             Value::Float(2.5),
-            Value::SignedInt(3),
-            Value::SignedInt(5),
+            Value::UnsignedInt(3),
+            Value::UnsignedInt(5),
         ]
     );
 

@@ -130,13 +130,19 @@ pub fn decode_value(value_type: ValueDataType, bytes: &[u8]) -> Option<(Value, &
     })
 }
 
-/// Decodes a number in the [`Number`](ValueDataType::Number) band: a whole
-/// number as an integer, one too large for an integer as a natural, and
-/// any other as a float. The band does not record which type wrote it.
+/// Decodes a number in the [`Number`](ValueDataType::Number) band. The band
+/// does not record which type wrote a number, so one reads back as the
+/// narrowest type that holds it: a whole number as a natural when it is
+/// not negative and as an integer when it is, and any other as a float.
+/// `3`, `3.0` and the natural `3` are one value in the band, as they are
+/// in identity, and a typed read views the value as the type it declares.
 fn decode_number(bytes: &[u8]) -> Option<(Value, &[u8])> {
     let (scalar, read) = dialog_number::read_scalar(bytes).ok()?;
     let value = match scalar {
-        dialog_number::Scalar::Integer(integer) => Value::SignedInt(integer),
+        dialog_number::Scalar::Integer(integer) => match u128::try_from(integer) {
+            Ok(natural) => Value::UnsignedInt(natural),
+            Err(_) => Value::SignedInt(integer),
+        },
         dialog_number::Scalar::Natural(natural) => Value::UnsignedInt(natural),
         dialog_number::Scalar::Float(float) => Value::Float(float),
     };
