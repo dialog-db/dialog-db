@@ -673,6 +673,7 @@ where
         allow_empty,
         canonicalize,
         amend,
+        rebuild: None,
     }
     .perform(env, line)
     .await?;
