@@ -7,6 +7,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use dialog_effects::blob::{BlobError, Read as BlobRead};
 use std::collections::BTreeSet;
+use std::iter;
 use std::pin::pin;
 use std::sync::Arc;
 
@@ -993,7 +994,7 @@ async fn it_round_trips_many_float_values() -> Result<()> {
     // reads back as the natural `5`, the same number.
     let mut written: Vec<f64> = (0..400u64)
         .map(|index| index as f64 * 1.5 - 100.0)
-        .chain(std::iter::once(1783112056217.0))
+        .chain(iter::once(1783112056217.0))
         .collect();
     let mut read: Vec<f64> = selected
         .iter()

@@ -180,12 +180,15 @@ impl RekeyStorage<'_> {
         let mut delta = ArchiveDelta::zero();
         let rewritten = rekey_tree(&tree, &store, &mut delta, target, branch.node_cache()).await?;
         persist(&branch.archive().index(), &mut delta, env).await?;
-        let revision = branch
-            .commit(stream::empty())
-            .rebuilding(rewritten)
-            .allow_empty()
-            .perform(env)
-            .await?;
+        // Boxed: the commit is a large future, and this one runs once.
+        let revision = Box::pin(
+            branch
+                .commit(stream::empty())
+                .rebuilding(rewritten)
+                .allow_empty()
+                .perform(env),
+        )
+        .await?;
         Ok(Some(revision))
     }
 }
@@ -216,7 +219,7 @@ impl Migrate<'_> {
             + ConditionalSync
             + 'static,
     {
-        let storage = self.branch.migrate_storage().perform(env).await?;
+        let storage = Box::pin(self.branch.migrate_storage().perform(env)).await?;
         let rules = self.branch.upgrade_rules().perform(env).await?;
         Ok(Migrated { storage, rules })
     }

@@ -14,11 +14,14 @@
 //! earlier release wrote and its rewrite as one tree, and a migration
 //! two replicas run on their own converge.
 
+use std::mem;
+
 use dialog_search_tree::Manifest;
 use futures_util::TryStreamExt as _;
 
 use crate::artifacts::decode_value;
 use crate::key::varkey::{ValuePayload, build_key, parse_key};
+use crate::merge::full_scope;
 use crate::tree::{ArtifactNodeCache, ArtifactTree, ArtifactTreeExt as _};
 use crate::{
     ArchiveDelta, ArchiveReader, DialogArtifactsError, Key, ValueDataType, encode_key_value_owned,
@@ -73,14 +76,14 @@ where
 {
     let value_encoding = manifest.value_encoding;
     let mut target = ArtifactTree::empty_with_manifest(manifest, cache);
-    let [range] = crate::merge::full_scope();
+    let [range] = full_scope();
     let stream = source.stream_range_handles(range, store);
     tokio::pin!(stream);
     let mut batch = Vec::with_capacity(BATCH);
     while let Some(entry) = stream.try_next().await? {
         batch.push((rekey(entry.key.as_ref(), value_encoding)?, entry.value));
         if batch.len() == BATCH {
-            let entries = std::mem::replace(&mut batch, Vec::with_capacity(BATCH));
+            let entries = mem::replace(&mut batch, Vec::with_capacity(BATCH));
             target.record(store, delta, entries.into()).await?;
         }
     }
