@@ -126,11 +126,44 @@ pub struct InMemoryAnswerTable {
     staged: HashMap<Entity, BTreeMap<Vec<u8>, Answer>>,
 }
 
-/// The canonical identity of a row: its dag-cbor bytes. dag-cbor
-/// sorts map keys per spec, so the encoding is a pure function of
-/// the row's contents.
+/// The identity of a row: each operand's name and value, length-framed
+/// and tagged with the value's type, in the row's name order. Injective,
+/// so two rows share a key exactly when they hold the same operands with
+/// the same values of the same types, and a pure function of the row, so
+/// the sorted tables iterate in one order in every process. Framed by
+/// hand rather than through dag-cbor: the key is taken once per derived
+/// row, and the serializer's dispatch was a twentieth of a recursive
+/// rule's evaluation.
 fn row_key(row: &Row) -> Vec<u8> {
-    serde_ipld_dagcbor::to_vec(row).expect("a row of values encodes")
+    let mut key = Vec::new();
+    for (operand, value) in row {
+        key.extend_from_slice(&(operand.len() as u32).to_be_bytes());
+        key.extend_from_slice(operand.as_bytes());
+        key.push(value.data_type() as u8);
+        let bytes = value.to_bytes();
+        key.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        key.extend_from_slice(&bytes);
+    }
+    key
+}
+
+impl InMemoryAnswerTable {
+    /// [`AnswerTable::total`], borrowed: the rounds read every table
+    /// once per rule and copied every row each time.
+    fn total_rows(&self, concept: &Entity) -> Vec<&Answer> {
+        self.total
+            .get(concept)
+            .map(|rows| rows.values().collect())
+            .unwrap_or_default()
+    }
+
+    /// [`AnswerTable::delta`], borrowed.
+    fn delta_rows(&self, concept: &Entity) -> Vec<&Answer> {
+        self.delta
+            .get(concept)
+            .map(|rows| rows.values().collect())
+            .unwrap_or_default()
+    }
 }
 
 impl AnswerTable for InMemoryAnswerTable {
@@ -466,7 +499,7 @@ where
         &[],
         vec![matched],
         scope.clone(),
-        &mut HashMap::new(),
+        &mut Vec::new(),
         env,
     )
     .await?;
@@ -484,54 +517,59 @@ where
 /// shares a variable with what is bound. So a rule with several
 /// occurrences joins them through the premises that connect them,
 /// rather than pairing every row of one table with every row of
-/// another and planning the body per pair. `plans` caches each
-/// stage's plan across calls that start from the same scope.
+/// another and planning the body per pair. `stages` is the order the
+/// first call from a scope settled, with each stage's plan: the order
+/// is the same for every row that starts from that scope, so a later
+/// call replays it without touching the premises.
 #[allow(clippy::too_many_arguments)]
 async fn join_rest<'a, Env>(
     member: &Member,
     split: &SplitRule,
     mut base: Vec<Premise>,
     mut siblings: Vec<usize>,
-    totals: &[Vec<Answer>],
+    totals: &[Vec<&Answer>],
     mut partials: Vec<Match>,
     mut scope: Environment,
-    plans: &mut HashMap<usize, Conjunction>,
+    stages: &mut Vec<Stage>,
     env: &'a Env,
 ) -> Result<Vec<Match>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
+    // Settled by an earlier row: replay. Every stage was settled then,
+    // whatever that row derived, so nothing is left to decide here.
+    if !stages.is_empty() {
+        for stage in stages.iter() {
+            partials = match stage {
+                Stage::Plan(plan) => evaluate_stage(plan, partials, env).await?,
+                Stage::Sibling(index) => {
+                    join_sibling(partials, &split.occurrences[*index], &totals[*index])
+                }
+            };
+            if partials.is_empty() {
+                break;
+            }
+        }
+        return Ok(partials);
+    }
+    // The first row from this scope settles every stage, even once it
+    // has nothing left to join (a stage over no rows costs its plan and
+    // nothing else), so the rows after it only replay.
     let types = &split.rule.analysis().types;
-    let mut stage = 0usize;
     while !base.is_empty() || !siblings.is_empty() {
         let (ready, later): (Vec<Premise>, Vec<Premise>) = base
             .into_iter()
             .partition(|premise| premise.feasible(&scope).is_ok());
         base = later;
         if !ready.is_empty() {
-            let plan = match plans.get(&stage) {
-                Some(plan) => plan.clone(),
-                None => {
-                    let plan = Planner::with_types(ready, types.clone())
-                        .plan(&scope)
-                        .map_err(|error| EvaluationError::Planning {
-                            message: error.to_string(),
-                        })?;
-                    plans.insert(stage, plan.clone());
-                    plan
-                }
-            };
-            let mut next = Vec::new();
-            for partial in partials {
-                let rows: Vec<Match> = plan
-                    .clone()
-                    .evaluate(partial.seed(), env)
-                    .try_collect()
-                    .await?;
-                next.extend(rows);
-            }
-            partials = next;
+            let plan = Planner::with_types(ready, types.clone())
+                .plan(&scope)
+                .map_err(|error| EvaluationError::Planning {
+                    message: error.to_string(),
+                })?;
+            partials = evaluate_stage(&plan, partials, env).await?;
             scope.extend(&plan.binds);
+            stages.push(Stage::Plan(plan));
         } else if !siblings.is_empty() {
             let connected = siblings.iter().position(|index| {
                 split.occurrences[*index]
@@ -541,17 +579,9 @@ where
             });
             let index = siblings.remove(connected.unwrap_or(0));
             let occurrence = &split.occurrences[index];
-            let mut next = Vec::new();
-            for partial in &partials {
-                for row in &totals[index] {
-                    let mut joined = partial.clone();
-                    if bind_occurrence(&mut joined, occurrence, row) {
-                        next.push(joined);
-                    }
-                }
-            }
-            partials = next;
+            partials = join_sibling(partials, occurrence, &totals[index]);
             add_terms(&mut scope, occurrence);
+            stages.push(Stage::Sibling(index));
         } else {
             return Err(EvaluationError::Planning {
                 message: format!(
@@ -560,12 +590,52 @@ where
                 ),
             });
         }
-        stage += 1;
-        if partials.is_empty() {
-            break;
-        }
     }
     Ok(partials)
+}
+
+/// One stage of a rule body after its leading rows are bound: a plan
+/// over the premises that had become feasible, or a join with a sibling
+/// occurrence's rows (an index into the split's occurrences).
+enum Stage {
+    Plan(Conjunction),
+    Sibling(usize),
+}
+
+/// Every row `plan` yields from each of `partials`.
+async fn evaluate_stage<'a, Env>(
+    plan: &Conjunction,
+    partials: Vec<Match>,
+    env: &'a Env,
+) -> Result<Vec<Match>, EvaluationError>
+where
+    Env: crate::Scope<'a>,
+{
+    let mut next = Vec::new();
+    for partial in partials {
+        let rows: Vec<Match> = plan
+            .clone()
+            .evaluate(partial.seed(), env)
+            .try_collect()
+            .await?;
+        next.extend(rows);
+    }
+    Ok(next)
+}
+
+/// Each of `partials` joined with each of `rows` that binds against it
+/// as `occurrence` reads them.
+fn join_sibling(partials: Vec<Match>, occurrence: &ConceptQuery, rows: &[&Answer]) -> Vec<Match> {
+    let mut next = Vec::new();
+    for partial in &partials {
+        for row in rows {
+            let mut joined = partial.clone();
+            if bind_occurrence(&mut joined, occurrence, row) {
+                next.push(joined);
+            }
+        }
+    }
+    next
 }
 
 /// [`project`], yielding nothing when a required operand is missing:
@@ -636,27 +706,32 @@ where
                 if split.occurrences.is_empty() {
                     continue;
                 }
-                let totals: Vec<Vec<Answer>> = split
+                // What a rule derives is staged once it has fired for
+                // every occurrence: a round reads the tables the previous
+                // round left either way, and they are borrowed while it
+                // fires.
+                let mut derived = Vec::new();
+                let totals: Vec<Vec<&Answer>> = split
                     .occurrences
                     .iter()
-                    .map(|occurrence| table.total(&ProgramAnalysis::node(&occurrence.predicate)))
+                    .map(|occurrence| {
+                        table.total_rows(&ProgramAnalysis::node(&occurrence.predicate))
+                    })
                     .collect();
                 for delta_index in 0..split.occurrences.len() {
-                    let delta = table.delta(&ProgramAnalysis::node(
+                    let delta = table.delta_rows(&ProgramAnalysis::node(
                         &split.occurrences[delta_index].predicate,
                     ));
                     if delta.is_empty() {
                         continue;
                     }
-                    for answer in
-                        fire_occurrence(member, split, delta_index, &delta, &totals, env).await?
-                    {
-                        table.insert(
-                            &ProgramAnalysis::node(&member.descriptor),
-                            answer.row,
-                            answer.standing,
-                        );
-                    }
+                    derived.extend(
+                        fire_occurrence(member, split, delta_index, &delta, &totals, env).await?,
+                    );
+                }
+                let node = ProgramAnalysis::node(&member.descriptor);
+                for answer in derived {
+                    table.insert(&node, answer.row, answer.standing);
                 }
             }
         }
@@ -671,8 +746,8 @@ async fn fire_occurrence<'a, Env>(
     member: &Member,
     split: &SplitRule,
     delta_index: usize,
-    delta: &[Answer],
-    totals: &[Vec<Answer>],
+    delta: &[&Answer],
+    totals: &[Vec<&Answer>],
     env: &'a Env,
 ) -> Result<Vec<Answer>, EvaluationError>
 where
@@ -680,9 +755,9 @@ where
 {
     let leading = &split.occurrences[delta_index];
     let mut derived = Vec::new();
-    // The order of stages is the same for every delta row, so a stage's
-    // plan is made once.
-    let mut plans: HashMap<usize, Conjunction> = HashMap::new();
+    // The order of stages is the same for every delta row, so the first
+    // row settles them and the rest replay; only it reads the premises.
+    let mut stages: Vec<Stage> = Vec::new();
     for row in delta {
         let mut matched = Match::new();
         if !bind_occurrence(&mut matched, leading, row) {
@@ -693,15 +768,20 @@ where
         let siblings: Vec<usize> = (0..split.occurrences.len())
             .filter(|index| *index != delta_index)
             .collect();
+        let base = if stages.is_empty() {
+            split.base.clone()
+        } else {
+            Vec::new()
+        };
         let complete = join_rest(
             member,
             split,
-            split.base.clone(),
+            base,
             siblings,
             totals,
             vec![matched],
             scope,
-            &mut plans,
+            &mut stages,
             env,
         )
         .await?;
