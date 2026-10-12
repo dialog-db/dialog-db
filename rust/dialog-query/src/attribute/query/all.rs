@@ -1100,9 +1100,11 @@ mod tests {
         Ok(())
     }
 
-    /// Mixed numeric rows under a NUMERIC-wide kind: nothing is
-    /// pushed, so every numeric row reaches the residual comparison —
-    /// the scan produces no false negatives.
+    /// Mixed numeric rows under a NUMERIC-wide kind: the interval is
+    /// pushed as one scan across the number band, which orders every
+    /// number by value whatever type wrote it, so the natural `5` and
+    /// the float `2.5` pass a bound of `>= 1` and the integer `-3` does
+    /// not — and the scan produces no false negatives.
     #[dialog_common::test]
     async fn it_keeps_mixed_numeric_rows_without_single_type_kind() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -1131,10 +1133,12 @@ mod tests {
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
+        let mut values: Vec<Value> = results.iter().map(|artifact| artifact.is().clone()).collect();
+        values.sort_by_key(|value| format!("{value:?}"));
         assert_eq!(
-            results.len(),
-            3,
-            "the un-narrowed scan yields every numeric row"
+            values,
+            vec![Value::Float(2.5), Value::UnsignedInt(5)],
+            "every number at or above 1 passes, whatever type wrote it"
         );
         Ok(())
     }
