@@ -49,6 +49,13 @@ What this changes for you:
   still sees them; code matching `Value::Float(5.0)` on a stored `5.0`
   now sees `UnsignedInt(5)`. A typed read (a concept field, a derived
   struct) views the number as the type it declares, unchanged.
+- An `ArtifactSelector` range bound reads each number through the lens
+  its type names before comparing, as a field declared with that type
+  reads it: an integer bound sees `34.5` as `34`, a natural bound does not
+  see `-3`, a float bound sees every number as it is, and
+  `across_numbers()` compares every number as it is for any bound.
+  Before, a bound admitted only numbers written with its own type; a
+  natural bound `>= 20` now finds a stored `30.0`.
 - `tree::rekey::rekey_tree` and `rekey` rewrite a tree or a key between
   encodings; `Branch::rekey_storage(0)` lays a branch out the earlier
   way, for tests of the migration.

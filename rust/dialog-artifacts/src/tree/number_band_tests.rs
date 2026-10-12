@@ -141,6 +141,63 @@ async fn it_scans_a_range_across_number_types_in_the_band() -> anyhow::Result<()
     Ok(())
 }
 
+/// A bound of a number type is a lens, as a field declared with that type
+/// is: a natural bound `>= 2` sees `2.5` as `2`, so it finds `2.5`, `3` and
+/// the whole float `5.0`, and never `-2`, which it does not see; a natural
+/// bound `<= 2` finds `2.5` alone; an integer bound `>= -3` finds every
+/// whole or floored number; a float bound sees every number as it is.
+/// `across_numbers` compares every number as it is: `<= 2` leaves `2.5` out.
+#[dialog_common::test]
+async fn it_reads_numbers_through_the_lens_of_the_bound() -> anyhow::Result<()> {
+    let (tree, store) = tree(NUMBER_BAND, sizes(&mixed())?).await?;
+    let at_least = |bound: Value| ArtifactSelector::new().the(size()).is_at_least(bound);
+    let at_most = |bound: Value| ArtifactSelector::new().the(size()).is_at_most(bound);
+    assert_eq!(
+        values(&tree, &store, at_least(Value::UnsignedInt(2))).await?,
+        vec![
+            Value::Float(2.5),
+            Value::UnsignedInt(3),
+            Value::UnsignedInt(5)
+        ],
+        "a natural bound sees 2.5 as 2 and does not see -2"
+    );
+    assert_eq!(
+        values(&tree, &store, at_most(Value::UnsignedInt(2))).await?,
+        vec![Value::Float(2.5)],
+        "2.5 is 2 through the natural lens; -2 is unseen"
+    );
+    assert_eq!(
+        values(&tree, &store, at_least(Value::SignedInt(-3))).await?,
+        vec![
+            Value::SignedInt(-2),
+            Value::Float(2.5),
+            Value::UnsignedInt(3),
+            Value::UnsignedInt(5)
+        ],
+        "an integer bound sees every number, floored"
+    );
+    assert_eq!(
+        values(&tree, &store, at_least(Value::Float(2.5))).await?,
+        vec![
+            Value::Float(2.5),
+            Value::UnsignedInt(3),
+            Value::UnsignedInt(5)
+        ],
+        "a float bound sees every number as it is"
+    );
+    assert_eq!(
+        values(
+            &tree,
+            &store,
+            at_most(Value::UnsignedInt(2)).across_numbers()
+        )
+        .await?,
+        vec![Value::SignedInt(-2)],
+        "across number types the bound compares numbers as they are"
+    );
+    Ok(())
+}
+
 /// A tree keying each type in its own band cannot bound one range across
 /// them, so a bound across number types scans without it and leaves the
 /// comparison to the caller: every number comes back, as written.

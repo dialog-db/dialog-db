@@ -16,7 +16,7 @@ use std::cmp::Ordering;
 
 use crate::{
     ArtifactSelector, NameShape, Value, ValueDataType,
-    artifacts::selector::Constrained,
+    artifacts::selector::{Constrained, ValueBound},
     decode_bytes_cow, decode_value,
     key::value_payload,
     key::varkey::{KeyRef, ValuePayload, ValueRef},
@@ -220,6 +220,18 @@ pub fn match_selector_and_key_ref(
                 if dialog_number::encoded_len(payload) != Some(payload.len()) {
                     return SelectorMatch::Excluded;
                 }
+                // A bound of a number type is a lens: the row's number is
+                // read through it before the comparison, so an integer
+                // bound sees 34.5 as 34 and a natural bound does not see
+                // -3. A float bound, or one across number types, compares
+                // the number as it is, which the band's bytes order.
+                let viewed = selector
+                    .value_lower()
+                    .into_iter()
+                    .chain(selector.value_upper())
+                    .any(|bound| bound.lens().is_some())
+                    .then(|| decode_value(ValueDataType::Number, payload))
+                    .flatten();
                 for (bound, lower) in [
                     (selector.value_lower(), true),
                     (selector.value_upper(), false),
@@ -228,10 +240,24 @@ pub fn match_selector_and_key_ref(
                     if !bound.value.data_type().is_number() {
                         return SelectorMatch::Excluded;
                     }
-                    let order = match &bound.encoded {
-                        Some(encoded) => (*payload).cmp(encoded.as_slice()),
-                        None => (*payload)
-                            .cmp(encode_key_value_owned(&bound.value, NUMBER_BAND).as_slice()),
+                    let order = match bound.lens() {
+                        None => match &bound.encoded {
+                            Some(encoded) => (*payload).cmp(encoded.as_slice()),
+                            None => (*payload)
+                                .cmp(encode_key_value_owned(&bound.value, NUMBER_BAND).as_slice()),
+                        },
+                        Some(view) => {
+                            let Some((value, _)) = viewed.clone() else {
+                                return SelectorMatch::Excluded;
+                            };
+                            let Some(value) = value.viewed_as(view) else {
+                                return SelectorMatch::Excluded;
+                            };
+                            match order(&value, &bound.value) {
+                                Some(order) => order,
+                                None => return SelectorMatch::Excluded,
+                            }
+                        }
                     };
                     let admitted = match order {
                         Ordering::Equal => bound.inclusive,
@@ -338,7 +364,10 @@ pub(crate) fn value_predicates_admit(
         if !comparable(value, &bound.value) {
             return false;
         }
-        match order(value, &bound.value) {
+        let Some(value) = through_lens(bound, value) else {
+            return false;
+        };
+        match order(&value, &bound.value) {
             Some(Ordering::Greater) => {}
             Some(Ordering::Equal) if bound.inclusive => {}
             _ => return false,
@@ -348,7 +377,10 @@ pub(crate) fn value_predicates_admit(
         if !comparable(value, &bound.value) {
             return false;
         }
-        match order(value, &bound.value) {
+        let Some(value) = through_lens(bound, value) else {
+            return false;
+        };
+        match order(&value, &bound.value) {
             Some(Ordering::Less) => {}
             Some(Ordering::Equal) if bound.inclusive => {}
             _ => return false,
@@ -362,6 +394,16 @@ pub(crate) fn value_predicates_admit(
 fn comparable(value: &Value, bound: &Value) -> bool {
     value.data_type() == bound.data_type()
         || (value.data_type().is_number() && bound.data_type().is_number())
+}
+
+/// `value` as `bound` compares it: a number read through the bound's lens
+/// (see [`lens`]), `None` when the lens does not see it; any other value as
+/// it is.
+fn through_lens(bound: &ValueBound, value: &Value) -> Option<Value> {
+    match bound.lens() {
+        Some(view) if value.data_type().is_number() => value.clone().viewed_as(view),
+        _ => Some(value.clone()),
+    }
 }
 
 /// How `value` orders against a bound. Numbers order by value across

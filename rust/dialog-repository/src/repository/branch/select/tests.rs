@@ -583,11 +583,12 @@ async fn it_selects_by_value_prefix() -> Result<()> {
     Ok(())
 }
 
-/// A numeric bound compares every number, whatever type wrote it: the
-/// band keys `30.0` and `50` as numbers, so `>= 20` finds both. A value
-/// of another kind beside them (a string, a boolean) is a non-match, not
-/// an error, over the value index and over the entity-pinned route alike,
-/// and bounds of two number types form one range; inverted bounds match
+/// A numeric bound reads each number through the lens its type names, as
+/// a field declared with that type does: a natural bound `>= 20` finds the
+/// stored `30.0` and `50`, and `25.5`, which it sees as `25`. A value of
+/// another kind beside them (a string, a boolean) is a non-match, not an
+/// error, over the value index and over the entity-pinned route alike;
+/// bounds of two number types form one range; inverted bounds match
 /// nothing.
 #[dialog_common::test]
 async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<()> {
@@ -601,6 +602,7 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
         Value::UnsignedInt(50),
         Value::String("forty".into()),
         Value::Float(30.0),
+        Value::Float(25.5),
         Value::Boolean(true),
     ]
     .into_iter()
@@ -608,27 +610,29 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
     .collect::<Result<Vec<_>>>()?;
     assert_all(&branch, data, &operator).await?;
 
-    let numbers = |selected: &[dialog_artifacts::Artifact]| -> Vec<u128> {
-        let mut numbers: Vec<u128> = selected
+    let numbers = |selected: &[dialog_artifacts::Artifact]| -> Vec<f64> {
+        let mut numbers: Vec<f64> = selected
             .iter()
             .map(|fact| match &fact.is {
-                Value::UnsignedInt(natural) => *natural,
-                other => panic!("a number >= 20 is a natural, not {other:?}"),
+                Value::UnsignedInt(natural) => *natural as f64,
+                Value::SignedInt(integer) => *integer as f64,
+                Value::Float(float) => *float,
+                other => panic!("a number matched the bound, not {other:?}"),
             })
             .collect();
-        numbers.sort_unstable();
+        numbers.sort_by(f64::total_cmp);
         numbers
     };
 
-    // A numeric range matches the numbers; the string and the boolean
-    // beside them are non-matches, not errors.
+    // A natural range sees every number through the natural lens; the
+    // string and the boolean beside them are non-matches, not errors.
     let selected = select(
         &branch,
         ArtifactSelector::new().is_at_least(Value::UnsignedInt(20)),
         &operator,
     )
     .await?;
-    assert_eq!(numbers(&selected), vec![30, 50], "{selected:?}");
+    assert_eq!(numbers(&selected), vec![25.5, 30.0, 50.0], "{selected:?}");
 
     // Same over the entity-pinned (EAV) route, where every type of the
     // entity's values passes through the filter.
@@ -656,11 +660,12 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
     .await?;
     assert_eq!(
         numbers(&selected),
-        vec![40],
+        vec![40.0],
         "the string label is a non-match: {selected:?}"
     );
 
-    // Bounds of two number types form one range over the band.
+    // Bounds of two number types form one range, each read through its
+    // own lens.
     let selected = select(
         &branch,
         ArtifactSelector::new()
@@ -669,7 +674,7 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
         &operator,
     )
     .await?;
-    assert_eq!(numbers(&selected), vec![30, 40], "{selected:?}");
+    assert_eq!(numbers(&selected), vec![25.5, 30.0, 40.0], "{selected:?}");
 
     // Inverted bounds are empty, not an error.
     let selected = select(

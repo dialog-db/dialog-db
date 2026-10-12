@@ -465,8 +465,8 @@ fn apply_prefix_bounds<K: KeyViewMut>(
         };
         let hi = match selector.value_upper() {
             Some(bound) => match &bound.value {
-                value if band == ValueDataType::Number => {
-                    encode_key_value_owned(value, manifest.value_encoding)
+                _ if band == ValueDataType::Number => {
+                    encode_key_value_owned(&bound.upper_edge(), manifest.value_encoding)
                 }
                 Value::Float(float) if *float == 0.0 => encode_value_owned(&Value::Float(0.0)),
                 value => encode_value_owned(value),
