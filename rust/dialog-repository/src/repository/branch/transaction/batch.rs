@@ -289,13 +289,16 @@ impl BatchPublish {
                 }
                 .into());
             }
-            if induction.content().as_ref() != Some(&tip) {
-                induction.publish(tip.clone()).perform(env).await?;
-            }
+            advance_watermark(&induction, &tip, Some(tip.version()), env).await?;
             retract_from_overlay(&overlay, overlay_retractions)?;
             return Ok(tip);
         }
 
+        // The head the chain built on, by the first parent of its first
+        // link: where the watermark stands when no other writer moved it.
+        let base = chain
+            .first()
+            .and_then(|(_, record)| record.parents.first().cloned());
         head.publish(tip.clone(), env).await?;
         retract_from_overlay(&overlay, overlay_retractions)?;
 
@@ -312,11 +315,50 @@ impl BatchPublish {
 
         // Advance the induction watermark: every staged commit ran
         // commit-time induction, so the published head is fully induced.
-        if induction.content().as_ref() != Some(&tip) {
-            induction.publish(tip.clone()).perform(env).await?;
-        }
+        advance_watermark(&induction, &tip, base, env).await?;
 
         Ok(tip)
+    }
+}
+
+/// Advance the induction watermark `induction` to `tip`, the head this
+/// writer has just landed, built on the head whose version is `base`.
+///
+/// The watermark is local to a replica, but one replica can have more
+/// than one writer: two processes over one store, say. In the window
+/// after the head moved and before this write, another writer can land
+/// a commit on `tip` and advance the watermark itself. A lost CAS here
+/// must not fail a commit whose head has already landed. So the cell is
+/// read again, and moved to `tip` only while it still stands at `base`,
+/// or at no revision. Anywhere else, another writer moved it on, or left
+/// it behind, which the next inducing instant catches up over.
+async fn advance_watermark<Env>(
+    induction: &Cell<Revision>,
+    tip: &Revision,
+    base: Option<Version>,
+    env: &Env,
+) -> Result<(), CommitError>
+where
+    Env: Provider<Publish> + Provider<Resolve> + ConditionalSync,
+{
+    if induction.content().as_ref() == Some(tip) {
+        return Ok(());
+    }
+    match induction.publish(tip.clone()).perform(env).await {
+        Err(PublishError::VersionMismatch { .. }) => {}
+        other => return other.map_err(CommitError::from),
+    }
+    induction.resolve().perform(env).await?;
+    if induction.content().as_ref() == Some(tip) {
+        return Ok(());
+    }
+    let standing = induction.content().map(|revision| revision.version());
+    if standing.is_some() && standing != base {
+        return Ok(());
+    }
+    match induction.publish(tip.clone()).perform(env).await {
+        Err(PublishError::VersionMismatch { .. }) => Ok(()),
+        other => other.map_err(CommitError::from),
     }
 }
 
@@ -907,6 +949,56 @@ mod tests {
             bodies(&branch, &operator).await?,
             vec!["interloper", "seed", "staged"]
         );
+
+        Ok(())
+    }
+
+    /// A second writer over the same replica moves the watermark after
+    /// the batch read it and before the batch publishes, as when it lands
+    /// a commit on the batch's head and induces it in the window after
+    /// the head moved. The head has landed, so the publish succeeds, and
+    /// the watermark stays where the other writer put it.
+    #[dialog_common::test]
+    async fn it_lands_a_publish_when_another_writer_moved_the_watermark() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let batch = branch
+            .transaction()
+            .assert(note("staged")?)
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        // The other writer's revision, minted on a branch of its own.
+        let elsewhere = repo.branch("elsewhere").open().perform(&operator).await?;
+        let moved = elsewhere
+            .transaction()
+            .assert(note("elsewhere")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let watermark = repo.branch("main").induction();
+        watermark.resolve().perform(&operator).await?;
+        watermark.publish(moved.clone()).perform(&operator).await?;
+
+        let tip = batch.revision();
+        let head = batch.publish().perform(&operator).await?;
+        assert_eq!(head, tip);
+        assert_eq!(branch.revision(), Some(tip));
+
+        let watermark = repo.branch("main").induction();
+        watermark.resolve().perform(&operator).await?;
+        assert_eq!(watermark.content(), Some(moved));
 
         Ok(())
     }
