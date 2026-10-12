@@ -861,4 +861,58 @@ mod tests {
 
         Ok(())
     }
+
+    /// A selection whose constant was written bare, as JSON writes one,
+    /// reads it as the type the field declares: the text `home:` under a
+    /// `text:` field matches the text claim, where read by its spelling
+    /// it would be an entity and match nothing. The same conformance
+    /// that rule compilation applies to a premise's constants applies to
+    /// a query's. Text shaped like a URL is not covered: read as an
+    /// entity first, it comes back with the URL's normalization
+    /// (`https://example.com/`), which only a reader that takes a bare
+    /// string as text fixes.
+    #[dialog_common::test]
+    async fn it_selects_by_a_bare_constant_under_the_fields_type() -> anyhow::Result<()> {
+        use dialog_query::ConceptQuery;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let url: dialog_query::Relation = "page/url".parse()?;
+        for (page, text) in [("id:home", "home:"), ("id:open", "case:open")] {
+            let page: Entity = page.parse()?;
+            branch
+                .transaction()
+                .assert(url.clone().of(page).is(text.to_string()))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        branch.refresh(&operator).await?;
+
+        for (text, expected) in [("home:", "id:home"), ("case:open", "id:open")] {
+            let query: ConceptQuery = serde_json::from_value(serde_json::json!({
+                "assert": { "with": { "url": { "the": "page/url", "as": "text:" } } },
+                "where": { "this": { "?": { "name": "this" } }, "url": text }
+            }))?;
+            let rows = branch
+                .transaction()
+                .query()
+                .select(query)
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            let found: Vec<Entity> = rows
+                .iter()
+                .map(|row| row.get::<Entity>("this"))
+                .collect::<Result<_, _>>()?;
+            assert_eq!(
+                found,
+                vec![expected.parse::<Entity>()?],
+                "the page whose url is {text:?}"
+            );
+        }
+        Ok(())
+    }
 }

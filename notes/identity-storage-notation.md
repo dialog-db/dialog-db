@@ -671,7 +671,18 @@ Each step lands with tests and a perf sweep:
    only a persistent cache (keyed by rule entity and compiler version, local to
    the replica, never synced, discarded on upgrade) would remove. Not built
    until a cold-start measurement over tonk's rule library says it is needed.
-6. **The JSON reader and writer** that take types from slots.
+6. **The JSON reader and writer** that take types from slots. Half done: the
+   reader applies a field's declared type to a bare constant wherever a slot
+   exists, which rule compilation did and selection (`select(ConceptQuery)`) now
+   does too. The other half, "a bare string is text", is deferred: it would
+   change how every untyped position reads (constraint, formula and resolver
+   operands, `as:` lists, `Changes`), re-type tonk's stored `db.attribute/among`
+   domains and so the identities of those attributes, and touch every tonk query
+   builder that writes `"this": "id:…"` bare. Its dependency list: box entities in
+   `as:` lists and in operands without a slot; migrate stored `among` JSON; apply
+   slots in tonk's `/query` and `/transact this`; then flip the reader. Notation
+   is never hashed, so this can land in a later release without re-keying
+   anything but `among`.
 7. **A migration test:** a pre-0.2 fixture (from tonk main) upgrades to 0.3.0
    references in one pass. The re-keyed home and template spaces resolve every
    definition.
