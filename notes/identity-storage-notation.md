@@ -283,20 +283,24 @@ could not be retracted while any rule names it. Within a body, the definitions
 table writes each concept once, as a WebAssembly module is self-contained and
 names its imports.
 
-**The authored form is a separate claim.** Canonicalization throws away two
-things the author wrote: the names of local variables (identity hashes canonical
-labels), and the order of premises (identity sorts them). Both are kept outside
-the body, under their own attribute on the rule's entity:
+**The authored form is a separate claim.** Identity leaves out three things the
+author wrote: the names of local variables (identity hashes canonical labels),
+the order of premises (identity sorts them), and descriptions (of the rule, its
+concepts and their attributes). All three are kept outside the body, under their
+own attribute on the rule's entity:
 
 - the label each variable had in the source;
-- the source position of each premise, as a permutation of the canonical order.
+- the source position of each premise, as a permutation of the canonical order;
+- the descriptions.
 
 Loading a rule never reads it. Display and diagnostics read it when they need
 it: an error names variables as the author did by loading it on the error path,
-and shows canonical labels when it is missing. Field names are not part of it;
-identity hashes them, so they stay in the body.
+and shows canonical labels when it is missing. The head's field names stay in
+the body, since identity hashes them. A premise binds by attribute, so its field
+names are not in identity either; whether they move out too is settled with the
+encoding.
 
-Two rules that differ only in names or premise order are one rule, with one
+Two rules that differ only in names, premise order or descriptions are one rule, with one
 reference and one body, so a later install of the same rule can bring a
 different authored form. Only the newest is kept: the attribute is read under
 `last`, so a re-install replaces the authored form and leaves the body alone.
@@ -718,8 +722,9 @@ Each step lands with tests and a perf sweep:
 - **Rules are stored as atomic records:** a body holds everything needed to
   load the rule, and links no part by reference.
 - **Body format 3 ships in 0.3.0**, so the migration rewrites bodies once.
-- **The authored form is a separate claim** on the rule, keeping only the newest
-  install's, and loading a rule does not read it.
+- **The authored form is a separate claim** on the rule: variable names, premise
+  order and descriptions. It keeps only the newest install's, and loading a rule
+  does not read it.
 
 ## Open questions
 
