@@ -14,6 +14,32 @@ says how to cut a release.
 
 ## Unreleased
 
+### A selection reads a bare constant as the type its field declares
+
+[#593](https://github.com/dialog-db/dialog-db/pull/593)
+
+`select(ConceptQuery)` now conforms each constant to the type its field
+declares, as compiling a rule already did for a premise's constants: a
+bare text `"home:"` under a `text:` field is the text, not an entity,
+and a bare `5` under `integer:` is a signed integer. A constant `this`
+is an entity.
+
+What this changes for you:
+
+- A query whose constant was written bare in JSON matches the claims
+  the field holds. Before, `"url": "home:"` under a `text:` field read
+  as the entity `home:` and matched nothing.
+- A constant in a field with no declared type still reads as the type
+  its spelling suggests.
+- A bare text constant shaped like a URL (`https://example.com`) is
+  still read as an entity first, and comes back as the URL's normalized
+  text (`https://example.com/`). Write such a constant tagged,
+  `{"text:": "https://example.com"}`, until the reader takes every bare
+  string as text.
+
+Why: a constant written bare has no type of its own; the slot it fills
+does, and reading it any other way makes a query miss what it names.
+
 ### Rule bodies store the canonical spelling
 
 [#593](https://github.com/dialog-db/dialog-db/pull/593),
