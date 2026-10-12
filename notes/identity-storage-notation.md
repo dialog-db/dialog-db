@@ -256,17 +256,16 @@ section := id:u8 size:bijou content
 
 | Id | Section | Content | Required |
 |---|---|---|---|
-| 1 | references | the references the body points to (concepts, attributes, types of `any` values, values stored apart), 32 bytes each | when the body references any |
+| 1 | references | the references the body names (types of `any` values), 32 bytes each | when the body has any |
 | 2 | strings | relation names, field names and text constants, each length-prefixed UTF-8 | when the body has any |
-| 3 | head | the conclusion: a concept by reference index, or its fields inline | yes |
-| 4 | premises | each premise: its kind, then its operands | yes |
-| 5 | reduce | the folds of an aggregating rule | no |
-| 128 | names | the names the author gave local variables, for display only | no |
-| 129 | order | the order the author wrote premises in, as a permutation of the canonical order, for display only | no |
+| 3 | definitions | the attributes and concepts the rule uses, each written once | when the body has any |
+| 4 | head | the conclusion: a concept by its index in the definitions | yes |
+| 5 | premises | each premise: its kind, then its operands | yes |
+| 6 | reduce | the folds of an aggregating rule | no |
 
 **Operands point into the tables.** A premise reads a concept by its index in
-the references section and a field by its index in the strings section. Each
-reference and name is stored once per body, and decoding does no lookups.
+the definitions section and a field by its index in the strings section. Each
+definition and name is stored once per body, and decoding does no lookups.
 
 **Schema-driven values.** The schema says what type each slot holds, so a stored
 value carries no type where the slot declares one. In an `any` slot it carries
@@ -275,32 +274,37 @@ which names types by reference, and the notation's boxing rule. It keeps bodies
 smaller than self-describing CBOR, and no value is read as a type its spelling
 resembles.
 
-**Inline or linked is storage's choice.** Because identity hashes parts'
-references, a body may embed a part or store only its reference, and the rule's
-reference is the same either way. Concepts read by many rules are linked so they
-are stored once. Scalars and premises are embedded.
+**A body is self-contained.** Everything needed to load and run the rule is in
+its body: no part is stored apart and linked by reference. Identity would allow
+linking (a parent's reference is the same with a part embedded or linked), and
+linking would store a concept read by many rules once. It is not done, because
+a linked body cannot load until every part it names has synced, and a part
+could not be retracted while any rule names it. Within a body, the definitions
+table writes each concept once, as a WebAssembly module is self-contained and
+names its imports.
 
-**The authored form lives apart.** Canonicalization throws away two things the
-author wrote: the names of local variables (identity hashes canonical labels),
-and the order of premises (identity sorts them). Two optional sections keep them:
+**The authored form is a separate claim.** Canonicalization throws away two
+things the author wrote: the names of local variables (identity hashes canonical
+labels), and the order of premises (identity sorts them). Both are kept outside
+the body, under their own attribute on the rule's entity:
 
-- **names** holds the label each variable had in the source;
-- **order** holds the source position of each premise, as a permutation of the
-  canonical order.
+- the label each variable had in the source;
+- the source position of each premise, as a permutation of the canonical order.
 
-With both, a decoded rule prints as the author wrote it. Nothing reads them
-except display and diagnostics, and they work like the WebAssembly name section.
-Two rules that differ only in names or premise order are one rule with one
-reference, so a later install of the same rule can bring a different authored
-form. The preference is that the newest install wins. A body is stored as a
-claim (`dialog.rule/source`), so read under `last`, a re-install replaces the
-authored form and leaves the reference unchanged. This is settled independently
-of the rest of this design.
+Loading a rule never reads it. Display and diagnostics read it when they need
+it: an error names variables as the author did by loading it on the error path,
+and shows canonical labels when it is missing. Field names are not part of it;
+identity hashes them, so they stay in the body.
+
+Two rules that differ only in names or premise order are one rule, with one
+reference and one body, so a later install of the same rule can bring a
+different authored form. Only the newest is kept: the attribute is read under
+`last`, so a re-install replaces the authored form and leaves the body alone.
+Retracting a rule retracts both claims.
 
 **Compatibility.** An unknown section id below 128 is an error. An unknown id
 of 128 or above is skipped, which is how later versions can add optional data
-without a new format number. The names (128) and order (129) sections are the
-first such sections.
+without a new format number.
 
 **A canonical layout.** WebAssembly's encoding is not canonical: it allows
 over-long LEB128 and some freedom in section order. Bodies are not hashed, but a
@@ -311,6 +315,9 @@ layout:
 - sections appear in ascending id order, each at most once;
 - the references and strings tables are sorted and hold no duplicates;
 - premises appear in canonical order (by their encoded bytes, after labeling).
+
+With the authored form outside the body, a body is a function of its rule: two
+spellings of one rule store the same bytes.
 
 **What it is not.** A body's indices are local to that body, as a WebAssembly
 module's are. The same concept has a different index in different bodies, so a
@@ -673,8 +680,9 @@ Each step lands with tests and a perf sweep:
    read as a merkle structure, a constant `{"<type entity>": payload}` taken
    as its value, so a constant has one identity wherever it appears.
    Attribute descriptions no longer reach rule identity.
-4. **Body format 3**, the WebAssembly-style layout above, with definitions
-   stored by reference. Formats 0 to 2 are still read. Pinned by a round-trip
+4. **Body format 3**, the WebAssembly-style layout above, self-contained, with
+   the authored form as its own claim. The 0.3.0 migration rewrites every stored
+   body into it, so bodies are rewritten once. Formats 0 to 2 are still read. Pinned by a round-trip
    test, a test that equal rules store equal bytes, and tests that feed the
    decoder truncated, oversized and out-of-range input. The repo has no fuzzing
    setup yet; a fuzz target for the decoder would be worth adding with it.
@@ -707,6 +715,11 @@ Each step lands with tests and a perf sweep:
   and width (`natural:8`, `integer:64`, `float:32`). `natural:`, `integer:` and
   `float:` stay unbounded. The derive infers the sized type from the Rust field.
 - **Identity keeps `dialog-number`** after the storage assessment above.
+- **Rules are stored as atomic records:** a body holds everything needed to
+  load the rule, and links no part by reference.
+- **Body format 3 ships in 0.3.0**, so the migration rewrites bodies once.
+- **The authored form is a separate claim** on the rule, keeping only the newest
+  install's, and loading a rule does not read it.
 
 ## Open questions
 
