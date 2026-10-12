@@ -121,9 +121,21 @@ where
     // overlay of the round view, which does not change across rounds.
     let operator = Identify.perform(env).await?;
 
+    // The rules, and the markers of transient concepts, that the
+    // transaction dispatched are rules of this commit alone: every
+    // round reads them, as it reads the rules staged in `changes`, and
+    // nothing commits them. A host can so bring rules of its own to a
+    // commit without writing them into the branch.
+    let dispatched_rules = rule_records(&transients);
+    let dispatched_entities: BTreeSet<Entity> = dispatched_rules
+        .iter()
+        .map(|(entity, _, _)| entity.clone())
+        .collect();
+
     // This round's transient facts. Round 1 sees the dispatched
     // commands; round N+1 sees only the transients round N emitted —
-    // a transient lives for exactly one round.
+    // a transient lives for exactly one round — and the dispatched
+    // rules.
     let mut transient_overlay = transients;
 
     let mut round: u32 = 0;
@@ -172,7 +184,7 @@ where
         // The overlay's trigger slice: rules, markers, and support
         // edges staged in this transaction (including novelty from
         // earlier rounds).
-        let overlay = OverlayTriggers::scan(changes);
+        let overlay = OverlayTriggers::scan(&[changes, &dispatched_rules]);
 
         // Installation handles current state: a rule is itself a fact,
         // so the circumstance "rule exists ∧ premises hold" completes
@@ -191,6 +203,12 @@ where
         let mut installed_deductive: BTreeSet<Entity> = BTreeSet::new();
         for instruction in &stimulus {
             if let Instruction::Assert(a, _) = instruction {
+                // A dispatched rule is not installed by this commit: it
+                // fires on the delta through its triggers, as a committed
+                // rule does, not on the whole branch.
+                if dispatched_entities.contains(&a.of) {
+                    continue;
+                }
                 if a.the == on {
                     installed.insert(a.of.clone());
                 } else if a.the == reads {
@@ -305,10 +323,37 @@ where
         stimulus.extend(emitted_transients.clone().into_instructions());
         novelty.assert(changes);
         emitted_transients.clone().assert(&mut induced);
+        dispatched_rules.clone().assert(&mut emitted_transients);
         transient_overlay = emitted_transients;
     }
 
     Ok(induced)
+}
+
+/// The records of rules, and the markers of transient concepts, among
+/// `changes`: what [`OverlayTriggers::scan`] reads.
+fn rule_records(changes: &Changes) -> Changes {
+    use dialog_artifacts::Update as _;
+
+    let transient = transient_attr();
+    let mut records = Changes::new();
+    for (entity, attribute, change) in changes.iter() {
+        if !attribute.to_string().starts_with("dialog.rule/") && *attribute != transient {
+            continue;
+        }
+        match change {
+            Change::Assert(value, pick) => records.associate(
+                attribute.clone(),
+                entity.clone(),
+                value.clone(),
+                pick.clone(),
+            ),
+            Change::Retract(value) => {
+                records.dissociate(attribute.clone(), entity.clone(), value.clone())
+            }
+        }
+    }
+    records
 }
 
 /// The committed side of trigger dispatch for one induction run: the
@@ -345,14 +390,14 @@ struct OverlayTriggers {
 }
 
 impl OverlayTriggers {
-    fn scan(changes: &Changes) -> Self {
+    fn scan(layers: &[&Changes]) -> Self {
         let on = on_attr();
         let reads = reads_attr();
         let source = source_attr();
         let transient = transient_attr();
 
         let mut slice = OverlayTriggers::default();
-        for (entity, attribute, change) in changes.iter() {
+        for (entity, attribute, change) in layers.iter().flat_map(|changes| changes.iter()) {
             if *attribute == on {
                 if let Change::Assert(Value::Entity(key), _) = change {
                     slice
@@ -1647,6 +1692,156 @@ mod tests {
                 .is_empty(),
             "a reported transient still never reaches the branch"
         );
+        Ok(())
+    }
+
+    /// Rules and transient markers dispatched beside a command are rules
+    /// of that commit alone: they fire on the command, in every round of
+    /// the cascade, and none of them reaches the branch.
+    #[dialog_common::test]
+    async fn it_induces_with_rules_dispatched_beside_a_command() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let command: Entity = "cmd:start".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        let batch = branch
+            .transaction()
+            .dispatch(transient_target("cmd.stage/target")?)
+            .dispatch(transient_target("cmd.finish/target")?)
+            .dispatch(relay("cmd.start/target", "cmd.stage/target")?)
+            .dispatch(relay("cmd.stage/target", "cmd.finish/target")?)
+            .dispatch(
+                dialog_query::the!("cmd.start/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            asserted(batch.induced()),
+            vec![
+                (
+                    "cmd.finish/target".to_string(),
+                    command.clone(),
+                    Value::Entity(target.clone())
+                ),
+                (
+                    "cmd.stage/target".to_string(),
+                    command.clone(),
+                    Value::Entity(target.clone())
+                ),
+            ],
+            "the dispatched rules fire in both rounds"
+        );
+        batch.publish().perform(&operator).await?;
+        for prefix in ["dialog.rule/", "dialog.concept/"] {
+            let records = branch
+                .claims()
+                .select(ArtifactSelector::new().the_starting_with(prefix))
+                .perform(&operator)
+                .await?
+                .collect::<Vec<_>>()
+                .await;
+            assert!(records.is_empty(), "no rule nor marker reaches the branch");
+        }
+
+        // The next commit has none of those rules.
+        let batch = branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.start/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert!(batch.induced().is_empty());
+        Ok(())
+    }
+
+    /// A dispatched rule fires on the delta of its commit, as a committed
+    /// rule does: a fact that an earlier commit wrote does not fire it
+    /// again at a dispatch that does not touch what it reads.
+    #[dialog_common::test]
+    async fn it_fires_a_dispatched_rule_on_the_delta_alone() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let command: Entity = "cmd:start".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("cmd.start/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let batch = branch
+            .transaction()
+            .dispatch(transient_target("cmd.stage/target")?)
+            .dispatch(relay("cmd.start/target", "cmd.stage/target")?)
+            .dispatch(
+                dialog_query::the!("cmd.other/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert!(
+            batch.induced().is_empty(),
+            "the committed fact does not fire the dispatched rule again"
+        );
+        Ok(())
+    }
+
+    /// A dispatched rule whose head is durable commits its head, and not
+    /// itself.
+    #[dialog_common::test]
+    async fn it_commits_the_durable_head_of_a_dispatched_rule() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let command: Entity = "cmd:start".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .dispatch(relay("cmd.start/target", "doc.done/target")?)
+            .dispatch(
+                dialog_query::the!("cmd.start/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            values(&branch, &operator, "doc.done/target", &command).await?,
+            vec![Value::Entity(target)]
+        );
+        let rules = branch
+            .claims()
+            .select(ArtifactSelector::new().the_starting_with("dialog.rule/"))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await;
+        assert!(rules.is_empty(), "no rule reaches the branch");
         Ok(())
     }
 
