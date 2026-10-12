@@ -1133,7 +1133,10 @@ mod tests {
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
-        let mut values: Vec<Value> = results.iter().map(|artifact| artifact.is().clone()).collect();
+        let mut values: Vec<Value> = results
+            .iter()
+            .map(|artifact| artifact.is().clone())
+            .collect();
         values.sort_by_key(|value| format!("{value:?}"));
         assert_eq!(
             values,
