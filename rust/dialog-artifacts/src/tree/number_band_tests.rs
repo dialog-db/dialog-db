@@ -132,7 +132,11 @@ async fn it_scans_a_range_across_number_types_in_the_band() -> anyhow::Result<()
         .across_numbers();
     assert_eq!(
         values(&tree, &store, selector).await?,
-        vec![Value::Float(2.5), Value::SignedInt(3), Value::SignedInt(5)]
+        vec![
+            Value::Float(2.5),
+            Value::UnsignedInt(3),
+            Value::UnsignedInt(5)
+        ]
     );
     Ok(())
 }
@@ -181,7 +185,7 @@ async fn it_holds_a_number_once_whatever_type_wrote_it() -> anyhow::Result<()> {
     let (band, store) = tree(NUMBER_BAND, facts.clone()).await?;
     assert_eq!(
         values(&band, &store, ArtifactSelector::new().of(item.clone())).await?,
-        vec![Value::SignedInt(5)]
+        vec![Value::UnsignedInt(5)]
     );
     let (per_type, store) = tree(0, facts).await?;
     assert_eq!(

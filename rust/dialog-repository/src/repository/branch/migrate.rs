@@ -226,14 +226,16 @@ impl Migrate<'_> {
 /// its manifest names the band, else its rewrite under the band, persisted
 /// into the branch's archive and memoized by root for the process.
 ///
-/// A pull aligns its sync base, the upstream head and the local head
-/// before it diffs or grafts them, so a tree a release before the band
-/// wrote (an old client's head, or the sync base left by one) meets the
-/// others in one encoding: the diff of two trees in different encodings
-/// finds every number changed. The rewrite is deterministic, so the
-/// rewrite of a base and of the head a replica minted over the same
-/// rewrite share their unchanged subtrees, and the graft adopts them by
-/// hash as it would any other.
+/// A pull that merges aligns its sync base, the upstream head and the
+/// local head before it diffs or grafts them, so a tree a release before
+/// the band wrote (an old client's head, or the sync base left by one)
+/// meets the others in one encoding: the diff of two trees in different
+/// encodings finds every number changed. The rewrite is deterministic,
+/// so the rewrite of a base and of the head a replica minted over the
+/// same rewrite share their unchanged subtrees, and the graft adopts them
+/// by hash as it would any other. A pull that adopts a head by root reads
+/// nothing and adopts it as it is; the next read or write that opens the
+/// branch migrates it.
 pub(crate) async fn aligned<Env>(
     branch: &Branch,
     tree: Index,
@@ -454,10 +456,12 @@ mod tests {
     }
 
     /// A replica on this release pulls an upstream a replica on the
-    /// release before the band wrote: first with nothing of its own, then
-    /// with novelty of its own while the upstream moved again the earlier
-    /// way. Each pull lands the upstream's facts in a head laid out in
-    /// the band, and the earlier replica's later writes are not lost.
+    /// release before the band wrote: first with nothing of its own, which
+    /// adopts the head as it is (no block is read) and leaves the
+    /// migration to the next read that opens the branch; then with novelty
+    /// of its own while the upstream moved again the earlier way, which
+    /// merges through the rewrite, so the earlier replica's later writes
+    /// are not lost and the merged head is laid out in the band.
     #[dialog_common::test]
     async fn it_pulls_an_upstream_an_earlier_release_wrote() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -475,11 +479,17 @@ mod tests {
         feature.refresh(&operator).await?;
         assert_eq!(
             feature.storage_encoding(&operator).await?,
-            Some(NUMBER_BAND),
-            "the pulled head is laid out in the band, not adopted as it was"
+            Some(0),
+            "a fast-forward adopts the head as it is, reading nothing"
         );
-        assert!(!feature.needs_migration(&operator).await?);
+        assert!(feature.needs_migration(&operator).await?);
         assert_eq!(sizes(&feature, &operator).await?, first);
+        feature.migrate().perform(&operator).await?;
+        feature.refresh(&operator).await?;
+        assert_eq!(
+            feature.storage_encoding(&operator).await?,
+            Some(NUMBER_BAND)
+        );
 
         // The earlier replica writes more, still the earlier way: its
         // head moves through the band and back, as an old client's

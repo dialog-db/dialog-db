@@ -645,8 +645,8 @@ mod tests {
     use dialog_common::Blake3Hash;
 
     use crate::{
-        ColumnData, Entry, Link, MIXED_LAYOUT, Manifest, NoveltyBuffer, NoveltyEntry, NoveltyOp,
-        PersistentIndex, PersistentNode, PersistentNodeBody, PersistentSegment, Scale,
+        ColumnData, Entry, Link, MIXED_LAYOUT, Manifest, NUMBER_BAND, NoveltyBuffer, NoveltyEntry,
+        NoveltyOp, PersistentIndex, PersistentNode, PersistentNodeBody, PersistentSegment, Scale,
         TAGGED_LAYOUT,
     };
 
@@ -1197,19 +1197,41 @@ mod tests {
 
     /// A node is written in the tagged layout: version, kind, header length,
     /// the manifest's fields, zero padding to 16 bytes, then the body. The
-    /// default manifest writes no fields at all.
+    /// default manifest writes one field, the number band (`value_encoding`,
+    /// code `0x05`, value 1), which is what a build before the band trips
+    /// on; the table defaults write no fields at all.
     #[dialog_common::test]
     async fn it_writes_the_tagged_layout() -> Result<()> {
         let segment = segment_node(&[key("a")])?;
         assert_eq!(segment.layout_version(), TAGGED_LAYOUT);
         assert_eq!(
             &segment.buffer().as_ref()[..16],
-            &[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            &[
+                2,
+                0,
+                3,
+                0x05,
+                1,
+                NUMBER_BAND as u8,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+            ]
         );
 
         let index = index_node(&[b"", b"m"])?;
         assert_eq!(index.layout_version(), TAGGED_LAYOUT);
-        assert_eq!(&index.buffer().as_ref()[..3], &[2, 1, 0]);
+        assert_eq!(
+            &index.buffer().as_ref()[..6],
+            &[2, 1, 3, 0x05, 1, NUMBER_BAND as u8]
+        );
 
         let manifest = Manifest {
             fanout_n: 4,

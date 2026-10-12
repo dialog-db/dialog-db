@@ -622,9 +622,10 @@ whoever writes it.
   - A commit on a tree laid out the earlier way fails with `NeedsMigration`
     and writes nothing, so a replica on 0.3.0 extends no tree a release
     before the band can still read.
-  - A pull aligns its sync base, the upstream head and the local head to the
-    band before diffing or grafting, and never adopts a legacy upstream head
-    by root: an old client's later writes merge in through the rewrite.
+  - A pull that merges aligns its sync base, the upstream head and the local
+    head to the band before diffing or grafting, so an old client's later
+    writes merge in through the rewrite. A pull that fast-forwards adopts the
+    head as it is, reading nothing; the next read or write migrates it.
   - A release before the band refuses a migrated tree by the critical
     manifest field it does not know, with the field's code in the error.
 - **dialog-db/dialog-db#593 becomes the 0.3.0 vehicle.**

@@ -326,21 +326,16 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             }
             None => Index::empty_with_cache(branch.node_cache()),
         };
-        // Every side meets the others in the band this release writes: a
-        // tree a release before the band laid out (an old client's head,
-        // or the sync base it left) is rewritten first, deterministically,
-        // so the diffs below compare like with like. See
-        // `migrate::aligned`.
-        let base_tree = aligned(branch, index_at(base.as_ref()), &store, env).await?;
-        let upstream_tree =
-            aligned(branch, index_at(Some(&upstream_revision.tree)), &store, env).await?;
-        let local_index = aligned(branch, index_at(local_tree.as_ref()), &store, env).await?;
-        let mut merged = local_index.clone();
-        // An upstream head laid out the earlier way is never adopted by
-        // root: the merge below mints a head over its rewrite instead, so
-        // this replica's head is one this release writes into.
-        let upstream_rewritten =
-            upstream_tree.root() != &NodeHash::from(*upstream_revision.tree.hash());
+        // The trees as the revisions name them. An arm that reads them
+        // aligns them first (`migrate::aligned`): a tree a release before
+        // the band laid out, an old client's head or the sync base it
+        // left, is rewritten so the diffs compare like with like. The arms
+        // that adopt or keep a head by root read nothing, and adopt a head
+        // as it is: a head laid out the earlier way is migrated by the
+        // next write or read that opens it.
+        let base_tree = index_at(base.as_ref());
+        let upstream_tree = index_at(Some(&upstream_revision.tree));
+        let local_index = index_at(local_tree.as_ref());
 
         // The receiver's causal context: the per-origin watermark of the
         // local head's ancestry. This is the merge's memory of every
@@ -414,9 +409,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             // keeps pull cost independent of upstream churn in regions
             // we never touch, and what makes adopting a deep history
             // free.
-            else if !upstream_rewritten
-                && base.as_ref().map(|base| base.hash())
-                    == local_tree.as_ref().map(|tree| tree.hash())
+            else if base.as_ref().map(|base| base.hash())
+                == local_tree.as_ref().map(|tree| tree.hash())
                 && theirs.includes(&local_context)
             {
                 contexts.insert(upstream_revision.version(), theirs.clone());
@@ -452,12 +446,12 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     > SMALL_DIVERGENCE
             {
                 let tree_store = store.clone();
-                // The three trees as aligned above: a side a release
-                // before the band laid out meets the others rewritten.
+                // The three trees, aligned: a side a release before the
+                // band laid out meets the others rewritten.
                 let _ = base_sync;
-                let base_tree = base_tree.clone();
-                let local_tree = local_index.clone();
-                let upstream_tree = upstream_tree.clone();
+                let base_tree = aligned(branch, base_tree.clone(), &store, env).await?;
+                let local_tree = aligned(branch, local_index.clone(), &store, env).await?;
+                let upstream_tree = aligned(branch, upstream_tree.clone(), &store, env).await?;
 
                 // Node-level divergence spans of each side against the
                 // base: conservative supersets read from the pruned diff
@@ -742,9 +736,10 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 && local_context.divergence(theirs) <= theirs.divergence(&local_context)
             {
                 let tree_store = store.clone();
-                // The trees as aligned above, their tree the substrate.
-                let base_tree = base_tree.clone();
-                let local_tree = local_index.clone();
+                // The trees, aligned, their tree the substrate.
+                let base_tree = aligned(branch, base_tree.clone(), &store, env).await?;
+                let local_tree = aligned(branch, local_index.clone(), &store, env).await?;
+                let upstream_tree = aligned(branch, upstream_tree.clone(), &store, env).await?;
                 let mut merged = upstream_tree.clone();
                 let upstream_snapshot = upstream_tree.clone();
 
@@ -875,6 +870,15 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // base and upstream actually differ within its region.
         let tree_store = store.clone();
         let screen_store = store.clone();
+        // The trees, aligned. An upstream head laid out the earlier way is
+        // not adopted here: the head minted below descends from it over
+        // its rewrite, so this replica's head is one it writes into.
+        let base_tree = aligned(branch, base_tree, &store, env).await?;
+        let upstream_tree = aligned(branch, upstream_tree, &store, env).await?;
+        let local_index = aligned(branch, local_index, &store, env).await?;
+        let upstream_rewritten =
+            upstream_tree.root() != &NodeHash::from(*upstream_revision.tree.hash());
+        let mut merged = local_index.clone();
         let local_snapshot = local_index.clone();
 
         // History changes are screened + emitted first, data changes

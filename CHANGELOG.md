@@ -52,9 +52,10 @@ What this changes for you:
 - `tree::rekey::rekey_tree` and `rekey` rewrite a tree or a key between
   encodings; `Branch::rekey_storage(0)` lays a branch out the earlier
   way, for tests of the migration.
-- A pull of an upstream whose head an earlier release wrote mints a
-  head over the rewrite instead of adopting the upstream's revision by
-  root, so this replica's head is always one it can write into.
+- A pull that merges a head an earlier release wrote rewrites it in
+  memory first, so both sides share one encoding and the old client's
+  writes merge in. A pull that fast-forwards adopts such a head as it is,
+  reading nothing, and the branch then needs migrating like any other.
 
 Why: identity and storage should agree on what a number is, a numeric
 range should be one scan, and the move should happen once, with the
@@ -349,8 +350,8 @@ change only once.
   band. It is read as before, and `Branch::migrate` (or
   `migrate_storage`) rewrites it under the one band, facts and history
   alike, as a new revision; until then a commit on it fails with
-  `NeedsMigration`. A pull rewrites a legacy upstream head in memory
-  and never adopts it by root. 0.2.0 and earlier refuse a migrated
+  `NeedsMigration`. A pull that merges rewrites a legacy head in memory;
+  one that fast-forwards adopts it as it is. 0.2.0 and earlier refuse a migrated
   tree: its manifest carries the critical field `value_encoding`
   (`0x05`), which they do not know. An embedder runs `Branch::migrate`
   once per branch when it opens it; it rewrites the whole tree, so the
