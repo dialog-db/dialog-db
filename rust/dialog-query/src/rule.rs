@@ -15,6 +15,7 @@
 //! [`AnalyzerError`](crate::AnalyzerError)) reference, so error
 //! reporting is uniform across both kinds.
 
+use crate::artifact::Value;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::{AnalysisError, TypeError};
 use crate::negation::Negation;
@@ -23,6 +24,7 @@ use crate::premise::Premise;
 use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
 use crate::rule::analyzer::Authored;
+use crate::term::Term;
 use crate::{Environment, Type};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::sync::Arc;
@@ -256,6 +258,7 @@ fn compile_rule_as<T: Compile>(
         .collect();
     let display_premises = premises.clone();
     let authored_reduce = reduce.clone();
+    encodable_constants(&conclusion, &premises, &reduce)?;
     if authored
         && matches!(T::KIND, RuleKind::Deductive)
         && let Some(error) = open_rule_error::<T>(&conclusion, &premises, &reduce)
@@ -354,7 +357,7 @@ fn compile_rule_as<T: Compile>(
     // (`this`, each field and each keyed field's key) are fixed names. The narrowed
     // premises are canonicalised and analysed again, which is the
     // same analysis under other names; the authored spelling is kept
-    // for storage and display.
+    // for display, and the canonical one is what the body stores.
     let analysis = match canonical::canonicalize(
         &conclusion,
         &analysis.premises,
@@ -395,6 +398,64 @@ fn compile_rule_as<T: Compile>(
     };
 
     Ok(T::from_analysis(analysis))
+}
+
+/// Refuse a constant no stored body can carry, before the rule is
+/// analysed: a body holds integers of at most 64 bits (a natural up to
+/// `u64::MAX`, an integer in `i64`'s range, which is what the reader's
+/// JSON detour admits) and finite floats, and NaN is not a value.
+/// Checked here so a rule that compiles always stores, where the
+/// storage path cannot report an error.
+fn encodable_constants(
+    conclusion: &ConceptDescriptor,
+    premises: &[Premise],
+    reduce: &[(String, ReduceSpec)],
+) -> Result<(), TypeError> {
+    fn unencodable(value: &Value) -> Option<&'static str> {
+        const INTEGERS: &str = "a stored rule holds integers of at most 64 bits";
+        match value {
+            Value::Float(float) if float.is_nan() => Some("NaN is not a value"),
+            Value::Float(float) if float.is_infinite() => Some("a stored rule holds finite floats"),
+            Value::UnsignedInt(natural) if *natural > u128::from(u64::MAX) => Some(INTEGERS),
+            Value::SignedInt(integer) if i64::try_from(*integer).is_err() => Some(INTEGERS),
+            _ => None,
+        }
+    }
+    let refuse = |value: &Value| -> Result<(), TypeError> {
+        match unencodable(value) {
+            Some(reason) => Err(TypeError::UnencodableConstant {
+                value: format!("{value:?}"),
+                reason: reason.to_string(),
+            }),
+            None => Ok(()),
+        }
+    };
+    let listed = |concept: &ConceptDescriptor| -> Result<(), TypeError> {
+        concept
+            .with()
+            .iter()
+            .flat_map(|(_, field)| field.descriptor().among())
+            .try_for_each(refuse)
+    };
+    listed(conclusion)?;
+    for premise in premises {
+        for (_, term) in premise.parameters().iter() {
+            if let Term::Constant(value) = term {
+                refuse(value)?;
+            }
+        }
+        if let Premise::Assert(Proposition::Concept(query))
+        | Premise::Unless(Negation(Proposition::Concept(query))) = premise
+        {
+            listed(&query.predicate)?;
+        }
+    }
+    for (_, spec) in reduce {
+        if let Term::Constant(value) = &spec.of {
+            refuse(value)?;
+        }
+    }
+    Ok(())
 }
 
 /// Helper for the [`Display`] impls on [`DeductiveRule`] and

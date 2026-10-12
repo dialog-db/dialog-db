@@ -14,6 +14,13 @@
 //! writes it under its identity with every index a current install
 //! writes.
 //!
+//! It also rewrites every body still in an earlier format, under its
+//! identity or not, into the format this release writes (see
+//! [`dialog_query::rule::body`]): the stored body is retracted by its
+//! bytes and the rule asserted again. After one run every body is in
+//! the current format, which holds the rule's canonical spelling, so a
+//! later retraction finds the body by encoding the rule.
+//!
 //! The earlier release also gave every attribute and concept another
 //! identity (see [`dialog_query::migration`]), and keyed a concept's
 //! `dialog.concept/transient` marker by it. For the concept every rule
@@ -53,6 +60,9 @@ pub struct RulesUpgraded {
     /// Each rule re-installed: the entity it was stored under, and its
     /// identity now.
     pub reinstalled: Vec<(Entity, Entity)>,
+    /// Each rule already under its identity whose body was in an
+    /// earlier format and is now rewritten in the current one.
+    pub rewritten: Vec<Entity>,
     /// Rule entities whose stored body this release cannot decode as
     /// either kind of rule. They are left as they are.
     pub undecodable: Vec<Entity>,
@@ -66,7 +76,8 @@ pub struct RulesUpgraded {
 
 impl Branch {
     /// Re-install every rule this branch stores under an entity that is
-    /// not its identity, as an earlier release stored rules. See the
+    /// not its identity, as an earlier release stored rules, and rewrite
+    /// every body stored in an earlier format. See the
     /// [module documentation](self) for when to run it.
     pub fn upgrade_rules(&self) -> UpgradeRules<'_> {
         UpgradeRules { branch: self }
@@ -99,6 +110,13 @@ impl Decoded {
         }
     }
 
+    fn encode(&self) -> Option<Vec<u8>> {
+        match self {
+            Decoded::Deductive(rule) => rule.try_encode(),
+            Decoded::Inductive(rule) => rule.try_encode(),
+        }
+    }
+
     fn conclusion(&self) -> &ConceptDescriptor {
         match self {
             Decoded::Deductive(rule) => rule.conclusion(),
@@ -109,7 +127,8 @@ impl Decoded {
 
 impl UpgradeRules<'_> {
     /// Read the branch's rule bodies, re-install those stored under
-    /// another entity than their identity in one commit, and publish it.
+    /// another entity than their identity and rewrite those in an
+    /// earlier format, in one commit, and publish it.
     pub async fn perform<Env>(self, env: &Env) -> Result<RulesUpgraded, CommitError>
     where
         Env: Provider<BlobSize>
@@ -159,11 +178,31 @@ impl UpgradeRules<'_> {
             {
                 conclusions.push(rule.conclusion().clone());
             }
-            if identity == stored.of
-                || upgraded
-                    .reinstalled
-                    .iter()
-                    .any(|(from, _)| *from == stored.of)
+            if identity == stored.of {
+                // Under its identity: rewritten if its body is in an
+                // earlier format, which is any body other than the one
+                // this release writes.
+                if rule.encode().as_deref() == Some(bytes.as_slice()) {
+                    continue;
+                }
+                transaction = transaction.retract(statement(
+                    source_attr(),
+                    stored.of.clone(),
+                    stored.is.clone(),
+                ));
+                transaction = match &rule {
+                    Decoded::Deductive(rule) => transaction.assert(rule),
+                    Decoded::Inductive(rule) => transaction.assert(rule),
+                };
+                if !upgraded.rewritten.contains(&stored.of) {
+                    upgraded.rewritten.push(stored.of.clone());
+                }
+                continue;
+            }
+            if upgraded
+                .reinstalled
+                .iter()
+                .any(|(from, _)| *from == stored.of)
             {
                 continue;
             }
@@ -216,7 +255,10 @@ impl UpgradeRules<'_> {
                 .assert(Transient(current.clone()));
             upgraded.remarked.push((earlier, current));
         }
-        if upgraded.reinstalled.is_empty() && upgraded.remarked.is_empty() {
+        if upgraded.reinstalled.is_empty()
+            && upgraded.rewritten.is_empty()
+            && upgraded.remarked.is_empty()
+        {
             return Ok(upgraded);
         }
         upgraded.revision = Some(transaction.commit().publish().perform(env).await?);

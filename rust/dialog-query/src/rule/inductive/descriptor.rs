@@ -267,8 +267,7 @@ mod tests {
 
         let reparsed: InductiveRule = serde_json::from_value(serialized).unwrap();
         assert_eq!(reparsed.polarity(), Polarity::Retract);
-        // Canonical dag-cbor equality: same content address ⇒ same
-        // rule. (Full struct equality is too strict — the analysis'
+        // Equal stored bodies: same canonical spelling ⇒ same rule. (Full struct equality is too strict — the analysis'
         // narrowing diagnostics capture HashMap iteration order.)
         assert_eq!(reparsed.encode(), rule.encode());
         assert_eq!(reparsed.this(), rule.this());

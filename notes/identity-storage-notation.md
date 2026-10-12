@@ -193,8 +193,8 @@ Two families of choices:
   - a float is the decimal it prints as (its shortest round-trip decimal): the
     float `0.1` is `0.1`, and the float `1e23` is 10²³;
   - integers of any width are exact;
-  - `-0.0` is `0`, and NaN is one value. Today dialog keeps NaN payloads
-    distinct, and a payload can change when a value passes through JavaScript.
+  - `-0.0` is `0`. NaN is not a value (see Decided); the encoding keeps a code
+    for it, as SQLite4's does, so a NaN built in Rust still has one identity.
 - **Maps** order entries by their keys' references; a set of premises, by their
   references after labeling.
 - **Structs** (AST nodes) are maps from field names to values, with an absent
@@ -234,8 +234,8 @@ Measured in the `rule-install` perf scenario (100 rules committed, then read bac
 The byte format is not where read time goes, so the storage format is chosen for
 determinism, evolvability and size, and speed comes from not recompiling.
 
-- **Body format 3:** a binary encoding modelled on the WebAssembly binary format,
-  with bijou in place of LEB128. It is described below.
+- **Body format 3:** the rule's canonical spelling in the dag-cbor envelope
+  formats 1 and 2 used. A binary layout was tried and set aside; see below.
 - **Compiled-rule cache keyed by rule reference:** in process first, persistent
   later if it measures. This is what removes the 13%.
 - **Values outside rules** (`Changes` batches, the session-overlay handoff):
@@ -244,93 +244,68 @@ determinism, evolvability and size, and speed comes from not recompiling.
 
 ### Body format 3
 
-A body is laid out like a WebAssembly module. The layout below is a sketch; the
-section ids and field order are settled when it is implemented.
+A body is the dag-cbor of the rule's canonical descriptor in the envelope the
+earlier formats used, stamped `3`:
 
 ```text
-body    := magic version section*
-magic   := 0x00 'd' 'l' 'g'
-version := u32 little endian (3)
-section := id:u8 size:bijou content
+{ "format": 3, "rule": { "deduce": {...}, "when": [...] } }
 ```
 
-| Id | Section | Content | Required |
-|---|---|---|---|
-| 1 | references | the references the body names (types of `any` values), 32 bytes each | when the body has any |
-| 2 | strings | relation names, field names and text constants, each length-prefixed UTF-8 | when the body has any |
-| 3 | definitions | the attributes and concepts the rule uses, each written once | when the body has any |
-| 4 | head | the conclusion: a concept by its index in the definitions | yes |
-| 5 | premises | each premise: its kind, then its operands | yes |
-| 6 | reduce | the folds of an aggregating rule | no |
+**What is stored is the canonical spelling,** the one identity hashes: locals and
+the head's fields renamed by the labeling, each premise's fields named by what
+they read, premises sorted, no descriptions. That spelling is a fixed point (a
+rule compiled from it has the same identity and the same canonical spelling,
+which a test pins), so a body holds exactly what identity holds and nothing
+else. Two consequences:
 
-**Operands point into the tables.** A premise reads a concept by its index in
-the definitions section and a field by its index in the strings section. Each
-definition and name is stored once per body, and decoding does no lookups.
+- two spellings of one rule store one body, so a re-install of another spelling
+  writes nothing new;
+- a rule's body is found by encoding the rule, which is what retraction does.
+  Before this, two spellings stored two bodies under one entity and retracting
+  one left the other.
 
-**Schema-driven values.** The schema says what type each slot holds, so a stored
-value carries no type where the slot declares one. In an `any` slot it carries
-the index of its type's reference in the references table. That mirrors identity,
-which names types by reference, and the notation's boxing rule. It keeps bodies
-smaller than self-describing CBOR, and no value is read as a type its spelling
-resembles.
+**Why dag-cbor stays.** The format question was never about correctness:
+constants have carried their type entity since format 2 (`{"text:": "foo:"}`
+and `{"entity:": "foo:"}` are distinct), a float is written as its 64 bits, and
+the type the author wrote is kept, so the move to one number band changes
+nothing in a body. The question was size and decode speed, and encoding plus
+decoding bodies measured at about 3% of `rule-install`. dag-cbor forbids NaN
+and infinities and holds integers of at most 64 bits (the reader's detour
+through a JSON tree narrows integers further, to `i64`); a rule with such a
+constant is refused when it compiles (`TypeError::UnencodableConstant`), where
+before it panicked on the storage path.
 
-**A body is self-contained.** Everything needed to load and run the rule is in
-its body: no part is stored apart and linked by reference. Identity would allow
-linking (a parent's reference is the same with a part embedded or linked), and
-linking would store a concept read by many rules once. It is not done, because
-a linked body cannot load until every part it names has synced, and a part
-could not be retracted while any rule names it. Within a body, the definitions
-table writes each concept once, as a WebAssembly module is self-contained and
-names its imports.
+**A binary layout was tried and set aside.** A WebAssembly-style body (magic,
+version, sections, bijou integers, string and definition tables) was built and
+measured. Encoding the generic data model with its map keys as table entries
+came out larger than dag-cbor (165 bytes against 159 for a small rule) and no
+faster; the size win needs a schema-specific layout (premise kinds as opcodes,
+operands in fixed positions), which is more code and a format revision whenever
+a premise kind is added. Bodies are not identity, and `Branch::upgrade_rules`
+rewrites bodies of earlier formats, so a later binary format costs a one-pass
+body rewrite, not a re-keying. It waits on a measurement of body sizes over
+tonk's actual rule library showing the win is worth it.
 
-**The authored form is a separate claim.** Identity leaves out three things the
-author wrote: the names of local variables (identity hashes canonical labels),
-the order of premises (identity sorts them), and descriptions (of the rule, its
-concepts and their attributes). All three are kept outside the body, under their
-own attribute on the rule's entity:
+**The authored form is not stored.** Identity leaves out what only display
+reads: local and field names, premise order, descriptions. Two ways to keep
+them were weighed:
 
-- the label each variable had in the source;
-- the source position of each premise, as a permutation of the canonical order;
-- the descriptions.
+- a separate claim on the rule's entity, read under `last` so a re-install
+  replaces it. Measured: a second claim per rule cost 35% to 75% more
+  instructions on `rule-install`, almost all of it tree settlement for the extra
+  entry, whether the claim held the whole authored descriptor or 40 bytes;
+- an optional section inside the body, which avoids the second claim but makes
+  two spellings of one rule store different bytes, so retraction by encoding
+  only finds the retracting spelling's body.
 
-Loading a rule never reads it. Display and diagnostics read it when they need
-it: an error names variables as the author did by loading it on the error path,
-and shows canonical labels when it is missing. The head's field names stay in
-the body, since identity hashes them. A premise binds by attribute, so its field
-names are not in identity either; whether they move out too is settled with the
-encoding.
+Neither is in 0.3.0. A decoded rule shows canonical names (`~0`, `#0`); a query
+still binds the head by its own concept's field names. A compact source map
+(canonical label to authored name, canonical premise position to authored
+position) is the form to measure when display needs it.
 
-Two rules that differ only in names, premise order or descriptions are one rule, with one
-reference and one body, so a later install of the same rule can bring a
-different authored form. Only the newest is kept: the attribute is read under
-`last`, so a re-install replaces the authored form and leaves the body alone.
-Retracting a rule retracts both claims.
-
-**Compatibility.** An unknown section id below 128 is an error. An unknown id
-of 128 or above is skipped, which is how later versions can add optional data
-without a new format number.
-
-**A canonical layout.** WebAssembly's encoding is not canonical: it allows
-over-long LEB128 and some freedom in section order. Bodies are not hashed, but a
-body should still be a function of its rule, so equal rules store equal bytes and
-dedupe. Bijou removes the over-long encodings by construction, and the rest is
-layout:
-
-- sections appear in ascending id order, each at most once;
-- the references and strings tables are sorted and hold no duplicates;
-- premises appear in canonical order (by their encoded bytes, after labeling).
-
-With the authored form outside the body, a body is a function of its rule: two
-spellings of one rule store the same bytes.
-
-**What it is not.** A body's indices are local to that body, as a WebAssembly
-module's are. The same concept has a different index in different bodies, so a
-body's bytes are never an identity. The rule's reference is computed from its AST,
-with indices resolved back to references.
-
-**Validation.** Bodies arrive from untrusted peers, so a decoder validates in one
-pass and refuses a malformed body instead of panicking. That means bounds-checked
-sizes, indices within their tables, and every required section present.
+**Compatibility.** Formats 0 to 2 are still read, and `upgrade_rules` rewrites
+them. A body in a later format is refused by name. 0.2.0 reads up to format 2,
+so it refuses format 3 rather than reading canonical names as authored ones.
 
 ### Ideas taken from schemaboi
 
@@ -443,7 +418,7 @@ perf suite has no numeric scenario today.
   how a number was written would keep "written as a float" queryable, but then
   5 and 5.0 would not join, and retracting one would leave the other. Those bite
   users; the written-as distinction is a leftover of Rust's types.
-- **Zero and NaN.** `-0.0` becomes `0`, and NaN is one value.
+- **Zero and NaN.** `-0.0` becomes `0`. NaN is not a value.
 - **Identity.** Dialog's number types become views over one `number` content,
   these bytes, keyed by the view's type reference, consistent with "a type is a
   view over bytes" above.
@@ -684,12 +659,11 @@ Each step lands with tests and a perf sweep:
    read as a merkle structure, a constant `{"<type entity>": payload}` taken
    as its value, so a constant has one identity wherever it appears.
    Attribute descriptions no longer reach rule identity.
-4. **Body format 3**, the WebAssembly-style layout above, self-contained, with
-   the authored form as its own claim. The 0.3.0 migration rewrites every stored
-   body into it, so bodies are rewritten once. Formats 0 to 2 are still read. Pinned by a round-trip
-   test, a test that equal rules store equal bytes, and tests that feed the
-   decoder truncated, oversized and out-of-range input. The repo has no fuzzing
-   setup yet; a fuzz target for the decoder would be worth adding with it.
+4. **Body format 3**: the canonical spelling in the dag-cbor envelope. Done.
+   `Branch::upgrade_rules` rewrites every body of an earlier format. Pinned by
+   tests that two spellings store one body and retracting either leaves nothing,
+   that the canonical spelling is a fixed point, that `main`'s bodies are
+   rewritten, and that unencodable constants are refused at compile time.
 5. **The compiled-rule cache.**
 6. **The JSON reader and writer** that take types from slots.
 7. **A migration test:** a pre-0.2 fixture (from tonk main) upgrades to 0.3.0
@@ -721,10 +695,15 @@ Each step lands with tests and a perf sweep:
 - **Identity keeps `dialog-number`** after the storage assessment above.
 - **Rules are stored as atomic records:** a body holds everything needed to
   load the rule, and links no part by reference.
-- **Body format 3 ships in 0.3.0**, so the migration rewrites bodies once.
-- **The authored form is a separate claim** on the rule: variable names, premise
-  order and descriptions. It keeps only the newest install's, and loading a rule
-  does not read it.
+- **A body is the canonical spelling** in the dag-cbor envelope, format 3. A
+  binary layout and a stored authored form are deferred, each to a measurement
+  (body sizes over tonk's rules; a compact source map).
+- **NaN is not a value.** A database value needs an equality, and the absence of
+  a claim already says "no number". NaN is refused where values enter: reading
+  a value, `float/parse`, a float operation whose result would be NaN (no row),
+  and a rule constant. Infinities stay values; they are ordered and equal to
+  themselves. dag-cbor cannot carry them, so they too are refused as rule
+  constants, as are integers beyond 64 bits.
 
 ## Open questions
 

@@ -94,9 +94,11 @@ pub struct ParseFloat {
 }
 
 impl ParseFloat {
-    /// Parse the text as f64, returning empty on failure
+    /// Parse the text as f64, returning empty on failure. `NaN` is no
+    /// row: NaN is not a value.
     pub fn compute(input: Input<Self>) -> Vec<Self> {
         match input.text.trim().parse::<f64>() {
+            Ok(number) if number.is_nan() => vec![],
             Ok(number) => vec![ParseFloat {
                 text: input.text,
                 is: number,
@@ -340,6 +342,24 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!((results[0].is - 3.15).abs() < f64::EPSILON);
+        Ok(())
+    }
+
+    /// `NaN` parses as a float in Rust, but NaN is not a value: it is no
+    /// row.
+    #[dialog_common::test]
+    async fn it_parses_nan_as_no_row() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+
+        let query = Query::<ParseFloat> {
+            text: Term::from("NaN".to_string()),
+            is: Term::var("num"),
+        };
+        let results = query.perform(&source).try_vec().await?;
+        assert!(results.is_empty());
         Ok(())
     }
 
