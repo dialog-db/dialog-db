@@ -236,8 +236,8 @@ determinism, evolvability and size, and speed comes from not recompiling.
 
 - **Body format 3:** the rule's canonical spelling in the dag-cbor envelope
   formats 1 and 2 used. A binary layout was tried and set aside; see below.
-- **Compiled-rule cache keyed by rule reference:** in process first, persistent
-  later if it measures. This is what removes the 13%.
+- **Compiled-rule cache keyed by rule reference:** in process (it exists, see
+  the plan), persistent later if a cold-start measurement asks for it.
 - **Values outside rules** (`Changes` batches, the session-overlay handoff):
   every value carries its type in storage. This fixes integers coming back as
   floats, which is a live bug in tonk's overlay handoff today.
@@ -664,7 +664,13 @@ Each step lands with tests and a perf sweep:
    tests that two spellings store one body and retracting either leaves nothing,
    that the canonical spelling is a fixed point, that `main`'s bodies are
    rewritten, and that unencodable constants are refused at compile time.
-5. **The compiled-rule cache.**
+5. **The compiled-rule cache.** The in-process cache already exists:
+   `RuleCache` (dialog-repository) keeps hydrated rules keyed by their
+   content-addressed entity, so a rule is compiled once per process and never
+   goes stale. What remains is the first load of each rule per process, which
+   only a persistent cache (keyed by rule entity and compiler version, local to
+   the replica, never synced, discarded on upgrade) would remove. Not built
+   until a cold-start measurement over tonk's rule library says it is needed.
 6. **The JSON reader and writer** that take types from slots.
 7. **A migration test:** a pre-0.2 fixture (from tonk main) upgrades to 0.3.0
    references in one pass. The re-keyed home and template spaces resolve every
