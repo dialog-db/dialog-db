@@ -335,11 +335,13 @@ code:
 
 ## Numbers: one band, typed views
 
-**The direction, assumed by the identity design above.** Numbers share one band
+**Adopted in 0.3.0, for identity and storage alike.** Numbers share one band
 in the value index, in SQLite4's decimal key encoding (the `dialog-number`
-crate), and dialog's number types are views over it. 0.3.0 adopts the encoding
-for identity, so that when storage follows, a number's identity content and its
-index key are the same bytes.
+crate), and dialog's number types are views over it. A number's identity
+content and its index key are the same bytes. A tree's manifest names the
+band in its critical `value_encoding` field (`0x05`): a new tree sets it, a
+tree an earlier release wrote leaves it at 0 and is read only to be
+rewritten (see [Migration: once](#migration-once)).
 
 **Decimal, not binary (decided).** The prototype below used binary digits, which
 keep every float's exact binary value but cannot hold `0.1`. The crate uses
@@ -466,11 +468,10 @@ scans the natural, integer and float bands, filtering floats to whole ones. It
 needs no storage change, but takes three seeks per lookup and keeps cross-type
 equality in the query layer.
 
-**Measured in dialog (the assessment, not in 0.3.0).** A prototype on the
-branch `claude/number-band-prototype` adds the band beside today's bands: a
-critical manifest field picks which band a tree writes and reads, and the
-`dialog-perf` suite gained numeric scenarios. Against the per-type bands, in
-instructions:
+**Measured in dialog.** The prototype on the branch `claude/number-band-prototype`,
+since ported, adds the band beside the per-type bands: a critical manifest
+field picks which band a tree writes and reads, and the `dialog-perf` suite
+gained numeric scenarios. Against the per-type bands, in instructions:
 
 | Scenario | One band |
 |---|---|
@@ -494,9 +495,13 @@ instructions:
 - The first tonk run returned no rows for natural fields under the band, until
   views read every stored number. A band without views silently loses rows.
 
-Conclusion: identity keeps `dialog-number`. The band is viable, and adopting it
-needs numeric equality on `Value`, the type lattice over views (below), writes
-through a view, and the migration.
+Conclusion: the band is adopted. Identity keeps `dialog-number`, storage keys
+every number in the band, numeric equality on `Value` (`same_number`) and the
+type lattice over views (below) came with the sized types, and the migration
+is the deterministic rewrite below. A number read back raw comes back as the
+narrowest type that holds it (a natural when whole and not negative, an integer
+when whole and negative, a float otherwise); a typed read views it as the type
+the field declares.
 
 ## Number types
 
@@ -515,9 +520,8 @@ Types an attribute can declare, beside the stored types:
 A fixed-width type is a view, read as [Views read and write](#views-read-and-write)
 says: it coerces where it only loses precision (a float through `natural:8`
 truncates, a decimal through `float:32` rounds to nearest), and it leaves out
-what it cannot hold. A write refuses a value outside the type. Until storage
-moves to one band, a view reads the per-type bands and stores in the band of
-its kind.
+what it cannot hold. A write refuses a value outside the type. A view reads the one band and
+stores in it.
 
 `#[derive(Attribute)]` declares the type from the Rust field: `u32` declares
 `natural:32`. `usize` declares `natural:`, since its width differs between
@@ -606,6 +610,23 @@ whoever writes it.
     entity.
 - **tonk-labs/tonk#1058 must not merge pinned to `v0.2.0`.** Users would then hold
   0.2.0 identities, and we would migrate them twice. It moves to 0.3.0 instead.
+- 0.3.0 also moves storage to the one number band, in the same pass:
+  - `Branch::migrate_storage` rewrites the head's tree under the band, every
+    entry re-keyed (`tree::rekey::rekey_tree`), leaf values as they were,
+    into a canonical tree, and publishes it as a revision. The rewrite is a
+    pure function of the tree, so replicas that migrate the same head
+    converge on the same tree.
+  - `Branch::migrate` is the storage rewrite followed by `upgrade_rules`:
+    one call for everything an earlier release stored. tonk runs it, then its
+    own definitions re-keying, the first time a process opens a branch.
+  - A commit on a tree laid out the earlier way fails with `NeedsMigration`
+    and writes nothing, so a replica on 0.3.0 extends no tree a release
+    before the band can still read.
+  - A pull aligns its sync base, the upstream head and the local head to the
+    band before diffing or grafting, and never adopts a legacy upstream head
+    by root: an old client's later writes merge in through the rewrite.
+  - A release before the band refuses a migrated tree by the critical
+    manifest field it does not know, with the field's code in the error.
 - **dialog-db/dialog-db#593 becomes the 0.3.0 vehicle.**
   - Picks as entities stay: that change is in the notation and the AST.
   - Its tagged dag-cbor identity is superseded by references.
@@ -709,7 +730,9 @@ Each step lands with tests and a perf sweep:
 - **`number:` is declarable**, and fixed-width number types are named by kind
   and width (`natural:8`, `integer:64`, `float:32`). `natural:`, `integer:` and
   `float:` stay unbounded. The derive infers the sized type from the Rust field.
-- **Identity keeps `dialog-number`** after the storage assessment above.
+- **Identity and storage use `dialog-number`:** every number is keyed in one
+  band, in the encoding identity hashes, and a tree's manifest names the band
+  in a critical field.
 - **Rules are stored as atomic records:** a body holds everything needed to
   load the rule, and links no part by reference.
 - **A body is the canonical spelling** in the dag-cbor envelope, format 3. A

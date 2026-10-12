@@ -14,6 +14,52 @@ says how to cut a release.
 
 ## Unreleased
 
+### Every number is keyed in one band, and a branch an earlier release wrote is migrated in one pass
+
+[#593](https://github.com/dialog-db/dialog-db/pull/593),
+[identity, storage and notation](./notes/identity-storage-notation.md#numbers-one-band-typed-views)
+
+A tree's manifest now sets `value_encoding` to the number band: every
+number is keyed in one band of the value index, in dialog-number's
+decimal encoding, the encoding identity already used. `3`, `3.0` and
+the natural `3` are one value in the index as they are in identity, and
+a range over a numeric attribute is one scan rather than three. The
+manifest field is critical, so a release before the band refuses a
+migrated tree by name rather than misreading it.
+
+A branch an earlier release wrote is read, never extended:
+`Branch::migrate` rewrites its head's tree under the band
+(`migrate_storage`) and then re-installs its rules (`upgrade_rules`),
+one call for everything an earlier release stored. The rewrite is
+deterministic, so two replicas that migrate the same head produce the
+same tree, and a pull that meets a head an old client wrote rewrites
+it in memory before merging, so the old client's writes are not lost.
+
+What this changes for you:
+
+- A commit on a branch whose head an earlier release laid out fails with
+  `CommitError::NeedsMigration` and writes nothing. Run
+  `Branch::migrate` (or `migrate_storage`) first; `Branch::needs_migration`
+  says whether a branch is in that state, and `storage_encoding` which
+  layout its head has.
+- A number read back raw (an `ArtifactSelector` select, a `Value` match)
+  comes back as the narrowest type that holds it: a natural when it is
+  whole and not negative, an integer when whole and negative, a float
+  otherwise. Code matching `Value::UnsignedInt` on counts and timestamps
+  still sees them; code matching `Value::Float(5.0)` on a stored `5.0`
+  now sees `UnsignedInt(5)`. A typed read (a concept field, a derived
+  struct) views the number as the type it declares, unchanged.
+- `tree::rekey::rekey_tree` and `rekey` rewrite a tree or a key between
+  encodings; `Branch::rekey_storage(0)` lays a branch out the earlier
+  way, for tests of the migration.
+- A pull of an upstream whose head an earlier release wrote mints a
+  head over the rewrite instead of adopting the upstream's revision by
+  root, so this replica's head is always one it can write into.
+
+Why: identity and storage should agree on what a number is, a numeric
+range should be one scan, and the move should happen once, with the
+rule and identity upgrades, rather than as a second migration later.
+
 ### A selection reads a bare constant as the type its field declares
 
 [#593](https://github.com/dialog-db/dialog-db/pull/593)
@@ -299,6 +345,16 @@ change only once.
   name.
 - A stored NaN from an earlier release is not rewritten. It reads as it
   did; nothing new can be written beside it.
+- Every tree an earlier release wrote keys each number type in its own
+  band. It is read as before, and `Branch::migrate` (or
+  `migrate_storage`) rewrites it under the one band, facts and history
+  alike, as a new revision; until then a commit on it fails with
+  `NeedsMigration`. A pull rewrites a legacy upstream head in memory
+  and never adopts it by root. 0.2.0 and earlier refuse a migrated
+  tree: its manifest carries the critical field `value_encoding`
+  (`0x05`), which they do not know. An embedder runs `Branch::migrate`
+  once per branch when it opens it; it rewrites the whole tree, so the
+  cost is one pass over the branch's entries.
 
 ## 0.2.0 (2026-10-09)
 
