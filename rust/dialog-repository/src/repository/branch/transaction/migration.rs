@@ -648,3 +648,166 @@ async fn rule_facts_under_an_entity_that_is_not_their_address_derive_nothing() -
     );
     Ok(())
 }
+
+/// The upgrade leaves every rule body in the current format: `main`'s
+/// body, re-keyed, is stored as the one body this release writes for
+/// the rule, which holds its canonical spelling.
+#[dialog_common::test]
+async fn an_upgraded_rule_is_stored_in_the_current_format() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    install(&branch, &operator, installed_by_main("salary_from_bonus")).await?;
+    let upgraded = upgrade(&branch, &operator).await?;
+    let identity = upgraded.reinstalled[0].1.clone();
+
+    let main = DeductiveRule::decode(&source_from_main("salary_from_bonus"))
+        .map_err(anyhow::Error::msg)?;
+    assert_eq!(
+        stored(&branch, &operator, "dialog.rule/source", &identity).await?,
+        vec![Value::Bytes(main.encode())],
+        "one body, in the current format"
+    );
+    assert_ne!(
+        main.encode(),
+        source_from_main("salary_from_bonus"),
+        "main's body is in an earlier format"
+    );
+    Ok(())
+}
+
+/// A body stored under its identity in format 2, as the release before
+/// this one wrote it with the author's spelling, is rewritten in the
+/// current format by the upgrade and still derives. A second run finds
+/// nothing.
+#[dialog_common::test]
+async fn a_body_in_an_earlier_format_is_rewritten() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let alice: Entity = "id:alice".parse()?;
+    let rule = DeductiveRule::decode(&source_from_main("salary_from_bonus"))
+        .map_err(anyhow::Error::msg)?;
+    let identity = rule.this();
+    // Format 2 wrote the authored descriptor in the dag-cbor envelope.
+    let format2 = serde_ipld_dagcbor::to_vec(&json!({
+        "format": 2,
+        "rule": serde_json::to_value(rule.descriptor())?,
+    }))?;
+    branch
+        .transaction()
+        .assert(&rule)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    branch.refresh(&operator).await?;
+    branch
+        .transaction()
+        .retract(statement(
+            "dialog.rule/source",
+            &identity,
+            Value::Bytes(rule.encode()),
+        ))
+        .assert(statement(
+            "dialog.rule/source",
+            &identity,
+            Value::Bytes(format2.clone()),
+        ))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    branch.refresh(&operator).await?;
+    assert_eq!(
+        stored(&branch, &operator, "dialog.rule/source", &identity).await?,
+        vec![Value::Bytes(format2)]
+    );
+
+    let upgraded = upgrade(&branch, &operator).await?;
+    assert_eq!(upgraded.rewritten, vec![identity.clone()]);
+    assert!(upgraded.reinstalled.is_empty());
+    assert_eq!(
+        stored(&branch, &operator, "dialog.rule/source", &identity).await?,
+        vec![Value::Bytes(rule.encode())],
+        "the format 2 body is gone and the current one is stored"
+    );
+    commit(
+        &branch,
+        &operator,
+        unsigned("org/bonus", &alice, 500, Pick::All),
+    )
+    .await?;
+    assert_eq!(salary(&branch, &operator, &alice, "all").await?, vec![500]);
+    assert_eq!(
+        upgrade(&branch, &operator).await?,
+        crate::RulesUpgraded::default()
+    );
+    Ok(())
+}
+
+/// Installing another spelling of an installed rule stores no second
+/// body, and retracting either spelling leaves nothing under the rule's
+/// identity.
+#[dialog_common::test]
+async fn a_respelled_rule_shares_its_body() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let spelled = |local: &str| -> Result<DeductiveRule> {
+        Ok(serde_json::from_value(json!({
+            "deduce": { "with": { "salary": { "the": "org/salary", "as": "natural:" } } },
+            "when": [{
+                "assert": { "with": { "bonus": { "the": "org/bonus", "as": "natural:" } } },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "bonus": { "?": { "name": local } }
+                }
+            }, {
+                "assert": "==",
+                "where": {
+                    "this": { "?": { "name": local } },
+                    "is": { "?": { "name": "salary" } }
+                }
+            }]
+        }))?)
+    };
+    let (first, second) = (spelled("b")?, spelled("bonus")?);
+    let identity = first.this();
+    assert_eq!(second.this(), identity);
+    for rule in [&first, &second] {
+        branch
+            .transaction()
+            .assert(rule)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+    }
+    assert_eq!(
+        stored(&branch, &operator, "dialog.rule/source", &identity).await?,
+        vec![Value::Bytes(first.encode())],
+        "one body for both spellings"
+    );
+    branch
+        .transaction()
+        .retract(&first)
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    branch.refresh(&operator).await?;
+    for the in [
+        "dialog.rule/source",
+        "dialog.rule/conclusion",
+        "dialog.rule/reads",
+        "dialog.rule/derives",
+    ] {
+        assert!(
+            stored(&branch, &operator, the, &identity).await?.is_empty(),
+            "no {the} left"
+        );
+    }
+    Ok(())
+}

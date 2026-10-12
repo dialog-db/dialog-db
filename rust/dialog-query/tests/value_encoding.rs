@@ -1,12 +1,14 @@
 //! A rule's constants survive storage and its identity tells them apart.
 //!
-//! A rule is stored, and hashed into its identity, as the dag-cbor of its
-//! descriptor, and a constant term serializes as its untagged `Value`.
+//! A rule is stored in its canonical spelling and hashed into its
+//! identity, and a constant term is written tagged by the entity naming
+//! its type, so it reads back as the type it was written as.
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use dialog_query::artifact::Value;
+use dialog_query::error::TypeError;
 use dialog_query::proposition::Proposition;
 use dialog_query::rule::{DeductiveRule, DeductiveRuleDescriptor};
 use dialog_query::term::Term;
@@ -15,6 +17,11 @@ use serde_json::json;
 /// The title of a page whose `page/url`, read as `kind` or untyped when
 /// `kind` is `None`, is `url`.
 fn rule_matching(url: Value, kind: Option<&str>) -> DeductiveRule {
+    try_rule_matching(url, kind).expect("the rule compiles")
+}
+
+/// [`rule_matching`], or why the rule does not compile.
+fn try_rule_matching(url: Value, kind: Option<&str>) -> Result<DeductiveRule, TypeError> {
     let url_field = match kind {
         Some(kind) => json!({ "the": "page/url", "as": kind }),
         None => json!({ "the": "page/url" }),
@@ -38,18 +45,61 @@ fn rule_matching(url: Value, kind: Option<&str>) -> DeductiveRule {
         panic!("a concept premise");
     };
     query.terms.insert("url".into(), Term::Constant(url));
-    descriptor.compile().expect("the rule compiles")
+    descriptor.compile()
 }
 
-/// The constant a stored rule's premise matches.
+/// The constant a stored rule's premise matches. The stored spelling
+/// names a premise's fields by what they read, not as written, so the
+/// constant is found by being the premise's one constant.
 fn constant_of(rule: &DeductiveRule) -> Value {
     let descriptor = rule.descriptor();
     let Some(Proposition::Concept(query)) = descriptor.when.first() else {
         panic!("a concept premise");
     };
-    match query.terms.get("url") {
-        Some(Term::Constant(value)) => value.clone(),
-        other => panic!("a constant, found {other:?}"),
+    let constants: Vec<&Value> = query
+        .terms
+        .iter()
+        .filter_map(|(_, term)| match term {
+            Term::Constant(value) => Some(value),
+            _ => None,
+        })
+        .collect();
+    match constants.as_slice() {
+        [value] => (*value).clone(),
+        other => panic!("one constant, found {other:?}"),
+    }
+}
+
+/// A constant no stored body can carry is refused when the rule
+/// compiles, naming the constant, rather than failing when it is
+/// stored: NaN, which is not a value, an infinite float, a natural
+/// above `u64::MAX` and an integer outside `i64`. The extremes that fit
+/// compile and round-trip.
+#[dialog_common::test]
+fn it_refuses_constants_a_body_cannot_carry() {
+    for (value, kind) in [
+        (Value::Float(f64::NAN), "float:"),
+        (Value::Float(f64::INFINITY), "float:"),
+        (Value::Float(f64::NEG_INFINITY), "float:"),
+        (Value::UnsignedInt(u128::from(u64::MAX) + 1), "natural:"),
+        (Value::SignedInt(i128::from(i64::MAX) + 1), "integer:"),
+        (Value::SignedInt(i128::from(i64::MIN) - 1), "integer:"),
+    ] {
+        let error = try_rule_matching(value.clone(), Some(kind)).expect_err("refused");
+        assert!(
+            matches!(&error, TypeError::UnencodableConstant { value: named, .. } if *named == format!("{value:?}")),
+            "{value:?}: {error}"
+        );
+    }
+    for (value, kind) in [
+        (Value::UnsignedInt(u128::from(u64::MAX)), "natural:"),
+        (Value::SignedInt(i128::from(i64::MAX)), "integer:"),
+        (Value::SignedInt(i128::from(i64::MIN)), "integer:"),
+        (Value::Float(f64::MAX), "float:"),
+    ] {
+        let rule = try_rule_matching(value.clone(), Some(kind)).expect("compiles");
+        let stored = DeductiveRule::decode(&rule.encode()).expect("decodes");
+        assert_eq!(constant_of(&stored), value);
     }
 }
 

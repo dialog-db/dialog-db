@@ -14,6 +14,66 @@ says how to cut a release.
 
 ## Unreleased
 
+### Rule bodies store the canonical spelling
+
+[#593](https://github.com/dialog-db/dialog-db/pull/593),
+[identity, storage and notation](./notes/identity-storage-notation.md#body-format-3)
+
+A rule's `dialog.rule/source` body is now written in format 3: the
+rule's canonical spelling, the one its identity hashes, in the dag-cbor
+envelope earlier formats used. The body holds exactly what the identity
+holds, so every spelling of one rule stores the same bytes, and a
+rule's body is found by encoding the rule.
+
+What this changes for you:
+
+- `DeductiveRule::decode` and `InductiveRule::decode` of a format 3
+  body give the rule in its canonical spelling: locals and head fields
+  named `~0`, `~1`, …, a premise's fields `#0`, `#1`, …, premises
+  sorted, no descriptions. A query still binds the head by its own
+  concept's field names. The names and descriptions an author wrote
+  are not stored.
+- Installing another spelling of an installed rule stores no second
+  body, and retracting either spelling removes the rule's body.
+  Before, two spellings stored two bodies under one entity, and
+  retracting one left the other.
+- A rule with a constant no body can carry is refused when it compiles
+  with `TypeError::UnencodableConstant`, naming the constant: a NaN or
+  infinite float, a natural above `u64::MAX` or an integer outside
+  `i64`. Before, such a rule compiled and panicked when stored.
+- `Branch::upgrade_rules()` also rewrites every body of an earlier
+  format into format 3, and reports those already under their identity
+  in `RulesUpgraded::rewritten`.
+
+Why: a stored rule should be one record that is a function of the
+rule, so equal rules store equal bytes and a retraction finds what an
+install wrote. The authored spelling is display data, and storing it
+beside every rule measured at 35% to 75% more instructions per
+install; it waits on a cheaper form.
+
+### NaN is not a value
+
+[#593](https://github.com/dialog-db/dialog-db/pull/593),
+[identity, storage and notation](./notes/identity-storage-notation.md#decided)
+
+A NaN float is refused wherever a value enters dialog, rather than
+stored as a number that is not equal to itself. Infinities stay
+values.
+
+What this changes for you:
+
+- Deserializing a `Value` from a NaN fails with "NaN is not a value".
+- `float/parse` of `NaN` is no row.
+- A float formula whose result would be NaN (`0.0 / 0.0`,
+  `inf - inf`) yields no row, as integer division by zero already did.
+- A rule constant of NaN is refused when the rule compiles (see above).
+
+Why: a database value needs an equality it can join and retract by.
+The absence of a claim already means "no number"; a value that exists
+only to say so, and that IEEE says is unequal to itself, had to be
+special-cased in equality, in the `float:32` view and in the number
+encoding to behave at all.
+
 ### Attributes can declare `number:` and fixed-width number types
 
 [#593](https://github.com/dialog-db/dialog-db/pull/593),
@@ -46,8 +106,8 @@ What this changes for you:
   a value, and `Value::viewed_as(kind)` reads a value through one.
 - The query type system gains `Refinement::views`, sent as `"views"`
   on the wire.
-- A view reads the same on every target: `float:32` gives one NaN, and
-  rounding to `f32` is pinned bit for bit on native and WebAssembly.
+- A view reads the same on every target: rounding to `f32` is pinned
+  bit for bit on native and WebAssembly.
 
 Why: a Rust field of `u8` cannot hold `300`, and an app should be able
 to say so in the schema rather than fail on read. `number:` gives an
@@ -113,8 +173,8 @@ What this changes for you:
   `number:` type and is identified by its value alone, in the encoding
   of the new `dialog-number` crate (SQLite4's decimal key encoding): a
   natural `5`, an integer `5` and a float `5.0` are one value, a float
-  is the decimal it prints as (`1e23` is 10²³), `-0.0` is `0`, and NaN
-  is one value. An attribute's `as:` list hashes values this way.
+  is the decimal it prints as (`1e23` is 10²³), and `-0.0` is `0`. An
+  attribute's `as:` list hashes values this way.
   The value index still keeps naturals, integers and floats apart, so
   until it moves to one band, two attributes that differ only by
   listing `5` or `5.0` share an identity but read different claims.
@@ -205,6 +265,14 @@ change only once.
 - Values in tonk's dag-cbor and IPLD conversions come out tagged. Use
   `Value::untagged()` where an identity minted from values has to stay
   as it was.
+- Rule bodies are written in format 3, the canonical spelling. Bodies
+  of formats 0 to 2 are still read, and `Branch::upgrade_rules()`
+  rewrites them in the same pass that re-keys rules; until it runs, a
+  body an earlier release wrote is read as before and a retraction of
+  the rule it holds leaves it behind. 0.2.0 refuses format 3 bodies by
+  name.
+- A stored NaN from an earlier release is not rewritten. It reads as it
+  did; nothing new can be written beside it.
 
 ## 0.2.0 (2026-10-09)
 

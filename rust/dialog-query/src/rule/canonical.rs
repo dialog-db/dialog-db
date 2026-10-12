@@ -699,10 +699,11 @@ mod tests {
         assert_ne!(direct.this(), indirect.this());
     }
 
-    /// The author's spelling is what the rule stores and shows; the
-    /// canonical one is what it hashes. Decoding the stored bytes gives
+    /// The author's spelling is what the rule shows; the canonical one
+    /// is what it hashes and stores. Decoding the stored bytes gives
     /// back the same identity, which is what the content-address check
-    /// on hydration relies on.
+    /// on hydration relies on, and two spellings of one rule store one
+    /// body.
     #[dialog_common::test]
     fn it_stores_the_authored_spelling_under_the_canonical_identity() {
         let authored = rule(vec![knows("x", "friend"), knows("this", "x")]);
@@ -740,7 +741,22 @@ mod tests {
         );
         let decoded = DeductiveRule::decode(&authored.encode()).expect("stored bytes decode");
         assert_eq!(decoded.this(), authored.this());
-        assert_eq!(decoded.descriptor(), descriptor);
+        assert_eq!(decoded.canonical_descriptor(), canonical);
+
+        let respelled = rule(vec![knows("this", "y"), knows("y", "friend")]);
+        assert_eq!(respelled.encode(), authored.encode(), "one body");
+    }
+
+    /// The canonical spelling is a fixed point: a rule compiled from it
+    /// is the same rule, with the same canonical spelling. A stored
+    /// body holds only that spelling, so this is what lets it load.
+    #[dialog_common::test]
+    fn it_compiles_its_canonical_spelling_to_the_same_rule() {
+        let authored = rule(vec![knows("x", "friend"), knows("this", "x")]);
+        let canonical = authored.canonical_descriptor();
+        let recompiled = canonical.clone().compile().expect("canonical compiles");
+        assert_eq!(recompiled.this(), authored.this());
+        assert_eq!(recompiled.canonical_descriptor(), canonical);
     }
 
     /// A rule installed into a bundle whose concept spells the same

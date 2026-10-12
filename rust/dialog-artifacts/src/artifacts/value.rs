@@ -437,6 +437,9 @@ impl<'de> de::Visitor<'de> for ValueVisitor {
     }
 
     fn visit_f64<E: de::Error>(self, float: f64) -> Result<Value, E> {
+        if float.is_nan() {
+            return Err(E::custom("NaN is not a value"));
+        }
         Ok(Value::Float(float))
     }
 
