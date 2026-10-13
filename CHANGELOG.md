@@ -56,6 +56,17 @@ What this changes for you:
   `across_numbers()` compares every number as it is for any bound.
   Before, a bound admitted only numbers written with its own type; a
   natural bound `>= 20` now finds a stored `30.0`.
+- An exact number, in a selector's `is(..)` or a query's constant, is the
+  range of that one number read through the same lens: `is(4)` as an
+  integer finds the stored `4`, `4.0` and `4.3`; `is(4.0)` as a float
+  finds the number `4` alone. This holds on the cardinality-one election
+  too, which compared the constant with the stored value by type and so
+  missed `+41` against a stored natural `41`.
+- A cardinality-one assertion of a value its cell already reads as,
+  through the lens of the asserted value's type, is a no-op
+  (`Value::reads_as`): asserting the integer `4` over a stored `4.3`
+  writes nothing, since an integer reader observes `4` already; asserting
+  `5` supersedes it.
 - `tree::rekey::rekey_tree` and `rekey` rewrite a tree or a key between
   encodings; `Branch::rekey_storage(0)` lays a branch out the earlier
   way, for tests of the migration.

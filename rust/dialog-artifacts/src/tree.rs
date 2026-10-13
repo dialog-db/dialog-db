@@ -1512,7 +1512,11 @@ where
                             if current.of != artifact.of || current.the != artifact.the {
                                 continue;
                             }
-                            if current.is == artifact.is {
+                            // The cell holds the written value when a
+                            // reader of the value's type observes it: an
+                            // integer 4 asserted over a stored 4.3 is what
+                            // the cell already reads as.
+                            if current.is.reads_as(&artifact.is) {
                                 held = Some(priors.len());
                             }
                             let versions: Vec<Version> =
@@ -1988,6 +1992,9 @@ mod range_tests {
 
 #[cfg(test)]
 mod number_band_tests;
+
+#[cfg(test)]
+mod number_semantics_tests;
 
 #[cfg(test)]
 mod selector_range_tests {

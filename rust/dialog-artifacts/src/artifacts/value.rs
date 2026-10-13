@@ -182,6 +182,23 @@ impl Value {
         })
     }
 
+    /// Whether a reader of `asserted`'s type observes this stored value as
+    /// `asserted`: a number is read through the lens of the asserted
+    /// number's type (the integer 4 observes a stored 4.3 as 4, and a float
+    /// observes it as 4.3), any other value as it is. A query constant
+    /// matches the rows its type reads as the constant, and a
+    /// cardinality-one assertion of a value its cell already reads as is a
+    /// no-op.
+    pub fn reads_as(&self, asserted: &Value) -> bool {
+        if self.data_type().is_number() && asserted.data_type().is_number() {
+            return self
+                .clone()
+                .viewed_as(asserted.data_type())
+                .is_some_and(|viewed| viewed == *asserted);
+        }
+        self == asserted
+    }
+
     /// Whether this and `other` are the same number, whatever types hold
     /// them: the natural 5, the integer 5 and the float 5.0 are one. Values
     /// that are not both numbers are compared as they are.
@@ -1877,6 +1894,9 @@ mod encoding_tests {
 /// The sized number types read numbers by range and precision: they filter
 /// what is out of range, coerce only where they lose precision, and hold
 /// exactly the numbers they read unchanged.
+#[cfg(test)]
+mod number_tests;
+
 #[cfg(test)]
 mod view_tests {
     #![allow(unexpected_cfgs)]

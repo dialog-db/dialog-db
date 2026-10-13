@@ -613,6 +613,27 @@ impl ArtifactSelector<Constrained> {
             self.value_lower = None;
             self.value_upper = None;
         }
+        // In the band an exact number is the range of that one number, read
+        // through the lens of its type like any bound: `is(4)` as an integer
+        // finds the stored 4, 4.0 and 4.3 (which the lens reads as 4), and
+        // `is(4.0)` finds the number 4 alone. The per-type bands key each
+        // type apart, so there the exact value stays a key.
+        if manifest.value_encoding == crate::NUMBER_BAND
+            && self
+                .value
+                .as_ref()
+                .is_some_and(|value| value.data_type().is_number())
+            && let Some(value) = self.value.take()
+        {
+            let bound = ValueBound {
+                value,
+                inclusive: true,
+                across: false,
+                encoded: None,
+            };
+            self.value_lower = Some(bound.clone());
+            self.value_upper = Some(bound);
+        }
         if manifest.value_encoding == crate::NUMBER_BAND {
             for bound in [&mut self.value_lower, &mut self.value_upper]
                 .into_iter()

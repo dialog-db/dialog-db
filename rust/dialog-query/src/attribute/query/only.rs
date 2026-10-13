@@ -263,7 +263,10 @@ impl AttributeQueryOnly {
                 let value_known = resolved.is().is_constant();
 
                 if entity_known || (attribute_known && !value_known) {
-                    // Sliding window path.
+                    // Sliding window path. A constant value admits the
+                    // winner a reader of the constant's type observes as
+                    // it (see `Value::reads_as`), as the scan's own exact
+                    // bound does.
                     let value_constraint = resolved.is().as_constant().cloned();
 
                     let scan = AttributeQueryAll::lookup(
@@ -302,8 +305,9 @@ impl AttributeQueryOnly {
                                         },
                                     ) {
                                         Some((winner, standing))
-                                            if value_constraint.is_none()
-                                                || value_constraint.as_ref() == Some(&winner.is) =>
+                                            if value_constraint
+                                                .as_ref()
+                                                .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
                                         {
                                             let mut extension = base.clone();
                                             selector.merge(&mut extension, winner, standing)?;
@@ -325,8 +329,9 @@ impl AttributeQueryOnly {
                             selector.admit(winner).map(|winner| (winner, standing))
                         }) {
                             Some((winner, standing))
-                                if value_constraint.is_none()
-                                    || value_constraint.as_ref() == Some(&winner.is) =>
+                                if value_constraint
+                                    .as_ref()
+                                    .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
                             {
                                 let mut extension = base.clone();
                                 selector.merge(&mut extension, winner, standing)?;

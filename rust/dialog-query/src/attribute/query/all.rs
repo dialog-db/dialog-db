@@ -1100,6 +1100,97 @@ mod tests {
         Ok(())
     }
 
+    /// A constant names a number, not a spelling: the store keys every
+    /// number in one band, so the integer `+41` and the float `41.0` find
+    /// the natural `41`, and a negative or fractional constant finds
+    /// nothing there.
+    #[dialog_common::test]
+    async fn it_finds_a_number_by_a_constant_of_another_type() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(the!("person/age").of(Entity::new()?).is(41u64))
+            .assert(the!("person/score").of(Entity::new()?).is(4.3f64))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        // A constant reads the rows through the lens of its type: an
+        // integer 4 observes the stored 4.3 as 4, a float 4.0 does not.
+        for (attribute, constant, found) in [
+            ("person/age", Value::UnsignedInt(41), 1),
+            ("person/age", Value::SignedInt(41), 1),
+            ("person/age", Value::Float(41.0), 1),
+            ("person/age", Value::SignedInt(-41), 0),
+            ("person/age", Value::Float(41.5), 0),
+            ("person/score", Value::UnsignedInt(4), 1),
+            ("person/score", Value::SignedInt(4), 1),
+            ("person/score", Value::Float(4.3), 1),
+            ("person/score", Value::Float(4.0), 0),
+            ("person/score", Value::UnsignedInt(5), 0),
+        ] {
+            let the: Relation = attribute.parse()?;
+            let query = AttributeQueryAll::new(
+                Term::from(the),
+                Term::<Entity>::var("e"),
+                Term::Constant(constant.clone()),
+                Term::var("cause"),
+            );
+            let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+            let results = query.perform(&source).try_vec().await?;
+            assert_eq!(results.len(), found, "{attribute} is {constant:?}");
+        }
+        Ok(())
+    }
+
+    /// The cardinality-one read finds a number by a constant of another
+    /// type too: the election over `(attribute, entity)` compares values,
+    /// and `+41` and `41.0` are the natural `41`.
+    #[dialog_common::test]
+    async fn it_elects_a_number_by_a_constant_of_another_type() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let person = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("person/age").of(person.clone()).is(41u64))
+            .assert(the!("person/score").of(person.clone()).is(4.3f64))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        for (attribute, constant, found) in [
+            ("person/age", Value::SignedInt(41), 1),
+            ("person/age", Value::Float(41.0), 1),
+            ("person/age", Value::Float(41.5), 0),
+            ("person/score", Value::SignedInt(4), 1),
+            ("person/score", Value::Float(4.3), 1),
+            ("person/score", Value::Float(4.0), 0),
+            ("person/score", Value::UnsignedInt(5), 0),
+        ] {
+            let the: Relation = attribute.parse()?;
+            for of in [Term::<Entity>::var("e"), Term::from(person.clone())] {
+                let query = crate::attribute::query::DynamicAttributeQuery::new(
+                    Term::from(the.clone()),
+                    of,
+                    Term::Constant(constant.clone()),
+                    Term::var("cause"),
+                    Some(crate::Cardinality::One),
+                );
+                let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+                let results = query.perform(&source).try_vec().await?;
+                assert_eq!(results.len(), found, "{attribute} is {constant:?}");
+            }
+        }
+        Ok(())
+    }
+
     /// Mixed numeric rows under a NUMERIC-wide kind: the interval is
     /// pushed as one scan across the number band, which orders every
     /// number by value whatever type wrote it, so the natural `5` and

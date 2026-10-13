@@ -531,8 +531,12 @@ impl Match {
         }
         if let Some(existing) = self.find(key) {
             match existing {
+                // A value already bound reads the new one as a constant of
+                // its type would (see `Value::reads_as`): a variable bound
+                // to the integer 4 takes the stored 4, 4.0 and 4.3, as a
+                // scan for the constant 4 admits them, and keeps the 4.
                 Binding::Present(existing_value) => {
-                    if *existing_value != value {
+                    if *existing_value != value && !value.reads_as(existing_value) {
                         Err(EvaluationError::Assignment {
                             reason: format!(
                                 "Can not set {:?} to {:?} because it is already set to {:?}.",
