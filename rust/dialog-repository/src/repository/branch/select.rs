@@ -333,4 +333,6 @@ impl SelectOwned<'_> {
 }
 
 #[cfg(test)]
+mod number_tests;
+#[cfg(test)]
 mod tests;

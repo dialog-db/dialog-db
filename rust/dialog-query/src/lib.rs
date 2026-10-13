@@ -94,6 +94,11 @@ pub mod term;
 
 mod memo;
 
+/// Numbers through the query engine: lenses, constants, typed writes,
+/// derived rows and encodings, pinned as tests.
+#[cfg(test)]
+mod number_tests;
+
 mod sort_order;
 pub use sort_order::*;
 
