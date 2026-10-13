@@ -87,19 +87,25 @@ An entity value is how facts link things together. If Bob adds `the demo.grocery
 
 ### Numbers
 
-A number is a number, however it was written. `2`, `2.0` and `+2` are one value: they share a key, they join in a query, and retracting one retracts them all. A float is taken as the decimal it prints as, so the `0.1` in a JSON file and the `0.1` a person typed are the same number. Negative zero is zero. NaN is not a value at all, and Dialog refuses it wherever a value comes in. The infinities are values.
+Numbers in Dialog have one universal representation, and it can hold a number of any precision. There is no stored integer `2` next to a stored float `2.0`. There is the number two, and `2`, `2.0` and `+2` are three ways of writing it. NaN is not a number, and Dialog refuses it wherever a value comes in.
 
-An attribute does not have to take every number. Besides `number:`, it can declare a narrower type, and that type works as a view over the stored numbers:
+Types like `integer:` and `float:` are not kinds of stored number. They are how an attribute chooses to interpret the numbers in its relation:
 
-| Type | What it reads |
+| Type | How it interprets a number |
 |---|---|
-| `number:` | every number, as it is |
-| `integer:` | every number, a fraction rounded down to a whole number |
-| `natural:` | the same, but only numbers that are not negative |
-| `float:` | every number, as the nearest 64-bit float |
-| `natural:8` to `natural:128`, `integer:8` to `integer:128`, `float:32`, `float:64` | the same views, fitted to a width |
+| `number:` | as it is |
+| `integer:` | as a whole number |
+| `natural:` | as a whole number that is not negative |
+| `float:` | as the nearest 64-bit float |
+| `natural:8` to `natural:128`, `integer:8` to `integer:128`, `float:32`, `float:64` | the same, fitted to a width |
 
-A view rounds where it only loses precision, and leaves out what it cannot hold. Read through `natural:8`, a stored `9.75` is `9`, and `300` and `-1` are not there. A write through a view refuses a value the view cannot hold.
+A type has a range, and a number outside it does not fit the attribute's definition. For that attribute the number does not exist, even though it exists in the relation and another attribute over the same relation may read it. Through `natural:8`, a stored `300` or `-1` is simply not there.
+
+A number inside the range is viewed at the precision of the type. A relation holding `4.3` is observed as `4` by an attribute that reads it as `integer:`, and as `4.3` by one that reads it as `number:`. A fraction is always rounded down, so `-4.3` is observed as `-5`.
+
+> ℹ️ Writes go through the same lens. Under the pick `last`, asserting `4` through an `integer:` attribute does nothing when the value observed through that attribute is already `4`, so a stored `4.3` stays `4.3`. Asserting `5` replaces the `4.3` with `5`.
+
+Dialog works this way so that apps using different lenses on the same relation can share it. An app with lower precision does not destroy detail that an app with higher precision cares about, because writing back what it read changes nothing. And the app with lower precision still observes the data at the level of precision it is able to handle, instead of failing on a number it did not expect.
 
 ## Saying things: assert and retract
 
