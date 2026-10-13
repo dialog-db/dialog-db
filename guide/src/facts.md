@@ -101,7 +101,7 @@ Types like `integer:` and `float:` are not kinds of stored number. They are how 
 
 A type has a range, and a number outside it does not fit the attribute's definition. For that attribute the number does not exist, even though it exists in the relation and another attribute over the same relation may read it. Through `natural:8`, a stored `300` or `-1` is simply not there.
 
-A number inside the range is viewed at the precision of the type. A relation holding `4.3` is observed as `4` by an attribute that reads it as `integer:`, and as `4.3` by one that reads it as `number:`. A fraction is always rounded down, so `-4.3` is observed as `-5`.
+A number inside the range is viewed at the precision of the type. A relation holding `4.3` is observed as `4` by an attribute that reads it as `integer:`, and as `4.3` by one that reads it as `float:`. A fraction is always rounded down, so `-4.3` is observed as `-5`.
 
 > ℹ️ Writes go through the same lens. Under the pick `last`, asserting `4` through an `integer:` attribute does nothing when the value observed through that attribute is already `4`, so a stored `4.3` stays `4.3`. Asserting `5` replaces the `4.3` with `5`.
 
