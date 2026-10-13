@@ -67,6 +67,37 @@ What this changes for you:
   (`Value::reads_as`): asserting the integer `4` over a stored `4.3`
   writes nothing, since an integer reader observes `4` already; asserting
   `5` supersedes it.
+- A float is the decimal it prints as, in memory as in the band:
+  `Value::viewed_as` reads `1e30` through an integer lens as the natural
+  `10^30`, not the float's binary value, and `Value::same_number` says
+  two values are one number exactly when the band keys them as one, so
+  `2^64` as a float is the natural `18446744073709552000` and not
+  `2^64`. Before, the in-memory views and the stored identity disagreed
+  past `2^53`.
+- Rows a query derives are one row per number: two rules deriving the
+  natural `3` and the float `3.0` for one relation yield one row, through
+  a union and through a fixpoint alike, as two such facts are one fact in
+  storage; an `all` pick tells values apart the same way
+  (`Value::identity_key`, the band's encoding of a number). Before, the
+  rows were keyed by type as well, and a `number:` reader saw both.
+- A number constant finds its matches on every path: the cardinality-one
+  lookup with the entity unbound compared the constant with the elected
+  claim by type, and a variable bound to a stored `4.3` refused the
+  constant `4` that arrived after it; both now read through the lens
+  (`Value::reads_as`), in either order.
+- A concept write (`ConceptDescriptor::edit`, the derive's builders)
+  writes each field under the field's pick, as an attribute statement
+  spelling that pick does: a `last` field's write succeeds the claim its
+  cell holds, and is the no-op above when the cell already reads as the
+  written value. `Attribution` carries the field's `pick` in place of its
+  `cardinality`. Before, every concept write was an `all` write, so a
+  cardinality-one field accumulated a claim per write; reads elected the
+  newest, so they read right while the cell grew.
+- `ValueDataType::holds` reads the same for every number type: a type
+  holds a number its view reads unchanged, so `float:` holds the natural
+  `3` and `natural:` the float `3.0`, as `float:64` and `natural:8`
+  already did; `natural:` still refuses `2.5` and `-1`. Before, an
+  unsized type held values of its own type only.
 - `tree::rekey::rekey_tree` and `rekey` rewrite a tree or a key between
   encodings; `Branch::rekey_storage(0)` lays a branch out the earlier
   way, for tests of the migration.
@@ -157,7 +188,12 @@ values.
 
 What this changes for you:
 
-- Deserializing a `Value` from a NaN fails with "NaN is not a value".
+- Deserializing a `Value` from a NaN fails with "NaN is not a value",
+  bare or tagged (`{"float:": NaN}` in dag-cbor), as does parsing the
+  string `float:NaN` into a `Value`. No type `holds` a NaN, so a typed
+  write refuses it, and a commit that would write one by a raw assertion
+  fails with `CommitError::Artifact(InvalidValue("NaN is not a value"))`
+  before anything lands.
 - `float/parse` of `NaN` is no row.
 - A float formula whose result would be NaN (`0.0 / 0.0`,
   `inf - inf`) yields no row, as integer division by zero already did.

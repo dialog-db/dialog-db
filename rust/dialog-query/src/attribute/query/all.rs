@@ -724,6 +724,7 @@ mod tests {
 
     use super::*;
     use crate::artifact::encode_value_owned;
+    use crate::attribute::query::DynamicAttributeQuery;
     use crate::query::Output;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
@@ -1176,12 +1177,12 @@ mod tests {
         ] {
             let the: Relation = attribute.parse()?;
             for of in [Term::<Entity>::var("e"), Term::from(person.clone())] {
-                let query = crate::attribute::query::DynamicAttributeQuery::new(
+                let query = DynamicAttributeQuery::new(
                     Term::from(the.clone()),
                     of,
                     Term::Constant(constant.clone()),
                     Term::var("cause"),
-                    Some(crate::Cardinality::One),
+                    Some(Cardinality::One),
                 );
                 let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
                 let results = query.perform(&source).try_vec().await?;

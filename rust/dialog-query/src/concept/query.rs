@@ -1464,9 +1464,10 @@ fn widened(input: &Match, terms: &Parameters) -> Result<Match, EvaluationError> 
     Ok(widened)
 }
 
-/// A value's canonical bytes, for grouping and tie-breaking.
+/// The bytes an election tells values apart by: one key per value, the
+/// natural 3 and the float 3.0 included (see [`Value::identity_key`]).
 fn encode_value(value: &Value) -> Result<Vec<u8>, EvaluationError> {
-    serde_ipld_dagcbor::to_vec(value).map_err(|error| EvaluationError::Store(error.to_string()))
+    Ok(value.identity_key())
 }
 
 /// The bytes an election groups an entity under: the entity's own,

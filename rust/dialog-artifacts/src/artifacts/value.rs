@@ -14,6 +14,7 @@ use std::{
 
 use crate::{Cause, DialogArtifactsError, Entity, Relation, TypeError, make_reference};
 use base58::{FromBase58, ToBase58};
+use dialog_number::Number;
 use dialog_storage::Blake3Hash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
@@ -120,15 +121,14 @@ impl Value {
                 Value::UnsignedInt(u128::try_from(integer).ok()?)
             }
             (Value::SignedInt(integer), ValueDataType::Float) => Value::Float(integer as f64),
+            // A float is the decimal it prints as, so its floor is read
+            // through that decimal, as the band reads it: `1e30` is the
+            // natural `10^30`, not the float's binary value.
             (Value::Float(float), ValueDataType::SignedInt) => {
-                let whole = floor(float)?;
-                (whole >= i128::MIN as f64 && whole < i128::MAX as f64)
-                    .then_some(Value::SignedInt(whole as i128))?
+                Value::SignedInt(Number::from(floor(float)?).to_i128()?)
             }
             (Value::Float(float), ValueDataType::UnsignedInt) => {
-                let whole = floor(float)?;
-                (whole >= 0.0 && whole < u128::MAX as f64)
-                    .then_some(Value::UnsignedInt(whole as u128))?
+                Value::UnsignedInt(Number::from(floor(float)?).to_u128()?)
             }
             (value, _) => value,
         })
@@ -199,38 +199,28 @@ impl Value {
         self == asserted
     }
 
-    /// Whether this and `other` are the same number, whatever types hold
-    /// them: the natural 5, the integer 5 and the float 5.0 are one. Values
-    /// that are not both numbers are compared as they are.
+    /// Whether this and `other` are one number, by the identity the band
+    /// gives numbers: the natural 3, the integer 3 and the float 3.0 are
+    /// one, `-0.0` is 0, and a float is the decimal it prints as, so
+    /// `1e30` is the natural `10^30` while `2^64` as a float is the natural
+    /// 18446744073709552000 and not `2^64`. Two values that are not both
+    /// numbers are the same number when they are equal.
     pub fn same_number(&self, other: &Value) -> bool {
-        fn exact(value: &Value) -> Option<(bool, u128, f64)> {
-            match value {
-                Value::UnsignedInt(natural) => Some((false, *natural, *natural as f64)),
-                Value::SignedInt(integer) => {
-                    Some((*integer < 0, integer.unsigned_abs(), *integer as f64))
-                }
-                _ => None,
-            }
+        match (self.number(), other.number()) {
+            (Some(a), Some(b)) => a == b,
+            _ => self == other,
         }
-        match (self, other) {
-            (Value::Float(a), Value::Float(b)) => a == b || (a.is_nan() && b.is_nan()),
-            (Value::Float(float), whole) | (whole, Value::Float(float)) => match exact(whole) {
-                Some((_, _, approximate)) => {
-                    // A float equals a whole number only if it is that
-                    // number exactly, not merely the nearest float to it.
-                    *float == approximate
-                        && whole.clone().viewed_as(ValueDataType::Float).is_some()
-                        && Value::Float(*float)
-                            .viewed_as(whole.data_type())
-                            .is_some_and(|back| back == *whole)
-                }
-                None => false,
-            },
-            (a, b) => match (exact(a), exact(b)) {
-                (Some((sa, ma, _)), Some((sb, mb, _))) => sa == sb && ma == mb,
-                _ => a == b,
-            },
-        }
+    }
+
+    /// The number this value is, when it is one: the identity the band keys
+    /// it by.
+    fn number(&self) -> Option<Number> {
+        Some(match self {
+            Value::UnsignedInt(natural) => Number::from(*natural),
+            Value::SignedInt(integer) => Number::from(*integer),
+            Value::Float(float) => Number::from(*float),
+            _ => return None,
+        })
     }
 
     /// This value as `kind`, where `kind` reads the same spelling or
@@ -396,7 +386,13 @@ impl<'de> de::Visitor<'de> for ValueVisitor {
                     let Integral(integer) = map.next_value()?;
                     Value::SignedInt(integer)
                 }
-                ValueDataType::Float => Value::Float(map.next_value()?),
+                ValueDataType::Float => {
+                    let float: f64 = map.next_value()?;
+                    if float.is_nan() {
+                        return Err(de::Error::custom("NaN is not a value"));
+                    }
+                    Value::Float(float)
+                }
                 ValueDataType::Record => Value::Record(map.next_value()?),
                 ValueDataType::Symbol => Value::Symbol(map.next_value()?),
                 // Any number (`number:`) or one a sized number type holds
@@ -491,6 +487,35 @@ impl Value {
             Value::Record(_) => ValueDataType::Record,
             Value::Symbol(_) => ValueDataType::Symbol,
         }
+    }
+
+    /// Bytes two values share exactly when they are one value: for a
+    /// number, the band's encoding of the number it is, whatever type
+    /// holds it, so the natural 3, the integer 3 and the float 3.0 are
+    /// one key, as they are one key in the index and one identity; for
+    /// any other value, its type's byte and its bytes. Cheaper than a
+    /// reference, for keying rows in memory.
+    pub fn identity_key(&self) -> Vec<u8> {
+        let mut key = Vec::with_capacity(17);
+        match self {
+            Value::UnsignedInt(natural) => {
+                key.push(ValueDataType::Number as u8);
+                dialog_number::encode_u128(*natural, &mut key);
+            }
+            Value::SignedInt(integer) => {
+                key.push(ValueDataType::Number as u8);
+                dialog_number::encode_i128(*integer, &mut key);
+            }
+            Value::Float(float) => {
+                key.push(ValueDataType::Number as u8);
+                dialog_number::encode_f64(*float, &mut key);
+            }
+            other => {
+                key.push(other.data_type() as u8);
+                key.extend_from_slice(&other.to_bytes());
+            }
+        }
+        key
     }
 
     /// Convert this [`Value`] to its byte representation
@@ -614,7 +639,15 @@ impl FromStr for Value {
             "string" => Value::String(value.to_owned()),
             "uint" => Value::UnsignedInt(value.parse().map_err(to_dialog_error)?),
             "sint" => Value::SignedInt(value.parse().map_err(to_dialog_error)?),
-            "float" => Value::Float(value.parse().map_err(to_dialog_error)?),
+            "float" => {
+                let float: f64 = value.parse().map_err(to_dialog_error)?;
+                if float.is_nan() {
+                    return Err(DialogArtifactsError::InvalidValue(
+                        "NaN is not a value".into(),
+                    ));
+                }
+                Value::Float(float)
+            }
             "record" => Value::Record(value.from_base58().map_err(to_dialog_error_debug)?),
             "attribute" => Value::Symbol(Relation::from_str(value)?),
             _ => {
@@ -1524,18 +1557,27 @@ impl ValueDataType {
 
     /// Whether a value of this type holds `value` exactly: one of its own
     /// type, any number where this is [`Number`](Self::Number), and for a
-    /// sized number type a number its view reads unchanged, so a write
-    /// through `natural:8` takes 255 and refuses 256 and 2.5.
+    /// number type a number its view reads unchanged, so a write through
+    /// `natural:8` takes 255, the float 255.0 included, and refuses 256 and
+    /// 2.5; `float:` takes the natural 3 and `natural:` the float 3.0, each
+    /// being the number the view reads.
     pub fn holds(self, value: &Value) -> bool {
+        // NaN is not a value, so no type holds it.
+        if matches!(value, Value::Float(float) if float.is_nan()) {
+            return false;
+        }
         let actual = value.data_type();
-        if self.is_view() {
+        if self == ValueDataType::Number {
+            return actual.is_number();
+        }
+        if self.is_number() {
             return actual.is_number()
                 && value
                     .clone()
                     .viewed_as(self)
                     .is_some_and(|viewed| viewed.same_number(value));
         }
-        actual == self || (self == ValueDataType::Number && actual.is_number())
+        actual == self
     }
 
     /// Whether this is one of the number types.
@@ -1958,7 +2000,7 @@ mod view_tests {
     /// natively, and both must produce these constants.
     #[dialog_common::test]
     fn it_views_identically_on_every_target() {
-        use ValueDataType::{F32, F64, I8, I64, U8, U64};
+        use ValueDataType::{F32, F64, I8, I64, SignedInt, U8, U64};
         fn bits(value: &Option<Value>) -> String {
             match value {
                 Some(Value::Float(float)) => format!("f{:016x}", float.to_bits()),
@@ -1969,7 +2011,7 @@ mod view_tests {
             }
         }
         let quiet_nan = f64::from_bits(0x7ff8_0000_0000_0001);
-        let cases: [(Value, ValueDataType, &str); 24] = [
+        let cases: [(Value, ValueDataType, &str); 25] = [
             (Value::Float(255.0), U8, "u255"),
             (Value::Float(255.999), U8, "u255"),
             (Value::Float(256.0), U8, "none"),
@@ -1988,10 +2030,14 @@ mod view_tests {
                 "u18446744073709551615",
             ),
             (Value::Float(18_446_744_073_709_551_616.0), U64, "none"),
+            // A float is the decimal it prints as: `-2^63` as a float is
+            // -9223372036854776000, below `i64::MIN`, so `integer:64` does
+            // not see it, and `integer:` reads it as that decimal.
+            (Value::Float(-9_223_372_036_854_775_808.0), I64, "none"),
             (
                 Value::Float(-9_223_372_036_854_775_808.0),
-                I64,
-                "i-9223372036854775808",
+                SignedInt,
+                "i-9223372036854776000",
             ),
             (Value::Float(1e-45), F32, "f36a0000000000000"),
             (Value::Float(f64::from(f32::MAX)), F32, "f47efffffe0000000"),
@@ -2067,7 +2113,14 @@ mod view_tests {
         assert!(!Value::Float(5.5).same_number(&Value::SignedInt(5)));
         // The nearest float to 2^60 + 1 is 2^60, not the same number.
         assert!(!Value::UnsignedInt((1 << 60) + 1).same_number(&Value::Float(2f64.powi(60))));
-        assert!(Value::UnsignedInt(1 << 60).same_number(&Value::Float(2f64.powi(60))));
+        // A float is the decimal it prints as, the identity the band keys
+        // it by: 2^60 as a float prints as 1152921504606847000, so it is
+        // that natural and not 2^60.
+        assert!(!Value::UnsignedInt(1 << 60).same_number(&Value::Float(2f64.powi(60))));
+        assert!(
+            Value::UnsignedInt(1_152_921_504_606_847_000).same_number(&Value::Float(2f64.powi(60)))
+        );
+        assert!(Value::UnsignedInt(10u128.pow(30)).same_number(&Value::Float(1e30)));
     }
 
     #[dialog_common::test]

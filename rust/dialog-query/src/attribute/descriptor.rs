@@ -19,17 +19,20 @@ use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::iter;
 use std::str::FromStr;
 
-/// A validated attribute–value pair with its cardinality, produced by
-/// [`AttributeDescriptor::resolve`]. Used inside [`ConceptStatement`](crate::concept::descriptor::ConceptStatement)
-/// to represent the set of facts that make up a concept instance.
+/// A validated attribute–value pair with the pick it is written under,
+/// produced by [`AttributeDescriptor::resolve`]. Used inside
+/// [`ConceptStatement`](crate::concept::descriptor::ConceptStatement) to
+/// represent the set of facts that make up a concept instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attribution {
     /// The fully-qualified attribute selector.
     pub the: ArtifactsRelation,
     /// The resolved value for this attribute.
     pub is: Value,
-    /// Whether this attribute allows one or many values per entity.
-    pub cardinality: Cardinality,
+    /// The pick the attribute reads under, which its write elects under:
+    /// a `last` field's write succeeds the claim the cell holds, an
+    /// `all` field's lands beside the others.
+    pub pick: Pick,
 }
 
 /// What an attribute's `the` holds: one relation, or every entry of a
@@ -679,7 +682,7 @@ impl AttributeDescriptor {
             Ok(Attribution {
                 the,
                 is: value.clone(),
-                cardinality: self.cardinality(),
+                pick: self.pick.clone(),
             })
         } else {
             Err(FieldTypeError::TypeMismatch {

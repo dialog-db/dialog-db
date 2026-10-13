@@ -608,11 +608,13 @@ impl Cell {
                 let elected = Election::from(policy)
                     .elect_claims(pool)
                     .map_err(|error| CommitError::Succession(error.to_string()))?;
-                // The read returns a claim of the written value already:
-                // the write changes nothing. An overlay row or a derived
-                // candidate of the value is not a claim, and the write
-                // lands beside it.
-                if matches!(&elected, Some((elected, true)) if elected == value) {
+                // The read returns a claim the written value already reads
+                // as, through the lens of its type (see `Value::reads_as`):
+                // the write changes nothing, as writing the integer 4 over
+                // a held 4.3 does, since an integer reader observes 4. An
+                // overlay row or a derived candidate of the value is not a
+                // claim, and the write lands beside it.
+                if matches!(&elected, Some((elected, true)) if elected.reads_as(value)) {
                     return Ok(Vec::new());
                 }
                 let mut settled = Vec::with_capacity(2);

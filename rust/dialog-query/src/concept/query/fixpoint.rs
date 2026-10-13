@@ -117,8 +117,8 @@ pub trait AnswerTable {
 }
 
 /// In-memory [`AnswerTable`]. [`Value`] has no total order (floats),
-/// so rows are deduplicated by their canonical dag-cbor encoding and
-/// stored in sorted maps for deterministic iteration.
+/// so rows are deduplicated by their [`row_key`] and stored in sorted
+/// maps for deterministic iteration.
 #[derive(Debug, Default)]
 pub struct InMemoryAnswerTable {
     total: HashMap<Entity, BTreeMap<Vec<u8>, Answer>>,
@@ -126,21 +126,22 @@ pub struct InMemoryAnswerTable {
     staged: HashMap<Entity, BTreeMap<Vec<u8>, Answer>>,
 }
 
-/// The identity of a row: each operand's name and value, length-framed
-/// and tagged with the value's type, in the row's name order. Injective,
-/// so two rows share a key exactly when they hold the same operands with
-/// the same values of the same types, and a pure function of the row, so
-/// the sorted tables iterate in one order in every process. Framed by
-/// hand rather than through dag-cbor: the key is taken once per derived
-/// row, and the serializer's dispatch was a twentieth of a recursive
-/// rule's evaluation.
+/// The identity of a row: each operand's name and value's
+/// [`identity_key`](Value::identity_key), length-framed, in the row's
+/// name order. Injective over values, so two rows share a key exactly
+/// when they hold the same operands with the same values, a number
+/// derived as the natural 3 and as the float 3.0 being one value as it
+/// is one fact in storage, and a pure function of the row, so the sorted
+/// tables iterate in one order in every process. Framed by hand rather
+/// than through dag-cbor: the key is taken once per derived row, and the
+/// serializer's dispatch was a twentieth of a recursive rule's
+/// evaluation.
 fn row_key(row: &Row) -> Vec<u8> {
     let mut key = Vec::new();
     for (operand, value) in row {
         key.extend_from_slice(&(operand.len() as u32).to_be_bytes());
         key.extend_from_slice(operand.as_bytes());
-        key.push(value.data_type() as u8);
-        let bytes = value.to_bytes();
+        let bytes = value.identity_key();
         key.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
         key.extend_from_slice(&bytes);
     }

@@ -87,9 +87,12 @@ where
         }
 
         // Only the surviving winner decodes its value; the losing
-        // challengers never materialized anything.
+        // challengers never materialized anything. The candidate's value
+        // may be the query's constant, which the winner matches through
+        // the lens of the constant's type (see `Value::reads_as`), as the
+        // scan that found the candidate did.
         if let Some(winner) = winner
-            && winner.value()? == value
+            && winner.value()?.reads_as(&value)
         {
             let winner_cause = winner.cause().cloned().unwrap_or(Cause([0; 32]));
             if cause.is_none() || cause == Some(winner_cause) {
