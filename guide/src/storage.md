@@ -21,7 +21,7 @@ A node, once written, never changes. That makes naming it easy: a node is named 
 
 The hash is BLAKE3, 32 bytes, unkeyed, taken over the whole node, prelude included. Anything stored this way is called a block, and tree nodes are blocks.
 
-Bytes that are not nodes are named the same way, by their BLAKE3 hash, but they are kept apart in a blob store, which can stream them rather than handling them as whole buffers. Two things live there. One is the spilled values from the [Keys](./keys.md) chapter. The other is assets: content such as photos that an app stores next to its facts.
+Bytes that are not nodes are named the same way, by their BLAKE3 hash, but they are kept apart in an asset store, which can stream them rather than handling them as whole buffers. Two things live there. One is the spilled values from the [Keys](./keys.md) chapter. The other is assets: content such as photos that an app stores next to its facts.
 
 Naming by hash has three useful consequences:
 
@@ -31,7 +31,7 @@ Naming by hash has three useful consequences:
 
 ## Assets
 
-An app stores a photo by asserting it in a transaction, like a fact. The commit writes the photo's bytes to the blob store and records one fact about them in the same revision: the `dialog.asset/size` of the entity `asset:{hash}` is the number of bytes. That entity is the photo's name, and the app's own facts can point at it, such as *the `demo.grocery/photo` of `item:2` is `asset:…`*.
+An app stores a photo by asserting it in a transaction, like a fact. The commit writes the photo's bytes to the asset store and records one fact about them in the same revision: the `dialog.asset/size` of the entity `asset:{hash}` is the number of bytes. That entity is the photo's name, and the app's own facts can point at it, such as *the `demo.grocery/photo` of `item:2` is `asset:…`*.
 
 The fact is what says a branch holds the asset. A push sends the bytes of every asset whose fact is new, a read fetches only bytes that such a fact vouches for, and retracting the fact drops the branch's hold on the bytes. Only a commit that stores the bytes can write the fact, since it is in a `dialog.` domain, so the size it states is measured from the bytes themselves.
 
@@ -39,7 +39,7 @@ The fact is what says a branch holds the asset. A push sends the bytes of every 
 
 For its data, a repository keeps two kinds of things:
 
-- **The archive** holds blocks and blobs. It is a map from hash to bytes. Entries are only ever added, and a name always means the same bytes.
+- **The archive** holds blocks and assets. It is a map from hash to bytes. Entries are only ever added, and a name always means the same bytes.
 - **Memory** holds cells. A cell is a small named value that can change, like the current head of a branch (see [Commits and History](./history.md)). A cell is updated with compare-and-swap: a writer says what it believes the cell holds now, and the update fails if someone else changed it first.
 
 Almost everything is in the archive. A handful of cells point into it.
@@ -56,13 +56,13 @@ The same archive runs on several backends. Tree nodes go in a catalog named `ind
 | S3 or R2 | object `{repository DID}/index/{base58 hash}` |
 | In memory | a map, for tests |
 
-Blobs sit beside them: `{repository's directory}/blob/{base58 hash}` on a file system, and `{repository DID}/blob/{base58 hash}` on S3 or R2. In a browser, blobs always go to OPFS, even when blocks and cells are in IndexedDB.
+Assets sit beside them: `{repository's directory}/blob/{base58 hash}` on a file system, and `{repository DID}/blob/{base58 hash}` on S3 or R2. In a browser, assets always go to OPFS, even when blocks and cells are in IndexedDB.
 
 The file system backend writes each block atomically, and skips the write when the file already exists, since a block with that name can only have those bytes.
 
 ## Writing: one import per commit
 
-While a commit edits the tree, the new nodes it produces collect in memory, and so do the values it spills. When the commit is sealed, the spilled values are written to the blob store, each checked against its hash, and then every new node is written to the archive in one import. Only after that can the branch's head move to the new root. A head can therefore never point at a root whose blocks are not yet stored.
+While a commit edits the tree, the new nodes it produces collect in memory, and so do the values it spills. When the commit is sealed, the spilled values are written to the asset store, each checked against its hash, and then every new node is written to the archive in one import. Only after that can the branch's head move to the new root. A head can therefore never point at a root whose blocks are not yet stored.
 
 ## Reading: fetch on demand
 
@@ -92,7 +92,7 @@ A replica does not need every block of a tree to use it. When a read reaches a n
 </svg>
 </figure>
 
-So a phone can open a large shared repository by fetching its root, then mostly the nodes its queries walk through, plus some that a query fetches ahead of where it is reading. The hash check happens in the tree reader, which is why a remote peer can be any dumb store of bytes. Spilled values are fetched the same way, from the blob store, and checked the same way.
+So a phone can open a large shared repository by fetching its root, then mostly the nodes its queries walk through, plus some that a query fetches ahead of where it is reading. The hash check happens in the tree reader, which is why a remote peer can be any dumb store of bytes. Spilled values are fetched the same way, from the asset store, and checked the same way.
 
 Fetches are scheduled, not fired one by one. Readers that want the same block share one fetch, and each remote peer serves a limited number of requests at a time, with a read that a query is waiting on going ahead of one made on speculation.
 

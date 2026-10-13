@@ -114,7 +114,7 @@ The commands Dialog sends to a remote peer look like paths:
 | `/use/get/memory/cell` | read a cell, such as a branch head |
 | `/use/put/memory/cell` | update a cell, with compare-and-swap |
 | `/use/delete/memory/cell` | remove a cell |
-| `/use/get/archive/blob`, `/use/put/archive/blob` | read or store a blob |
+| `/use/get/archive/blob`, `/use/put/archive/blob` | read or store an asset |
 
 The first part of a command says what kind of thing it does. Everything under `/use` reads or writes. Destroying something, such as deleting a branch, is under `/void`, so a delegation for `/use` does not allow it. More commands exist than a remote peer ever sees: creating and listing branches, or keeping a peer's contacts, are commands too, performed on the device and checked the same way.
 
@@ -180,7 +180,7 @@ The remote peer checks, in order:
 2. The current time falls inside every delegation's window.
 3. The command is covered by every delegation in the chain, and the arguments meet their conditions.
 4. Every signature holds, and no link has been revoked.
-5. The body is what the invocation promised. For a block, its BLAKE3 hash is the digest the invocation named and its SHA-256 is the checksum. For a cell, its SHA-256 is the checksum. For a blob, its size and digest match.
+5. The body is what the invocation promised. For a block, its BLAKE3 hash is the digest the invocation named and its SHA-256 is the checksum. For a cell, its SHA-256 is the checksum. For an asset, its size and digest match.
 
 Only then does the remote peer store the block or answer the read. The remote peer never needs to know who Alice is. It only needs to know the repository's DID, and to check signatures.
 

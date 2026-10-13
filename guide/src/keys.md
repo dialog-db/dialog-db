@@ -41,10 +41,10 @@ Each copy is called an index. The first byte of the key, the tag, says which ind
 | `01` | AEV | attribute, entity, value | everything with an attribute |
 | `02` | VAE | value, attribute, entity | things that have a value |
 | `03` | History | version, entity, attribute, value | the log of changes |
-| `04` | Blob | hash | blobs, in trees written before assets |
+| `04` | Asset | hash | assets, in trees written before assets were recorded as facts |
 | `05` | Coverage | version, entity, attribute, value hash | what a change removed |
 
-The first three hold the facts themselves. The last three are Dialog's own bookkeeping, and later chapters come back to them. Nothing is added under tag `04` any more. A stored blob is now recorded by an ordinary fact (see [Blocks and Storage](./storage.md)), and the entries older trees hold there are still read.
+The first three hold the facts themselves. The last three are Dialog's own bookkeeping, and later chapters come back to them. Nothing is added under tag `04` any more. A stored asset is recorded by an ordinary fact instead (see [Blocks and Storage](./storage.md)), and the entries older trees hold there are still read.
 
 ## A key, byte by byte
 
@@ -471,10 +471,10 @@ That entry has a small payload next to its key. The payload holds no part of the
 
 ## Big values spill
 
-A key holding a whole photo would make a terrible key. So every tree sets a limit on how long a value in a key may be, and a value whose encoded form is longer than that limit spills. The value's place in the key keeps only the encoding of a short prefix of it, and the key ends with a `01` byte and the 32-byte BLAKE3 hash of the whole value. In EAV and AEV that tail comes right after the value; in VAE it comes after the entity, the key's last part. The value itself is stored on its own, as a blob named by that hash:
+A key holding a whole photo would make a terrible key. So every tree sets a limit on how long a value in a key may be, and a value whose encoded form is longer than that limit spills. The value's place in the key keeps only the encoding of a short prefix of it, and the key ends with a `01` byte and the 32-byte BLAKE3 hash of the whole value. In EAV and AEV that tail comes right after the value; in VAE it comes after the entity, the key's last part. The value itself is stored on its own, in the asset store, named by that hash:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 740 190" width="740" height="190" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A spilled value: the key keeps a prefix and the whole value's hash; the value is its own blob">
+<svg class="dg" viewBox="0 0 740 190" width="740" height="190" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A spilled value: the key keeps a prefix and the whole value's hash; the value is stored on its own">
 <defs><marker id="spill-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <text class="title" x="10" y="18">EAV key of a spilled value</text>
 <rect class="shade" x="10" y="34" width="26" height="30"/>
@@ -500,7 +500,7 @@ A key holding a whole photo would make a terrible key. So every tree sets a limi
 <path class="wire" d="M630,96 V140 H530" marker-end="url(#spill-arrow)"/>
 <rect class="value" x="310" y="120" width="216" height="40"/>
 <text class="value" x="418" y="138" text-anchor="middle">the whole value</text>
-<text class="small muted" x="418" y="153" text-anchor="middle">its own blob, found by its hash</text>
+<text class="small muted" x="418" y="153" text-anchor="middle">stored on its own, found by its hash</text>
 </svg>
 </figure>
 
