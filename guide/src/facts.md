@@ -63,13 +63,9 @@ The pick an attribute gets unless it says otherwise is `last`, the newest fact, 
 
 Two apps can declare different attributes over the same relation, one reading a quantity as a whole number and another as it is. The facts do not change. Most of this guide can say attribute for both, since the grocery list reads each relation one way. The indexes in the next chapter do too: the relation's place in a key is called the attribute, which is where EAV, AEV and VAE get their A.
 
-Domains that start with `dialog.` are reserved. An app must not assert or retract facts in them, and Dialog rejects a transaction that tries. They are reserved so that Dialog can keep its own things in the same tree as an app's data, as facts, with no risk that the two collide: rules and concepts, the record of each commit, stored assets, and other bookkeeping the later chapters describe. The two exceptions are rules and concepts, which an app installs by asserting them under `dialog.rule/` and `dialog.concept/` (see [Queries](./queries.md)).
+Domains that start with `dialog.` are reserved. An app must not assert or retract facts in them, and Dialog rejects a transaction that tries. They are reserved so that Dialog can keep its own things in the same tree as an app's data, as facts, with no risk that the two collide: rules and concepts, the record of each commit, stored assets, and other bookkeeping the later chapters describe.
 
-<div class="aside">
-
-**Proposing an extension.** If you are building something that Dialog itself might adopt one day, do not put it in a `dialog.` domain. Put your own name in front, as in `myorg.dialog.`, so the relation reads `myorg.dialog.presence/cursor`. The facts are yours and cannot collide with anything Dialog adds later, and the name still shows where the idea is meant to end up.
-
-</div>
+> ℹ️ If you are building something that Dialog itself might adopt one day, do not put it in a `dialog.` domain. Put your own name in front, as in `myorg.dialog.`, so the relation reads `myorg.dialog.presence/cursor`. The facts are yours and cannot collide with anything Dialog adds later, and the name still shows where the idea is meant to end up.
 
 ## Values
 
