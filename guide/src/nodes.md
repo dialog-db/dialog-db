@@ -102,7 +102,7 @@ Here is the whole prelude of a leaf in a tree created today:
 </svg>
 </figure>
 
-There is one field, three bytes long. A setting equal to its default is never written, and a new tree differs from the defaults in one setting: `value_encoding`, which says that the tree keys every number under one type byte, as the [Keys](./keys.md) chapter described. The default is the older way, with a type byte for each kind of number, so a tree written before the setting existed has no fields at all, and its nodes mean what they always meant.
+There is one field, three bytes long. A setting equal to its default is never written, and a new tree differs from the defaults in one setting: `value_encoding`, which says how values are written in keys. Its value is 1, which names the encoding the [Keys](./keys.md) chapter described.
 
 So every node of every new tree starts with the same 16 bytes, give or take the kind byte. A reader uses the kind byte to validate the body as a leaf or an index, then checks the 16 bytes with a single comparison.
 
@@ -212,7 +212,7 @@ Codes come from a public table. These are the ones defined today:
 | `02` | `fanout_n` | recommended | 8 | buffers flush at 2<sup>n</sup> ops; with `max_segment` 0, the expected fanout |
 | `03` | `spill_prefix` | required | 64 | how many bytes of a spilled value its key keeps |
 | `04` | `max_separator` | recommended | 512 | separators longer than this never cut |
-| `05` | `value_encoding` | required | 0 | how values are written in keys: 0 gives each kind of number its own type byte, 1 gives all numbers one |
+| `05` | `value_encoding` | required | 0 | how values are written in keys; trees are created with 1, the encoding the [Keys](./keys.md) chapter describes |
 | `06` | `max_segment` | recommended | 65536 | the node size target the coins aim for |
 | `08` | `frame_ceiling_factor` | recommended | 3 | nodes over this many targets are force-split |
 | `0a` | `anchor_selector` | recommended | 1 | how a forced split picks its spot |
@@ -296,7 +296,7 @@ A build that has never seen a code cannot look up which kind it is, so the code 
 
 The three fields take 13 bytes, so this prelude fills its 16 bytes exactly and has no padding.
 
-Within this layout, the only setting that can lock out an older build is a required one the tree actually uses. `value_encoding` is the first setting to do so. A build from before version 0.3.0 has never heard of code `05`. It sees an odd code, refuses the tree, and names the code in the error. That is the right outcome, because that build would have looked for every number under the wrong key. Trees that use only recommended settings stay readable by every build that reads this layout. A new layout version or node kind would lock older builds out too, which is why those are reserved for changes that need it.
+Within this layout, the only setting that can lock out an older build is a required one the tree actually uses. Trees that use only recommended settings stay readable by every build that reads this layout. A new layout version or node kind would lock older builds out too, which is why those are reserved for changes that need it.
 
 ## Reading a node
 

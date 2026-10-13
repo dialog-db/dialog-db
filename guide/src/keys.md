@@ -508,14 +508,14 @@ The prefix keeps a spilled value sorting by its first 64 bytes, so a range scan 
 
 The two numbers, 4,096 and 64, are not fixed forever. They belong to the tree's format, which every node carries, written out only where it differs from these defaults, as the [Nodes](./nodes.md) chapter shows. A reader that guessed them wrong would build different keys and miss facts, so they are among the few settings a reader must understand.
 
-## Older trees key numbers by type
+<div class="aside">
 
-How numbers are written is a setting of the tree's format too, and it has changed once. A tree written before version 0.3.0 keeps natural numbers, integers and floats apart, under the type bytes `04`, `05` and `06`. Each is fixed width and big-endian: 16 bytes for a natural, 16 bytes with the sign bit flipped for an integer, and 8 bytes for a float, with the sign bit flipped when it is not negative and every bit flipped when it is. In such a tree `2` and `2.0` are two keys, and a range over numbers is three scans.
+**Before 0.3.** Releases before version 0.3.0 kept natural numbers, integers and floats in three separate bands of the index, each under its own type byte, so `2` and `2.0` were different keys. A tree written that way can still be read, but not added to: a commit on it fails with `NeedsMigration`, and `Branch::migrate` rewrites the branch into the layout this chapter describes.
 
-Dialog still reads those trees, but it does not add to them. A commit on a branch whose tree is laid out the older way is refused, and the app migrates the branch first. The migration writes every entry again under the one type byte, facts and history alike, into a new tree. It depends on nothing but the tree it starts from, so two replicas that migrate the same tree end up with the same new one.
+</div>
 
 <div class="aside">
 
-**Implementations.** Keys are built by `build_key` in [`dialog-artifacts/src/key/varkey.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/key/varkey.rs). The string encoding and the older number encodings are in [`artifacts/ordkey.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/ordkey.rs) and [`artifacts/ordvalue.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/ordvalue.rs), and the number encoding is the [`dialog-number`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-number) crate. Rewriting a tree from the older number keys is `rekey_tree` in [`tree/rekey.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/tree/rekey.rs). Spilling is decided by `EncodedValue::new` in [`key.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/key.rs).
+**Implementations.** Keys are built by `build_key` in [`dialog-artifacts/src/key/varkey.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/key/varkey.rs). The string encoding is in [`artifacts/ordkey.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/ordkey.rs) and [`artifacts/ordvalue.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/ordvalue.rs), and the number encoding is the [`dialog-number`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-number) crate. Spilling is decided by `EncodedValue::new` in [`key.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/key.rs).
 
 </div>

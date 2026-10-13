@@ -92,8 +92,6 @@ A pull brings the remote peer's changes in. It reads the remote peer's head, che
 | The remote peer has seen everything local, and nothing changed locally since the last sync | *"I'll take yours."* | adopts the remote peer's root as is, reading no blocks at all |
 | Both sides have changes the other has not seen | *"We need to merge."* | merges, then makes a merge commit |
 
-The first two cases read no trees, only heads. The third reads trees, and if either side's tree was written by a release before version 0.3.0 and keys numbers the older way (see [Keys](./keys.md#older-trees-key-numbers-by-type)), the replica first rewrites it in memory, so that both sides are laid out alike and the older client's writes merge in. A head adopted as is in the second case may still be laid out the older way, and the branch then has to be migrated before its next commit.
-
 When Bob pulls for the first time, he has no local changes, so he takes Alice's root as it is. He reads no nodes to do it. The nodes arrive later, on demand, as his queries walk through them ([Blocks and Storage](./storage.md)).
 
 ## Merge

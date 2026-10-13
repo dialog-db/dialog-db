@@ -199,9 +199,3 @@ That one question answers both questions from the start of the chapter. When a c
 **Transactions.** Every write goes through a transaction. An app opens one on a branch, asserts and retracts facts in it, commits it, and publishes the commit. A transaction can be queried before it is committed, and it answers as the committed result would: a fact that one of its own writes superseded is already gone. An app can also stage several commits one after another, or amend the one it just staged, and publish them all with a single swap of the head, so other readers see all of them or none. That is `Transaction` in [`branch/transaction.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/transaction.rs), with the staging and the single swap in [`transaction/batch.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/transaction/batch.rs).
 
 </div>
-
-<div class="aside">
-
-**Branches from an older release.** A branch whose tree keys numbers the older way (see [Keys](./keys.md#older-trees-key-numbers-by-type)) cannot be committed to. The commit fails with `NeedsMigration` and writes nothing. `Branch::migrate` rewrites the tree and publishes the result as a new revision on top of the old head, and then installs the branch's rules again under their current names. The signed head keeps its shape. What changes is the tree its root names. Migration is in [`branch/migrate.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/migrate.rs).
-
-</div>

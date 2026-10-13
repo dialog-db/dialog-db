@@ -140,12 +140,6 @@ Absence is only well defined once everything that could be there has been derive
 
 Dialog does not refuse such a set of rules, because rules arrive by sync and something has to be done with whatever arrives. It sets one rule of the loop aside instead, and evaluates the rest. It picks the rule installed last, ordered by the commits that installed them, which every replica sees the same way. So replicas with the same history set aside the same rule and agree on every answer. A rule that is set aside comes back by itself once the loop is broken, and a query can ask which rules are set aside by reading `dialog.rule/quarantined`.
 
-<div class="aside">
-
-**Rules from an older release.** A rule installed by a release before version 0.3.0 is stored under a name computed the older way, and no read looks for it there, so it does nothing. `Branch::migrate` installs every such rule again under its current name. It is the same call that rewrites a tree's number keys (see [Keys](./keys.md#older-trees-key-numbers-by-type)), so an app that opens an older branch runs it once.
-
-</div>
-
 ## Subscriptions
 
 A list on screen should update when the data does. A subscription keeps a query live. It remembers which key ranges the last evaluation read. Each time the app polls it after the branch's head moves, it compares the old and new trees, again skipping every subtree whose hash matches, and looks at whether any change falls inside those ranges. If none does, the list stays as it is and nothing is re-run. If some do, it re-derives only the entities that changed when the query allows it, and re-runs the whole query when a rule changed. The app receives what was added and what was removed.

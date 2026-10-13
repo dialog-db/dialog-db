@@ -97,12 +97,6 @@ An attribute does not have to take every number. Besides `number:`, it can decla
 
 A view rounds where it only loses precision, and leaves out what it cannot hold. Read through `natural:8`, a stored `9.75` is `9`, and `300` and `-1` are not there. A write through a view refuses a value the view cannot hold.
 
-<div class="aside">
-
-**Three types became one.** Before version 0.3.0, natural numbers, integers and floats were three separate types, with type bytes `04`, `05` and `06`, and a natural `2` and a float `2.0` were different values. A tree written that way can still be read. The [Nodes](./nodes.md) chapter shows how a tree says which of the two it is.
-
-</div>
-
 ## Saying things: assert and retract
 
 An app never edits a fact in place. Facts cannot change. Instead, an app asserts and retracts whole facts:
