@@ -89,13 +89,13 @@ The two-byte prefix `ed 01` says what kind of key follows. The 34 bytes are writ
 Several kinds of things are keys:
 
 - **A repository** has its own key. Its DID is the repository's name: in permissions, on a remote peer's storage, and in the identities of its replicas and branches.
-- **An account** is someone responsible for changes: usually a person, like Alice, with a presence across several peers, such as her laptop and her phone. It is the key those peers act for. No peer holds it. The account's key is made once, when Alice first sets up, and sealed to the recovery credentials she keeps. Her peers act through permissions the account signs for them.
+- **An authority** is someone responsible for changes: usually a person, like Alice, with a presence across several peers, such as her laptop and her phone. It is the key those peers act for. No peer holds it. The authority's key is made once, when Alice first sets up, and sealed to the recovery credentials she keeps. Her peers act through permissions the authority signs for them.
 - **A peer** is a place where replicas live, such as Alice's laptop or Bob's phone. One peer can hold replicas of many repositories. Its key never leaves it. The key is kept in a credential store of its own, apart from the storage that holds the data, and in a browser it is a non-extractable WebCrypto key, so even the page that uses it cannot read its secret half.
 - **A session** is the same peer acting with a second key, under less. The key is usually derived from the peer's key for one app or one purpose, and the session acts only under a permission from the peer. It is never handed the peer's key or a repository's key, so the app never holds either.
 
-A secret key that has to outlive one device is never stored in the open. It is **sealed** to another key: encrypted so that only the holder of that key can open it. A key that other secrets are sealed to is called a vault, and an account is one.
+A secret key that has to outlive one device is never stored in the open. It is **sealed** to another key: encrypted so that only the holder of that key can open it. A key that other secrets are sealed to is called a vault, and an authority is one.
 
-When Alice's laptop creates the grocery list repository, it makes a fresh key for it. It seals the secret half to Alice's account, and keeps a second copy sealed to itself, so it can sign as the repository without asking for her recovery credentials. The repository's key then signs one permission, to the account, allowing everything. Storage is handed only the public half. From then on, the repository is Alice's because the repository itself said so.
+When Alice's laptop creates the grocery list repository, it makes a fresh key for it. It seals the secret half to Alice, as its authority, and keeps a second copy sealed to itself, so it can sign as the repository without asking for her recovery credentials. The repository's key then signs one permission, to the authority, allowing everything. Storage is handed only the public half. From then on, the repository is Alice's because the repository itself said so.
 
 ## Capabilities
 
@@ -128,7 +128,7 @@ Here is a typical chain that lets the session on Alice's laptop store a block in
 <text class="small muted" x="80" y="57" text-anchor="middle">did:key:zR…</text>
 <rect class="alice" x="225" y="20" width="140" height="46"/>
 <text class="label" x="295" y="40" text-anchor="middle">Alice</text>
-<text class="small muted" x="295" y="57" text-anchor="middle">account</text>
+<text class="small muted" x="295" y="57" text-anchor="middle">authority</text>
 <rect class="alice" x="440" y="20" width="140" height="46"/>
 <text class="label" x="510" y="40" text-anchor="middle">Alice's peer</text>
 <text class="small muted" x="510" y="57" text-anchor="middle">her laptop</text>
@@ -156,7 +156,7 @@ Here is a typical chain that lets the session on Alice's laptop store a block in
 </svg>
 </figure>
 
-Each delegation's issuer must be the previous one's audience, and the first issuer must be the repository itself. The repository's delegation to the account names the repository as its subject. The account's delegation to the laptop, and the laptop's to its session, are of the *any* kind. Bob gets access the same way: someone who holds a delegation for the repository signs a new one to Bob, possibly for a narrower command.
+Each delegation's issuer must be the previous one's audience, and the first issuer must be the repository itself. The repository's delegation to the authority names the repository as its subject. The authority's delegation to the laptop, and the laptop's to its session, are of the *any* kind. Bob gets access the same way: someone who holds a delegation for the repository signs a new one to Bob, possibly for a narrower command.
 
 ## Asking a remote peer
 
@@ -188,12 +188,12 @@ A second exchange exists for storage the remote peer does not proxy. There the r
 
 <div class="aside">
 
-**Revocation.** UCAN lets an issuer revoke a delegation it signed, and the verifier in Dialog asks a revocation checker about every link of the chain. The checker Dialog ships today does not consult any store, so it reports every delegation as not revoked. Until a real store is plugged in, a delegation stays valid until its time window ends, and the repository's delegation to its account has no window at all.
+**Revocation.** UCAN lets an issuer revoke a delegation it signed, and the verifier in Dialog asks a revocation checker about every link of the chain. The checker Dialog ships today does not consult any store, so it reports every delegation as not revoked. Until a real store is plugged in, a delegation stays valid until its time window ends, and the repository's delegation to its authority has no window at all.
 
 </div>
 
 <div class="aside">
 
-**Implementations.** Keys are in [`dialog-credentials`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-credentials) and signatures in [`dialog-varsig`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-varsig). Capabilities are [`dialog-capability`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-capability), and the commands are defined in [`dialog-effects`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-effects). UCAN tokens and chain checks are [`dialog-ucan-core`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-ucan-core). The HTTP exchange is [`dialog-remote-ucan`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-ucan). Creating a repository and delegating it to its account is in [`dialog-peer/src/peer/space.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-peer/src/peer/space.rs). Vaults and accounts are in [`dialog-peer/src/peer/secret.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-peer/src/peer/secret.rs), sealing in [`dialog-credentials/src/secret.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-credentials/src/secret.rs), and the design is written up in [`notes/peer-and-session.md`](https://github.com/dialog-db/dialog-db/blob/main/notes/peer-and-session.md).
+**Implementations.** Keys are in [`dialog-credentials`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-credentials) and signatures in [`dialog-varsig`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-varsig). Capabilities are [`dialog-capability`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-capability), and the commands are defined in [`dialog-effects`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-effects). UCAN tokens and chain checks are [`dialog-ucan-core`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-ucan-core). The HTTP exchange is [`dialog-remote-ucan`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-ucan). Creating a repository and delegating it to its authority is in [`dialog-peer/src/peer/space.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-peer/src/peer/space.rs). Vaults and authorities are in [`dialog-peer/src/peer/secret.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-peer/src/peer/secret.rs), sealing in [`dialog-credentials/src/secret.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-credentials/src/secret.rs), and the design is written up in [`notes/peer-and-session.md`](https://github.com/dialog-db/dialog-db/blob/main/notes/peer-and-session.md).
 
 </div>
