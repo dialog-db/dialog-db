@@ -63,11 +63,17 @@ The pick an attribute gets unless it says otherwise is `last`, the newest fact, 
 
 Two apps can declare different attributes over the same relation, one reading a quantity as a whole number and another as it is. The facts do not change. Most of this guide can say attribute for both, since the grocery list reads each relation one way. The indexes in the next chapter do too: the relation's place in a key is called the attribute, which is where EAV, AEV and VAE get their A.
 
-Relations in the `dialog.` domains belong to Dialog itself, which stores some of its own bookkeeping as facts. Apps cannot write there, except for rules and concepts (see [Queries](./queries.md)), which live under `dialog.rule/` and `dialog.concept/`.
+Domains that start with `dialog.` are reserved. An app must not assert or retract facts in them, and Dialog rejects a transaction that tries. They are reserved so that Dialog can keep its own things in the same tree as an app's data, as facts, with no risk that the two collide: rules and concepts, the record of each commit, stored assets, and other bookkeeping the later chapters describe. The two exceptions are rules and concepts, which an app installs by asserting them under `dialog.rule/` and `dialog.concept/` (see [Queries](./queries.md)).
+
+<div class="aside">
+
+**Proposing an extension.** If you are building something that Dialog itself might adopt one day, do not put it in a `dialog.` domain. Put your own name in front, as in `myorg.dialog.`, so the relation reads `myorg.dialog.presence/cursor`. The facts are yours and cannot collide with anything Dialog adds later, and the name still shows where the idea is meant to end up.
+
+</div>
 
 ## Values
 
-A value is one of seven types. A type is named by an entity, such as `text:`, and it has a number that is written into every key that holds the value (see [Keys](./keys.md)):
+A value is one of seven types. Each type has a number, and that number is written into every key that holds the value (see [Keys](./keys.md)):
 
 | Type byte | Type | Example |
 |---|---|---|
@@ -78,6 +84,8 @@ A value is one of seven types. A type is named by an entity, such as `text:`, an
 | `07` | `record:` | opaque structured bytes |
 | `08` | `symbol:` | a relation name used as a value |
 | `09` | `number:` | `2`, `-3`, `1.5` |
+
+The types are themselves identified by entities. `text:` is a URI like `item:1`, one that happens to have nothing after its scheme, and it names the type everywhere a type is written down: in an attribute's declaration, in a rule, and in the hash that gives an attribute its identity. So a type is something facts can be about, like anything else.
 
 An entity value is how facts link things together. If Bob adds `the demo.grocery/store of item:2 is store:corner-shop`, the item now points at a store, and the store can have facts of its own.
 
