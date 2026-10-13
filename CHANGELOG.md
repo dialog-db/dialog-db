@@ -14,6 +14,35 @@ says how to cut a release.
 
 ## Unreleased
 
+### Dialog builds for WASI, and a key held outside the process can sign
+
+[#594](https://github.com/dialog-db/dialog-db/pull/594)
+
+`dialog-repository`, `dialog-query` and `dialog-peer` build for
+`wasm32-wasip2` and `wasm32-wasip3`. The browser paths of `dialog-common`,
+`dialog-ucan-core` and `dialog-credentials` are for `wasm32-unknown-unknown`
+alone, and a WASI build takes the native ones. `ed25519::external` adds a
+signing key that holds only a public key and an `ExternalSign`, which gets
+the bytes to sign and gives back the signature.
+
+What this changes for you:
+
+- `Ed25519SigningKey` has a third variant, `External`, and
+  `Ed25519KeyError` has a variant of the same name. A match that names every
+  variant of either no longer compiles.
+- An external key cannot be exported (`Ed25519KeyError::External`), and has
+  no agreement key, so `agreement_key` gives `AgreementKeyUnavailable` and
+  `Secret::derive` and `Secret::reveal` give
+  `SecretError::AgreementKeyUnavailable`.
+- `dialog_common::random::fill` is where the workspace gets random bytes.
+  On WASI it uses `getrandom` 0.4, and `getrandom` 0.2 everywhere else.
+- `Invocation::issued_at` reads the time an invocation was issued.
+- On WASI the file system provider compiles and refuses every call.
+
+Why: a Wasm component reaches storage, keys and the clock through the host
+that runs it. It cannot use the browser's APIs, and its memory is not where
+its host wants a signing key kept.
+
 ## 0.2.0 (2026-10-09)
 
 ### Relations, types and picks have one name each

@@ -121,18 +121,18 @@ impl Credential {
     /// the browser too (no WebCrypto import of a non-extractable signing key).
     /// The result can verify and yields the credential's [`Did`], which is all
     /// that subject checks need; it cannot sign.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     pub fn identity(bytes: &[u8]) -> Result<Self, CredentialExportError> {
         Self::identity_native(bytes)
     }
 
     /// Recover a verifier-only credential from tagged bytes (any target).
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     pub fn identity(bytes: &[u8]) -> Result<Self, CredentialExportError> {
         Self::identity_any(bytes)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     fn identity_native(bytes: &[u8]) -> Result<Self, CredentialExportError> {
         use constants::{PRIVATE_TAG, PUBLIC_KEY_OFFSET, PUBLIC_TAG, PUBLIC_TAG_SIZE};
 
@@ -175,7 +175,7 @@ impl Credential {
         )))
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     fn identity_any(bytes: &[u8]) -> Result<Self, CredentialExportError> {
         use constants::{PUBLIC_TAG, PUBLIC_TAG_SIZE};
         if bytes.starts_with(PUBLIC_TAG) && bytes.len() == PUBLIC_TAG_SIZE + constants::KEY_SIZE {

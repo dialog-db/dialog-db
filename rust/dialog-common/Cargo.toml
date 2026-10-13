@@ -20,6 +20,7 @@ base58 = { workspace = true }
 base64 = { workspace = true }
 blake3 = { workspace = true }
 futures-util = { workspace = true }
+getrandom = { workspace = true }
 rkyv = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }
@@ -39,7 +40,10 @@ serde_json = { workspace = true, optional = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync"] }
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+[target.'cfg(all(target_arch = "wasm32", not(target_os = "unknown")))'.dependencies]
+getrandom_04 = { workspace = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { workspace = true, features = ["js"] }
 tokio = { workspace = true, features = ["sync"] }
 wasm-bindgen-futures = { workspace = true }
