@@ -33,7 +33,7 @@ Naming by hash has three useful consequences:
 
 An app stores a photo by asserting it in a transaction, like a fact. The commit writes the photo's bytes to the blob store and records one fact about them in the same revision: the `dialog.asset/size` of the entity `asset:{hash}` is the number of bytes. That entity is the photo's name, and the app's own facts can point at it, such as *the `demo.grocery/photo` of `item:2` is `asset:…`*.
 
-The fact is what says a branch holds the asset. A push sends the bytes of every asset whose fact is new, a read fetches only bytes that such a fact vouches for, and retracting the fact drops the branch's hold on the bytes. Only a commit that stores the bytes can write the fact, since it is in a `dialog.` domain, so the size it states is measured, not claimed.
+The fact is what says a branch holds the asset. A push sends the bytes of every asset whose fact is new, a read fetches only bytes that such a fact vouches for, and retracting the fact drops the branch's hold on the bytes. Only a commit that stores the bytes can write the fact, since it is in a `dialog.` domain, so the size it states is measured from the bytes themselves.
 
 ## Two kinds of storage
 

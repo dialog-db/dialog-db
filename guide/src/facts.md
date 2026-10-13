@@ -22,7 +22,7 @@ Everything Dialog stores is a fact. A fact is one small statement about one thin
 </svg>
 </figure>
 
-Read aloud, it is a sentence: *the grocery name of item 1 is "Oat milk"*. Dialog's own vocabulary follows that sentence. The attribute is called `the`, the entity `of`, and the value `is`. A fact is also called a claim, and the two words mean the same thing.
+Read aloud, it is a sentence: *the grocery name of item 1 is "Oat milk"*. Dialog's own vocabulary follows that sentence. The attribute is called `the`, the entity `of`, and the value `is`.
 
 A grocery list is a pile of such sentences. Alice's list, after she adds two items, looks like this:
 
