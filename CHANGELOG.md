@@ -14,6 +14,8 @@ says how to cut a release.
 
 ## Unreleased
 
+## 0.3.0 (2026-10-13)
+
 ### Every number is keyed in one band, and a branch an earlier release wrote is migrated in one pass
 
 [#593](https://github.com/dialog-db/dialog-db/pull/593),
