@@ -471,10 +471,10 @@ That entry has a small payload next to its key. The payload holds no part of the
 
 ## Big values spill
 
-A key holding a whole photo would make a terrible key. So a value whose encoded form is longer than 4,096 bytes spills. The value's place in the key keeps only the encoding of its first 64 bytes, and the key ends with a `01` byte and the 32-byte BLAKE3 hash of the whole value. In EAV and AEV that tail comes right after the value; in VAE it comes after the entity, the key's last part. The value itself is stored on its own, as a blob named by that hash:
+A key holding a whole photo would make a terrible key. So every tree sets a limit on how long a value in a key may be, and a value whose encoded form is longer than that limit spills. The value's place in the key keeps only the encoding of a short prefix of it, and the key ends with a `01` byte and the 32-byte BLAKE3 hash of the whole value. In EAV and AEV that tail comes right after the value; in VAE it comes after the entity, the key's last part. The value itself is stored on its own, as a blob named by that hash:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 740 190" width="740" height="190" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A spilled value: the key keeps a 64-byte prefix and the whole value's hash; the value is its own blob">
+<svg class="dg" viewBox="0 0 740 190" width="740" height="190" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A spilled value: the key keeps a prefix and the whole value's hash; the value is its own blob">
 <defs><marker id="spill-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <text class="title" x="10" y="18">EAV key of a spilled value</text>
 <rect class="shade" x="10" y="34" width="26" height="30"/>
@@ -486,13 +486,13 @@ A key holding a whole photo would make a terrible key. So a value whose encoded 
 <rect class="shade" x="302" y="34" width="26" height="30"/>
 <text x="315" y="54" text-anchor="middle">03</text>
 <rect class="value" x="330" y="34" width="180" height="30"/>
-<text class="value" x="420" y="54" text-anchor="middle">first 64 bytes, 00</text>
+<text class="value" x="420" y="54" text-anchor="middle">its prefix, 00</text>
 <rect class="shade" x="512" y="34" width="26" height="30"/>
 <text x="525" y="54" text-anchor="middle">01</text>
 <rect class="hash" x="540" y="34" width="180" height="30"/>
 <text class="hash" x="630" y="54" text-anchor="middle">blake3(value)</text>
 <path class="wire" d="M330,70 v4 H510 v-4"/>
-<text class="label small" x="420" y="88" text-anchor="middle">sorts by its first 64 bytes</text>
+<text class="label small" x="420" y="88" text-anchor="middle">sorts by its prefix</text>
 <path class="wire" d="M512,70 v4 H538 v-4"/>
 <text class="label small" x="525" y="88" text-anchor="middle">spilled</text>
 <path class="wire" d="M540,70 v4 H720 v-4"/>
@@ -504,9 +504,9 @@ A key holding a whole photo would make a terrible key. So a value whose encoded 
 </svg>
 </figure>
 
-The prefix keeps a spilled value sorting by its first 64 bytes, so a range scan over strings still finds it in about the right neighborhood. The hash keeps two different long values from sharing a key. A reader tells the two shapes apart by what is left after the key's last part: nothing for an inline value, exactly 33 bytes for a spilled one.
+The prefix keeps a spilled value sorting by how it starts, so a range scan over strings still finds it in about the right neighborhood. The hash keeps two different long values from sharing a key. A reader tells the two shapes apart by what is left after the key's last part: nothing for an inline value, exactly 33 bytes for a spilled one.
 
-The two numbers, 4,096 and 64, are not fixed forever. They belong to the tree's format, which every node carries, written out only where it differs from these defaults, as the [Nodes](./nodes.md) chapter shows. A reader that guessed them wrong would build different keys and miss facts, so they are among the few settings a reader must understand.
+The limit and the length of the prefix are not constants of Dialog. They are settings of the tree, and every node carries them in its header, as the [Nodes](./nodes.md) chapter shows. Unless a tree says otherwise, the limit is 4,096 bytes and the prefix is the value's first 64 bytes. A reader that guessed them wrong would build different keys and miss facts, so they are among the few settings a reader must understand.
 
 <div class="aside">
 
