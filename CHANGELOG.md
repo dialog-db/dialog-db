@@ -83,6 +83,10 @@ What this changes for you:
 - A query whose constant was written bare in JSON matches the claims
   the field holds. Before, `"url": "home:"` under a `text:` field read
   as the entity `home:` and matched nothing.
+- Every evaluation of a `ConceptQuery` conforms its constants, through
+  `select`, a plan's concept premise, or the query's own `evaluate`.
+  Before, only `select` did, and a plan built by an embedder read `+41`
+  under a `natural:` field as a signed integer that matched nothing.
 - A constant in a field with no declared type still reads as the type
   its spelling suggests.
 - A bare text constant shaped like a URL (`https://example.com`) is

@@ -709,6 +709,31 @@ Each step lands with tests and a perf sweep:
    references in one pass. The re-keyed home and template spaces resolve every
    definition.
 
+### Next cycle: one layout, the legacy reader opt-in
+
+Decided for the cycle after 0.3.0, not for this release. This release
+keeps two value encodings live in the engine, chosen per tree by the
+manifest: the key builders, the scan range, the row matcher, the
+selector fitting and the value decoder each branch on it (about 28
+sites), and a pull aligns a legacy head in memory so an old client's
+writes merge. Only replicas holding pre-0.2 data ever read the old
+layout, and each reads it once, to migrate. So the dual path is a
+one-shot tool living in the hot path.
+
+The next cycle makes the default build single-layout: opening a tree
+whose manifest names another `value_encoding` is refused at open, by
+name, as an unknown critical field already is; the per-type band edges,
+the per-type matcher arm and the pull alignment go. The legacy reader
+(`rekey_tree`, `migrate_storage`, body formats 0 to 2, the v0
+identities) moves behind a `legacy` feature an application enables for
+the release in which it migrates, or into a migration crate that links
+the previous release's crates to read and the current ones to write, so
+the engine carries no old arms at all. Which of the two depends on how
+long tonk must migrate pre-0.2 data: one release, and the migration
+crate is the shape; indefinitely, and the feature is. A pull that meets
+a legacy head is then refused with the same "migrate first" error:
+mixed-version sync is not supported, which is already the stance.
+
 ## Decided
 
 - **`natural`, `integer` and `float` are views** over one `number` value type.

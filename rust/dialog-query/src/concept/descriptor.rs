@@ -752,15 +752,13 @@ impl From<ConceptQuery> for ConceptDescriptor {
 impl Application for ConceptQuery {
     type Conclusion = ConceptConclusion;
 
-    /// Evaluates the application with each constant conformed to the
-    /// type its field declares (see [`ConceptQuery::conformed`]): a
-    /// constant written bare, as JSON writes it, reads as the first type
-    /// its payload fits, and the field's declared type says which it is.
+    /// Evaluates the application, each constant conformed to the type its
+    /// field declares.
     fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
     where
         Env: crate::Scope<'a>,
     {
-        ConceptQuery::evaluate(self.conformed(), selection, env)
+        self.evaluate_application(selection, env)
     }
 
     fn restrict(&self, entity: &Entity) -> Restriction<Self> {

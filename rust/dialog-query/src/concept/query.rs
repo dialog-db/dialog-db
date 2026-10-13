@@ -437,7 +437,17 @@ impl ConceptQuery {
     /// it ([`Match::within`]), and each result is merged back into the row it
     /// came from. Evaluating the plan once per row instead rebuilt the whole
     /// pipeline, every step's stream and a copy of the plan, for every row.
-    pub fn evaluate<'a, Env, M: Selection + 'a>(
+    ///
+    /// Each constant is first conformed to the type its field declares
+    /// ([`conformed`](Self::conformed)): `+41` under a natural field reads
+    /// the natural `41`, which is the value a claim of the field holds.
+    ///
+    /// The one implementation of [`Application::evaluate`] for a concept
+    /// query, reached through the trait alone, so every caller (a plan's
+    /// concept premise, an embedder's `select`) evaluates the same way.
+    ///
+    /// [`Application::evaluate`]: crate::query::Application::evaluate
+    pub(crate) fn evaluate_application<'a, Env, M: Selection + 'a>(
         self,
         selection: M,
         env: &'a Env,
@@ -454,7 +464,7 @@ impl ConceptQuery {
         // generic over the stream handed the next level a type that held
         // this level's, and the compiler unrolled the recursion forty
         // levels deep (a 50 KB type term) in a workload's binary.
-        self.evaluate_erased(Box::pin(selection), env)
+        self.conformed().evaluate_erased(Box::pin(selection), env)
     }
 
     fn evaluate_erased<'a, Env>(
@@ -1511,6 +1521,7 @@ impl Display for ConceptQuery {
 #[cfg(test)]
 mod tests {
     use crate::premise::reading;
+    use crate::query::Application as _;
     mod entry_form {
         #[cfg(target_arch = "wasm32")]
         wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);

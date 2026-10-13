@@ -44,6 +44,7 @@ use dialog_artifacts::{
     Relation as ArtifactsRelation, Select, Value,
 };
 use dialog_capability::Provider;
+use dialog_query::Application as _;
 use dialog_query::attribute::{AttributeDescriptor, Relation, The};
 use dialog_query::concept::query::Election;
 use dialog_query::query::Output as _;

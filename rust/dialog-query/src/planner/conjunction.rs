@@ -1,6 +1,7 @@
 use super::Plan;
 use crate::attribute::query::DynamicAttributeQuery;
 use crate::concept::query::ConceptQuery;
+use crate::query::Application as _;
 use crate::selection::{Match, Selection};
 use crate::{Environment, SortOrder, multi_merge_join};
 use core::pin::Pin;
