@@ -16,6 +16,7 @@ use crate::concept::descriptor::ConceptFieldDescriptor;
 use crate::concept::query::ConceptQuery;
 use crate::error::TypeError;
 use crate::formula::attribute::AttributeParts;
+use crate::identity;
 use crate::memo::Memo;
 use crate::negation::Negation;
 use crate::optional::OptionalAttributeQuery;
@@ -25,6 +26,7 @@ pub use crate::premise::Premise;
 use crate::reduce::{Reduce, ReduceEntry, ReduceSpec};
 use crate::rule::analyzer::AnalyzedRule;
 use crate::rule::body;
+use crate::rule::reference;
 use crate::rule::{Compile, RuleKind, compile_internal, compile_rule, fmt_rule_schema};
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
@@ -428,8 +430,10 @@ impl DeductiveRule {
         }
     }
 
-    /// Canonical encoding of this rule's descriptor, if it has one —
-    /// the dag-cbor bytes, deterministic by construction.
+    /// This rule's stored body, if it has one: its canonical spelling
+    /// in the current [body format](crate::rule::body), the same bytes
+    /// for every spelling of the rule, so a rule's body is found by
+    /// encoding the rule.
     ///
     /// Returns `None` when the rule body can't be expressed in formal
     /// notation: the implicit per-descriptor rule and any rule built
@@ -437,19 +441,14 @@ impl DeductiveRule {
     /// because `Proposition`'s formal-notation `Serialize` rejects
     /// attribute propositions. Only rules with concept/formula bodies
     /// (what `rule!:` notation and stored `dialog.rule/*` rules produce)
-    /// have a canonical encoding.
-    ///
-    /// dag-cbor canonicalizes map keys per the spec, so the encoding is
-    /// a pure function of the descriptor even though a premise's terms
-    /// come from a [`Parameters`] `HashMap` — no manual key sorting
-    /// needed. This is the same encoding dialog content-addresses with
-    /// elsewhere.
+    /// have a body.
     pub fn try_encode(&self) -> Option<Vec<u8>> {
-        body::encode(&self.descriptor())
+        body::encode(&self.canonical_descriptor())
     }
 
     /// This rule's content-addressed identity, if it has an encodable
-    /// body: `rule:<base58(blake3(dag-cbor(canonical descriptor)))>`.
+    /// body: `rule:` and the base58 of the merkle reference of its
+    /// canonical spelling (see [`reference`](crate::rule::reference)).
     ///
     /// `None` for rules with no encodable body (implicit / attribute-query
     /// rules — see [`try_encode`](Self::try_encode)). A pure function of
@@ -460,11 +459,30 @@ impl DeductiveRule {
     pub fn try_this(&self) -> Option<Entity> {
         self.identity
             .get_or_init(|| {
-                use base58::ToBase58;
-                let canonical = serde_ipld_dagcbor::to_vec(&self.canonical_descriptor()).ok()?;
-                let hash = blake3::hash(&canonical);
-                let encoded = hash.as_bytes().as_ref().to_base58();
-                format!("rule:{encoded}").parse().ok()
+                let reference = match &self.analysis.canonical {
+                    Some(identity) => reference::rule(
+                        "deduce",
+                        &identity.conclusion,
+                        &identity.premises,
+                        &identity.reduce,
+                    )?,
+                    // No canonical spelling: the rule as given, which has an
+                    // identity only if every part has a wire form.
+                    None => {
+                        let descriptor = self.canonical_descriptor();
+                        reference::described(
+                            "deduce",
+                            &descriptor.deduce,
+                            &descriptor.when,
+                            &descriptor.unless,
+                            descriptor
+                                .reduce
+                                .iter()
+                                .map(|(name, spec)| (name.as_str(), spec)),
+                        )?
+                    }
+                };
+                Some(identity::entity("rule:", reference))
             })
             .clone()
     }
@@ -518,9 +536,9 @@ impl DeductiveRule {
         }
     }
 
-    /// Canonical dag-cbor encoding, panicking if the rule has no
-    /// encodable body. Use on the storage path where the rule is known
-    /// to be storable (concept/formula bodies). Prefer
+    /// This rule's stored body, panicking if the rule has no encodable
+    /// body. Use on the storage path where the rule is known to be
+    /// storable (concept/formula bodies). Prefer
     /// [`try_encode`](Self::try_encode) otherwise.
     pub fn encode(&self) -> Vec<u8> {
         self.try_encode()
@@ -535,9 +553,10 @@ impl DeductiveRule {
             .expect("storable rule must have a content-addressed identity")
     }
 
-    /// Rebuild a rule from its canonical dag-cbor [`encode`](Self::encode)
-    /// bytes. `Err` carries a human-readable reason — either the cbor
-    /// decode failed or the decoded descriptor didn't compile.
+    /// Rebuild a rule from a stored body, in this release's format or an
+    /// earlier one. A body in the current format gives the rule in its
+    /// canonical spelling. `Err` carries a human-readable reason: the
+    /// body did not decode, or its descriptor did not compile.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let descriptor: DeductiveRuleDescriptor = body::decode(bytes)?;
         descriptor.compile().map_err(|e| e.to_string())
@@ -2136,7 +2155,7 @@ mod tests {
         let rule = compiled(serde_json::json!({
             "deduce": { "with": { "tag": { "the": "item/label", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "tag": { "the": "item/tag", "as": "text:", "pick": "all" } } },
+                "assert": { "with": { "tag": { "the": "item/tag", "as": "text:", "pick": "all:" } } },
                 "where": { "this": { "?": { "name": "this" } }, "tag": { "?": { "name": "tag" } } }
             }]
         }));

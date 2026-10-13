@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::str::FromStr as _;
 
-use crate::{Entity, Name, NameShape, Relation, Symbol, Value};
+use crate::{Entity, Name, NameShape, Relation, Symbol, Value, ValueDataType};
 
 /// A marker type that represents a totally open-ended [`ArtifactSelector`]
 #[derive(Clone)]
@@ -31,6 +31,50 @@ pub struct ValueBound {
     /// Whether the bound is inclusive (`>=` / `<=`) rather than exclusive
     /// (`>` / `<`).
     pub inclusive: bool,
+    /// Whether the bound compares every number as it is, rather than
+    /// reading each through the lens its type names: an integer bound sees
+    /// 34.5 as 34, and a natural bound does not see -3 (see
+    /// [`ArtifactSelector::across_numbers`]).
+    pub across: bool,
+    /// The bound as a number-band key encodes it. The scan sets it when it
+    /// fits the selector to a tree that keys numbers in one band
+    /// ([`ArtifactSelector::for_manifest`]), so each row is compared with
+    /// these bytes rather than encoding the bound per row; leave it `None`.
+    pub encoded: Option<Vec<u8>>,
+}
+
+impl ValueBound {
+    /// The number type this bound reads rows through before comparing, if
+    /// any: its own type, for a natural or an integer bound that is not
+    /// across number types. A float bound reads every number as a float,
+    /// which is the number as it is, and a bound across number types
+    /// compares as it is, so neither needs a lens.
+    pub fn lens(&self) -> Option<ValueDataType> {
+        if self.across {
+            return None;
+        }
+        match self.value.data_type().storage() {
+            view @ (ValueDataType::UnsignedInt | ValueDataType::SignedInt) => Some(view),
+            _ => None,
+        }
+    }
+
+    /// The value a number-band scan ends at when this is the upper bound: the
+    /// bound itself, or the next whole number for an inclusive bound read
+    /// through an integer lens, which admits every number that floors to the
+    /// bound (`at_most(2)` sees 2.5 as 2, and 2.5 is keyed above 2). The
+    /// per-row check keeps the result exact.
+    pub fn upper_edge(&self) -> Value {
+        match (&self.value, self.inclusive && self.lens().is_some()) {
+            (Value::UnsignedInt(natural), true) => {
+                Value::UnsignedInt(natural.checked_add(1).unwrap_or(*natural))
+            }
+            (Value::SignedInt(integer), true) => {
+                Value::SignedInt(integer.checked_add(1).unwrap_or(*integer))
+            }
+            (value, _) => value.clone(),
+        }
+    }
 }
 
 /// The basic query system for selecting [`Artifact`]s from an artifact index.
@@ -459,6 +503,8 @@ where
         self.with_value_lower(ValueBound {
             value,
             inclusive: true,
+            across: false,
+            encoded: None,
         })
     }
 
@@ -468,6 +514,8 @@ where
         self.with_value_lower(ValueBound {
             value,
             inclusive: false,
+            across: false,
+            encoded: None,
         })
     }
 
@@ -477,6 +525,8 @@ where
         self.with_value_upper(ValueBound {
             value,
             inclusive: true,
+            across: false,
+            encoded: None,
         })
     }
 
@@ -486,6 +536,8 @@ where
         self.with_value_upper(ValueBound {
             value,
             inclusive: false,
+            across: false,
+            encoded: None,
         })
     }
 
@@ -525,6 +577,76 @@ where
             value_upper: Some(bound),
             state_type: PhantomData,
         }
+    }
+}
+
+impl ArtifactSelector<Constrained> {
+    /// Let the value bounds compare every number as it is. Without this a
+    /// bound reads each number through the lens its type names before
+    /// comparing, as a field declared with that type reads it: an integer
+    /// bound `<= 3` admits `3.5`, which it sees as `3`, and a natural bound
+    /// never admits `-2`, which it does not see; a float bound sees every
+    /// number as it is. With it a natural bound `<= 3` leaves `3.5` out. A
+    /// tree that keys every number in one band scans the bounded range of
+    /// it; one that keys each type in its own band cannot bound one range
+    /// across them, so it scans without the bounds and leaves them to the
+    /// caller.
+    pub fn across_numbers(mut self) -> Self {
+        for bound in [&mut self.value_lower, &mut self.value_upper]
+            .into_iter()
+            .flatten()
+        {
+            bound.across = bound.value.data_type().is_number();
+        }
+        self
+    }
+
+    /// This selector as a tree written under `manifest` can scan it: bounds
+    /// across number types are dropped where the tree keys each type in its
+    /// own band.
+    pub fn for_manifest(mut self, manifest: &dialog_search_tree::Manifest) -> Self {
+        let across = [&self.value_lower, &self.value_upper]
+            .into_iter()
+            .flatten()
+            .any(|bound| bound.across);
+        if across && manifest.value_encoding != crate::NUMBER_BAND {
+            self.value_lower = None;
+            self.value_upper = None;
+        }
+        // In the band an exact number is the range of that one number, read
+        // through the lens of its type like any bound: `is(4)` as an integer
+        // finds the stored 4, 4.0 and 4.3 (which the lens reads as 4), and
+        // `is(4.0)` finds the number 4 alone. The per-type bands key each
+        // type apart, so there the exact value stays a key.
+        if manifest.value_encoding == crate::NUMBER_BAND
+            && self
+                .value
+                .as_ref()
+                .is_some_and(|value| value.data_type().is_number())
+            && let Some(value) = self.value.take()
+        {
+            let bound = ValueBound {
+                value,
+                inclusive: true,
+                across: false,
+                encoded: None,
+            };
+            self.value_lower = Some(bound.clone());
+            self.value_upper = Some(bound);
+        }
+        if manifest.value_encoding == crate::NUMBER_BAND {
+            for bound in [&mut self.value_lower, &mut self.value_upper]
+                .into_iter()
+                .flatten()
+                .filter(|bound| bound.value.data_type().is_number())
+            {
+                bound.encoded = Some(crate::encode_key_value_owned(
+                    &bound.value,
+                    crate::NUMBER_BAND,
+                ));
+            }
+        }
+        self
     }
 }
 

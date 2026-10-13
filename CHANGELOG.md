@@ -14,6 +14,414 @@ says how to cut a release.
 
 ## Unreleased
 
+### Every number is keyed in one band, and a branch an earlier release wrote is migrated in one pass
+
+[#593](https://github.com/dialog-db/dialog-db/pull/593),
+[identity, storage and notation](./notes/identity-storage-notation.md#numbers-one-band-typed-views)
+
+A tree's manifest now sets `value_encoding` to the number band: every
+number is keyed in one band of the value index, in dialog-number's
+decimal encoding, the encoding identity already used. `3`, `3.0` and
+the natural `3` are one value in the index as they are in identity, and
+a range over a numeric attribute is one scan rather than three. The
+manifest field is critical, so a release before the band refuses a
+migrated tree by name rather than misreading it.
+
+A branch an earlier release wrote is read, never extended:
+`Branch::migrate` rewrites its head's tree under the band
+(`migrate_storage`) and then re-installs its rules (`upgrade_rules`),
+one call for everything an earlier release stored. The rewrite is
+deterministic, so two replicas that migrate the same head produce the
+same tree, and a pull that meets a head an old client wrote rewrites
+it in memory before merging, so the old client's writes are not lost.
+
+What this changes for you:
+
+- A commit on a branch whose head an earlier release laid out fails with
+  `CommitError::NeedsMigration` and writes nothing. Run
+  `Branch::migrate` (or `migrate_storage`) first; `Branch::needs_migration`
+  says whether a branch is in that state, and `storage_encoding` which
+  layout its head has.
+- A number read back raw (an `ArtifactSelector` select, a `Value` match)
+  comes back as the narrowest type that holds it: a natural when it is
+  whole and not negative, an integer when whole and negative, a float
+  otherwise. Code matching `Value::UnsignedInt` on counts and timestamps
+  still sees them; code matching `Value::Float(5.0)` on a stored `5.0`
+  now sees `UnsignedInt(5)`. A typed read (a concept field, a derived
+  struct) views the number as the type it declares, unchanged.
+- An `ArtifactSelector` range bound reads each number through the lens
+  its type names before comparing, as a field declared with that type
+  reads it: an integer bound sees `34.5` as `34`, a natural bound does not
+  see `-3`, a float bound sees every number as it is, and
+  `across_numbers()` compares every number as it is for any bound.
+  Before, a bound admitted only numbers written with its own type; a
+  natural bound `>= 20` now finds a stored `30.0`.
+- An exact number, in a selector's `is(..)` or a query's constant, is the
+  range of that one number read through the same lens: `is(4)` as an
+  integer finds the stored `4`, `4.0` and `4.3`; `is(4.0)` as a float
+  finds the number `4` alone. This holds on the cardinality-one election
+  too, which compared the constant with the stored value by type and so
+  missed `+41` against a stored natural `41`.
+- A cardinality-one assertion of a value its cell already reads as,
+  through the lens of the asserted value's type, is a no-op
+  (`Value::reads_as`): asserting the integer `4` over a stored `4.3`
+  writes nothing, since an integer reader observes `4` already; asserting
+  `5` supersedes it.
+- A float is the decimal it prints as, in memory as in the band:
+  `Value::viewed_as` reads `1e30` through an integer lens as the natural
+  `10^30`, not the float's binary value, and `Value::same_number` says
+  two values are one number exactly when the band keys them as one, so
+  `2^64` as a float is the natural `18446744073709552000` and not
+  `2^64`. Before, the in-memory views and the stored identity disagreed
+  past `2^53`.
+- Rows a query derives are one row per number: two rules deriving the
+  natural `3` and the float `3.0` for one relation yield one row, through
+  a union and through a fixpoint alike, as two such facts are one fact in
+  storage; an `all` pick tells values apart the same way
+  (`Value::identity_key`, the band's encoding of a number). Before, the
+  rows were keyed by type as well, and a `number:` reader saw both.
+- A number constant finds its matches on every path: the cardinality-one
+  lookup with the entity unbound compared the constant with the elected
+  claim by type, and a variable bound to a stored `4.3` refused the
+  constant `4` that arrived after it; both now read through the lens
+  (`Value::reads_as`), in either order.
+- A concept write (`ConceptDescriptor::edit`, the derive's builders)
+  writes each field under the field's pick, as an attribute statement
+  spelling that pick does: a `last` field's write succeeds the claim its
+  cell holds, and is the no-op above when the cell already reads as the
+  written value. `Attribution` carries the field's `pick` in place of its
+  `cardinality`. Before, every concept write was an `all` write, so a
+  cardinality-one field accumulated a claim per write; reads elected the
+  newest, so they read right while the cell grew.
+- The band and the identity carry a number of any size (dialog-number
+  keys any decimal), but `Value` does not yet: it holds `u128`, `i128`
+  and `f64`, so no wider number enters, and a stored number wider than
+  `u128` reads back as the nearest float. A `Value` variant holding a
+  `dialog_number::Number`, with the fixed-width types as views over it,
+  is planned for the next cycle; it changes no key and no identity, so
+  nothing stored now will need rewriting for it.
+- `ValueDataType::holds` reads the same for every number type: a type
+  holds a number its view reads unchanged, so `float:` holds the natural
+  `3` and `natural:` the float `3.0`, as `float:64` and `natural:8`
+  already did; `natural:` still refuses `2.5` and `-1`. Before, an
+  unsized type held values of its own type only.
+- `tree::rekey::rekey_tree` and `rekey` rewrite a tree or a key between
+  encodings; `Branch::rekey_storage(0)` lays a branch out the earlier
+  way, for tests of the migration.
+- A pull that merges a head an earlier release wrote rewrites it in
+  memory first, so both sides share one encoding and the old client's
+  writes merge in. A pull that fast-forwards adopts such a head as it is,
+  reading nothing, and the branch then needs migrating like any other.
+
+Why: identity and storage should agree on what a number is, a numeric
+range should be one scan, and the move should happen once, with the
+rule and identity upgrades, rather than as a second migration later.
+
+### A selection reads a bare constant as the type its field declares
+
+[#593](https://github.com/dialog-db/dialog-db/pull/593)
+
+`select(ConceptQuery)` now conforms each constant to the type its field
+declares, as compiling a rule already did for a premise's constants: a
+bare text `"home:"` under a `text:` field is the text, not an entity,
+and a bare `5` under `integer:` is a signed integer. A constant `this`
+is an entity.
+
+What this changes for you:
+
+- A query whose constant was written bare in JSON matches the claims
+  the field holds. Before, `"url": "home:"` under a `text:` field read
+  as the entity `home:` and matched nothing.
+- Every evaluation of a `ConceptQuery` conforms its constants, through
+  `select`, a plan's concept premise, or the query's own `evaluate`.
+  Before, only `select` did, and a plan built by an embedder read `+41`
+  under a `natural:` field as a signed integer that matched nothing.
+- A constant in a field with no declared type still reads as the type
+  its spelling suggests.
+- A bare text constant shaped like a URL (`https://example.com`) is
+  still read as an entity first, and comes back as the URL's normalized
+  text (`https://example.com/`). Write such a constant tagged,
+  `{"text:": "https://example.com"}`, until the reader takes every bare
+  string as text.
+
+Why: a constant written bare has no type of its own; the slot it fills
+does, and reading it any other way makes a query miss what it names.
+
+### Rule bodies store the canonical spelling
+
+[#593](https://github.com/dialog-db/dialog-db/pull/593),
+[identity, storage and notation](./notes/identity-storage-notation.md#body-format-3)
+
+A rule's `dialog.rule/source` body is now written in format 3: the
+rule's canonical spelling, the one its identity hashes, in the dag-cbor
+envelope earlier formats used. The body holds exactly what the identity
+holds, so every spelling of one rule stores the same bytes, and a
+rule's body is found by encoding the rule.
+
+What this changes for you:
+
+- `DeductiveRule::decode` and `InductiveRule::decode` of a format 3
+  body give the rule in its canonical spelling: locals and head fields
+  named `~0`, `~1`, …, a premise's fields `#0`, `#1`, …, premises
+  sorted, no descriptions. A query still binds the head by its own
+  concept's field names. The names and descriptions an author wrote
+  are not stored.
+- Installing another spelling of an installed rule stores no second
+  body, and retracting either spelling removes the rule's body.
+  Before, two spellings stored two bodies under one entity, and
+  retracting one left the other.
+- A rule with a constant no body can carry is refused when it compiles
+  with `TypeError::UnencodableConstant`, naming the constant: a NaN or
+  infinite float, a natural above `u64::MAX` or an integer outside
+  `i64`. Before, such a rule compiled and panicked when stored.
+- `Branch::upgrade_rules()` also rewrites every body of an earlier
+  format into format 3, and reports those already under their identity
+  in `RulesUpgraded::rewritten`.
+
+Why: a stored rule should be one record that is a function of the
+rule, so equal rules store equal bytes and a retraction finds what an
+install wrote. The authored spelling is display data, and storing it
+beside every rule measured at 35% to 75% more instructions per
+install; it waits on a cheaper form.
+
+### NaN is not a value
+
+[#593](https://github.com/dialog-db/dialog-db/pull/593),
+[identity, storage and notation](./notes/identity-storage-notation.md#decided)
+
+A NaN float is refused wherever a value enters dialog, rather than
+stored as a number that is not equal to itself. Infinities stay
+values.
+
+What this changes for you:
+
+- Deserializing a `Value` from a NaN fails with "NaN is not a value",
+  bare or tagged (`{"float:": NaN}` in dag-cbor), as does parsing the
+  string `float:NaN` into a `Value`. No type `holds` a NaN, so a typed
+  write refuses it, and a commit that would write one by a raw assertion
+  fails with `CommitError::Artifact(InvalidValue("NaN is not a value"))`
+  before anything lands.
+- `float/parse` of `NaN` is no row.
+- A float formula whose result would be NaN (`0.0 / 0.0`,
+  `inf - inf`) yields no row, as integer division by zero already did.
+- A rule constant of NaN is refused when the rule compiles (see above).
+
+Why: a database value needs an equality it can join and retract by.
+The absence of a claim already means "no number"; a value that exists
+only to say so, and that IEEE says is unequal to itself, had to be
+special-cased in equality, in the `float:32` view and in the number
+encoding to behave at all.
+
+### Attributes can declare `number:` and fixed-width number types
+
+[#593](https://github.com/dialog-db/dialog-db/pull/593),
+[identity, storage and notation](./notes/identity-storage-notation.md#number-types)
+
+An attribute may declare `as: number:`, which holds every number, or a
+fixed-width number type: `natural:8` to `natural:128`, `integer:8` to
+`integer:128`, `float:32` and `float:64`, one for each Rust number.
+`natural:`, `integer:` and `float:` stay as they were, without a width.
+A fixed-width type is a view over the stored number. On read, it coerces
+where it only loses precision and leaves out what it cannot hold:
+through `natural:8`, a stored `9.75` reads as `9`, and `300` and `-1`
+are not rows. A write refuses a value the type cannot hold. Values are
+still stored as naturals, integers and floats, as before.
+
+What this changes for you:
+
+- `#[derive(Attribute)]` on a fixed-width Rust number declares its
+  sized type: `struct Level(u8)` declares `natural:8`, and `f32`
+  declares `float:32`. The identities of these attributes, and of the
+  concepts and rules that use them, differ from those declaring
+  `natural:`, `integer:` or `float:`. `usize` still declares `natural:`,
+  because it has no width common to every target.
+- `Typed::DECLARED` gives the type an attribute over a Rust type
+  declares. `TypeDescriptor::TYPE`, and the kind of a `Term<u8>`, are
+  unchanged.
+- `ValueDataType` gains `Number`, `U8` to `U128`, `I8` to `I128`, `F32`
+  and `F64`. No stored value has these types: they type attributes and
+  query slots. `ValueDataType::holds(&value)` says whether a type admits
+  a value, and `Value::viewed_as(kind)` reads a value through one.
+- The query type system gains `Refinement::views`, sent as `"views"`
+  on the wire.
+- A view reads the same on every target: rounding to `f32` is pinned
+  bit for bit on native and WebAssembly.
+
+Why: a Rust field of `u8` cannot hold `300`, and an app should be able
+to say so in the schema rather than fail on read. `number:` gives an
+attribute that holds numbers of every type, which JSON already writes
+as naturals, integers and floats.
+
+### Rules are identified by merkle references
+
+[#593](https://github.com/dialog-db/dialog-db/pull/593),
+[identity, storage and notation](./notes/identity-storage-notation.md#plan)
+
+A rule's identity is now the merkle reference of its canonical
+spelling under `rule:`, not the BLAKE3 hash of its dag-cbor. The head
+is its concept by reference with each field bound to its canonical
+variable; `when` and `unless` are sets of premises; a concept premise
+is its concept by reference with each binding keyed by the field it
+binds (attribute and options), not by a field name; other premises
+and reduce clauses are their wire form read as a merkle structure,
+with constants identified by value.
+
+What this changes for you:
+
+- Every rule identity differs from 0.2.0's and from 0.3.0-rc.1's.
+  `Branch::upgrade_rules()` re-installs stored rules under the new
+  identities.
+- An attribute's description no longer changes the identity of a rule
+  that uses it, as it did when rules embedded their concepts' wire
+  form.
+- A rule's numeric constants are identified by value: a rule with the
+  constant `5` written as a natural, an integer or a float is one
+  rule.
+
+Why: a rule's identity should depend on what it means, and the
+concepts it uses should enter by reference, so a rule is the same
+whether they are embedded or linked.
+
+### Attributes and concepts are identified by merkle references
+
+[#593](https://github.com/dialog-db/dialog-db/pull/593),
+[identity, storage and notation](./notes/identity-storage-notation.md#identity-merkle-reference-v2),
+[merkle-reference v2](./rust/merkle-reference/spec.md)
+
+An attribute's and a concept's identity is now a merkle reference
+(`merkle-reference`, a new crate in this workspace), not the BLAKE3
+hash of their dag-cbor. Types are named by URI; the crate defines only
+the shapes of composites (`list:`, `map:`, `set:`), and dialog names
+its own scalar types (`text:`, `boolean:`, `number:`, `entity:`,
+`symbol:`, `record:`). A definition is hashed as a map from field
+names under its own type (`the:`, `concept:`), and a concept hashes its
+attributes' and its conformance targets' references, so it is the same
+whether they are embedded or linked. The entities keep their shape,
+`the:<base58>` and `concept:<base58>`, with other digits.
+
+What this changes for you:
+
+- Every attribute and concept identity differs from 0.2.0's and from
+  0.3.0-rc.1's. Rule identities change too (see above).
+- `AttributeDescriptor::hash()` and `ConceptDescriptor::hash()` are
+  `reference()`, returning a `merkle_reference::Reference`.
+  `to_cbor_bytes()` is gone from both. `AttributeDescriptor::parse_uri`
+  returns a `Reference`.
+- `Value::reference()` gives a value's identity. Every number has one
+  `number:` type and is identified by its value alone, in the encoding
+  of the new `dialog-number` crate (SQLite4's decimal key encoding): a
+  natural `5`, an integer `5` and a float `5.0` are one value, a float
+  is the decimal it prints as (`1e23` is 10²³), and `-0.0` is `0`. An
+  attribute's `as:` list hashes values this way.
+  The value index still keeps naturals, integers and floats apart, so
+  until it moves to one band, two attributes that differ only by
+  listing `5` or `5.0` share an identity but read different claims.
+- `dialog_artifacts::identity` and `dialog_query::identity` hold the
+  types dialog hashes under.
+
+Why: identity should be a function of what a definition means, cheap
+to compute, and independent of where its parts are stored. This is the
+first step of moving every identity to merkle references in one
+migration.
+
+### Constants name their type by an entity
+
+[notation](./notes/notation.md#constants)
+
+A value in a binary encoding is written as `{"<type entity>": payload}`:
+`{"text:": "foo:"}`, `{"entity:": "foo:"}`, `{"integer:": 5}`.
+
+What this changes for you:
+
+- Rule bodies and identities: text, an entity and a symbol of the same
+  spelling, or a natural and a signed integer of the same number, are
+  different constants. A committed rule matching text shaped like a URI
+  derives again.
+- Rule bodies are format 2. Formats 0 and 1 are still read, and a
+  constant in a field with a declared type takes that type.
+- `Changes` batches keep each value's type through dag-cbor. Integers
+  used to come back as floats.
+- JSON writes a value bare where the bare form reads back as the same
+  value, and tagged otherwise. It reads both forms.
+- `Value::untagged()` gives the bare form, for encodings that must keep
+  an earlier spelling. `Value::conform(kind)` converts a value to a
+  type that reads it.
+
+Why: an encoding that leaves out a constant's type makes the meaning
+depend on how its spelling looks, and lets two different rules share
+one identity.
+
+### Picks are named by entities
+
+[glossary](./notes/glossary.md#pick)
+
+A pick is named by an entity, as a type is: `last:`, `all:`, `top:`,
+`max:`, `min:`.
+
+What this changes for you:
+
+- Descriptors write `"pick": "all:"`, and the 0.2.0 spelling `"all"`
+  is still read. Batches serialize `Pick` the same way.
+- Attribute identities hash the entity, so every attribute, concept
+  and rule identity differs from 0.2.0's.
+- `Pick::uri()` returns the entity. `name()` and `Display` are
+  unchanged.
+- The derive takes `#[pick(last|all|max|min)]`. `#[cardinality(..)]` no
+  longer compiles, and the error names its replacement.
+
+Why: a notation that resolves every bare word needs `pick: all` to name
+something. Doing this before anything ships on 0.2.0 means identities
+change only once.
+
+### Compatibility and migration
+
+- From pre-0.2: unchanged, `Branch::upgrade_rules()` lands on this
+  release's identities.
+- From 0.2.0 (nothing shipped on it): `upgrade_rules()` re-installs its
+  rules but does not move its transient markers.
+- 0.2.0 cannot read descriptors this release writes. Stored claims are
+  not rewritten.
+- Rule bodies from 0.2.0 or earlier wrote constants bare. On upgrade,
+  each constant takes its field's declared type. A constant in an
+  untyped field keeps the type its spelling suggests. Text shaped like
+  a URL may come back with its URL normalization (`https://a` becomes
+  `https://a/`).
+- Every rule with a constant, and every attribute with an `as:` list,
+  has a new identity. `upgrade_rules()` re-installs those rules.
+- Every attribute and concept has a new identity, from 0.2.0 and from
+  0.3.0-rc.1 alike. Nothing stored is rewritten: definitions recorded
+  under their old entities (tonk's `db.attribute/*` and concept facts)
+  need re-recording under the new ones, as tonk's `upgrade_definitions`
+  does for pre-0.2 replicas.
+- An attribute derived over a fixed-width Rust number (`u8` to `u128`,
+  `i8` to `i128`, `f32`, `f64`) has a new identity, as do the concepts
+  and rules that use it. Its stored claims are not rewritten, but they
+  read differently: a stored number of another type now reads through
+  the view (a float `9.75` under a `u8` field reads as `9`, where it was
+  no row), and a value the Rust type cannot hold is left out, where it
+  failed the read. 0.2.0 cannot read the sized types.
+- Values in tonk's dag-cbor and IPLD conversions come out tagged. Use
+  `Value::untagged()` where an identity minted from values has to stay
+  as it was.
+- Rule bodies are written in format 3, the canonical spelling. Bodies
+  of formats 0 to 2 are still read, and `Branch::upgrade_rules()`
+  rewrites them in the same pass that re-keys rules; until it runs, a
+  body an earlier release wrote is read as before and a retraction of
+  the rule it holds leaves it behind. 0.2.0 refuses format 3 bodies by
+  name.
+- A stored NaN from an earlier release is not rewritten. It reads as it
+  did; nothing new can be written beside it.
+- Every tree an earlier release wrote keys each number type in its own
+  band. It is read as before, and `Branch::migrate` (or
+  `migrate_storage`) rewrites it under the one band, facts and history
+  alike, as a new revision; until then a commit on it fails with
+  `NeedsMigration`. A pull that merges rewrites a legacy head in memory;
+  one that fast-forwards adopts it as it is. 0.2.0 and earlier refuse a migrated
+  tree: its manifest carries the critical field `value_encoding`
+  (`0x05`), which they do not know. An embedder runs `Branch::migrate`
+  once per branch when it opens it; it rewrites the whole tree, so the
+  cost is one pass over the branch's entries.
+
 ## 0.2.0 (2026-10-09)
 
 ### Relations, types and picks have one name each

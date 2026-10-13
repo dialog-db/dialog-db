@@ -44,6 +44,7 @@ use dialog_artifacts::{
     Relation as ArtifactsRelation, Select, Value,
 };
 use dialog_capability::Provider;
+use dialog_query::Application as _;
 use dialog_query::attribute::{AttributeDescriptor, Relation, The};
 use dialog_query::concept::query::Election;
 use dialog_query::query::Output as _;
@@ -607,11 +608,13 @@ impl Cell {
                 let elected = Election::from(policy)
                     .elect_claims(pool)
                     .map_err(|error| CommitError::Succession(error.to_string()))?;
-                // The read returns a claim of the written value already:
-                // the write changes nothing. An overlay row or a derived
-                // candidate of the value is not a claim, and the write
-                // lands beside it.
-                if matches!(&elected, Some((elected, true)) if elected == value) {
+                // The read returns a claim the written value already reads
+                // as, through the lens of its type (see `Value::reads_as`):
+                // the write changes nothing, as writing the integer 4 over
+                // a held 4.3 does, since an integer reader observes 4. An
+                // overlay row or a derived candidate of the value is not a
+                // claim, and the write lands beside it.
+                if matches!(&elected, Some((elected, true)) if elected.reads_as(value)) {
                     return Ok(Vec::new());
                 }
                 let mut settled = Vec::with_capacity(2);
@@ -737,7 +740,7 @@ mod tests {
         of: &Entity,
     ) -> Result<Vec<u64>> {
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": "max" }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": "max:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(of.clone()));
@@ -1100,7 +1103,7 @@ mod tests {
             .assert(last(&carol, 30));
 
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": "last" }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": "last:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));
@@ -1178,7 +1181,7 @@ mod tests {
             .retract(last(&bob, 20))
             .assert(last(&bob, 25));
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": "all" }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": "all:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::var("this"));
@@ -1300,7 +1303,7 @@ mod tests {
         let read = |value: u32| {
             let predicate: ConceptDescriptor =
                 serde_json::from_value(serde_json::json!({ "with": {
-                    "salary": { "the": "org/salary", "as": "natural:", "pick": "all" }
+                    "salary": { "the": "org/salary", "as": "natural:", "pick": "all:" }
                 }}))
                 .expect("a descriptor");
             let mut terms = Parameters::new();
@@ -1361,7 +1364,7 @@ mod tests {
         let read = |of: &Entity| {
             let predicate: ConceptDescriptor =
                 serde_json::from_value(serde_json::json!({ "with": {
-                    "salary": { "the": "org/salary", "as": "natural:", "pick": "all" }
+                    "salary": { "the": "org/salary", "as": "natural:", "pick": "all:" }
                 }}))
                 .expect("a descriptor");
             let mut terms = Parameters::new();
@@ -1668,7 +1671,7 @@ mod tests {
 
         let transaction = branch.transaction().assert(salary(&alice, 150));
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": "all" }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": "all:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".to_string(), Term::<Any>::constant(alice.clone()));

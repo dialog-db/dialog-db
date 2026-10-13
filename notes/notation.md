@@ -134,20 +134,22 @@ the: io.gozala.person/name
 as: "text:"
 ```
 
-`pick` is one of:
+`pick` is one of these entities:
 
-- `last` (the default): the newest claim;
-- `all`: every claim, as a set;
-- `top`: the best ranked of the values listed in `as` or the relations listed in `the`; a list in either implies `top`;
-- `max`, `min`: the greatest or least value of an ordered type.
+- `last:` (the default): the newest claim;
+- `all:`: every claim, as a set;
+- `top:`: the best ranked of the values listed in `as` or the relations listed in `the`; a list in either implies `top:`;
+- `max:`, `min:`: the greatest or least value of an ordered type.
 
 ```yaml
 the: io.gozala.person/email
 as: "text:"
-pick: all
+pick: "all:"
 ```
 
-`cardinality: one` and `cardinality: many` are the older spellings of `last` and `all`. They are read, never written, and `pick` wins when both are given.
+A pick is an entity for the same reason a type is: it is a name the descriptor refers to, not text, and an attribute's identity hashes it as such. The plain names 0.2 wrote (`all`) are read, never written.
+
+`cardinality: one` and `cardinality: many` are the older spellings of `last:` and `all:`. They are read, never written, and `pick` wins when both are given.
 
 <details>
 <summary>Attribute</summary>
@@ -167,9 +169,9 @@ pick: all
       },
       "pick": {
         "type": "string",
-        "enum": ["last", "all", "top", "max", "min"],
-        "description": "Which of an entity's claims the attribute reads. Defaults to 'last', or to 'top' when 'the' or 'as' is a list.",
-        "default": "last"
+        "enum": ["last:", "all:", "top:", "max:", "min:"],
+        "description": "Which of an entity's claims the attribute reads, named by an entity. Defaults to 'last:', or to 'top:' when 'the' or 'as' is a list. The plain names 0.2 wrote ('all') are read, never written.",
+        "default": "last:"
       },
       "optional": {
         "type": "boolean",
@@ -368,7 +370,7 @@ symbol-named half is a **dictionary**, the position-named half a
     "member": {
       "description": "The list's members, in order",
       "the": { "domain": "todo.list", "keyed": "sequence" },
-      "pick": "all",
+      "pick": "all:",
       "as": "text:"
     }
   }
@@ -498,17 +500,49 @@ An advanced form of composition that goes beyond stitching attributes together. 
     "required": ["?"]
   },
   "Constant": {
-    "description": "A concrete value: string, number, or boolean.",
+    "description": "A concrete value: bare (string, number, boolean, or a list of bytes), or tagged by the entity naming its type.",
     "oneOf": [
       { "type": "string" },
       { "type": "number" },
       { "type": "integer" },
-      { "type": "boolean" }
+      { "type": "boolean" },
+      { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 } },
+      {
+        "type": "object",
+        "description": "A tagged constant: one key, the entity naming its type.",
+        "minProperties": 1,
+        "maxProperties": 1,
+        "propertyNames": {
+          "enum": ["text:", "entity:", "symbol:", "integer:", "natural:", "float:", "boolean:", "bytes:", "record:"]
+        }
+      }
     ]
   }
 }
 </pre>
 </details>
+
+#### Constants
+
+A constant is a value a premise matches exactly. Every constant names its
+type by an entity, as an attribute does: `{"text:": "Alice"}`,
+`{"entity:": "did:web:cdata.earth"}`, `{"integer:": 5}`. That is how a
+stored rule writes each constant, and what its identity hashes, so two rules
+that match the same spelling under different types (the text `foo:` and the
+entity `foo:`) are two rules, and a constant reads back as the type it was
+written as.
+
+JSON may write a constant bare, and writes one bare wherever the bare
+spelling reads back as the same value: `"Alice"`, `5`, `true`. A bare string
+that parses as a URI reads as an entity and any other as text, and a bare
+integer reads as natural unless it is negative. A field that declares its
+type conforms a bare constant to it: `5` under `integer:` is a signed
+integer, and `"home:"` under `text:` is text. The tagged form says which type
+is meant where no field declares one.
+
+```json
+{ "rank": 5, "slug": "home:", "link": { "text:": "https://example.com" } }
+```
 
 #### Variables
 

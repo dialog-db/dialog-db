@@ -7,6 +7,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use dialog_effects::blob::{BlobError, Read as BlobRead};
 use std::collections::BTreeSet;
+use std::iter;
 use std::pin::pin;
 use std::sync::Arc;
 
@@ -582,10 +583,13 @@ async fn it_selects_by_value_prefix() -> Result<()> {
     Ok(())
 }
 
-/// A range predicate is a filter, never a type assertion: values of a
-/// different type than the bound simply do not match (no error, no stream
-/// abort) and the matching-type values still come back. Degenerate ranges
-/// (mismatched bound types, inverted bounds) select nothing, silently.
+/// A numeric bound reads each number through the lens its type names, as
+/// a field declared with that type does: a natural bound `>= 20` finds the
+/// stored `30.0` and `50`, and `25.5`, which it sees as `25`. A value of
+/// another kind beside them (a string, a boolean) is a non-match, not an
+/// error, over the value index and over the entity-pinned route alike;
+/// bounds of two number types form one range; inverted bounds match
+/// nothing.
 #[dialog_common::test]
 async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -598,6 +602,7 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
         Value::UnsignedInt(50),
         Value::String("forty".into()),
         Value::Float(30.0),
+        Value::Float(25.5),
         Value::Boolean(true),
     ]
     .into_iter()
@@ -605,20 +610,29 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
     .collect::<Result<Vec<_>>>()?;
     assert_all(&branch, data, &operator).await?;
 
-    // An unsigned range matches only the unsigned values; the string,
-    // float, and boolean neighbors are non-matches, not errors.
+    let numbers = |selected: &[dialog_artifacts::Artifact]| -> Vec<f64> {
+        let mut numbers: Vec<f64> = selected
+            .iter()
+            .map(|fact| match &fact.is {
+                Value::UnsignedInt(natural) => *natural as f64,
+                Value::SignedInt(integer) => *integer as f64,
+                Value::Float(float) => *float,
+                other => panic!("a number matched the bound, not {other:?}"),
+            })
+            .collect();
+        numbers.sort_by(f64::total_cmp);
+        numbers
+    };
+
+    // A natural range sees every number through the natural lens; the
+    // string and the boolean beside them are non-matches, not errors.
     let selected = select(
         &branch,
         ArtifactSelector::new().is_at_least(Value::UnsignedInt(20)),
         &operator,
     )
     .await?;
-    assert_eq!(
-        selected.len(),
-        1,
-        "only UnsignedInt(50) is >= 20u: {selected:?}"
-    );
-    assert_eq!(selected[0].is, Value::UnsignedInt(50));
+    assert_eq!(numbers(&selected), vec![25.5, 30.0, 50.0], "{selected:?}");
 
     // Same over the entity-pinned (EAV) route, where every type of the
     // entity's values passes through the filter.
@@ -645,14 +659,13 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
     )
     .await?;
     assert_eq!(
-        selected.len(),
-        1,
+        numbers(&selected),
+        vec![40.0],
         "the string label is a non-match: {selected:?}"
     );
-    assert_eq!(selected[0].is, Value::UnsignedInt(40));
 
-    // Degenerate ranges: mismatched bound types and inverted bounds are
-    // empty, not errors.
+    // Bounds of two number types form one range, each read through its
+    // own lens.
     let selected = select(
         &branch,
         ArtifactSelector::new()
@@ -661,8 +674,9 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
         &operator,
     )
     .await?;
-    assert!(selected.is_empty(), "mixed-type bounds match nothing");
+    assert_eq!(numbers(&selected), vec![25.5, 30.0, 40.0], "{selected:?}");
 
+    // Inverted bounds are empty, not an error.
     let selected = select(
         &branch,
         ArtifactSelector::new()
@@ -981,12 +995,24 @@ async fn it_round_trips_many_float_values() -> Result<()> {
     )
     .await?;
     assert_eq!(selected.len(), expected, "every float fact reads back");
-    assert!(
-        selected
-            .iter()
-            .all(|fact| matches!(fact.is, Value::Float(_))),
-        "every value round-trips as a float"
-    );
+    // The band does not record that a float wrote a whole number: `5.0`
+    // reads back as the natural `5`, the same number.
+    let mut written: Vec<f64> = (0..400u64)
+        .map(|index| index as f64 * 1.5 - 100.0)
+        .chain(iter::once(1783112056217.0))
+        .collect();
+    let mut read: Vec<f64> = selected
+        .iter()
+        .map(|fact| match &fact.is {
+            Value::Float(float) => *float,
+            Value::UnsignedInt(natural) => *natural as f64,
+            Value::SignedInt(integer) => *integer as f64,
+            other => panic!("a number reads back as a number, not {other:?}"),
+        })
+        .collect();
+    written.sort_by(f64::total_cmp);
+    read.sort_by(f64::total_cmp);
+    assert_eq!(read, written, "every value round-trips as the same number");
     Ok(())
 }
 

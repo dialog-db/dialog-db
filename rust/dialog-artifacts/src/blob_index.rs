@@ -288,8 +288,12 @@ impl BlobIndexExt for ArtifactTree {
             .select_record(store.clone(), &entity, &attribute)
             .await?
         {
-            if let Value::UnsignedInt(size) = fact.is {
-                return Ok(u64::try_from(size).ok());
+            // A tree keying numbers in one band reads the size back as an
+            // integer.
+            match fact.is {
+                Value::UnsignedInt(size) => return Ok(u64::try_from(size).ok()),
+                Value::SignedInt(size) => return Ok(u64::try_from(size).ok()),
+                _ => {}
             }
         }
         Ok(None)

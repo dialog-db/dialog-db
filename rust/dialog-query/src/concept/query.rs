@@ -16,7 +16,7 @@ pub use rules::{ConceptRules, Exact, Installed};
 
 use std::fmt;
 
-use crate::artifact::{ArtifactsRelation, Value};
+use crate::artifact::{ArtifactsRelation, Type, Value};
 use crate::attribute::The;
 use crate::concept::descriptor::{ConceptDescriptor, ConceptFieldDescriptor};
 use crate::planner::{Disjunction, Plan};
@@ -239,6 +239,39 @@ impl<'de> Deserialize<'de> for ConceptQuery {
 }
 
 impl ConceptQuery {
+    /// This application with each constant conformed to the type its
+    /// field declares (see [`Value::conform`]), and a constant `this` to
+    /// an entity. A constant written bare reads as the first type its
+    /// payload fits, so it may name the field's value under another type,
+    /// which no claim of the field would match.
+    pub fn conformed(mut self) -> Self {
+        let mut conformed = Vec::new();
+        for (name, term) in self.terms.iter() {
+            let Term::Constant(value) = term else {
+                continue;
+            };
+            let kind = if name == "this" {
+                Some(Type::Entity)
+            } else {
+                self.predicate
+                    .with()
+                    .iter()
+                    .find(|(field, _)| field == name)
+                    .and_then(|(_, field)| field.content_type())
+            };
+            if let Some(kind) = kind {
+                let fitted = value.clone().conform(kind);
+                if &fitted != value {
+                    conformed.push((name.clone(), fitted));
+                }
+            }
+        }
+        for (name, value) in conformed {
+            self.terms.insert(name, Term::Constant(value));
+        }
+        self
+    }
+
     /// Estimate the cost of this concept application given the current environment.
     /// A concept is essentially a join over N fact lookups (one per attribute).
     /// Each fact lookup has the form: (this, attribute_i, value_i).
@@ -404,7 +437,17 @@ impl ConceptQuery {
     /// it ([`Match::within`]), and each result is merged back into the row it
     /// came from. Evaluating the plan once per row instead rebuilt the whole
     /// pipeline, every step's stream and a copy of the plan, for every row.
-    pub fn evaluate<'a, Env, M: Selection + 'a>(
+    ///
+    /// Each constant is first conformed to the type its field declares
+    /// ([`conformed`](Self::conformed)): `+41` under a natural field reads
+    /// the natural `41`, which is the value a claim of the field holds.
+    ///
+    /// The one implementation of [`Application::evaluate`] for a concept
+    /// query, reached through the trait alone, so every caller (a plan's
+    /// concept premise, an embedder's `select`) evaluates the same way.
+    ///
+    /// [`Application::evaluate`]: crate::query::Application::evaluate
+    pub(crate) fn evaluate_application<'a, Env, M: Selection + 'a>(
         self,
         selection: M,
         env: &'a Env,
@@ -421,7 +464,7 @@ impl ConceptQuery {
         // generic over the stream handed the next level a type that held
         // this level's, and the compiler unrolled the recursion forty
         // levels deep (a 50 KB type term) in a workload's binary.
-        self.evaluate_erased(Box::pin(selection), env)
+        self.conformed().evaluate_erased(Box::pin(selection), env)
     }
 
     fn evaluate_erased<'a, Env>(
@@ -1421,9 +1464,10 @@ fn widened(input: &Match, terms: &Parameters) -> Result<Match, EvaluationError> 
     Ok(widened)
 }
 
-/// A value's canonical bytes, for grouping and tie-breaking.
+/// The bytes an election tells values apart by: one key per value, the
+/// natural 3 and the float 3.0 included (see [`Value::identity_key`]).
 fn encode_value(value: &Value) -> Result<Vec<u8>, EvaluationError> {
-    serde_ipld_dagcbor::to_vec(value).map_err(|error| EvaluationError::Store(error.to_string()))
+    Ok(value.identity_key())
 }
 
 /// The bytes an election groups an entity under: the entity's own,
@@ -1478,6 +1522,7 @@ impl Display for ConceptQuery {
 #[cfg(test)]
 mod tests {
     use crate::premise::reading;
+    use crate::query::Application as _;
     mod entry_form {
         #[cfg(target_arch = "wasm32")]
         wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);

@@ -46,6 +46,8 @@ pub mod formula;
 /// dialog-query, so it can only ever be a dev-dependency here).
 #[cfg(test)]
 pub mod helpers;
+
+pub mod identity;
 /// The identities an earlier release gave attributes and concepts,
 /// for migrating what it stored under them.
 pub mod migration;
@@ -91,6 +93,11 @@ pub mod stream;
 pub mod term;
 
 mod memo;
+
+/// Numbers through the query engine: lenses, constants, typed writes,
+/// derived rows and encodings, pinned as tests.
+#[cfg(test)]
+mod number_tests;
 
 mod sort_order;
 pub use sort_order::*;

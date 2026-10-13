@@ -233,6 +233,16 @@ impl AttributeQueryAll {
     /// never an error. This filter is [`Match::bind`]'s contract:
     /// binding treats a kind mismatch as a violation, on the
     /// premise that scans never feed one.
+    /// `artifact` as this query's typed slots read it, or `None` when they
+    /// do not admit it: a number reaches a slot of another number type
+    /// through its view ([`Kind::view`]).
+    pub(crate) fn admit(&self, mut artifact: Artifact) -> Option<Artifact> {
+        if let Some(kind) = self.is.kind() {
+            artifact.is = kind.view(artifact.is)?;
+        }
+        self.admits(&artifact).then_some(artifact)
+    }
+
     pub(crate) fn admits(&self, artifact: &Artifact) -> bool {
         if let Some(kind) = self.is.kind()
             && !kind.admits(&artifact.is)
@@ -423,9 +433,9 @@ impl AttributeQueryAll {
                     };
                     // Typed `is`/`the` slots filter facts falling
                     // outside their kinds.
-                    if !selector.admits(&artifact) {
+                    let Some(artifact) = selector.admit(artifact) else {
                         continue;
-                    }
+                    };
                     let mut extension = base.clone();
                     selector.merge(&mut extension, artifact, standing)?;
                     yield extension;
@@ -589,8 +599,8 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                     && let Some(interval) = kind
                         .refinement()
                         .and_then(|refinement| refinement.interval.as_ref())
-                    && let Some(data_type) =
-                        single_comparable_type(kind.primitive_part().required())
+                    && let Some((data_type, across)) =
+                        pushable_type(kind.primitive_part().required(), interval.value_type)
                 {
                     if let Some(bound) = &interval.lower
                         && let Some(value) =
@@ -604,6 +614,9 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                     {
                         selector = Some(push_bound(selector.take(), value, bound.inclusive, false));
                     }
+                    if across {
+                        selector = selector.map(ArtifactSelector::across_numbers);
+                    }
                 }
             }
         }
@@ -612,6 +625,22 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
             message: "At least one field must be constrained".to_string(),
         })
     }
+}
+
+/// The type an interval bound is pushed as, if it can be, and whether it
+/// spans number types. A kind of one comparable type pushes as that type.
+/// A kind of several number types pushes its literal as written, marked to
+/// admit every number type: a tree keying numbers in one band scans that
+/// range, and one keying each type in its own band scans without it (see
+/// `ArtifactSelector::across_numbers`).
+fn pushable_type(primitive: Primitive, literal: Type) -> Option<(Type, bool)> {
+    if let Some(single) = single_comparable_type(primitive) {
+        return Some((single, false));
+    }
+    let numbers = !primitive.is_empty()
+        && primitive.intersect(Primitive::NUMERIC) == Some(primitive)
+        && Primitive::NUMERIC.contains(literal);
+    numbers.then_some((literal, true))
 }
 
 /// The single comparable type a primitive set admits, or `None` when it
@@ -695,11 +724,12 @@ mod tests {
 
     use super::*;
     use crate::artifact::encode_value_owned;
+    use crate::attribute::query::DynamicAttributeQuery;
     use crate::query::Output;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
-    use crate::type_system::{Interval, IntervalBound, NameShape, Refinement};
+    use crate::type_system::{Interval, IntervalBound, NameShape, Refinement, Views};
     use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use std::collections::BTreeSet;
 
@@ -863,8 +893,10 @@ mod tests {
     }
 
     /// The single-comparable-type gate: a kind admitting several
-    /// types pushes no bound (rows of the other types would be
-    /// silently dropped from the scan), and an unadaptable literal
+    /// number types pushes its bound marked to span them all, which
+    /// only a tree keying numbers in one band scans as a range (one
+    /// with a band per type drops it rather than lose rows of the other
+    /// types); any other multi-type kind, and an unadaptable literal,
     /// pushes no bound (no row of the scanned type satisfies it; the
     /// residual comparison filters every one).
     #[dialog_common::test]
@@ -879,10 +911,10 @@ mod tests {
             Term::var("cause"),
         );
         let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
-        assert!(
-            selector.value_lower().is_none() && selector.value_upper().is_none(),
-            "a kind admitting several numeric types pushes nothing"
-        );
+        let lower = selector.value_lower().expect("the bound is pushed");
+        assert_eq!(lower.value, Value::UnsignedInt(30));
+        assert!(lower.across, "it spans every number type");
+        assert!(selector.value_upper().is_none());
 
         // A String bound on a STRING_LIKE kind narrows the membership
         // to String (a non-numeric literal never adapts, so symbol
@@ -911,6 +943,7 @@ mod tests {
                 prefix: None,
                 conforms: BTreeSet::default(),
                 name_shape: None,
+                views: Views::default(),
                 interval: Some(Box::new(Interval {
                     value_type: Type::String,
                     lower: Some(IntervalBound {
@@ -958,6 +991,7 @@ mod tests {
                 prefix: None,
                 conforms: BTreeSet::default(),
                 name_shape: None,
+                views: Views::default(),
                 interval: Some(Box::new(Interval {
                     value_type: Type::String,
                     lower: Some(IntervalBound {
@@ -1067,9 +1101,102 @@ mod tests {
         Ok(())
     }
 
-    /// Mixed numeric rows under a NUMERIC-wide kind: nothing is
-    /// pushed, so every numeric row reaches the residual comparison —
-    /// the scan produces no false negatives.
+    /// A constant names a number, not a spelling: the store keys every
+    /// number in one band, so the integer `+41` and the float `41.0` find
+    /// the natural `41`, and a negative or fractional constant finds
+    /// nothing there.
+    #[dialog_common::test]
+    async fn it_finds_a_number_by_a_constant_of_another_type() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(the!("person/age").of(Entity::new()?).is(41u64))
+            .assert(the!("person/score").of(Entity::new()?).is(4.3f64))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        // A constant reads the rows through the lens of its type: an
+        // integer 4 observes the stored 4.3 as 4, a float 4.0 does not.
+        for (attribute, constant, found) in [
+            ("person/age", Value::UnsignedInt(41), 1),
+            ("person/age", Value::SignedInt(41), 1),
+            ("person/age", Value::Float(41.0), 1),
+            ("person/age", Value::SignedInt(-41), 0),
+            ("person/age", Value::Float(41.5), 0),
+            ("person/score", Value::UnsignedInt(4), 1),
+            ("person/score", Value::SignedInt(4), 1),
+            ("person/score", Value::Float(4.3), 1),
+            ("person/score", Value::Float(4.0), 0),
+            ("person/score", Value::UnsignedInt(5), 0),
+        ] {
+            let the: Relation = attribute.parse()?;
+            let query = AttributeQueryAll::new(
+                Term::from(the),
+                Term::<Entity>::var("e"),
+                Term::Constant(constant.clone()),
+                Term::var("cause"),
+            );
+            let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+            let results = query.perform(&source).try_vec().await?;
+            assert_eq!(results.len(), found, "{attribute} is {constant:?}");
+        }
+        Ok(())
+    }
+
+    /// The cardinality-one read finds a number by a constant of another
+    /// type too: the election over `(attribute, entity)` compares values,
+    /// and `+41` and `41.0` are the natural `41`.
+    #[dialog_common::test]
+    async fn it_elects_a_number_by_a_constant_of_another_type() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let person = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("person/age").of(person.clone()).is(41u64))
+            .assert(the!("person/score").of(person.clone()).is(4.3f64))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        for (attribute, constant, found) in [
+            ("person/age", Value::SignedInt(41), 1),
+            ("person/age", Value::Float(41.0), 1),
+            ("person/age", Value::Float(41.5), 0),
+            ("person/score", Value::SignedInt(4), 1),
+            ("person/score", Value::Float(4.3), 1),
+            ("person/score", Value::Float(4.0), 0),
+            ("person/score", Value::UnsignedInt(5), 0),
+        ] {
+            let the: Relation = attribute.parse()?;
+            for of in [Term::<Entity>::var("e"), Term::from(person.clone())] {
+                let query = DynamicAttributeQuery::new(
+                    Term::from(the.clone()),
+                    of,
+                    Term::Constant(constant.clone()),
+                    Term::var("cause"),
+                    Some(Cardinality::One),
+                );
+                let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+                let results = query.perform(&source).try_vec().await?;
+                assert_eq!(results.len(), found, "{attribute} is {constant:?}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Mixed numeric rows under a NUMERIC-wide kind: the interval is
+    /// pushed as one scan across the number band, which orders every
+    /// number by value whatever type wrote it, so the natural `5` and
+    /// the float `2.5` pass a bound of `>= 1` and the integer `-3` does
+    /// not — and the scan produces no false negatives.
     #[dialog_common::test]
     async fn it_keeps_mixed_numeric_rows_without_single_type_kind() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -1098,10 +1225,15 @@ mod tests {
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
+        let mut values: Vec<Value> = results
+            .iter()
+            .map(|artifact| artifact.is().clone())
+            .collect();
+        values.sort_by_key(|value| format!("{value:?}"));
         assert_eq!(
-            results.len(),
-            3,
-            "the un-narrowed scan yields every numeric row"
+            values,
+            vec![Value::Float(2.5), Value::UnsignedInt(5)],
+            "every number at or above 1 passes, whatever type wrote it"
         );
         Ok(())
     }

@@ -87,9 +87,12 @@ where
         }
 
         // Only the surviving winner decodes its value; the losing
-        // challengers never materialized anything.
+        // challengers never materialized anything. The candidate's value
+        // may be the query's constant, which the winner matches through
+        // the lens of the constant's type (see `Value::reads_as`), as the
+        // scan that found the candidate did.
         if let Some(winner) = winner
-            && winner.value()? == value
+            && winner.value()?.reads_as(&value)
         {
             let winner_cause = winner.cause().cloned().unwrap_or(Cause([0; 32]));
             if cause.is_none() || cause == Some(winner_cause) {
@@ -263,7 +266,10 @@ impl AttributeQueryOnly {
                 let value_known = resolved.is().is_constant();
 
                 if entity_known || (attribute_known && !value_known) {
-                    // Sliding window path.
+                    // Sliding window path. A constant value admits the
+                    // winner a reader of the constant's type observes as
+                    // it (see `Value::reads_as`), as the scan's own exact
+                    // bound does.
                     let value_constraint = resolved.is().as_constant().cloned();
 
                     let scan = AttributeQueryAll::lookup(
@@ -296,11 +302,15 @@ impl AttributeQueryOnly {
                                     // (`CorruptEntry`) is a corrupt tree
                                     // entry: drop the group's yield rather
                                     // than failing the query.
-                                    match materialize_winner(current)? {
+                                    match materialize_winner(current)?.and_then(
+                                        |(winner, standing)| {
+                                            selector.admit(winner).map(|winner| (winner, standing))
+                                        },
+                                    ) {
                                         Some((winner, standing))
-                                            if (value_constraint.is_none()
-                                                || value_constraint.as_ref() == Some(&winner.is))
-                                                && selector.admits(&winner) =>
+                                            if value_constraint
+                                                .as_ref()
+                                                .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
                                         {
                                             let mut extension = base.clone();
                                             selector.merge(&mut extension, winner, standing)?;
@@ -318,11 +328,13 @@ impl AttributeQueryOnly {
                     // Yield the final group's winner (unless its stored
                     // bytes are corrupt; see the group-close arm above).
                     if let Some(winner) = candidate.take() {
-                        match materialize_winner(winner)? {
+                        match materialize_winner(winner)?.and_then(|(winner, standing)| {
+                            selector.admit(winner).map(|winner| (winner, standing))
+                        }) {
                             Some((winner, standing))
-                                if (value_constraint.is_none()
-                                    || value_constraint.as_ref() == Some(&winner.is))
-                                    && selector.admits(&winner) =>
+                                if value_constraint
+                                    .as_ref()
+                                    .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
                             {
                                 let mut extension = base.clone();
                                 selector.merge(&mut extension, winner, standing)?;

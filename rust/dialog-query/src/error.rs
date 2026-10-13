@@ -263,6 +263,17 @@ pub enum TypeError {
         reason: String,
     },
 
+    /// A rule names a constant its stored body cannot carry: dag-cbor
+    /// holds integers of at most 64 bits and finite floats, and NaN is
+    /// not a value.
+    #[error("The constant {value} cannot be stored in a rule: {reason}")]
+    UnencodableConstant {
+        /// The constant, as it prints.
+        value: String,
+        /// Why no body can carry it.
+        reason: String,
+    },
+
     /// A rule application omits a required parameter.
     #[error("Rule {rule} application omits required parameter \"{parameter}\"")]
     OmittedParameter {

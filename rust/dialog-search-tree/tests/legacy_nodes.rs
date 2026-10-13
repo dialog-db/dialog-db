@@ -60,6 +60,11 @@ fn fixtures() -> Vec<Fixture> {
                         .parse()
                         .expect("frame_ceiling_factor"),
                     inline_n: field(line, "inline_n").parse().expect("inline_n"),
+                    // Written before the number band: a legacy node carries
+                    // no `value_encoding`, and reads as the per-type layout
+                    // its release keyed values in, whatever a new tree's
+                    // default is now.
+                    value_encoding: 0,
                     ..Manifest::default()
                 },
                 nodes: Vec::new(),

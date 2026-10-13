@@ -190,13 +190,12 @@ impl KeyParts {
             // to escape.
             let mut payload = Vec::with_capacity(if upper { MAX_FILLER + 1 } else { 1 });
             if upper {
-                // A parseable payload dominating every real value of the
-                // maximum type: `MAX_FILLER_BYTE` exceeds every UTF-8 byte,
-                // and real symbol names are UTF-8. (Like the entity/attribute
-                // fillers this is a bounded synthetic maximum; `set_value_*`
-                // replaces it with a real payload, this is only the unset
-                // bound.)
-                encode_bytes(&[MAX_FILLER_BYTE; MAX_FILLER], &mut payload);
+                // The maximum type is the number band, and its largest
+                // number, positive infinity, is a one-byte payload that
+                // parses and sorts with or above every real value in it.
+                // (`set_value_*` replaces it with a real payload; this is
+                // only the unset bound.)
+                dialog_number::encode_f64(f64::INFINITY, &mut payload);
                 (ValueDataType::max(), ValuePayload::Inline(payload))
             } else {
                 // The minimum value type is a terminated-string type, whose
@@ -425,10 +424,12 @@ fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
     // An unknown discriminant is corruption: reject the key rather than
     // guessing a width (`ValueDataType::from` would silently default to
     // Bytes and misparse the tail).
-    if type_byte > u8::from(ValueDataType::Symbol) {
+    if type_byte > u8::from(ValueDataType::Number) {
         return None;
     }
     match ValueDataType::from(type_byte) {
+        // The one number band: dialog-number's self-delimiting encoding.
+        ValueDataType::Number => dialog_number::encoded_len(bytes.get(at..)?),
         // 128-bit integers: 16 big-endian bytes.
         ValueDataType::UnsignedInt | ValueDataType::SignedInt => Some(16),
         // `f64`: 8 big-endian bytes (the order-preserving `encode_f64`), NOT 16
@@ -443,6 +444,9 @@ fn value_payload_len(type_byte: u8, bytes: &[u8], at: usize) -> Option<usize> {
         | ValueDataType::Record
         | ValueDataType::Entity
         | ValueDataType::Symbol => terminated_len(bytes, at),
+        // `number:` and the sized number types type slots, not keys: their
+        // bytes are rejected above.
+        _ => None,
     }
 }
 
@@ -650,78 +654,189 @@ pub struct KeyRef<'a> {
     pub version: Option<[u8; VERSION_LENGTH]>,
 }
 
-/// Parses key bytes into borrowed components, dispatching on the tag. Like
-/// [`parse_key`] but borrows the entity/attribute/value bytes from `bytes`
-/// (owning only an escaped entity/attribute), so a scan reconstructs entries
-/// without per-field allocation. Returns `None` on malformed input.
+/// Where each component of a key sits in its bytes: what one walk of the key
+/// learns, kept so a scanned row parses its key once and reads every field
+/// off this afterwards ([`KeyLayout::view`]) instead of walking it again.
+///
+/// A plain [`Copy`] value of offsets: it borrows nothing, so a row can hold
+/// it beside the key bytes it describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyLayout {
+    tag: u8,
+    entity: Span,
+    attribute: Span,
+    value_type: ValueDataType,
+    /// The value slot's payload: its offset and length.
+    payload: (u32, u32),
+    /// Where the spill tail (sentinel and whole-value hash) starts, after
+    /// the ordering's final component, if the value spilled.
+    spill: Option<u32>,
+    /// Whether the key carries a version, right after its tag.
+    versioned: bool,
+}
+
+/// One terminated byte-string component of a key: where its encoding starts
+/// and, when it carries no escape, its content's length. An escaped one is
+/// decoded again when read; real entities and attributes are UTF-8 and
+/// carry none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Span {
+    start: u32,
+    length: u32,
+    escaped: bool,
+}
+
+impl Span {
+    /// Reads the component starting at `at`, returning it and where the next
+    /// one starts.
+    #[inline]
+    fn read(bytes: &[u8], at: usize) -> Option<(Self, usize)> {
+        let (content, rest) = decode_bytes_cow(bytes.get(at..)?)?;
+        let next = bytes.len() - rest.len();
+        let span = match content {
+            Cow::Borrowed(content) => Span {
+                start: u32::try_from(at).ok()?,
+                length: u32::try_from(content.len()).ok()?,
+                escaped: false,
+            },
+            Cow::Owned(_) => Span {
+                start: u32::try_from(at).ok()?,
+                length: 0,
+                escaped: true,
+            },
+        };
+        Some((span, next))
+    }
+
+    #[inline]
+    fn view<'a>(&self, bytes: &'a [u8]) -> Cow<'a, [u8]> {
+        let start = self.start as usize;
+        if self.escaped {
+            decode_bytes_cow(&bytes[start..])
+                .map(|(content, _)| content)
+                .expect("the layout was read from these bytes")
+        } else {
+            Cow::Borrowed(&bytes[start..start + self.length as usize])
+        }
+    }
+}
+
+/// Reads a key's layout, dispatching on its tag. Returns `None` on malformed
+/// input.
 ///
 /// The spill signal is the REMAINDER after the ordering's final component:
 /// zero bytes left means an inline value, [`SPILL_TAIL_LENGTH`] means the
 /// value spilled and the remainder is the [`SPILL_SENTINEL`] followed by its
 /// whole-value hash (the slot then holds the value's encoded prefix). Any
 /// other remainder is malformed.
-pub fn parse_key_ref(bytes: &[u8]) -> Option<KeyRef<'_>> {
-    let (&tag, rest) = bytes.split_first()?;
+#[inline]
+pub fn parse_key_layout(bytes: &[u8]) -> Option<KeyLayout> {
+    let &tag = bytes.first()?;
 
-    // Reads the value slot borrowed from the key: one type byte plus its
-    // self-delimiting payload slice (full inline encoding or spilled prefix).
-    fn value_slot(bytes: &[u8]) -> Option<(ValueDataType, &[u8], &[u8])> {
-        let (&type_byte, rest) = bytes.split_first()?;
-        let payload_len = value_payload_len(type_byte, bytes, 1)?;
-        let (payload, rest) = rest.split_at_checked(payload_len)?;
-        Some((ValueDataType::from(type_byte), payload, rest))
-    }
+    // Reads the value slot at `at`: one type byte plus its self-delimiting
+    // payload (full inline encoding or spilled prefix).
+    let value_slot = |at: usize| -> Option<(ValueDataType, (u32, u32), usize)> {
+        let &type_byte = bytes.get(at)?;
+        let length = value_payload_len(type_byte, bytes, at + 1)?;
+        let end = (at + 1).checked_add(length)?;
+        if end > bytes.len() {
+            return None;
+        }
+        let payload = (u32::try_from(at + 1).ok()?, u32::try_from(length).ok()?);
+        Some((ValueDataType::from(type_byte), payload, end))
+    };
 
-    let (version, entity, attribute, value_type, payload, rest) = match tag {
+    let (versioned, entity, attribute, value_type, payload, end) = match tag {
         ATTRIBUTE_KEY_TAG => {
-            let (attribute, rest) = decode_bytes_cow(rest)?;
-            let (entity, rest) = decode_bytes_cow(rest)?;
-            let (value_type, payload, rest) = value_slot(rest)?;
-            (None, entity, attribute, value_type, payload, rest)
+            let (attribute, at) = Span::read(bytes, 1)?;
+            let (entity, at) = Span::read(bytes, at)?;
+            let (value_type, payload, end) = value_slot(at)?;
+            (false, entity, attribute, value_type, payload, end)
         }
         VALUE_KEY_TAG => {
-            let (value_type, payload, rest) = value_slot(rest)?;
-            let (attribute, rest) = decode_bytes_cow(rest)?;
-            let (entity, rest) = decode_bytes_cow(rest)?;
-            (None, entity, attribute, value_type, payload, rest)
+            let (value_type, payload, at) = value_slot(1)?;
+            let (attribute, at) = Span::read(bytes, at)?;
+            let (entity, end) = Span::read(bytes, at)?;
+            (false, entity, attribute, value_type, payload, end)
         }
         HISTORY_KEY_TAG | COVERAGE_KEY_TAG => {
             // The version leads, read raw: it is fixed-width and already
             // order-preserving, so it carries no length prefix and no
             // terminator, and the variable-length fields after it still parse.
-            let (version, rest) = rest.split_at_checked(VERSION_LENGTH)?;
-            let (entity, rest) = decode_bytes_cow(rest)?;
-            let (attribute, rest) = decode_bytes_cow(rest)?;
-            let (value_type, payload, rest) = value_slot(rest)?;
-            let version: [u8; VERSION_LENGTH] = version.try_into().ok()?;
-            (Some(version), entity, attribute, value_type, payload, rest)
+            let at = 1 + VERSION_LENGTH;
+            if bytes.len() < at {
+                return None;
+            }
+            let (entity, at) = Span::read(bytes, at)?;
+            let (attribute, at) = Span::read(bytes, at)?;
+            let (value_type, payload, end) = value_slot(at)?;
+            (true, entity, attribute, value_type, payload, end)
         }
         // ENTITY_KEY_TAG and unknown tags share the EAV shape, a safe
         // self-delimiting default.
         _ => {
-            let (entity, rest) = decode_bytes_cow(rest)?;
-            let (attribute, rest) = decode_bytes_cow(rest)?;
-            let (value_type, payload, rest) = value_slot(rest)?;
-            (None, entity, attribute, value_type, payload, rest)
+            let (entity, at) = Span::read(bytes, 1)?;
+            let (attribute, at) = Span::read(bytes, at)?;
+            let (value_type, payload, end) = value_slot(at)?;
+            (false, entity, attribute, value_type, payload, end)
         }
     };
 
-    let value = match rest.len() {
-        0 => ValueRef::Inline(payload),
-        SPILL_TAIL_LENGTH if rest[0] == SPILL_SENTINEL => ValueRef::Spilled {
-            prefix: payload,
-            hash: &rest[1..],
-        },
+    let rest = &bytes[end..];
+    let spill = match rest.len() {
+        0 => None,
+        SPILL_TAIL_LENGTH if rest[0] == SPILL_SENTINEL => Some(u32::try_from(end).ok()?),
         _ => return None,
     };
-    Some(KeyRef {
+    Some(KeyLayout {
         tag,
         entity,
         attribute,
         value_type,
-        value,
-        version,
+        payload,
+        spill,
+        versioned,
     })
+}
+
+impl KeyLayout {
+    /// The key's components, borrowed from `bytes`, which must be the bytes
+    /// this layout was read from.
+    #[inline]
+    pub fn view<'a>(&self, bytes: &'a [u8]) -> KeyRef<'a> {
+        let (start, length) = (self.payload.0 as usize, self.payload.1 as usize);
+        let payload = &bytes[start..start + length];
+        let value = match self.spill {
+            Some(tail) => ValueRef::Spilled {
+                prefix: payload,
+                hash: &bytes[tail as usize + 1..],
+            },
+            None => ValueRef::Inline(payload),
+        };
+        let version = self.versioned.then(|| {
+            bytes[1..1 + VERSION_LENGTH]
+                .try_into()
+                .expect("a versioned layout spans the version")
+        });
+        KeyRef {
+            tag: self.tag,
+            entity: self.entity.view(bytes),
+            attribute: self.attribute.view(bytes),
+            value_type: self.value_type,
+            value,
+            version,
+        }
+    }
+}
+
+/// Parses key bytes into borrowed components, dispatching on the tag. Like
+/// [`parse_key`] but borrows the entity/attribute/value bytes from `bytes`
+/// (owning only an escaped entity/attribute), so a scan reconstructs entries
+/// without per-field allocation. Returns `None` on malformed input; see
+/// [`parse_key_layout`], which this reads and then views.
+#[inline]
+pub fn parse_key_ref(bytes: &[u8]) -> Option<KeyRef<'_>> {
+    parse_key_layout(bytes).map(|layout| layout.view(bytes))
 }
 
 #[cfg(test)]

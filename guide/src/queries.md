@@ -31,7 +31,7 @@ pub struct Item {
 }
 ```
 
-The domain comes from `#[domain]` and the name from the type, kebab-cased, so `grocery::Name` is the attribute `demo.grocery/name`. The doc comment becomes its description, the wrapped type its value type, and its cardinality is one unless it says `#[cardinality(many)]`. Each field of the concept is one pattern, and `this` is the entity they share. Writing an `Item` asserts its facts. Querying for `Item` with blanks in every field asks for every item:
+The domain comes from `#[domain]` and the name from the type, kebab-cased, so `grocery::Name` is the attribute `demo.grocery/name`. The doc comment becomes its description, the wrapped type its value type, and it reads one value, the newest, unless it says another pick such as `#[pick(all)]`. Each field of the concept is one pattern, and `this` is the entity they share. Writing an `Item` asserts its facts. Querying for `Item` with blanks in every field asks for every item:
 
 ```rust
 use dialog_query::query::Output;
@@ -108,7 +108,7 @@ When one pattern is much narrower than the other, say `done` pinned to `false`, 
 
 ## Cardinality
 
-An attribute is declared as having one value or many. `demo.grocery/name` has one, which is the default, and `demo.grocery/tag` could be declared with `#[cardinality(many)]`. For a one-valued attribute, a query that finds two values runs the election from the [Sync](./sync.md) chapter and returns one. Every replica elects the same value. For a many-valued attribute, a query returns every value.
+An attribute is declared as having one value or many. `demo.grocery/name` has one, which is the default, and `demo.grocery/tag` could be declared with `#[pick(all)]`. For a one-valued attribute, a query that finds two values runs the election from the [Sync](./sync.md) chapter and returns one. Every replica elects the same value. For a many-valued attribute, a query returns every value.
 
 ## Optional fields
 

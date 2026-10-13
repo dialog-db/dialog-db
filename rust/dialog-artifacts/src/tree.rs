@@ -46,14 +46,16 @@ use crate::{
     DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart, Instruction, Key, KeyView,
     KeyViewConstruct, KeyViewMut, LoadBlob, Pick, SelectorMatch, Standing, State, VALUE_KEY_TAG,
     Value, ValueDataType, ValueKey, decode_value_parts, encode_bytes, encode_value_owned,
-    key::varkey::{self, KeyRef, ValuePayload, ValueRef, parse_key_ref},
+    key::varkey::{self, KeyLayout, KeyRef, ValuePayload, ValueRef, parse_key_layout},
     key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
     make_reference, match_selector_and_key_ref,
     selector::Constrained,
     value_predicates_admit,
 };
+use crate::{NUMBER_BAND, encode_key_value_owned};
 
 pub mod distribution;
+pub mod rekey;
 
 /// The concrete search-tree type the artifact indexes use.
 ///
@@ -341,6 +343,9 @@ fn prefix_upper(prefix: &[u8]) -> Vec<u8> {
 ///   BELOW the full bound bytes.
 /// - A zero float widens across the `-0.0`/`+0.0` encoding cluster.
 fn value_lower_edge(value: &Value, manifest: &Manifest) -> Vec<u8> {
+    if value.data_type().band(manifest.value_encoding) == ValueDataType::Number {
+        return encode_key_value_owned(value, manifest.value_encoding);
+    }
     if let Value::Float(float) = value
         && *float == 0.0
     {
@@ -452,7 +457,7 @@ fn apply_prefix_bounds<K: KeyViewMut>(
         let band = selector
             .value_lower()
             .or(selector.value_upper())
-            .map(|bound| bound.value.data_type())
+            .map(|bound| bound.value.data_type().band(manifest.value_encoding))
             .unwrap_or_else(ValueDataType::min);
         let lo = match selector.value_lower() {
             Some(bound) => value_lower_edge(&bound.value, manifest),
@@ -460,6 +465,9 @@ fn apply_prefix_bounds<K: KeyViewMut>(
         };
         let hi = match selector.value_upper() {
             Some(bound) => match &bound.value {
+                _ if band == ValueDataType::Number => {
+                    encode_key_value_owned(&bound.upper_edge(), manifest.value_encoding)
+                }
                 Value::Float(float) if *float == 0.0 => encode_value_owned(&Value::Float(0.0)),
                 value => encode_value_owned(value),
             },
@@ -477,6 +485,10 @@ fn apply_prefix_bounds<K: KeyViewMut>(
 /// bound key still parses (an empty payload would let the following key
 /// component slide into the value position and corrupt the range edge).
 fn value_band_min(value_type: ValueDataType) -> Vec<u8> {
+    // The number band's lowest number is NaN.
+    if value_type == ValueDataType::Number {
+        return encode_key_value_owned(&Value::Float(f64::NAN), NUMBER_BAND);
+    }
     match numeric_width(value_type) {
         0 => vec![0x00],
         width => vec![0x00; width],
@@ -491,6 +503,10 @@ fn value_band_min(value_type: ValueDataType) -> Vec<u8> {
 /// band. Used only as a raw range edge; it deliberately does not parse (it
 /// is the last field set on the bound).
 fn value_band_max(value_type: ValueDataType, manifest: &Manifest) -> Vec<u8> {
+    // The number band's highest number is positive infinity.
+    if value_type == ValueDataType::Number {
+        return encode_key_value_owned(&Value::Float(f64::INFINITY), NUMBER_BAND);
+    }
     match numeric_width(value_type) {
         0 => vec![0xFF; manifest.inline_n as usize + 2],
         width => vec![0xFF; width],
@@ -878,6 +894,7 @@ impl ArtifactTreeExt for ArtifactTree {
         // The range must be built under the manifest the facts were written
         // with, the same requirement `scan` has.
         let manifest = tree.manifest(&storage).await?;
+        let selector = selector.for_manifest(&manifest);
         let range = selector_range(&selector, &manifest);
         // `range_scale` intersects half-open `[lower, upper)`; the selector's
         // range is inclusive, so the upper bound is the successor of the last
@@ -908,6 +925,7 @@ impl ArtifactTreeExt for ArtifactTree {
             // boundary-sized value encodes differently here than in the tree
             // and the scan silently misses it.
             let manifest = tree.manifest(&storage).await?;
+            let selector = selector.for_manifest(&manifest);
             let range = selector_range(&selector, &manifest);
 
             let stream = tree.stream_range_handles(range, &storage);
@@ -925,18 +943,19 @@ impl ArtifactTreeExt for ArtifactTree {
                 // A key that does not parse is corruption; dropping it
                 // silently would make the corrupt entry vanish from results
                 // with no signal.
-                let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
+                let layout = parse_key_layout(raw.key.as_ref()).ok_or_else(|| {
                     DialogArtifactsError::InvalidKey(
                         "scanned entry's key does not parse".to_string(),
                     )
                 })?;
+                let parts = layout.view(raw.key.as_ref());
                 let verdict = match_selector_and_key_ref(&selector, &parts, &manifest);
                 if verdict == SelectorMatch::Excluded || !matches!(raw.value, State::Added(_)) {
                     return Ok(Staged::Skip);
                 }
                 if let ValueRef::Spilled { hash, .. } = &parts.value {
                     let hash = hash.to_vec();
-                    return Ok(Staged::Spilled { raw, verdict, hash });
+                    return Ok(Staged::Spilled { raw, layout, verdict, hash });
                 }
                 // A NeedsValue verdict means some value predicate's answer
                 // lies beyond what the key decides; re-check semantically
@@ -950,7 +969,7 @@ impl ArtifactTreeExt for ArtifactTree {
                 let State::Added(datum) = raw.value else {
                     unreachable!("Added state checked above")
                 };
-                Ok(Staged::Ready(ArtifactView::new(raw.key, datum, None)))
+                Ok(Staged::Ready(ArtifactView::new(raw.key, layout, datum, None)))
             });
             // Stage two: the spilled rows' block fetches, SPILL_LOOKAHEAD in
             // flight, in row order.
@@ -960,8 +979,8 @@ impl ArtifactTreeExt for ArtifactTree {
                     let cache = &cache;
                     let selector = &selector;
                     async move {
-                        let (raw, verdict, hash) = match staged? {
-                            Staged::Spilled { raw, verdict, hash } => (raw, verdict, hash),
+                        let (raw, layout, verdict, hash) = match staged? {
+                            Staged::Spilled { raw, layout, verdict, hash } => (raw, layout, verdict, hash),
                             finished => return Ok(staged_ready(finished)),
                         };
                         let spilled = fetch_spilled_reference(raw_store, cache, &hash).await?;
@@ -969,11 +988,7 @@ impl ArtifactTreeExt for ArtifactTree {
                         // view anyway), so the value predicates can be
                         // answered past the in-key prefix.
                         if verdict == SelectorMatch::NeedsValue {
-                            let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
-                                DialogArtifactsError::InvalidKey(
-                                    "scanned entry's key does not parse".to_string(),
-                                )
-                            })?;
+                            let parts = layout.view(raw.key.as_ref());
                             if !value_predicates_admit(
                                 selector,
                                 &decode_value_parts(&parts, Some(spilled.clone()))?,
@@ -986,6 +1001,7 @@ impl ArtifactTreeExt for ArtifactTree {
                         };
                         Ok::<_, DialogArtifactsError>(Some(ArtifactView::new(
                             raw.key,
+                            layout,
                             datum,
                             Some(spilled),
                         )))
@@ -1018,20 +1034,21 @@ impl ArtifactTreeExt for ArtifactTree {
             // Both the scan range and the per-entry match must be built under
             // the manifest the stored facts were WRITTEN with — see `scan`.
             let manifest = tree.manifest(&storage).await?;
+            let selector = selector.for_manifest(&manifest);
             let range = selector_range(&selector, &manifest);
 
             let stream = tree.stream_range_handles(range, &storage);
-            // The two stages of `scan`, reconstructing whole facts: an
-            // inline-valued row is parsed once and materialized here; a
-            // spilled row is parsed again once its block has landed, which
-            // it pays a round trip for anyway.
+            // The two stages of `scan`, reconstructing whole facts: every
+            // row is parsed once, and a spilled row is materialized from
+            // that parse once its block has landed.
             let staged = stream.map(|item| -> Result<Staged<_, Artifact>, DialogArtifactsError> {
                 let raw = item?;
-                let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
+                let layout = parse_key_layout(raw.key.as_ref()).ok_or_else(|| {
                     DialogArtifactsError::InvalidKey(
                         "scanned entry's key does not parse".to_string(),
                     )
                 })?;
+                let parts = layout.view(raw.key.as_ref());
                 let verdict = match_selector_and_key_ref(&selector, &parts, &manifest);
                 if verdict == SelectorMatch::Excluded {
                     return Ok(Staged::Skip);
@@ -1041,7 +1058,7 @@ impl ArtifactTreeExt for ArtifactTree {
                 };
                 if let ValueRef::Spilled { hash, .. } = &parts.value {
                     let hash = hash.to_vec();
-                    return Ok(Staged::Spilled { raw, verdict, hash });
+                    return Ok(Staged::Spilled { raw, layout, verdict, hash });
                 }
                 Ok(match reconstruct(&selector, &parts, datum, None, verdict)? {
                     Some(artifact) => Staged::Ready(artifact),
@@ -1054,16 +1071,12 @@ impl ArtifactTreeExt for ArtifactTree {
                     let cache = &cache;
                     let selector = &selector;
                     async move {
-                        let (raw, verdict, hash) = match staged? {
-                            Staged::Spilled { raw, verdict, hash } => (raw, verdict, hash),
+                        let (raw, layout, verdict, hash) = match staged? {
+                            Staged::Spilled { raw, layout, verdict, hash } => (raw, layout, verdict, hash),
                             finished => return Ok(staged_ready(finished)),
                         };
                         let spilled = fetch_spilled_reference(raw_store, cache, &hash).await?;
-                        let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
-                            DialogArtifactsError::InvalidKey(
-                                "scanned entry's key does not parse".to_string(),
-                            )
-                        })?;
+                        let parts = layout.view(raw.key.as_ref());
                         let State::Added(datum) = &raw.value else {
                             unreachable!("Added state checked above")
                         };
@@ -1094,6 +1107,7 @@ enum Staged<Raw, Ready> {
     Ready(Ready),
     Spilled {
         raw: Raw,
+        layout: KeyLayout,
         verdict: SelectorMatch,
         hash: Vec<u8>,
     },
@@ -1183,9 +1197,12 @@ pub fn selector_range(
             selector
                 .attribute()
                 .map(|attribute| AttributeKeyPart::from(attribute).raw().to_vec()),
-            selector
-                .value()
-                .map(|value| (value.data_type(), build_value_payload(value, manifest))),
+            selector.value().map(|value| {
+                (
+                    value.data_type().band(manifest.value_encoding),
+                    build_value_payload(value, manifest),
+                )
+            }),
         );
         Key::from(varkey::build_key(&parts))
     };
@@ -1404,7 +1421,7 @@ where
                 // reference come from the same pass.
                 let encoded = EncodedValue::new(&artifact.is, manifest);
                 let (entity_key, attribute_key, value_key) =
-                    artifact_index_keys_with(&artifact, encoded.payload);
+                    artifact_index_keys_with(&artifact, encoded.value_type, encoded.payload);
 
                 // Persist a spilling value's bytes as a content-addressed
                 // block before recording the fact; the key holds only the
@@ -1495,7 +1512,11 @@ where
                             if current.of != artifact.of || current.the != artifact.the {
                                 continue;
                             }
-                            if current.is == artifact.is {
+                            // The cell holds the written value when a
+                            // reader of the value's type observes it: an
+                            // integer 4 asserted over a stored 4.3 is what
+                            // the cell already reads as.
+                            if current.is.reads_as(&artifact.is) {
                                 held = Some(priors.len());
                             }
                             let versions: Vec<Version> =
@@ -1593,7 +1614,7 @@ where
                 // cell held it.
                 let encoded = EncodedValue::new(&artifact.is, manifest);
                 let (entity_key, attribute_key, value_key) =
-                    artifact_index_keys_with(&artifact, encoded.payload);
+                    artifact_index_keys_with(&artifact, encoded.value_type, encoded.payload);
                 stage_spilled_value(staged, encoded.spill);
                 let mut datum = Datum::for_artifact(&artifact);
                 datum.version = version;
@@ -1968,6 +1989,12 @@ mod range_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod number_band_tests;
+
+#[cfg(test)]
+mod number_semantics_tests;
 
 #[cfg(test)]
 mod selector_range_tests {

@@ -16,11 +16,12 @@ use std::cmp::Ordering;
 
 use crate::{
     ArtifactSelector, NameShape, Value, ValueDataType,
-    artifacts::selector::Constrained,
+    artifacts::selector::{Constrained, ValueBound},
     decode_bytes_cow, decode_value,
     key::value_payload,
     key::varkey::{KeyRef, ValuePayload, ValueRef},
 };
+use crate::{NUMBER_BAND, encode_key_value_owned};
 use dialog_search_tree::Manifest;
 
 /// The verdict of matching one scanned key against a selector.
@@ -99,7 +100,7 @@ pub fn match_selector_and_key_ref(
     }
 
     if let Some(value) = selector.value() {
-        if value.data_type() != key.value_type {
+        if value.data_type().band(manifest.value_encoding) != key.value_type {
             return SelectorMatch::Excluded;
         }
         // Compare by the same encoding the key was built with. Equality never
@@ -213,6 +214,61 @@ pub fn match_selector_and_key_ref(
     // prefix unless the bound extends past it.
     if selector.value_lower().is_some() || selector.value_upper().is_some() {
         match &key.value {
+            ValueRef::Inline(payload) if key.value_type == ValueDataType::Number => {
+                // The number band orders by its bytes, so a bound compares
+                // with the payload as encoded, without decoding the row.
+                if dialog_number::encoded_len(payload) != Some(payload.len()) {
+                    return SelectorMatch::Excluded;
+                }
+                // A bound of a number type is a lens: the row's number is
+                // read through it before the comparison, so an integer
+                // bound sees 34.5 as 34 and a natural bound does not see
+                // -3. A float bound, or one across number types, compares
+                // the number as it is, which the band's bytes order.
+                let viewed = selector
+                    .value_lower()
+                    .into_iter()
+                    .chain(selector.value_upper())
+                    .any(|bound| bound.lens().is_some())
+                    .then(|| decode_value(ValueDataType::Number, payload))
+                    .flatten();
+                for (bound, lower) in [
+                    (selector.value_lower(), true),
+                    (selector.value_upper(), false),
+                ] {
+                    let Some(bound) = bound else { continue };
+                    if !bound.value.data_type().is_number() {
+                        return SelectorMatch::Excluded;
+                    }
+                    let order = match bound.lens() {
+                        None => match &bound.encoded {
+                            Some(encoded) => (*payload).cmp(encoded.as_slice()),
+                            None => (*payload)
+                                .cmp(encode_key_value_owned(&bound.value, NUMBER_BAND).as_slice()),
+                        },
+                        Some(view) => {
+                            let Some((value, _)) = viewed.clone() else {
+                                return SelectorMatch::Excluded;
+                            };
+                            let Some(value) = value.viewed_as(view) else {
+                                return SelectorMatch::Excluded;
+                            };
+                            match order(&value, &bound.value) {
+                                Some(order) => order,
+                                None => return SelectorMatch::Excluded,
+                            }
+                        }
+                    };
+                    let admitted = match order {
+                        Ordering::Equal => bound.inclusive,
+                        Ordering::Greater => lower,
+                        Ordering::Less => !lower,
+                    };
+                    if !admitted {
+                        return SelectorMatch::Excluded;
+                    }
+                }
+            }
             ValueRef::Inline(payload) => {
                 // An undecodable inline payload is corrupt: fail closed
                 // rather than admit it.
@@ -305,24 +361,59 @@ pub(crate) fn value_predicates_admit(
         }
     }
     if let Some(bound) = selector.value_lower() {
-        if value.data_type() != bound.value.data_type() {
+        if !comparable(value, &bound.value) {
             return false;
         }
-        match value.partial_cmp(&bound.value) {
+        let Some(value) = through_lens(bound, value) else {
+            return false;
+        };
+        match order(&value, &bound.value) {
             Some(Ordering::Greater) => {}
             Some(Ordering::Equal) if bound.inclusive => {}
             _ => return false,
         }
     }
     if let Some(bound) = selector.value_upper() {
-        if value.data_type() != bound.value.data_type() {
+        if !comparable(value, &bound.value) {
             return false;
         }
-        match value.partial_cmp(&bound.value) {
+        let Some(value) = through_lens(bound, value) else {
+            return false;
+        };
+        match order(&value, &bound.value) {
             Some(Ordering::Less) => {}
             Some(Ordering::Equal) if bound.inclusive => {}
             _ => return false,
         }
     }
     true
+}
+
+/// Whether `value` compares with `bound`: values of one type, or two
+/// numbers, which the one band holds together.
+fn comparable(value: &Value, bound: &Value) -> bool {
+    value.data_type() == bound.data_type()
+        || (value.data_type().is_number() && bound.data_type().is_number())
+}
+
+/// `value` as `bound` compares it: a number read through the bound's lens
+/// (see [`lens`]), `None` when the lens does not see it; any other value as
+/// it is.
+fn through_lens(bound: &ValueBound, value: &Value) -> Option<Value> {
+    match bound.lens() {
+        Some(view) if value.data_type().is_number() => value.clone().viewed_as(view),
+        _ => Some(value.clone()),
+    }
+}
+
+/// How `value` orders against a bound. Numbers order by value across
+/// natural, integer and float, as their one-band encoding does.
+fn order(value: &Value, bound: &Value) -> Option<Ordering> {
+    if value.data_type() != bound.data_type() && value.data_type().is_number() {
+        return Some(
+            encode_key_value_owned(value, NUMBER_BAND)
+                .cmp(&encode_key_value_owned(bound, NUMBER_BAND)),
+        );
+    }
+    value.partial_cmp(bound)
 }

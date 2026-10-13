@@ -156,13 +156,17 @@ pub(crate) fn canonicalize(
         .collect();
 
     // The identity reads the premises with their concepts' fields named
-    // by what they read; the working spelling keeps the given names.
+    // by what they read, and without descriptions, which are not part of
+    // any identity and so must not decide the labeling either; the
+    // working spelling keeps the given names and descriptions.
     let given = premises;
     let unnamed: Vec<Premise> = premises
         .iter()
-        .map(unnamed)
+        .map(|premise| unnamed(&without_descriptions(premise)))
         .collect::<Result<_, TypeError>>()?;
     let premises = unnamed.as_slice();
+    let plain = conclusion.without_descriptions();
+    let conclusion = &plain;
 
     let mut atoms = Vec::with_capacity(premises.len() + reduce.len() + fields.len());
     let holed = rename_premises(premises, &holes)?;
@@ -506,6 +510,23 @@ fn unnamed(premise: &Premise) -> Result<Premise, TypeError> {
     })
 }
 
+/// A premise with its concepts' descriptions dropped.
+fn without_descriptions(premise: &Premise) -> Premise {
+    let strip = |query: &ConceptQuery| ConceptQuery {
+        predicate: query.predicate.without_descriptions(),
+        terms: query.terms.clone(),
+    };
+    match premise {
+        Premise::Assert(Proposition::Concept(query)) => {
+            Premise::Assert(Proposition::Concept(strip(query)))
+        }
+        Premise::Unless(Negation(Proposition::Concept(query))) => {
+            Premise::Unless(Negation(Proposition::Concept(strip(query))))
+        }
+        other => other.clone(),
+    }
+}
+
 /// A premise's encoding: its polarity, then its proposition. `None`
 /// for a premise the formal notation cannot express.
 fn encode_premise(premise: &Premise) -> Option<Vec<u8>> {
@@ -678,10 +699,11 @@ mod tests {
         assert_ne!(direct.this(), indirect.this());
     }
 
-    /// The author's spelling is what the rule stores and shows; the
-    /// canonical one is what it hashes. Decoding the stored bytes gives
+    /// The author's spelling is what the rule shows; the canonical one
+    /// is what it hashes and stores. Decoding the stored bytes gives
     /// back the same identity, which is what the content-address check
-    /// on hydration relies on.
+    /// on hydration relies on, and two spellings of one rule store one
+    /// body.
     #[dialog_common::test]
     fn it_stores_the_authored_spelling_under_the_canonical_identity() {
         let authored = rule(vec![knows("x", "friend"), knows("this", "x")]);
@@ -719,7 +741,22 @@ mod tests {
         );
         let decoded = DeductiveRule::decode(&authored.encode()).expect("stored bytes decode");
         assert_eq!(decoded.this(), authored.this());
-        assert_eq!(decoded.descriptor(), descriptor);
+        assert_eq!(decoded.canonical_descriptor(), canonical);
+
+        let respelled = rule(vec![knows("this", "y"), knows("y", "friend")]);
+        assert_eq!(respelled.encode(), authored.encode(), "one body");
+    }
+
+    /// The canonical spelling is a fixed point: a rule compiled from it
+    /// is the same rule, with the same canonical spelling. A stored
+    /// body holds only that spelling, so this is what lets it load.
+    #[dialog_common::test]
+    fn it_compiles_its_canonical_spelling_to_the_same_rule() {
+        let authored = rule(vec![knows("x", "friend"), knows("this", "x")]);
+        let canonical = authored.canonical_descriptor();
+        let recompiled = canonical.clone().compile().expect("canonical compiles");
+        assert_eq!(recompiled.this(), authored.this());
+        assert_eq!(recompiled.canonical_descriptor(), canonical);
     }
 
     /// A rule installed into a bundle whose concept spells the same

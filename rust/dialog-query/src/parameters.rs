@@ -1,7 +1,8 @@
 use crate::term::Term;
 use crate::types::Any;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// A name-to-parameter mapping that describes how a premise is applied.
 ///
@@ -14,12 +15,30 @@ use std::collections::BTreeMap;
 /// which parameters are required vs optional, and the planner uses this
 /// information together with the current [`Environment`](crate::Environment)
 /// to decide whether the premise is viable.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default)]
 /// Kept in name order: everything that iterates a query's parameters,
 /// the planner among them, then sees them in one order in every
 /// process, and a plan does not depend on the hash seed the process
 /// drew.
-pub struct Parameters(BTreeMap<String, Term<Any>>);
+///
+/// Shared on clone: a premise, a plan and every conclusion a concept
+/// yields carry the same parameters, and the evaluator clones them per
+/// row, so a clone is a reference count and the map is copied only when
+/// a holder writes to it.
+pub struct Parameters(Arc<BTreeMap<String, Term<Any>>>);
+
+impl Serialize for Parameters {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.as_ref().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Parameters {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        BTreeMap::deserialize(deserializer).map(|map| Parameters(Arc::new(map)))
+    }
+}
+
 impl Parameters {
     /// Create a new empty parameter set
     pub fn new() -> Self {
@@ -36,13 +55,13 @@ impl Parameters {
     /// Accepts anything convertible to [`Term<Any>`], including `Term<T>`
     /// for any `T: Scalar`.
     pub fn insert(&mut self, name: String, param: Term<Any>) {
-        self.0.insert(name, param);
+        Arc::make_mut(&mut self.0).insert(name, param);
     }
 
     /// Removes the parameter binding for the given name, returning it
     /// when there was one.
     pub fn remove(&mut self, name: &str) -> Option<Term<Any>> {
-        self.0.remove(name)
+        Arc::make_mut(&mut self.0).remove(name)
     }
 
     /// Checks if a parameter binding exists for the given name.

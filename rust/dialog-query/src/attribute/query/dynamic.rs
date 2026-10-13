@@ -488,7 +488,9 @@ mod tests {
 
         assert_eq!(name_results.len(), 1, "Should have exactly one name result");
         assert_eq!(age_results.len(), 1, "Should have exactly one age result");
-        assert_eq!(age_results[0].is(), &Value::SignedInt(30));
+        // Written as an integer, read back raw as the narrowest type that
+        // holds the number: the store keys every number in one band.
+        assert_eq!(age_results[0].is(), &Value::UnsignedInt(30));
 
         Ok(())
     }

@@ -134,15 +134,21 @@ pub fn shipment_ref(
 fn asset_ref(key: &Key) -> Option<ShipmentRef> {
     let parts = parse_key_ref(key.as_ref())?;
     if parts.attribute.as_ref() != ASSET_SIZE.as_bytes()
-        || parts.value_type != ValueDataType::UnsignedInt
+        || !matches!(
+            parts.value_type,
+            ValueDataType::UnsignedInt | ValueDataType::Number
+        )
     {
         return None;
     }
     let ValueRef::Inline(payload) = parts.value else {
         return None;
     };
-    let (Value::UnsignedInt(size), _) = decode_value(ValueDataType::UnsignedInt, payload)? else {
-        return None;
+    // The number band reads a whole number as an integer.
+    let size = match decode_value(parts.value_type, payload)?.0 {
+        Value::UnsignedInt(size) => size,
+        Value::SignedInt(size) => u128::try_from(size).ok()?,
+        _ => return None,
     };
     let entity: Entity = from_utf8(&parts.entity).ok()?.parse().ok()?;
     Some(ShipmentRef::BlobAdded {

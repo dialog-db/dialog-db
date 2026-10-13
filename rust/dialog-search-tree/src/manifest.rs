@@ -50,6 +50,7 @@ mod code {
     pub const FANOUT_N: u64 = 0x02;
     pub const SPILL_PREFIX: u64 = 0x03;
     pub const MAX_SEPARATOR: u64 = 0x04;
+    pub const VALUE_ENCODING: u64 = 0x05;
     pub const MAX_SEGMENT: u64 = 0x06;
     pub const FRAME_CEILING_FACTOR: u64 = 0x08;
     pub const ANCHOR_SELECTOR: u64 = 0x0a;
@@ -62,6 +63,12 @@ mod code {
         code % 2 == 1
     }
 }
+
+/// The `value_encoding` under which every number is keyed in one band, in
+/// dialog-number's encoding. A new tree is created under it; a tree whose
+/// manifest leaves `value_encoding` at 0 keys each number type in its own
+/// band, and is read only to be rewritten under this one.
+pub const NUMBER_BAND: u32 = 1;
 
 /// The format parameters of a tree, carried by every node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +83,10 @@ pub struct Manifest {
     /// How many leading raw value bytes a spilled value's key carries as its
     /// order-preserving prefix.
     pub spill_prefix: u16,
+    /// How keys encode values: 0 keys each type in its own band, 1 keys
+    /// every number in one band in dialog-number's encoding. Critical: a
+    /// tree's readers build keys the way its writers did.
+    pub value_encoding: u32,
     /// Node weight target between coin-decided cuts; 0 turns byte pacing
     /// off. A run between accepted seams whose summed entry weight exceeds
     /// it is force-split at deterministic, leaf-level-only positions.
@@ -148,11 +159,12 @@ impl Extensions {
 /// these, to decide what to omit and what an absent field stands for; a new
 /// tree takes [`Manifest::default`], which the experiment environment can
 /// override.
-const TABLE_DEFAULTS: [(u64, u64); 10] = [
+const TABLE_DEFAULTS: [(u64, u64); 11] = [
     (code::INLINE_N, 4096),
     (code::FANOUT_N, 8),
     (code::SPILL_PREFIX, 64),
     (code::MAX_SEPARATOR, 512),
+    (code::VALUE_ENCODING, 0),
     (code::MAX_SEGMENT, 65536),
     (code::FRAME_CEILING_FACTOR, 3),
     (code::ANCHOR_SELECTOR, 1),
@@ -178,6 +190,7 @@ impl Manifest {
             max_separator: 0,
             inline_n: 0,
             spill_prefix: 0,
+            value_encoding: 0,
             max_segment: 0,
             frame_ceiling_factor: 0,
             anchor_selector: 0,
@@ -203,12 +216,13 @@ impl Manifest {
     }
 
     /// The known fields as `(code, value)` pairs, in ascending code order.
-    fn known_fields(&self) -> [(u64, u64); 10] {
+    fn known_fields(&self) -> [(u64, u64); 11] {
         [
             (code::INLINE_N, u64::from(self.inline_n)),
             (code::FANOUT_N, u64::from(self.fanout_n)),
             (code::SPILL_PREFIX, u64::from(self.spill_prefix)),
             (code::MAX_SEPARATOR, u64::from(self.max_separator)),
+            (code::VALUE_ENCODING, u64::from(self.value_encoding)),
             (code::MAX_SEGMENT, u64::from(self.max_segment)),
             (
                 code::FRAME_CEILING_FACTOR,
@@ -236,6 +250,7 @@ impl Manifest {
             code::FANOUT_N => self.fanout_n = fit(code, value)?,
             code::SPILL_PREFIX => self.spill_prefix = fit(code, value)?,
             code::MAX_SEPARATOR => self.max_separator = fit(code, value)?,
+            code::VALUE_ENCODING => self.value_encoding = fit(code, value)?,
             code::MAX_SEGMENT => self.max_segment = fit(code, value)?,
             code::FRAME_CEILING_FACTOR => self.frame_ceiling_factor = fit(code, value)?,
             code::ANCHOR_SELECTOR => self.anchor_selector = fit(code, value)?,
@@ -412,6 +427,12 @@ impl Default for Manifest {
                         "DIALOG_TREE_ANCHOR_SELECTOR",
                         table.anchor_selector,
                     ),
+                    // A fresh tree keys every number in one band. The table
+                    // default stays 0, which is what a manifest written
+                    // before the band means by the field's absence;
+                    // `DIALOG_TREE_VALUE_ENCODING=0` creates per-type-band
+                    // trees, so the perf suite measures both from one binary.
+                    value_encoding: env_override("DIALOG_TREE_VALUE_ENCODING", NUMBER_BAND),
                     ..table
                 }
             })
@@ -545,6 +566,7 @@ mod tests {
             max_separator: 300,
             inline_n: 70_000,
             spill_prefix: 32,
+            value_encoding: 1,
             max_segment: 0,
             frame_ceiling_factor: 0,
             anchor_selector: 0,
@@ -571,7 +593,7 @@ mod tests {
         let mut sorted = codes.clone();
         sorted.sort_unstable();
         assert_eq!(codes, sorted);
-        assert_eq!(codes.len(), 10);
+        assert_eq!(codes.len(), 11);
         Ok(())
     }
 
@@ -660,7 +682,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} ({code:#x}) is in the table but not the code"));
             assert_eq!(*known, code);
             assert_eq!(value.to_string(), default, "{name}'s default");
-            let critical = matches!(name, "inline_n" | "spill_prefix");
+            let critical = matches!(name, "inline_n" | "spill_prefix" | "value_encoding");
             assert_eq!(code::is_critical(code), critical, "{name}'s parity");
             rows += 1;
         }

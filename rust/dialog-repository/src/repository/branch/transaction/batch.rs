@@ -617,6 +617,22 @@ impl TransactionCommit<TransactionBatch> {
     }
 }
 
+/// NaN is not a value: a commit that would write one is refused before
+/// anything lands, as deserialization and the rule compiler refuse it.
+fn refuse_nan<'a>(changes: impl Iterator<Item = &'a Change>) -> Result<(), CommitError> {
+    for change in changes {
+        if let Change::Assert(dialog_artifacts::Value::Float(float), _) = change
+            && float.is_nan()
+        {
+            return Err(dialog_artifacts::DialogArtifactsError::InvalidValue(
+                "NaN is not a value".into(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Mint one staged link: run commit-time induction over the batch, then
 /// [`Mint`] the settled changes on the line `line` names, carrying the
 /// trigger footprint forward. Nothing is published or adopted — the
@@ -651,6 +667,7 @@ where
         + ConditionalSync
         + 'static,
 {
+    refuse_nan(changes.log().iter().map(|(_, _, change)| change))?;
     let operator = Identify.perform(env).await?;
     let mut changes = Box::pin(succession::settle(
         vec![source.to_source()],
@@ -673,6 +690,7 @@ where
         allow_empty,
         canonicalize,
         amend,
+        rebuild: None,
     }
     .perform(env, line)
     .await?;

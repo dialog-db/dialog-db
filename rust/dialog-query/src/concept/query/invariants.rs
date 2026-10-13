@@ -8,6 +8,7 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+use crate::query::Application as _;
 use crate::query::Output as _;
 use crate::rule::DeductiveRuleDescriptor;
 use crate::session::RuleRegistry;
@@ -527,7 +528,7 @@ async fn a_recursive_relation_read_under_last_yields_one_value_per_entity() -> a
     let source = TestEnv::new(&branch, &operator, registry);
 
     let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-        "ancestor": { "the": "family/ancestor", "as": "entity:", "pick": "last" }
+        "ancestor": { "the": "family/ancestor", "as": "entity:", "pick": "last:" }
     }}))?;
     let mut terms = Parameters::new();
     terms.insert("this".into(), Term::<Any>::constant(c.clone()));
@@ -629,11 +630,11 @@ async fn a_rule_recursing_through_a_last_read_derives_down_the_chain() -> anyhow
         "deduce": { "with": { "label": { "the": "x/label", "as": "text:" } } },
         "when": [
             {
-                "assert": { "with": { "next": { "the": "x/next", "as": "entity:", "pick": "last" } } },
+                "assert": { "with": { "next": { "the": "x/next", "as": "entity:", "pick": "last:" } } },
                 "where": { "this": { "?": { "name": "this" } }, "next": { "?": { "name": "next" } } }
             },
             {
-                "assert": { "with": { "label": { "the": "x/label", "as": "text:", "pick": "last" } } },
+                "assert": { "with": { "label": { "the": "x/label", "as": "text:", "pick": "last:" } } },
                 "where": { "this": { "?": { "name": "next" } }, "label": { "?": { "name": "label" } } }
             }
         ]
@@ -771,7 +772,7 @@ async fn every_last_read_of_a_cell_elects_the_same_claim() -> anyhow::Result<()>
             .collect::<Result<_, crate::EvaluationError>>()?;
 
         let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
-            "salary": { "the": "org/salary", "as": "natural:", "pick": "last" }
+            "salary": { "the": "org/salary", "as": "natural:", "pick": "last:" }
         }}))?;
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::<Any>::constant(of.clone()));

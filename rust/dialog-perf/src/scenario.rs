@@ -13,6 +13,7 @@ use dialog_query::ConceptDescriptor;
 use crate::env::{Env, assert_all, concept, entity, fact, text};
 
 mod commit;
+mod number;
 mod read;
 mod rule;
 mod subscribe;
@@ -155,8 +156,55 @@ pub fn catalog() -> Vec<Spec> {
             name: "rule-install",
             size: 100,
             about: "one transaction committing `size` rules, then the first read of the last one: discovery and hydration cold",
-            volatile: false,
+            // Its commit's tree write varies between runs of one binary
+            // (221 M to 232 M instructions on main, 225 M to 234 M on the
+            // pick-entity head, every counter equal, with or without
+            // ASLR), all of it in vector growth in the reshape path.
+            // Gated on counters.
+            volatile: true,
             prepare: |size| Box::pin(rule::install(size)),
+        },
+        Spec {
+            name: "number-commit",
+            size: 1000,
+            about: "one transaction asserting a timestamp, a price, a count and a size per item: how numbers key",
+            volatile: false,
+            prepare: |size| Box::pin(number::commit(size)),
+        },
+        Spec {
+            name: "number-point",
+            size: 2000,
+            about: "two hundred single-item reads of a float price",
+            volatile: false,
+            prepare: |size| Box::pin(number::point(size)),
+        },
+        Spec {
+            name: "number-scan",
+            size: 2000,
+            about: "one read of every item's float price: a number decoded per row",
+            volatile: false,
+            prepare: |size| Box::pin(number::scan(size)),
+        },
+        Spec {
+            name: "number-range-narrow",
+            size: 2000,
+            about: "twenty reads of the ten items in a window of integer timestamps, the window pushed into the scan",
+            volatile: false,
+            prepare: |size| Box::pin(number::narrow(size)),
+        },
+        Spec {
+            name: "number-range-wide",
+            size: 2000,
+            about: "one read of every item priced at 500 or more, about half, the bound pushed into the scan",
+            volatile: false,
+            prepare: |size| Box::pin(number::wide(size)),
+        },
+        Spec {
+            name: "number-range-mixed",
+            size: 2000,
+            about: "one read of the tenth of items with the largest size, a relation holding naturals, integers and floats",
+            volatile: false,
+            prepare: |size| Box::pin(number::mixed(size)),
         },
         Spec {
             name: "subscribe-repoll",

@@ -167,6 +167,14 @@ fn encode_refinement(refinement: &Refinement, out: &mut Map<String, Json>) {
         slot.insert("case".into(), Json::String(case.into()));
         out.insert("name".into(), Json::Object(slot));
     }
+    if !refinement.views.is_empty() {
+        let views = refinement
+            .views
+            .iter()
+            .map(|view| Json::String(view.uri().into()))
+            .collect();
+        out.insert("views".into(), Json::Array(views));
+    }
     if !refinement.conforms.is_empty() {
         let targets = refinement
             .conforms
@@ -239,6 +247,22 @@ pub fn decode(json: &Json) -> Result<Type, WireError> {
                 let domain = field(value, "is", "domain")?;
                 kind.with_prefix(format!("{domain}/"))
                     .ok_or(WireError::Uninhabited("domain"))?
+            }
+            "views" => {
+                let Json::Array(views) = value else {
+                    return Err(WireError::Malformed("views: expected an array"));
+                };
+                for view in views {
+                    let view = view
+                        .as_str()
+                        .and_then(ValueType::named)
+                        .filter(|view| view.is_view())
+                        .ok_or(WireError::Malformed("views: entry"))?;
+                    kind = kind
+                        .intersect(&Type::from(view))
+                        .ok_or(WireError::Uninhabited("views"))?;
+                }
+                kind
             }
             "name" => {
                 let case = field(value, "case", "name")?;

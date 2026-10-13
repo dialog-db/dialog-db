@@ -2,6 +2,7 @@ use super::memory::Cell;
 use crate::rules::SharedRuleCache;
 use crate::{Ephemeral, RemoteFallback, ResolveError, Revision};
 use dialog_capability::Provider;
+use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory;
@@ -69,6 +70,8 @@ mod open;
 pub use open::*;
 
 mod merge;
+mod migrate;
+pub use migrate::*;
 mod pull;
 pub use pull::*;
 
@@ -191,6 +194,13 @@ pub struct Branch {
     /// verification that otherwise run on every ancestry step (skip
     /// extension, context walks, causality).
     record_cache: dialog_search_tree::Cache<Version, RevisionRecord>,
+    /// Shared memo of trees rewritten under the band this release writes
+    /// (see `branch::migrate::aligned`), keyed by the root of the tree
+    /// an earlier release laid out, holding the root of its rewrite. A
+    /// rewrite is a pure function of the tree, so entries never
+    /// invalidate; a hit spares the full rewrite a pull would otherwise
+    /// repeat for a sync base it rewrote as the previous upstream head.
+    rewrite_cache: dialog_search_tree::Cache<NodeHash, NodeHash>,
     /// Carries the live buffered spine between this branch's commits (keyed
     /// by the tree root it was persisted as, so any out-of-band head change
     /// safely misses), sparing every commit the root-frame decode and
@@ -621,6 +631,12 @@ impl Branch {
     /// A shared handle to this branch's verified-record memo.
     pub(crate) fn records(&self) -> dialog_search_tree::Cache<Version, RevisionRecord> {
         self.record_cache.clone()
+    }
+
+    /// A shared handle to this branch's memo of trees rewritten under the
+    /// current band, by the root of the tree they rewrite.
+    pub(crate) fn rewrites(&self) -> dialog_search_tree::Cache<NodeHash, NodeHash> {
+        self.rewrite_cache.clone()
     }
 
     /// The branch entity and version-control origin this branch commits

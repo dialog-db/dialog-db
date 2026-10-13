@@ -11,7 +11,7 @@ use dialog_artifacts::history::{
     Context, Edition, Origin, RevisionRecord, TreeHistory, Version, context_of, extend_skips,
 };
 use dialog_artifacts::tree::{Stamp, WriteScope};
-use dialog_artifacts::{Datum, DialogArtifactsError, Entity, Instruction, Key, State};
+use dialog_artifacts::{Datum, DialogArtifactsError, Entity, Instruction, Key, NUMBER_BAND, State};
 use dialog_capability::{Did, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -38,6 +38,7 @@ pub struct Commit<'a, Changes> {
     entries: Vec<(Key, State<Datum>)>,
     merge: bool,
     machinery: Vec<Instruction>,
+    rebuild: Option<Index>,
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
@@ -51,7 +52,18 @@ impl<'a, Changes> Commit<'a, Changes> {
             entries: Vec::new(),
             merge: false,
             machinery: Vec::new(),
+            rebuild: None,
         }
+    }
+
+    /// Build on `tree` in place of the base revision's own: the revision
+    /// minted names it, with the batch's changes and its record applied.
+    /// For a rewrite of the base's tree under another format (see
+    /// [`Branch::rekey_storage`]), whose nodes the caller has persisted.
+    /// The tree is written as it is, whatever format it carries.
+    pub(crate) fn rebuilding(mut self, tree: Index) -> Self {
+        self.rebuild = Some(tree);
+        self
     }
 
     /// Permit reserved `dialog.*` attributes in the change stream.
@@ -294,6 +306,7 @@ where
             allow_empty: self.allow_empty,
             canonicalize: self.canonicalize,
             amend: None,
+            rebuild: self.rebuild,
         }
         .perform(env, |profile, issuer| {
             branch.commit_identity(profile, issuer)
@@ -411,6 +424,7 @@ where
             allow_empty: self.allow_empty,
             canonicalize: self.canonicalize,
             amend: None,
+            rebuild: self.rebuild,
         }
         .perform(env, |_, issuer| {
             (lineage.clone(), origin_of(&lineage, issuer))
@@ -497,6 +511,9 @@ pub(crate) struct Mint<'a, Changes> {
     /// is a staged revision nobody has seen, and this is what it recorded.
     /// See [`TransactionCommit::amend`](crate::TransactionCommit::amend).
     pub(crate) amend: Option<Amended>,
+    /// The tree to build on in place of the base revision's. See
+    /// [`Commit::rebuilding`].
+    pub(crate) rebuild: Option<Index>,
 }
 
 /// What a staged revision recorded about itself, for a [`Mint`] amending
@@ -598,11 +615,31 @@ where
         // commits and queries already fetched (and blocks the persist below
         // seeds), instead of re-fetching everything into a cache that dies
         // with this commit.
-        let mut tree = match base_revision.as_ref() {
-            Some(base) => {
-                Index::from_hash_with_cache(NodeHash::from(*base.tree.hash()), source.node_cache())
+        let mut tree = match (self.rebuild, base_revision.as_ref()) {
+            (Some(rebuilt), _) => rebuilt,
+            (None, Some(base)) => {
+                let tree = Index::from_hash_with_cache(
+                    NodeHash::from(*base.tree.hash()),
+                    source.node_cache(),
+                );
+                // A tree written the way an earlier release laid values out
+                // is read, never extended: it is rewritten first (see
+                // `Branch::migrate_storage`), and every write after that
+                // builds on the rewrite. A rewrite is the one commit that
+                // builds on a tree of its own.
+                let manifest = tree
+                    .manifest(&store)
+                    .await
+                    .map_err(DialogArtifactsError::from)?;
+                if manifest.value_encoding != NUMBER_BAND {
+                    return Err(CommitError::NeedsMigration(format!(
+                        "its tree keys values under encoding {}, and this release writes {NUMBER_BAND}",
+                        manifest.value_encoding
+                    )));
+                }
+                tree
             }
-            None => Index::empty_with_cache(source.node_cache()),
+            (None, None) => Index::empty_with_cache(source.node_cache()),
         };
 
         // Drain the change stream into the tree. EAV/AEV/VAE writes,

@@ -172,14 +172,14 @@ impl Term<Relation> {
     ///
     /// ```
     /// use dialog_query::{Term, Premise};
-    /// use dialog_query::attribute::The;
+    /// use dialog_query::attribute::Relation;
     /// use dialog_query::artifact::Entity;
     ///
     /// let alice = Entity::try_from("urn:alice".to_string()).unwrap();
     /// let bob = Entity::try_from("urn:bob".to_string()).unwrap();
     ///
     /// // Find all relations between alice and bob
-    /// let premise: Premise = Term::<The>::var("relation")
+    /// let premise: Premise = Term::<Relation>::var("relation")
     ///     .of(alice)
     ///     .is(bob)
     ///     .into();

@@ -20,11 +20,13 @@ pub mod descriptor;
 use crate::artifact::Entity;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
+use crate::identity;
 use crate::negation::Negation;
 use crate::planner::{Conjunction, Planner};
 use crate::premise::Premise;
 use crate::rule::analyzer::AnalyzedRule;
 use crate::rule::body;
+use crate::rule::reference;
 use crate::rule::{Compile, RuleKind, fmt_rule_schema};
 use crate::{Environment, Parameters, Proposition};
 use descriptor::InductiveRuleDescriptor;
@@ -139,28 +141,41 @@ impl InductiveRule {
         self.conclusion().apply(parameters)
     }
 
-    /// Canonical dag-cbor encoding of this rule's descriptor, if the
-    /// body is expressible in formal notation. Mirrors
+    /// This rule's stored body, its canonical spelling in the current
+    /// body format, if the body is expressible in formal notation. Mirrors
     /// [`DeductiveRule::try_encode`](crate::rule::DeductiveRule::try_encode):
     /// rules built directly from raw [`AttributeQuery`](crate::AttributeQuery)
     /// premises encode to nothing, because `Proposition`'s
     /// formal-notation `Serialize` rejects attribute propositions.
     pub fn try_encode(&self) -> Option<Vec<u8>> {
-        body::encode(&self.descriptor())
+        body::encode(&self.canonical_descriptor())
     }
 
     /// This rule's content-addressed identity, if it has an encodable
-    /// body: `rule:<base58(blake3(dag-cbor(canonical descriptor)))>`,
-    /// the same for every spelling of the body (see
-    /// [`canonical`](crate::rule::canonical)). The `assert!` head field
-    /// is part of the encoding, so an inductive rule never collides
-    /// with the deductive rule of the same body.
+    /// body: `rule:` and the base58 of the merkle reference of its
+    /// canonical spelling (see [`reference`](crate::rule::reference)),
+    /// the same for every spelling of the body. The head is keyed
+    /// `assert!` or `retract!`, so an inductive rule never collides with
+    /// the deductive rule of the same body.
     pub fn try_this(&self) -> Option<Entity> {
-        use base58::ToBase58;
-        let canonical = serde_ipld_dagcbor::to_vec(&self.canonical_descriptor()).ok()?;
-        let hash = blake3::hash(&canonical);
-        let encoded = hash.as_bytes().as_ref().to_base58();
-        format!("rule:{encoded}").parse().ok()
+        let head = match self.polarity {
+            Polarity::Assert => "assert!",
+            Polarity::Retract => "retract!",
+        };
+        let reference = match &self.analysis.canonical {
+            Some(identity) => reference::rule(
+                head,
+                &identity.conclusion,
+                &identity.premises,
+                &identity.reduce,
+            )?,
+            None => {
+                let descriptor = self.canonical_descriptor();
+                let conclusion = descriptor.assert.as_ref().or(descriptor.retract.as_ref())?;
+                reference::described(head, conclusion, &descriptor.when, &descriptor.unless, [])?
+            }
+        };
+        Some(identity::entity("rule:", reference))
     }
 
     /// Whether this rule's body is what was stored under `entity`:
@@ -172,7 +187,7 @@ impl InductiveRule {
         self.try_this().as_ref() == Some(entity)
     }
 
-    /// Canonical dag-cbor encoding, panicking if the rule has no
+    /// This rule's stored body, panicking if the rule has no
     /// encodable body. Use on the storage path where the rule is known
     /// to be storable (concept/formula bodies); prefer
     /// [`try_encode`](Self::try_encode) otherwise.
@@ -189,9 +204,10 @@ impl InductiveRule {
             .expect("storable rule must have a content-addressed identity")
     }
 
-    /// Rebuild a rule from its canonical dag-cbor [`encode`](Self::encode)
-    /// bytes. `Err` carries a human-readable reason — either the cbor
-    /// decode failed or the decoded descriptor didn't compile.
+    /// Rebuild a rule from a stored body, in this release's format or an
+    /// earlier one, in its canonical spelling. `Err` carries a
+    /// human-readable reason: the body did not decode, or its descriptor
+    /// did not compile.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
         let descriptor: InductiveRuleDescriptor = body::decode(bytes)?;
         descriptor.compile().map_err(|e| e.to_string())
@@ -357,6 +373,41 @@ mod tests {
         assert!(!rule.stored_as(&legacy));
         let other: Entity = "rule:forged".parse().expect("an entity");
         assert!(!rule.stored_as(&other));
+    }
+
+    /// The body holds the canonical spelling, so two spellings store one
+    /// body, and a retracting rule keeps its polarity through storage.
+    #[dialog_common::test]
+    fn it_stores_one_body_for_every_spelling() {
+        let spelled = |head: &str, local: &str| -> InductiveRule {
+            let descriptor: InductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+                head: { "with": { "tag": { "the": "derived/tag", "as": "text:" } } },
+                "when": [{
+                    "assert": { "with": { "title": { "the": "doc/title", "as": "text:" } } },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "title": { "?": { "name": local } }
+                    }
+                }, {
+                    "assert": "==",
+                    "where": { "this": { "?": { "name": local } }, "is": { "?": { "name": "tag" } } }
+                }]
+            }))
+            .expect("descriptor parses");
+            descriptor.compile().expect("rule compiles")
+        };
+        let a = spelled("assert!", "t");
+        let b = spelled("assert!", "u");
+        assert_eq!(a.encode(), b.encode());
+        assert_eq!(a.this(), b.this());
+        let decoded = InductiveRule::decode(&a.encode()).expect("the body decodes");
+        assert_eq!(decoded.this(), a.this());
+
+        let retracting = spelled("retract!", "t");
+        assert_ne!(retracting.encode(), a.encode());
+        let decoded = InductiveRule::decode(&retracting.encode()).expect("the body decodes");
+        assert_eq!(decoded.polarity(), Polarity::Retract);
+        assert_eq!(decoded.this(), retracting.this());
     }
 
     #[dialog_common::test]

@@ -1,0 +1,25 @@
+[package]
+name = "dialog-number"
+description = "Dialog's numbers: one exact decimal domain with one canonical, order-preserving encoding"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+readme = "README.md"
+
+[dependencies]
+zmij = { workspace = true }
+
+[dev-dependencies]
+ryu = { workspace = true }
+dialog-common = { workspace = true, features = ["helpers"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = { workspace = true }
+
+[lints.rust]
+# This cfg is used by the dialog_common::test proc macro for wasm inner tests
+unexpected_cfgs = { level = "warn", check-cfg = [
+    "cfg(dialog_test_wasm_integration)",
+    "cfg(feature, values(\"web-integration-tests\", \"integration-tests\"))",
+] }

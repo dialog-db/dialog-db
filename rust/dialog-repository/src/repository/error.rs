@@ -499,6 +499,12 @@ pub enum CommitError {
     #[error("Succession failed: {0}")]
     Succession(String),
 
+    /// The branch stores its data the way an earlier release laid it
+    /// out, and this release does not write into such a tree. Run
+    /// [`Branch::migrate`](crate::Branch::migrate) first.
+    #[error("The branch must be migrated before it is written: {0}")]
+    NeedsMigration(String),
+
     /// Reading the registry for what a write replaces failed.
     #[error("Failed to read the registry: {0}")]
     Registry(String),
