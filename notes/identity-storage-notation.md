@@ -734,6 +734,30 @@ crate is the shape; indefinitely, and the feature is. A pull that meets
 a legacy head is then refused with the same "migrate first" error:
 mixed-version sync is not supported, which is already the stance.
 
+### Next cycle: a number of any size in memory
+
+The band and the identity already carry a number of any size: a
+`dialog_number::Number` holds its base-100 digits in a vector, the key
+format bounds nothing, and SQLite4's numeric class, which the encoding
+follows, never did either. The bound is `Value`: `UnsignedInt(u128)`,
+`SignedInt(i128)` and `Float(f64)`, nothing wider. So a 40-digit integer
+has a key and an identity but no way in, and a stored number wider than
+`u128` decodes to the nearest float (`read_scalar` tries integer, then
+natural, then falls to `f64`). The float question above, whether `2^64`
+as a float is the natural `2^64`, is a symptom of the same bound: with a
+decimal in memory, a float's identity as its shortest decimal is plain,
+because the lossy step is visibly the `f64` the caller chose.
+
+The next cycle adds a `Value` variant holding a `Number`, or makes
+`Number` the one number representation with `u128`, `i128` and `f64` as
+views over it, as the sized types already are. The key encoding and the
+identity hash do not move, so this is a Rust-surface change with no
+storage migration, and it lands in the same API-breaking cycle as the
+single layout above. Until then, integers past `2^53` should enter as
+integers, never through a float: the JSON reader should parse an integer
+literal of any width exactly (serde_json's `arbitrary_precision`) rather
+than through `f64`, which loses it before dialog sees it.
+
 ## Decided
 
 - **`natural`, `integer` and `float` are views** over one `number` value type.

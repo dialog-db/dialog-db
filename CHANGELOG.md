@@ -93,6 +93,13 @@ What this changes for you:
   `cardinality`. Before, every concept write was an `all` write, so a
   cardinality-one field accumulated a claim per write; reads elected the
   newest, so they read right while the cell grew.
+- The band and the identity carry a number of any size (dialog-number
+  keys any decimal), but `Value` does not yet: it holds `u128`, `i128`
+  and `f64`, so no wider number enters, and a stored number wider than
+  `u128` reads back as the nearest float. A `Value` variant holding a
+  `dialog_number::Number`, with the fixed-width types as views over it,
+  is planned for the next cycle; it changes no key and no identity, so
+  nothing stored now will need rewriting for it.
 - `ValueDataType::holds` reads the same for every number type: a type
   holds a number its view reads unchanged, so `float:` holds the natural
   `3` and `natural:` the float `3.0`, as `float:64` and `natural:8`
