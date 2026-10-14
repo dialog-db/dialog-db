@@ -600,7 +600,9 @@ oversight:
 - The watermark lag is the bottom's. A rule on an upper layer fires
   on what the commit changes and on the bottom's catch-up, not on
   what entered its own layer outside the stack; that layer's own
-  transactions catch it up.
+  transactions catch it up. On the `sapling` branch, what enters an
+  ephemeral upper layer is induced over too (*Rules over what enters an
+  upper layer*); a durable upper layer still has no lag.
 - A layer's session store (the old overlay) does not dispatch rules
   in a stack transaction; tree layers and standalone ephemeral layers
   do. Session stores are on their way out with the ephemeral layer.
@@ -800,6 +802,36 @@ it needs before its workers move onto stacks. Each is offered upstream.
   through a queue as large as its log; more instants than that between two
   calls of the channel make a gap, every peer resyncs, and a command that
   waited is lost with the log. See the docs of `Channel` for the timeline.
+- **Rules over what enters an upper layer.** The watermark lag of *Known
+  limits* now covers each ephemeral layer. A stack observes each of them,
+  and its next commit treats each fact that entered one outside the stack,
+  such as one that `Channel::receive` applied, as a change of the commit, as
+  the bottom's lag treats what a pull brought. A rule fires on it once, at
+  that commit, even a commit with no facts of its own. `receive` itself runs
+  no rule: induction stays inside a commit that its owner makes. As the
+  bottom's watermark moves only with a commit that lands, what entered
+  counts as induced only once the commit that induced over it publishes; a
+  commit whose publish fails, or whose chain an advance or a pull drops,
+  leaves it for the run again. The witness of a transient that entered is
+  not a change of the store, and is not part of it. What another stack
+  writes into a shared layer entered this one. What entered is kept as one
+  net change for each fact, as the bottom's lag is a net diff: a fact that
+  entered and left again before the next commit changed nothing. A fact that
+  entered and makes a rule derive a write that fails to route fails every
+  commit until the layer drops it, as a fact of the bottom's lag does on
+  0.3.0; once it leaves, the next commit lands. A commit of the stack that
+  clears or forgets it is one that drops it: what that commit clears or
+  forgets is no change of it. To recover from a gap, the stack keeps a copy
+  of what each ephemeral layer holds, so each such layer costs about twice
+  its facts in memory. A commit drains its observers as it lands, so its own
+  instants never wait for the next one. The stack observes each layer
+  through a queue as large as a channel's log. Past that it gaps, logs it,
+  and takes what entered from the layer itself: the facts it holds now
+  against those it held when the queue last saw it. What the stack wrote
+  itself in the gap counts as entered then too. A worker holds one stack,
+  and its clones, for its whole life: another stack over the same layer
+  counts this one's writes as entered, and what entered while no stack was
+  open fires no rule.
 
 ## Order of work
 
@@ -829,8 +861,8 @@ it needs before its workers move onto stacks. Each is offered upstream.
 
 - Descriptor blobs in the archive, `Stack::open` by a stack identity
   alone, `named`, the registry metadata.
-- The upper-layer watermark lag, and rule dispatch from a layer's
-  session store (both listed under *Known limits*).
+- The watermark lag of a durable upper layer, and rule dispatch from a
+  layer's session store (both listed under *Known limits*).
 - Per-session layers in tonk (`memory:session`, one layer per
   connection linked above the application layer) and the inspector
   over the environment's ephemeral registry.
