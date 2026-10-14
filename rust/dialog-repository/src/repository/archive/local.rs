@@ -46,7 +46,7 @@ impl<'a, Env: ?Sized> LocalIndex<'a, Env> {
 
 impl<Env> LocalIndex<'_, Env>
 where
-    Env: ?Sized + Provider<Get> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + ConditionalSync,
 {
     /// The block stored under `hash` in the local archive, if any, as the
     /// archive holds it: unverified. Readers outside the crate load through
@@ -64,7 +64,7 @@ where
 
 impl<Env> LocalIndex<'_, Env>
 where
-    Env: ?Sized + Provider<Get> + Provider<BlobRead> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<BlobRead> + ConditionalSync,
 {
     /// The spilled value stored under `hash` locally, if any.
     ///
@@ -113,7 +113,7 @@ pub(crate) fn archive_error(error: BlobError) -> ArchiveError {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<LoadBlock> for LocalIndex<'_, Env>
 where
-    Env: ?Sized + Provider<Get> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + ConditionalSync,
 {
     async fn execute(
         &self,
@@ -131,7 +131,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<LoadBlob> for LocalIndex<'_, Env>
 where
-    Env: ?Sized + Provider<Get> + Provider<BlobRead> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<BlobRead> + ConditionalSync,
 {
     async fn execute(
         &self,
