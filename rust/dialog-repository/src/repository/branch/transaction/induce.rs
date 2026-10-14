@@ -100,7 +100,9 @@ impl Witness for &Ephemeral {
 /// read from where `watermark` says;
 /// `view` is every line a rule body reads and every line whose rules
 /// dispatch, which is `source` alone for a transaction on one branch
-/// and the whole composite for a [`Stack`](crate::Stack).
+/// and the whole composite for a [`Stack`](crate::Stack). `entered` is
+/// what entered the upper layers of a stack outside it since its last
+/// commit: a change of this commit, as the lag of `source` is.
 ///
 /// Returns every transient a rule head emitted, across all rounds. The
 /// dispatched `transients` are not part of it.
@@ -112,6 +114,7 @@ pub(crate) async fn induce<Env, W: Witness>(
     placements: &Placements,
     changes: &mut Changes,
     mut transients: Changes,
+    entered: Vec<Instruction>,
     witness: &mut W,
     env: &Env,
 ) -> Result<Changes, CommitError>
@@ -167,6 +170,10 @@ where
         });
     }
     stimulus.extend(lag);
+    // What entered an upper layer of a stack outside it since its last
+    // commit, such as what a channel received: a change of this commit,
+    // as the lag is for the bottom.
+    stimulus.extend(entered);
     let mut induced = Changes::new();
     if stimulus.is_empty() {
         return Ok(induced);
@@ -4209,6 +4216,7 @@ mod tests {
             &placements,
             &mut changes,
             transients,
+            Vec::new(),
             &mut view.overlay(),
             &operator,
         )

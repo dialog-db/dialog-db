@@ -174,7 +174,14 @@ pub struct Instant {
 /// prevents. An instant minted outside a stack commit has no hold, and
 /// counts as released.
 #[derive(Clone, Debug, Default)]
-pub struct CommitHold(Option<Arc<AtomicU8>>);
+pub struct CommitHold {
+    /// Where the commit stands, shared by each instant it minted; `None`
+    /// for an instant minted outside a stack commit.
+    state: Option<Arc<AtomicU8>>,
+    /// The stack in the process whose write minted the instant. No stack
+    /// is 0, which the hold of no stack's write carries.
+    owner: u64,
+}
 
 /// Where a [`CommitHold`] stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,9 +200,30 @@ const HOLD_RELEASED: u8 = 1;
 const HOLD_DROPPED: u8 = 2;
 
 impl CommitHold {
-    /// A new hold, open until it is released or dropped.
-    pub(crate) fn open() -> Self {
-        Self(Some(Arc::new(AtomicU8::new(HOLD_OPEN))))
+    /// A new hold of a commit of the stack `owner`, open until it is
+    /// released or dropped.
+    pub(crate) fn open(owner: u64) -> Self {
+        Self {
+            state: Some(Arc::new(AtomicU8::new(HOLD_OPEN))),
+            owner,
+        }
+    }
+
+    /// The hold of a write of the stack `owner` that waits for no publish,
+    /// such as the wiring that an advance re-stamps: released from the
+    /// start, and still known as that stack's own.
+    pub(crate) fn released(owner: u64) -> Self {
+        Self {
+            state: Some(Arc::new(AtomicU8::new(HOLD_RELEASED))),
+            owner,
+        }
+    }
+
+    /// Whether the stack `owner` minted the instant: a commit, or a write
+    /// that waits for no publish. An instant with no hold, or one that
+    /// another stack minted, entered the layer outside this stack.
+    pub(crate) fn by(&self, owner: u64) -> bool {
+        self.state.is_some() && self.owner == owner
     }
 
     /// The commit published: its instants may leave. A hold that was
@@ -211,14 +239,18 @@ impl CommitHold {
     }
 
     fn settle(&self, to: u8) {
-        if let Some(state) = &self.0 {
+        if let Some(state) = &self.state {
             let _ = state.compare_exchange(HOLD_OPEN, to, Ordering::SeqCst, Ordering::SeqCst);
         }
     }
 
     /// Where the hold stands now.
     pub(crate) fn state(&self) -> Held {
-        match self.0.as_ref().map(|state| state.load(Ordering::SeqCst)) {
+        match self
+            .state
+            .as_ref()
+            .map(|state| state.load(Ordering::SeqCst))
+        {
             Some(HOLD_OPEN) => Held::Open,
             Some(HOLD_DROPPED) => Held::Dropped,
             _ => Held::Released,
