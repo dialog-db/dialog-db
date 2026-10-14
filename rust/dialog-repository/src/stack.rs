@@ -114,7 +114,12 @@ use parking_lot::RwLock;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::placement::{Placements, Target, elected};
+mod guide;
+
+pub use guide::Divergence;
+pub(crate) use guide::{Divergences, Guide, GuidedLayer};
+
+use crate::placement::{Bindings, Placements, Target, elected};
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::registry::RegistryEnv;
 use crate::repository::branch::resolve::ResolveEnv;
@@ -579,13 +584,12 @@ struct Topology {
 
 impl Topology {
     /// Whether a write of `the` lands only in tree layers, as the commit
-    /// routes it under `placements`: a write with no placement, or of the
-    /// default scope, lands on the bottom, and any other on the layers
-    /// linked under its scope.
+    /// routes it under `placements`: a write placed on a scope that links
+    /// bind lands on the layers linked under it, and any other on the
+    /// bottom.
     fn lands_in_trees(&self, placements: &Placements, the: &dialog_artifacts::Relation) -> bool {
-        match placements.scope_of(the) {
+        match placements.placement_of(the) {
             None => true,
-            Some(scope) if Some(scope) == placements.default_scope() => true,
             Some(scope) => self.bound.get(scope).is_none_or(|indices| {
                 indices
                     .iter()
@@ -838,7 +842,11 @@ pub struct OpenStack {
 
 impl OpenStack {
     /// Link `from` to `to` under `name` once the stack is open, as
-    /// [`StackTransaction::link`] would.
+    /// [`StackTransaction::link`] would. A layer linked beneath another
+    /// enters just beneath it, so of the layers that one layer links side
+    /// by side, the first linked is lowest: link the bottom first, since
+    /// the bottom holds the placements and takes every write that has
+    /// none.
     pub fn link<F: AsLayer, T: AsLayer>(mut self, from: &F, to: &T, name: Entity) -> Self {
         self.edits.push(LinkEdit::Link {
             from: from.as_layer(),
@@ -1146,6 +1154,9 @@ where
 pub struct Stack {
     /// Wiring, heads, and staged chains, shared by clones.
     state: Arc<RwLock<State>>,
+    /// The divergences of placement that reads of the stack found, until
+    /// its host takes them. Shared by clones.
+    divergences: Divergences,
 }
 
 /// What a stack knows: its shape, and its layers' heads.
@@ -1242,7 +1253,17 @@ impl Stack {
                 staged,
                 induced: None,
             })),
+            divergences: Divergences::default(),
         }
+    }
+
+    /// Takes each divergence of placement that a read of the stack found
+    /// since the last call: a fact in a layer outside the scope of its
+    /// attribute's placement. No read sees such a fact, and each one is
+    /// reported once, with its attribute and its layer. See
+    /// [`Divergence`].
+    pub fn divergences(&self) -> Vec<Divergence> {
+        self.divergences.take()
     }
 
     /// The shape now.
@@ -1521,7 +1542,32 @@ impl Stack {
     fn composite_at(&self, topology: &Topology, heads: &[Head], top_staged: bool) -> Composite {
         let top = topology.layers.len().saturating_sub(1);
         let mut composite = Composite::default();
+        let mut guide = Guide {
+            lines: Vec::new(),
+            ephemerals: Vec::new(),
+            bound: topology.bound.keys().cloned().collect(),
+            bottom: match topology.layers.first() {
+                Some(Layer::Branch(branch)) => branch.bindings().clone(),
+                Some(Layer::Snapshot(snapshot)) => snapshot.bindings().clone(),
+                _ => Bindings::default(),
+            },
+            divergences: self.divergences.clone(),
+        };
         for (index, layer) in topology.layers.iter().enumerate() {
+            let guided = GuidedLayer {
+                address: layer.address_entity(),
+                scopes: topology
+                    .bound
+                    .iter()
+                    .filter(|(_, layers)| layers.contains(&index))
+                    .map(|(scope, _)| scope.clone())
+                    .collect(),
+                bottom: index == 0,
+            };
+            match layer {
+                Layer::Ephemeral(_) => guide.ephemerals.push(guided),
+                Layer::Branch(_) | Layer::Snapshot(_) => guide.lines.push(guided),
+            }
             match layer {
                 Layer::Branch(branch) if index == top && !top_staged => composite
                     .sources
@@ -1540,6 +1586,14 @@ impl Stack {
                     .push(Source::Snapshot(Arc::new(snapshot.clone()))),
                 Layer::Ephemeral(ephemeral) => composite.ephemerals.push(ephemeral.clone()),
             }
+        }
+        // The placements live in the bottom layer, so a read is guided
+        // only when the bottom is a tree.
+        if matches!(
+            topology.layers.first(),
+            Some(Layer::Branch(_) | Layer::Snapshot(_))
+        ) {
+            composite.guide = Some(Arc::new(guide));
         }
         composite
     }
@@ -1853,7 +1907,6 @@ impl State {
 struct StackWitness<'a> {
     topology: &'a Topology,
     placements: &'a Placements,
-    default: Option<Entity>,
     bottom: &'a Ephemeral,
 }
 
@@ -1862,9 +1915,9 @@ impl Witness for StackWitness<'_> {
         let mut shares: BTreeMap<Option<usize>, Changes> = BTreeMap::new();
         for instruction in transients.clone().into_instructions() {
             let (op, artifact) = split(instruction);
-            let targets: Vec<Option<usize>> = match self.placements.scope_of(&artifact.the) {
+            // A scope that links bind decides first, as for routing.
+            let targets: Vec<Option<usize>> = match self.placements.placement_of(&artifact.the) {
                 None => vec![None],
-                Some(scope) if Some(scope) == self.default.as_ref() => vec![None],
                 Some(scope) => match self.topology.bound.get(scope) {
                     Some(indices) => indices.iter().map(|index| Some(*index)).collect(),
                     None => vec![None],
@@ -1958,11 +2011,13 @@ impl<'a> StackTransaction<'a> {
 
     /// Link `from` to `to` under `name`: `from` records `to`'s head
     /// and the name routes to `to`. A `from` not yet in the stack
-    /// enters beneath the top; a `to` not yet in the stack enters
-    /// beneath `from`. The audience rule, the ordering, and a
-    /// snapshot's inability to link are checked when the transaction
-    /// commits, and the link facts land on `from` with the rest of
-    /// the commit.
+    /// must enter through another link of the transaction; a `to` not
+    /// yet in the stack enters just beneath `from`, so of the layers
+    /// that `from` links side by side, the first linked is lowest, and
+    /// the lowest of all is the bottom, which holds the placements.
+    /// The audience rule, the ordering, and a snapshot's inability to
+    /// link are checked when the transaction commits, and the link
+    /// facts land on `from` with the rest of the commit.
     pub fn link<F: AsLayer, T: AsLayer>(mut self, from: &F, to: &T, name: Entity) -> Self {
         self.edits.push(LinkEdit::Link {
             from: from.as_layer(),
@@ -2187,10 +2242,37 @@ impl<'a> StackCommit<'a> {
         // induction itself adds routes the settled batch below.
         let mut witness = StackWitness {
             topology: &topology,
-            default: staged.default_scope().cloned(),
             placements: &staged,
             bottom: primary.overlay(),
         };
+        // A transient placed on a scope that no link binds, that is not the
+        // default, and that the bottom does not bind to its tree, has no
+        // store that a read of the stack takes: it is refused, as a write
+        // of it is. A transient that the transaction asserted is one it
+        // dispatched.
+        let unserved = |artifact: &Artifact| match staged.placement_of(&artifact.the) {
+            Some(scope)
+                if !topology.bound.contains_key(scope)
+                    && Some(scope) != staged.default_scope()
+                    && primary.bindings().target(scope) != Some(Target::Tree) =>
+            {
+                Err(StackError::from(CommitError::UnboundScope {
+                    attribute: artifact.the.to_string(),
+                    scope: scope.to_string(),
+                }))
+            }
+            _ => Ok(()),
+        };
+        for instruction in self.transients.export().into_instructions() {
+            let (_, artifact) = split(instruction);
+            unserved(&artifact)?;
+        }
+        for instruction in changes.clone().into_instructions() {
+            let (_, artifact) = split(instruction);
+            if staged.is_transient(&artifact.the) {
+                unserved(&artifact)?;
+            }
+        }
         let mut changes = changes;
         // Assets ride apart from the facts: induction and routing rebuild
         // the batch fact by fact, and only a tree can store an asset, so
@@ -2216,11 +2298,13 @@ impl<'a> StackCommit<'a> {
         let default = placements.default_scope().cloned();
         for instruction in changes.into_instructions() {
             let (op, artifact) = split(instruction);
-            let targets: Vec<usize> = match placements.scope_of(&artifact.the) {
+            // A scope that links bind decides first, as for a read, so a
+            // default scope never overrides a placement.
+            let targets: Vec<usize> = match placements.placement_of(&artifact.the) {
                 None => vec![0],
-                Some(scope) if Some(scope) == default.as_ref() => vec![0],
                 Some(scope) => match topology.bound.get(scope) {
                     Some(indices) => indices.clone(),
+                    None if Some(scope) == default.as_ref() => vec![0],
                     None => match primary.bindings().target(scope) {
                         Some(Target::Tree) => vec![0],
                         Some(Target::Session) | None => {
@@ -4774,6 +4858,365 @@ mod tests {
         Ok(())
     }
 
+    /// A stack over `shared`, with the ephemeral layer `state` linked
+    /// above it under `memory:state`, and `cmd.increment/counter` placed
+    /// on that scope by the session store of the bottom. The increment
+    /// rule is held in `state`, so only the stack's commits run it, and
+    /// the counter starts at 1.
+    async fn guided_stack(
+        operator: &impl StackSyncEnv,
+        shared: &Branch,
+    ) -> Result<(Stack, Ephemeral, Entity)> {
+        let counter: Entity = "ctr:1".parse()?;
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(operator)
+            .await?;
+        shared.refresh(operator).await?;
+        let state = Ephemeral::create().perform(operator).await;
+        let mut rule = Changes::new();
+        increment_rule().assert(&mut rule);
+        state.apply(rule).unwrap();
+        shared.overlay().assert(Placement::new(
+            "cmd.increment/counter".parse()?,
+            name("state"),
+        ))?;
+        let top = Ephemeral::create().perform(operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, shared, name("shared"))
+            .perform(operator)
+            .await?;
+        Ok((stack, state, counter))
+    }
+
+    /// A fact placed on one scope and found in the layer of another
+    /// reaches no query and no rule, and the stack reports it once.
+    /// Here a raw commit through another handle of the bottom, which
+    /// holds no placement, brings a command that belongs to the ephemeral
+    /// layer.
+    #[dialog_common::test]
+    async fn it_reads_no_fact_that_a_commit_put_outside_its_scope() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let (stack, _, counter) = guided_stack(&operator, &shared).await?;
+        // The scope `memory:state` names the ephemeral layer, not the
+        // bottom.
+        let mut layers = stack.layers();
+        let bottom = layers.remove(0).address_entity();
+
+        // A raw commit through another handle: it runs no rule and
+        // knows no placement, so the fact waits in the induction lag of
+        // the bottom until the next commit of the stack.
+        let other = repo.branch("main").open().perform(&operator).await?;
+        let command: Entity = "cmd:1".parse()?;
+        other
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "cmd.increment/counter".parse()?,
+                    of: command.clone(),
+                    is: Value::Entity(counter.clone()),
+                    cause: None,
+                },
+                Pick::All,
+            )]))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            committed(&other, &operator, "cmd.increment/counter", &command)
+                .await?
+                .len(),
+            1,
+            "the bottom holds the misplaced fact"
+        );
+        stack.advance(&operator).await?;
+
+        assert!(
+            values::<Entity>(&stack, &operator, "cmd.increment/counter", &command)
+                .await?
+                .is_empty(),
+            "no query reads it"
+        );
+        // A commit of the stack catches up with what entered the bottom:
+        // the misplaced command fires no rule.
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("note/text")
+                    .of("note:1".parse::<Entity>()?)
+                    .is("hello".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(1)],
+            "the rule did not fire on the misplaced command"
+        );
+        assert_eq!(
+            stack.divergences(),
+            vec![Divergence {
+                attribute: "cmd.increment/counter".into(),
+                layer: bottom,
+                scope: Some(name("state")),
+            }],
+            "the divergence is reported once, with the attribute and the layer"
+        );
+        assert!(stack.divergences().is_empty(), "and taken once");
+        Ok(())
+    }
+
+    /// The same holds for a fact that a pull brings: a replica with no
+    /// placement commits a command, the bottom pulls it, and neither a
+    /// query nor a subscription of the stack reads it.
+    #[dialog_common::test]
+    async fn it_reads_no_fact_that_a_pull_put_outside_its_scope() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let (stack, _, counter) = guided_stack(&operator, &shared).await?;
+
+        let mut subscription = stack.query().subscribe(AttributeQuery::from(
+            Term::<Relation>::from(dialog_query::the!("cmd.increment/counter"))
+                .of(Term::<Entity>::var("e"))
+                .is(Term::<Entity>::var("v")),
+        ));
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert!(initial.asserted.is_empty());
+
+        let foreign = repo.branch("foreign").open().perform(&operator).await?;
+        foreign.pull().from(&shared).perform(&operator).await?;
+        let command: Entity = "cmd:1".parse()?;
+        foreign
+            .transaction()
+            .assert(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command.clone())
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.pull().from(&foreign).perform(&operator).await?;
+        stack.advance(&operator).await?;
+        // The poll after the advance maintains the result from the diff of
+        // the bottom: the misplaced fact is no change of it.
+        let delta = subscription.poll(&operator).await?;
+        assert!(
+            delta.is_none_or(|delta| delta.asserted.is_empty()),
+            "no subscription reads it"
+        );
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "the poll maintained the result"
+        );
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("note/text")
+                    .of("note:1".parse::<Entity>()?)
+                    .is("hello".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(1)],
+            "the rule did not fire on the pulled command"
+        );
+        assert_eq!(stack.divergences().len(), 1);
+        Ok(())
+    }
+
+    /// A fact that enters an upper ephemeral layer, outside the scope of
+    /// its placement, reaches no query and no subscription, on the
+    /// incremental path too, and is reported. So does one that the session
+    /// store of the bottom holds.
+    #[dialog_common::test]
+    async fn it_reads_no_fact_that_an_upper_layer_holds_outside_its_scope() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let (stack, state, counter) = guided_stack(&operator, &shared).await?;
+        shared
+            .overlay()
+            .assert(Placement::new("site/path".parse()?, name("shared")))?;
+        let site: Entity = "site:1".parse()?;
+        let mut subscription = stack.query().subscribe(AttributeQuery::from(
+            Term::<Relation>::from(dialog_query::the!("site/path"))
+                .of(Term::<Entity>::var("e"))
+                .is(Term::<String>::var("v")),
+        ));
+        subscription.poll(&operator).await?.expect("initial");
+
+        let mut misplaced = Changes::new();
+        dialog_query::the!("site/path")
+            .of(site.clone())
+            .is("/upper".to_string())
+            .assert(&mut misplaced);
+        state.apply(misplaced)?;
+        let delta = subscription.poll(&operator).await?;
+        assert!(
+            delta.is_none_or(|delta| delta.asserted.is_empty()),
+            "no subscription reads it"
+        );
+        assert!(
+            values::<String>(&stack, &operator, "site/path", &site)
+                .await?
+                .is_empty()
+        );
+        assert_eq!(
+            stack.divergences(),
+            vec![Divergence {
+                attribute: "site/path".into(),
+                layer: state.entity().clone(),
+                scope: Some(name("shared")),
+            }]
+        );
+
+        // The bottom's session store is memory of the bottom: a command
+        // placed on the ephemeral layer is not read from it.
+        let command: Entity = "cmd:1".parse()?;
+        shared.overlay().assert(
+            dialog_query::the!("cmd.increment/counter")
+                .of(command.clone())
+                .is(counter),
+        )?;
+        assert!(
+            values::<Entity>(&stack, &operator, "cmd.increment/counter", &command)
+                .await?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    /// A subscription evaluates afresh when the placements that guide it
+    /// move: a placement in the session store of the bottom moves an
+    /// attribute off the bottom, and the row it read goes.
+    #[dialog_common::test]
+    async fn it_reevaluates_a_subscription_when_a_placement_moves() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let site: Entity = "site:1".parse()?;
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("site/path")
+                    .of(site.clone())
+                    .is("/committed".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared
+            .transaction()
+            .assert(Placement::new("site/path".parse()?, name("shared")))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        let mut subscription = stack.query().subscribe(AttributeQuery::from(
+            Term::<Relation>::from(dialog_query::the!("site/path"))
+                .of(Term::<Entity>::var("e"))
+                .is(Term::<String>::var("v")),
+        ));
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(initial.asserted.len(), 1);
+
+        shared
+            .overlay()
+            .assert(Placement::new("site/path".parse()?, name("state")))?;
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("the moved placement re-evaluates the subscription");
+        assert_eq!(delta.retracted.len(), 1, "the row of the bottom goes");
+        Ok(())
+    }
+
+    /// A placement in the session store of the bottom guides reads, and
+    /// outranks a placement that the bottom commits: the bottom commits
+    /// `site/path` onto its own scope, the session store moves it to the
+    /// ephemeral layer, and a fact of it in the bottom is not read.
+    #[dialog_common::test]
+    async fn it_reads_by_the_placement_of_the_session_store_first() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let site: Entity = "site:1".parse()?;
+        // The fact first: the branch alone binds no scope but its tree,
+        // so it refuses a fact placed elsewhere.
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("site/path")
+                    .of(site.clone())
+                    .is("/committed".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared
+            .transaction()
+            .assert(Placement::new("site/path".parse()?, name("shared")))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            values::<String>(&stack, &operator, "site/path", &site).await?,
+            vec![Value::String("/committed".into())],
+            "the committed placement names the bottom"
+        );
+
+        shared
+            .overlay()
+            .assert(Placement::new("site/path".parse()?, name("state")))?;
+        assert!(
+            values::<String>(&stack, &operator, "site/path", &site)
+                .await?
+                .is_empty(),
+            "the session store moves the attribute to the ephemeral layer"
+        );
+        assert_eq!(stack.divergences().len(), 1);
+        Ok(())
+    }
+
     /// Placement says where a fact belongs: a declared attribute lands
     /// under its scope, `forget` drops an entity's facts from the
     /// scope's layer, `clear` empties it, and none of it touches the
@@ -4919,6 +5362,277 @@ mod tests {
                 Err(StackError::Commit(CommitError::UnboundScope { .. }))
             ),
             "a scope nothing is linked under refuses the write: {unbound:?}"
+        );
+        Ok(())
+    }
+
+    /// A placement that a transaction declares guides a query of it, as
+    /// it routes the commit: a row outside the scope it names is no longer
+    /// read.
+    #[dialog_common::test]
+    async fn it_reads_by_a_placement_that_the_transaction_declares() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let doc: Entity = "doc:1".parse()?;
+        let mut held = Changes::new();
+        dialog_query::the!("ui/selected")
+            .of(doc.clone())
+            .is(true)
+            .assert(&mut held);
+        state.apply(held).unwrap();
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            seen::<bool>(&stack.transaction().query(), &operator, "ui/selected", &doc).await?,
+            vec![Value::Boolean(true)],
+            "an attribute with no placement is read from every layer"
+        );
+        let placed = stack
+            .transaction()
+            .assert(Placement::new("ui/selected".parse()?, name("shared")))
+            .query();
+        assert!(
+            seen::<bool>(&placed, &operator, "ui/selected", &doc)
+                .await?
+                .is_empty(),
+            "the placement that the transaction declares leads the read to the bottom"
+        );
+        Ok(())
+    }
+
+    /// A default scope that a writer of the bottom commits never overrides
+    /// a placement: an attribute placed on a scope that a link binds is
+    /// read from that layer, and written there, even when the default
+    /// names the same scope.
+    #[dialog_common::test]
+    async fn it_reads_by_a_placement_over_a_default_that_names_its_scope() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let space: Entity = "space:1".parse()?;
+        shared
+            .transaction()
+            .assert(crate::DefaultScope::new(&repo.did(), name("device")))
+            .assert(
+                dialog_query::the!("idx/origin")
+                    .of(space.clone())
+                    .is("forged".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        shared
+            .overlay()
+            .assert(Placement::new("idx/origin".parse()?, name("device")))?;
+        let device = Ephemeral::create().perform(&operator).await;
+        let mut held = Changes::new();
+        dialog_query::the!("idx/origin")
+            .of(space.clone())
+            .is("real".to_string())
+            .assert(&mut held);
+        device.apply(held)?;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &device, name("device"))
+            .link(&device, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            values::<String>(&stack, &operator, "idx/origin", &space).await?,
+            vec![Value::String("real".into())],
+            "the placement leads the read to the device layer alone"
+        );
+        let other: Entity = "space:2".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("idx/origin")
+                    .of(other.clone())
+                    .is("new".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            device
+                .scan(&ArtifactSelector::new().the("idx/origin".parse()?).of(other))
+                .len(),
+            1,
+            "and its write lands there"
+        );
+
+        // An attribute with no placement belongs to the bottom, whatever
+        // layer the default scope binds: its write lands there, and the
+        // stack reads it back.
+        let note: Entity = "note:1".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("note/text")
+                    .of(note.clone())
+                    .is("hello".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "note/text", &note).await?,
+            vec![Value::String("hello".into())],
+            "the unplaced write lands on the bottom"
+        );
+        assert_eq!(
+            values::<String>(&stack, &operator, "note/text", &note).await?,
+            vec![Value::String("hello".into())],
+            "and the stack reads it"
+        );
+        Ok(())
+    }
+
+    /// A retraction that a layer holds outside the scope of its attribute
+    /// hides nothing, as a fact there reaches no read: a guided read takes
+    /// the tombstones of a layer only for the attributes it reads there.
+    #[dialog_common::test]
+    async fn it_hides_nothing_with_a_retraction_outside_its_scope() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        shared
+            .overlay()
+            .assert(crate::DefaultScope::new(&repo.did(), name("shared")))?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let mut retracted = Changes::new();
+        retracted.dissociate(
+            "doc/title".parse()?,
+            doc.clone(),
+            Value::String("Notes".into()),
+        );
+        application.apply(retracted)?;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &application, name("application"))
+            .link(&application, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            values::<String>(&stack, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Notes".into())],
+            "the misplaced retraction hides nothing"
+        );
+        Ok(())
+    }
+
+    /// An attribute placed on a scope that no link of the stack binds, and
+    /// that the bottom does not bind to its tree, has no layer in the
+    /// stack: a fact of it in the bottom reaches no read, and is reported,
+    /// as in a space whose stack links no `memory:device`.
+    #[dialog_common::test]
+    async fn it_reads_no_fact_of_a_scope_that_the_stack_does_not_bind() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        shared
+            .overlay()
+            .assert(Placement::new("idx/name".parse()?, name("device")))?;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        let bottom = stack.layers()[0].address_entity();
+
+        // A member commits the index fact into the subject.
+        let other = repo.branch("main").open().perform(&operator).await?;
+        let persona: Entity = "persona:1".parse()?;
+        other
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "idx/name".parse()?,
+                    of: persona.clone(),
+                    is: Value::String("Eve".into()),
+                    cause: None,
+                },
+                Pick::All,
+            )]))
+            .perform(&operator)
+            .await?;
+        stack.advance(&operator).await?;
+
+        assert!(
+            values::<String>(&stack, &operator, "idx/name", &persona)
+                .await?
+                .is_empty(),
+            "no read takes the fact"
+        );
+        assert_eq!(
+            stack.divergences(),
+            vec![Divergence {
+                attribute: "idx/name".into(),
+                layer: bottom,
+                scope: Some(name("device")),
+            }]
+        );
+        Ok(())
+    }
+
+    /// A transient placed on a scope that the stack does not bind has no
+    /// store that a read of the stack takes: dispatching it is refused, as
+    /// a write of it is.
+    #[dialog_common::test]
+    async fn it_refuses_a_transient_of_a_scope_that_the_stack_does_not_bind() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        shared
+            .overlay()
+            .assert(Placement::new("cmd/open".parse()?, name("nowhere")))?;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        let refused = stack
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd/open")
+                    .of("doc:1".parse::<Entity>()?)
+                    .is(true),
+            )
+            .commit()
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(StackError::Commit(CommitError::UnboundScope { .. }))
+            ),
+            "a transient of an unbound scope is refused: {refused:?}"
         );
         Ok(())
     }
