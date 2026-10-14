@@ -319,10 +319,10 @@ pub(crate) async fn resolve_against(
 
 /// How a settlement reads `view`: its lines with `overlay`, and its
 /// standalone ephemeral layers, whose rows a read elects among like the
-/// rows of a session overlay.
+/// rows of a session overlay, guided by placement as a read of the
+/// stack is, so a claim outside its scope is no candidate.
 fn read<'a>(view: &Composite, overlay: &Arc<Changes>, env: &'a Erased) -> QueryEnv<'a> {
-    QueryEnv::new(view.sources.clone(), overlay.clone(), env)
-        .with_ephemerals(view.ephemerals.clone())
+    QueryEnv::over(view.clone(), overlay.clone(), env)
 }
 
 /// A claim or candidate a succession may elect: its value and its

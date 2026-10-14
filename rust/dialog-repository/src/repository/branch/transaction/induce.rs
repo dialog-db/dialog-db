@@ -142,7 +142,20 @@ where
     // missed one is caught up.
     let mut stimulus: Vec<Instruction> = changes.clone().into_instructions();
     stimulus.extend(transients.clone().into_instructions());
-    stimulus.extend(lag_delta(source, env).await?);
+    let mut lag = lag_delta(source, env).await?;
+    // In a stack, the lag is what entered the bottom, and a read of the
+    // bottom is guided by placement: a fact of an attribute placed on
+    // another scope fires no rule, as it answers no query.
+    if let Some(guide) = &view.guide
+        && let Some(bottom) = guide.lines.first()
+    {
+        let scopes = placements.scopes();
+        lag.retain(|instruction| {
+            let (Instruction::Assert(fact, _) | Instruction::Retract(fact)) = instruction;
+            guide.admits(bottom, &scopes, fact.the.as_str())
+        });
+    }
+    stimulus.extend(lag);
     let mut induced = Changes::new();
     if stimulus.is_empty() {
         return Ok(induced);
