@@ -72,22 +72,26 @@ impl Session {
     {
         let request = match Request::decode(bytes) {
             Ok(request) => request,
-            Err(error) => return Some(malformed(None, error.to_string())),
+            Err(error) => return Some(malformed(None, None, error.to_string())),
         };
-        let (container, payload) = match request {
+        let (id, container, payload) = match request {
             Request::Cancel { invocation } => {
                 self.watches.remove(&invocation);
                 return None;
             }
-            Request::Invoke { container, payload } => (container, payload),
+            Request::Invoke {
+                id,
+                container,
+                payload,
+            } => (id, container, payload),
         };
         let container = match Container::from_bytes(&container) {
             Ok(container) => container,
-            Err(error) => return Some(malformed(None, error.to_string())),
+            Err(error) => return Some(malformed(id, None, error.to_string())),
         };
         let chain = match InvocationChain::try_from(container.clone()) {
             Ok(chain) => chain,
-            Err(error) => return Some(malformed(None, error.to_string())),
+            Err(error) => return Some(malformed(id, None, error.to_string())),
         };
         let invocation = chain.invocation.to_cid().to_string();
         let watch = chain.command().0.iter().map(String::as_str).eq(WATCH);
@@ -97,12 +101,12 @@ impl Session {
                     self.watches.insert(invocation.clone(), subscription);
                     Reply::State { invocation, state }
                 }
-                Err(answer) => reply(Some(invocation), answer).await,
+                Err(answer) => reply(id, Some(invocation), answer).await,
             });
         }
         let payload = Payload::Bytes(payload.unwrap_or_default());
         let answer = access.answer(container, payload, Issuance::Required).await;
-        Some(reply(Some(invocation), answer).await)
+        Some(reply(id, Some(invocation), answer).await)
     }
 
     /// Deliver that the cell `cell` in `space` of `subject` now holds
@@ -177,8 +181,9 @@ pub struct Change<'a> {
     pub state: &'a CellState,
 }
 
-fn malformed(invocation: Option<String>, detail: String) -> Reply {
+fn malformed(id: Option<u64>, invocation: Option<String>, detail: String) -> Reply {
     Reply::Answer {
+        id,
         invocation,
         status: 400,
         version: None,
@@ -187,12 +192,13 @@ fn malformed(invocation: Option<String>, detail: String) -> Reply {
     }
 }
 
-async fn reply(invocation: Option<String>, answer: Answer) -> Reply {
+async fn reply(id: Option<u64>, invocation: Option<String>, answer: Answer) -> Reply {
     let response = match answer {
         Answer::Performed(response) => response,
         Answer::Refused(refusal) => refusal.into_response(),
         Answer::Unsupported => {
             return Reply::Answer {
+                id,
                 invocation,
                 status: 406,
                 version: None,
@@ -204,6 +210,7 @@ async fn reply(invocation: Option<String>, answer: Answer) -> Reply {
     let version = response.version;
     let body = response.body.collect().await.unwrap_or_default();
     Reply::Answer {
+        id,
         invocation,
         status,
         version,

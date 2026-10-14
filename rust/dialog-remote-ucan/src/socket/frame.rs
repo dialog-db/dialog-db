@@ -14,6 +14,12 @@ pub enum Request {
     /// An invocation, and the bytes it stores when it is a write: what a
     /// request carries in its `Authorization` header and its body.
     Invoke {
+        /// Which of the client's frames this is, echoed in the answer, so
+        /// an answer reaches whoever sent the frame even when the service
+        /// could not read the invocation in it. The client chooses it, and
+        /// it need only differ from the others it awaits an answer to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<u64>,
         /// The invocation's container, as dag-cbor.
         #[serde(with = "serde_bytes")]
         container: Vec<u8>,
@@ -35,7 +41,17 @@ pub enum Request {
 pub enum Reply {
     /// How an invocation was answered: what a response to a request
     /// carries. A watch that is not accepted is answered this way too.
+    ///
+    /// An answer naming neither a frame nor an invocation answers a frame
+    /// the service could not read at all. A client cannot tell which of
+    /// its frames that was, so it takes it as the answer to none and fails
+    /// every invocation it awaits an answer to, since any of them may be
+    /// the one.
     Answer {
+        /// The frame answered, as its `Invoke` named it, or none for a
+        /// frame that could not be read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<u64>,
         /// The invocation answered, or none for a frame whose invocation
         /// could not be read.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,10 +170,12 @@ mod tests {
     fn it_reads_back_every_frame() {
         let requests = [
             Request::Invoke {
+                id: Some(7),
                 container: vec![1, 2, 3],
                 payload: Some(vec![4, 5]),
             },
             Request::Invoke {
+                id: None,
                 container: vec![1],
                 payload: None,
             },
@@ -170,12 +188,21 @@ mod tests {
         }
         let replies = [
             Reply::Answer {
+                id: Some(7),
                 invocation: Some("bafy".into()),
                 status: 200,
                 version: Some("v1".into()),
                 body: vec![9],
             },
             Reply::Answer {
+                id: Some(8),
+                invocation: None,
+                status: 400,
+                version: None,
+                body: Vec::new(),
+            },
+            Reply::Answer {
+                id: None,
                 invocation: None,
                 status: 400,
                 version: None,

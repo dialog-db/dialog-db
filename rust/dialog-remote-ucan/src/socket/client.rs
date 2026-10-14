@@ -97,57 +97,116 @@ impl Sockets {
     }
 }
 
-/// Who is waiting on which invocation, shared between a connection and
-/// what reads it.
+/// Who is waiting on which reply, shared between a connection and what
+/// reads it.
+///
+/// An invocation awaiting its answer is found by the frame that carried
+/// it, which the answer names even when the service could not read the
+/// invocation, or else by the invocation. A watch, once the service
+/// answers it with the cell's state, is found by its invocation, which
+/// every later state names.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Routes {
-    waiting: Arc<Mutex<HashMap<String, UnboundedSender<Reply>>>>,
+    waits: Arc<Mutex<Waits>>,
+    frames: Arc<std::sync::atomic::AtomicU64>,
     closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[derive(Debug, Default)]
+struct Waits {
+    /// Invocations awaiting their answer, by the frame that carried them,
+    /// with the invocation's name.
+    answers: HashMap<u64, (String, UnboundedSender<Reply>)>,
+    /// Watches the service began, by invocation.
+    watches: HashMap<String, UnboundedSender<Reply>>,
+}
+
 impl Routes {
-    fn wait(&self, invocation: String) -> UnboundedReceiver<Reply> {
+    /// Wait for what the service answers `invocation` with: the frame to
+    /// send it in, and where the replies arrive.
+    fn wait(&self, invocation: String) -> (u64, UnboundedReceiver<Reply>) {
+        let frame = self
+            .frames
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (sender, receiver) = unbounded();
-        self.waiting
+        self.waits
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(invocation, sender);
-        receiver
+            .answers
+            .insert(frame, (invocation, sender));
+        (frame, receiver)
     }
 
     fn forget(&self, invocation: &str) {
-        self.waiting
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(invocation);
+        let mut waits = self.waits.lock().unwrap_or_else(PoisonError::into_inner);
+        waits
+            .answers
+            .retain(|_, (awaited, _)| awaited != invocation);
+        waits.watches.remove(invocation);
     }
 
-    /// Hand `reply` to whoever waits on the invocation it names. A reply
-    /// that ends what was waited on (a refused watch, an ended one) ends
-    /// the wait.
+    /// Hand `reply` to whoever waits on it. An answer, or the end of a
+    /// watch, is the last reply its wait gets; a watch's first state moves
+    /// it from awaiting its answer to following its cell.
+    ///
+    /// An answer naming neither a frame nor an invocation answers a frame
+    /// the service could not read at all, which could have been any of
+    /// those awaiting an answer, so every one of them is handed it.
     pub(crate) fn route(&self, reply: Reply) {
-        let Some(invocation) = reply.invocation().map(str::to_string) else {
-            return;
-        };
-        let last = !matches!(reply, Reply::State { .. });
-        let mut waiting = self.waiting.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(sender) = waiting.get(&invocation)
-            && sender.unbounded_send(reply).is_err()
-        {
-            waiting.remove(&invocation);
-        }
-        if last {
-            waiting.remove(&invocation);
+        let mut waits = self.waits.lock().unwrap_or_else(PoisonError::into_inner);
+        match &reply {
+            Reply::Answer {
+                id: None,
+                invocation: None,
+                ..
+            } => {
+                for (_, (_, sender)) in waits.answers.drain() {
+                    let _ = sender.unbounded_send(reply.clone());
+                }
+            }
+            Reply::Answer { id, invocation, .. } => {
+                let frame = id.filter(|id| waits.answers.contains_key(id)).or_else(|| {
+                    waits
+                        .answers
+                        .iter()
+                        .find(|(_, (awaited, _))| Some(awaited) == invocation.as_ref())
+                        .map(|(frame, _)| *frame)
+                });
+                if let Some((_, sender)) = frame.and_then(|frame| waits.answers.remove(&frame)) {
+                    let _ = sender.unbounded_send(reply);
+                }
+            }
+            Reply::State { invocation, .. } => {
+                let began = waits
+                    .answers
+                    .iter()
+                    .find(|(_, (awaited, _))| awaited == invocation)
+                    .map(|(frame, _)| *frame);
+                if let Some((_, sender)) = began.and_then(|frame| waits.answers.remove(&frame)) {
+                    waits.watches.insert(invocation.clone(), sender);
+                }
+                let delivered = waits
+                    .watches
+                    .get(invocation)
+                    .is_some_and(|sender| sender.unbounded_send(reply.clone()).is_ok());
+                if !delivered {
+                    waits.watches.remove(invocation);
+                }
+            }
+            Reply::Ended { invocation, .. } => {
+                if let Some(sender) = waits.watches.remove(invocation) {
+                    let _ = sender.unbounded_send(reply);
+                }
+            }
         }
     }
 
     /// The connection closed: every wait ends.
     pub(crate) fn close(&self) {
         self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
-        self.waiting
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
+        let mut waits = self.waits.lock().unwrap_or_else(PoisonError::into_inner);
+        waits.answers.clear();
+        waits.watches.clear();
     }
 
     fn is_closed(&self) -> bool {
@@ -174,8 +233,9 @@ impl Connection {
         invocation: String,
         container: Vec<u8>,
     ) -> Result<Watching, MemoryError> {
-        let replies = self.routes.wait(invocation.clone());
+        let (id, replies) = self.routes.wait(invocation.clone());
         let frame = Request::Invoke {
+            id: Some(id),
             container,
             payload: None,
         }
@@ -194,22 +254,38 @@ impl Connection {
 
     /// Send the invocation `container` carries, named `invocation`, with
     /// the bytes a write stores, and wait for the service's answer.
+    ///
+    /// An answer to a frame the service could not read at all fails it:
+    /// it may have been this one, and whether this invocation was carried
+    /// out is then not known.
     pub(crate) async fn invoke(
         &self,
         invocation: String,
         container: Vec<u8>,
         payload: Option<Vec<u8>>,
     ) -> Result<Reply, MemoryError> {
-        let mut replies = self.routes.wait(invocation.clone());
-        let frame = Request::Invoke { container, payload }.encode();
+        let (id, mut replies) = self.routes.wait(invocation.clone());
+        let frame = Request::Invoke {
+            id: Some(id),
+            container,
+            payload,
+        }
+        .encode();
         if let Err(error) = self.link.send(frame) {
             self.routes.forget(&invocation);
             return Err(error);
         }
-        replies
-            .next()
-            .await
-            .ok_or_else(|| unavailable("the socket closed before the service answered"))
+        match replies.next().await {
+            Some(Reply::Answer {
+                id: None,
+                invocation: None,
+                ..
+            }) => Err(unavailable(
+                "the service could not read a frame, which may have been this one",
+            )),
+            Some(reply) => Ok(reply),
+            None => Err(unavailable("the socket closed before the service answered")),
+        }
     }
 
     fn cancel(&self, invocation: &str) {
@@ -360,6 +436,7 @@ mod tests {
                     while let Some(Ok(message)) = socket.next().await {
                         if let Message::Binary(_) = message {
                             let reply = Reply::Answer {
+                                id: None,
                                 invocation: None,
                                 status: 400,
                                 version: None,

@@ -1188,10 +1188,46 @@ mod layer {
 
     fn invoke(container: &Container, payload: Option<Vec<u8>>) -> Vec<u8> {
         Frame::Invoke {
+            id: Some(1),
             container: container.to_bytes().expect("encodes"),
             payload,
         }
         .encode()
+    }
+
+    /// A frame whose invocation cannot be read is still answered as the
+    /// frame it is: the answer names the frame, so it reaches whoever sent
+    /// it rather than every invocation that awaits an answer.
+    #[dialog_common::test]
+    async fn it_answers_an_unreadable_invocation_under_its_frame() {
+        let access = Access::new(MemoryStore::default());
+        let mut session = Session::new();
+        let frame = Frame::Invoke {
+            id: Some(42),
+            container: b"not a container".to_vec(),
+            payload: None,
+        }
+        .encode();
+
+        let reply = session.receive(&access, &frame).await;
+        let Some(Reply::Answer {
+            id,
+            invocation,
+            status,
+            body,
+            ..
+        }) = reply
+        else {
+            panic!("expected an answer, got {reply:?}");
+        };
+        assert_eq!(id, Some(42), "the answer names the frame");
+        assert_eq!(invocation, None, "no invocation could be read");
+        assert_eq!(status, 400);
+        let reason: AuthorizeError = serde_json::from_slice(&body).expect("a reason");
+        assert!(
+            matches!(reason, AuthorizeError::Malformed { .. }),
+            "{reason:?}"
+        );
     }
 
     /// Over a socket a watch is answered with what its cell holds, each
