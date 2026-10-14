@@ -62,6 +62,74 @@ pub struct UcanServer {
 struct ServerState {
     access: Access<Announcing>,
     max_body_bytes: u64,
+    fault: Fault,
+    /// How many times the fault has been played out.
+    faulted: std::sync::atomic::AtomicUsize,
+}
+
+/// A failure the service's socket plays out, so a test can see what a
+/// client does when its connection fails the ways real ones do. The
+/// service's endpoint answers requests as always.
+#[derive(Debug, Clone, Default)]
+pub enum Fault {
+    /// Nothing fails.
+    #[default]
+    None,
+    /// The first `times` connections are cut by the service, `after` each
+    /// opened, without a word: what a deploy, or a Durable Object that was
+    /// evicted, does to a client.
+    Cut {
+        /// How long after it opened a connection is cut.
+        after: std::time::Duration,
+        /// How many connections are cut.
+        times: usize,
+    },
+    /// The first `times` connections go silent `after` each opened: the
+    /// service neither answers anything on them, pings included, nor
+    /// closes them, as a connection that went half-open looks to a client.
+    Freeze {
+        /// How long after it opened a connection goes silent.
+        after: std::time::Duration,
+        /// How many connections go silent.
+        times: usize,
+    },
+    /// The first `times` publishes that arrive over the socket are carried
+    /// out, and their connection cut before they are answered: a write
+    /// that landed and was lost in flight.
+    LosePublish {
+        /// How many publishes are lost.
+        times: usize,
+    },
+}
+
+impl ServerState {
+    /// Whether the fault is played out once more.
+    fn fault_again(&self, times: usize) -> bool {
+        self.faulted
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            < times
+    }
+}
+
+/// Whether `bytes` is a frame invoking a publish, whose command is a write
+/// of the cell: `/use/put/memory/cell`.
+fn publishes(bytes: &[u8]) -> bool {
+    let Ok(crate::socket::Request::Invoke { container, .. }) =
+        crate::socket::Request::decode(bytes)
+    else {
+        return false;
+    };
+    dialog_ucan_core::Container::from_bytes(&container)
+        .ok()
+        .and_then(|container| dialog_ucan_core::InvocationChain::try_from(container).ok())
+        .is_some_and(|chain| {
+            chain
+                .command()
+                .0
+                .iter()
+                .map(String::as_str)
+                .eq(["use", "put", "memory", "cell"])
+        })
 }
 
 /// A cell the store wrote, and what it now holds.
@@ -84,6 +152,12 @@ impl UcanServer {
     /// Start the service on a free loopback port, refusing bodies over
     /// `max_body_bytes`.
     pub async fn start(max_body_bytes: u64) -> anyhow::Result<Self> {
+        Self::start_with(max_body_bytes, Fault::None).await
+    }
+
+    /// Start the service on a free loopback port, refusing bodies over
+    /// `max_body_bytes`, its socket playing out `fault`.
+    pub async fn start_with(max_body_bytes: u64, fault: Fault) -> anyhow::Result<Self> {
         let store = MemoryStore::default();
         let (changes, _) = broadcast::channel(64);
         let state = Arc::new(ServerState {
@@ -92,6 +166,8 @@ impl UcanServer {
                 changes: changes.clone(),
             }),
             max_body_bytes,
+            fault,
+            faulted: Default::default(),
         });
 
         let socket_state = state.clone();
@@ -179,16 +255,58 @@ async fn serve_socket(
     };
     let (mut sink, mut source) = socket.split();
     let mut session = Session::new();
+    // When this connection fails, if the fault fails it.
+    let failing = match state.fault {
+        Fault::Cut { after, times } | Fault::Freeze { after, times }
+            if state.fault_again(times) =>
+        {
+            Some(tokio::time::Instant::now() + after)
+        }
+        _ => None,
+    };
+    let fails = async {
+        match failing {
+            Some(at) => tokio::time::sleep_until(at).await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(fails);
+    // A fault due already fails the connection before anything on it is
+    // answered: a timer due now does not fire before the first frame.
+    if failing.is_some_and(|at| at <= tokio::time::Instant::now()) {
+        if let Fault::Freeze { .. } = state.fault {
+            freeze(&mut source, &mut closed).await;
+        }
+        return;
+    }
     loop {
         let delivered = tokio::select! {
+            // In this order, so a fault that is due fails the connection
+            // before a frame that arrived with it is answered.
+            biased;
             // The flag only ever turns on: any change is the service
             // stopping.
             _ = closed.changed() => {
                 let _ = sink.send(Message::Close(None)).await;
                 break;
             }
+            () = &mut fails => {
+                if let Fault::Freeze { .. } = state.fault {
+                    freeze(&mut source, &mut closed).await;
+                }
+                // Cut: drop the connection without a close.
+                return;
+            }
             message = source.next() => match message {
                 Some(Ok(Message::Binary(bytes))) => {
+                    if let Fault::LosePublish { times } = state.fault
+                        && publishes(&bytes)
+                        && state.fault_again(times)
+                    {
+                        // Carry it out, then go before answering.
+                        let _ = session.receive(&state.access, &bytes).await;
+                        return;
+                    }
                     session.receive(&state.access, &bytes).await.into_iter().collect()
                 }
                 // A ping is answered as a hibernating service answers it,
@@ -247,6 +365,25 @@ async fn serve_socket(
             if sink.send(Message::binary(reply.encode())).await.is_err() {
                 return;
             }
+        }
+    }
+}
+
+/// Read what comes and answer none of it, until the client goes or the
+/// service stops: a connection gone silent, as a client sees one.
+async fn freeze(
+    source: &mut futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    >,
+    closed: &mut watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = closed.changed() => return,
+            message = source.next() => match message {
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                Some(Ok(_)) => {}
+            },
         }
     }
 }
@@ -510,12 +647,15 @@ pub struct UcanSettings {
     /// The largest request body the service reads. Defaults to 32 MiB,
     /// room for any block a write carries.
     pub max_body_bytes: u64,
+    /// A failure the service's socket plays out. Defaults to none.
+    pub fault: Fault,
 }
 
 impl Default for UcanSettings {
     fn default() -> Self {
         Self {
             max_body_bytes: 32 * 1024 * 1024,
+            fault: Fault::None,
         }
     }
 }
@@ -525,7 +665,7 @@ impl Default for UcanSettings {
 pub async fn ucan(
     settings: UcanSettings,
 ) -> anyhow::Result<Service<UcanServiceAddress, UcanServer>> {
-    let server = UcanServer::start(settings.max_body_bytes).await?;
+    let server = UcanServer::start_with(settings.max_body_bytes, settings.fault).await?;
     let address = UcanServiceAddress {
         endpoint: server.endpoint.clone(),
         socket: server.socket.clone(),

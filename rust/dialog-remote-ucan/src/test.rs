@@ -650,6 +650,107 @@ async fn it_keeps_a_quiet_connection_whose_service_answers_pings(
     Ok(())
 }
 
+/// A watch whose connection goes silent ends once the connection is given
+/// up on, rather than waiting for ever on a connection that is gone, so
+/// whoever watches can begin it again.
+#[dialog_common::test(
+    fault = crate::helpers::Fault::Freeze {
+        after: std::time::Duration::from_millis(200),
+        times: 1,
+    }
+)]
+async fn it_ends_a_watch_once_its_connection_went_silent(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let watch = CellScope::new(subject, "local", "head").watch();
+    let authorization = issued(&signer, &watch).await;
+    let address = UcanAddress::new(&service.endpoint).with_socket(&service.socket);
+    let site = UcanSite::with_liveness(quick());
+    let mut editions = Provider::<ForkInvocation<UcanSite, Watch>>::execute(
+        &site,
+        ForkInvocation::new(watch, address, authorization),
+    )
+    .await?;
+    assert_eq!(editions.next().await?, Some(None), "the watch began");
+
+    let ended = editions.next().await;
+    assert!(
+        matches!(ended, Ok(None) | Err(_)),
+        "the watch ends once its connection is given up on; got {ended:?}"
+    );
+    Ok(())
+}
+
+/// A resolve sent over a connection that went silent is answered as
+/// unavailable once the connection is given up on: a read may be tried
+/// again, and nothing was changed.
+#[dialog_common::test(
+    fault = crate::helpers::Fault::Freeze {
+        after: std::time::Duration::ZERO,
+        times: 1,
+    }
+)]
+async fn it_answers_a_read_over_a_silent_connection_as_unavailable(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let resolve = CellScope::new(subject, "local", "head").resolve();
+    let authorization = issued(&signer, &resolve).await;
+    let address = UcanAddress::new(&service.endpoint).with_socket(&service.socket);
+    let resolved = Provider::<ForkInvocation<UcanSite, Resolve>>::execute(
+        &UcanSite::with_liveness(quick()),
+        ForkInvocation::new(resolve, address, authorization),
+    )
+    .await;
+    assert!(
+        matches!(
+            resolved,
+            Err(MemoryError::Rejected(
+                dialog_effects::Rejection::Unavailable { .. }
+            ))
+        ),
+        "{resolved:?}"
+    );
+    Ok(())
+}
+
+/// A publish the service carried out, but whose answer was lost with its
+/// connection, is not answered as a failure the caller may simply retry:
+/// it is not known to have failed, and here it landed.
+#[dialog_common::test(fault = crate::helpers::Fault::LosePublish { times: 1 })]
+async fn it_answers_a_lost_publish_as_not_known_to_have_failed(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let cell = CellScope::new(subject, "local", "head");
+    let publish = cell.publish(b"landed".to_vec(), None);
+    let authorization = issued(&signer, &publish).await;
+    let address = UcanAddress::new(&service.endpoint).with_socket(&service.socket);
+    let published = Provider::<ForkInvocation<UcanSite, Publish>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(publish, address, authorization),
+    )
+    .await;
+    assert!(
+        matches!(
+            published,
+            Err(MemoryError::Rejected(
+                dialog_effects::Rejection::Unclassified { .. }
+            ))
+        ),
+        "{published:?}"
+    );
+
+    let resolved = perform(&service, &signer, cell.resolve()).await?;
+    assert_eq!(
+        resolved.map(|edition| edition.content),
+        Some(b"landed".to_vec()),
+        "the publish landed"
+    );
+    Ok(())
+}
+
 /// A watch the service refuses is refused when it is begun, not as the
 /// first thing it delivers, so whoever begins it can tell a watch that
 /// runs from one that never will. Here the watch does not say when it was
