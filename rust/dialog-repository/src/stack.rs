@@ -90,9 +90,11 @@
 //! branch may not link a process-local store; the store may link the
 //! branch.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{mem, slice};
 
 use base58::ToBase58 as _;
@@ -111,7 +113,7 @@ use dialog_effects::memory::{Publish, Resolve, Version as MemoryVersion};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
 use futures_util::lock::Mutex as AsyncMutex;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -1283,6 +1285,254 @@ pub struct Stack {
     /// that the publish drops, and its instants be released with no part
     /// of it published.
     turn: Arc<AsyncMutex<()>>,
+    /// What entered the ephemeral layers outside the stack, until a
+    /// commit induces over it. Shared by clones.
+    entered: Entered,
+    /// The identity of this stack in the process, which clones share: an
+    /// instant minted under a hold of another stack entered this one's
+    /// layers from outside it.
+    id: u64,
+}
+
+/// The next identity of a stack in the process.
+static STACKS: AtomicU64 = AtomicU64::new(1);
+
+/// What entered the ephemeral layers of a stack outside it, such as what
+/// a channel received: an observer of each layer, and the facts they saw
+/// that no commit has induced over yet. The next commit of the stack
+/// treats them as changes of its own, as a commit of a branch treats what
+/// a pull brought, so a rule fires on them once.
+#[derive(Debug, Clone, Default)]
+struct Entered(Arc<Mutex<Watched>>);
+
+/// A fact that entered a layer: the layer, and the attribute, entity, and
+/// value of the fact.
+type EnteredFact = (Entity, String, String, Vec<u8>);
+
+/// What entered, as one net change for each fact: the fact, and whether
+/// it was stored or removed. A fact stored and then removed again, or the
+/// reverse, changed nothing, and is not there.
+type Changed = BTreeMap<EnteredFact, (Artifact, bool)>;
+
+/// What a stack knows of what entered its ephemeral layers: how it
+/// watches each, what entered and no commit induced over yet, and what
+/// the staged commits induced over.
+#[derive(Debug, Default)]
+struct Watched {
+    /// How the stack watches each ephemeral layer, by its address entity.
+    observers: HashMap<Entity, Watch>,
+    /// What entered since a commit last induced over it.
+    pending: Changed,
+    /// What each staged commit induced over, oldest first, until it
+    /// publishes. It counts as induced once the commit publishes, and is
+    /// offered again, beneath what entered since, if it never does.
+    claimed: Vec<Changed>,
+}
+
+/// How a stack watches one ephemeral layer: an observer of it, and the
+/// facts the layer held as of the last instant the observer saw. When the
+/// observer falls behind, the facts the layer holds now, against those,
+/// are what entered.
+#[derive(Debug)]
+struct Watch {
+    layer: Ephemeral,
+    observer: crate::Observer,
+    seen: HashMap<EnteredFact, Artifact>,
+}
+
+impl Watch {
+    /// Watch `layer` from now on: what it holds now has not entered.
+    fn new(address: &Entity, layer: &Ephemeral) -> Self {
+        // As many instants as a channel over the layer logs, so that the
+        // largest catch-up it receives at once fits.
+        let observer = layer.observe_everything_within(crate::DEFAULT_LOG_CAPACITY);
+        Self {
+            layer: layer.clone(),
+            observer,
+            seen: Self::held(address, layer),
+        }
+    }
+
+    fn held(address: &Entity, layer: &Ephemeral) -> HashMap<EnteredFact, Artifact> {
+        layer
+            .facts()
+            .into_iter()
+            .map(|fact| (entered_fact(address, &fact), fact))
+            .collect()
+    }
+}
+
+/// Fold the change of `fact`, which `key` names, into `changes`: a change
+/// that undoes the one held cancels it.
+fn fold(changes: &mut Changed, key: EnteredFact, fact: Artifact, stored: bool) {
+    match changes.get(&key) {
+        Some((_, held)) if *held != stored => {
+            changes.remove(&key);
+        }
+        _ => {
+            changes.insert(key, (fact, stored));
+        }
+    }
+}
+
+/// The key of `fact` in `layer`.
+fn entered_fact(layer: &Entity, fact: &Artifact) -> EnteredFact {
+    (
+        layer.clone(),
+        fact.the.to_string(),
+        fact.of.to_string(),
+        fact.is.to_bytes(),
+    )
+}
+
+impl Entered {
+    /// Observe each ephemeral layer of `topology` that is not observed
+    /// yet, from now on, and stop observing each layer that left.
+    fn track(&self, topology: &Topology) {
+        let mut watched = self.0.lock();
+        let layers: HashMap<Entity, &Ephemeral> = topology
+            .layers
+            .iter()
+            .filter_map(|layer| match layer {
+                Layer::Ephemeral(ephemeral) => Some((layer.address_entity(), ephemeral)),
+                _ => None,
+            })
+            .collect();
+        watched
+            .observers
+            .retain(|address, _| layers.contains_key(address));
+        // What entered a layer that left the stack is no change of it.
+        let Watched {
+            pending, claimed, ..
+        } = &mut *watched;
+        pending.retain(|(layer, ..), _| layers.contains_key(layer));
+        for group in claimed.iter_mut() {
+            group.retain(|(layer, ..), _| layers.contains_key(layer));
+        }
+        for (address, ephemeral) in layers {
+            if let Entry::Vacant(slot) = watched.observers.entry(address) {
+                let watch = Watch::new(slot.key(), ephemeral);
+                slot.insert(watch);
+            }
+        }
+    }
+
+    /// Everything that entered and no commit has induced over yet: each
+    /// fact that an instant from outside the stack stored or removed, as
+    /// its net change. What a stack writes itself, and the witness of a
+    /// transient, is not part of it.
+    fn pending(&self, owner: u64) -> Vec<(Entity, Artifact, bool)> {
+        let watched = self.drain(owner);
+        watched
+            .pending
+            .iter()
+            .map(|((layer, ..), (fact, stored))| (layer.clone(), fact.clone(), *stored))
+            .collect()
+    }
+
+    /// Take in what the observers saw: what entered from outside the
+    /// stack joins what is pending. A commit drains them as it lands too,
+    /// so that its own instants never wait in a queue for the next one.
+    fn drain(&self, owner: u64) -> parking_lot::MutexGuard<'_, Watched> {
+        let mut watched = self.0.lock();
+        let Watched {
+            observers, pending, ..
+        } = &mut *watched;
+        for (address, watch) in observers.iter_mut() {
+            match watch.observer.drain() {
+                crate::Drained::Instants(instants) => {
+                    for instant in instants {
+                        if instant.transient {
+                            continue;
+                        }
+                        let outside = !instant.hold.by(owner);
+                        for fact in instant.retracted {
+                            let key = entered_fact(address, &fact);
+                            watch.seen.remove(&key);
+                            if outside {
+                                fold(pending, key, fact, false);
+                            }
+                        }
+                        for fact in instant.asserted {
+                            let key = entered_fact(address, &fact);
+                            watch.seen.insert(key.clone(), fact.clone());
+                            if outside {
+                                fold(pending, key, fact, true);
+                            }
+                        }
+                    }
+                }
+                crate::Drained::Gap { .. } => {
+                    // The observer fell behind: what the layer holds now,
+                    // against what it held when the observer last saw it,
+                    // is what entered. What the stack wrote itself in the
+                    // meantime counts as entered too.
+                    tracing::warn!(
+                        layer = %address,
+                        "more entered an ephemeral layer than a stack observes between two \
+                         commits; what entered is taken from the layer"
+                    );
+                    let now = Watch::held(address, &watch.layer);
+                    for (key, fact) in &now {
+                        if !watch.seen.contains_key(key) {
+                            fold(pending, key.clone(), fact.clone(), true);
+                        }
+                    }
+                    for (key, fact) in mem::take(&mut watch.seen) {
+                        if !now.contains_key(&key) {
+                            fold(pending, key, fact, false);
+                        }
+                    }
+                    watch.seen = now;
+                }
+            }
+        }
+        watched
+    }
+
+    /// A commit that stages induced over all that is pending: it waits for
+    /// the commit to publish.
+    fn claim(&self) {
+        let mut watched = self.0.lock();
+        let group = mem::take(&mut watched.pending);
+        if !group.is_empty() {
+            watched.claimed.push(group);
+        }
+    }
+
+    /// A commit that staged nothing induced over all that is pending: it
+    /// goes.
+    fn induce(&self) {
+        self.0.lock().pending.clear();
+    }
+
+    /// The staged commits published: what they induced over goes.
+    fn published(&self) {
+        self.0.lock().claimed.clear();
+    }
+
+    /// What entered goes with nothing induced over it: a stack with no
+    /// branch at its bottom runs no rule.
+    fn forget(&self) {
+        let mut watched = self.0.lock();
+        watched.pending.clear();
+        watched.claimed.clear();
+    }
+
+    /// The staged commits never publish: what they induced over is
+    /// offered to the next commit again, with what entered since folded
+    /// over it.
+    fn unclaim(&self) {
+        let mut watched = self.0.lock();
+        let mut offered = Changed::new();
+        let later = mem::take(&mut watched.pending);
+        for group in watched.claimed.drain(..).chain([later]) {
+            for (key, (fact, stored)) in group {
+                fold(&mut offered, key, fact, stored);
+            }
+        }
+        watched.pending = offered;
+    }
 }
 
 /// What a stack knows: its shape, and its layers' heads.
@@ -1329,9 +1579,9 @@ struct Pending {
 }
 
 impl Pending {
-    fn open() -> Self {
+    fn open(owner: u64) -> Self {
         Self {
-            hold: Some(Hold::open()),
+            hold: Some(Hold::open(owner)),
             staging: None,
         }
     }
@@ -1367,24 +1617,35 @@ impl Drop for Pending {
 }
 
 /// The holds of the commits that a publish settles, taken from the stack
-/// while it runs. A publish that fails, or whose future is dropped, before
-/// every chain lands discards them: those commits never publish whole.
-struct Settling(Vec<Hold>);
+/// while it runs, and what entered its layers that those commits induced
+/// over. A publish that fails, or whose future is dropped, before every
+/// chain lands discards the holds, since those commits never publish
+/// whole, and offers what entered to the next commit again.
+struct Settling {
+    holds: Vec<Hold>,
+    entered: Entered,
+}
 
 impl Settling {
-    /// Every chain published: the instants may leave.
+    /// Every chain published: the instants may leave, and what entered
+    /// is induced.
     fn release(mut self) {
-        for hold in self.0.drain(..) {
+        for hold in self.holds.drain(..) {
             hold.release();
         }
+        self.entered.published();
     }
 }
 
 impl Drop for Settling {
     fn drop(&mut self) {
-        for hold in self.0.drain(..) {
+        if self.holds.is_empty() {
+            return;
+        }
+        for hold in self.holds.drain(..) {
             hold.discard();
         }
+        self.entered.unclaim();
     }
 }
 
@@ -1474,7 +1735,7 @@ impl Stack {
         let published: Vec<Head> = topology.layers.iter().map(Layer::head).collect();
         let versions = versions_of(&topology.layers);
         let staged = topology.layers.iter().map(|_| None).collect();
-        Stack {
+        let stack = Stack {
             state: Arc::new(RwLock::new(State {
                 topology,
                 published,
@@ -1486,7 +1747,11 @@ impl Stack {
             })),
             divergences: Divergences::default(),
             turn: Arc::default(),
-        }
+            entered: Entered::default(),
+            id: STACKS.fetch_add(1, Ordering::Relaxed),
+        };
+        stack.entered.track(&stack.topology());
+        stack
     }
 
     /// Takes each divergence of placement that a read of the stack found
@@ -1655,13 +1920,14 @@ impl Stack {
             state.versions = versions_of(&topology.layers);
             state.drop_staged();
         }
+        self.entered.unclaim();
         self.capture(
             &topology,
             BTreeMap::new(),
             &Upkeep::new(),
             live,
             &previous,
-            &Hold::default(),
+            &Hold::released(self.id),
             env,
         )
         .await?;
@@ -1714,7 +1980,10 @@ impl Stack {
         let layers = self.layers();
         // The commits staged now are the ones this publish settles: the
         // turn of the stack keeps any other commit out until it ends.
-        let holds = Settling(mem::take(&mut self.state.write().holds));
+        let holds = Settling {
+            holds: mem::take(&mut self.state.write().holds),
+            entered: self.entered.clone(),
+        };
         for (index, layer) in layers.iter().enumerate() {
             let Some(batch) = self.state.write().staged[index].take() else {
                 continue;
@@ -1787,7 +2056,9 @@ impl Stack {
         // A publish of the bottom's own chain moved the watermark past the
         // head the commits read, and another writer may have moved it too:
         // it moves only from where the commits found it.
-        if cell.content().map(|revision| revision.version()) != base {
+        if cell.content().as_ref() == Some(&head)
+            || cell.content().map(|revision| revision.version()) != base
+        {
             return Ok(());
         }
         match cell.publish(head).perform(env).await {
@@ -1798,16 +2069,20 @@ impl Stack {
 
     /// Hold the instants that a commit minted under `hold` until its
     /// chains publish, or release them at once when it staged no durable
-    /// layer and nothing waits to publish. A commit with no durable change
-    /// staged behind one that waits shares its fate: if that publish
-    /// fails, its instants never leave either. Publish each commit before
-    /// the next, as `commit().publish()` does, to keep them apart.
+    /// layer and nothing waits to publish. What entered an upper layer,
+    /// which the commit induced over, counts as induced at the same time.
+    /// A commit with no durable change staged behind one that waits
+    /// shares its fate: if that publish fails, its instants never leave
+    /// either. Publish each commit before the next, as
+    /// `commit().publish()` does, to keep them apart.
     fn hold_until_published(&self, hold: Hold) {
         let mut state = self.state.write();
         if state.staged.iter().any(Option::is_some) {
+            self.entered.claim();
             state.holds.push(hold);
         } else {
             hold.release();
+            self.entered.induce();
         }
     }
 
@@ -2181,14 +2456,18 @@ impl Stack {
     /// and return the state it replaces. No chain is staged on that one: a
     /// commit that rewires a stack with staged commits is refused.
     fn install(&self, state: State) -> State {
-        mem::replace(&mut *self.state.write(), state)
+        let replaced = mem::replace(&mut *self.state.write(), state);
+        self.entered.track(&self.topology());
+        replaced
     }
 
     /// Drop every staged chain, after a commit failed partway through
     /// staging: a chain that holds part of it must never publish, and a
-    /// chain cannot be cut back to the commits before it.
+    /// chain cannot be cut back to the commits before it. What its
+    /// commits induced over is offered again.
     fn abandon_staged(&self) {
         self.state.write().drop_staged();
+        self.entered.unclaim();
     }
 }
 
@@ -2567,10 +2846,32 @@ impl<'a> StackCommit<'a> {
         };
         // Every instant this commit mints in an ephemeral layer carries
         // its hold, so a channel sends it only once the commit publishes.
-        let mut pending = Pending::open();
+        let mut pending = Pending::open(stack.id);
         let hold = pending.hold();
+        // What entered an upper layer outside the stack since its last
+        // commit is a change of this one: a commit with no facts of its
+        // own still runs the rules over it.
+        stack.entered.track(&stack.topology());
+        let mut entered = stack.entered.pending(stack.id);
+        if topology.primary().is_none() {
+            // With no branch at the bottom no rule runs, and no commit
+            // stages: what entered has nothing to fire, and goes.
+            stack.entered.forget();
+            entered.clear();
+        }
+        // What this commit clears or forgets from a layer is no change of
+        // it: a fact that entered and fails every commit leaves with the
+        // clear, so the stack can drop it itself.
+        entered.retain(|(address, fact, _)| {
+            topology
+                .layers
+                .iter()
+                .position(|layer| layer.address_entity() == *address)
+                .and_then(|index| maintenance.get(&index))
+                .is_none_or(|(clear, forgotten)| !*clear && !forgotten.contains(&fact.of))
+        });
 
-        if self.changes.is_empty() && self.transients.is_empty() && !rewired {
+        if self.changes.is_empty() && self.transients.is_empty() && !rewired && entered.is_empty() {
             // Maintenance alone: each store's lands as one instant, its
             // wiring re-stamped, through the same staging pass a write
             // takes.
@@ -2587,6 +2888,7 @@ impl<'a> StackCommit<'a> {
                 )
                 .await?;
             stack.hold_until_published(pending.keep());
+            drop(stack.entered.drain(stack.id));
             return Ok(heads);
         }
         let Some(primary) = topology.primary() else {
@@ -2729,6 +3031,24 @@ impl<'a> StackCommit<'a> {
                 None => CommitError::Detached.into(),
             });
         }
+        // A fact that entered a layer outside the scope of its placement
+        // fires no rule, as it answers no query.
+        let scopes = staged.scopes();
+        let stimulus: Vec<Instruction> = entered
+            .iter()
+            .filter(|(address, fact, _)| match &composite.guide {
+                Some(guide) => guide
+                    .ephemerals
+                    .iter()
+                    .find(|layer| layer.address == *address)
+                    .is_none_or(|layer| guide.admits(layer, &scopes, fact.the.as_str())),
+                None => true,
+            })
+            .map(|(_, fact, stored)| match stored {
+                true => Instruction::Assert(fact.clone(), Pick::All),
+                false => Instruction::Retract(fact.clone()),
+            })
+            .collect();
         induce(
             source,
             watermark,
@@ -2736,6 +3056,7 @@ impl<'a> StackCommit<'a> {
             &staged,
             &mut changes,
             self.transients.export(),
+            stimulus,
             &mut witness,
             env,
         )
@@ -2803,13 +3124,15 @@ impl<'a> StackCommit<'a> {
                 return Err(error.into());
             }
         };
-        // The commit landed: its hold settles before the watermark moves,
-        // so a failure to move it drops nothing that staged.
+        // The commit landed: its hold, and what entered that it induced
+        // over, settle before the watermark moves, so a failure to move it
+        // fires nothing twice.
         let waits = stack.is_staged();
         if waits {
             stack.state.write().induced = lagged.clone();
         }
         stack.hold_until_published(pending.keep());
+        drop(stack.entered.drain(stack.id));
         if !waits {
             stack.catch_up_induction(lagged, env).await?;
         }
@@ -6472,9 +6795,13 @@ mod tests {
     /// and stalls a channel.
     #[test]
     fn it_settles_the_holds_of_a_publish_however_it_ends() {
-        let (released, dropped) = (Hold::open(), Hold::open());
-        Settling(vec![released.clone()]).release();
-        drop(Settling(vec![dropped.clone()]));
+        let (released, dropped) = (Hold::open(1), Hold::open(1));
+        let settling = |hold: &Hold| Settling {
+            holds: vec![hold.clone()],
+            entered: Entered::default(),
+        };
+        settling(&released).release();
+        drop(settling(&dropped));
         assert_eq!(released.state(), crate::Held::Released);
         assert_eq!(dropped.state(), crate::Held::Dropped);
     }
@@ -6973,6 +7300,794 @@ mod tests {
             .await?;
         assert!(!stack.is_staged(), "no durable layer staged");
         assert_eq!(commands(&channel, &daemon), 1);
+        Ok(())
+    }
+
+    /// A fact that a channel receives into an upper layer fires a rule at
+    /// the next commit of the stack, and only once; `receive` itself runs
+    /// no rule, and a commit with no facts of its own runs the rules over
+    /// what entered.
+    #[dialog_common::test]
+    async fn it_runs_rules_over_what_a_channel_received() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        // A rule that answers each result with a notice: a transient,
+        // witnessed on the application layer each time the rule fires.
+        let notice: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "status": { "the": "notice/seen", "as": "text:" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "status": { "the": "result/status", "as": "text:" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "status": { "?": { "name": "status" } }
+                }
+            }]
+        }))?;
+        shared
+            .transaction()
+            .assert(notice)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        for attribute in ["result/status", "notice/seen"] {
+            shared
+                .overlay()
+                .assert(Placement::new(attribute.parse()?, name("application")))?;
+        }
+        shared
+            .overlay()
+            .assert(crate::TransientAttribute::new("notice/seen".parse()?))?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &application, name("application"))
+            .link(&application, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        let observer = application.observe_everything();
+        let notices = || match observer.drain() {
+            Drained::Instants(instants) => instants
+                .iter()
+                .filter(|instant| {
+                    instant.transient
+                        && instant
+                            .asserted
+                            .iter()
+                            .any(|fact| fact.the.as_str() == "notice/seen")
+                })
+                .count(),
+            Drained::Gap { .. } => panic!("no gap"),
+        };
+
+        // The daemon writes a result into its end of the channel, and the
+        // worker receives it.
+        let (worker, daemon): (Entity, Entity) =
+            ("did:key:z6MkWorker".parse()?, "did:key:z6MkDaemon".parse()?);
+        let theirs = crate::Channel::new(Ephemeral::create().perform(&operator).await);
+        let ours = crate::Channel::new(application.clone());
+        theirs.join(worker.clone());
+        ours.join(daemon.clone());
+        let mut result = Changes::new();
+        result.associate(
+            "result/status".parse()?,
+            "cmd:1".parse()?,
+            Value::String("done".into()),
+            Pick::All,
+        );
+        theirs.layer().apply(result)?;
+        assert_eq!(ours.receive(&daemon, theirs.since(&worker)), 1);
+        assert_eq!(notices(), 0, "receive runs no rule");
+
+        let commit = || async {
+            stack
+                .transaction()
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await
+        };
+        commit().await?;
+        assert_eq!(
+            notices(),
+            1,
+            "the next commit, with no facts of its own, runs the rule"
+        );
+        commit().await?;
+        assert_eq!(notices(), 0, "and only once");
+        Ok(())
+    }
+
+    /// A rule that records each result on the bottom, as `seen/status`.
+    fn record_results() -> Result<dialog_query::InductiveRule> {
+        Ok(serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "status": { "the": "seen/status", "as": "text:" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "status": { "the": "result/status", "as": "text:" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "status": { "?": { "name": "status" } }
+                }
+            }]
+        }))?)
+    }
+
+    /// A stack over `shared` whose application layer holds the results,
+    /// with a rule on the bottom that sends a transient notice of each
+    /// result, and an observer of the bottom's session store, where each
+    /// notice is witnessed: one witness for each time the rule fires.
+    async fn notices_stack(
+        operator: &impl StackSyncEnv,
+        shared: &Branch,
+        application: &Ephemeral,
+    ) -> Result<(Stack, crate::Observer)> {
+        let notify: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "status": { "the": "notice/status", "as": "text:" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "status": { "the": "result/status", "as": "text:" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "status": { "?": { "name": "status" } }
+                }
+            }]
+        }))?;
+        shared
+            .transaction()
+            .assert(notify)
+            .commit()
+            .publish()
+            .perform(operator)
+            .await?;
+        shared.refresh(operator).await?;
+        shared
+            .overlay()
+            .assert(Placement::new(
+                "result/status".parse()?,
+                name("application"),
+            ))?
+            .assert(crate::TransientAttribute::new("notice/status".parse()?))?;
+        let top = Ephemeral::create().perform(operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, application, name("application"))
+            .link(application, shared, name("shared"))
+            .perform(operator)
+            .await?;
+        Ok((stack, shared.overlay().observe_everything()))
+    }
+
+    /// How many notices `observer` saw witnessed since it last drained.
+    fn notices(observer: &crate::Observer) -> usize {
+        match observer.drain() {
+            Drained::Instants(instants) => instants
+                .iter()
+                .filter(|instant| {
+                    instant
+                        .asserted
+                        .iter()
+                        .any(|fact| fact.the.as_str() == "notice/status")
+                })
+                .count(),
+            Drained::Gap { .. } => panic!("no gap"),
+        }
+    }
+
+    /// A result applied to the application layer, as a channel applies
+    /// what it receives.
+    fn received(layer: &Ephemeral, command: &str) -> Result<()> {
+        let mut result = Changes::new();
+        result.associate(
+            "result/status".parse()?,
+            command.parse()?,
+            Value::String("done".into()),
+            Pick::All,
+        );
+        layer.apply(result)?;
+        Ok(())
+    }
+
+    /// What entered counts as induced once the commit that induced over it
+    /// publishes: a staged commit, its publish, and a later commit fire the
+    /// rule once.
+    #[dialog_common::test]
+    async fn it_fires_once_over_what_entered_through_a_publish() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let (stack, observer) = notices_stack(&operator, &shared, &application).await?;
+        received(&application, "cmd:1")?;
+
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("note/text")
+                    .of("note:1".parse::<Entity>()?)
+                    .is("staged".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert!(stack.is_staged());
+        stack.publish(&operator).await?;
+        stack
+            .transaction()
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(notices(&observer), 1, "the rule fired once");
+        Ok(())
+    }
+
+    /// What a stack writes into its own layers is a change of its commit,
+    /// not something that entered from outside: a later commit does not
+    /// fire on it again.
+    #[dialog_common::test]
+    async fn it_runs_no_rule_again_over_what_it_wrote_itself() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let (stack, observer) = notices_stack(&operator, &shared, &application).await?;
+
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("result/status")
+                    .of("cmd:1".parse::<Entity>()?)
+                    .is("done".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        stack
+            .transaction()
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(notices(&observer), 1, "the rule fired at the commit alone");
+        Ok(())
+    }
+
+    /// A fact that entered a layer outside the scope of its placement
+    /// fires no rule, as it answers no query.
+    #[dialog_common::test]
+    async fn it_runs_no_rule_over_what_entered_outside_its_scope() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let (stack, observer) = notices_stack(&operator, &shared, &application).await?;
+        let top = stack.layers().pop().expect("a stack has a top");
+        let Layer::Ephemeral(top) = top else {
+            panic!("the top is ephemeral");
+        };
+        received(&top, "cmd:1")?;
+
+        stack
+            .transaction()
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(notices(&observer), 0, "the misplaced result fired nothing");
+        Ok(())
+    }
+
+    /// A stack over `shared` whose application layer holds the results,
+    /// with the rule of [`record_results`] on the bottom.
+    async fn results_stack(
+        operator: &impl StackSyncEnv,
+        shared: &Branch,
+        application: &Ephemeral,
+    ) -> Result<Stack> {
+        shared
+            .transaction()
+            .assert(record_results()?)
+            .commit()
+            .publish()
+            .perform(operator)
+            .await?;
+        shared.refresh(operator).await?;
+        shared.overlay().assert(Placement::new(
+            "result/status".parse()?,
+            name("application"),
+        ))?;
+        let top = Ephemeral::create().perform(operator).await;
+        Ok(Stack::open(top.clone())
+            .link(&top, application, name("application"))
+            .link(application, shared, name("shared"))
+            .perform(operator)
+            .await?)
+    }
+
+    /// What entered an upper layer counts as induced only once the commit
+    /// that induced over it publishes: a commit that loses its publish
+    /// leaves it for the run again, whose rule records it.
+    #[dialog_common::test]
+    async fn it_keeps_what_entered_for_a_commit_that_did_not_publish() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let stack = results_stack(&operator, &shared, &application).await?;
+        let command: Entity = "cmd:1".parse()?;
+        let mut result = Changes::new();
+        result.associate(
+            "result/status".parse()?,
+            command.clone(),
+            Value::String("done".into()),
+            Pick::All,
+        );
+        application.apply(result)?;
+
+        stack.transaction().commit().perform(&operator).await?;
+        let other = repo.branch("main").open().perform(&operator).await?;
+        other
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of("doc:1".parse::<Entity>()?)
+                    .is("elsewhere".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert!(stack.publish(&operator).await.is_err(), "the publish loses");
+
+        stack.advance(&operator).await?;
+        stack
+            .transaction()
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "seen/status", &command).await?,
+            vec![Value::String("done".into())],
+            "the run again records the result"
+        );
+        Ok(())
+    }
+
+    /// A fact that entered an upper layer and left it again before the
+    /// next commit changed nothing: no rule fires on it.
+    #[dialog_common::test]
+    async fn it_runs_no_rule_over_what_entered_and_left() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let stack = results_stack(&operator, &shared, &application).await?;
+        let command: Entity = "cmd:1".parse()?;
+        let mut result = Changes::new();
+        result.associate(
+            "result/status".parse()?,
+            command.clone(),
+            Value::String("done".into()),
+            Pick::All,
+        );
+        application.apply(result)?;
+        let mut removed = Changes::new();
+        removed.dissociate(
+            "result/status".parse()?,
+            command.clone(),
+            Value::String("done".into()),
+        );
+        application.apply(removed)?;
+
+        stack
+            .transaction()
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert!(
+            committed(&shared, &operator, "seen/status", &command)
+                .await?
+                .is_empty(),
+            "no rule fired on a result that the layer no longer holds"
+        );
+        Ok(())
+    }
+
+    /// A fact that entered an upper layer, and whose derived write fails to
+    /// route, fails each commit until the layer drops it. Then the stack
+    /// commits again.
+    #[dialog_common::test]
+    async fn it_commits_again_once_what_failed_its_commits_leaves() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let stack = results_stack(&operator, &shared, &application).await?;
+        shared
+            .overlay()
+            .assert(Placement::new("seen/status".parse()?, name("nowhere")))?;
+        let command: Entity = "cmd:1".parse()?;
+        let mut result = Changes::new();
+        result.associate(
+            "result/status".parse()?,
+            command.clone(),
+            Value::String("done".into()),
+            Pick::All,
+        );
+        application.apply(result)?;
+        for _ in 0..2 {
+            let refused = stack.transaction().commit().perform(&operator).await;
+            assert!(
+                matches!(
+                    refused,
+                    Err(StackError::Commit(CommitError::UnboundScope { .. }))
+                ),
+                "the derived write has nowhere to land: {refused:?}"
+            );
+        }
+
+        let mut removed = Changes::new();
+        removed.dissociate(
+            "result/status".parse()?,
+            command.clone(),
+            Value::String("done".into()),
+        );
+        application.apply(removed)?;
+        let note: Entity = "note:1".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("note/text")
+                    .of(note.clone())
+                    .is("hello".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "note/text", &note).await?,
+            vec![Value::String("hello".into())]
+        );
+        Ok(())
+    }
+
+    /// A stack drops itself a fact that entered and fails every commit: a
+    /// commit that clears the layer lands, and so does the next one.
+    #[dialog_common::test]
+    async fn it_clears_what_failed_its_commits() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let stack = results_stack(&operator, &shared, &application).await?;
+        shared
+            .overlay()
+            .assert(Placement::new("seen/status".parse()?, name("nowhere")))?;
+        let mut result = Changes::new();
+        result.associate(
+            "result/status".parse()?,
+            "cmd:1".parse()?,
+            Value::String("done".into()),
+            Pick::All,
+        );
+        application.apply(result)?;
+        assert!(
+            stack
+                .transaction()
+                .commit()
+                .perform(&operator)
+                .await
+                .is_err(),
+            "the derived write has nowhere to land"
+        );
+
+        stack
+            .transaction()
+            .clear(name("application"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert!(
+            application
+                .scan(&ArtifactSelector::new().the("result/status".parse()?))
+                .is_empty(),
+            "the clear dropped the result"
+        );
+        let note: Entity = "note:1".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("note/text")
+                    .of(note.clone())
+                    .is("hello".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "note/text", &note).await?,
+            vec![Value::String("hello".into())]
+        );
+        Ok(())
+    }
+
+    /// More instants than a stack observes between two commits enter an
+    /// upper layer: the stack takes what entered from the layer itself, and
+    /// its rules still fire on each fact.
+    #[dialog_common::test]
+    async fn it_runs_rules_over_what_entered_past_its_observer() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let stack = results_stack(&operator, &shared, &application).await?;
+        let count = crate::DEFAULT_LOG_CAPACITY + 8;
+        for index in 0..count {
+            let mut result = Changes::new();
+            result.associate(
+                "result/status".parse()?,
+                format!("cmd:{index}").parse()?,
+                Value::String("done".into()),
+                Pick::All,
+            );
+            application.apply(result)?;
+        }
+
+        stack
+            .transaction()
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        for index in [0, count - 1] {
+            let command: Entity = format!("cmd:{index}").parse()?;
+            assert_eq!(
+                committed(&shared, &operator, "seen/status", &command).await?,
+                vec![Value::String("done".into())],
+                "the rule recorded the result of {command}"
+            );
+        }
+        Ok(())
+    }
+
+    /// What a commit writes into an upper layer is never taken for what
+    /// entered, even when more enters than the stack observes before the
+    /// next commit: the rule fires on the stack's own result once.
+    #[dialog_common::test]
+    async fn it_runs_no_rule_again_over_its_own_write_past_its_observer() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let (stack, observer) = notices_stack(&operator, &shared, &application).await?;
+        let own: Entity = "cmd:own".parse()?;
+        let notices_of = |observer: &crate::Observer| match observer.drain() {
+            Drained::Instants(instants) => instants
+                .iter()
+                .flat_map(|instant| instant.asserted.iter())
+                .filter(|fact| fact.the.as_str() == "notice/status" && fact.of == own)
+                .count(),
+            Drained::Gap { .. } => panic!("no gap"),
+        };
+
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("result/status")
+                    .of(own.clone())
+                    .is("done".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(notices_of(&observer), 1, "the rule fired at the commit");
+        for index in 0..crate::DEFAULT_LOG_CAPACITY + 8 {
+            received(&application, &format!("cmd:{index}"))?;
+        }
+        stack
+            .transaction()
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            notices_of(&observer),
+            0,
+            "and not again over its own result"
+        );
+        Ok(())
+    }
+
+    /// The persona stack of Sapling: a wiring layer at the top links the
+    /// space first, so it is the bottom, the index under a read-only link,
+    /// and the application layer beside them. An index fact that a member
+    /// commits into the space reaches no read, a write of the index fails,
+    /// and a result that enters the application layer fires a rule once.
+    #[dialog_common::test]
+    async fn it_guides_holds_and_reacts_in_the_shape_of_a_sapling_stack() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let space = repo.branch("main").open().perform(&operator).await?;
+        let index = repo.branch("index").open().perform(&operator).await?;
+        let persona: Entity = "persona:1".parse()?;
+        index
+            .transaction()
+            .assert(
+                dialog_query::the!("idx/name")
+                    .of(persona.clone())
+                    .is("Ana".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        index.refresh(&operator).await?;
+        space
+            .transaction()
+            .assert(record_results()?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        space.refresh(&operator).await?;
+        space
+            .overlay()
+            .assert(crate::DefaultScope::new(&repo.did(), name("space")))?
+            .assert(Placement::new("idx/name".parse()?, name("device")))?
+            .assert(Placement::new(
+                "result/status".parse()?,
+                name("application"),
+            ))?;
+        let wiring = Ephemeral::create().perform(&operator).await;
+        let application = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(wiring.clone())
+            .link(&wiring, &space, name("space"))
+            .link_read_only(&wiring, &index, name("device"))
+            .link(&wiring, &application, name("application"))
+            .perform(&operator)
+            .await?;
+        assert!(stack.layers()[0].same(&Layer::Branch(space.clone())));
+
+        // A member commits an index fact into the space.
+        let other = repo.branch("main").open().perform(&operator).await?;
+        other
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "idx/name".parse()?,
+                    of: persona.clone(),
+                    is: Value::String("Eve".into()),
+                    cause: None,
+                },
+                Pick::All,
+            )]))
+            .perform(&operator)
+            .await?;
+        stack.advance(&operator).await?;
+        assert_eq!(
+            values::<String>(&stack, &operator, "idx/name", &persona).await?,
+            vec![Value::String("Ana".into())],
+            "the index is read from the index layer alone"
+        );
+
+        let refused = stack
+            .transaction()
+            .assert(
+                dialog_query::the!("idx/name")
+                    .of(persona.clone())
+                    .is("Mallory".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await;
+        match refused {
+            Err(StackError::ReadOnly { scope }) => assert_eq!(scope, name("device")),
+            other => panic!("a write of the index is refused: {other:?}"),
+        }
+
+        received(&application, "cmd:1")?;
+        for _ in 0..2 {
+            stack
+                .transaction()
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        space.refresh(&operator).await?;
+        assert_eq!(
+            committed(&space, &operator, "seen/status", &"cmd:1".parse()?).await?,
+            vec![Value::String("done".into())],
+            "the rule recorded the result that entered"
+        );
+        Ok(())
+    }
+
+    /// A write of another stack into a layer that this stack links entered
+    /// this stack from outside it: its rules run over it.
+    #[dialog_common::test]
+    async fn it_runs_rules_over_what_another_stack_wrote() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        shared.overlay().assert(Placement::new(
+            "result/status".parse()?,
+            name("application"),
+        ))?;
+        let application = Ephemeral::create().perform(&operator).await;
+        // The rule lives in this stack's own top, which the writer does not
+        // link, so only a commit of this stack runs it.
+        let top = Ephemeral::create().perform(&operator).await;
+        let mut rule = Changes::new();
+        record_results()?.assert(&mut rule);
+        top.apply(rule)?;
+        let stack = Stack::open(top.clone())
+            .link(&top, &application, name("application"))
+            .link(&application, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        let other_top = Ephemeral::create().perform(&operator).await;
+        let writer = Stack::open(other_top.clone())
+            .link(&other_top, &application, name("application"))
+            .link(&application, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        let command: Entity = "cmd:2".parse()?;
+        writer
+            .transaction()
+            .assert(
+                dialog_query::the!("result/status")
+                    .of(command.clone())
+                    .is("done".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert!(
+            committed(&shared, &operator, "seen/status", &command)
+                .await?
+                .is_empty(),
+            "the writer runs no rule of this stack"
+        );
+
+        stack.advance(&operator).await?;
+        stack
+            .transaction()
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "seen/status", &command).await?,
+            vec![Value::String("done".into())],
+            "this stack's next commit runs its rule over what the writer wrote"
+        );
         Ok(())
     }
 
