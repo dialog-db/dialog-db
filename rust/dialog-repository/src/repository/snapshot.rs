@@ -78,13 +78,14 @@ use parking_lot::RwLock;
 
 use dialog_varsig::Principal;
 
+use crate::placement::Target as StoreTarget;
 use crate::repository::archive::erased;
 use crate::repository::archive::routes;
 use crate::repository::remote::Step;
 use crate::repository::source::{Caches, Live};
 use crate::{
-    BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, PublishError, RemoteSite, Repository,
-    Revision, Select, SelectQuery, SnapshotError,
+    Bindings, BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, PublishError, RemoteSite,
+    Repository, Revision, Select, SelectQuery, SnapshotError,
 };
 use crate::{CacheBudget, HeldCaches};
 use dialog_effects::MethodExt as _;
@@ -195,6 +196,9 @@ pub struct Snapshot {
     head: RwLock<Head>,
     caches: Caches,
     overlay: Ephemeral,
+    /// The scope bindings this snapshot's commits route by: a branch's,
+    /// for a snapshot the branch mints. See [`Bindings`].
+    bindings: Bindings,
 }
 
 /// What a snapshot's commits move: the revision, and the line they are
@@ -259,6 +263,7 @@ impl Branch {
             }),
             caches: self.caches(),
             overlay: Ephemeral::default(),
+            bindings: self.bindings().clone(),
         })
     }
 
@@ -277,6 +282,7 @@ impl Branch {
             }),
             caches: self.caches(),
             overlay,
+            bindings: self.bindings().clone(),
         }
     }
 }
@@ -292,6 +298,7 @@ impl Snapshot {
             }),
             caches: Caches::sized(CacheBudget::default()),
             overlay: Ephemeral::default(),
+            bindings: Bindings::default(),
         }
     }
 
@@ -306,6 +313,7 @@ impl Snapshot {
                 lineage: None,
             }),
             overlay: Ephemeral::default(),
+            bindings: Bindings::default(),
         }
     }
 
@@ -330,6 +338,7 @@ impl Snapshot {
             }),
             caches,
             overlay: Ephemeral::default(),
+            bindings: Bindings::default(),
         }
     }
 
@@ -434,6 +443,19 @@ impl Snapshot {
         &self.overlay
     }
 
+    /// Bind a scope to one of this snapshot's stores. See
+    /// [`Branch::bind`].
+    pub fn bind(&self, scope: Entity, target: StoreTarget) -> &Self {
+        self.bindings.bind(scope, target);
+        self
+    }
+
+    /// This snapshot's scope bindings. A snapshot minted from a branch
+    /// shares the branch's.
+    pub fn bindings(&self) -> &Bindings {
+        &self.bindings
+    }
+
     /// This snapshot's blob store, the target for [`Blob`](crate::Blob)
     /// reads. Blob writes advance the line through the branch's memory
     /// cell, which a snapshot does not have — see [`BlobArchive`].
@@ -512,6 +534,7 @@ impl Clone for Snapshot {
             }),
             caches: self.caches.clone(),
             overlay: self.overlay.clone(),
+            bindings: self.bindings.clone(),
         }
     }
 }
