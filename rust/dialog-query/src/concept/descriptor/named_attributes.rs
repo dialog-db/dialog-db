@@ -1,9 +1,10 @@
 use crate::Cardinality;
 use crate::artifact::Type;
 use crate::attribute::AttributeDescriptor;
-use crate::attribute::Relation;
+use crate::attribute::The;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::TypeError;
+use crate::memo::Memo;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -31,7 +32,7 @@ fn is_not_optional(optional: &bool) -> bool {
 /// `"optional": true`:
 ///
 /// ```json
-/// { "the": "person/nickname", "as": "Text", "optional": true }
+/// { "the": "person/nickname", "as": "text:", "optional": true }
 /// ```
 ///
 /// A required field omits `optional`, so it is byte-identical to the
@@ -58,15 +59,36 @@ pub struct ConceptFieldDescriptor {
     /// hashing uses only the target's `concept:{hash}` URI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     conforms: Option<Box<ConceptDescriptor>>,
+    /// The attribute concept of this field (see
+    /// [`ConceptDescriptor::of_attribute`]), built on first use. Every
+    /// resolution of a concept asks for it, and for its identity, per
+    /// field; clones share the memo, so the identity is hashed once.
+    #[serde(skip)]
+    attribute: Memo<ConceptDescriptor>,
 }
 
 impl ConceptFieldDescriptor {
+    /// This field with no descriptions, its attribute's or a conformance
+    /// target's: what identity sees.
+    pub(crate) fn without_descriptions(&self) -> Self {
+        Self {
+            descriptor: self.descriptor.without_description(),
+            optional: self.optional,
+            conforms: self
+                .conforms
+                .as_ref()
+                .map(|target| Box::new(target.without_descriptions())),
+            attribute: Memo::default(),
+        }
+    }
+
     /// A required concept field wrapping the given attribute descriptor.
     pub fn required(descriptor: AttributeDescriptor) -> Self {
         Self {
             descriptor,
             optional: false,
             conforms: None,
+            attribute: Memo::default(),
         }
     }
 
@@ -77,7 +99,15 @@ impl ConceptFieldDescriptor {
             descriptor,
             optional: true,
             conforms: None,
+            attribute: Memo::default(),
         }
+    }
+
+    /// The attribute concept of this field: the single-field concept
+    /// that is the relation of its attribute.
+    pub fn attribute_concept(&self) -> &ConceptDescriptor {
+        self.attribute
+            .get_or_init(|| ConceptDescriptor::attribute_concept(self))
     }
 
     /// A *concept-typed* field: a required, entity-valued attribute
@@ -99,6 +129,7 @@ impl ConceptFieldDescriptor {
             descriptor,
             optional: false,
             conforms: Some(Box::new(target)),
+            attribute: Memo::default(),
         })
     }
 
@@ -120,7 +151,7 @@ impl ConceptFieldDescriptor {
 
     /// Convenience: what this field selects — one attribute, or every
     /// entry of a keyed collection.
-    pub fn the(&self) -> &Relation {
+    pub fn the(&self) -> &The {
         self.descriptor.the()
     }
 
@@ -210,6 +241,12 @@ impl NamedAttributes {
             return Err(TypeError::EmptyConcept);
         }
         for field in map.values() {
+            if let Some(reason) = field.descriptor().pick_error() {
+                return Err(TypeError::UnfitPick {
+                    the: field.the().to_string(),
+                    reason,
+                });
+            }
             if field.is_optional() && field.the().attribute().is_none() {
                 return Err(TypeError::OptionalCollection {
                     domain: field.domain().to_string(),

@@ -33,7 +33,7 @@ Dialog answers both questions at the front of every node. A node starts with a s
 <path class="wire" d="M561,62 v4 H679 v-4"/>
 <text class="label small muted" x="620.0" y="82" text-anchor="middle">the rest</text>
 <path class="wire" d="M11,96 v4 H558 v-4"/>
-<text class="label small" x="279.0" y="116" text-anchor="middle">the prelude: 16 bytes for a default tree</text>
+<text class="label small" x="279.0" y="116" text-anchor="middle">the prelude: 16 bytes for a new tree</text>
 <text class="label small" x="622" y="116" text-anchor="middle">rkyv, read in place</text>
 </svg>
 </figure>
@@ -51,22 +51,22 @@ The prelude has four parts:
 
 After the fields come zero bytes, up to the next multiple of 16. The body starts right after, on a 16-byte boundary, because the body is read in place and needs that alignment.
 
-Here is the whole prelude of a leaf in a tree that uses the default format:
+Here is the whole prelude of a leaf in a tree created today:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 462 107" width="462" height="107" xmlns="http://www.w3.org/2000/svg" role="img">
+<svg class="dg" viewBox="0 0 462 107" width="462" height="107" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The prelude of a leaf in a new tree: version 02, kind 00, header length 03, the field 05 01 01, then ten zero bytes">
 <rect class="shade" x="8" y="6" width="26" height="26"/>
 <text x="21.0" y="24.0" text-anchor="middle">02</text>
 <rect class="shade" x="36" y="6" width="26" height="26"/>
 <text x="49.0" y="24.0" text-anchor="middle">00</text>
 <rect class="shade" x="64" y="6" width="26" height="26"/>
-<text x="77.0" y="24.0" text-anchor="middle">00</text>
-<rect class="ghost" x="92" y="6" width="26" height="26"/>
-<text x="105.0" y="24.0" text-anchor="middle">00</text>
-<rect class="ghost" x="120" y="6" width="26" height="26"/>
-<text x="133.0" y="24.0" text-anchor="middle">00</text>
-<rect class="ghost" x="148" y="6" width="26" height="26"/>
-<text x="161.0" y="24.0" text-anchor="middle">00</text>
+<text x="77.0" y="24.0" text-anchor="middle">03</text>
+<rect class="critical" x="92" y="6" width="26" height="26"/>
+<text x="105.0" y="24.0" text-anchor="middle">05</text>
+<rect class="critical" x="120" y="6" width="26" height="26"/>
+<text x="133.0" y="24.0" text-anchor="middle">01</text>
+<rect class="critical" x="148" y="6" width="26" height="26"/>
+<text x="161.0" y="24.0" text-anchor="middle">01</text>
 <rect class="ghost" x="176" y="6" width="26" height="26"/>
 <text x="189.0" y="24.0" text-anchor="middle">00</text>
 <rect class="ghost" x="204" y="6" width="26" height="26"/>
@@ -95,12 +95,16 @@ Here is the whole prelude of a leaf in a tree that uses the default format:
 <path class="wire" d="M65,37 v4 H89 v-4"/>
 <line x1="77.0" y1="41" x2="77.0" y2="74" class="dashed"/>
 <text class="label small" x="77.0" y="85" text-anchor="middle">header length</text>
-<path class="wire" d="M93,37 v4 H453 v-4"/>
-<text class="label small" x="273.0" y="55" text-anchor="middle">padding</text>
+<path class="wire" d="M93,37 v4 H173 v-4"/>
+<text class="label small" x="133.0" y="55" text-anchor="middle">value_encoding = 1</text>
+<path class="wire" d="M177,37 v4 H453 v-4"/>
+<text class="label small" x="315.0" y="55" text-anchor="middle">padding</text>
 </svg>
 </figure>
 
-There are no fields at all, because a setting equal to its default is never written. So every node of every default tree starts with the same 16 bytes, give or take the kind byte. A reader uses the kind byte to validate the body as a leaf or an index, then checks the 16 bytes with a single comparison.
+There is one field, three bytes long. A setting equal to its default is never written, and a new tree differs from the defaults in one setting: `value_encoding`, which says how values are written in keys. Its value is 1, which names the encoding the [Keys](./keys.md) chapter described.
+
+So every node of every new tree starts with the same 16 bytes, give or take the kind byte. A reader uses the kind byte to validate the body as a leaf or an index, then checks the 16 bytes with a single comparison.
 
 ## Numbers in the prelude
 
@@ -144,28 +148,28 @@ The ranges are offset so they never overlap: `f8 00` means 248, not 0. So every 
 
 ## The manifest fields
 
-Each field is three things in a row: a code saying which setting it is, the length of its value in bytes, and the value. Here is a leaf from a tree whose only difference from the defaults is a fanout setting of 4:
+Each field is three things in a row: a code saying which setting it is, the length of its value in bytes, and the value. The field above is `05 01 01`: code 5 (`value_encoding`), one byte long, value 1. Here is a leaf from a new tree that also sets its fanout to 4:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 462 107" width="462" height="107" xmlns="http://www.w3.org/2000/svg" role="img">
+<svg class="dg" viewBox="0 0 462 107" width="462" height="107" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The prelude of a leaf whose tree sets fanout_n to 4: header length 06, the fields 02 01 04 and 05 01 01, then seven zero bytes">
 <rect class="shade" x="8" y="6" width="26" height="26"/>
 <text x="21.0" y="24.0" text-anchor="middle">02</text>
 <rect class="shade" x="36" y="6" width="26" height="26"/>
 <text x="49.0" y="24.0" text-anchor="middle">00</text>
 <rect class="shade" x="64" y="6" width="26" height="26"/>
-<text x="77.0" y="24.0" text-anchor="middle">03</text>
+<text x="77.0" y="24.0" text-anchor="middle">06</text>
 <rect class="hash" x="92" y="6" width="26" height="26"/>
 <text x="105.0" y="24.0" text-anchor="middle">02</text>
 <rect class="hash" x="120" y="6" width="26" height="26"/>
 <text x="133.0" y="24.0" text-anchor="middle">01</text>
 <rect class="hash" x="148" y="6" width="26" height="26"/>
 <text x="161.0" y="24.0" text-anchor="middle">04</text>
-<rect class="ghost" x="176" y="6" width="26" height="26"/>
-<text x="189.0" y="24.0" text-anchor="middle">00</text>
-<rect class="ghost" x="204" y="6" width="26" height="26"/>
-<text x="217.0" y="24.0" text-anchor="middle">00</text>
-<rect class="ghost" x="232" y="6" width="26" height="26"/>
-<text x="245.0" y="24.0" text-anchor="middle">00</text>
+<rect class="critical" x="176" y="6" width="26" height="26"/>
+<text x="189.0" y="24.0" text-anchor="middle">05</text>
+<rect class="critical" x="204" y="6" width="26" height="26"/>
+<text x="217.0" y="24.0" text-anchor="middle">01</text>
+<rect class="critical" x="232" y="6" width="26" height="26"/>
+<text x="245.0" y="24.0" text-anchor="middle">01</text>
 <rect class="ghost" x="260" y="6" width="26" height="26"/>
 <text x="273.0" y="24.0" text-anchor="middle">00</text>
 <rect class="ghost" x="288" y="6" width="26" height="26"/>
@@ -190,12 +194,15 @@ Each field is three things in a row: a code saying which setting it is, the leng
 <text class="label small" x="77.0" y="85" text-anchor="middle">header length</text>
 <path class="wire" d="M93,37 v4 H173 v-4"/>
 <text class="label small" x="133.0" y="55" text-anchor="middle">fanout_n = 4</text>
-<path class="wire" d="M177,37 v4 H453 v-4"/>
-<text class="label small" x="315.0" y="55" text-anchor="middle">padding</text>
+<path class="wire" d="M177,37 v4 H257 v-4"/>
+<line x1="217.0" y1="41" x2="217.0" y2="59" class="dashed"/>
+<text class="label small" x="217.0" y="70" text-anchor="middle">value_encoding = 1</text>
+<path class="wire" d="M261,37 v4 H453 v-4"/>
+<text class="label small" x="357.0" y="55" text-anchor="middle">padding</text>
 </svg>
 </figure>
 
-The field is `02 01 04`: code 2 (`fanout_n`), one byte long, value 4. The header length says 3, and ten zero bytes pad the prelude out to 16.
+The new field is `02 01 04`: code 2 (`fanout_n`), one byte long, value 4. It comes first, because its code is smaller. The header length says 6, and seven zero bytes pad the prelude out to 16.
 
 Codes come from a public table. These are the ones defined today:
 
@@ -205,6 +212,7 @@ Codes come from a public table. These are the ones defined today:
 | `02` | `fanout_n` | recommended | 8 | buffers flush at 2<sup>n</sup> ops; with `max_segment` 0, the expected fanout |
 | `03` | `spill_prefix` | required | 64 | how many bytes of a spilled value its key keeps |
 | `04` | `max_separator` | recommended | 512 | separators longer than this never cut |
+| `05` | `value_encoding` | required | 0 | how values are written in keys; trees are created with 1, the encoding the [Keys](./keys.md) chapter describes |
 | `06` | `max_segment` | recommended | 65536 | the node size target the coins aim for |
 | `08` | `frame_ceiling_factor` | recommended | 3 | nodes over this many targets are force-split |
 | `0a` | `anchor_selector` | recommended | 1 | how a forced split picks its spot |
@@ -229,18 +237,18 @@ Suppose Bob's phone runs a newer build of Dialog than Alice's laptop. Bob's buil
 Every setting is one of two kinds:
 
 - **Recommended settings** only shape the tree: they move where the cuts fall. A build that does not recognize one does not follow it. Alice's build still keeps the field and writes it back into every node it edits, so it does not strip Bob's setting from his tree. Its edits may come out shaped a little differently from the canonical tree, which costs some extra work when replicas compare trees, but never loses a fact.
-- **Required settings** change how bytes are read. `inline_n` and `spill_prefix` decide how a value is laid out inside its key, and a reader that ignored them would build different keys and miss facts. A build that does not recognize a required setting is not compatible with the tree: it refuses to read it and needs to be updated.
+- **Required settings** change how bytes are read. `inline_n`, `spill_prefix` and `value_encoding` decide how a value is laid out inside its key, and a reader that ignored them would build different keys and miss facts. A build that does not recognize a required setting is not compatible with the tree: it refuses to read it and needs to be updated.
 
-A build that has never seen a code cannot look up which kind it is, so the code itself says: even codes are recommended, odd codes are required. `inline_n` (`01`) and `spill_prefix` (`03`) are the required settings today. Here is a leaf that changes one of each kind:
+A build that has never seen a code cannot look up which kind it is, so the code itself says: even codes are recommended, odd codes are required. `inline_n` (`01`), `spill_prefix` (`03`) and `value_encoding` (`05`) are the required settings today. Here is a leaf from a new tree that also changes one setting of each kind:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 462 107" width="462" height="107" xmlns="http://www.w3.org/2000/svg" role="img">
+<svg class="dg" viewBox="0 0 462 110" width="462" height="110" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The prelude of a leaf that changes inline_n and max_segment: header length 0d and three fields, filling sixteen bytes exactly">
 <rect class="shade" x="8" y="6" width="26" height="26"/>
 <text x="21.0" y="24.0" text-anchor="middle">02</text>
 <rect class="shade" x="36" y="6" width="26" height="26"/>
 <text x="49.0" y="24.0" text-anchor="middle">00</text>
 <rect class="shade" x="64" y="6" width="26" height="26"/>
-<text x="77.0" y="24.0" text-anchor="middle">0a</text>
+<text x="77.0" y="24.0" text-anchor="middle">0d</text>
 <rect class="critical" x="92" y="6" width="26" height="26"/>
 <text x="105.0" y="24.0" text-anchor="middle">01</text>
 <rect class="critical" x="120" y="6" width="26" height="26"/>
@@ -251,22 +259,22 @@ A build that has never seen a code cannot look up which kind it is, so the code 
 <text x="189.0" y="24.0" text-anchor="middle">00</text>
 <rect class="critical" x="204" y="6" width="26" height="26"/>
 <text x="217.0" y="24.0" text-anchor="middle">08</text>
-<rect class="hash" x="232" y="6" width="26" height="26"/>
-<text x="245.0" y="24.0" text-anchor="middle">06</text>
-<rect class="hash" x="260" y="6" width="26" height="26"/>
-<text x="273.0" y="24.0" text-anchor="middle">03</text>
-<rect class="hash" x="288" y="6" width="26" height="26"/>
-<text x="301.0" y="24.0" text-anchor="middle">f9</text>
+<rect class="critical" x="232" y="6" width="26" height="26"/>
+<text x="245.0" y="24.0" text-anchor="middle">05</text>
+<rect class="critical" x="260" y="6" width="26" height="26"/>
+<text x="273.0" y="24.0" text-anchor="middle">01</text>
+<rect class="critical" x="288" y="6" width="26" height="26"/>
+<text x="301.0" y="24.0" text-anchor="middle">01</text>
 <rect class="hash" x="316" y="6" width="26" height="26"/>
-<text x="329.0" y="24.0" text-anchor="middle">3e</text>
+<text x="329.0" y="24.0" text-anchor="middle">06</text>
 <rect class="hash" x="344" y="6" width="26" height="26"/>
-<text x="357.0" y="24.0" text-anchor="middle">08</text>
-<rect class="ghost" x="372" y="6" width="26" height="26"/>
-<text x="385.0" y="24.0" text-anchor="middle">00</text>
-<rect class="ghost" x="400" y="6" width="26" height="26"/>
-<text x="413.0" y="24.0" text-anchor="middle">00</text>
-<rect class="ghost" x="428" y="6" width="26" height="26"/>
-<text x="441.0" y="24.0" text-anchor="middle">00</text>
+<text x="357.0" y="24.0" text-anchor="middle">03</text>
+<rect class="hash" x="372" y="6" width="26" height="26"/>
+<text x="385.0" y="24.0" text-anchor="middle">f9</text>
+<rect class="hash" x="400" y="6" width="26" height="26"/>
+<text x="413.0" y="24.0" text-anchor="middle">3e</text>
+<rect class="hash" x="428" y="6" width="26" height="26"/>
+<text x="441.0" y="24.0" text-anchor="middle">08</text>
 <path class="wire" d="M9,37 v4 H33 v-4"/>
 <text class="label small" x="21.0" y="55" text-anchor="middle">version</text>
 <path class="wire" d="M37,37 v4 H61 v-4"/>
@@ -277,13 +285,16 @@ A build that has never seen a code cannot look up which kind it is, so the code 
 <text class="label small" x="77.0" y="85" text-anchor="middle">header length</text>
 <path class="wire" d="M93,37 v4 H229 v-4"/>
 <text class="label small" x="161.0" y="55" text-anchor="middle">inline_n = 512, required</text>
-<path class="wire" d="M233,37 v4 H369 v-4"/>
-<line x1="301.0" y1="41" x2="301.0" y2="59" class="dashed"/>
-<text class="label small" x="301.0" y="70" text-anchor="middle">max_segment = 16384, recommended</text>
-<path class="wire" d="M373,37 v4 H453 v-4"/>
-<text class="label small" x="413.0" y="55" text-anchor="middle">padding</text>
+<path class="wire" d="M233,37 v4 H313 v-4"/>
+<line x1="273.0" y1="41" x2="273.0" y2="59" class="dashed"/>
+<text class="label small" x="273.0" y="70" text-anchor="middle">value_encoding = 1, required</text>
+<path class="wire" d="M317,37 v4 H453 v-4"/>
+<line x1="385.0" y1="41" x2="385.0" y2="89" class="dashed"/>
+<text class="label small" x="453" y="100" text-anchor="end">max_segment = 16384, recommended</text>
 </svg>
 </figure>
+
+The three fields take 13 bytes, so this prelude fills its 16 bytes exactly and has no padding.
 
 Within this layout, the only setting that can lock out an older build is a required one the tree actually uses. Trees that use only recommended settings stay readable by every build that reads this layout. A new layout version or node kind would lock older builds out too, which is why those are reserved for changes that need it.
 
@@ -302,7 +313,7 @@ The body is the node itself, stored with [rkyv](https://rkyv.org/) so that its s
 
 ## The empty tree
 
-An empty tree still has a format, so it is still a node: a leaf with no entries, carrying the manifest like any other. With the default format that is the 16-byte prelude and an empty leaf body. It is only ever a root. The first insert replaces it.
+An empty tree still has a format, so it is still a node: a leaf with no entries, carrying the manifest like any other. For a new tree that is the 16-byte prelude above and an empty leaf body. It is only ever a root. The first insert replaces it.
 
 <div class="aside">
 

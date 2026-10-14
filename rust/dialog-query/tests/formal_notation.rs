@@ -21,7 +21,7 @@ fn it_parses_attribute_formal_notation() {
         "description": "Name of the person",
         "the": "io.gozala.person/name",
         "cardinality": "one",
-        "as": "Text"
+        "as": "text:"
     });
 
     let attr: dialog_query::AttributeDescriptor =
@@ -38,21 +38,37 @@ fn it_parses_attribute_formal_notation() {
 
     let reserialized = serde_json::to_value(&attr).unwrap();
     assert_eq!(reserialized["the"], "io.gozala.person/name");
-    assert_eq!(reserialized["as"], "Text");
-    assert_eq!(reserialized["cardinality"], "one");
+    assert_eq!(reserialized["as"], "text:");
+    assert!(
+        reserialized.get("cardinality").is_none(),
+        "`cardinality: one` is the older spelling of `last`, read but never written: {reserialized}"
+    );
 }
 
 #[dialog_common::test]
 fn it_parses_attribute_value_types() {
+    use dialog_query::artifact::Type;
+    // Each type is named by its entity; the names the release before
+    // type entities wrote are still read.
     let types = [
-        ("Bytes", dialog_query::artifact::Type::Bytes),
-        ("Entity", dialog_query::artifact::Type::Entity),
-        ("Boolean", dialog_query::artifact::Type::Boolean),
-        ("Text", dialog_query::artifact::Type::String),
-        ("UnsignedInteger", dialog_query::artifact::Type::UnsignedInt),
-        ("SignedInteger", dialog_query::artifact::Type::SignedInt),
-        ("Float", dialog_query::artifact::Type::Float),
-        ("Symbol", dialog_query::artifact::Type::Symbol),
+        ("bytes:", Type::Bytes),
+        ("entity:", Type::Entity),
+        ("boolean:", Type::Boolean),
+        ("text:", Type::String),
+        ("natural:", Type::UnsignedInt),
+        ("integer:", Type::SignedInt),
+        ("float:", Type::Float),
+        ("record:", Type::Record),
+        ("symbol:", Type::Symbol),
+        ("Bytes", Type::Bytes),
+        ("Entity", Type::Entity),
+        ("Boolean", Type::Boolean),
+        ("Text", Type::String),
+        ("UnsignedInteger", Type::UnsignedInt),
+        ("SignedInteger", Type::SignedInt),
+        ("Float", Type::Float),
+        ("Record", Type::Record),
+        ("Symbol", Type::Symbol),
     ];
 
     for (type_str, expected_type) in types {
@@ -86,7 +102,7 @@ fn it_parses_attribute_cardinality_many() {
     let json = json!({
         "the": "post/tags",
         "cardinality": "many",
-        "as": "Text"
+        "as": "text:"
     });
     let attr: dialog_query::AttributeDescriptor = serde_json::from_value(json).unwrap();
     assert_eq!(attr.cardinality(), dialog_query::Cardinality::Many);
@@ -103,13 +119,13 @@ fn it_parses_concept_formal_notation() {
                 "description": "Name of the person",
                 "the": "io.gozala.person/name",
                 "cardinality": "one",
-                "as": "Text"
+                "as": "text:"
             },
             "address": {
                 "description": "Address of the person",
                 "the": "io.gozala.person/address",
                 "cardinality": "one",
-                "as": "Text"
+                "as": "text:"
             }
         }
     });
@@ -137,8 +153,8 @@ fn it_parses_concept_formal_notation() {
 fn it_computes_concept_structural_identity() {
     let concept_a: ConceptDescriptor = serde_json::from_value(json!({
         "with": {
-            "field_a": { "the": "person/name", "as": "Text" },
-            "field_b": { "the": "person/age", "as": "UnsignedInteger" }
+            "field_a": { "the": "person/name", "as": "text:" },
+            "field_b": { "the": "person/age", "as": "natural:" }
         }
     }))
     .unwrap();
@@ -146,8 +162,8 @@ fn it_computes_concept_structural_identity() {
     let concept_b: ConceptDescriptor = serde_json::from_value(json!({
         "description": "Different description",
         "with": {
-            "different_name_1": { "the": "person/name", "as": "Text" },
-            "different_name_2": { "the": "person/age", "as": "UnsignedInteger" }
+            "different_name_1": { "the": "person/name", "as": "text:" },
+            "different_name_2": { "the": "person/age", "as": "natural:" }
         }
     }))
     .unwrap();
@@ -167,19 +183,19 @@ fn it_accepts_concept_maybe_field() {
             "instruction": {
                 "description": "What to do in this step",
                 "the": "diy.cook.recipe-step/instruction",
-                "as": "Text"
+                "as": "text:"
             }
         },
         "maybe": {
             "after": {
                 "description": "Step that must be completed before this one",
                 "the": "diy.cook.recipe-step/after",
-                "as": "Entity"
+                "as": "entity:"
             },
             "duration": {
                 "description": "Time in minutes this step takes",
                 "the": "diy.cook.recipe-step/duration",
-                "as": "UnsignedInteger"
+                "as": "natural:"
             }
         }
     });
@@ -549,7 +565,7 @@ fn it_parses_concept_premise() {
     let json = json!({
         "assert": {
             "with": {
-                "name": { "the": "diy.cook/ingredient-name", "as": "Text" }
+                "name": { "the": "diy.cook/ingredient-name", "as": "text:" }
             }
         },
         "where": {
@@ -584,7 +600,7 @@ fn it_parses_conjunction_premise_array() {
         {
             "assert": {
                 "with": {
-                    "name": { "the": "diy.cook/ingredient-name", "as": "Text" }
+                    "name": { "the": "diy.cook/ingredient-name", "as": "text:" }
                 }
             },
             "where": {
@@ -595,7 +611,7 @@ fn it_parses_conjunction_premise_array() {
         {
             "assert": {
                 "with": {
-                    "quantity": { "the": "diy.cook/quantity", "as": "UnsignedInteger" }
+                    "quantity": { "the": "diy.cook/quantity", "as": "natural:" }
                 }
             },
             "where": {
@@ -606,7 +622,7 @@ fn it_parses_conjunction_premise_array() {
         {
             "assert": {
                 "with": {
-                    "unit": { "the": "diy.cook/unit", "as": "Text" }
+                    "unit": { "the": "diy.cook/unit", "as": "text:" }
                 }
             },
             "where": {
@@ -640,17 +656,17 @@ fn it_parses_rule_structure_ingredient_example() {
                 "name": {
                     "description": "Ingredient name",
                     "the": "diy.cook/ingredient-name",
-                    "as": "Text"
+                    "as": "text:"
                 },
                 "quantity": {
                     "description": "Amount needed",
                     "the": "diy.cook/quantity",
-                    "as": "UnsignedInteger"
+                    "as": "natural:"
                 },
                 "unit": {
                     "description": "Unit of measurement",
                     "the": "diy.cook/unit",
-                    "as": "Text"
+                    "as": "text:"
                 }
             }
         },
@@ -658,7 +674,7 @@ fn it_parses_rule_structure_ingredient_example() {
             {
                 "assert": {
                     "with": {
-                        "name": { "the": "diy.cook/ingredient-name", "as": "Text" }
+                        "name": { "the": "diy.cook/ingredient-name", "as": "text:" }
                     }
                 },
                 "where": {
@@ -669,7 +685,7 @@ fn it_parses_rule_structure_ingredient_example() {
             {
                 "assert": {
                     "with": {
-                        "quantity": { "the": "diy.cook/quantity", "as": "UnsignedInteger" }
+                        "quantity": { "the": "diy.cook/quantity", "as": "natural:" }
                     }
                 },
                 "where": {
@@ -680,7 +696,7 @@ fn it_parses_rule_structure_ingredient_example() {
             {
                 "assert": {
                     "with": {
-                        "unit": { "the": "diy.cook/unit", "as": "Text" }
+                        "unit": { "the": "diy.cook/unit", "as": "text:" }
                     }
                 },
                 "where": {
@@ -709,7 +725,7 @@ fn it_parses_rule_with_equality_constraint() {
             {
                 "assert": {
                     "with": {
-                        "name": { "the": "org.employee/name", "as": "Text" }
+                        "name": { "the": "org.employee/name", "as": "text:" }
                     }
                 },
                 "where": {
@@ -748,7 +764,7 @@ fn it_parses_rule_with_formula() {
             {
                 "assert": {
                     "with": {
-                        "quantity": { "the": "diy.cook/quantity", "as": "UnsignedInteger" }
+                        "quantity": { "the": "diy.cook/quantity", "as": "natural:" }
                     }
                 },
                 "where": {
@@ -786,9 +802,9 @@ fn it_parses_rule_with_unless() {
             {
                 "assert": {
                     "with": {
-                        "attendee": { "the": "diy.planner/attendee", "as": "Entity" },
-                        "recipe": { "the": "diy.planner/recipe", "as": "Entity" },
-                        "occasion": { "the": "diy.planner/occasion", "as": "Entity" }
+                        "attendee": { "the": "diy.planner/attendee", "as": "entity:" },
+                        "recipe": { "the": "diy.planner/recipe", "as": "entity:" },
+                        "occasion": { "the": "diy.planner/occasion", "as": "entity:" }
                     }
                 },
                 "where": {
@@ -802,8 +818,8 @@ fn it_parses_rule_with_unless() {
             {
                 "assert": {
                     "with": {
-                        "person": { "the": "diy.planner/person", "as": "Entity" },
-                        "recipe": { "the": "diy.planner/recipe", "as": "Entity" }
+                        "person": { "the": "diy.planner/person", "as": "entity:" },
+                        "recipe": { "the": "diy.planner/recipe", "as": "entity:" }
                     }
                 },
                 "where": {
@@ -826,7 +842,7 @@ fn it_discriminates_concept_vs_formula_vs_constraint() {
     let concept_json = json!({
         "assert": {
             "with": {
-                "name": { "the": "person/name", "as": "Text" }
+                "name": { "the": "person/name", "as": "text:" }
             }
         },
         "where": {
@@ -894,12 +910,12 @@ fn it_round_trips_concept() {
                 "the": "diy.cook/quantity",
                 "description": "How much of this ingredient",
                 "cardinality": "one",
-                "as": "UnsignedInteger"
+                "as": "natural:"
             },
             "name": {
                 "the": "diy.cook/ingredient-name",
                 "description": "Name of the ingredient",
-                "as": "Text"
+                "as": "text:"
             }
         }
     });
@@ -1006,17 +1022,17 @@ fn it_round_trips_ingredient_rule() {
                 "name": {
                     "description": "Ingredient name",
                     "the": "diy.cook/ingredient-name",
-                    "as": "Text"
+                    "as": "text:"
                 },
                 "quantity": {
                     "description": "Amount needed",
                     "the": "diy.cook/quantity",
-                    "as": "UnsignedInteger"
+                    "as": "natural:"
                 },
                 "unit": {
                     "description": "Unit of measurement",
                     "the": "diy.cook/unit",
-                    "as": "Text"
+                    "as": "text:"
                 }
             }
         },
@@ -1024,7 +1040,7 @@ fn it_round_trips_ingredient_rule() {
             {
                 "assert": {
                     "with": {
-                        "name": { "the": "diy.cook/ingredient-name", "as": "Text" }
+                        "name": { "the": "diy.cook/ingredient-name", "as": "text:" }
                     }
                 },
                 "where": {
@@ -1035,7 +1051,7 @@ fn it_round_trips_ingredient_rule() {
             {
                 "assert": {
                     "with": {
-                        "quantity": { "the": "diy.cook/quantity", "as": "UnsignedInteger" }
+                        "quantity": { "the": "diy.cook/quantity", "as": "natural:" }
                     }
                 },
                 "where": {
@@ -1046,7 +1062,7 @@ fn it_round_trips_ingredient_rule() {
             {
                 "assert": {
                     "with": {
-                        "unit": { "the": "diy.cook/unit", "as": "Text" }
+                        "unit": { "the": "diy.cook/unit", "as": "text:" }
                     }
                 },
                 "where": {
@@ -1073,7 +1089,7 @@ fn it_round_trips_rule_with_formula() {
             "with": {
                 "quantity": {
                     "the": "diy.cook.doubled-quantity/quantity",
-                    "as": "UnsignedInteger"
+                    "as": "natural:"
                 }
             }
         },
@@ -1081,7 +1097,7 @@ fn it_round_trips_rule_with_formula() {
             {
                 "assert": {
                     "with": {
-                        "is": { "the": "diy.cook/quantity", "as": "UnsignedInteger" }
+                        "is": { "the": "diy.cook/quantity", "as": "natural:" }
                     }
                 },
                 "where": {
@@ -1114,18 +1130,18 @@ fn it_round_trips_rule_with_negation() {
         "description": "A safe meal",
         "deduce": {
             "with": {
-                "attendee": { "the": "diy.planner.safe-meal/attendee", "as": "Entity" },
-                "recipe": { "the": "diy.planner.safe-meal/recipe", "as": "Entity" },
-                "occasion": { "the": "diy.planner.safe-meal/occasion", "as": "Entity" }
+                "attendee": { "the": "diy.planner.safe-meal/attendee", "as": "entity:" },
+                "recipe": { "the": "diy.planner.safe-meal/recipe", "as": "entity:" },
+                "occasion": { "the": "diy.planner.safe-meal/occasion", "as": "entity:" }
             }
         },
         "when": [
             {
                 "assert": {
                     "with": {
-                        "attendee": { "the": "diy.planner/attendee", "as": "Entity" },
-                        "recipe": { "the": "diy.planner/recipe", "as": "Entity" },
-                        "occasion": { "the": "diy.planner/occasion", "as": "Entity" }
+                        "attendee": { "the": "diy.planner/attendee", "as": "entity:" },
+                        "recipe": { "the": "diy.planner/recipe", "as": "entity:" },
+                        "occasion": { "the": "diy.planner/occasion", "as": "entity:" }
                     }
                 },
                 "where": {
@@ -1139,8 +1155,8 @@ fn it_round_trips_rule_with_negation() {
             {
                 "assert": {
                     "with": {
-                        "person": { "the": "diy.planner/person", "as": "Entity" },
-                        "recipe": { "the": "diy.planner/recipe", "as": "Entity" }
+                        "person": { "the": "diy.planner/person", "as": "entity:" },
+                        "recipe": { "the": "diy.planner/recipe", "as": "entity:" }
                     }
                 },
                 "where": {
@@ -1168,15 +1184,15 @@ fn it_compiles_valid_rule() {
     let json = json!({
         "deduce": {
             "with": {
-                "name": { "the": "person/name", "as": "Text" },
-                "age": { "the": "person/age", "as": "UnsignedInteger" }
+                "name": { "the": "person/name", "as": "text:" },
+                "age": { "the": "person/age", "as": "natural:" }
             }
         },
         "when": [
             {
                 "assert": {
                     "with": {
-                        "name": { "the": "person/name", "as": "Text" }
+                        "name": { "the": "person/name", "as": "text:" }
                     }
                 },
                 "where": {
@@ -1187,7 +1203,7 @@ fn it_compiles_valid_rule() {
             {
                 "assert": {
                     "with": {
-                        "age": { "the": "person/age", "as": "UnsignedInteger" }
+                        "age": { "the": "person/age", "as": "natural:" }
                     }
                 },
                 "where": {
@@ -1208,15 +1224,15 @@ fn it_rejects_rule_with_unbound_variable() {
     let json = json!({
         "deduce": {
             "with": {
-                "name": { "the": "person/name", "as": "Text" },
-                "age": { "the": "person/age", "as": "UnsignedInteger" }
+                "name": { "the": "person/name", "as": "text:" },
+                "age": { "the": "person/age", "as": "natural:" }
             }
         },
         "when": [
             {
                 "assert": {
                     "with": {
-                        "name": { "the": "person/name", "as": "Text" }
+                        "name": { "the": "person/name", "as": "text:" }
                     }
                 },
                 "where": {

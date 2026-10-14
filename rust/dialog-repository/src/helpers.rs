@@ -183,12 +183,15 @@ where
     for round in 0..(6 * scale) {
         let rows: Vec<_> = (0..150)
             .map(|i| {
-                Instruction::Assert(Artifact {
-                    the: "device/link".parse().expect("valid attribute"),
-                    of: format!("device:{round}-{i}").parse().expect("valid entity"),
-                    is: Value::String(format!("device-{round}-{i}").repeat(24)),
-                    cause: None,
-                })
+                Instruction::Assert(
+                    Artifact {
+                        the: "device/link".parse().expect("valid attribute"),
+                        of: format!("device:{round}-{i}").parse().expect("valid entity"),
+                        is: Value::String(format!("device-{round}-{i}").repeat(24)),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
+                )
             })
             .collect();
         branch.commit(stream::iter(rows)).perform(env).await?;
@@ -240,6 +243,10 @@ impl<P: dialog_common::Holds> dialog_common::Holds for Counting<P> {
 
     fn hold(&self, key: String, handle: dialog_common::Held) {
         self.inner.hold(key, handle)
+    }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> dialog_common::Held) -> dialog_common::Held {
+        self.inner.held_or(key, make)
     }
 }
 

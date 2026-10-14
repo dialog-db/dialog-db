@@ -1,0 +1,66 @@
+//! Shaping-hash accounting over the Stack Exchange replay: how many key and
+//! separator hashes the tree asks for and computes while committing, and how
+//! many blocks the commits read back from the archive.
+//!
+//! ```sh
+//! cargo run --release -p dialog-baseline --example hash_audit -- 2000
+//! ```
+
+use dialog_baseline::metered::Tally;
+use dialog_baseline::repo::DialogRepo;
+use dialog_baseline::se::{SeLog, se_instructions};
+use dialog_repository::BranchReference;
+
+fn main() -> anyhow::Result<()> {
+    let count: usize = std::env::args()
+        .nth(1)
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(2000);
+    let log = SeLog::load(count)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let tally = Tally::default();
+        let repo = DialogRepo::metered(tally.clone()).await?;
+        let started = std::time::Instant::now();
+        // `HASH_AUDIT_REOPEN` opens the branch afresh for every commit, the
+        // way a service that keeps no handle between requests does.
+        let reopen = std::env::var("HASH_AUDIT_REOPEN").is_ok();
+        for commit in &log.transactions {
+            let instructions = se_instructions(commit)?.into_iter().collect();
+            if reopen {
+                BranchReference::from(repo.branch())
+                    .open()
+                    .perform(repo.operator())
+                    .await?
+                    .transaction()
+                    .integrate(instructions)
+                    .commit()
+                    .publish()
+                    .perform(repo.operator())
+                    .await?;
+            } else {
+                repo.branch()
+                    .transaction()
+                    .integrate(instructions)
+                    .commit()
+                    .publish()
+                    .perform(repo.operator())
+                    .await?;
+            }
+        }
+        let elapsed = started.elapsed();
+        println!(
+            "commits={} facts={} elapsed={elapsed:?} reads={} read_bytes={} writes={} write_bytes={}",
+            log.transactions.len(),
+            log.fact_count(),
+            tally.reads(),
+            tally.read_bytes(),
+            tally.writes(),
+            tally.write_bytes(),
+        );
+        println!("{}", dialog_search_tree::audit::report());
+        Ok(())
+    })
+}

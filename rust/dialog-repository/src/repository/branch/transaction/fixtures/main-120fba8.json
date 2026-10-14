@@ -1,0 +1,65 @@
+{
+  "attributes": {
+    "org/salary one UnsignedInteger": "the:4vXu9fi3HmrqRfUFVbhC6qkDdwQvq8qnvVBZi5KAWJp9",
+    "org/tag many Text": "the:56uocbCn7AYhvCCXvCN8MmDhskKw3LgfWNibieftXGYb"
+  },
+  "concepts": {
+    "{salary: org/salary one UnsignedInteger, tag: org/tag many Text}": "concept:2g8y9UKMRgkk2yS2CFEoJgdXanPsjNh6AF2Usj8X5q9L",
+    "{target: cmd.stage/target Entity}": "concept:4K2b59UUCyizSXPK8xG2CQKtNh1KPAyGgBLMMDzJ8fNn"
+  },
+  "release": "main 120fba8",
+  "rules": {
+    "salary_from_bonus": {
+      "entity": "rule:Db34mpQ7r7ukEPE2unuYiGuXXwhB3PiFScr85Bdi2gcA",
+      "facts": [
+        {
+          "is": {
+            "bytes": "a2647768656e81a2657768657265a26474686973a1613fa1646e616d65647468697365626f6e7573a1613fa1646e616d656673616c61727966617373657274a16477697468a165626f6e7573a46261736f556e7369676e6564496e746567657263746865696f72672f626f6e75736b63617264696e616c697479636f6e656b6465736372697074696f6e6066646564756365a16477697468a16673616c617279a46261736f556e7369676e6564496e7465676572637468656a6f72672f73616c6172796b63617264696e616c697479636f6e656b6465736372697074696f6e60"
+          },
+          "of": "rule:Db34mpQ7r7ukEPE2unuYiGuXXwhB3PiFScr85Bdi2gcA",
+          "the": "dialog.rule/source"
+        },
+        {
+          "is": {
+            "entity": "concept:264qdKjupNnBR6z4XoPRGi4WQ1WRvcW2uqnJjbjhChfG"
+          },
+          "of": "rule:Db34mpQ7r7ukEPE2unuYiGuXXwhB3PiFScr85Bdi2gcA",
+          "the": "dialog.rule/conclusion"
+        },
+        {
+          "is": {
+            "entity": "on:org/bonus"
+          },
+          "of": "rule:Db34mpQ7r7ukEPE2unuYiGuXXwhB3PiFScr85Bdi2gcA",
+          "the": "dialog.rule/reads"
+        }
+      ]
+    },
+    "tagger": {
+      "entity": "rule:AfJDEG9TNACTjimTRfxTN1TixZtUrij8PAxiGoLfB5eC",
+      "facts": [
+        {
+          "is": {
+            "bytes": "a2647768656e81a2657768657265a26474686973a1613fa1646e616d656474686973657469746c65a1613fa1646e616d656374616766617373657274a16477697468a1657469746c65a462617364546578746374686569646f632f7469746c656b63617264696e616c697479636f6e656b6465736372697074696f6e606761737365727421a16477697468a163746167a46261736454657874637468656b646572697665642f7461676b63617264696e616c697479636f6e656b6465736372697074696f6e60"
+          },
+          "of": "rule:AfJDEG9TNACTjimTRfxTN1TixZtUrij8PAxiGoLfB5eC",
+          "the": "dialog.rule/source"
+        },
+        {
+          "is": {
+            "entity": "concept:CRqEvQvkpzHiSYUJhiQQGSmGH9PYBLZELQA2YxWYCCJf"
+          },
+          "of": "rule:AfJDEG9TNACTjimTRfxTN1TixZtUrij8PAxiGoLfB5eC",
+          "the": "dialog.rule/induces"
+        },
+        {
+          "is": {
+            "entity": "on:doc/title"
+          },
+          "of": "rule:AfJDEG9TNACTjimTRfxTN1TixZtUrij8PAxiGoLfB5eC",
+          "the": "dialog.rule/on"
+        }
+      ]
+    }
+  }
+}

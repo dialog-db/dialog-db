@@ -7,7 +7,7 @@ A node, once written, never changes. That makes naming it easy: a node is named 
 <defs><marker id="s-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <rect class="shade" x="10" y="30" width="170" height="44"/>
 <text class="label" x="95" y="50" text-anchor="middle">node bytes</text>
-<text class="small muted" x="95" y="66" text-anchor="middle">02 00 00 00 … body</text>
+<text class="small muted" x="95" y="66" text-anchor="middle">02 00 03 05 … body</text>
 <line x1="180" y1="52" x2="226" y2="52" marker-end="url(#s-arrow)"/>
 <rect class="hash solid" x="230" y="30" width="110" height="44"/>
 <text class="title" x="285" y="57" text-anchor="middle" style="fill:var(--dg-paper)">BLAKE3</text>
@@ -19,7 +19,9 @@ A node, once written, never changes. That makes naming it easy: a node is named 
 </svg>
 </figure>
 
-The hash is BLAKE3, 32 bytes, unkeyed, taken over the whole node, prelude included. Anything stored this way is called a block. Tree nodes are blocks, and so are spilled values from the [Keys](./keys.md) chapter. Blobs such as photos are named by their BLAKE3 hash too, but they live in a separate blob store that streams them rather than handling them as whole buffers.
+The hash is BLAKE3, 32 bytes, unkeyed, taken over the whole node, prelude included. Anything stored this way is called a block, and tree nodes are blocks.
+
+Bytes that are not nodes are named the same way, by their BLAKE3 hash, but they are kept apart in an asset store, which can stream them rather than handling them as whole buffers. Two things live there. One is the spilled values from the [Keys](./keys.md) chapter. The other is assets: content such as photos that an app stores next to its facts.
 
 Naming by hash has three useful consequences:
 
@@ -27,11 +29,17 @@ Naming by hash has three useful consequences:
 - **Equal blocks are stored once.** Two trees that share a subtree share its blocks. Writing a block that already exists is harmless: it can only write the same bytes again.
 - **A root names a whole tree.** A root holds its children's hashes, which hold theirs. Handing someone one 32-byte root hands them a name for every fact beneath it.
 
+## Assets
+
+An app stores a photo by asserting it in a transaction, like a fact. The commit writes the photo's bytes to the asset store and records one fact about them in the same revision: the `dialog.asset/size` of the entity `asset:{hash}` is the number of bytes. That entity is the photo's name, and the app's own facts can point at it, such as *the `demo.grocery/photo` of `item:2` is `asset:…`*.
+
+The fact is what says a branch holds the asset. A push sends the bytes of every asset whose fact is new, a read fetches only bytes that such a fact vouches for, and retracting the fact drops the branch's hold on the bytes. Only a commit that stores the bytes can write the fact, since it is in a `dialog.` domain, so the size it states is measured from the bytes themselves.
+
 ## Two kinds of storage
 
 For its data, a repository keeps two kinds of things:
 
-- **The archive** holds blocks. It is a map from hash to bytes. Entries are only ever added, and a name always means the same bytes.
+- **The archive** holds blocks and assets. It is a map from hash to bytes. Entries are only ever added, and a name always means the same bytes.
 - **Memory** holds cells. A cell is a small named value that can change, like the current head of a branch (see [Commits and History](./history.md)). A cell is updated with compare-and-swap: a writer says what it believes the cell holds now, and the update fails if someone else changed it first.
 
 Almost everything is in the archive. A handful of cells point into it.
@@ -42,17 +50,19 @@ The same archive runs on several backends. Tree nodes go in a catalog named `ind
 
 | Backend | Where a tree node lives |
 |---|---|
-| Native file system | `{repository}/archive/index/{base58 hash}` |
+| Native file system | `{repository's directory}/archive/index/{base58 hash}` |
 | Browser IndexedDB | object store `archive/index`, key `{base58 hash}` |
 | Browser file system (OPFS, opt-in) | the same path layout as native |
 | S3 or R2 | object `{repository DID}/index/{base58 hash}` |
 | In memory | a map, for tests |
 
+Assets sit beside them: `{repository's directory}/blob/{base58 hash}` on a file system, and `{repository DID}/blob/{base58 hash}` on S3 or R2. In a browser, assets always go to OPFS, even when blocks and cells are in IndexedDB.
+
 The file system backend writes each block atomically, and skips the write when the file already exists, since a block with that name can only have those bytes.
 
 ## Writing: one import per commit
 
-While a commit edits the tree, the new nodes it produces collect in memory. Spilled values are written as the commit applies them. When the commit is sealed, every new node is written to the archive in one import, and only after that does the branch's head move to the new root. A head can therefore never point at a root whose blocks are not yet stored.
+While a commit edits the tree, the new nodes it produces collect in memory, and so do the values it spills. When the commit is sealed, the spilled values are written to the asset store, each checked against its hash, and then every new node is written to the archive in one import. Only after that can the branch's head move to the new root. A head can therefore never point at a root whose blocks are not yet stored.
 
 ## Reading: fetch on demand
 
@@ -82,10 +92,12 @@ A replica does not need every block of a tree to use it. When a read reaches a n
 </svg>
 </figure>
 
-So a phone can open a large shared repository by fetching its root, then mostly the nodes its queries walk through, plus some fetched ahead of time in the background. The hash check happens in the tree reader, which is why a remote peer can be any dumb store of bytes.
+So a phone can open a large shared repository by fetching its root, then mostly the nodes its queries walk through, plus some that a query fetches ahead of where it is reading. The hash check happens in the tree reader, which is why a remote peer can be any dumb store of bytes. Spilled values are fetched the same way, from the asset store, and checked the same way.
+
+Fetches are scheduled, not fired one by one. Readers that want the same block share one fetch, and each remote peer serves a limited number of requests at a time, with a read that a query is waiting on going ahead of one made on speculation.
 
 <div class="aside">
 
-**Implementations.** Hash-checked reads and writes are `ContentAddressedStorage` in [`dialog-search-tree/src/storage.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-search-tree/src/storage.rs). The local backends are under [`dialog-storage/src/storage/provider`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-storage/src/storage/provider), and the S3 and R2 remote peer is [`dialog-remote-s3`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-s3). Fetching from a remote peer on a local miss is `NetworkedIndex` in [`dialog-repository/src/repository/archive/networked.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/archive/networked.rs).
+**Implementations.** Hash-checked reads are `LoadBlock` in [`dialog-search-tree/src/load.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-search-tree/src/load.rs) for tree nodes, and `LoadBlob` in [`dialog-artifacts/src/archive.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/archive.rs) for spilled values. Assets are [`dialog-repository/src/repository/branch/asset.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/asset.rs). The local backends are under [`dialog-storage/src/storage/provider`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-storage/src/storage/provider), and the S3 and R2 remote peer is [`dialog-remote-s3`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-s3). Fetching from a remote peer on a local miss is `NetworkedIndex` in [`dialog-repository/src/repository/archive/networked.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/archive/networked.rs), and the scheduling is in [`dialog-peer/src/peer/hydrate.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-peer/src/peer/hydrate.rs).
 
 </div>

@@ -15,22 +15,34 @@
 //! [`AnalyzerError`](crate::AnalyzerError)) reference, so error
 //! reporting is uniform across both kinds.
 
+use crate::artifact::Value;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::error::{AnalysisError, TypeError};
+use crate::negation::Negation;
 use crate::planner::Planner;
 use crate::premise::Premise;
+use crate::proposition::Proposition;
 use crate::reduce::ReduceSpec;
+use crate::rule::analyzer::Authored;
+use crate::term::Term;
 use crate::{Environment, Type};
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::sync::Arc;
 
 /// Rule analysis: inference and dependency graph over premises.
 pub mod analyzer;
+pub mod body;
+pub mod canonical;
 /// Deductive rule definitions for deriving new facts.
 pub mod deductive;
 /// Inductive rule definitions (a.k.a. effects).
 pub mod inductive;
+#[cfg(test)]
+mod invariants;
 /// Premises collection type.
 pub mod premises;
+
+pub(crate) mod reference;
 /// Rules as statements: `dialog.rule/*` vocabulary and install-by-assert.
 pub mod statement;
 /// Type inference over a rule's premises.
@@ -165,10 +177,58 @@ pub trait Compile: Sized + Into<Rule> {
 /// analysis, plannability, and head grounding, parameterized over an
 /// optional `reduce` clause (`(field, spec)` pairs in head-field
 /// order; empty for a plain rule).
+/// Why `premises` and `reduce` cannot make a deductive rule, if they
+/// cannot: a deductive rule is open, installed as facts and read by
+/// whatever program exists when a query runs, so it admits no
+/// `reduce`: a fold withdraws its result when a fact arrives and has no
+/// reading inside a dependency cycle. An `unless` is admitted: outside
+/// a cycle it is stratified, and a rule closing a cycle through it is
+/// quarantined by the program analysis
+/// ([`ProgramAnalysis::quarantined`](crate::session::ProgramAnalysis::quarantined)). The
+/// check depends on the rule alone, never on the rest of the program,
+/// so no merge of rule sets is ever rejected.
+fn open_rule_error<T: Compile>(
+    conclusion: &ConceptDescriptor,
+    premises: &[Premise],
+    reduce: &[(String, ReduceSpec)],
+) -> Option<TypeError> {
+    // A negated attribute or concept premise asks that a fact be
+    // absent. Outside a dependency cycle that is stratified; a rule
+    // closing a cycle through it is quarantined, so either way the
+    // program evaluates. A fold has no such reading, so it stays out.
+    if !reduce.is_empty() {
+        let rule = Box::new(T::in_progress(conclusion.clone(), premises.to_vec()).into());
+        return Some(TypeError::ReduceInOpenRule { rule });
+    }
+    None
+}
+
 pub(crate) fn compile_rule<T: Compile>(
     conclusion: ConceptDescriptor,
     premises: Vec<Premise>,
     reduce: Vec<(String, ReduceSpec)>,
+) -> Result<T, TypeError> {
+    compile_rule_as::<T>(conclusion, premises, reduce, true)
+}
+
+/// [`compile_rule`] for a rule the engine writes for itself: a
+/// concept's implicit rule, a selecting or covering rule, a head
+/// split from a source. Such a rule reads a field under whatever
+/// pick the reader declared, which is how the pick reaches the
+/// evaluation, so the open-rule check that an author's rule passes
+/// does not apply to it.
+pub(crate) fn compile_internal<T: Compile>(
+    conclusion: ConceptDescriptor,
+    premises: Vec<Premise>,
+) -> Result<T, TypeError> {
+    compile_rule_as::<T>(conclusion, premises, Vec::new(), false)
+}
+
+fn compile_rule_as<T: Compile>(
+    conclusion: ConceptDescriptor,
+    premises: Vec<Premise>,
+    reduce: Vec<(String, ReduceSpec)>,
+    authored: bool,
 ) -> Result<T, TypeError> {
     // A concept with no required (`with`) attributes is
     // unconstructable (see `ConceptDescriptor`'s `TryFrom` /
@@ -180,7 +240,31 @@ pub(crate) fn compile_rule<T: Compile>(
     // Coalesce / reduce checks + dependency graph, all from the
     // premises, before any execution order is chosen. The original
     // premises are kept for the error-path display rule.
+    // A concept premise reads the fields it names and the required
+    // ones: an optional field it leaves out decides nothing, and
+    // selecting it could put the concept on a cycle with the rules
+    // deriving that field (see `ConceptQuery::narrowed`).
+    let premises: Vec<Premise> = premises
+        .into_iter()
+        .map(|premise| match premise {
+            Premise::Assert(Proposition::Concept(query)) => {
+                Premise::Assert(Proposition::Concept(query.narrowed()))
+            }
+            Premise::Unless(Negation(Proposition::Concept(query))) => {
+                Premise::Unless(Negation(Proposition::Concept(query.narrowed())))
+            }
+            other => other,
+        })
+        .collect();
     let display_premises = premises.clone();
+    let authored_reduce = reduce.clone();
+    encodable_constants(&conclusion, &premises, &reduce)?;
+    if authored
+        && matches!(T::KIND, RuleKind::Deductive)
+        && let Some(error) = open_rule_error::<T>(&conclusion, &premises, &reduce)
+    {
+        return Err(error);
+    }
     let analysis = match analyzer::analyze_with(conclusion.clone(), premises, T::KIND, reduce) {
         Ok(analysis) => analysis,
         Err(err) => {
@@ -267,7 +351,111 @@ pub(crate) fn compile_rule<T: Compile>(
         });
     }
 
+    // The rule's canonical spelling: locals renamed by the body's
+    // structure and premises sorted, so one body spelled two ways is
+    // one rule to everything keyed by its identity. The head's operands
+    // (`this`, each field and each keyed field's key) are fixed names. The narrowed
+    // premises are canonicalised and analysed again, which is the
+    // same analysis under other names; the authored spelling is kept
+    // for display, and the canonical one is what the body stores.
+    let analysis = match canonical::canonicalize(
+        &conclusion,
+        &analysis.premises,
+        &authored_reduce
+            .iter()
+            .map(|(field, _)| {
+                let entry = analysis
+                    .reduce
+                    .iter()
+                    .find(|entry| entry.field == *field)
+                    .expect("an analysed reduce clause keeps every field");
+                (field.clone(), ReduceSpec::from(entry))
+            })
+            .collect::<Vec<_>>(),
+    )? {
+        Some(canonical) => {
+            let respelled = canonical.premises != analysis.premises;
+            let authored = Authored {
+                premises: analysis.premises,
+                reduce: analysis.reduce,
+            };
+            let mut analysis = analyzer::analyze_with(
+                conclusion.clone(),
+                canonical.premises,
+                T::KIND,
+                canonical.reduce,
+            )
+            .map_err(|error| TypeError::TypeInference {
+                reason: format!("canonical spelling fails analysis: {error:?}"),
+            })?;
+            if respelled {
+                analysis.authored = Some(Arc::new(authored));
+            }
+            analysis.canonical = Some(Arc::new(canonical.identity));
+            analysis
+        }
+        None => analysis,
+    };
+
     Ok(T::from_analysis(analysis))
+}
+
+/// Refuse a constant no stored body can carry, before the rule is
+/// analysed: a body holds integers of at most 64 bits (a natural up to
+/// `u64::MAX`, an integer in `i64`'s range, which is what the reader's
+/// JSON detour admits) and finite floats, and NaN is not a value.
+/// Checked here so a rule that compiles always stores, where the
+/// storage path cannot report an error.
+fn encodable_constants(
+    conclusion: &ConceptDescriptor,
+    premises: &[Premise],
+    reduce: &[(String, ReduceSpec)],
+) -> Result<(), TypeError> {
+    fn unencodable(value: &Value) -> Option<&'static str> {
+        const INTEGERS: &str = "a stored rule holds integers of at most 64 bits";
+        match value {
+            Value::Float(float) if float.is_nan() => Some("NaN is not a value"),
+            Value::Float(float) if float.is_infinite() => Some("a stored rule holds finite floats"),
+            Value::UnsignedInt(natural) if *natural > u128::from(u64::MAX) => Some(INTEGERS),
+            Value::SignedInt(integer) if i64::try_from(*integer).is_err() => Some(INTEGERS),
+            _ => None,
+        }
+    }
+    let refuse = |value: &Value| -> Result<(), TypeError> {
+        match unencodable(value) {
+            Some(reason) => Err(TypeError::UnencodableConstant {
+                value: format!("{value:?}"),
+                reason: reason.to_string(),
+            }),
+            None => Ok(()),
+        }
+    };
+    let listed = |concept: &ConceptDescriptor| -> Result<(), TypeError> {
+        concept
+            .with()
+            .iter()
+            .flat_map(|(_, field)| field.descriptor().among())
+            .try_for_each(refuse)
+    };
+    listed(conclusion)?;
+    for premise in premises {
+        for (_, term) in premise.parameters().iter() {
+            if let Term::Constant(value) = term {
+                refuse(value)?;
+            }
+        }
+        if let Premise::Assert(Proposition::Concept(query))
+        | Premise::Unless(Negation(Proposition::Concept(query))) = premise
+        {
+            listed(&query.predicate)?;
+        }
+    }
+    for (_, spec) in reduce {
+        if let Term::Constant(value) = &spec.of {
+            refuse(value)?;
+        }
+    }
+    Ok(())
 }
 
 /// Helper for the [`Display`] impls on [`DeductiveRule`] and
@@ -447,7 +635,7 @@ mod tests {
         assert_eq!(birthday.domain(), "macro-person");
         assert_eq!(birthday.name(), Some("birthday"));
         assert_eq!(birthday.description(), "Birthday of the person");
-        assert_eq!(birthday.content_type(), Some(Type::UnsignedInt));
+        assert_eq!(birthday.content_type(), Some(Type::U32));
 
         // Test that MacroPerson implements Rule
         let test_match = Query::<MacroPerson> {

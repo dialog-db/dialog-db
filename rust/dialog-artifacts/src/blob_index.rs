@@ -26,7 +26,7 @@ use dialog_storage::Blake3Hash;
 use futures_util::Stream;
 
 use crate::{
-    ASSET_SIZE, Attribute, BlobKey, Datum, DialogArtifactsError, Entity, State, Value,
+    ASSET_SIZE, BlobKey, Datum, DialogArtifactsError, Entity, Relation, State, Value,
     spill::{ShipmentRef, shipment_refs},
     tree::{ArtifactTree, ArtifactTreeExt},
 };
@@ -283,13 +283,17 @@ impl BlobIndexExt for ArtifactTree {
         S: ArchiveReader + Clone,
     {
         let entity = Entity::from_blob(hash)?;
-        let attribute: Attribute = ASSET_SIZE.parse()?;
+        let attribute: Relation = ASSET_SIZE.parse()?;
         for fact in self
             .select_record(store.clone(), &entity, &attribute)
             .await?
         {
-            if let Value::UnsignedInt(size) = fact.is {
-                return Ok(u64::try_from(size).ok());
+            // A tree keying numbers in one band reads the size back as an
+            // integer.
+            match fact.is {
+                Value::UnsignedInt(size) => return Ok(u64::try_from(size).ok()),
+                Value::SignedInt(size) => return Ok(u64::try_from(size).ok()),
+                _ => {}
             }
         }
         Ok(None)

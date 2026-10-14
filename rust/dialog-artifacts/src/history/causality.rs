@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use dialog_common::ConditionalSync;
 
-use crate::{Attribute, DialogArtifactsError, Entity};
+use crate::{DialogArtifactsError, Entity, Relation};
 
 use super::{Claim, RevisionRecord, Version};
 
@@ -48,7 +48,7 @@ pub trait History: ConditionalSync {
         &self,
         version: &Version,
         of: &Entity,
-        the: &Attribute,
+        the: &Relation,
     ) -> Result<Vec<Claim>, DialogArtifactsError>;
 
     /// The [`RevisionRecord`] minted by the revision identified by

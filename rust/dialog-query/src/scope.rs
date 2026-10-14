@@ -7,17 +7,23 @@
 //! content-addressed loads for resolver premises (tree nodes through
 //! [`LoadBlock`], spilled values through [`LoadBlob`]), and
 //! advisory replication hints ([`Preload`]) for ranges evaluation
-//! expects to need. `Scope` names that bundle once so premise
-//! evaluation signatures stay stable as effects are added.
+//! expects to need. It also holds what evaluation keeps between
+//! queries ([`Holds`]): the outputs of formulas that ask to be cached.
+//! `Scope` names that bundle once so premise evaluation signatures stay
+//! stable as effects are added.
 
 use dialog_artifacts::{Estimate, LoadBlob, LoadBlock, Preload, Select};
 use dialog_capability::Provider;
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 
+use crate::recall::BodyMemo;
 use crate::source::SelectRules;
 
 /// The full provider bundle premise evaluation requires. Blanket
 /// implemented: any environment providing the effects is a `Scope`.
+/// [`BodyMemo`] is the one non-effect: the per-query memo rule heads
+/// share their body's rows through, which an environment may decline
+/// to keep.
 pub trait Scope<'a>:
     Provider<Select<'a>>
     + Provider<SelectRules>
@@ -25,6 +31,8 @@ pub trait Scope<'a>:
     + Provider<LoadBlob>
     + Provider<Preload>
     + Provider<Estimate>
+    + BodyMemo
+    + Holds
     + ConditionalSync
 {
 }
@@ -36,6 +44,8 @@ impl<'a, T> Scope<'a> for T where
         + Provider<LoadBlob>
         + Provider<Preload>
         + Provider<Estimate>
+        + BodyMemo
+        + Holds
         + ConditionalSync
 {
 }

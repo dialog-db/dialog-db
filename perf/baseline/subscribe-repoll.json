@@ -1,0 +1,27 @@
+{
+  "scenario": "subscribe-repoll",
+  "size": 1000,
+  "profile": "release",
+  "outcome": {
+    "asserted": 10,
+    "maintenances": 1,
+    "recomputes": 1,
+    "retracted": 10
+  },
+  "counters": {
+    "archive.get": 11,
+    "archive.get.bytes": 445804,
+    "archive.put": 1,
+    "archive.put.bytes": 12492,
+    "span.apply_batch_reusing": 1,
+    "span.buffer_records": 2,
+    "span.commit": 1,
+    "span.hydrate_rule": 0,
+    "span.resolve_bundle": 18,
+    "span.resolve_rules": 18,
+    "span.seal_batch": 1,
+    "span.settle": 1,
+    "span.write_instructions": 1
+  },
+  "instructions": 19196770
+}

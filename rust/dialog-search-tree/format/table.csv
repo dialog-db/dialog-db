@@ -8,6 +8,7 @@ inline_n,manifest,0x01,draft,4096,Values whose encoded form is longer than this 
 fanout_n,manifest,0x02,draft,8,Branching parameter n: expected fanout 2^n.
 spill_prefix,manifest,0x03,draft,64,How many leading raw value bytes a spilled value's key carries as its order-preserving prefix. Critical: it decides how values are laid out in keys.
 max_separator,manifest,0x04,draft,512,Keys longer than this never become boundaries; bounds every separator.
+value_encoding,manifest,0x05,draft,0,How keys encode values: 0 each type in its own band; 1 every number in one band in dialog-number's encoding. Critical: it decides how values are laid out in keys.
 max_segment,manifest,0x06,draft,65536,Node weight target in weighted bytes between coin-decided cuts; 0 turns byte pacing off.
 frame_ceiling_factor,manifest,0x08,draft,3,A frame over this multiple of max_segment is force-split at accepted seams; 0 turns the ceiling off.
 anchor_selector,manifest,0x0a,draft,1,Which candidate seam a forced cut anchors at: 0 rendezvous (hash-minimal); 1 hybrid (shortest separator; then hash-minimal).

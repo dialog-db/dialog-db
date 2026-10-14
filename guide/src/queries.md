@@ -31,7 +31,7 @@ pub struct Item {
 }
 ```
 
-The domain comes from `#[domain]` and the name from the type, kebab-cased, so `grocery::Name` is the attribute `demo.grocery/name`. The doc comment becomes its description, the wrapped type its value type, and its cardinality is one unless it says `#[cardinality(many)]`. Each field of the concept is one pattern, and `this` is the entity they share. Writing an `Item` asserts its facts. Querying for `Item` with blanks in every field asks for every item:
+The domain comes from `#[domain]` and the name from the type, kebab-cased, so `grocery::Name` is an attribute over the relation `demo.grocery/name`. The doc comment becomes its description, the wrapped type its value type, and it reads one value, the newest, unless it says another pick such as `#[pick(all)]`. A wrapped `String` declares `text:` and a `bool` declares `boolean:`. A Rust number declares the number type of its own width, so a `u8` declares `natural:8`. Each field of the concept is one pattern, and `this` is the entity they share. Writing an `Item` asserts its facts. Querying for `Item` with blanks in every field asks for every item:
 
 ```rust
 use dialog_query::query::Output;
@@ -48,7 +48,9 @@ let items: Vec<Item> = branch
     .await?;
 ```
 
-A concept is a way of reading facts, not a table. The facts do not know which concepts they belong to. Any entity with a `demo.grocery/name` and a `demo.grocery/done` is an `Item`, and a second app can declare its own concept over the same attributes without asking the first.
+A concept is a way of reading facts, not a table. The facts do not know which concepts they belong to. Any entity with a `demo.grocery/name` and a `demo.grocery/done` is an `Item`, and a second app can declare its own concept over the same relations without asking the first.
+
+Attributes and concepts have identities of their own. An attribute is named by a hash of what it means: the relation it reads, its type and its pick. A concept is named by a hash of the attributes its fields hold, and whether each is optional. Descriptions and field names are left out, so rewording a description or renaming a field changes no name. The names are entities, written `the:…` and `concept:…`, so two apps that declare the same attribute have declared the same thing.
 
 ## Planning
 
@@ -106,9 +108,13 @@ Which index a pattern reads follows directly from the [Keys](./keys.md) chapter:
 
 When one pattern is much narrower than the other, say `done` pinned to `false`, the planner drives from that pattern instead and looks up each row's other fields in EAV. Either way, every step is a range scan over sorted keys, streamed. A query never loads a whole index. On a phone that has fetched only part of the tree, a query fetches only the nodes along the ranges it reads: its patterns' ranges, plus the range where rules are stored.
 
-## Cardinality
+## Picks
 
-An attribute is declared as having one value or many. `demo.grocery/name` has one, which is the default, and `demo.grocery/tag` could be declared with `#[cardinality(many)]`. For a one-valued attribute, a query that finds two values runs the election from the [Sync](./sync.md) chapter and returns one. Every replica elects the same value. For a many-valued attribute, a query returns every value.
+An attribute is declared with a pick, which says which of an entity's facts a read returns (see [Facts](./facts.md)). `demo.grocery/name` reads under `last`, which is the default, and `demo.grocery/tag` could be declared with `#[pick(all)]`. Under `last`, a query that finds two values runs the election from the [Sync](./sync.md) chapter and returns one. Every replica elects the same value. Under `all`, a query returns every value.
+
+The other picks also return one value. `max` and `min` return the greatest and the least. `top` takes a list, of values or of relations, and returns the first on the list that the entity has: a status that is `"urgent"` if any fact says so, or a display name that falls back to a username.
+
+A number is compared the way its attribute's type reads it (see [Facts](./facts.md#numbers)). A query for a quantity of `2` through an attribute declared `natural:` also finds a stored `2.5`, because that is what a reader of the attribute sees there.
 
 ## Optional fields
 
@@ -118,9 +124,21 @@ A concept field can be optional: `quantity: Option<grocery::Quantity>`. An item 
 
 A rule derives facts from other facts. An app could say *an item is urgent if it is tagged `"breakfast"` and not done*, and then query for urgent items as if `urgent` were stored.
 
-Rules are installed by asserting them, and they are stored as facts in the tree, under `dialog.rule/`. So a rule syncs with the data like everything else. When Bob's phone pulls Alice's rule, his queries start using it. A rule is named by the hash of its body, so two replicas that install the same rule install the same entity.
+What a rule derives are facts in relations, like the ones an app asserts. A rule that concludes a concept derives one fact for each of the concept's fields. So any concept that reads one of those relations sees the derived values next to the stored ones, not only the concept the rule was written for.
+
+Rules are installed by asserting them, and they are stored as facts in the tree, under `dialog.rule/`. So a rule syncs with the data like everything else. When Bob's phone pulls Alice's rule, his queries start using it.
+
+A rule is named by a hash of what it means, not of the bytes its author wrote. Before hashing, its variables are renamed by where they appear and its patterns are put in order, and the concepts it uses enter by their own names. Two people who write the same rule with different variable names install the same entity. That canonical form is also what gets stored, so the names an author chose are not kept.
 
 Most rules run at query time. A rule can also run when a commit is made, and write its conclusions into the tree, which suits derived data that is read far more often than it changes.
+
+### Rules that say "not"
+
+The urgent rule asks for something to be absent: the item is *not* done. A rule can say that with `unless`, and an optional field or a pick like `top` asks the same kind of question, since "the best one" means "this one, and nothing better".
+
+Absence is only well defined once everything that could be there has been derived. Usually that is easy: Dialog derives what a rule tests in full before running the rule. It stops being possible when rules form a loop through such a test, where a rule tests for the absence of something that depends on the rule's own conclusion. No single author has to write that loop. Alice and Bob can each install rules that are fine alone and close a loop when their replicas merge.
+
+Dialog does not refuse such a set of rules, because rules arrive by sync and something has to be done with whatever arrives. It sets one rule of the loop aside instead, and evaluates the rest. It picks the rule installed last, ordered by the commits that installed them, which every replica sees the same way. So replicas with the same history set aside the same rule and agree on every answer. A rule that is set aside comes back by itself once the loop is broken, and a query can ask which rules are set aside by reading `dialog.rule/quarantined`.
 
 ## Subscriptions
 
@@ -130,6 +148,6 @@ So when Alice's merge arrives on Bob's phone, the diff between the two roots is 
 
 <div class="aside">
 
-**Implementations.** The query engine is [`dialog-query`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-query): concepts in `src/concept`, the planner in `src/planner.rs`, rules in `src/rule.rs`. The attribute and concept derives are in [`dialog-macros`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-macros). Choosing an index for a pattern is `selector_range` in [`dialog-artifacts/src/tree.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/tree.rs). Subscriptions are [`branch/subscription.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/subscription.rs) in `dialog-repository`.
+**Implementations.** The query engine is [`dialog-query`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-query): concepts in `src/concept`, the planner in `src/planner.rs`, rules in `src/rule.rs`, and the identities of attributes, concepts and rules in `src/identity.rs` and `src/rule/canonical.rs`, built on [`merkle-reference`](https://github.com/dialog-db/dialog-db/tree/main/rust/merkle-reference). The attribute and concept derives are in [`dialog-macros`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-macros). Choosing an index for a pattern is `selector_range` in [`dialog-artifacts/src/tree.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/tree.rs). Subscriptions are [`branch/subscription.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/subscription.rs) in `dialog-repository`.
 
 </div>

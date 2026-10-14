@@ -85,7 +85,7 @@ Provides modeling primitives for describing a domain: attributes, concepts, rule
 
 #### Attributes
 
-An attribute is a relation elevated with domain-specific invariants. It extends the `domain/name` identifier with a value type and cardinality, specifying what kind of values the association admits and how many.
+An attribute is a relation qualified by a value type and a pick. It extends the `domain/name` identifier with what kind of values the relation is read as and which of an entity's claims a read returns. A Rust-declared attribute picks by its cardinality: `last` for one, `all` for many.
 
 An attribute is defined as a newtype wrapping a value type. The **domain** is derived from the enclosing module name (underscores become hyphens), and the **name** from the struct name (converted to kebab-case):
 
@@ -117,13 +117,13 @@ mod model {
 }
 ```
 
-By default an attribute has **cardinality one**, an entity has at most one value for it. Use `#[cardinality(many)]` when an entity can have multiple values:
+By default an attribute is read under the `last` pick: an entity has one value for it, the newest. Use `#[pick(all)]` when an entity can have multiple values (`#[pick(max)]` and `#[pick(min)]` read the greatest and least):
 
 ```rs
 mod employee {
     /// Skills associated with the employee
     #[derive(Attribute, Clone)]
-    #[cardinality(many)]
+    #[pick(all)]
     pub struct Skill(pub String);  // -> "employee/skill" (many)
 }
 ```

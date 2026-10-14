@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Environment;
 use crate::Premise;
-use crate::artifact::{ArtifactsAttribute, Entity, Type, Value};
-use crate::attribute::The;
+use crate::artifact::{ArtifactsRelation, Entity, Type, Value};
+use crate::attribute::Relation;
 use crate::constraint::{Coalesce, Constraint, Equality};
 use crate::error::{FieldTypeError, TypeError};
 use crate::proposition::Proposition;
@@ -372,8 +372,8 @@ where
     }
 }
 
-impl From<ArtifactsAttribute> for Term<ArtifactsAttribute> {
-    fn from(attr: ArtifactsAttribute) -> Self {
+impl From<ArtifactsRelation> for Term<ArtifactsRelation> {
+    fn from(attr: ArtifactsRelation) -> Self {
         Term::Constant(Value::from(attr))
     }
 }
@@ -384,8 +384,8 @@ impl From<Entity> for Term<Entity> {
     }
 }
 
-impl From<The> for Term<The> {
-    fn from(the: The) -> Self {
+impl From<Relation> for Term<Relation> {
+    fn from(the: Relation) -> Self {
         Term::Constant(Value::from(the))
     }
 }
@@ -402,23 +402,23 @@ impl From<&str> for Term<String> {
     }
 }
 
-impl TryFrom<String> for Term<ArtifactsAttribute> {
+impl TryFrom<String> for Term<ArtifactsRelation> {
     type Error = TypeError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
         value
-            .parse::<ArtifactsAttribute>()
+            .parse::<ArtifactsRelation>()
             .map(|a| Term::Constant(Value::from(a)))
             .map_err(|_| TypeError::InvalidAttributeSyntax { actual: value })
     }
 }
 
-impl TryFrom<&str> for Term<ArtifactsAttribute> {
+impl TryFrom<&str> for Term<ArtifactsRelation> {
     type Error = TypeError;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         value
-            .parse::<ArtifactsAttribute>()
+            .parse::<ArtifactsRelation>()
             .map(|a| Term::Constant(Value::from(a)))
             .map_err(|_| TypeError::InvalidAttributeSyntax {
                 actual: value.into(),
