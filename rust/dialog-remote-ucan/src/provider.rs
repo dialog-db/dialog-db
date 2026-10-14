@@ -29,7 +29,7 @@ use dialog_ucan_core::Container;
 use crate::address::{Exchange, UcanAddress};
 use crate::direct;
 use crate::site::UcanSite;
-use crate::socket::Reply;
+use crate::socket::{Failed, Reply};
 
 /// Hand a fork to the permit-based site, which redeems and performs it
 /// the way it always has.
@@ -114,7 +114,14 @@ impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
-        let answer = exchange(self, &invocation.address, &invocation.authorization, None).await?;
+        let answer = exchange(
+            self,
+            Operation::Read,
+            &invocation.address,
+            &invocation.authorization,
+            None,
+        )
+        .await?;
         match answer {
             answer if answer.is_success() => {
                 let version = Version::from(answer.version()?);
@@ -146,6 +153,7 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
         let payload = invocation.capability.content().to_vec();
         let answer = exchange(
             self,
+            Operation::Write,
             &invocation.address,
             &invocation.authorization,
             Some(payload),
@@ -176,7 +184,14 @@ impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
-        let answer = exchange(self, &invocation.address, &invocation.authorization, None).await?;
+        let answer = exchange(
+            self,
+            Operation::Write,
+            &invocation.address,
+            &invocation.authorization,
+            None,
+        )
+        .await?;
         match answer {
             answer if answer.is_success() => Ok(()),
             answer if answer.status == 412 => Err(MemoryError::VersionMismatch {
@@ -301,19 +316,37 @@ impl Provider<ForkInvocation<UcanSite, Watch>> for UcanSite {
             .map_err(|error| MemoryError::Storage(error.to_string()))?;
         let name = chain.invocation.to_cid().to_string();
         let connection = self.sockets().connect(&url).await?;
-        Ok(Box::new(connection.watch(name, container)?))
+        // Wait for the service to begin the watch, so a refusal is the
+        // answer to the watch rather than the first thing it delivers.
+        let watching = connection.watch(name, container)?.begun().await?;
+        Ok(Box::new(watching))
     }
+}
+
+/// Whether an operation reads or writes, which decides what may be done
+/// once it was sent over a socket and no answer came.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Operation {
+    /// Reading changes nothing: one that was lost may be tried again.
+    Read,
+    /// Writing may have happened: one that was lost is not known to have
+    /// failed.
+    Write,
 }
 
 /// Carry a cell's invocation to the service: over its socket when the
 /// address names one, as a request otherwise.
 ///
-/// A socket that cannot be reached is passed over for a request. One that
-/// fails once the frame is sent is not: the operation may have been
-/// carried out, and the same invocation sent again would be refused as
-/// presented before, so the failure is answered as it is.
+/// A socket that cannot be reached, or that could not take the frame, is
+/// passed over for a request: the invocation never left. One that fails
+/// once the frame is sent is not, since the same invocation sent again
+/// would be refused as presented before. A read lost that way is answered
+/// as unavailable, so whoever asked may try it again, at this address or
+/// the next, with an invocation of its own. A write lost that way may have
+/// been carried out, so it is answered as not known to have failed.
 async fn exchange(
     site: &UcanSite,
+    operation: Operation,
     address: &UcanAddress,
     authorization: &UcanAuthorization,
     payload: Option<Vec<u8>>,
@@ -333,7 +366,7 @@ async fn exchange(
         .to_bytes()
         .map_err(|error| S3Error::Serialization(error.to_string()))?;
     let name = chain.invocation.to_cid().to_string();
-    match connection.invoke(name, container, payload).await {
+    match connection.invoke(name, container, payload.clone()).await {
         Ok(Reply::Answer {
             status,
             version,
@@ -343,9 +376,17 @@ async fn exchange(
         Ok(other) => Err(S3Error::Rejected(Rejection::Unclassified {
             detail: format!("the service answered an invocation with {other:?}"),
         })),
-        Err(error) => Err(S3Error::Rejected(Rejection::Unclassified {
-            detail: error.to_string(),
-        })),
+        Err(Failed::NotSent) => direct::invoke(address, authorization, payload).await,
+        Err(Failed::Lost(error)) => Err(match operation {
+            Operation::Read => S3Error::Rejected(Rejection::Unavailable {
+                reason: error.to_string(),
+            }),
+            Operation::Write => S3Error::Rejected(Rejection::Unclassified {
+                detail: format!(
+                    "the write was sent and not answered, so it may have been carried out: {error}"
+                ),
+            }),
+        }),
     }
 }
 
