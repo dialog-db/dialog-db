@@ -101,8 +101,10 @@ use futures_util::stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use super::session::{Composite, QueryEnv, QueryLayer};
+use crate::placement::{Placements, ScopeMap};
 use crate::repository::archive::erased;
 use crate::repository::source::Source;
+use crate::stack::{Guide, GuidedLayer};
 use crate::{Branch, Drained, Ephemeral, Index, Observer, RemoteSite, Revision, Staged};
 
 /// How many touched entities a maintained poll re-derives at once.
@@ -433,6 +435,13 @@ pub struct Subscription<Q: Application> {
     /// branch transaction reads its own (see [`Staged`]): a write under a
     /// pick that elects settles its succession on each evaluation.
     layers: Vec<Staged>,
+    /// The guide of a stack's read: which layers each attribute is read
+    /// from. See [`Composite::guide`].
+    guide: Option<Arc<Guide>>,
+    /// The placements that the last evaluation read by, for a guided
+    /// read. They are outside every demand cover, so a poll compares them
+    /// itself, and evaluates afresh when they moved.
+    placed: Option<ScopeMap>,
     /// An observer of each tree line's session store, parallel to
     /// `sources`, then of each standalone ephemeral layer, parallel to
     /// `ephemerals`. Registered with the demand cover, so only the
@@ -506,6 +515,7 @@ impl<Q: Application> Subscription<Q> {
         let Composite {
             sources,
             ephemerals,
+            guide,
         } = composite;
         let demand = Demand::new();
         Subscription {
@@ -515,6 +525,8 @@ impl<Q: Application> Subscription<Q> {
             sources,
             ephemerals,
             layers: Vec::new(),
+            guide,
+            placed: None,
             changes,
             query,
             demand,
@@ -544,7 +556,9 @@ impl<Q: Application> Subscription<Q> {
         let Composite {
             sources,
             ephemerals,
+            guide,
         } = composite;
+        self.guide = guide;
         // A layer swapped for another is a new shape too: its pin and its
         // observer belong to the layer that left.
         let same_lines = sources.len() == self.sources.len()
@@ -745,6 +759,31 @@ enum Touched {
 }
 
 impl Touched {
+    /// What changed in `layer` that a read guided by `guide` takes: a
+    /// fact outside the scope of its placement reaches no result, so it
+    /// is no change of one either.
+    fn guided(self, guide: &Guide, layer: &GuidedLayer, scopes: &ScopeMap) -> Self {
+        let Touched::Facts {
+            subjects,
+            asserted,
+            retracted,
+        } = self
+        else {
+            return self;
+        };
+        let admitted = |fact: &Fact| guide.admits(layer, scopes, fact.the.as_str());
+        let asserted: Vec<Fact> = asserted.into_iter().filter(admitted).collect();
+        let retracted: Vec<Fact> = retracted.into_iter().filter(admitted).collect();
+        if asserted.is_empty() && retracted.is_empty() {
+            return Touched::Nothing;
+        }
+        Touched::Facts {
+            subjects,
+            asserted,
+            retracted,
+        }
+    }
+
     /// Fold another verdict into this one: a rule hit on either side
     /// dominates; fact changes union; nothing is the identity.
     fn merge(self, other: Touched) -> Touched {
@@ -841,7 +880,43 @@ where
         Composite {
             sources: self.sources.clone(),
             ephemerals: self.ephemerals.clone(),
+            guide: self.guide.clone(),
         }
+    }
+
+    /// The placements that a guided read of the composite reads by, from
+    /// its bottom line and the pending writes that the subscription reads,
+    /// as a fresh evaluation reads by them, or `None` for a read that no
+    /// guide leads.
+    async fn scopes<Env>(&self, env: &Env) -> Result<Option<ScopeMap>, EvaluationError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<ArchiveLoad>
+            + Provider<nodes::Write<CorpusNode>>
+            + Provider<nodes::Read<CorpusNode>>
+            + Provider<nodes::Preload<CorpusNode>>
+            + Provider<BlobLoad>
+            + Provider<dialog_corpus::Preload>
+            + Holds
+            + ConditionalSync
+            + 'static,
+    {
+        let (Some(_), Some(bottom)) = (&self.guide, self.sources.first()) else {
+            return Ok(None);
+        };
+        let mut pending = Staged::default();
+        pending.apply(self.changes.clone());
+        for layer in &self.layers {
+            pending.apply(layer.export());
+        }
+        let placements = Placements::resolve(&bottom.as_view(), &pending.export(), env)
+            .await
+            .map_err(|error| EvaluationError::Store(format!("resolve the placements: {error}")))?;
+        Ok(Some(placements.scopes()))
     }
 
     /// Anchor every branch line's metadata entity on `demand` (see
@@ -910,7 +985,9 @@ where
             let quiet = observed.iter().all(
                 |observed| matches!(observed, Drained::Instants(instants) if instants.is_empty()),
             );
-            if self.initialized {
+            let scopes = self.scopes(env).await?;
+            let replaced = scopes != self.placed;
+            if self.initialized && !replaced {
                 if current == self.pins && quiet {
                     self.sequences = sequences;
                     return Ok(None);
@@ -926,6 +1003,16 @@ where
                     .zip(&self.pins)
                     .any(|(now, pinned)| now.revision != pinned.revision);
                 if !(heads_moved && self.demand.depends_on_head()) {
+                    let guided = |verdict: Touched, layer: Option<&GuidedLayer>| match (
+                        &self.guide,
+                        layer,
+                        &scopes,
+                    ) {
+                        (Some(guide), Some(layer), Some(scopes)) => {
+                            verdict.guided(guide, layer, scopes)
+                        }
+                        _ => verdict,
+                    };
                     let mut touched = Touched::Nothing;
                     for (index, source) in self.sources.iter().enumerate() {
                         if current[index].revision != self.pins[index].revision {
@@ -937,17 +1024,30 @@ where
                                     &current[index].revision,
                                 )
                                 .await?;
-                            touched = touched.merge(verdict);
+                            let layer =
+                                self.guide.as_ref().and_then(|guide| guide.lines.get(index));
+                            touched = touched.merge(guided(verdict, layer));
                         }
                         if matches!(touched, Touched::Rules) {
                             break;
                         }
                     }
-                    for observed in observed {
+                    // The observers watch each line's session store, then
+                    // each standalone ephemeral layer; a guide reads each as
+                    // the layer it belongs to.
+                    let lines = self.sources.len();
+                    for (index, observed) in observed.into_iter().enumerate() {
                         if matches!(touched, Touched::Rules) {
                             break;
                         }
-                        touched = touched.merge(self.touched_observed(observed));
+                        let layer =
+                            self.guide
+                                .as_ref()
+                                .and_then(|guide| match index.checked_sub(lines) {
+                                    None => guide.lines.get(index),
+                                    Some(at) => guide.ephemerals.get(at),
+                                });
+                        touched = touched.merge(guided(self.touched_observed(observed), layer));
                     }
                     match touched {
                         Touched::Nothing => {
@@ -1010,6 +1110,7 @@ where
             }
             self.pins = current;
             self.sequences = sequences;
+            self.placed = scopes;
             self.initialized = true;
             Ok(Some(delta))
         }

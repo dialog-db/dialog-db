@@ -40,7 +40,8 @@ use tokio::sync::OnceCell;
 
 use crate::CommitError;
 use crate::REGISTRY;
-use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped};
+use crate::layer::{Hidden, MergeKeys, filter_hidden, guide_rows, merge_grouped};
+use crate::placement::{Placements, ScopeMap};
 use crate::repository::archive::TreeEnv;
 use crate::repository::branch::select::line_manifest;
 use crate::repository::ephemeral::Window;
@@ -57,6 +58,7 @@ use crate::rules::{
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
 };
+use crate::stack::{Guide, GuidedLayer};
 use crate::{Branch, Ephemeral, RemoteSite, Snapshot, Staged};
 
 /// A composable query over one or more lines (branches, snapshots)
@@ -121,6 +123,10 @@ pub struct QueryLayer<'a> {
 pub(crate) struct Composite {
     pub(crate) sources: Vec<Source>,
     pub(crate) ephemerals: Vec<Ephemeral>,
+    /// How a read meets each layer, for the composite of a stack: a row
+    /// is read only from the layers of its attribute's scope. See
+    /// [`Guide`](crate::stack::Guide).
+    pub(crate) guide: Option<Arc<Guide>>,
 }
 
 impl Composite {
@@ -129,6 +135,7 @@ impl Composite {
         Self {
             sources: vec![source],
             ephemerals: Vec::new(),
+            guide: None,
         }
     }
 
@@ -180,6 +187,7 @@ impl<'a> QueryLayer<'a> {
         Composite {
             sources: views.into_iter().map(View::into_source).collect(),
             ephemerals: self.ephemerals.iter().map(|line| (*line).clone()).collect(),
+            guide: None,
         }
     }
 
@@ -194,6 +202,7 @@ impl<'a> QueryLayer<'a> {
                 .map(|line| Source::following(*line))
                 .collect(),
             ephemerals: self.ephemerals.iter().map(|line| (*line).clone()).collect(),
+            guide: None,
         }
     }
 
@@ -572,6 +581,11 @@ pub(crate) struct QueryEnv<'a> {
     /// session store. Their tombstones hide facts in every tree line:
     /// a stack's memory layer shadows what the layers beneath it hold.
     ephemerals: Vec<Ephemeral>,
+    /// The guide of a stack's read, and the placements it reads by,
+    /// resolved from the bottom line on the first read and shared by
+    /// clones. See [`Composite::guide`].
+    guide: Option<Arc<Guide>>,
+    scopes: Arc<OnceCell<Arc<ScopeMap>>>,
     /// The query's own overlay: caller-asserted facts and the
     /// auto-injected metadata, held as a line (see
     /// [`QueryLayer::overlay`]) and read under the lines' format.
@@ -691,6 +705,8 @@ impl<'a> QueryEnv<'a> {
         Self {
             sources,
             ephemerals: Vec::new(),
+            guide: None,
+            scopes: Arc::new(OnceCell::new()),
             overlay,
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
@@ -709,8 +725,11 @@ impl<'a> QueryEnv<'a> {
         let Composite {
             sources,
             ephemerals,
+            guide,
         } = composite;
-        Self::new(sources, overlay, env).with_ephemerals(ephemerals)
+        let mut env = Self::new(sources, overlay, env).with_ephemerals(ephemerals);
+        env.guide = guide;
+        env
     }
 
     /// Read `layers` above the lines too: a transaction's writes, held
@@ -777,6 +796,7 @@ impl<'a> QueryEnv<'a> {
             let view = Composite {
                 sources: self.sources.clone(),
                 ephemerals: self.ephemerals.clone(),
+                guide: self.guide.clone(),
             };
             Box::pin(settlement.advance(&view, &self.overlay, layer, self.env))
                 .await
@@ -864,6 +884,32 @@ impl QueryEnv<'_> {
         &self.layers
     }
 
+    /// The guide of a stack's read, with the placements that it reads by,
+    /// resolved from the bottom line once and shared by clones, over the
+    /// pending writes that the read sees: a placement that a transaction
+    /// declares guides a query of it, as it routes its commit. `None` for
+    /// a read that no guide leads.
+    async fn guided(&self) -> Result<Option<(Arc<Guide>, Arc<ScopeMap>)>, DialogCorpusError> {
+        let (Some(guide), Some(bottom)) = (&self.guide, self.sources.first()) else {
+            return Ok(None);
+        };
+        let scopes = self
+            .scopes
+            .get_or_try_init(|| async {
+                let mut pending = Staged::default();
+                pending.apply(self.overlay.export());
+                for layer in self.layers() {
+                    pending.apply(layer.export());
+                }
+                Placements::resolve(&bottom.as_view(), &pending.export(), self.env)
+                    .await
+                    .map(|placements| Arc::new(placements.scopes()))
+                    .map_err(|error| DialogCorpusError::Storage(error.to_string()))
+            })
+            .await?;
+        Ok(Some((guide.clone(), scopes.clone())))
+    }
+
     /// The lines' formats and the tombstones keyed under them, resolved
     /// from the lines' tree roots on first use (see [`Format`]).
     async fn format(&self) -> Result<&Format, DialogCorpusError> {
@@ -882,11 +928,22 @@ impl QueryEnv<'_> {
                 } else {
                     MergeKeys::Fields
                 };
+                // A guided read takes the tombstones of a layer only for the
+                // attributes it reads from that layer, as it does its rows.
+                let guided = self.guided().await?;
+                let held = |store: &Ephemeral, layer: Option<&GuidedLayer>, line: &Manifest| match (
+                    &guided, layer,
+                ) {
+                    (Some((guide, scopes)), Some(layer)) => store
+                        .tombstones_where(line, |attribute| guide.admits(layer, scopes, attribute)),
+                    _ => store.tombstones(line),
+                };
                 let lines = self
                     .sources
                     .iter()
                     .zip(lines)
-                    .map(|(source, line)| {
+                    .enumerate()
+                    .map(|(index, (source, line))| {
                         let changes = self.overlay.tombstones(&line);
                         // Every set is shared, never merged, so this costs
                         // nothing per query however much the layers or the
@@ -895,10 +952,18 @@ impl QueryEnv<'_> {
                         for layer in layers {
                             staged = staged.facts(layer.tombstones(&line));
                         }
-                        let mut tombstones =
-                            staged.clone().facts(source.overlay().tombstones(&line));
-                        for ephemeral in &self.ephemerals {
-                            tombstones = tombstones.facts(ephemeral.tombstones(&line));
+                        let guide = guided.as_ref().map(|(guide, _)| guide);
+                        let mut tombstones = staged.clone().facts(held(
+                            source.overlay(),
+                            guide.and_then(|guide| guide.lines.get(index)),
+                            &line,
+                        ));
+                        for (at, ephemeral) in self.ephemerals.iter().enumerate() {
+                            tombstones = tombstones.facts(held(
+                                ephemeral,
+                                guide.and_then(|guide| guide.ephemerals.get(at)),
+                                &line,
+                            ));
                         }
                         LineFormat {
                             manifest: line,
@@ -927,6 +992,8 @@ impl Clone for QueryEnv<'_> {
         Self {
             sources: self.sources.clone(),
             ephemerals: self.ephemerals.clone(),
+            guide: self.guide.clone(),
+            scopes: self.scopes.clone(),
             overlay: self.overlay.clone(),
             layers: self.layers.clone(),
             format: self.format.clone(),
@@ -1024,8 +1091,16 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // by the line's session tombstones. Each line's stream is
         // filtered with the tombstones keyed under its own manifest, and
         // borrows only `self.env`.
-        for (source, line) in self.sources.iter().zip(&format.lines) {
-            let raw = select_from_source(source, self.env, input.clone()).await?;
+        // A stack's read is guided by placement: each line yields only
+        // the rows of the attributes placed on its scopes.
+        let guided = self.guided().await?;
+        for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
+            let mut raw = select_from_source(source, self.env, input.clone()).await?;
+            if let Some((guide, scopes)) = &guided
+                && let Some(layer) = guide.lines.get(index)
+            {
+                raw = guide_rows(raw, guide.clone(), layer.clone(), scopes.clone());
+            }
             let mut hidden = line.tombstones.within(&input);
             if !succeeded.is_empty() {
                 hidden = hidden.facts(hidden_in(&line.manifest));
@@ -1070,8 +1145,15 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
                 .fold(pending(), |newest, edition| newest.max(edition))
                 .successor()
         };
-        for (source, line) in self.sources.iter().zip(&format.lines) {
-            let rows = source.overlay().select_within(&window, &line.manifest);
+        for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
+            let mut rows = source.overlay().select_within(&window, &line.manifest);
+            // A line's session store is memory of that layer: a guided read
+            // takes from it only the attributes placed on the layer.
+            if let Some((guide, scopes)) = &guided
+                && let Some(layer) = guide.lines.get(index)
+            {
+                rows.retain(|fact| guide.admits(layer, scopes, fact.the.as_str()));
+            }
             if rows.is_empty() {
                 continue;
             }
@@ -1090,8 +1172,13 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // Each standalone ephemeral layer, read live and filtered the
         // same way: a layer's own tombstones hide facts beneath it,
         // never its own. Its rows stand where a session overlay's do.
-        for ephemeral in &self.ephemerals {
-            let rows = ephemeral.select(&input, &manifest);
+        for (index, ephemeral) in self.ephemerals.iter().enumerate() {
+            let mut rows = ephemeral.select(&input, &manifest);
+            if let Some((guide, scopes)) = &guided
+                && let Some(layer) = guide.ephemerals.get(index)
+            {
+                rows.retain(|fact| guide.admits(layer, scopes, fact.the.as_str()));
+            }
             if rows.is_empty() {
                 continue;
             }

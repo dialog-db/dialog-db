@@ -64,26 +64,18 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use dialog_capability::{Fork, Provider};
-use dialog_common::{ConditionalSync, Holds};
 use dialog_corpus::selector::Constrained;
-use dialog_corpus::tree::CorpusNode;
 use dialog_corpus::{
     Change, Changes, DialogCorpusError, Entity, FactView, Instruction, Pick, Relation, Selector,
     Statement, Update, Value,
 };
-use dialog_effects::archive::Load as ArchiveLoad;
-use dialog_effects::archive::{Get, Put};
-use dialog_effects::blob::Load as BlobLoad;
-use dialog_effects::blob::Read as BlobRead;
-use dialog_effects::memory::Resolve;
 use dialog_query::the;
-use dialog_search_tree::nodes;
 use futures_util::TryStreamExt as _;
 use parking_lot::RwLock;
 
+use crate::CommitError;
+use crate::repository::branch::session::{Erased, select_from_source};
 use crate::repository::source::View;
-use crate::{CommitError, RemoteSite};
 
 /// The `dialog.attribute/scope` declaration attribute.
 pub(crate) fn scope_attr() -> Relation {
@@ -346,26 +338,11 @@ fn scope_value(attribute: &str, value: &Value) -> Result<Entity, CommitError> {
 impl Placements {
     /// Resolve the placements in force for a commit on `source` whose
     /// settled batch is `changes`.
-    pub(crate) async fn resolve<Env>(
+    pub(crate) async fn resolve(
         source: &View<'_>,
         changes: &Changes,
-        env: &Env,
-    ) -> Result<Self, CommitError>
-    where
-        Env: Provider<BlobRead>
-            + Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<ArchiveLoad>
-            + Provider<nodes::Write<CorpusNode>>
-            + Provider<nodes::Read<CorpusNode>>
-            + Provider<nodes::Preload<CorpusNode>>
-            + Provider<BlobLoad>
-            + Holds
-            + ConditionalSync
-            + 'static,
-    {
+        env: &Erased,
+    ) -> Result<Self, CommitError> {
         let committed = committed_placements(source, env).await?;
         let mut placements = Placements {
             committed,
@@ -381,6 +358,16 @@ impl Placements {
             if let Some(attribute) = entity_attribute(&claim.of) {
                 let target = scope_value(attribute.as_str(), &claim.is)?;
                 placements.declared.insert(attribute, target);
+            }
+        }
+        // A default that the session store declares outranks the committed
+        // one, as a placement there does: a writer of the tree cannot move
+        // the attributes of this process by declaring another default.
+        use crate::schema::DidExt as _;
+        let repository = source.subject().did().this();
+        for claim in store.scan(&defaults_selector()) {
+            if claim.of == repository {
+                placements.default = Some(scope_value("dialog.attribute/default", &claim.is)?);
             }
         }
         for claim in store.scan(&transients_selector()) {
@@ -448,12 +435,19 @@ impl Placements {
     /// The scope `attribute`'s facts live in, or `None` for the tree
     /// when nothing names it.
     pub(crate) fn scope_of(&self, attribute: &Relation) -> Option<&Entity> {
+        self.placement_of(attribute)
+            .or_else(|| self.default_scope())
+    }
+
+    /// The scope that a placement of `attribute` names, if one does: no
+    /// default scope stands in.
+    pub(crate) fn placement_of(&self, attribute: &Relation) -> Option<&Entity> {
         if let Some(scope) = self.declared.get(attribute) {
             return Some(scope);
         }
         match self.committed.attributes.get(attribute) {
             Some(scope) if self.retracted.get(attribute) != Some(scope) => Some(scope),
-            _ => self.default_scope(),
+            _ => None,
         }
     }
 
@@ -476,26 +470,11 @@ impl Placements {
     /// The attributes that `staged` writes under a choosing pick, to the
     /// session store of `source` rather than its tree: a settlement leaves
     /// their writes as written, and the store elects among its own rows.
-    pub(crate) async fn stores<Env>(
+    pub(crate) async fn stores(
         source: &View<'_>,
         staged: &crate::Staged,
-        env: &Env,
-    ) -> Result<HashSet<Relation>, CommitError>
-    where
-        Env: Provider<BlobRead>
-            + Provider<Get>
-            + Provider<Put>
-            + Provider<Resolve>
-            + Provider<Fork<RemoteSite, Resolve>>
-            + Provider<ArchiveLoad>
-            + Provider<nodes::Write<CorpusNode>>
-            + Provider<nodes::Read<CorpusNode>>
-            + Provider<nodes::Preload<CorpusNode>>
-            + Provider<BlobLoad>
-            + Holds
-            + ConditionalSync
-            + 'static,
-    {
+        env: &Erased,
+    ) -> Result<HashSet<Relation>, CommitError> {
         if !staged.has_successions() {
             return Ok(HashSet::new());
         }
@@ -545,6 +524,50 @@ impl Placements {
     }
 }
 
+/// The scope of each placed attribute, by the name of the attribute, and
+/// the default scope: what a read guided by placement asks of each row it
+/// meets. A row carries its attribute as bytes, so the map is keyed by
+/// name and a read parses no attribute.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct ScopeMap {
+    scopes: HashMap<String, Entity>,
+    default: Option<Entity>,
+}
+
+impl ScopeMap {
+    /// The scope that `attribute` is placed on, if any placement names
+    /// it.
+    pub(crate) fn scope_of(&self, attribute: &str) -> Option<&Entity> {
+        self.scopes.get(attribute)
+    }
+
+    /// The scope that an attribute with no placement belongs to, if one
+    /// is declared.
+    pub(crate) fn default(&self) -> Option<&Entity> {
+        self.default.as_ref()
+    }
+}
+
+impl Placements {
+    /// The placements in force, as a [`ScopeMap`].
+    pub(crate) fn scopes(&self) -> ScopeMap {
+        let mut scopes: HashMap<String, Entity> = self
+            .committed
+            .attributes
+            .iter()
+            .filter(|(attribute, scope)| self.retracted.get(*attribute) != Some(*scope))
+            .map(|(attribute, scope)| (attribute.to_string(), scope.clone()))
+            .collect();
+        for (attribute, scope) in &self.declared {
+            scopes.insert(attribute.to_string(), scope.clone());
+        }
+        ScopeMap {
+            scopes,
+            default: self.default_scope().cloned(),
+        }
+    }
+}
+
 /// A settled batch split by destination store.
 pub(crate) struct Partitioned {
     /// Bound for the layer's tree.
@@ -570,25 +593,10 @@ fn transients_selector() -> Selector<Constrained> {
 
 /// The committed declarations at `source`'s head — three range scans,
 /// cached per head.
-async fn committed_placements<Env>(
+async fn committed_placements(
     source: &View<'_>,
-    env: &Env,
-) -> Result<CommittedPlacements, CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + Provider<ArchiveLoad>
-        + Provider<nodes::Write<CorpusNode>>
-        + Provider<nodes::Read<CorpusNode>>
-        + Provider<nodes::Preload<CorpusNode>>
-        + Provider<BlobLoad>
-        + Holds
-        + ConditionalSync
-        + 'static,
-{
+    env: &Erased,
+) -> Result<CommittedPlacements, CommitError> {
     let Some(head) = source.revision() else {
         // A layer with no commits declares nothing.
         return Ok(Arc::default());
@@ -628,31 +636,14 @@ where
 /// Collect the artifacts a selector matches on the layer's committed
 /// tree, one for each cell: the claim that `last` elects, which every
 /// declaration is written under.
-async fn committed<Env>(
+async fn committed(
     source: &View<'_>,
     selector: Selector<Constrained>,
-    env: &Env,
-) -> Result<Vec<dialog_corpus::Fact>, CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + Provider<ArchiveLoad>
-        + Provider<nodes::Write<CorpusNode>>
-        + Provider<nodes::Read<CorpusNode>>
-        + Provider<nodes::Preload<CorpusNode>>
-        + Provider<BlobLoad>
-        + Holds
-        + ConditionalSync
-        + 'static,
-{
-    let stream = crate::Select::from_view(source.clone(), selector)
-        .perform(env)
+    env: &Erased,
+) -> Result<Vec<dialog_corpus::Fact>, CommitError> {
+    let views: Vec<FactView> = select_from_source(&source.to_source(), env, selector)
         .await
-        .map_err(|error| CommitError::Induction(format!("placement scan: {error}")))?;
-    let views: Vec<FactView> = stream
+        .map_err(|error| CommitError::Induction(format!("placement scan: {error}")))?
         .try_collect()
         .await
         .map_err(|error| CommitError::Induction(format!("placement scan: {error}")))?;
@@ -696,10 +687,13 @@ mod tests {
     use crate::{Branch, RemoteSite};
     use anyhow::Result;
     use dialog_capability::{Fork, Provider};
-    use dialog_common::ConditionalSync;
+    use dialog_common::{ConditionalSync, Holds};
+    use dialog_corpus::tree::CorpusNode;
     use dialog_corpus::{Entity, Selector, Value};
+    use dialog_effects::archive::Load as ArchiveLoad;
     use dialog_effects::archive::{Get, Put};
     use dialog_effects::authority::Identify;
+    use dialog_effects::blob::Load as BlobLoad;
     use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
     use dialog_peer::helpers::test_session_with_peer;
@@ -707,6 +701,7 @@ mod tests {
     use dialog_query::query::Output as _;
     use dialog_query::types::Scalar;
     use dialog_query::{AttributeQuery, InductiveRule, Term};
+    use dialog_search_tree::nodes;
     use futures_util::StreamExt as _;
     use serde_json::json;
 

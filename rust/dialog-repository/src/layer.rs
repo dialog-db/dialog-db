@@ -32,6 +32,11 @@ use dialog_corpus::selector::Constrained;
 use dialog_corpus::{Cause, FactStream, FactView, Selector, SortKey, sort_key};
 use dialog_search_tree::Manifest;
 use futures_util::{StreamExt, stream};
+use std::future::ready;
+use std::str;
+
+use crate::placement::ScopeMap;
+use crate::stack::{Guide, GuidedLayer};
 
 /// Merge sorted fact streams into one stream whose order matches
 /// what a single physical probabilistic search tree containing every input would
@@ -239,6 +244,30 @@ impl Hidden {
         let key = view.sort_key(manifest)?;
         Ok(self.facts.iter().any(|facts| facts.contains(&key)))
     }
+}
+
+/// The rows of `inner` that a read guided by `guide` takes from `layer`,
+/// under the placements `scopes`: each other row is a divergence of
+/// placement, which the guide reports and the read skips.
+pub(crate) fn guide_rows<'a>(
+    inner: FactStream<'a>,
+    guide: Arc<Guide>,
+    layer: GuidedLayer,
+    scopes: Arc<ScopeMap>,
+) -> FactStream<'a> {
+    Box::pin(inner.filter(move |row| {
+        let keep = match row {
+            Ok(view) => match view.the_bytes() {
+                Ok(the) => match str::from_utf8(&the) {
+                    Ok(the) => guide.admits(&layer, &scopes, the),
+                    Err(_) => guide.admits(&layer, &scopes, &String::from_utf8_lossy(&the)),
+                },
+                Err(_) => true,
+            },
+            Err(_) => true,
+        };
+        ready(keep)
+    }))
 }
 
 /// Wrap a fact stream in a filter that drops any item `hidden`
