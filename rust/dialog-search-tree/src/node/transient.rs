@@ -11,9 +11,10 @@ use rkyv::{
 use std::ops::Bound;
 
 use crate::{
-    ArchivedIndex, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Key, Link, Manifest,
-    Node, NodeBody, NoveltyBuffer, NoveltyEntry, NoveltyOp, PersistentNode, PersistentNodeBody,
-    Rank, Value, distribution::cap, into_owned, resolve_pending,
+    ArchivedIndex, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Hashed, Key,
+    LazyHash, Link, Manifest, Node, NodeBody, NodeCache, NoveltyBuffer, NoveltyEntry, NoveltyOp,
+    PersistentNode, PersistentNodeBody, Rank, Separator, Value, distribution::cap, into_owned,
+    resolve_pending,
 };
 
 /// The rank threshold for grouping entries into leaf segments (level 0). Every
@@ -1132,7 +1133,7 @@ pub struct TransientSegment<Key, Value> {
     /// above everything left of the seam and at or below this segment's
     /// first key. Empty for the tree's global leftmost segment. This is the
     /// ground truth every index level above derives its separators from.
-    pub separator: Vec<u8>,
+    pub separator: Separator,
     /// Cached sum of the entries' raw weights ([`Entry::raw_weight`]; the
     /// per-entry overhead is added from the manifest when read), `None` until
     /// first queried or after a wholesale mutation invalidated it. The edit
@@ -1146,10 +1147,10 @@ pub struct TransientSegment<Key, Value> {
 
 impl<Key, Value> TransientSegment<Key, Value> {
     /// Builds a segment from its entries and left-edge separator.
-    pub fn new(entries: Vec<Entry<Key, Value>>, separator: Vec<u8>) -> Self {
+    pub fn new(entries: Vec<Entry<Key, Value>>, separator: impl Into<Separator>) -> Self {
         Self {
             entries,
-            separator,
+            separator: separator.into(),
             weight: None,
         }
     }
@@ -1174,7 +1175,7 @@ impl<Key, Value> TransientSegment<Key, Value> {
     }
 
     /// Consumes the segment, returning its entries and separator.
-    pub fn into_parts(self) -> (Vec<Entry<Key, Value>>, Vec<u8>) {
+    pub fn into_parts(self) -> (Vec<Entry<Key, Value>>, Separator) {
         (self.entries, self.separator)
     }
 
@@ -1253,13 +1254,19 @@ impl<Key, Value> TransientNode<Key, Value> {
     /// pending op move it would reshape the tree as a side effect of
     /// buffering.
     pub fn separator(&self) -> Result<&[u8], DialogSearchTreeError> {
+        Ok(self.edge()?.as_slice())
+    }
+
+    /// The separator at this node's left edge as it is held, with the hash
+    /// it keeps (see [`Node::edge`]).
+    pub fn edge(&self) -> Result<&Separator, DialogSearchTreeError> {
         match self {
-            TransientNode::Segment(segment) => Ok(segment.separator.as_slice()),
+            TransientNode::Segment(segment) => Ok(&segment.separator),
             TransientNode::Index(index) => index
                 .children
                 .first()
                 .ok_or_else(|| DialogSearchTreeError::Node("Index was unexpectedly empty".into()))?
-                .separator(),
+                .edge(),
         }
     }
 }
@@ -1354,10 +1361,17 @@ where
         node: &PersistentNode<Key, Value>,
     ) -> Result<TransientIndex<Key, Value>, DialogSearchTreeError> {
         let index = node.as_index()?;
+        // Every link keeps its separator's hash in the stored index's own
+        // cells, as an opened leaf's entries do theirs.
+        let hashes = node.hashes();
         let children = index
             .links()?
             .into_iter()
-            .map(Node::Persistent)
+            .enumerate()
+            .map(|(at, mut link)| {
+                link.separator = link.separator.stored(&hashes, at);
+                Node::Persistent(link)
+            })
             .collect::<Vec<Node<Key, Value>>>();
         // Carry the node's novelty across to the transient form so a flush or
         // canonicalize can act on it. The stored form is already grouped per
@@ -1391,18 +1405,23 @@ where
     /// separator is derived from its first child.
     pub fn open(
         node: &PersistentNode<Key, Value>,
-        separator: Vec<u8>,
+        separator: impl Into<Separator>,
     ) -> Result<Self, DialogSearchTreeError> {
         match node.body() {
             NodeBody::Index(_) => Ok(TransientNode::Index(TransientNode::open_index(node)?)),
             NodeBody::Segment(segment) => {
                 let mut entries = Vec::with_capacity(segment.len());
                 let mut keys = segment.keys::<Key>()?;
+                // Every entry keeps its key's hash in the stored leaf's own
+                // cells, so what one opening of this leaf computes the next
+                // finds, for as long as the node is held.
+                let hashes = node.hashes();
                 while let Some((at, key)) = keys.next_key()? {
-                    entries.push(Entry {
-                        key: Key::try_from_bytes(key)?,
-                        value: into_owned(segment.value_at(at)?)?,
-                    });
+                    entries.push(Entry::opened(
+                        Key::try_from_bytes(key)?,
+                        into_owned(segment.value_at(at)?)?,
+                        LazyHash::stored(&hashes, at),
+                    ));
                 }
                 Ok(TransientNode::Segment(TransientSegment::new(
                     entries, separator,
@@ -1435,10 +1454,16 @@ where
     /// freshly encoded with the segment codec. This makes no shape decisions:
     /// the children, novelty, and entries are encoded exactly as the edits
     /// left them.
+    ///
+    /// Every node sealed is kept in `cache` with the hashes its entries (or
+    /// links) already had: it is the node the next edit of this tree opens,
+    /// and a node read back from storage instead would be checked again and
+    /// would hash every key again before it could be regrouped.
     pub fn persist(
         self,
         delta: &mut Delta<Blake3Hash, Buffer>,
         manifest: &Manifest,
+        cache: &NodeCache<Key, Value>,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
         // Measurement-only (uncommitted, env-gated): classify the node being
         // sealed so a duplicate store downstream can be attributed to a kind.
@@ -1451,17 +1476,26 @@ where
         } else {
             None
         };
-        let body = match self {
+        let (body, hashes) = match self {
             TransientNode::Segment(segment) => {
-                PersistentNodeBody::segment_from_entries(segment.entries, manifest.clone())?
+                let hashes = segment.entries.iter().map(Entry::known_hash).collect();
+                let body =
+                    PersistentNodeBody::segment_from_entries(segment.entries, manifest.clone())?;
+                (body, hashes)
             }
             TransientNode::Index(TransientIndex { children, novelty }) => {
                 let links = children
                     .into_iter()
-                    .map(|child| child.into_link(delta, manifest))
+                    .map(|child| child.into_link(delta, manifest, cache))
                     .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
+                let hashes = links
+                    .iter()
+                    .map(|link| link.separator.known_hash())
+                    .collect();
                 let buffers = novelty.into_buffers::<Key>(&links)?;
-                PersistentNodeBody::index_from_buffers(links, buffers, manifest.clone())?
+                let body =
+                    PersistentNodeBody::index_from_buffers(links, buffers, manifest.clone())?;
+                (body, hashes)
             }
         };
 
@@ -1471,6 +1505,7 @@ where
             dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);
         }
         delta.add(node.hash().clone(), node.buffer().clone());
+        Self::keep(cache, &node, hashes);
         Ok(node)
     }
 
@@ -1490,6 +1525,7 @@ where
         &mut self,
         delta: &mut Delta<Blake3Hash, Buffer>,
         manifest: &Manifest,
+        cache: &NodeCache<Key, Value>,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
         let audit_kind = if dialog_storage::dup_audit::enabled() {
             Some(match &self {
@@ -1500,11 +1536,15 @@ where
         } else {
             None
         };
-        let body = match self {
-            TransientNode::Segment(segment) => PersistentNodeBody::segment_from_entries(
-                segment.entries().to_vec(),
-                manifest.clone(),
-            )?,
+        let (body, hashes) = match self {
+            TransientNode::Segment(segment) => {
+                let hashes = segment.entries().iter().map(Entry::known_hash).collect();
+                let body = PersistentNodeBody::segment_from_entries(
+                    segment.entries().to_vec(),
+                    manifest.clone(),
+                )?;
+                (body, hashes)
+            }
             TransientNode::Index(TransientIndex { children, novelty }) => {
                 // Collapse any live (cascade-touched) child back to its
                 // persisted link; an untouched persistent child passes
@@ -1518,7 +1558,7 @@ where
                                 Vec::new(),
                             ))),
                         );
-                        *child = Node::Persistent(lifted.into_link(delta, manifest)?);
+                        *child = Node::Persistent(lifted.into_link(delta, manifest, cache)?);
                     }
                 }
                 let links = children
@@ -1530,8 +1570,14 @@ where
                         )),
                     })
                     .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
+                let hashes = links
+                    .iter()
+                    .map(|link| link.separator.known_hash())
+                    .collect();
                 let buffers = novelty.persist_buffers::<Key>(&links)?;
-                PersistentNodeBody::index_from_buffers(links, buffers, manifest.clone())?
+                let body =
+                    PersistentNodeBody::index_from_buffers(links, buffers, manifest.clone())?;
+                (body, hashes)
             }
         };
 
@@ -1541,7 +1587,23 @@ where
             dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);
         }
         delta.add(node.hash().clone(), node.buffer().clone());
+        Self::keep(cache, &node, hashes);
         Ok(node)
+    }
+
+    /// Keeps a node just sealed in `cache`, with the hashes already computed
+    /// for what it was sealed from (see [`PersistentNode::adopt_hashes`]). A
+    /// node the cache already holds under this hash is the same bytes with
+    /// whatever it has derived since, so it stays.
+    fn keep(
+        cache: &NodeCache<Key, Value>,
+        node: &PersistentNode<Key, Value>,
+        hashes: Vec<Option<Blake3Hash>>,
+    ) {
+        if cache.get_cached(node.hash()).is_none() {
+            node.adopt_hashes(hashes);
+            cache.insert(node.hash().clone(), node.clone());
+        }
     }
 }
 
@@ -1645,7 +1707,7 @@ where
     // see the whole frame structure before any child moves.
     let mut cut_before = vec![false; children.len()];
     for (at, child) in children.iter().enumerate() {
-        cut_before[at] = at > 0 && D::seam_rank(child.separator()?, manifest) > threshold;
+        cut_before[at] = at > 0 && D::seam_rank(child.edge()?.hashed(), manifest) > threshold;
     }
 
     // The index-level frame ceiling: under byte pacing, a frame (the run of
@@ -1667,9 +1729,9 @@ where
         for child in &children {
             weights.push(cap::link_weight(child.separator()?, manifest));
         }
-        let mut separators: Vec<&[u8]> = Vec::with_capacity(children.len());
+        let mut separators: Vec<Hashed<'_>> = Vec::with_capacity(children.len());
         for child in &children {
-            separators.push(child.separator()?);
+            separators.push(child.edge()?.hashed());
         }
         let mut start = 0usize;
         for end in 0..children.len() {
@@ -1816,13 +1878,12 @@ where
 /// per-entry [`Entry::weight`] values when `manifest.max_segment` is
 /// non-zero, and may be empty otherwise (the entry-counted coin reads no
 /// weights).
-pub(crate) fn cut_plan<Key, D>(
-    keys: &[&Key],
+pub(crate) fn cut_plan<D>(
+    keys: &[Hashed<'_>],
     weights: &[usize],
     manifest: &Manifest,
 ) -> (Vec<bool>, Vec<bool>)
 where
-    Key: self::Key,
     D: Distribution,
 {
     let count = keys.len();
@@ -1830,8 +1891,8 @@ where
     let mut cut_after = vec![false; count];
     let mut bank = 0usize;
     for at in 0..count.saturating_sub(1) {
-        let key = keys[at].as_ref();
-        vetoed[at] = D::vetoes(key, keys[at + 1].as_ref(), manifest);
+        let key = keys[at];
+        vetoed[at] = D::vetoes(key.bytes(), keys[at + 1].bytes(), manifest);
         if vetoed[at] {
             // The coin is skipped entirely for vetoed seams: the veto
             // overrides whatever it would say, and the weight moves into
@@ -1962,8 +2023,9 @@ where
     } else {
         entries.iter().map(|entry| entry.weight(manifest)).collect()
     };
-    let key_refs: Vec<&Key> = entries.iter().map(|entry| &entry.key).collect();
-    let (cut_after, forced_start) = cut_plan::<Key, D>(&key_refs, &weights, manifest);
+    let keys: Vec<Hashed<'_>> = entries.iter().map(Entry::hashed).collect();
+    let (cut_after, forced_start) = cut_plan::<D>(&keys, &weights, manifest);
+    drop(keys);
 
     let origin_for = |start: usize, end: usize| -> Option<&Link> {
         origins
@@ -2068,6 +2130,7 @@ fn seal<Key, Value, D>(
         }
         Some(previous) => D::separator(previous.as_ref(), first.as_ref()),
     };
+    let separator = Separator::from(separator);
     *previous_last = Some(last);
     // A group that reproduces an untouched origin piece byte-for-byte —
     // same entries (the exact-range match) and same separator — passes the
@@ -2126,10 +2189,7 @@ mod tests {
     fn segments_of(keys: &[u32]) -> Result<Vec<Segment>> {
         let entries: Vec<Entry<[u8; 4], Vec<u8>>> = keys
             .iter()
-            .map(|&i| Entry {
-                key: i.to_le_bytes(),
-                value: vec![i as u8],
-            })
+            .map(|&i| Entry::new(i.to_le_bytes(), vec![i as u8]))
             .collect();
 
         // Byte pacing off: this pins the pure geometric coin's segment cuts,
@@ -2244,6 +2304,189 @@ mod tests {
             "every entry must land in exactly one segment"
         );
 
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod kept_hash_tests {
+    #![allow(unexpected_cfgs)]
+
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use dialog_common::Blake3Hash;
+
+    use super::{Novelty, TransientIndex, TransientNode, TransientSegment};
+    use crate::distribution::summary::PieceSummary;
+    use crate::{
+        Cache, Delta, Entry, Geometric, Hashed, Manifest, Node, NodeCache, PersistentNode,
+    };
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    type Leaf = PersistentNode<[u8; 4], Vec<u8>>;
+
+    fn entries_of(keys: std::ops::Range<u32>) -> Vec<Entry<[u8; 4], Vec<u8>>> {
+        keys.map(|key| Entry::new(key.to_be_bytes(), key.to_be_bytes().to_vec()))
+            .collect()
+    }
+
+    fn seal(
+        entries: Vec<Entry<[u8; 4], Vec<u8>>>,
+        cache: &NodeCache<[u8; 4], Vec<u8>>,
+    ) -> Result<Leaf> {
+        Ok(
+            TransientNode::Segment(TransientSegment::new(entries, Vec::new())).persist(
+                &mut Delta::zero(),
+                &Manifest::default(),
+                cache,
+            )?,
+        )
+    }
+
+    fn open(leaf: &Leaf) -> Result<TransientSegment<[u8; 4], Vec<u8>>> {
+        match TransientNode::open(leaf, Vec::new())? {
+            TransientNode::Segment(segment) => Ok(segment),
+            TransientNode::Index(_) => anyhow::bail!("a leaf opened as an index"),
+        }
+    }
+
+    /// A stored leaf keeps the hashes of its keys: what one opening
+    /// computes the next opening of the same node already has, and a key
+    /// nobody asked about stays unhashed.
+    #[dialog_common::test]
+    fn it_keeps_a_stored_leafs_key_hashes_between_openings() -> Result<()> {
+        let leaf = seal(entries_of(0..8), &Cache::new())?;
+
+        let first = open(&leaf)?;
+        assert!(
+            first
+                .entries()
+                .iter()
+                .all(|entry| entry.known_hash().is_none()),
+            "nothing is hashed before it is asked for"
+        );
+        let hash = first.entries()[3].key_hash();
+        assert_eq!(hash, Blake3Hash::hash(&3u32.to_be_bytes()));
+        drop(first);
+
+        let second = open(&leaf)?;
+        assert_eq!(second.entries()[3].known_hash(), Some(hash));
+        assert_eq!(second.entries()[2].known_hash(), None);
+        Ok(())
+    }
+
+    /// A leaf sealed from entries whose keys were ranked opens with those
+    /// hashes in place: the node that replaces a regrouped leaf does not
+    /// start over.
+    #[dialog_common::test]
+    fn it_seals_a_leaf_with_the_hashes_its_entries_had() -> Result<()> {
+        let entries = entries_of(0..8);
+        let ranked = entries[5].key_hash();
+
+        let opened = open(&seal(entries, &Cache::new())?)?;
+
+        assert_eq!(opened.entries()[5].known_hash(), Some(ranked));
+        assert_eq!(opened.entries()[4].known_hash(), None);
+        Ok(())
+    }
+
+    /// An index keeps its separators' hashes the same way: sealed with the
+    /// ones its links had, and handing them to whoever opens it.
+    #[dialog_common::test]
+    fn it_seals_an_index_with_the_hashes_its_separators_had() -> Result<()> {
+        let cache = Cache::new();
+        let left = seal(entries_of(0..4), &cache)?.to_link(Vec::new());
+        let right = seal(entries_of(4..8), &cache)?.to_link(4u32.to_be_bytes().to_vec());
+        let ranked = right.separator.hashed().hash();
+
+        let index = TransientNode::Index(TransientIndex {
+            children: vec![Node::Persistent(left), Node::Persistent(right)],
+            novelty: Novelty::new(),
+        })
+        .persist(&mut Delta::zero(), &Manifest::default(), &cache)?;
+        let opened = TransientNode::open_index(&index)?;
+
+        assert_eq!(opened.children[1].edge()?.known_hash(), Some(ranked));
+        assert_eq!(opened.children[0].edge()?.known_hash(), None);
+        Ok(())
+    }
+
+    /// Every node a persist seals is kept in the cache it was given, so the
+    /// next edit opens the node that carries the hashes rather than reading
+    /// its bytes back from storage.
+    #[dialog_common::test]
+    fn it_keeps_every_node_it_seals_in_the_cache() -> Result<()> {
+        let cache = Cache::new();
+        let left = seal(entries_of(0..4), &cache)?;
+        let right = seal(entries_of(4..8), &cache)?;
+        let index = TransientNode::<[u8; 4], Vec<u8>>::Index(TransientIndex {
+            children: vec![
+                Node::Persistent(left.to_link(Vec::new())),
+                Node::Persistent(right.to_link(4u32.to_be_bytes().to_vec())),
+            ],
+            novelty: Novelty::new(),
+        })
+        .persist(&mut Delta::zero(), &Manifest::default(), &cache)?;
+
+        for node in [&left, &right, &index] {
+            assert!(
+                cache.get_cached(node.hash()).is_some(),
+                "a sealed node must be in the cache"
+            );
+        }
+        Ok(())
+    }
+
+    /// Sealing bytes the cache already holds leaves the held node in place:
+    /// it is the same node, and it has whatever it derived since.
+    #[dialog_common::test]
+    fn it_keeps_the_node_already_held_when_the_same_bytes_are_sealed_again() -> Result<()> {
+        let cache = Cache::new();
+        let held = seal(entries_of(0..8), &cache)?;
+        let hash = open(&held)?.entries()[1].key_hash();
+
+        let again = seal(entries_of(0..8), &cache)?;
+        assert_eq!(again.hash(), held.hash());
+
+        let cached = cache.get_cached(held.hash()).expect("the node is held");
+        assert_eq!(open(&cached)?.entries()[1].known_hash(), Some(hash));
+        Ok(())
+    }
+
+    /// A piece's summary stays with its node, and is read back only under
+    /// the manifest knobs it was built with.
+    #[dialog_common::test]
+    fn it_keeps_a_piece_summary_under_the_knobs_it_was_built_with() -> Result<()> {
+        let manifest = Manifest::default();
+        let leaf = seal(entries_of(0..8), &Cache::new())?;
+        assert!(leaf.summary(&manifest).is_none());
+
+        let segment = open(&leaf)?;
+        let keys: Vec<Hashed<'_>> = segment.entries().iter().map(Entry::hashed).collect();
+        let weights: Vec<usize> = segment
+            .entries()
+            .iter()
+            .map(|entry| entry.weight(&manifest))
+            .collect();
+        let kept = leaf.summarize(
+            &manifest,
+            PieceSummary::build::<Geometric>(&keys, &weights, &manifest),
+        );
+
+        let found = leaf.summary(&manifest).expect("the summary is kept");
+        assert!(Arc::ptr_eq(&found, &kept));
+
+        let other = Manifest {
+            max_separator: manifest.max_separator + 1,
+            ..manifest.clone()
+        };
+        assert!(
+            leaf.summary(&other).is_none(),
+            "a summary built under other knobs must not be read"
+        );
         Ok(())
     }
 }

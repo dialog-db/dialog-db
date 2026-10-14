@@ -866,7 +866,7 @@ where
                         stored = futures_util::StreamExt::next(&mut base).await.transpose()?;
                     }
                     if let NoveltyOp::Assert(value) = op.op {
-                        yield Entry { key: Key::try_from_bytes(&op.key)?, value };
+                        yield Entry::new(Key::try_from_bytes(&op.key)?, value);
                     }
                 } else {
                     match stored.take() {
@@ -975,7 +975,7 @@ where
             // manifest it was opened under.
             HitchhikerRoot::Loaded(node) => {
                 let manifest = Self::format(&self.manifest)?;
-                let node = node.persist(delta, &manifest)?;
+                let node = node.persist(delta, &manifest, &self.cache)?;
                 // Seed the shared node cache with the frame just produced:
                 // the very next read of this root (a manifest lookup, a
                 // query descent) otherwise misses, re-fetches the bytes
@@ -1011,7 +1011,7 @@ where
             HitchhikerRoot::Unloaded(hash) => Ok(hash.clone()),
             HitchhikerRoot::Loaded(node) => {
                 let manifest = Self::format(&self.manifest)?;
-                let node = node.persist_mut(delta, &manifest)?;
+                let node = node.persist_mut(delta, &manifest, &self.cache)?;
                 // Same cache seeding as `persist`: the frame this commit
                 // just produced is what the next read resolves the root to.
                 self.cache.insert(node.hash().clone(), node.clone());

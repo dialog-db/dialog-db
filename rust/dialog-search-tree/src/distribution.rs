@@ -1,8 +1,10 @@
-use crate::{BOTTOM_RANK, Manifest};
+use crate::{BOTTOM_RANK, Hashed, Manifest};
 
 /// Measurement-only hash accounting (uncommitted experiment plumbing): every
-/// blake3 invocation on the shaping paths bumps a counter, split by purpose,
-/// so a replay can attribute hash cost. Snapshot and reset from the harness.
+/// hash the shaping paths ask for bumps a counter, split by purpose, and every
+/// hash actually computed bumps `HASHED`, so a replay can attribute hash cost
+/// and see how much of what was asked was already kept. Snapshot and reset
+/// from the harness.
 #[allow(missing_docs, clippy::missing_docs_in_private_items)]
 pub mod audit {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,11 +34,11 @@ pub mod audit {
         NODE_HASHES.fetch_add(1, Ordering::Relaxed);
         NODE_HASH_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
     }
-    pub static MEMO_HITS: AtomicU64 = AtomicU64::new(0);
-    pub static MEMO_HIT_BYTES: AtomicU64 = AtomicU64::new(0);
-    pub fn memo_hit(bytes: usize) {
-        MEMO_HITS.fetch_add(1, Ordering::Relaxed);
-        MEMO_HIT_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
+    pub static HASHED: AtomicU64 = AtomicU64::new(0);
+    pub static HASHED_BYTES: AtomicU64 = AtomicU64::new(0);
+    pub fn hashed(bytes: usize) {
+        HASHED.fetch_add(1, Ordering::Relaxed);
+        HASHED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
     }
     pub fn report() -> String {
         format!(
@@ -50,89 +52,10 @@ pub mod audit {
             NODE_HASHES.swap(0, Ordering::Relaxed),
             NODE_HASH_BYTES.swap(0, Ordering::Relaxed),
         ) + &format!(
-            " memo_hits={} memo_hit_bytes={}",
-            MEMO_HITS.swap(0, Ordering::Relaxed),
-            MEMO_HIT_BYTES.swap(0, Ordering::Relaxed),
+            " hashed={} hashed_bytes={}",
+            HASHED.swap(0, Ordering::Relaxed),
+            HASHED_BYTES.swap(0, Ordering::Relaxed),
         )
-    }
-}
-
-/// A bounded, thread-local memo of `blake3(bytes)` for the shaping paths:
-/// the coins, the ladders, and the anchor elections all hash the same key
-/// and separator strings over and over — every regroup of a widened run
-/// rehashes its whole window, and the audit measured those recomputations
-/// at ~95% of the pacing machinery's added hash bytes. A memo of a pure
-/// function changes no decision; it only remembers. Keys are the exact
-/// input bytes (full compare on lookup, so collisions are impossible), the
-/// map is cleared wholesale when it reaches capacity (regularly-reused
-/// strings immediately repopulate), and thread-locality keeps it lock-free
-/// on native and trivially correct on wasm.
-mod hash_memo {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    use std::hash::{BuildHasherDefault, Hasher};
-
-    use dialog_common::Blake3Hash;
-
-    /// Entries retained before the memo resets. At ~150 bytes per typical
-    /// key this bounds the memo near 20 MB per thread, far under the node
-    /// cache's own footprint.
-    const CAPACITY: usize = 1 << 17;
-
-    /// The memo's table hasher (FxHash): deterministic and a fraction of
-    /// SipHash's cost per byte, which matters because every shaping-path
-    /// hash pays one table lookup over the full key bytes — the lookups
-    /// were measured at a quarter of a large batch commit's instructions
-    /// under the default hasher. Collision quality is not load-bearing:
-    /// the map compares full keys on lookup, so a weak hash costs probes,
-    /// never correctness, and the memoized blake3 values (the only thing
-    /// shape decisions read) are unaffected.
-    #[derive(Default)]
-    struct FxHasher(u64);
-
-    impl Hasher for FxHasher {
-        fn write(&mut self, bytes: &[u8]) {
-            const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
-            let mut chunks = bytes.chunks_exact(8);
-            for chunk in &mut chunks {
-                let word = u64::from_le_bytes(chunk.try_into().expect("8-byte chunk"));
-                self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(SEED);
-            }
-            let mut tail = 0u64;
-            for (at, byte) in chunks.remainder().iter().enumerate() {
-                tail |= u64::from(*byte) << (at * 8);
-            }
-            self.0 = (self.0.rotate_left(5) ^ tail).wrapping_mul(SEED);
-        }
-
-        fn finish(&self) -> u64 {
-            self.0
-        }
-    }
-
-    thread_local! {
-        static MEMO: RefCell<HashMap<Vec<u8>, Blake3Hash, BuildHasherDefault<FxHasher>>> =
-            RefCell::new(HashMap::with_capacity_and_hasher(
-                1024,
-                BuildHasherDefault::default(),
-            ));
-    }
-
-    /// The blake3 hash of `bytes`, memoized.
-    pub fn hash(bytes: &[u8]) -> Blake3Hash {
-        MEMO.with(|memo| {
-            let mut memo = memo.borrow_mut();
-            if let Some(hash) = memo.get(bytes) {
-                super::audit::memo_hit(bytes.len());
-                return hash.clone();
-            }
-            if memo.len() >= CAPACITY {
-                memo.clear();
-            }
-            let hash = Blake3Hash::hash(bytes);
-            memo.insert(bytes.to_vec(), hash.clone());
-            hash
-        })
     }
 }
 
@@ -168,15 +91,17 @@ pub trait Distribution {
     /// the proposal stands unless the seam to the entry's successor is
     /// vetoed ([`vetoes`](Self::vetoes)).
     ///
-    /// The coin sees only the key bytes: every key is ranked, whatever its
-    /// length. The separator bound (`manifest.max_separator`) is enforced per
+    /// The coin sees only the key: every key is ranked, whatever its
+    /// length. It is handed the key's bytes together with wherever their
+    /// hash is kept ([`Hashed`]), so a coin that draws from the hash does
+    /// not compute it again for a key already ranked. The separator bound (`manifest.max_separator`) is enforced per
     /// seam by the veto, which rejects exactly the seams whose shortest
     /// separator would exceed it, instead of demoting every long key to rank
     /// 0 (the retired length guard, which glued all long keys into one
     /// unbounded run even where they diverged early). The branching parameter
     /// (`manifest.branch_factor`) sets the split probability, i.e. the
     /// expected fanout.
-    fn rank(key: &[u8], manifest: &Manifest) -> Rank;
+    fn rank(key: Hashed<'_>, manifest: &Manifest) -> Rank;
 
     /// The seam coin: computes the rank of a seam from its separator bytes.
     /// A child whose separator rank exceeds the level threshold starts a new
@@ -201,7 +126,7 @@ pub trait Distribution {
     /// index cut. Guard and veto MUST agree (both compare the same separator
     /// against the same bound), or a cut accepted at the leaf could go
     /// missing at index levels.
-    fn seam_rank(separator: &[u8], manifest: &Manifest) -> Rank {
+    fn seam_rank(separator: Hashed<'_>, manifest: &Manifest) -> Rank {
         if separator.len() as u32 > manifest.max_separator {
             return 0;
         }
@@ -277,7 +202,7 @@ pub trait Distribution {
     /// shape-relevant wherever pacing is armed. With `max_segment == 0` the
     /// weight is ignored entirely and the decision is the entry-counted
     /// geometric coin (`rank`), byte for byte the shipped baseline.
-    fn leaf_cut(key: &[u8], weight: usize, manifest: &Manifest) -> bool {
+    fn leaf_cut(key: Hashed<'_>, weight: usize, manifest: &Manifest) -> bool {
         if manifest.max_segment == 0 {
             Self::rank(key, manifest) > BOTTOM_RANK
         } else {
@@ -318,7 +243,7 @@ pub trait Distribution {
 pub struct Geometric;
 
 impl Distribution for Geometric {
-    fn rank(key: &[u8], manifest: &Manifest) -> Rank {
+    fn rank(key: Hashed<'_>, manifest: &Manifest) -> Rank {
         // Every key is ranked by a coin over its own bytes alone. The
         // separator bound is enforced per seam by the veto
         // (`Distribution::vetoes`) and the seam coin's length guard, not by
@@ -335,7 +260,7 @@ impl Distribution for Geometric {
         // whatever the key-size mix (see [`weight_paced_rank`]).
         if manifest.max_segment == 0 {
             audit::key(key.len());
-            geometric::compute_geometric_rank(&hash_memo::hash(key), manifest.branch_factor())
+            geometric::compute_geometric_rank(&key.hash(), manifest.branch_factor())
         } else {
             weight_paced_rank(key, manifest)
         }
@@ -358,13 +283,13 @@ impl Distribution for Geometric {
     /// the trait default: accepted seams are within the bound by
     /// construction, so it fires only for forced leaf separators (the cap
     /// backstop), keeping them leaf-level only.
-    fn seam_rank(separator: &[u8], manifest: &Manifest) -> Rank {
+    fn seam_rank(separator: Hashed<'_>, manifest: &Manifest) -> Rank {
         if separator.len() as u32 > manifest.max_separator {
             return 0;
         }
         audit::seam(separator.len());
         if manifest.max_segment == 0 {
-            geometric::compute_geometric_rank(&hash_memo::hash(separator), manifest.branch_factor())
+            geometric::compute_geometric_rank(&separator.hash(), manifest.branch_factor())
         } else {
             weight_paced_seam_rank(separator, manifest)
         }
@@ -396,10 +321,10 @@ impl Distribution for Geometric {
 /// same scale as leaves — which is what keeps the per-commit root rewrite
 /// flat as the tree grows, instead of one flat root accumulating every leaf
 /// link.
-pub fn weight_paced_seam_rank(separator: &[u8], manifest: &Manifest) -> Rank {
-    let hash = hash_memo::hash(separator);
+pub fn weight_paced_seam_rank(separator: Hashed<'_>, manifest: &Manifest) -> Rank {
+    let hash = separator.hash();
     let bytes = *hash.as_bytes();
-    let weight = cap::link_weight(separator, manifest) as u128;
+    let weight = cap::link_weight(&separator, manifest) as u128;
     let target = manifest.max_segment as u128;
     let mut rank = BOTTOM_RANK + 1;
     for level in 0..8usize {
@@ -443,8 +368,8 @@ pub fn weight_paced_seam_rank(separator: &[u8], manifest: &Manifest) -> Rank {
 /// whole key — the two stay independent by construction. Returns
 /// `BOTTOM_RANK + 1` (cut) or `BOTTOM_RANK` (no cut); index promotion is the
 /// seam coin's job alone.
-pub fn weight_paced_rank(key: &[u8], manifest: &Manifest) -> Rank {
-    if weight_paced_cut(key, cap::entry_weight(key, manifest), manifest) {
+pub fn weight_paced_rank(key: Hashed<'_>, manifest: &Manifest) -> Rank {
+    if weight_paced_cut(key, cap::entry_weight(&key, manifest), manifest) {
         BOTTOM_RANK + 1
     } else {
         BOTTOM_RANK
@@ -462,9 +387,9 @@ pub fn weight_paced_rank(key: &[u8], manifest: &Manifest) -> Rank {
 /// `weight >= max_segment` makes the inequality hold for every draw (a
 /// stretch several times the target cuts with certainty, which is exactly
 /// the pacing intent).
-pub fn weight_paced_cut(key: &[u8], weight: usize, manifest: &Manifest) -> bool {
+pub fn weight_paced_cut(key: Hashed<'_>, weight: usize, manifest: &Manifest) -> bool {
     audit::key(key.len());
-    let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *hash_memo::hash(key).as_bytes();
+    let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = *key.hash().as_bytes();
     let draw = u64::from_le_bytes([b0, b1, b2, b3, b4, b5, b6, b7]);
     let weight = weight as u128;
     let target = manifest.max_segment as u128;
@@ -569,7 +494,7 @@ pub fn raise_to_floor(min: &[u8], floor: &[u8]) -> Vec<u8> {
 pub mod cap {
     use dialog_common::Blake3Hash;
 
-    use crate::{Key, Manifest};
+    use crate::{Hashed, Manifest};
 
     /// The weight the per-key cut floor charges an entry toward
     /// `manifest.max_segment`: its key bytes plus
@@ -616,7 +541,7 @@ pub mod cap {
     /// Recursive bisection lacked it: an added byte could move the frame's
     /// top-level split and cascade fresh boundaries through both halves.
     pub fn index_frame_cut_positions(
-        separators: &[&[u8]],
+        separators: &[Hashed<'_>],
         weights: &[usize],
         ceiling: usize,
         manifest: &Manifest,
@@ -637,7 +562,7 @@ pub mod cap {
                 candidate.push(None);
             } else {
                 super::audit::election(separator.len());
-                candidate.push(Some((separator.len(), super::hash_memo::hash(separator))));
+                candidate.push(Some((separator.len(), separator.hash())));
             }
         }
 
@@ -875,14 +800,11 @@ pub mod cap {
     /// run of short keys offers no separator the quietness rule accepts);
     /// in the fully vetoed stretches the backstop is scoped to, every seam
     /// qualifies, so this is a formality there.
-    pub fn forced_cut_positions<K>(
-        keys: &[&K],
+    pub fn forced_cut_positions(
+        keys: &[Hashed<'_>],
         weights: &[usize],
         manifest: &Manifest,
-    ) -> Vec<usize>
-    where
-        K: Key,
-    {
+    ) -> Vec<usize> {
         let cap = manifest.max_segment as usize;
         if cap == 0 || keys.len() < 2 {
             return Vec::new();
@@ -893,14 +815,14 @@ pub mod cap {
 
         let mut candidates: Vec<Anchor> = Vec::new();
         for at in 1..keys.len() {
-            let left = keys[at - 1].as_ref();
-            let right = keys[at].as_ref();
+            let left = keys[at - 1].bytes();
+            let right = keys[at].bytes();
             if is_forced_candidate(left, right, manifest) {
                 super::audit::election(right.len());
                 candidates.push(Anchor {
                     at,
                     separator_len: shortest_separator_len(left, right),
-                    hash: super::hash_memo::hash(right),
+                    hash: keys[at].hash(),
                 });
             }
         }
@@ -1010,15 +932,12 @@ pub mod cap {
     /// function's own output, or the stretch backstop's) never feed back
     /// into frame definition, so there is no cascade: the frame partition
     /// is a pure function of the key set, and so are the anchors.
-    pub fn frame_cut_positions<K>(
-        keys: &[&K],
+    pub fn frame_cut_positions(
+        keys: &[Hashed<'_>],
         weights: &[usize],
         vetoed: &[bool],
         manifest: &Manifest,
-    ) -> Vec<usize>
-    where
-        K: Key,
-    {
+    ) -> Vec<usize> {
         let ceiling = manifest.frame_ceiling();
         if ceiling == 0 || keys.len() < 2 {
             return Vec::new();
@@ -1032,14 +951,14 @@ pub mod cap {
             if vetoed[at - 1] {
                 continue;
             }
-            let left = keys[at - 1].as_ref();
-            let right = keys[at].as_ref();
+            let left = keys[at - 1].bytes();
+            let right = keys[at].bytes();
             if is_frame_candidate(left, right, manifest) {
                 super::audit::election(right.len());
                 candidates.push(Anchor {
                     at,
                     separator_len: shortest_separator_len(left, right),
-                    hash: super::hash_memo::hash(right),
+                    hash: keys[at].hash(),
                 });
             }
         }
@@ -1200,13 +1119,6 @@ pub mod cap {
 
 pub(crate) mod summary;
 
-/// The memoized anchor hash of a key — the same hash the elections use
-/// for candidate ordering — exposed for the compressed quiet check, whose
-/// boundary anchors are built outside this module.
-pub(crate) fn anchor_hash(key: &[u8]) -> dialog_common::Blake3Hash {
-    hash_memo::hash(key)
-}
-
 /// Geometric distribution for computing node ranks.
 pub mod geometric {
     use dialog_common::Blake3Hash;
@@ -1277,7 +1189,7 @@ mod tests {
 
     use super::geometric::compute_geometric_rank;
     use super::{cap, weight_paced_rank};
-    use crate::{BOTTOM_RANK, Manifest};
+    use crate::{BOTTOM_RANK, Hashed, Manifest};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -1464,7 +1376,7 @@ mod tests {
             let mut key = vec![0u8; len];
             rng.fill(&mut key[..]);
             run += cap::entry_weight(&key, &manifest);
-            if weight_paced_rank(&key, &manifest) > BOTTOM_RANK {
+            if weight_paced_rank(Hashed::from(&key), &manifest) > BOTTOM_RANK {
                 runs.push(run);
                 run = 0;
             }
@@ -1510,10 +1422,15 @@ mod tests {
             let mut key = vec![0u8; len];
             rng.fill(&mut key[..]);
             let baseline =
-                <super::Geometric as super::Distribution>::rank(&key, &manifest) > BOTTOM_RANK;
+                <super::Geometric as super::Distribution>::rank(Hashed::from(&key), &manifest)
+                    > BOTTOM_RANK;
             for bank in [0usize, 1, 512, 65_536, 10 << 20] {
                 assert_eq!(
-                    <super::Geometric as super::Distribution>::leaf_cut(&key, bank, &manifest),
+                    <super::Geometric as super::Distribution>::leaf_cut(
+                        Hashed::from(&key),
+                        bank,
+                        &manifest
+                    ),
                     baseline,
                     "a zero target must ignore the bank"
                 );
@@ -1590,7 +1507,7 @@ mod tests {
                 .collect();
             let weights: Vec<usize> = (0..count).map(|_| rng.gen_range(20..600usize)).collect();
 
-            let refs: Vec<&[u8]> = separators.iter().map(Vec::as_slice).collect();
+            let refs: Vec<Hashed<'_>> = separators.iter().map(Hashed::from).collect();
             let cuts = cap::index_frame_cut_positions(&refs, &weights, ceiling, &manifest);
             if cuts.is_empty() {
                 continue;
@@ -1604,7 +1521,7 @@ mod tests {
             let mut w2 = weights.clone();
             sep2.push(format!("s{count:05}").into_bytes());
             w2.push(rng.gen_range(20..600usize));
-            let refs2: Vec<&[u8]> = sep2.iter().map(Vec::as_slice).collect();
+            let refs2: Vec<Hashed<'_>> = sep2.iter().map(Hashed::from).collect();
             let cuts2 = cap::index_frame_cut_positions(&refs2, &w2, ceiling, &manifest);
             for &cut in &cuts {
                 assert!(
@@ -1641,7 +1558,7 @@ mod tests {
                 .map(|i| format!("s{i:05}").into_bytes())
                 .collect();
             let weights: Vec<usize> = (0..count).map(|_| rng.gen_range(20..600usize)).collect();
-            let refs: Vec<&[u8]> = separators.iter().map(Vec::as_slice).collect();
+            let refs: Vec<Hashed<'_>> = separators.iter().map(Hashed::from).collect();
             let cuts = cap::index_frame_cut_positions(&refs, &weights, ceiling, &manifest);
             if cuts.len() < 2 {
                 continue;
@@ -1655,7 +1572,7 @@ mod tests {
             let mut w2 = weights.clone();
             sep2.insert(count - 1, b"s99998tail".to_vec());
             w2.insert(count - 1, rng.gen_range(20..600usize));
-            let refs2: Vec<&[u8]> = sep2.iter().map(Vec::as_slice).collect();
+            let refs2: Vec<Hashed<'_>> = sep2.iter().map(Hashed::from).collect();
             let cuts2 = cap::index_frame_cut_positions(&refs2, &w2, ceiling, &manifest);
 
             for &cut in cuts.iter().rev().skip(1) {
@@ -1691,7 +1608,7 @@ mod tests {
                 .map(|i| format!("s{i:05}").into_bytes())
                 .collect();
             let weights: Vec<usize> = (0..count).map(|_| rng.gen_range(20..600usize)).collect();
-            let refs: Vec<&[u8]> = separators.iter().map(Vec::as_slice).collect();
+            let refs: Vec<Hashed<'_>> = separators.iter().map(Hashed::from).collect();
 
             let cuts = cap::index_frame_cut_positions(&refs, &weights, ceiling, &manifest);
             assert_eq!(
