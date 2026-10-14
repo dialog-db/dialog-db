@@ -797,7 +797,7 @@ pub enum AuthorizeError {
         /// The revoked certificate, as the text of its CID, when the
         /// responder knows which link of the presented chain it was.
         /// A holder that retains more than one chain for the subject
-        /// can then set this one aside and prove through another; with
+        /// can then retract this one and prove through another; with
         /// no certificate named it can only stop. Absent from a
         /// responder that predates the field.
         #[serde(default, skip_serializing_if = "Option::is_none")]

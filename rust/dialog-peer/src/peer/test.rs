@@ -1658,16 +1658,16 @@ mod tests {
             Ok(certificate)
         }
 
-        /// A certificate the service refuses as revoked is set aside and
+        /// A certificate the service refuses as revoked is retracted and
         /// the fork is proved again through another retained grant.
         ///
         /// The holder retained a fresh grant beside the one that was
         /// revoked (a device linked again holds the old and the new grant
         /// until the revocation reaches it), and the walk admits whichever
         /// content hash order puts first. The service names the one it
-        /// refused; the retry presents the other. With every grant revoked
-        /// the refusal stands, it is reported as the revocation it is, and
-        /// nothing is stored.
+        /// refused; the peer retracts it and the retry presents the other.
+        /// With every grant revoked the refusal stands, it is reported as
+        /// the revocation it is, and nothing is stored.
         #[dialog_common::test]
         async fn fork_proves_through_another_grant_when_the_service_revokes_one(
             s3: UcanS3Address,
@@ -1744,6 +1744,16 @@ mod tests {
                 .perform(&operator)
                 .await?;
             assert_eq!(retrieved, Some(content));
+            let held = operator
+                .issued_to(&profile.did())
+                .await?
+                .iter()
+                .map(|grant| grant.chain().proof_cids()[0])
+                .collect::<Vec<_>>();
+            assert!(
+                !held.contains(&picked),
+                "the revoked grant is retracted where the peer retains grants"
+            );
 
             // With the other grant revoked too, the refusal is reported as
             // the revocation it is, not as a missing proof, and the write

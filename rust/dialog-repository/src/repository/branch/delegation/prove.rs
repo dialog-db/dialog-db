@@ -65,6 +65,15 @@ impl<'a> Delegations<'a> {
             audience,
         }
     }
+
+    /// The retained certificate with this CID, if any: the one a remote's
+    /// refusal names, found again here so it can be retracted.
+    pub fn retained(self, certificate: Cid) -> Retained<'a> {
+        Retained {
+            branch: self.branch,
+            certificate,
+        }
+    }
 }
 
 /// The delegations a principal signed. Created by
@@ -92,7 +101,7 @@ impl IssuedBy<'_> {
             + 'static,
     {
         Ok(
-            certificates(self.branch, DELEGATION_ISSUER, &self.issuer, env)
+            certificates(self.branch, DELEGATION_ISSUER, Some(&self.issuer), env)
                 .await?
                 .into_iter()
                 .filter(|certificate| certificate.issuer() == &self.issuer)
@@ -127,7 +136,7 @@ impl IssuedTo<'_> {
             + 'static,
     {
         Ok(
-            certificates(self.branch, DELEGATION_AUDIENCE, &self.audience, env)
+            certificates(self.branch, DELEGATION_AUDIENCE, Some(&self.audience), env)
                 .await?
                 .into_iter()
                 .filter(|certificate| certificate.audience() == &self.audience)
@@ -137,13 +146,47 @@ impl IssuedTo<'_> {
     }
 }
 
-/// The retained certificates whose `attribute` fact names `did`, their
-/// envelopes read back. An envelope that is unavailable or undecodable is
-/// skipped; the caller checks it against the fact it was found by.
+/// A lookup of one retained certificate by its CID. Created by
+/// [`Delegations::retained`].
+pub struct Retained<'a> {
+    branch: &'a Branch,
+    certificate: Cid,
+}
+
+impl Retained<'_> {
+    /// Read it: the CID is a digest of the envelope, which no fact
+    /// carries, so every retained certificate is a candidate and their
+    /// envelopes are read back until one has the CID. `None` when none
+    /// does, including when it was retained once and has been retracted.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Option<UcanCertificate>, AuthorizeError>
+    where
+        Env: Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<BlobRead>
+            + Provider<BlobImport>
+            + Provider<crate::Hydrate>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<Fork<RemoteSite, BlobRead>>
+            + ConditionalSync
+            + 'static,
+    {
+        Ok(certificates(self.branch, DELEGATION_ISSUER, None, env)
+            .await?
+            .into_iter()
+            .find(|certificate| certificate.0.to_cid() == self.certificate))
+    }
+}
+
+/// The retained certificates whose `attribute` fact names `did`, or every
+/// retained certificate carrying the attribute when no `did` is given,
+/// their envelopes read back. An envelope that is unavailable or
+/// undecodable is skipped; the caller checks it against the fact it was
+/// found by.
 async fn certificates<Env>(
     branch: &Branch,
     attribute: &str,
-    did: &Did,
+    did: Option<&Did>,
     env: &Env,
 ) -> Result<Vec<UcanCertificate>, AuthorizeError>
 where
@@ -162,13 +205,15 @@ where
         return Ok(Vec::new());
     }
     let store = index_store(branch, env).await;
-    let selector = ArtifactSelector::new()
-        .the(
-            attribute
-                .parse()
-                .map_err(|error| malformed("delegation attribute", error))?,
-        )
-        .is(Value::String(did.to_string()));
+    let attribute = attribute
+        .parse()
+        .map_err(|error| malformed("delegation attribute", error))?;
+    let selector = match did {
+        Some(did) => ArtifactSelector::new()
+            .the(attribute)
+            .is(Value::String(did.to_string())),
+        None => ArtifactSelector::new().the(attribute),
+    };
     let facts = Select::new(branch, selector)
         .execute(store)
         .await
@@ -221,7 +266,6 @@ impl<'a> Delegations<'a> {
             principal,
             access,
             duration: TimeRange::unbounded(),
-            excluded: HashSet::new(),
         }
     }
 }
@@ -233,8 +277,6 @@ pub struct ProveDelegation<'a> {
     principal: Did,
     access: Scope,
     duration: TimeRange,
-    /// Certificates the walk must not admit, by CID.
-    excluded: HashSet<Cid>,
 }
 
 /// A delegation considered by the walk, read entirely from its facts; the
@@ -265,18 +307,6 @@ impl ProveDelegation<'_> {
     /// Constrain the proof to a time range the chain must cover.
     pub fn during(mut self, duration: TimeRange) -> Self {
         self.duration = duration;
-        self
-    }
-
-    /// Set aside certificates the walk must not admit, by CID.
-    ///
-    /// A retained certificate stays a candidate until it expires or the
-    /// retaining replica learns it was revoked; a remote that refused a
-    /// chain as revoked names the certificate it refused, and the caller
-    /// excludes it here so the next walk proves the claim through another
-    /// grant when one is retained.
-    pub fn excluding(mut self, certificates: impl IntoIterator<Item = Cid>) -> Self {
-        self.excluded.extend(certificates);
         self
     }
 
@@ -546,18 +576,6 @@ impl ProveDelegation<'_> {
                 return Ok(None);
             }
         };
-
-        // A certificate the caller set aside (a remote refused it as
-        // revoked) is skipped like any other inadmissible candidate, so the
-        // walk goes on to the next grant instead of proving the claim
-        // through a link the remote will refuse again.
-        if !self.excluded.is_empty() && self.excluded.contains(&certificate.0.to_cid()) {
-            tracing::debug!(
-                entity = %candidate.entity,
-                "delegation envelope set aside by the caller; skipping candidate"
-            );
-            return Ok(None);
-        }
 
         // The facts routed this envelope here, but the envelope is the
         // authority: a drifted record (any peer with push access can write
@@ -979,71 +997,57 @@ mod tests {
         Ok(())
     }
 
-    /// A certificate the caller sets aside is skipped at admission: the
-    /// walk proves the claim through the other retained grant, and with
-    /// every grant set aside proves nothing.
+    /// A retained certificate is found again by the CID a remote names,
+    /// and is not found once retracted.
     #[dialog_common::test]
-    async fn it_sets_aside_the_certificates_the_caller_excludes() -> Result<()> {
-        use dialog_ucan_core::time::timestamp::Timestamp;
-
-        let harness = Harness::new("prove-excluding").await?;
+    async fn it_finds_a_retained_certificate_by_cid() -> Result<()> {
+        let harness = Harness::new("retained-by-cid").await?;
         let space = signer().await;
         let holder = signer().await;
+        let other = signer().await;
+        let grant = delegate(&space, &holder, UcanSubject::Specific(space.did())).await;
+        let beside = delegate(&space, &other, UcanSubject::Specific(space.did())).await;
+        let unretained =
+            delegate(&space, &signer().await, UcanSubject::Specific(space.did())).await;
+        let cid = grant.chain().proof_cids()[0];
+        harness.retain(grant.clone()).await?;
+        harness.retain(beside).await?;
 
-        // Two direct grants to the holder, distinct by their bounds: the
-        // builder mints no nonce, so otherwise they would be one
-        // certificate.
-        let open = delegate(&space, &holder, UcanSubject::Specific(space.did())).await;
-        let far = Timestamp::try_from(4_000_000_000_i128).unwrap();
-        let bounded = DelegationBuilder::new()
-            .issuer(dialog_credentials::Signer::from(space.clone()))
-            .audience(&holder)
-            .subject(UcanSubject::Specific(space.did()))
-            .command(vec!["storage".to_string()])
-            .expiration(far)
-            .try_build()
-            .await
-            .unwrap();
-        let bounded = UcanDelegation::new(DelegationChain::new(bounded));
-        let open_cid = open.chain().proof_cids()[0];
-        let bounded_cid = bounded.chain().proof_cids()[0];
-        assert_ne!(open_cid, bounded_cid);
-        harness.retain(open).await?;
-        harness.retain(bounded).await?;
-
-        for excluded in [open_cid, bounded_cid] {
-            let proof = harness
-                .branch
-                .delegations()
-                .prove(holder.did(), scope(&space, &["storage"]))
-                .excluding([excluded])
-                .perform(&harness.operator)
-                .await
-                .expect("the other grant proves the claim");
-            let admitted = proof
-                .proofs()
-                .iter()
-                .map(|certificate| certificate.0.to_cid())
-                .collect::<Vec<_>>();
-            assert_eq!(admitted.len(), 1, "a direct grant is a one-link chain");
-            assert!(
-                !admitted.contains(&excluded),
-                "the excluded certificate is not admitted"
-            );
-        }
-
-        let refused = harness
+        let found = harness
             .branch
             .delegations()
-            .prove(holder.did(), scope(&space, &["storage"]))
-            .excluding([open_cid, bounded_cid])
+            .retained(cid)
             .perform(&harness.operator)
-            .await
-            .err();
-        assert!(
-            matches!(refused, Some(AuthorizeError::UnprovenSubject { .. })),
-            "with every grant set aside nothing proves the claim, got {refused:?}"
+            .await?;
+        assert_eq!(
+            found.map(|certificate| certificate.0.to_cid()),
+            Some(cid),
+            "the retained certificate is found by its CID"
         );
+        let missing = harness
+            .branch
+            .delegations()
+            .retained(unretained.chain().proof_cids()[0])
+            .perform(&harness.operator)
+            .await?;
+        assert!(
+            missing.is_none(),
+            "a certificate never retained is not found"
+        );
+
+        harness
+            .branch
+            .delegations()
+            .retract(grant)
+            .perform(&harness.operator)
+            .await?;
+        let gone = harness
+            .branch
+            .delegations()
+            .retained(cid)
+            .perform(&harness.operator)
+            .await?;
+        assert!(gone.is_none(), "a retracted certificate is not found");
         Ok(())
     }
 

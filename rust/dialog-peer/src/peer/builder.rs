@@ -818,7 +818,6 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                 runtime: self.runtime,
                 state,
                 chains: Mutex::default(),
-                refused: Mutex::default(),
                 grants,
                 holdings,
                 connections: Mutex::default(),
