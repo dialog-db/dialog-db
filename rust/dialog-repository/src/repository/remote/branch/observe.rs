@@ -1,12 +1,12 @@
 //! Observe command for remote branches.
 
 use super::RemoteEdition;
-use crate::{ConnectedBranch, ObserveRemoteBranchError, Revision};
+use crate::{ConnectedBranch, ObserveRemoteBranchError, PublishError, Revision};
 use dialog_artifacts::DialogArtifactsError;
 use dialog_capability::Provider;
 use dialog_capability::identity::Precedence;
 use dialog_common::ConditionalSync;
-use dialog_effects::memory::Publish;
+use dialog_effects::memory::{Publish, Resolve};
 
 /// Command to record a head of the remote branch that was observed
 /// rather than fetched: delivered by a subscription, say, or by a peer.
@@ -16,6 +16,12 @@ use dialog_effects::memory::Publish;
 /// known (see [`Revision::precedence`]). Recording it makes it the head a
 /// pull or push [assuming upstream](crate::Pull::assuming_upstream)
 /// acts on, without a round trip to the remote.
+///
+/// The head known is the one recorded locally, read when the head is
+/// observed rather than taken from this handle: more than one handle
+/// records heads of the same remote branch (a watch holds one for as long
+/// as it runs, and each pull opens its own), so what this handle last saw
+/// may be behind.
 pub struct ObserveRemoteBranch<'a> {
     branch: &'a ConnectedBranch,
     edition: RemoteEdition,
@@ -43,25 +49,38 @@ impl<'a> ObserveRemoteBranch<'a> {
     /// Execute the observation.
     pub async fn perform<Env>(self, env: &Env) -> Result<Observation, ObserveRemoteBranchError>
     where
-        Env: Provider<Publish> + ConditionalSync,
+        Env: Provider<Resolve> + Provider<Publish> + ConditionalSync,
     {
         let observed = &self.edition.content;
         observed.verify().map_err(DialogArtifactsError::from)?;
 
-        if let Some(known) = self.branch.revision() {
-            match observed.precedence(&known) {
-                Precedence::After => {}
-                Precedence::Same | Precedence::Before => return Ok(Observation::Stale),
-                Precedence::Concurrent => return Ok(Observation::Diverged),
+        // A head recorded through another handle between the read and the
+        // write loses the write; it is read again and compared once more,
+        // since the head it recorded may be this one or one after it.
+        let mut raced = false;
+        loop {
+            self.branch.cache().resolve().perform(env).await?;
+            if let Some(known) = self.branch.revision() {
+                match observed.precedence(&known) {
+                    Precedence::After => {}
+                    Precedence::Same | Precedence::Before => return Ok(Observation::Stale),
+                    Precedence::Concurrent => return Ok(Observation::Diverged),
+                }
+            }
+            match self
+                .branch
+                .cache()
+                .publish(self.edition.clone())
+                .perform(env)
+                .await
+            {
+                Ok(()) => break,
+                Err(PublishError::VersionMismatch { .. }) if !raced => raced = true,
+                Err(error) => return Err(error.into()),
             }
         }
 
         let revision = observed.clone();
-        self.branch
-            .cache()
-            .publish(self.edition.clone())
-            .perform(env)
-            .await?;
         self.branch.upstream().reset(self.edition);
         Ok(Observation::Advanced(revision))
     }

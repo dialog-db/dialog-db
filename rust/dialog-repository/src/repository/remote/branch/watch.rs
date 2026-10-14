@@ -45,7 +45,10 @@ impl<'a> WatchRemoteBranch<'a> {
         WatchRemoteBranchError,
     >
     where
-        Env: Provider<Fork<RemoteSite, memory::Watch>> + Provider<Publish> + ConditionalSync,
+        Env: Provider<Fork<RemoteSite, memory::Watch>>
+            + Provider<memory::Resolve>
+            + Provider<Publish>
+            + ConditionalSync,
     {
         let branch = self.branch.clone();
         let connection = branch.repository().connection(env);

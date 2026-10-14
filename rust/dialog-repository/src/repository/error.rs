@@ -43,6 +43,10 @@ pub enum ObserveRemoteBranchError {
     #[error("Observed head does not verify: {0}")]
     Artifact(#[from] DialogArtifactsError),
 
+    /// Reading the head recorded in the local cache failed.
+    #[error("Failed to read the recorded revision from local cache: {0}")]
+    Resolve(#[from] ResolveError),
+
     /// Recording the observed head in the local cache failed.
     #[error("Failed to record observed revision in local cache: {0}")]
     Publish(#[from] PublishError),
