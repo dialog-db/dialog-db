@@ -32,6 +32,11 @@ use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{ArtifactSelector, ArtifactStream, ArtifactView, Cause, SortKey, sort_key};
 use dialog_search_tree::Manifest;
 use futures_util::{StreamExt, stream};
+use std::future::ready;
+use std::str;
+
+use crate::placement::ScopeMap;
+use crate::stack::{Guide, GuidedLayer};
 
 /// Merge sorted artifact streams into one stream whose order matches
 /// what a single physical probabilistic search tree containing every input would
@@ -239,6 +244,30 @@ impl Hidden {
         let key = view.sort_key(manifest)?;
         Ok(self.facts.iter().any(|facts| facts.contains(&key)))
     }
+}
+
+/// The rows of `inner` that a read guided by `guide` takes from `layer`,
+/// under the placements `scopes`: each other row is a divergence of
+/// placement, which the guide reports and the read skips.
+pub(crate) fn guide_rows<'a>(
+    inner: ArtifactStream<'a>,
+    guide: Arc<Guide>,
+    layer: GuidedLayer,
+    scopes: Arc<ScopeMap>,
+) -> ArtifactStream<'a> {
+    Box::pin(inner.filter(move |row| {
+        let keep = match row {
+            Ok(view) => match view.the_bytes() {
+                Ok(the) => match str::from_utf8(&the) {
+                    Ok(the) => guide.admits(&layer, &scopes, the),
+                    Err(_) => guide.admits(&layer, &scopes, &String::from_utf8_lossy(&the)),
+                },
+                Err(_) => true,
+            },
+            Err(_) => true,
+        };
+        ready(keep)
+    }))
 }
 
 /// Wrap an artifact stream in a filter that drops any item `hidden`
