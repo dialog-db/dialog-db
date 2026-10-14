@@ -312,6 +312,15 @@ pub enum PeerError {
     Authorization(#[from] AuthorizeError),
 }
 
+impl dialog_capability::access::AuthorizationFailure for PeerError {
+    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{PeerAddress, PeerConnection, PeerError};

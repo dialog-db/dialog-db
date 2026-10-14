@@ -14,6 +14,65 @@ says how to cut a release.
 
 ## Unreleased
 
+### A certificate a remote refuses as revoked is set aside, and the request is proved again through another grant
+
+[#597](https://github.com/dialog-db/dialog-db/pull/597)
+
+A peer that retains two grants for the same claim, one revoked and one
+fresh, presented whichever the proof walk admitted first, and the walk
+admits candidates in content hash order: half the time it presented the
+revoked one, and the remote refused a request the peer had every right
+to make. A device linked to an account again, after the account revoked
+its earlier grant, holds exactly that pair until the revocation reaches
+it, which is how this surfaced as a flaky sync.
+
+The refusal now names the certificate. `AuthorizeError::Revoked` carries
+`certificate`, the CID text of the revoked link, when the responder
+knows which it was (the UCAN access service does). A `Peer` performing
+a fork that comes back `Revoked` with a certificate sets that
+certificate aside for the rest of its life, drops any cached chain that
+carried it, and authorizes the fork again; the walk skips what was set
+aside and admits the other grant. The loop ends when the request goes
+through, when no chain proves the claim without the refused link (the
+original refusal is reported, since it names the authority that was
+withdrawn), or when the remote names a certificate already set aside.
+`Delegations::prove` gains `excluding` for the same exclusion by hand,
+and the new `AuthorizationFailure` trait, implemented by every effect
+error that wraps an `AuthorizeError`, is how a caller reads the refusal
+back out of an effect's error without matching each enum.
+
+What this changes for you:
+
+- `AuthorizeError::Revoked` has a new field, `certificate:
+  Option<String>`. A pattern that spells out its fields needs `..` or
+  the field; a constructor needs `certificate: None`.
+- A fork refused as revoked is retried once per named certificate,
+  through the peer's remaining grants. A caller that retried on
+  `Revoked` itself can stop; a caller that counted requests to the
+  access service sees one more per revoked link in a presented chain.
+- `ProveDelegation::excluding(cids)` on `Delegations::prove` skips the
+  named certificates during the walk.
+- `AuthorizationFailure::authorization_failure(&self) ->
+  Option<&AuthorizeError>` on `ArchiveError`, `BlobError`, `MemoryError`,
+  `BranchError`, `PeerError`, `ForkError`, `DialogStorageError`,
+  `DialogArtifactsError`, `ResolveError`, `PublishError`,
+  `RetractError`, `S3Error` and `AuthorizeError` itself.
+- The UCAN test service (`dialog-remote-ucan-s3`'s `helpers`) accepts
+  `POST /revocations/<cid>` and refuses that certificate from then on.
+
+Why: the retaining replica is the one that learns of a revocation, and
+until it does the revoked grant is a valid candidate on every other
+replica. The remote is the first to know; it says which link it refused,
+and the peer that asked is in the best position to try the others
+rather than report a refusal that a different grant would have avoided.
+
+### Compatibility and migration
+
+- Nothing stored changes. The `certificate` field is additive on the
+  wire: an older access service answers `Revoked` without it, and a peer
+  on this release reports that refusal as before, without retrying. An
+  older peer reading this release's answer ignores the field.
+
 ## 0.3.0 (2026-10-13)
 
 ### Every number is keyed in one band, and a branch an earlier release wrote is migrated in one pass

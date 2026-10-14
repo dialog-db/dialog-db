@@ -80,7 +80,7 @@ pub use secret::{
 };
 pub use upgrade::{Step, StepBound, StepFuture, Upgraded};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -106,6 +106,7 @@ use dialog_storage::provider::storage::Storage;
 use dialog_storage::resource::Resource;
 use dialog_ucan::UcanCertificate;
 use dialog_varsig::{Did, Principal};
+use ipld_core::cid::Cid;
 use parking_lot::Mutex;
 
 use access::ChainCache;
@@ -257,6 +258,12 @@ pub(crate) struct Inner {
     /// Resolved-chain cache: its keys carry the principal, and its epoch
     /// is the registry head.
     chains: Mutex<ChainCache>,
+    /// Retained certificates a remote refused as revoked, by CID. The
+    /// proof walk sets them aside so a claim resolves through another
+    /// grant when one is retained. In memory only: the retaining replica
+    /// learns of the revocation through its own channels, and until it
+    /// does the certificate stays a candidate for every other handle.
+    refused: Mutex<HashSet<Cid>>,
     /// The grants this peer holds: delegations to its key, minted in
     /// memory at build, one per allowance. Never persisted — a derived
     /// key re-mints identical authority on demand, and persisting it
@@ -432,6 +439,11 @@ impl<S: Clone, M: Mode> Peer<S, M> {
 
     pub(crate) fn chains(&self) -> &Mutex<ChainCache> {
         &self.inner.chains
+    }
+
+    /// Retained certificates a remote refused as revoked, by CID.
+    pub(crate) fn refused(&self) -> &Mutex<HashSet<Cid>> {
+        &self.inner.refused
     }
 
     pub(crate) fn speculation(&self) -> &Arc<dialog_artifacts::PreloadQueue> {

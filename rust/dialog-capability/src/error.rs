@@ -39,6 +39,13 @@ pub enum ForkError {
     Authorization(#[from] AuthorizeError),
 }
 
+impl crate::access::AuthorizationFailure for ForkError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        let Self::Authorization(reason) = self;
+        Some(reason)
+    }
+}
+
 /// Error type for capability execution failures.
 pub enum DialogCapabilityPerformError<E: StdError> {
     /// Error during effect execution.

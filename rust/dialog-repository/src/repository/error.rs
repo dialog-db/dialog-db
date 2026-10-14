@@ -751,6 +751,15 @@ pub enum ResolveError {
     Decode(String),
 }
 
+impl dialog_capability::access::AuthorizationFailure for ResolveError {
+    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 impl From<MemoryError> for ResolveError {
     fn from(error: MemoryError) -> Self {
         match error {
@@ -798,6 +807,15 @@ pub enum PublishError {
     Encode(String),
 }
 
+impl dialog_capability::access::AuthorizationFailure for PublishError {
+    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 /// Errors returned by cell retract operations.
 #[derive(Error, Debug)]
 pub enum RetractError {
@@ -832,6 +850,15 @@ pub enum RetractError {
     /// access decision.
     #[error(transparent)]
     Rejected(#[from] Rejection),
+}
+
+impl dialog_capability::access::AuthorizationFailure for RetractError {
+    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 impl From<MemoryError> for RetractError {
@@ -892,6 +919,7 @@ mod tests {
             subject: dialog_capability::did!(
                 "did:key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"
             ),
+            certificate: None,
         }
     }
 

@@ -33,6 +33,15 @@ pub enum DialogStorageError {
     Verification(String),
 }
 
+impl dialog_capability::access::AuthorizationFailure for DialogStorageError {
+    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 impl From<ArchiveError> for DialogStorageError {
     fn from(error: ArchiveError) -> Self {
         match error {

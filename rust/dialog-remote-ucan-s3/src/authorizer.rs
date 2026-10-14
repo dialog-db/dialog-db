@@ -377,8 +377,9 @@ where
         ContainerError::InvalidDelegationSignature { issuer, .. } => {
             AuthorizeError::InvalidSignature { issuer }
         }
-        ContainerError::Revoked { .. } => AuthorizeError::Revoked {
+        ContainerError::Revoked { cid, .. } => AuthorizeError::Revoked {
             subject: chain.subject().clone(),
+            certificate: Some(cid.to_string()),
         },
         ContainerError::Unauthorized(reason) => check_failed_to_authorize_error(reason),
         ContainerError::Invocation(detail) => AuthorizeError::Malformed {

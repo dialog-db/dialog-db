@@ -367,6 +367,15 @@ pub enum MemoryError {
     Authorization(#[from] AuthorizeError),
 }
 
+impl dialog_capability::access::AuthorizationFailure for MemoryError {
+    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 impl From<StorageError> for MemoryError {
     fn from(e: StorageError) -> Self {
         Self::Storage(e.to_string())

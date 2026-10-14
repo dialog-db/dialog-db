@@ -48,6 +48,7 @@ use dialog_repository::{Branch, RemoteSite};
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Ucan, UcanCertificate, UcanDelegation, UcanProof};
 use dialog_ucan_core::subject::Subject as UcanSubject;
+use ipld_core::cid::Cid;
 use std::collections::HashMap;
 
 use dialog_artifacts::history::Version;
@@ -242,6 +243,27 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         self.chains().lock().chains.len()
     }
 
+    /// Set a retained certificate aside: a remote refused a chain through
+    /// it as revoked. Later walks skip it, and a cached chain carrying it
+    /// is dropped, so the next claim resolves through another grant when
+    /// one is retained. `false` when it was already set aside, which
+    /// tells a caller that retrying through the walk cannot change the
+    /// answer.
+    ///
+    /// The set is this handle's memory, not the branch's: the certificate
+    /// stays retained (its revocation is the retaining party's to record)
+    /// and other handles learn nothing from this one.
+    pub(crate) fn refuse(&self, certificate: Cid) -> bool {
+        if !self.refused().lock().insert(certificate) {
+            return false;
+        }
+        self.chains()
+            .lock()
+            .chains
+            .retain(|_, chain| !chain.iter().any(|link| link.0.to_cid() == certificate));
+        true
+    }
+
     /// The cache key for a claim, or `None` when the claim is not
     /// cacheable (a wildcard subject or self-authorization resolves to an
     /// empty proof without touching storage).
@@ -272,6 +294,8 @@ impl<S: Clone, M: Mode> Peer<S, M> {
             return None;
         }
         let chain = cache.chains.get(key)?;
+        // `refuse` drops the entries carrying a certificate it sets aside,
+        // so a hit here is a chain no remote has refused.
 
         let mut effective = TimeRange::unbounded();
         for certificate in chain {
@@ -491,11 +515,13 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         let env = AccessEnv {
             operator: self.clone(),
         };
+        let refused = self.refused().lock().iter().copied().collect::<Vec<_>>();
         Box::pin(
             self.delegations()
                 .delegations()
                 .prove(principal, claim.access.clone())
                 .during(claim.duration)
+                .excluding(refused)
                 .perform(&env),
         )
         .await
@@ -1007,6 +1033,43 @@ mod tests {
             expiration: Some(now + 7200),
         };
         assert!(operator.resolve(widened).await.is_err());
+        Ok(())
+    }
+
+    /// A certificate a remote refused as revoked is set aside: the next
+    /// claim resolves through the other retained grant, and the cached
+    /// chain that carried the refused certificate is not served again.
+    /// With every grant set aside the claim is refused as unproven.
+    #[dialog_common::test]
+    async fn it_resolves_through_another_grant_once_one_is_refused() -> Result<()> {
+        let (operator, _profile) = operator("refused-beside-live").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        let live = Timestamp::try_from((now_s() + 3600) as i128).unwrap();
+        let open = retain_grant(&operator, &space, &holder, None).await;
+        let open = open.chain().proof_cids()[0];
+        let bounded = retain_grant(&operator, &space, &holder, Some(live)).await;
+        let bounded = bounded.chain().proof_cids()[0];
+        assert_ne!(open, bounded);
+
+        let link = |proof: UcanProof| proof.proofs()[0].0.to_cid();
+        let first = link(operator.resolve(claim(&holder, &space)).await?);
+        assert!(first == open || first == bounded);
+        assert_eq!(operator.cached_chains(), 1, "the walk's chain is cached");
+
+        // The remote refuses the grant the walk picked.
+        assert!(operator.refuse(first), "newly set aside");
+        assert_eq!(operator.cached_chains(), 0, "the cached chain carried it");
+        let second = link(operator.resolve(claim(&holder, &space)).await?);
+        assert_ne!(second, first, "the claim resolves through the other grant");
+        assert!(!operator.refuse(first), "already set aside");
+
+        assert!(operator.refuse(second));
+        let refused = operator.resolve(claim(&holder, &space)).await.err();
+        assert!(
+            matches!(refused, Some(AuthorizeError::UnprovenSubject { .. })),
+            "with every grant set aside nothing proves the claim, got {refused:?}"
+        );
         Ok(())
     }
 

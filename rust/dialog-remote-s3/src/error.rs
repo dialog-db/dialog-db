@@ -40,6 +40,15 @@ pub enum S3Error {
     Serialization(String),
 }
 
+impl dialog_capability::access::AuthorizationFailure for S3Error {
+    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 impl From<reqwest::Error> for S3Error {
     fn from(error: reqwest::Error) -> Self {
         // A connection that could not be made carried no request, so the
@@ -172,6 +181,7 @@ mod tests {
             subject: dialog_capability::did!(
                 "did:key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"
             ),
+            certificate: None,
         }
     }
 

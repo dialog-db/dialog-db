@@ -102,6 +102,15 @@ pub enum DialogArtifactsError {
     IncompleteHistory(String),
 }
 
+impl dialog_capability::access::AuthorizationFailure for DialogArtifactsError {
+    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 impl From<DialogStorageError> for DialogArtifactsError {
     fn from(error: DialogStorageError) -> Self {
         match error {
@@ -196,6 +205,7 @@ mod tests {
             subject: dialog_capability::did!(
                 "did:key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"
             ),
+            certificate: None,
         }
     }
 

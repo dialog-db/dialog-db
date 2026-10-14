@@ -32,6 +32,7 @@ use dialog_ucan_core::DelegationChain;
 use dialog_ucan_core::command::Command;
 use dialog_ucan_core::subject::Subject as UcanSubject;
 use futures_util::StreamExt as _;
+use ipld_core::cid::Cid;
 use std::collections::HashSet;
 use std::fmt::Display;
 
@@ -220,6 +221,7 @@ impl<'a> Delegations<'a> {
             principal,
             access,
             duration: TimeRange::unbounded(),
+            excluded: HashSet::new(),
         }
     }
 }
@@ -231,6 +233,8 @@ pub struct ProveDelegation<'a> {
     principal: Did,
     access: Scope,
     duration: TimeRange,
+    /// Certificates the walk must not admit, by CID.
+    excluded: HashSet<Cid>,
 }
 
 /// A delegation considered by the walk, read entirely from its facts; the
@@ -261,6 +265,18 @@ impl ProveDelegation<'_> {
     /// Constrain the proof to a time range the chain must cover.
     pub fn during(mut self, duration: TimeRange) -> Self {
         self.duration = duration;
+        self
+    }
+
+    /// Set aside certificates the walk must not admit, by CID.
+    ///
+    /// A retained certificate stays a candidate until it expires or the
+    /// retaining replica learns it was revoked; a remote that refused a
+    /// chain as revoked names the certificate it refused, and the caller
+    /// excludes it here so the next walk proves the claim through another
+    /// grant when one is retained.
+    pub fn excluding(mut self, certificates: impl IntoIterator<Item = Cid>) -> Self {
+        self.excluded.extend(certificates);
         self
     }
 
@@ -530,6 +546,18 @@ impl ProveDelegation<'_> {
                 return Ok(None);
             }
         };
+
+        // A certificate the caller set aside (a remote refused it as
+        // revoked) is skipped like any other inadmissible candidate, so the
+        // walk goes on to the next grant instead of proving the claim
+        // through a link the remote will refuse again.
+        if !self.excluded.is_empty() && self.excluded.contains(&certificate.0.to_cid()) {
+            tracing::debug!(
+                entity = %candidate.entity,
+                "delegation envelope set aside by the caller; skipping candidate"
+            );
+            return Ok(None);
+        }
 
         // The facts routed this envelope here, but the envelope is the
         // authority: a drifted record (any peer with push access can write
@@ -948,6 +976,74 @@ mod tests {
             )
             .await;
         assert_eq!(proof.expect("chain proves").proofs().len(), 2);
+        Ok(())
+    }
+
+    /// A certificate the caller sets aside is skipped at admission: the
+    /// walk proves the claim through the other retained grant, and with
+    /// every grant set aside proves nothing.
+    #[dialog_common::test]
+    async fn it_sets_aside_the_certificates_the_caller_excludes() -> Result<()> {
+        use dialog_ucan_core::time::timestamp::Timestamp;
+
+        let harness = Harness::new("prove-excluding").await?;
+        let space = signer().await;
+        let holder = signer().await;
+
+        // Two direct grants to the holder, distinct by their bounds: the
+        // builder mints no nonce, so otherwise they would be one
+        // certificate.
+        let open = delegate(&space, &holder, UcanSubject::Specific(space.did())).await;
+        let far = Timestamp::try_from(4_000_000_000_i128).unwrap();
+        let bounded = DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(space.clone()))
+            .audience(&holder)
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec!["storage".to_string()])
+            .expiration(far)
+            .try_build()
+            .await
+            .unwrap();
+        let bounded = UcanDelegation::new(DelegationChain::new(bounded));
+        let open_cid = open.chain().proof_cids()[0];
+        let bounded_cid = bounded.chain().proof_cids()[0];
+        assert_ne!(open_cid, bounded_cid);
+        harness.retain(open).await?;
+        harness.retain(bounded).await?;
+
+        for excluded in [open_cid, bounded_cid] {
+            let proof = harness
+                .branch
+                .delegations()
+                .prove(holder.did(), scope(&space, &["storage"]))
+                .excluding([excluded])
+                .perform(&harness.operator)
+                .await
+                .expect("the other grant proves the claim");
+            let admitted = proof
+                .proofs()
+                .iter()
+                .map(|certificate| certificate.0.to_cid())
+                .collect::<Vec<_>>();
+            assert_eq!(admitted.len(), 1, "a direct grant is a one-link chain");
+            assert!(
+                !admitted.contains(&excluded),
+                "the excluded certificate is not admitted"
+            );
+        }
+
+        let refused = harness
+            .branch
+            .delegations()
+            .prove(holder.did(), scope(&space, &["storage"]))
+            .excluding([open_cid, bounded_cid])
+            .perform(&harness.operator)
+            .await
+            .err();
+        assert!(
+            matches!(refused, Some(AuthorizeError::UnprovenSubject { .. })),
+            "with every grant set aside nothing proves the claim, got {refused:?}"
+        );
         Ok(())
     }
 

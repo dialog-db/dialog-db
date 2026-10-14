@@ -323,6 +323,15 @@ pub enum BranchError {
     Authorization(#[from] AuthorizeError),
 }
 
+impl dialog_capability::access::AuthorizationFailure for BranchError {
+    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;

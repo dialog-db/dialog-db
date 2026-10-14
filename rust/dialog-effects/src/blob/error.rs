@@ -52,6 +52,15 @@ pub enum BlobError {
     Storage(String),
 }
 
+impl dialog_capability::access::AuthorizationFailure for BlobError {
+    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 impl From<StorageError> for BlobError {
     fn from(e: StorageError) -> Self {
         Self::Storage(e.to_string())

@@ -7,19 +7,67 @@
 //! container in the body).
 
 use super::UcanS3Address;
-use crate::{FromUcanArgs, UcanAuthorizer};
+use crate::{DefaultResolver, FromUcanArgs, UcanAuthorizer};
 use dialog_capability::access::AuthorizeError;
 use dialog_common::helpers::{Provider, Service};
 use dialog_remote_s3::helpers::LocalS3;
 use dialog_remote_s3::{Address, S3Credential, S3Error};
+use dialog_ucan_core::revocation::{RevocationChecker, RevocationMatch, RevocationSelector};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use ipld_core::cid::Cid;
+use std::collections::HashSet;
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
+
+/// The path a test posts a certificate's CID to, to have the service
+/// treat that certificate as revoked from then on.
+pub const REVOCATIONS_PATH: &str = "/revocations";
+
+/// The certificates the service treats as revoked, by CID.
+///
+/// Test-only: a revocation here counts whoever is asked about, where a
+/// real index answers only for the principals entitled to revoke the
+/// link. Nothing is revoked until a test posts a CID to
+/// [`REVOCATIONS_PATH`].
+#[derive(Debug, Clone, Default)]
+pub struct RevocationList(Arc<Mutex<HashSet<Cid>>>);
+
+impl RevocationList {
+    fn revoke(&self, certificate: Cid) {
+        self.0
+            .lock()
+            .expect("revocation list poisoned")
+            .insert(certificate);
+    }
+}
+
+impl RevocationChecker for RevocationList {
+    type Error = std::convert::Infallible;
+
+    async fn query(
+        &self,
+        selector: RevocationSelector<'_>,
+    ) -> Result<Option<RevocationMatch>, Self::Error> {
+        let revoked = self
+            .0
+            .lock()
+            .expect("revocation list poisoned")
+            .contains(&selector.delegation);
+        Ok(revoked.then(|| RevocationMatch {
+            revocation: selector.delegation,
+            principal: selector
+                .by
+                .first()
+                .cloned()
+                .expect("a chain link has an issuer"),
+        }))
+    }
+}
 
 /// A running UCAN access service test server instance.
 pub struct UcanAccessServer {
@@ -33,7 +81,8 @@ pub struct UcanAccessServer {
 /// What the service holds across requests: the authorizer, and how it
 /// has answered so far.
 struct ServerState {
-    authorizer: RwLock<UcanAuthorizer>,
+    authorizer: RwLock<UcanAuthorizer<DefaultResolver, RevocationList>>,
+    revocations: RevocationList,
     stats: Stats,
 }
 
@@ -73,8 +122,13 @@ impl UcanAccessServer {
 
         let credential = S3Credential::new(access_key, secret_key);
 
+        let revocations = RevocationList::default();
         let authorizer = Arc::new(ServerState {
-            authorizer: RwLock::new(UcanAuthorizer::new(address, Some(credential))),
+            authorizer: RwLock::new(
+                UcanAuthorizer::new(address, Some(credential))
+                    .with_revocations(revocations.clone()),
+            ),
+            revocations,
             stats: Stats::default(),
         });
 
@@ -165,6 +219,29 @@ async fn handle_request(
             .status(StatusCode::METHOD_NOT_ALLOWED)
             .body(Full::new(Bytes::from("Method not allowed")))
             .unwrap());
+    }
+
+    // `POST /revocations/<cid>` marks a certificate revoked for every
+    // later invocation. A test's hook, not part of the access protocol.
+    if let Some(certificate) = req
+        .uri()
+        .path()
+        .strip_prefix(REVOCATIONS_PATH)
+        .and_then(|rest| rest.strip_prefix('/'))
+    {
+        return Ok(match certificate.parse::<Cid>() {
+            Ok(certificate) => {
+                state.revocations.revoke(certificate);
+                add_cors_headers(Response::builder())
+                    .status(StatusCode::NO_CONTENT)
+                    .body(Full::new(Bytes::new()))
+                    .unwrap()
+            }
+            Err(error) => add_cors_headers(Response::builder())
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::new(Bytes::from(format!("not a CID: {error}"))))
+                .unwrap(),
+        });
     }
 
     state.stats.requests.fetch_add(1, Ordering::SeqCst);
