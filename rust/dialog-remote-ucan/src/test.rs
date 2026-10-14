@@ -576,6 +576,69 @@ async fn it_refuses_a_watch_where_the_service_names_no_socket(
     Ok(())
 }
 
+/// A resolve whose socket closes after the frame was sent is answered as
+/// unavailable, as a resolve whose request failed on the wire is: a read
+/// that may have reached the service changes nothing there, so it may be
+/// tried at the peer's next address. Answered as unclassified, the
+/// connection's failover (`Resend` for `memory::Resolve`, which resends
+/// on `Rejection::Unavailable`) never tries the next address.
+///
+/// Native only, for the service it stands up; the browser's link answers
+/// a socket that closes in flight the same way, through the same
+/// `exchange`.
+#[cfg(not(target_arch = "wasm32"))]
+#[dialog_common::test]
+async fn it_answers_a_resolve_lost_on_the_socket_as_unavailable() -> anyhow::Result<()> {
+    use futures_util::StreamExt as _;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let socket = format!("ws://{}/", listener.local_addr()?);
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let speaks = |_: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
+            response.headers_mut().insert(
+                "Sec-WebSocket-Protocol",
+                HeaderValue::from_static(crate::socket::SUBPROTOCOL),
+            );
+            Ok(response)
+        };
+        let Ok(mut socket) = tokio_tungstenite::accept_hdr_async(stream, speaks).await else {
+            return;
+        };
+        // Take the frame, then go away without answering it.
+        while let Some(Ok(message)) = socket.next().await {
+            if let Message::Binary(_) = message {
+                break;
+            }
+        }
+    });
+
+    let (signer, subject) = owner().await;
+    let resolve = CellScope::new(subject, "local", "head").resolve();
+    let authorization = issued(&signer, &resolve).await;
+    let address = UcanAddress::new("http://127.0.0.1:1/").with_socket(&socket);
+    let resolved = Provider::<ForkInvocation<UcanSite, Resolve>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(resolve, address, authorization),
+    )
+    .await;
+    assert!(
+        matches!(
+            resolved,
+            Err(MemoryError::Rejected(
+                dialog_effects::Rejection::Unavailable { .. }
+            ))
+        ),
+        "a read lost in flight may be tried elsewhere; got {resolved:?}"
+    );
+    Ok(())
+}
+
 /// The layer itself, driven directly: what it does with a request that
 /// carries no invocation, a credential it cannot read, an operation it
 /// does not perform, and a body that is not what the invocation bound.
