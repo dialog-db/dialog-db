@@ -154,7 +154,7 @@ pub mod branch {
     /// one, so cardinality-many.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.branch")]
-    #[cardinality(many)]
+    #[pick(all)]
     pub struct Pull(
         /// The pulled-from branch's entity.
         pub Entity,
@@ -164,7 +164,7 @@ pub mod branch {
     /// as for [`Pull`]. A push goes to every one, so cardinality-many.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.branch")]
-    #[cardinality(many)]
+    #[pick(all)]
     pub struct Push(
         /// The pushed-to branch's entity.
         pub Entity,
@@ -407,7 +407,7 @@ pub mod peer {
     /// cardinality-many.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.peer")]
-    #[cardinality(many)]
+    #[pick(all)]
     pub struct Address(
         /// The encoded site address.
         pub Vec<u8>,
@@ -466,7 +466,7 @@ pub mod revision {
     /// parent (two for a merge), so cardinality-many.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.revision")]
-    #[cardinality(many)]
+    #[pick(all)]
     pub struct Parent(
         /// A parent revision's entity.
         pub Entity,
@@ -477,7 +477,7 @@ pub mod revision {
     /// so cardinality-many.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.revision")]
-    #[cardinality(many)]
+    #[pick(all)]
     pub struct Ancestor(
         /// An ancestor revision's entity.
         pub Entity,
@@ -631,7 +631,7 @@ pub mod session {
     /// branch).
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.session")]
-    #[cardinality(many)]
+    #[pick(all)]
     pub struct Branch(
         /// The branch entity (the `Branch.this` for that branch under
         /// the session's current replica).

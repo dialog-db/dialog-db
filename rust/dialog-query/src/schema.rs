@@ -10,6 +10,7 @@
 //! `Some(vt)` becomes `Type::Primitive(singleton(vt))`.
 
 use crate::type_system;
+use dialog_artifacts::Pick;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -116,6 +117,28 @@ pub enum Cardinality {
     One,
     /// The attribute holds multiple values per entity.
     Many,
+}
+
+impl Cardinality {
+    /// The arity of `pick`: a set for `all`, one value for every other
+    /// pick.
+    pub fn of(pick: &Pick) -> Self {
+        if pick.is_set() {
+            Cardinality::Many
+        } else {
+            Cardinality::One
+        }
+    }
+
+    /// The pick an attribute of this arity has when none is declared:
+    /// `last` for one value, `all` for many. `cardinality: one | many`
+    /// is the older spelling of the two.
+    pub fn pick(self) -> Pick {
+        match self {
+            Cardinality::One => Pick::Last,
+            Cardinality::Many => Pick::All,
+        }
+    }
 }
 
 impl Cardinality {

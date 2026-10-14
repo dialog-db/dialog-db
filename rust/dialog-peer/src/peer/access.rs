@@ -44,7 +44,7 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::{BlobError, Import as BlobImport, Read as BlobRead, Write as BlobWrite};
 use dialog_effects::memory::{Publish, Resolve};
-use dialog_repository::RemoteSite;
+use dialog_repository::{Branch, RemoteSite};
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Ucan, UcanCertificate, UcanDelegation, UcanProof};
 use dialog_ucan_core::subject::Subject as UcanSubject;
@@ -594,6 +594,19 @@ impl<S: PeerSpace, M: Mode> Peer<S, M> {
         Box::pin(branch.delegations().issued_by(issuer.clone()).perform(&env)).await
     }
 
+    /// The delegations `branch` retains that `issuer` issued: another
+    /// branch of this peer's space, as it stands, read as the peer.
+    pub(crate) async fn issued_by_on(
+        &self,
+        branch: &Branch,
+        issuer: &Did,
+    ) -> Result<Vec<UcanDelegation>, AuthorizeError> {
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
+        Box::pin(branch.delegations().issued_by(issuer.clone()).perform(&env)).await
+    }
+
     /// The delegations retained where this peer proves from that were
     /// issued to `audience`: the grants it holds.
     pub(crate) async fn issued_to(
@@ -837,7 +850,7 @@ mod tests {
     /// account's root delegation failed with `Version mismatch` forever.
     #[dialog_common::test]
     async fn it_retains_after_another_handle_moved_the_head() -> Result<()> {
-        use dialog_artifacts::{Attribute, Changes, Entity, Update as _, Value};
+        use dialog_artifacts::{Changes, Entity, Relation, Update as _, Value};
         use dialog_repository::ACCESS_BRANCH;
 
         let (operator, profile) = operator("retain-stale-head").await;
@@ -861,9 +874,10 @@ mod tests {
         for note in ["moved the head", "and again"] {
             let mut moved = Changes::new();
             moved.associate(
-                Attribute::try_from("test.profile/name".to_string())?,
+                Relation::try_from("test.profile/name".to_string())?,
                 Entity::new()?,
                 Value::String(note.to_string()),
+                dialog_artifacts::Pick::All,
             );
             elsewhere
                 .transaction()

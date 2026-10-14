@@ -172,7 +172,10 @@ where
                 // A replace, not an assert: an asset has one size, and
                 // replacing a fact with the value it already has is a no-op,
                 // so re-asserting a recorded asset mints nothing.
-                instructions.push(Instruction::Replace(asset.fact()?));
+                instructions.push(Instruction::Assert(
+                    asset.fact()?,
+                    dialog_artifacts::Pick::Last,
+                ));
             }
             AssetChange::Discard(asset) => {
                 if let Some(size) = recorded_size(source, asset.hash(), env).await? {
@@ -295,8 +298,8 @@ mod tests {
     use crate::{Blob, Branch, CommitError};
     use anyhow::Result;
     use dialog_artifacts::{
-        ASSET_SIZE, Artifact, ArtifactSelector, Asset, Attribute, Changes, DialogArtifactsError,
-        Entity, Update as _, Value,
+        ASSET_SIZE, Artifact, ArtifactSelector, Asset, Changes, DialogArtifactsError, Entity,
+        Relation, Update as _, Value,
     };
     use dialog_effects::blob::{BlobError, BlobReader};
     use dialog_peer::helpers::test_session_with_peer;
@@ -312,7 +315,7 @@ mod tests {
         out
     }
 
-    fn avatar() -> Attribute {
+    fn avatar() -> Relation {
         "profile/avatar".parse().expect("valid attribute")
     }
 
@@ -323,7 +326,12 @@ mod tests {
     /// A fact batch pointing `user:alice`'s avatar at `content`.
     fn avatar_of_alice(content: Entity) -> Changes {
         let mut facts = Changes::new();
-        facts.associate_unique(avatar(), alice(), Value::Entity(content));
+        facts.associate(
+            avatar(),
+            alice(),
+            Value::Entity(content),
+            dialog_artifacts::Pick::Last,
+        );
         facts
     }
 
@@ -895,7 +903,12 @@ mod tests {
 
         let mut forged = Changes::new();
         let fact = Asset::from(b"forged".to_vec()).fact()?;
-        forged.associate(fact.the, fact.of, Value::UnsignedInt(1_000_000));
+        forged.associate(
+            fact.the,
+            fact.of,
+            Value::UnsignedInt(1_000_000),
+            dialog_artifacts::Pick::All,
+        );
         let refused = branch
             .transaction()
             .assert(forged)
@@ -906,7 +919,7 @@ mod tests {
         assert!(matches!(
             refused,
             Err(CommitError::Artifact(
-                DialogArtifactsError::ReservedAttribute(_)
+                DialogArtifactsError::ReservedRelation(_)
             ))
         ));
         Ok(())

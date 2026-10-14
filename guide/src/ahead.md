@@ -6,6 +6,8 @@ Dialog is experimental, and several of the pieces above are still moving. These 
 
 **The node layout is a draft.** Every assigned code in the code table is marked `draft`. The layout could still change before a stable release. A change to the layout would get a new version byte, and a new setting gets a new code; neither reinterprets old nodes silently. Whether the table stays a CSV that the code is checked against, or becomes a schema the code is generated from, is also open.
 
+**Numbers of any size.** A key can already hold a number of any size, and so can a number's identity. The values an app hands to Dialog cannot yet: they are 128-bit integers and 64-bit floats, so a wider number stored by someone else reads back as the nearest float. A value that holds any number is planned. It changes no key, so nothing stored will need rewriting for it.
+
 **Encryption.** Nodes are stored in the clear today, so a remote peer can read what it stores even though it cannot change it. The node prelude leaves room for encrypted bodies as a future layout version.
 
 **A level in every node.** A node does not say how deep it sits in its tree. Sync and diffing could use that to plan their work without descending, and it would be one more byte in the prelude, under a new version.

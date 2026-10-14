@@ -1,7 +1,7 @@
 //! Read-side claim type representing a stored EAV datum.
 
-pub use crate::artifact::{Artifact, ArtifactsAttribute, Cause, Entity, Value};
-use crate::attribute::The;
+pub use crate::artifact::{Artifact, ArtifactsRelation, Cause, Entity, Value};
+use crate::attribute::Relation;
 use crate::concept::Conclusion;
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Claim {
     /// The claim identifier (e.g., "user/name")
-    pub the: The,
+    pub the: Relation,
     /// The entity (subject)
     pub of: Entity,
     /// The value (object)
@@ -23,7 +23,7 @@ pub struct Claim {
 
 impl Claim {
     /// Get the attribute for this claim
-    pub fn the(&self) -> &The {
+    pub fn the(&self) -> &Relation {
         &self.the
     }
 
@@ -65,7 +65,7 @@ impl Conclusion for Claim {
 impl From<Artifact> for Claim {
     fn from(artifact: Artifact) -> Self {
         Claim {
-            the: The::from(artifact.the),
+            the: Relation::from(artifact.the),
             of: artifact.of,
             is: artifact.is,
             cause: artifact.cause.unwrap_or(Cause([0; 32])),
@@ -76,7 +76,7 @@ impl From<Artifact> for Claim {
 impl From<&Artifact> for Claim {
     fn from(artifact: &Artifact) -> Self {
         Claim {
-            the: The::from(artifact.the.clone()),
+            the: Relation::from(artifact.the.clone()),
             of: artifact.of.clone(),
             is: artifact.is.clone(),
             cause: artifact.cause.clone().unwrap_or(Cause([0; 32])),

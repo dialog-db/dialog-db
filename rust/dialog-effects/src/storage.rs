@@ -34,7 +34,8 @@ pub enum Directory {
     /// Resolves to:
     /// - FS: `~/Library/Application Support/dialog/` (macOS),
     ///   `~/.local/share/dialog/` (Linux)
-    /// - IDB: database suffix `.profile`
+    /// - IDB: no suffix: a browser keeps an origin's databases in one
+    ///   place, so this and [`Current`](Directory::Current) are the same
     Profile,
 
     /// Working directory storage.

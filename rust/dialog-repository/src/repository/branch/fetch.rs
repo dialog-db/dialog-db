@@ -124,12 +124,15 @@ mod tests {
 
         let main = repo.branch("main").open().perform(&operator).await?;
         let _hash = main
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:main".parse()?,
-                is: Value::String("Main data".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:main".parse()?,
+                    is: Value::String("Main data".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
         let main_revision = main.revision().expect("main should have a revision");
@@ -158,12 +161,15 @@ mod tests {
 
         let main = repo.branch("main").open().perform(&operator).await?;
         let _hash = main
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:main".parse()?,
-                is: Value::String("Main data".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:main".parse()?,
+                    is: Value::String("Main data".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
 

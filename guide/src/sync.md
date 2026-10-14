@@ -2,7 +2,9 @@
 
 Alice and Bob each have a replica. Now they need to agree. Dialog does this through a remote peer: a peer that both can reach and that stores blocks and cells, such as an S3 bucket, a Cloudflare R2 bucket behind a UCAN service, or a shared folder. The remote peer stores bytes and swaps cells. It does not understand facts, trees or merges. All of that happens on the replicas.
 
-A branch that syncs with a remote peer remembers one extra thing per remote peer: its **sync base**, the tree the remote peer's head pointed at the last time the two agreed.
+What a branch syncs with is called an **upstream**: another branch, usually the same branch on a remote peer. An app names a branch's upstreams, to pull from, to push to, or both, and the repository records them as facts in a small branch of its own. A remote peer is known by its DID and the addresses it can be reached at, which the device keeps as a contact. A pull or a push that names no upstream goes to all of them.
+
+A branch remembers one extra thing per upstream: its **sync base**, the tree the upstream's head pointed at the last time the two agreed.
 
 ## A whole conversation
 
@@ -72,9 +74,9 @@ The rest of the chapter walks through it.
 
 A push moves the remote peer's head forward to the local one, and only forward.
 
-1. **Check.** Read the remote peer's head. If it is not the sync base, someone else has pushed since this replica last looked, and the push stops with a refusal: *not a fast-forward*. The replica must pull first.
+1. **Check.** Read the remote peer's head and check its signature. If it is not the sync base, someone else has pushed since this replica last looked, and the push stops with a refusal: *not a fast-forward*. The replica must pull first.
 2. **Find what is new.** Compare the local tree with the sync base, skipping every subtree whose hash matches, as described in [The Search Tree](./tree.md). What is left are the blocks the remote peer does not have.
-3. **Upload.** Send spilled values and blobs, then the new tree nodes, children before parents. A node never arrives before the nodes it points at, so the remote peer never holds a node with a dangling link.
+3. **Upload.** Send spilled values and the bytes of new assets, then the new tree nodes, children before parents. A node never arrives before the nodes it points at, so the remote peer never holds a node with a dangling link.
 4. **Swap the head.** Ask the remote peer to set its head cell to the new signed head, *if it still holds what step 1 read*. If another push slipped in between, the swap fails and nothing points at the uploaded blocks.
 5. **Record.** The new tree becomes the sync base.
 
@@ -134,9 +136,11 @@ Alice renamed the milk to `"Oat milk, 1 L"`. Bob, without seeing that, renamed i
 </svg>
 </figure>
 
-A name is meant to have one value, so a reader that asks for it with cardinality one sees an election between the two. The fact whose commit had seen more wins: the deeper edition. If the editions are equal, as they are here, the hash of the version decides. Every fact a commit wrote carries the same version, so a whole commit wins or loses together: a reader never sees half of Alice's edit and half of Bob's.
+A name is meant to have one value, so a reader that asks for it under the pick `last` sees an election between the two. The fact whose commit had seen more wins: the deeper edition. If the editions are equal, as they are here, the hash of the version decides. Every fact a commit wrote carries the same version, so a whole commit wins or loses together: a reader never sees half of Alice's edit and half of Bob's.
 
-The election is a function of the stored facts alone, so every replica elects the same name without talking to anyone. The losing value is not deleted. It stays in the store until someone asserts a new name, and an app that wants to show "edited on two devices" can ask for every value.
+The election is a function of the stored facts alone, so every replica elects the same name without talking to anyone. The losing value is not deleted. It stays in the store, and an app that wants to show "edited on two devices" can ask for every value by reading the name under `all`. It stays even after someone asserts a new name, because an assertion supersedes only the fact a read returned, which is the winner. The loser goes when someone retracts it.
+
+The other picks choose in their own ways, `max` by the greatest value and `top` by a ranked list, but always from the stored facts alone, and so the same way on every replica.
 
 ## After the merge
 
@@ -144,6 +148,6 @@ Alice pushes her merge. This time the remote peer's head is Bob's, which is her 
 
 <div class="aside">
 
-**Implementations.** Push is [`branch/push.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/push.rs) and pull is [`branch/pull.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/pull.rs), both in `dialog-repository`. The screens are documented and implemented in [`dialog-artifacts/src/merge.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/merge.rs). The election is `ArtifactView::elect` in [`artifacts/artifact.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/artifact.rs). The remote peers are [`dialog-remote-s3`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-s3), [`dialog-remote-ucan`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-ucan) and [`dialog-remote-fs`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-fs).
+**Implementations.** Push is [`branch/push.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/push.rs) and pull is [`branch/pull.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/pull.rs), both in `dialog-repository`. The screens are documented and implemented in [`dialog-artifacts/src/merge.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/merge.rs). The election is `ArtifactView::elect` in [`artifacts/artifact.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/artifact.rs). Naming and resolving upstreams is [`branch/set_upstream.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/set_upstream.rs) and [`branch/upstream.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/upstream.rs). The remote peers are [`dialog-remote-s3`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-s3), [`dialog-remote-ucan`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-ucan), [`dialog-remote-ucan-s3`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-ucan-s3) and [`dialog-remote-fs`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-remote-fs).
 
 </div>

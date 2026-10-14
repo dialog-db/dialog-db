@@ -17,6 +17,8 @@ serde_ipld_dagcbor = { workspace = true }
 # Hashing
 blake3 = { workspace = true }
 base58 = { workspace = true }
+dialog-number = { workspace = true }
+merkle-reference = { workspace = true }
 
 # Caching
 sieve-cache = { workspace = true }
@@ -104,6 +106,11 @@ required-features = ["helpers"]
 
 [[bench]]
 name = "query_disk"
+harness = false
+required-features = ["helpers"]
+
+[[bench]]
+name = "query_rules"
 harness = false
 required-features = ["helpers"]
 

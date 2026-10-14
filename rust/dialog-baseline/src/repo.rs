@@ -17,7 +17,7 @@ use std::str::FromStr;
 use anyhow::Result;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::ArtifactTree;
-use dialog_artifacts::{Artifact, ArtifactSelector, Attribute, Changes, Entity, Value};
+use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Relation, Value};
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSync, Holds};
@@ -36,7 +36,6 @@ use dialog_repository::{
 };
 use dialog_storage::NativeTempSpace;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
-use futures_util::stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use crate::metered::{Meter, Metered, Tally};
@@ -161,9 +160,15 @@ where
     /// Commit each row as its own branch commit (the small-commit shape).
     pub async fn insert_per_row_transactions(&self, rows: &[FactRow]) -> Result<()> {
         for row in rows {
-            let instructions = stream::iter(artifacts_for(row)?.map(Instruction::Assert));
+            let changes: Changes = artifacts_for(row)?
+                .into_iter()
+                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+                .collect();
             self.branch
-                .commit(instructions)
+                .transaction()
+                .integrate(changes)
+                .commit()
+                .publish()
                 .perform(&self.operator)
                 .await?;
         }
@@ -174,7 +179,10 @@ where
     pub async fn insert_one_transaction(&self, rows: &[FactRow]) -> Result<()> {
         let instructions = instructions_for(rows)?;
         self.branch
-            .commit(stream::iter(instructions))
+            .transaction()
+            .integrate(instructions.into_iter().collect())
+            .commit()
+            .publish()
             .perform(&self.operator)
             .await?;
         Ok(())
@@ -242,7 +250,7 @@ where
     /// Point lookup: the value of `(entity, stuff/name)`.
     pub async fn point_get(&self, entity: &str) -> Result<Option<Value>> {
         let selector = ArtifactSelector::new()
-            .the(Attribute::from_str(NAME_ATTRIBUTE)?)
+            .the(Relation::from_str(NAME_ATTRIBUTE)?)
             .of(Entity::from_str(entity)?);
         Ok(self
             .scan_pairs(selector)
@@ -253,7 +261,7 @@ where
 
     /// Attribute scan: every `stuff/name` fact.
     pub async fn attribute_scan(&self) -> Result<usize> {
-        let selector = ArtifactSelector::new().the(Attribute::from_str(NAME_ATTRIBUTE)?);
+        let selector = ArtifactSelector::new().the(Relation::from_str(NAME_ATTRIBUTE)?);
         Ok(self.scan_pairs(selector).await?.len())
     }
 
@@ -262,10 +270,10 @@ where
     /// `query_join` engine benchmark.
     pub async fn join(&self) -> Result<usize> {
         let names = self
-            .scan_pairs(ArtifactSelector::new().the(Attribute::from_str(NAME_ATTRIBUTE)?))
+            .scan_pairs(ArtifactSelector::new().the(Relation::from_str(NAME_ATTRIBUTE)?))
             .await?;
         let roles = self
-            .scan_pairs(ArtifactSelector::new().the(Attribute::from_str(ROLE_ATTRIBUTE)?))
+            .scan_pairs(ArtifactSelector::new().the(Relation::from_str(ROLE_ATTRIBUTE)?))
             .await?;
         let names_by_entity: std::collections::HashMap<String, Value> = names.into_iter().collect();
         Ok(roles
@@ -277,7 +285,7 @@ where
     /// The current title of a post (point read of a superseded pair).
     pub async fn se_title(&self, post: &str) -> Result<Option<Value>> {
         let selector = ArtifactSelector::new()
-            .the(Attribute::from_str("se.post/title")?)
+            .the(Relation::from_str("se.post/title")?)
             .of(Entity::from_str(post)?);
         Ok(self.collect(selector).await?.pop().map(|found| found.is))
     }
@@ -285,7 +293,7 @@ where
     /// All entities whose `se.post/kind` is `kind` (a VAE-indexed lookup).
     pub async fn se_by_kind(&self, kind: &str) -> Result<usize> {
         let selector = ArtifactSelector::new()
-            .the(Attribute::from_str("se.post/kind")?)
+            .the(Relation::from_str("se.post/kind")?)
             .is(Value::String(kind.to_owned()));
         Ok(self.collect(selector).await?.len())
     }
@@ -301,9 +309,11 @@ where
     /// buffer, leaving the head on the canonical tree its facts determine.
     pub async fn canonicalize(&self) -> Result<()> {
         self.branch
-            .commit(stream::iter(Vec::new()))
+            .transaction()
+            .commit()
             .allow_empty()
             .canonicalize()
+            .publish()
             .perform(&self.operator)
             .await?;
         Ok(())
@@ -410,14 +420,20 @@ where
             gathered += 1;
             if gathered.is_multiple_of(group) {
                 self.branch
-                    .commit(stream::iter(std::mem::take(&mut pending)))
+                    .transaction()
+                    .integrate(std::mem::take(&mut pending).into_iter().collect())
+                    .commit()
+                    .publish()
                     .perform(&self.operator)
                     .await?;
             }
         }
         if !pending.is_empty() {
             self.branch
-                .commit(stream::iter(pending))
+                .transaction()
+                .integrate(pending.into_iter().collect())
+                .commit()
+                .publish()
                 .perform(&self.operator)
                 .await?;
         }
@@ -440,7 +456,10 @@ where
         for commit in &log.transactions {
             let instructions = se_instructions(commit)?;
             self.branch
-                .commit(stream::iter(instructions))
+                .transaction()
+                .integrate(instructions.into_iter().collect())
+                .commit()
+                .publish()
                 .perform(&self.operator)
                 .await?;
         }

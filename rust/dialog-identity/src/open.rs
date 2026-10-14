@@ -280,10 +280,10 @@ mod tests {
             .unwrap();
     }
 
-    /// On the filesystem the key is a file in the store's directory for
-    /// the name, and the directory outlives the key: forgetting removes
-    /// the key, the name is free for the next, and a fresh handle on the
-    /// store reads the new key.
+    /// On the filesystem the key is a file in the directory's credential
+    /// space, which outlives the key: forgetting removes the key, the name
+    /// is free for the next, and a fresh handle on the store reads the
+    /// new key.
     #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
     async fn it_forgets_a_credential_on_the_filesystem() {
@@ -327,10 +327,10 @@ mod tests {
         assert_eq!(loaded.did(), second.did());
     }
 
-    /// In the browser the key is a row in the store's database for the
-    /// name, and the database outlives the key: forgetting removes the
-    /// row, the name is free for the next, and a fresh handle on the
-    /// store reads the new key.
+    /// In the browser the key is a row in the directory's credential
+    /// database, which outlives the key: forgetting removes the row, the
+    /// name is free for the next, and a fresh handle on the store reads
+    /// the new key.
     #[cfg(target_arch = "wasm32")]
     #[dialog_common::test]
     async fn it_forgets_a_credential_in_indexeddb() {

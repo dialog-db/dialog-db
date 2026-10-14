@@ -176,7 +176,7 @@ mod tests {
     use dialog_artifacts::Entity;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::query::Output;
-    use dialog_query::{Concept, Query, Term, the};
+    use dialog_query::{Concept, ConceptDescriptor, Query, Term, the};
 
     mod people {
 
@@ -525,11 +525,11 @@ mod tests {
         // query time, not persisted. Confirm by raw attribute lookup
         // through the branch's underlying claim stream.
         use dialog_query::AttributeQuery;
-        use dialog_query::attribute::The;
+        use dialog_query::attribute::Relation;
         let profile_facts: Vec<dialog_query::Claim> = branch
             .query()
             .select(AttributeQuery::from(
-                Term::<The>::from(the!("dialog.session/profile"))
+                Term::<Relation>::from(the!("dialog.session/profile"))
                     .of(Term::<Entity>::var("e"))
                     .is(Term::<Entity>::var("v")),
             ))
@@ -666,9 +666,9 @@ mod tests {
         // employee(this, name) :- person-name(this, name)
         let rule = {
             let json = serde_json::json!({
-                "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+                "deduce": { "with": { "name": { "the": "org/employee-name", "as": "text:" } } },
                 "when": [{
-                    "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                    "assert": { "with": { "name": { "the": "org/person-name", "as": "text:" } } },
                     "where": {
                         "this": { "?": { "name": "this" } },
                         "name": { "?": { "name": "name" } }
@@ -706,11 +706,14 @@ mod tests {
         Ok(())
     }
 
-    /// An uncommitted *reducing* rule staged on a transaction
-    /// resolves as a transient overlay rule: the pending view folds
-    /// pending facts without the rule or the data being committed.
+    /// An uncommitted rule staged on a transaction derives a relation
+    /// the transaction's query elects over: the pending view reads the
+    /// pending candidates under `max` without the rule or the data
+    /// being committed. The choice is the query's, read over the
+    /// relation the rule derives into, whatever pick the rule's own
+    /// head declared.
     #[dialog_common::test]
-    async fn it_resolves_reducing_rules_pending_in_the_transaction() -> anyhow::Result<()> {
+    async fn it_elects_over_a_derived_relation_pending_in_the_transaction() -> anyhow::Result<()> {
         use dialog_query::rule::DeductiveRuleDescriptor;
         use dialog_query::{ConceptQuery, Parameters};
 
@@ -718,32 +721,31 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        // dept-total(this, total: sum(?salary)) grouped by department.
+        // dept-salary(dept, salary) :- dept(employee, dept), salary(employee, salary)
         let rule = {
             let json = serde_json::json!({
                 "deduce": { "with": {
-                    "total": { "the": "org/dept-total", "as": "UnsignedInteger" }
+                    "salary": { "the": "org/dept-salary", "as": "natural:", "pick": "all:" }
                 }},
                 "when": [{
                     "assert": { "with": {
-                        "dept": { "the": "org/dept", "as": "Entity" },
-                        "salary": { "the": "org/salary", "as": "UnsignedInteger" }
+                        "dept": { "the": "org/dept", "as": "entity:" },
+                        "salary": { "the": "org/salary", "as": "natural:" }
                     }},
                     "where": {
                         "this": { "?": { "name": "employee" } },
                         "dept": { "?": { "name": "this" } },
                         "salary": { "?": { "name": "salary" } }
                     }
-                }],
-                "reduce": {
-                    "total": { "apply": "sum", "of": { "?": { "name": "salary" } } }
-                }
+                }]
             });
             let descriptor: DeductiveRuleDescriptor =
                 serde_json::from_value(json).expect("descriptor parses");
-            descriptor.compile().expect("reducing rule compiles")
+            descriptor.compile().expect("rule compiles")
         };
-        let dept_total = rule.conclusion().clone();
+        let dept_top: ConceptDescriptor = serde_json::from_value(serde_json::json!({ "with": {
+            "top": { "the": "org/dept-salary", "as": "natural:", "pick": "max:" }
+        }}))?;
 
         let dept: Entity = "id:dept-a".parse()?;
         let alice: Entity = "id:alice".parse()?;
@@ -758,11 +760,11 @@ mod tests {
 
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("dept"));
-        terms.insert("total".into(), Term::var("total"));
+        terms.insert("top".into(), Term::var("top"));
         let rows = tx
             .query()
             .select(ConceptQuery {
-                predicate: dept_total,
+                predicate: dept_top,
                 terms,
             })
             .perform(&operator)
@@ -771,11 +773,146 @@ mod tests {
         assert_eq!(
             rows.len(),
             1,
-            "the pending reducing rule folds pending facts"
+            "the query elects among the pending rule's candidates"
         );
         assert_eq!(*rows[0].entity(), dept);
-        assert_eq!(rows[0].get::<u64>("total")?, 7);
+        assert_eq!(rows[0].get::<u64>("top")?, 4);
 
+        Ok(())
+    }
+
+    /// A committed rule matching a text constant still derives from the
+    /// text it was written to match, whether or not the text is shaped
+    /// like a URI. The rule is read back from the branch, and its
+    /// constant with it.
+    #[dialog_common::test]
+    async fn it_derives_through_a_committed_rule_matching_uri_shaped_text() -> anyhow::Result<()> {
+        use dialog_artifacts::Value;
+        use dialog_query::rule::DeductiveRuleDescriptor;
+        use dialog_query::{ConceptQuery, Parameters, Proposition};
+
+        for (domain, url) in [("plain", "home"), ("uri", "https://example.com")] {
+            let (operator, profile) = test_session_with_peer().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            // home-title(this, title) :- url(this, <url>), title(this, title)
+            let rule = {
+                let mut descriptor: DeductiveRuleDescriptor =
+                    serde_json::from_value(serde_json::json!({
+                        "deduce": { "with": {
+                            "title": { "the": format!("{domain}/home-title"), "as": "text:" }
+                        } },
+                        "when": [{
+                            "assert": { "with": {
+                                "url": { "the": format!("{domain}/url"), "as": "text:" },
+                                "title": { "the": format!("{domain}/title"), "as": "text:" }
+                            } },
+                            "where": {
+                                "this": { "?": { "name": "this" } },
+                                "url": "placeholder",
+                                "title": { "?": { "name": "title" } }
+                            }
+                        }]
+                    }))?;
+                let Some(Proposition::Concept(query)) = descriptor.when.first_mut() else {
+                    panic!("a concept premise");
+                };
+                query
+                    .terms
+                    .insert("url".into(), Term::Constant(Value::String(url.into())));
+                descriptor.compile().expect("rule compiles")
+            };
+            let home = rule.conclusion().clone();
+
+            let page: Entity = "id:page".parse()?;
+            let relation = |name: &str| -> anyhow::Result<dialog_query::Relation> {
+                Ok(format!("{domain}/{name}").parse()?)
+            };
+            branch
+                .transaction()
+                .assert(&rule)
+                .assert(relation("url")?.of(page.clone()).is(url.to_string()))
+                .assert(relation("title")?.of(page.clone()).is("Home".to_string()))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("this"));
+            terms.insert("title".into(), Term::var("title"));
+            let rows = branch
+                .transaction()
+                .query()
+                .select(ConceptQuery {
+                    predicate: home,
+                    terms,
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(
+                rows.len(),
+                1,
+                "the page whose url is the text {url:?} derives"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// A selection whose constant was written bare, as JSON writes one,
+    /// reads it as the type the field declares: the text `home:` under a
+    /// `text:` field matches the text claim, where read by its spelling
+    /// it would be an entity and match nothing. The same conformance
+    /// that rule compilation applies to a premise's constants applies to
+    /// a query's. Text shaped like a URL is not covered: read as an
+    /// entity first, it comes back with the URL's normalization
+    /// (`https://example.com/`), which only a reader that takes a bare
+    /// string as text fixes.
+    #[dialog_common::test]
+    async fn it_selects_by_a_bare_constant_under_the_fields_type() -> anyhow::Result<()> {
+        use dialog_query::ConceptQuery;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let url: dialog_query::Relation = "page/url".parse()?;
+        for (page, text) in [("id:home", "home:"), ("id:open", "case:open")] {
+            let page: Entity = page.parse()?;
+            branch
+                .transaction()
+                .assert(url.clone().of(page).is(text.to_string()))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        branch.refresh(&operator).await?;
+
+        for (text, expected) in [("home:", "id:home"), ("case:open", "id:open")] {
+            let query: ConceptQuery = serde_json::from_value(serde_json::json!({
+                "assert": { "with": { "url": { "the": "page/url", "as": "text:" } } },
+                "where": { "this": { "?": { "name": "this" } }, "url": text }
+            }))?;
+            let rows = branch
+                .transaction()
+                .query()
+                .select(query)
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            let found: Vec<Entity> = rows
+                .iter()
+                .map(|row| row.get::<Entity>("this"))
+                .collect::<Result<_, _>>()?;
+            assert_eq!(
+                found,
+                vec![expected.parse::<Entity>()?],
+                "the page whose url is {text:?}"
+            );
+        }
         Ok(())
     }
 }

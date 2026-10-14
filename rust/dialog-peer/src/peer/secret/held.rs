@@ -1,20 +1,21 @@
 //! Principals whose key the peer holds, such as a space, shared with more
-//! holders, revoked from one, or handed from one holder to another.
+//! holders, revoked from one, handed from one holder to another, or
+//! carried from another branch of the peer's space.
 //!
 //! Every key is opened, used and dropped inside `perform`: the peer's own
 //! copy opens it, or the account's, through a custodian of the account the
 //! principal is held for. Nothing here hands a key out.
 
 use super::{
-    ACCOUNT, SpaceVaultExt as _, Vault, VaultKey, copy, held_context, opened, reissue, seal_key,
-    sealable, session_writes_nothing, unavailable, unopened,
+    ACCOUNT, SpaceVaultExt as _, Vault, VaultKey, copy, held_context, opened, reissue, retain,
+    seal_key, sealable, session_writes_nothing, unavailable, unopened,
 };
 use crate::peer::{Mode, Peer, PeerSpace};
 use dialog_credentials::secret::SealedSecret;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::credential::CredentialError;
 use dialog_repository::secrets::{self, HeldPrincipal};
-use dialog_repository::{Branch, BranchReference};
+use dialog_repository::{Branch, BranchReference, RepositoryMemoryExt as _};
 use dialog_ucan::UcanDelegation;
 use dialog_varsig::{Did, Principal as _};
 
@@ -64,6 +65,76 @@ impl HeldReference {
             holder,
             via: None,
         }
+    }
+
+    /// Carry the principal from the branch `branch` of the peer's space,
+    /// where another peer over the same space keeps its records, into the
+    /// branch this peer keeps its own in.
+    pub fn carry_from(self, branch: impl Into<String>) -> HeldCarry {
+        HeldCarry {
+            principal: self.principal,
+            from: branch.into(),
+        }
+    }
+}
+
+/// Carry a held principal from another branch of the peer's space.
+/// Created by [`HeldReference::carry_from`].
+///
+/// A space's branches each keep the records of the peer opened on them,
+/// so a principal held through one is unknown to the peer on another.
+/// Carrying records here what the other branch records of the principal:
+/// who its key is held for, every copy of its key sealed to a holder,
+/// and the delegations it issued. No key is opened: the records are
+/// sealed to their holders and are carried as they are, so the peer holds
+/// the principal for whoever it was held for there.
+///
+/// The other branch is left as it was. Forgetting it is a separate act,
+/// for whoever owns it to make once nothing on it is wanted.
+pub struct HeldCarry {
+    principal: Did,
+    from: String,
+}
+
+impl HeldCarry {
+    /// Carry it. What this peer's branch records already is not written
+    /// again, so carrying twice writes nothing the second time. A
+    /// principal the other branch does not hold is `NotFound`. The peer's
+    /// own act: a session is refused.
+    pub async fn perform<S: PeerSpace, M: Mode>(
+        self,
+        peer: &Peer<S, M>,
+    ) -> Result<(), CredentialError> {
+        session_writes_nothing::<M>(&peer.did())?;
+        let state = BranchReference::from(peer.state());
+        if state.name() == self.from {
+            return Err(CredentialError::Storage(format!(
+                "{} is the branch {} keeps its records in",
+                self.from,
+                peer.did()
+            )));
+        }
+        let to = opened(&state, peer).await?;
+        let from = opened(&state.subject().branch(self.from.as_str()), peer).await?;
+        if !secrets::carry(&from, &to, &self.principal, peer)
+            .await
+            .map_err(unavailable)?
+        {
+            return Err(CredentialError::NotFound(format!(
+                "no key held for {} on {}",
+                self.principal, self.from
+            )));
+        }
+        // Retaining is by content: a delegation this peer retains already
+        // is not written again.
+        for delegation in peer
+            .issued_by_on(&from, &self.principal)
+            .await
+            .map_err(unavailable)?
+        {
+            retain(peer, delegation.chain().clone()).await?;
+        }
+        Ok(())
     }
 }
 
@@ -417,7 +488,7 @@ mod tests {
     use dialog_identity::OpenCredential;
     use dialog_repository::{BranchReference, Repository, RepositoryExt as _, secrets, spaces};
     use dialog_storage::Flaky;
-    use dialog_storage::provider::storage::Storage;
+    use dialog_storage::provider::storage::{Storage, VolatileSpace};
     use dialog_storage::provider::{Space, Volatile};
     use dialog_ucan::{Parameters, Scope, Ucan};
     use dialog_ucan_core::command::Command as UcanCommand;
@@ -526,6 +597,160 @@ mod tests {
         assert!(
             matches!(handed, Err(CredentialError::Withheld(_))),
             "{handed:?}"
+        );
+        assert_eq!(head(&peer).await?, before, "nothing was written");
+        Ok(())
+    }
+
+    /// Two peers over one space and one key, each keeping its records in
+    /// a branch of its own: the one a device works in signed out, and the
+    /// one it returns to.
+    async fn on_two_branches()
+    -> anyhow::Result<(Peer<VolatileSpace>, SignerCredential, Peer<VolatileSpace>)> {
+        let storage = test_storage().await;
+        let credential = OpenCredential::open(unique_name("alice"))
+            .perform(&test_credential_store())
+            .await?;
+        let location = Location::profile(unique_name("held"));
+        let open = |branch: &'static str| {
+            let credential = credential.clone();
+            let location = location.clone();
+            let storage = storage.clone();
+            async move {
+                anyhow::Ok(
+                    Peer::new(credential.clone())
+                        .at(location)
+                        .space(Repository::from(credential.did()).branch(branch))
+                        .with(storage)
+                        .grant(test_grant().await)
+                        .await?,
+                )
+            }
+        };
+        let workspace = open("workspace").await?;
+        let custodian = onboard(&workspace).await?;
+        let account = open("main").await?;
+        onboard(&account).await?;
+        Ok((workspace, custodian, account))
+    }
+
+    /// A space held through one branch is unknown to the peer on another
+    /// until it is carried there. Carrying records who it is held for,
+    /// every copy of its key and the delegations it issued, as they are:
+    /// the peer then proves the holder's authority over the space and
+    /// opens its key through the copy it carried. The branch it came from
+    /// is left as it was, and carrying again writes nothing.
+    #[dialog_common::test]
+    async fn it_carries_a_space_from_another_branch() -> anyhow::Result<()> {
+        let (workspace, custodian, account) = on_two_branches().await?;
+        let space = created(&workspace).await?;
+        let root = holder().await?;
+        workspace
+            .held_principal(&space)
+            .hand_over(root.clone())
+            .via(&custodian)
+            .perform(&workspace)
+            .await?;
+        let source = secrets::held_principal(workspace.state(), &space, &workspace)
+            .await?
+            .expect("the workspace holds the space");
+        assert_eq!(source.to, root);
+        assert!(
+            secrets::held_principal(account.state(), &space, &account)
+                .await?
+                .is_none(),
+            "the other branch knows nothing of the space"
+        );
+        assert!(proves(&account, &root, &space).await.is_err());
+
+        let left = head(&workspace).await?;
+        account
+            .held_principal(&space)
+            .carry_from("workspace")
+            .perform(&account)
+            .await?;
+
+        let carried = secrets::held_principal(account.state(), &space, &account)
+            .await?
+            .expect("the space is held here now");
+        assert_eq!(carried, source, "held for whom it was, sealed as it was");
+        proves(&account, &root, &space).await?;
+        // The copy of the key the peer keeps for itself came too, so the
+        // peer on this branch opens the key with no custodian.
+        let other = holder().await?;
+        account
+            .held_principal(&space)
+            .share(other.clone())
+            .perform(&account)
+            .await?;
+        proves(&account, &other, &space).await?;
+        assert_eq!(head(&workspace).await?, left, "the source is untouched");
+
+        let before = head(&account).await?;
+        account
+            .held_principal(&space)
+            .carry_from("workspace")
+            .perform(&account)
+            .await?;
+        assert_eq!(head(&account).await?, before, "nothing was written");
+        Ok(())
+    }
+
+    /// A principal the other branch does not hold is not found, and a
+    /// peer's own branch is not somewhere to carry from. Neither writes.
+    #[dialog_common::test]
+    async fn it_carries_nothing_that_is_not_held_there() -> anyhow::Result<()> {
+        let (workspace, _, account) = on_two_branches().await?;
+        let space = created(&account).await?;
+        let stranger = holder().await?;
+        let before = head(&account).await?;
+        let left = head(&workspace).await?;
+
+        let missing = account
+            .held_principal(&stranger)
+            .carry_from("workspace")
+            .perform(&account)
+            .await;
+        assert!(
+            matches!(missing, Err(CredentialError::NotFound(_))),
+            "{missing:?}"
+        );
+        // Held here, not there.
+        let elsewhere = account
+            .held_principal(&space)
+            .carry_from("workspace")
+            .perform(&account)
+            .await;
+        assert!(
+            matches!(elsewhere, Err(CredentialError::NotFound(_))),
+            "{elsewhere:?}"
+        );
+        let own = account
+            .held_principal(&space)
+            .carry_from("main")
+            .perform(&account)
+            .await;
+        assert!(matches!(own, Err(CredentialError::Storage(_))), "{own:?}");
+        assert_eq!(head(&account).await?, before, "nothing was written");
+        assert_eq!(head(&workspace).await?, left, "nothing was written");
+        Ok(())
+    }
+
+    /// A session carries nothing, and writes nothing asking.
+    #[dialog_common::test]
+    async fn it_refuses_a_session_carrying() -> anyhow::Result<()> {
+        let (session, peer) = test_session_with_peer().await;
+        let space = created(&peer).await?;
+        let before = head(&peer).await?;
+
+        let carried = session
+            .held_principal(&space)
+            .carry_from("workspace")
+            .perform(&session)
+            .await;
+        assert!(
+            matches!(carried, Err(CredentialError::Withheld(_))),
+            "{carried:?}"
         );
         assert_eq!(head(&peer).await?, before, "nothing was written");
         Ok(())

@@ -152,7 +152,11 @@ impl Numeric {
         match (self, other) {
             (Numeric::UnsignedInt(a), Numeric::UnsignedInt(b)) => u(a, b).map(Numeric::UnsignedInt),
             (Numeric::SignedInt(a), Numeric::SignedInt(b)) => i(a, b).map(Numeric::SignedInt),
-            (Numeric::Float(a), Numeric::Float(b)) => f(a, b).map(Numeric::Float),
+            // NaN is not a value: a float operation producing one (`0.0 /
+            // 0.0`, `inf - inf`) has no result.
+            (Numeric::Float(a), Numeric::Float(b)) => {
+                f(a, b).filter(|float| !float.is_nan()).map(Numeric::Float)
+            }
             // Mixed variants: no value of a single type is the
             // result — strict, no promotion.
             _ => None,
@@ -333,6 +337,21 @@ mod tests {
         let a = Numeric::Float(2.0);
         let b = Numeric::Float(1.5);
         assert_eq!(a.add(b), Some(Numeric::Float(3.5)));
+    }
+
+    /// NaN is not a value, so a float operation whose IEEE result is
+    /// NaN has no result, where one producing an infinity has.
+    #[dialog_common::test]
+    fn it_yields_no_nan() {
+        assert_eq!(Numeric::Float(0.0).divide(Numeric::Float(0.0)), None);
+        assert_eq!(
+            Numeric::Float(f64::INFINITY).subtract(Numeric::Float(f64::INFINITY)),
+            None
+        );
+        assert_eq!(
+            Numeric::Float(1.0).divide(Numeric::Float(0.0)),
+            Some(Numeric::Float(f64::INFINITY))
+        );
     }
 
     /// Mixed variants are a non-match, never a promotion: dialog's

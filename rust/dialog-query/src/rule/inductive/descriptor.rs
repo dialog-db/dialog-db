@@ -58,10 +58,15 @@ impl InductiveRuleDescriptor {
     /// evaluation. Fails unless exactly one of `assert!` / `retract!`
     /// is present.
     pub fn compile(self) -> Result<InductiveRule, TypeError> {
-        let mut premises: Vec<Premise> = self.when.into_iter().map(Premise::Assert).collect();
+        let mut premises: Vec<Premise> = self
+            .when
+            .into_iter()
+            .map(Proposition::conformed)
+            .map(Premise::Assert)
+            .collect();
 
         for proposition in self.unless {
-            premises.push(Premise::Unless(Negation::not(proposition)));
+            premises.push(Premise::Unless(Negation::not(proposition.conformed())));
         }
 
         match (self.assert, self.retract) {
@@ -87,14 +92,14 @@ mod tests {
             "description": "Increment a counter on increment command",
             "assert!": {
                 "with": {
-                    "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                    "count": { "the": "counter/count", "as": "natural:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                            "count": { "the": "counter/count", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -134,14 +139,14 @@ mod tests {
         let json = json!({
             "assert!": {
                 "with": {
-                    "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                    "count": { "the": "counter/count", "as": "natural:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                            "count": { "the": "counter/count", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -171,14 +176,14 @@ mod tests {
             "description": "Promote pending todos that aren't blocked",
             "assert!": {
                 "with": {
-                    "status": { "the": "todo/status", "as": "Text" }
+                    "status": { "the": "todo/status", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "status": { "the": "todo/status", "as": "Text" }
+                            "status": { "the": "todo/status", "as": "text:" }
                         }
                     },
                     "where": {
@@ -191,7 +196,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "blocked": { "the": "todo/blocked", "as": "Boolean" }
+                            "blocked": { "the": "todo/blocked", "as": "boolean:" }
                         }
                     },
                     "where": {
@@ -225,14 +230,14 @@ mod tests {
             "description": "Consume an acked message",
             "retract!": {
                 "with": {
-                    "body": { "the": "mailbox.message/body", "as": "Text" }
+                    "body": { "the": "mailbox.message/body", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "message": { "the": "cmd.ack/message", "as": "Entity" }
+                            "message": { "the": "cmd.ack/message", "as": "entity:" }
                         }
                     },
                     "where": {
@@ -242,7 +247,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "body": { "the": "mailbox.message/body", "as": "Text" }
+                            "body": { "the": "mailbox.message/body", "as": "text:" }
                         }
                     },
                     "where": {
@@ -262,8 +267,7 @@ mod tests {
 
         let reparsed: InductiveRule = serde_json::from_value(serialized).unwrap();
         assert_eq!(reparsed.polarity(), Polarity::Retract);
-        // Canonical dag-cbor equality: same content address ⇒ same
-        // rule. (Full struct equality is too strict — the analysis'
+        // Equal stored bodies: same canonical spelling ⇒ same rule. (Full struct equality is too strict — the analysis'
         // narrowing diagnostics capture HashMap iteration order.)
         assert_eq!(reparsed.encode(), rule.encode());
         assert_eq!(reparsed.this(), rule.this());
@@ -272,10 +276,10 @@ mod tests {
     #[dialog_common::test]
     fn it_rejects_a_rule_with_both_heads_or_neither() {
         let both = json!({
-            "assert!": { "with": { "n": { "the": "test/n", "as": "Text" } } },
-            "retract!": { "with": { "n": { "the": "test/n", "as": "Text" } } },
+            "assert!": { "with": { "n": { "the": "test/n", "as": "text:" } } },
+            "retract!": { "with": { "n": { "the": "test/n", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "n": { "the": "test/n", "as": "Text" } } },
+                "assert": { "with": { "n": { "the": "test/n", "as": "text:" } } },
                 "where": { "this": { "?": { "name": "this" } }, "n": { "?": { "name": "n" } } }
             }]
         });
@@ -284,7 +288,7 @@ mod tests {
 
         let neither = json!({
             "when": [{
-                "assert": { "with": { "n": { "the": "test/n", "as": "Text" } } },
+                "assert": { "with": { "n": { "the": "test/n", "as": "text:" } } },
                 "where": { "this": { "?": { "name": "this" } }, "n": { "?": { "name": "n" } } }
             }]
         });
@@ -299,14 +303,14 @@ mod tests {
         let json = json!({
             "assert!": {
                 "with": {
-                    "status": { "the": "todo/status", "as": "Text" }
+                    "status": { "the": "todo/status", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "status": { "the": "todo/status", "as": "Text" }
+                            "status": { "the": "todo/status", "as": "text:" }
                         }
                     },
                     "where": {
@@ -319,7 +323,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "blocked": { "the": "todo/blocked", "as": "Boolean" }
+                            "blocked": { "the": "todo/blocked", "as": "boolean:" }
                         }
                     },
                     "where": {
@@ -342,14 +346,14 @@ mod tests {
         let json = json!({
             "assert!": {
                 "with": {
-                    "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                    "count": { "the": "counter/count", "as": "natural:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                            "count": { "the": "counter/count", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -383,15 +387,15 @@ mod tests {
         let json = json!({
             "assert!": {
                 "with": {
-                    "count": { "the": "counter/count", "as": "UnsignedInteger" },
-                    "name": { "the": "counter/name", "as": "Text" }
+                    "count": { "the": "counter/count", "as": "natural:" },
+                    "name": { "the": "counter/name", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                            "count": { "the": "counter/count", "as": "natural:" }
                         }
                     },
                     "where": {

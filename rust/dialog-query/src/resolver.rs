@@ -625,6 +625,167 @@ impl ResolverQuery {
         params
     }
 
+    /// This resolver over `terms` instead of its own: a slot `terms`
+    /// does not name keeps its current term.
+    pub fn with_parameters(&self, terms: &Parameters) -> Self {
+        let mut renamed = self.clone();
+        match &mut renamed {
+            Self::TreeNode(query) => {
+                if let Some(term) = terms.get("of") {
+                    query.of = term.clone();
+                }
+                if let Some(term) = terms.get("kind") {
+                    query.kind = term.clone();
+                }
+                if let Some(term) = terms.get("size") {
+                    query.size = term.clone();
+                }
+                if let Some(term) = terms.get("count") {
+                    query.count = term.clone();
+                }
+                if let Some(term) = terms.get("scale") {
+                    query.scale = term.clone();
+                }
+                if let Some(term) = terms.get("novelty") {
+                    query.novelty = term.clone();
+                }
+            }
+            Self::TreeSpan(query) => {
+                if let Some(term) = terms.get("of") {
+                    query.of = term.clone();
+                }
+                if let Some(term) = terms.get("at") {
+                    query.at = term.clone();
+                }
+                if let Some(term) = terms.get("node") {
+                    query.node = term.clone();
+                }
+                if let Some(term) = terms.get("separator") {
+                    query.separator = term.clone();
+                }
+                if let Some(term) = terms.get("until") {
+                    query.until = term.clone();
+                }
+                if let Some(term) = terms.get("scale") {
+                    query.scale = term.clone();
+                }
+                if let Some(term) = terms.get("rank") {
+                    query.rank = term.clone();
+                }
+                if let Some(term) = terms.get("novelty") {
+                    query.novelty = term.clone();
+                }
+            }
+            Self::TreeKey(query) => {
+                if let Some(term) = terms.get("of") {
+                    query.of = term.clone();
+                }
+                if let Some(term) = terms.get("at") {
+                    query.at = term.clone();
+                }
+                if let Some(term) = terms.get("key") {
+                    query.key = term.clone();
+                }
+                if let Some(term) = terms.get("rank") {
+                    query.rank = term.clone();
+                }
+            }
+            Self::TreeEntry(query) => {
+                if let Some(term) = terms.get("of") {
+                    query.of = term.clone();
+                }
+                if let Some(term) = terms.get("at") {
+                    query.at = term.clone();
+                }
+                if let Some(term) = terms.get("key") {
+                    query.key = term.clone();
+                }
+                if let Some(term) = terms.get("state") {
+                    query.state = term.clone();
+                }
+                if let Some(term) = terms.get("retraction") {
+                    query.retraction = term.clone();
+                }
+                if let Some(term) = terms.get("origin") {
+                    query.origin = term.clone();
+                }
+                if let Some(term) = terms.get("edition") {
+                    query.edition = term.clone();
+                }
+                if let Some(term) = terms.get("cause") {
+                    query.cause = term.clone();
+                }
+                if let Some(term) = terms.get("collapsed") {
+                    query.collapsed = term.clone();
+                }
+                if let Some(term) = terms.get("supersedes") {
+                    query.supersedes = term.clone();
+                }
+                if let Some(term) = terms.get("spill") {
+                    query.spill = term.clone();
+                }
+            }
+            Self::TreeValue(query) => {
+                if let Some(term) = terms.get("of") {
+                    query.of = term.clone();
+                }
+                if let Some(term) = terms.get("size") {
+                    query.size = term.clone();
+                }
+                if let Some(term) = terms.get("bytes") {
+                    query.bytes = term.clone();
+                }
+            }
+            Self::TreeBlob(query) => {
+                if let Some(term) = terms.get("of") {
+                    query.of = term.clone();
+                }
+                if let Some(term) = terms.get("at") {
+                    query.at = term.clone();
+                }
+                if let Some(term) = terms.get("blob") {
+                    query.blob = term.clone();
+                }
+                if let Some(term) = terms.get("version") {
+                    query.version = term.clone();
+                }
+                if let Some(term) = terms.get("size") {
+                    query.size = term.clone();
+                }
+            }
+            Self::TreeManifest(query) => {
+                if let Some(term) = terms.get("of") {
+                    query.of = term.clone();
+                }
+                if let Some(term) = terms.get("version") {
+                    query.version = term.clone();
+                }
+                if let Some(term) = terms.get("fanout_n") {
+                    query.fanout_n = term.clone();
+                }
+                if let Some(term) = terms.get("max_separator") {
+                    query.max_separator = term.clone();
+                }
+                if let Some(term) = terms.get("inline_n") {
+                    query.inline_n = term.clone();
+                }
+                if let Some(term) = terms.get("spill_prefix") {
+                    query.spill_prefix = term.clone();
+                }
+                if let Some(term) = terms.get("max_segment") {
+                    query.max_segment = term.clone();
+                }
+                if let Some(term) = terms.get("frame_ceiling_factor") {
+                    query.frame_ceiling_factor = term.clone();
+                }
+                if let Some(term) = terms.get("anchor_selector") {
+                    query.anchor_selector = term.clone();
+                }
+            }
+        }
+        renamed
+    }
+
     /// Resolve the node-reference input against the row: a base58
     /// string in a constant or a bound variable. `None` filters the
     /// row (unresolvable or malformed references contribute nothing,

@@ -377,6 +377,43 @@ pub async fn hold_principal<Env: RegistryEnv>(
     Ok(apply(state, changes, env).await?)
 }
 
+/// Record in `to` what `from` records of `principal`'s key: who it is
+/// held for, and every copy of it sealed to another holder. Answers
+/// whether `from` holds the principal at all.
+///
+/// Everything recorded is ciphertext sealed to its holder, so nothing is
+/// opened to carry it. What `to` records already is not written again,
+/// and `from` is left as it was: what becomes of it is its owner's call.
+pub async fn carry<Env: RegistryEnv>(
+    from: &Branch,
+    to: &Branch,
+    principal: &Did,
+    env: &Env,
+) -> Result<bool, SecretError> {
+    let Some(held) = held_principal(from, principal, env).await? else {
+        return Ok(false);
+    };
+    if held_principal(to, principal, env).await?.as_ref() != Some(&held) {
+        hold_principal(
+            to,
+            principal,
+            &held.kind,
+            sealed_message(&held.to, held.sealed.clone()),
+            env,
+        )
+        .await?;
+    }
+    for holder in holders_of(from, principal, env).await? {
+        let kept = keys_of(to, principal, &holder, env).await?;
+        for sealed in keys_of(from, principal, &holder, env).await? {
+            if !kept.contains(&sealed) {
+                grant(to, principal, &holder, sealed, env).await?;
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// Forget that `principal`'s key is held sealed: the record naming it,
 /// not the message it pointed at, which stays ciphertext nobody reads.
 pub async fn forget_principal<Env: RegistryEnv>(

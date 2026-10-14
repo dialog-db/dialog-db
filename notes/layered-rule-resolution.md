@@ -24,10 +24,16 @@ one implementation and cannot diverge.
 
 ## Rule storage (`dialog.rule/*`)
 
-A deductive rule is stored as two facts (see `rules.rs`):
+A deductive rule is stored as these facts (see `rules.rs`):
 
-- `dialog.rule/conclusion` `of` rule-entity `is` concept-entity — the index;
-  "which rules conclude concept X".
+- `dialog.rule/derives` `of` rule-entity `is` `on:<attribute>` — one per
+  head attribute; the index resolution probes: "which rules derive
+  attribute a".
+- `dialog.rule/conclusion` `of` rule-entity `is` concept-entity — "which
+  rules conclude concept X"; consulted for rules installed before the
+  `derives` index existed, which resolve by the concept they conclude.
+- `dialog.rule/reads` `of` rule-entity `is` `on:<attribute>` — one per
+  attribute the body reads, for commit-time dispatch.
 - `dialog.rule/source` `of` rule-entity `is` the rule body as canonical
   dag-cbor `DeductiveRuleDescriptor` (a `Value::Bytes`), hydrated with
   `DeductiveRule::decode`.
@@ -45,16 +51,22 @@ These attribute names are a dialog-repository convention, like
 
 ## Resolution
 
-`QueryEnv`'s `Provider<SelectRules>::execute(concept_descriptor)`:
+`QueryEnv`'s `Provider<SelectRules>::execute(concept_descriptor)`
+resolves per the shape of the concept (see
+[`attribute-heads.md`](./attribute-heads.md)):
 
-1. Build the **implicit** per-descriptor rule once (`ConceptRules::new`).
-   It reads the concept's attributes directly; it is not stored and has
-   no content identity.
-2. For each branch, gather its **durable** rules: look up
-   `dialog.rule/conclusion = concept` against the tree, hydrate each body.
-3. Gather **transient** rules from the overlay `Changes`.
-4. Install the durable + transient rules onto the implicit one and
-   return the `ConceptRules`.
+- An **attribute concept** (one attribute) is the attribute's relation:
+  the implicit scan plus the head of every rule deriving the attribute.
+  Rules are found by `dialog.rule/derives = on:<attribute>` on every
+  layer (durable, head-cached; session overlay, query overlay and staged
+  layers, fresh), by the built-ins, and by `dialog.rule/conclusion` for
+  rules without a `derives` index. Each rule's head for the attribute is
+  cached by `(rule entity, attribute concept)`.
+- A **built-in** concept installs its rules as written.
+- Any other concept gets its **selecting** rule alone: each attribute some
+  rule derives is read through its attribute concept, the rest from
+  stored facts. A rule concluding exactly this concept without a
+  `derives` index installs beside it as written.
 
 The single consumer is `ConceptQuery::evaluate`
 (`dialog-query/.../concept/query.rs`): it calls `SelectRules`, then
@@ -68,10 +80,14 @@ Two caches with different correctness disciplines.
 **Discovery + hydration** — per branch, on `Branch` (`RuleCache`,
 alongside `node_cache`; configured once per opened handle):
 
-- *Discovery* ("which rule entities conclude concept X, committed") is
-  keyed by concept and tagged with the branch head (`Revision`). A head
-  advance — commit or pull — re-scans that concept. Read from the tree
+- *Discovery* ("which rule entities derive attribute a" and, for the
+  legacy index, "which conclude concept X", committed) is keyed by
+  attribute or concept and tagged with the branch head (`Revision`). A
+  head advance — commit or pull — re-scans that key. Read from the tree
   only.
+- *Heads* (a rule re-spelled onto an attribute concept) are keyed by
+  `(rule entity, attribute concept entity)`, both content-addressed, so
+  an entry is never stale.
 - *Hydration* (compiled bodies) is keyed by the content-addressed rule
   entity, so an entry is never stale and is reused across concepts and
   head changes.
