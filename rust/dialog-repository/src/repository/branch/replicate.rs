@@ -29,6 +29,10 @@ pub enum Replicated {
     Pulled(Revision),
     /// The branch's head reached its upstreams.
     Pushed(Revision),
+    /// The watch of this upstream ended: it is no longer followed as it
+    /// moves, and is pulled from only on the host's ticks, which begin the
+    /// watch again. Without ticks it is not followed again.
+    Unwatched(Target),
 }
 
 /// Command that keeps a branch in step with its upstreams for as long as
@@ -58,6 +62,12 @@ impl Branch {
     ///
     /// Chain [`Replicate::pull`] or [`Replicate::push`] to do only one;
     /// a bare replicate does both.
+    ///
+    /// Without [`Replicate::every`] nothing is checked on a schedule: a
+    /// watch that ends (its socket dropped, say) is never begun again, and
+    /// its upstream is not pulled from until the replication is started
+    /// anew. The stream answers [`Replicated::Unwatched`] when that
+    /// happens, so a host can tell.
     pub fn replicate(&self) -> Replicate<'_> {
         Replicate {
             branch: self,
@@ -203,8 +213,9 @@ where
                     }
                     Event::Ended(target) => {
                         if !unwatched.contains(&target) {
-                            unwatched.push(target);
+                            unwatched.push(target.clone());
                         }
+                        yield Ok(Replicated::Unwatched(target));
                     }
                     Event::Tick => {
                         if pull {
