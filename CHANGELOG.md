@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A certificate a remote refuses as revoked is set aside, and the request is proved again through another grant
 
-[#597](https://github.com/dialog-db/dialog-db/pull/597)
+[#598](https://github.com/dialog-db/dialog-db/pull/598)
 
 A peer that retains two grants for the same claim, one revoked and one
 fresh, presented whichever the proof walk admitted first, and the walk
