@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### `dialog-network`, `dialog-repository` and `dialog-peer` are built as `rlib` only
 
-[#PR](https://github.com/dialog-db/dialog-db/pull/PR)
+[#601](https://github.com/dialog-db/dialog-db/pull/601)
 
 The three crates declared `crate-type = ["cdylib", "rlib"]` since they were created. Nothing in the workspace, its CI or tonk consumes the dynamic library the `cdylib` target produced: the wasm test jobs build `wasm-bindgen-test` binaries, and tonk's worker crates are cdylibs of their own that link these as `rlib`s. They are now `rlib` only.
 
