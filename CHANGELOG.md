@@ -14,6 +14,33 @@ says how to cut a release.
 
 ## Unreleased
 
+### The node cache is bounded by bytes and shared between scopes
+
+[#573](https://github.com/dialog-db/dialog-db/pull/573)
+
+`NodeCache` is its own type. It holds up to a budget of stored node
+bytes (`NODE_CACHE_BUDGET`, 128 MiB, unless built with another), evicts
+by SIEVE, allocates nothing until a node is kept, and serves a node
+larger than it can keep without keeping it. A handle has a `Scope` and
+is answered only with nodes its scope holds: `scoped` hands out a handle
+on the same cache for another scope, and `release` forgets what a scope
+held. A node two scopes hold is kept once.
+
+What this changes for you:
+
+- `NodeCache` is no longer an alias of `Cache`. Build it with
+  `NodeCache::new()` or `NodeCache::with_budget(bytes)`.
+- A cache that held 2,048 nodes of any size now holds 128 MiB of node
+  bytes, whatever their count. What a node derives from its bytes
+  (decoded keys, key hashes, its summary) is not charged, so resident
+  memory can run to about twice the budget.
+- `Cache<K, V>` is unchanged and still serves the count-bounded caches of
+  small values.
+
+Why: nodes differ in size by orders of magnitude, so a count bounded
+nothing; and a cache that repositories share must never answer one with
+a block only another holds.
+
 ### Measurement counters are compiled in by an `audit` feature
 
 [#570](https://github.com/dialog-db/dialog-db/pull/570)

@@ -128,7 +128,8 @@ mod tests {
     use futures_util::future::join_all;
 
     use crate::{
-        Accessor, Buffer, Cache, Delta, PersistentNode, PersistentTree, helpers::ObservingBlocks,
+        Accessor, Buffer, Delta, NodeCache, PersistentNode, PersistentTree,
+        helpers::ObservingBlocks,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -155,7 +156,7 @@ mod tests {
         }
         let hash = tree.root().clone();
 
-        let accessor = Accessor::new(Cache::new(), &storage);
+        let accessor = Accessor::new(NodeCache::new(), &storage);
         backend.reset();
 
         let reads = join_all((0..8).map(|_| accessor.get_node(&hash))).await;
@@ -185,7 +186,7 @@ mod tests {
         let hash = garbage.blake3_hash().clone();
         storage.store(garbage);
 
-        let accessor = Accessor::<[u8; 4], Vec<u8>, _>::new(Cache::new(), &storage);
+        let accessor = Accessor::<[u8; 4], Vec<u8>, _>::new(NodeCache::new(), &storage);
         backend.reset();
 
         assert!(accessor.get_node(&hash).await.is_err());

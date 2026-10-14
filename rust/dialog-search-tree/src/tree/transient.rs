@@ -14,7 +14,7 @@
 //! no shape decisions, because the shape was already established at edit time.
 
 use crate::{
-    Accessor, BOTTOM_RANK, Buffer, Cache, Change, Delta, DialogSearchTreeError, Differential,
+    Accessor, BOTTOM_RANK, Buffer, Change, Delta, DialogSearchTreeError, Differential,
     Distribution, Entry, Geometric, Hashed, IndexPieceOrigin, Key, Link, LoadBlock, Manifest, Node,
     NodeCache, Novelty, NoveltyEntry, NoveltyOp, PersistentIndex, PersistentNode,
     PersistentNodeBody, PersistentTree, PieceOrigin, Rank, Separator, TransientIndex,
@@ -1036,7 +1036,7 @@ where
                 Piece::Range { source, .. } => Some(source.node_cache.clone()),
                 Piece::Entries(_) => None,
             })
-            .unwrap_or_else(Cache::new);
+            .unwrap_or_else(NodeCache::new);
         let accessor = Accessor::new(cache.clone(), storage);
 
         // The stitched tree keeps its sources' format, read from the first
@@ -4819,7 +4819,7 @@ mod tests {
     use dialog_common::Blake3Hash;
 
     use crate::{
-        Accessor, Buffer, Cache, Delta, Entry, PersistentNode, PersistentTree, Piece, Rank,
+        Accessor, Buffer, Delta, Entry, NodeCache, PersistentNode, PersistentTree, Piece, Rank,
         TransientTree, distribution,
     };
 
@@ -4901,7 +4901,7 @@ mod tests {
     /// is stable across edits and readable from any node.
     #[dialog_common::test]
     async fn it_stamps_the_manifest_into_the_root_across_edits() -> Result<()> {
-        use crate::{Accessor, Cache, Manifest, PersistentNode};
+        use crate::{Accessor, Manifest, NodeCache, PersistentNode};
 
         let mut storage = MemoryBlocks::new();
         let built = sequential(&(0..200).collect::<Vec<u32>>(), &mut storage).await?;
@@ -4909,7 +4909,7 @@ mod tests {
         // A fresh cache reads the persisted nodes straight from storage,
         // through a handle of its own so the edit below can keep writing.
         let reader = storage.clone();
-        let accessor = Accessor::new(Cache::new(), &reader);
+        let accessor = Accessor::new(NodeCache::new(), &reader);
         let root: PersistentNode<[u8; 4], Vec<u8>> = accessor.get_node(built.root()).await?;
         assert_eq!(root.manifest()?, Manifest::default());
 
@@ -5758,7 +5758,7 @@ mod tests {
         }
 
         let mut delta = Delta::zero();
-        TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), unknown)
+        TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(NodeCache::new(), unknown)
             .persist(&mut delta)?;
         Ok(())
     }
@@ -5784,7 +5784,7 @@ mod tests {
             (Manifest::default(), 300..600u32),
         ] {
             let mut edit =
-                TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), manifest);
+                TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(NodeCache::new(), manifest);
             for key in keys {
                 edit = edit
                     .insert(key.to_be_bytes(), key.to_be_bytes().to_vec(), &storage)
@@ -6413,7 +6413,7 @@ mod tests {
         let mut delta = Delta::zero();
         for key in keys {
             let transient = match &tree {
-                None => TransientTree::empty_with_manifest(Cache::new(), manifest.clone()),
+                None => TransientTree::empty_with_manifest(NodeCache::new(), manifest.clone()),
                 Some(tree) => tree.edit(),
             };
             let next = transient
@@ -6581,7 +6581,7 @@ mod tests {
     /// the stored nodes. The shape probe the veto tests read.
     async fn leaf_boundaries(root: &Blake3Hash, storage: &MemoryBlocks) -> Result<Vec<Vec<u8>>> {
         let mut boundaries: Vec<Vec<u8>> = Vec::new();
-        let accessor = Accessor::new(Cache::new(), storage);
+        let accessor = Accessor::new(NodeCache::new(), storage);
         let mut frontier = vec![root.clone()];
         while !frontier.is_empty() {
             let mut next = Vec::new();
@@ -6742,7 +6742,7 @@ mod tests {
         storage: &MemoryBlocks,
     ) -> Result<Vec<(usize, Vec<u8>)>> {
         let mut pieces: Vec<(usize, Vec<u8>)> = Vec::new();
-        let accessor = Accessor::new(Cache::new(), storage);
+        let accessor = Accessor::new(NodeCache::new(), storage);
         let mut frontier: Vec<(Blake3Hash, usize)> = vec![(root.clone(), 0)];
         while !frontier.is_empty() {
             let mut next = Vec::new();
@@ -7271,7 +7271,7 @@ mod tests {
         let mut delta = Delta::zero();
         for key in &sorted {
             let transient = match &fresh {
-                None => TransientTree::empty_with_manifest(Cache::new(), manifest.clone()),
+                None => TransientTree::empty_with_manifest(NodeCache::new(), manifest.clone()),
                 Some(tree) => tree.edit(),
             };
             let value = if key == &target {
@@ -7306,7 +7306,7 @@ mod tests {
         storage: &MemoryBlocks,
     ) -> Result<Vec<(usize, usize, usize)>> {
         let mut stats = Vec::new();
-        let accessor = Accessor::new(Cache::new(), storage);
+        let accessor = Accessor::new(NodeCache::new(), storage);
         let mut frontier = vec![root.clone()];
         let mut depth = 0usize;
         while !frontier.is_empty() {
@@ -7337,7 +7337,7 @@ mod tests {
         storage: &MemoryBlocks,
     ) -> Result<Vec<HashSet<Blake3Hash>>> {
         let mut levels: Vec<HashSet<Blake3Hash>> = Vec::new();
-        let accessor = Accessor::new(Cache::new(), storage);
+        let accessor = Accessor::new(NodeCache::new(), storage);
         let mut frontier = vec![root.clone()];
         while !frontier.is_empty() {
             let mut next = Vec::new();
@@ -8240,10 +8240,11 @@ mod tests {
 
         let mut delta = Delta::zero();
         let first = key_at(0);
-        let mut tree: VarTree = TransientTree::empty_with_manifest(Cache::new(), manifest.clone())
-            .insert(first.clone(), first.0.clone(), &storage)
-            .await?
-            .persist(&mut delta)?;
+        let mut tree: VarTree =
+            TransientTree::empty_with_manifest(NodeCache::new(), manifest.clone())
+                .insert(first.clone(), first.0.clone(), &storage)
+                .await?
+                .persist(&mut delta)?;
         for (_, buffer) in delta.flush() {
             storage.store(buffer);
         }
