@@ -21,19 +21,20 @@
 //! These names are a dialog-repository convention (like
 //! `dialog.session/*`).
 //!
-//! # Two layers, two caches
+//! # Two rule sources, two caches
 //!
-//! - A **durable** layer reads a branch's committed tree. Its rule
+//! - A **durable** rule source reads a branch's committed tree. Its rule
 //!   discovery (the `derives` lookup) is cacheable by branch head —
 //!   the committed rule set for a concept only changes when the head
 //!   moves. Hydrated bodies are cached by content-addressed rule entity.
-//! - A **transient** layer reads an overlay: a line's session overlay,
-//!   the per-query overlay, or a transaction's staged writes. Overlay
-//!   rules (`tx.assert(rule)` / `.with(rule)`, uncommitted — the head
-//!   has NOT moved) are never head-cached: a rule set assembled over
-//!   them is keyed by the rule facts each layer holds (see [`RuleKey`]),
-//!   which is what makes the "overlay rule masked by a head-keyed cache"
-//!   bug structurally impossible.
+//! - A **transient** rule source reads an overlay: a line's session
+//!   overlay, a standalone ephemeral layer, the per-query overlay, or a
+//!   transaction's staged writes. Overlay rules (`tx.assert(rule)` /
+//!   `.with(rule)`, uncommitted — the head has NOT moved) are never
+//!   head-cached: a rule set assembled over them is keyed by the rule
+//!   facts each overlay holds (see [`RuleKey`]), which is what makes the
+//!   "overlay rule masked by a head-keyed cache" bug structurally
+//!   impossible.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
@@ -62,6 +63,7 @@ use dialog_query::{
 use dialog_search_tree::{Cache, Manifest};
 use parking_lot::RwLock;
 
+use crate::placement::CommittedPlacements;
 use crate::{Revision, schema};
 use dialog_common::Blake3Hash;
 
@@ -479,8 +481,9 @@ type Root = Option<[u8; 32]>;
 pub(crate) struct RuleKey {
     /// Each line's rules root.
     pub(crate) lines: Vec<Root>,
-    /// Each overlay (the lines' session overlays, then the query's own)
-    /// that holds rule facts, by its position and their hash.
+    /// Each overlay (the lines' session overlays, then each standalone
+    /// ephemeral layer, then the query's own) that holds rule facts, by
+    /// its position and their hash.
     pub(crate) overlays: Vec<(usize, Blake3Hash)>,
     /// Each staged layer that holds rule facts, likewise.
     pub(crate) staged: Vec<(usize, Blake3Hash)>,
@@ -504,6 +507,9 @@ struct RuleCacheInner {
     /// Whether a concept carries the committed `dialog.concept/transient`
     /// marker, as of a branch head.
     transient: HashMap<Entity, (Revision, bool)>,
+    /// The committed attribute placements (`dialog.attribute/scope`),
+    /// as of a branch head. One range scan on a miss.
+    placements: Option<(Revision, CommittedPlacements)>,
     /// A concept's assembled rule set -- built-in, committed, overlay,
     /// and its program analysis attached -- as of the [`RuleKey`] it
     /// was resolved from. Assembling it is most of what planning a warm
@@ -896,10 +902,23 @@ impl RuleCache {
             .transient
             .insert(concept, (head, verdict));
     }
+
+    /// The committed attribute placements if scanned at `head`.
+    pub(crate) fn placements(&self, head: &Revision) -> Option<CommittedPlacements> {
+        match &self.inner.read().placements {
+            Some((scanned_at, placements)) if scanned_at == head => Some(placements.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record the committed attribute placements at `head`.
+    pub(crate) fn record_placements(&self, head: Revision, placements: CommittedPlacements) {
+        self.inner.write().placements = Some((head, placements));
+    }
 }
 
 /// Assemble a [`ConceptRules`] for `concept` from the implicit rule plus
-/// the installed rules found across the layers' rule sets.
+/// the installed rules found across the rule sources' rule sets.
 ///
 /// `durable` are the rules read (and cached) from each branch's
 /// committed tree; `transient` are read fresh from the overlay. Both are
