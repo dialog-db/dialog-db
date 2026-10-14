@@ -14,6 +14,75 @@ says how to cut a release.
 
 ## Unreleased
 
+### A peer is reached where its DID document says
+
+[#564](https://github.com/dialog-db/dialog-db/pull/564)
+
+A peer is named by its DID, and where it is reached is what its DID document says. `contact(did).discover()` reads the services the document names and records the access service among them as the peer's address. `Discover` asks for a DID's services beside `Resolve`: a `did:key` names none, and a `did:web` or `did:plc` document is fetched as resolving it is. A document naming a DID other than the one asked for is refused, so a host serving a DID's URL cannot point it at services the DID never named.
+
+What this changes for you:
+
+- `PeerBuilder::discovery` sets how a peer discovers; by default it reads `did:key` locally and `did:web` and `did:plc` over the network, and a peer's sessions discover as it does.
+- `UcanAddress::from_services` reads the endpoint from a `UcanAccessService` entry (`ACCESS_SERVICE`) and the socket from a `UcanAccessSocket` entry (`ACCESS_SOCKET`). A service that wants to be discovered adds both to its DID document.
+- `dialog-peer` and `dialog-repository` now depend on `dialog-did-web`.
+
+Why: a peer's address was configured by hand beside its DID, so the two could disagree, and a service could not move or add a socket without every client being told. The DID document already answers who a peer is; it now answers where too.
+
+### Invocations say when they were issued, and a service refuses one that is stale or presented again
+
+[#564](https://github.com/dialog-db/dialog-db/pull/564)
+
+The client stamps every invocation with `iat`. `Access::admit` refuses one issued longer ago than its freshness window (`FRESHNESS`, 30 seconds by default) and one presented before, remembering the invocations it accepted while they are fresh through a `Presented` record. Over a socket an invocation must say when it was issued; over HTTP one that does not is still served, so a client that predates the stamp keeps working.
+
+What this changes for you:
+
+- New refusals: `AuthorizeError::Stale { issued_at, at }`, which carries the service's time, and `AuthorizeError::Replayed { invocation }`. Both answer 401. An exhaustive match on `AuthorizeError` needs the arms.
+- The record of accepted invocations (`RecentInvocations` by default) is per `Access`, so per process. An embedder that builds a service per request, or runs several processes, shares one record across them with `Access::with_presented`, or a replay can reach another instance; `Access::with_freshness` sets the window.
+- A test that presents one invocation twice to one `Access` now gets `Replayed`.
+- A client whose clock is more than the window off from the service's has every invocation refused as `Stale`.
+
+Why: an invocation carried no time of its own and the service never asked how old one was, so a captured invocation held for as long as its delegations did.
+
+### A cell can be watched, and a cell's invocations go over the access service's socket
+
+[#564](https://github.com/dialog-db/dialog-db/pull/564)
+
+`memory::Watch` follows a cell: what it holds when the watch begins, then each state it takes, through an `EditionSource` that may skip intermediate states but never the last one. Its command is `/use/get/memory/cell/watch`, so any grant to read the cell covers it. A UCAN address can name a `socket`: one connection per space, shared by every watch of a cell in that space, which also carries the cell's resolves, publishes and retracts; blocks and blobs stay requests. Every frame on it is an invocation verified on its own, and the service checks a running watch's authority again, as of the time it delivers to it, once it was last found to hold more than an interval before (`Access::recheck`). `Session` is the service's side of one connection and holds no connection or clock, so a loopback server and a service that hibernates between messages serve it alike.
+
+What this changes for you:
+
+- `UcanAddress` has a public `socket` field (`with_socket`, `socket`), so a struct literal of it needs the field; `UcanServiceAddress` (test helper) has one too.
+- A site that cannot follow a cell answers a watch with the new `Rejection::Unsupported`, as S3, the filesystem remote and a UCAN address with no socket do; the caller resolves the cell again instead. An exhaustive match on `Rejection` needs the arm.
+- `Access::subscribe` accepts a watch and answers a `Subscription`, plain data a service can store, which names the cell it follows (`subject`, `space`, `cell`).
+- A frame the client sends names itself (`Request::Invoke { id, .. }`) and the service's answer echoes it, so the answer to an invocation the service could not read reaches whoever sent it. An answer that names neither a frame nor an invocation fails every invocation awaiting an answer on that connection.
+- Dropping a site closes its sockets, so the service ends their sessions.
+- `dialog-remote-ucan` now depends on tokio and tokio-tungstenite natively and on web-sys's `WebSocket` on wasm.
+
+Why: a host learned that a remote branch moved only by resolving its head again and again, each time a verified invocation the service pays for. A watch tells it when the head moves.
+
+### A branch keeps itself in step with its upstreams, and a head delivered late is not recorded over a newer one
+
+[#564](https://github.com/dialog-db/dialog-db/pull/564)
+
+`Branch::replicate()` keeps a branch in step with its upstreams for as long as its stream is read: an upstream that can be watched is followed and each head it delivers is pulled with no round trip of its own, and one that cannot be watched, a local one, or one whose watch ended is pulled from on the ticks the host passes to `every`, which also begin an ended watch again and push the branch's own commits. A bare replicate pulls and pushes; `pull()` or `push()` does one. `ConnectedBranch::watch` follows a remote branch's head, and `ConnectedBranch::observe` records a delivered head only when it is ahead of the one recorded, read from the local record at that moment, since more than one handle records heads of one remote branch.
+
+What this changes for you:
+
+- `Revision::precedence` orders two heads of one branch (`Precedence::{Same, Before, After, Concurrent}`) by their signed contexts, falling back to editions for heads without one.
+- `ConnectedBranch::observe` answers `Observation::{Advanced, Stale, Diverged}`; a diverged head is not recorded, and `replicate` asks the remote where it stands instead.
+- `Pull::assuming_upstream` merges the head recorded for a remote upstream without asking the remote.
+- `replicate` answers `Replicated::Pulled`, `Replicated::Pushed`, and `Replicated::Unwatched(target)` when a watch ends. Without `every`, an ended watch is never begun again.
+- A watched head that cannot be recorded is answered as an error, and the remote is then asked where it stands, so the head is still pulled.
+- `Cell::watch` and `Cell::decode` give any cell a watch.
+
+Why: a delivered head can arrive after a newer one was fetched or delivered. Recorded as it came, it would move the sync point back and make the next push fail or upload what the remote holds.
+
+### Compatibility and migration
+
+- `UcanAddress` encodes an optional `socket`, left out when absent, so an address without one keeps its bytes. An older replica reads an address that names a socket and drops the socket, reaching the peer over requests.
+- Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
+- Nothing stored is rewritten.
+
 ## 0.3.0 (2026-10-13)
 
 ### Every number is keyed in one band, and a branch an earlier release wrote is migrated in one pass
