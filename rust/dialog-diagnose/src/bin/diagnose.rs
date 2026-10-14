@@ -1,3 +1,6 @@
+// The CLI is native-only. On wasm the crate below is empty, so it has no
+// `main` to require.
+#![cfg_attr(target_arch = "wasm32", no_main)]
 #![cfg(not(target_arch = "wasm32"))]
 
 //! # Dialog Diagnose Binary
