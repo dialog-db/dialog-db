@@ -19,12 +19,13 @@
 //! re-run the transaction against the fresh head, minting fresh
 //! versions; nothing staged is ever rewritten.
 
-use super::induce::induce;
 use super::succession;
-use super::{Transaction, TransactionCommit, carry_footprint, touches_rules};
+use super::{Transaction, TransactionCommit, carry_footprint, settle, touches_rules};
 use crate::Ephemeral;
+use crate::placement::Placements;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
+use crate::repository::branch::session::Composite;
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
@@ -33,7 +34,8 @@ use crate::{
 use dialog_artifacts::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
 use dialog_artifacts::tree::WriteScope;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Change, Changes, Entity, Statement, Update as _,
+    Artifact, ArtifactSelector, AssetChange, Change, Changes, Entity, Relation, Statement,
+    Update as _,
 };
 use dialog_capability::history::Origin;
 use dialog_capability::{Did, Fork, Provider};
@@ -114,9 +116,12 @@ pub struct TransactionBatch {
 /// read hides such a fact, and the commit's retraction of it lands
 /// nothing in the tree, which never held it: the publish retracts it
 /// from the overlay, so the session's row does not come back.
-fn overlay_retractions(changes: &Staged, overlay: &Ephemeral) -> Vec<Artifact> {
+fn overlay_retractions<'a>(
+    changes: impl IntoIterator<Item = (&'a Relation, &'a Entity, &'a Change)>,
+    overlay: &Ephemeral,
+) -> Vec<Artifact> {
     let mut retracted = Vec::new();
-    for (the, of, change) in changes.log() {
+    for (the, of, change) in changes {
         let Change::Retract(value) = change else {
             continue;
         };
@@ -506,7 +511,13 @@ impl TransactionCommit<&Branch> {
         let authority = Identify.perform(env).await?;
         let (line, _) = branch.commit_identity(authority.profile(), &authority.did());
         let overlay = branch.overlay().clone();
-        let retractions = overlay_retractions(&self.changes, &overlay);
+        let retractions = overlay_retractions(
+            self.changes
+                .log()
+                .iter()
+                .map(|(the, of, change)| (the, of, change)),
+            &overlay,
+        );
 
         let (outcome, induced) = Box::pin(mint_link(
             SourceRef::Branch(branch),
@@ -612,7 +623,13 @@ impl TransactionCommit<TransactionBatch> {
             _ => None,
         };
         let amending = amend.is_some();
-        let retractions = overlay_retractions(&self.changes, &batch.overlay);
+        let retractions = overlay_retractions(
+            self.changes
+                .log()
+                .iter()
+                .map(|(the, of, change)| (the, of, change)),
+            &batch.overlay,
+        );
 
         let (outcome, induced) = Box::pin(mint_link(
             SourceRef::Snapshot(&batch.snapshot),
@@ -661,7 +678,7 @@ impl TransactionCommit<TransactionBatch> {
 
 /// NaN is not a value: a commit that would write one is refused before
 /// anything lands, as deserialization and the rule compiler refuse it.
-fn refuse_nan<'a>(changes: impl Iterator<Item = &'a Change>) -> Result<(), CommitError> {
+pub(crate) fn refuse_nan<'a>(changes: impl Iterator<Item = &'a Change>) -> Result<(), CommitError> {
     for change in changes {
         if let Change::Assert(dialog_artifacts::Value::Float(float), _) = change
             && float.is_nan()
@@ -711,17 +728,78 @@ where
 {
     refuse_nan(changes.log().iter().map(|(_, _, change)| change))?;
     let operator = Identify.perform(env).await?;
-    let mut changes = Box::pin(succession::settle(
-        vec![source.to_source()],
+    let stores = Placements::stores(source, &changes, env).await?;
+    let changes = Box::pin(succession::settle(
+        &Composite::of(source.to_source()),
         QueryLayer::from(source).overlay(&operator),
         &changes,
+        &stores,
         env,
     ))
     .await?;
-    let induced = induce(source, &mut changes, transients, env).await?;
+    let settled = settle(
+        source,
+        &Composite::of(source.to_source()),
+        changes,
+        transients,
+        env,
+    )
+    .await?;
+    let outcome = mint(
+        source,
+        base,
+        line,
+        settled.tree,
+        settled.assets,
+        allow_empty,
+        canonicalize,
+        amend,
+        env,
+    )
+    .await?;
+    // Session-bound instructions land once the tree link is minted, so
+    // a failed mint leaves the session untouched too.
+    source.overlay().apply(settled.session)?;
+    Ok((outcome, settled.induced))
+}
+
+/// [`Mint`] one link from already-settled, tree-bound changes on
+/// `base`, carrying the trigger footprint forward when the changes
+/// touch no rule structure. No induction, no routing: what
+/// [`mint_link`] does after settling, and what a [`Stack`](crate::Stack)
+/// does for every line of a transaction it settled as one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn mint<Env>(
+    source: SourceRef<'_>,
+    base: Option<Revision>,
+    line: impl FnOnce(&Did, &Did) -> (Entity, Origin),
+    changes: Changes,
+    assets: Vec<AssetChange>,
+    allow_empty: bool,
+    canonicalize: bool,
+    amend: Option<Amended>,
+    env: &Env,
+) -> Result<Outcome, CommitError>
+where
+    Env: Provider<BlobSize>
+        + Provider<BlobImport>
+        + Provider<Get>
+        + Provider<BlobRead>
+        + Provider<Put>
+        + Provider<Import>
+        + Provider<Resolve>
+        + Provider<Identify>
+        + Provider<Attest>
+        + Provider<crate::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + ConditionalSync
+        + 'static,
+{
     let touches = touches_rules(&changes);
     let previous = base.clone();
-    let machinery = store_assets(source, changes.take_assets(), env).await?;
+    let machinery = store_assets(source, assets, env).await?;
     let outcome = Mint {
         source,
         base,
@@ -741,7 +819,188 @@ where
     {
         carry_footprint(&source.rule_cache(), previous.as_ref(), &minted.revision);
     }
-    Ok((outcome, induced))
+    Ok(outcome)
+}
+
+impl TransactionBatch {
+    /// Stage a batch on `branch` from an explicit base rather than the
+    /// handle's head: the first link is minted from already-settled
+    /// changes on `base`, and publish will CAS against `base_version`.
+    /// What a [`Stack`](crate::Stack) opens for a line at the head it
+    /// captured, so a handle that moved since the capture cannot make
+    /// the publish overwrite the move.
+    pub(crate) async fn stage<Env>(
+        branch: &Branch,
+        base: Option<Revision>,
+        base_version: Option<MemoryVersion>,
+        changes: Changes,
+        env: &Env,
+    ) -> Result<TransactionBatch, CommitError>
+    where
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let head = branch.revision_cell().checkpoint_at(base_version.clone());
+        let cell = branch.revision_cell().clone();
+
+        let authority = Identify.perform(env).await?;
+        let (line, _) = branch.commit_identity(authority.profile(), &authority.did());
+
+        let pinned = base.clone();
+        let mut changes = changes;
+        let assets = changes.take_assets();
+        let overlay = branch.overlay().clone();
+        let retractions = overlay_retractions(
+            changes.iter().map(|(of, the, change)| (the, of, change)),
+            &overlay,
+        );
+        let outcome = Box::pin(mint(
+            SourceRef::Pinned(branch, pinned.as_ref()),
+            base,
+            |profile, issuer| branch.commit_identity(profile, issuer),
+            changes,
+            assets,
+            false,
+            false,
+            None,
+            env,
+        ))
+        .await?;
+
+        let caches = Caches {
+            causality: CausalityCache::new(),
+            contexts: ContextCache::new(),
+            records: Cache::new(),
+            ..branch.caches()
+        };
+
+        Ok(match outcome {
+            Outcome::Unchanged(tip) => TransactionBatch {
+                snapshot: Snapshot::staged(branch.subject(), tip, caches, line),
+                head,
+                cell,
+                base_version,
+                induction: branch.induction_cell().clone(),
+                chain: Vec::new(),
+                context: None,
+                records: branch.records(),
+                contexts: branch.contexts(),
+                induced: Changes::new(),
+                overlay,
+                overlay_retractions: retractions,
+            },
+            Outcome::Minted(minted) => {
+                let Minted {
+                    revision,
+                    record,
+                    context,
+                } = *minted;
+                let snapshot = Snapshot::staged(branch.subject(), revision.clone(), caches, line);
+                let version = revision.version();
+                snapshot.caches().records.insert(version, record.clone());
+                snapshot.caches().contexts.insert(version, context.clone());
+                TransactionBatch {
+                    snapshot,
+                    head,
+                    cell,
+                    base_version,
+                    induction: branch.induction_cell().clone(),
+                    chain: vec![(version, record)],
+                    context: Some(context),
+                    records: branch.records(),
+                    contexts: branch.contexts(),
+                    induced: Changes::new(),
+                    overlay,
+                    overlay_retractions: retractions,
+                }
+            }
+        })
+    }
+
+    /// Extend the chain by one link minted from already-settled
+    /// changes: no induction, no routing.
+    pub(crate) async fn mint<Env>(
+        &mut self,
+        changes: Changes,
+        env: &Env,
+    ) -> Result<Revision, CommitError>
+    where
+        Env: Provider<BlobSize>
+            + Provider<BlobImport>
+            + Provider<Get>
+            + Provider<BlobRead>
+            + Provider<Put>
+            + Provider<Import>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Attest>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let (base, lineage) = self.snapshot.head();
+        let line = lineage.expect("a transaction batch's line is seeded at construction");
+        let mut changes = changes;
+        let assets = changes.take_assets();
+        // A link that retracts a fact only the session overlay holds
+        // takes it from the overlay once the chain publishes, as the
+        // first link of the chain does.
+        let retractions = overlay_retractions(
+            changes.iter().map(|(of, the, change)| (the, of, change)),
+            &self.overlay,
+        );
+        let outcome = Box::pin(mint(
+            SourceRef::Snapshot(&self.snapshot),
+            Some(base.clone()),
+            |_, issuer| (line.clone(), origin_of(&line, issuer)),
+            changes,
+            assets,
+            false,
+            false,
+            None,
+            env,
+        ))
+        .await?;
+        if let Outcome::Minted(minted) = outcome {
+            let Minted {
+                revision,
+                record,
+                context,
+            } = *minted;
+            self.snapshot.advance(&base, revision.clone(), line)?;
+            let version = revision.version();
+            self.snapshot
+                .caches()
+                .records
+                .insert(version, record.clone());
+            self.snapshot
+                .caches()
+                .contexts
+                .insert(version, context.clone());
+            self.chain.push((version, record));
+            self.context = Some(context);
+        }
+        // Whether or not the tree changed: a retraction of a fact only
+        // the overlay holds changes no tree.
+        self.overlay_retractions.extend(retractions);
+        Ok(self.snapshot.revision())
+    }
 }
 
 #[cfg(test)]

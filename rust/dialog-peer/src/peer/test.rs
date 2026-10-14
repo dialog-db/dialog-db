@@ -23,6 +23,35 @@ mod tests {
         assert!(!operator.did().to_string().is_empty());
     }
 
+    /// An ephemeral layer is a process resource the peer holds: created
+    /// through a session of the peer it is registered under its
+    /// address, opening the address yields the same layer, and once
+    /// every handle is dropped the address opens nothing.
+    #[dialog_common::test]
+    async fn it_opens_ephemeral_layers_by_address() {
+        use dialog_repository::{Ephemeral, EphemeralError};
+        let storage = test_storage().await;
+        let peer = open_peer(storage.clone(), Location::profile(unique_name("test")))
+            .await
+            .unwrap();
+        let session = peer.session(b"test").space(peer.state()).await.unwrap();
+
+        let layer = Ephemeral::create().perform(&session).await;
+        let address = layer.entity().clone();
+        let reopened = Ephemeral::open(address.clone())
+            .perform(&session)
+            .await
+            .expect("registered");
+        assert!(reopened.is(&layer), "the same store");
+        drop(layer);
+        drop(reopened);
+        let missing = Ephemeral::open(address.clone()).perform(&session).await;
+        assert!(
+            matches!(&missing, Err(EphemeralError::NotOpen(at)) if *at == address),
+            "gone with its last handle: {missing:?}"
+        );
+    }
+
     #[dialog_common::test]
     async fn it_derives_different_operators_from_different_contexts() {
         let storage1 = test_storage().await;

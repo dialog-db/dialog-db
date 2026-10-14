@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use crate::rules::{RuleCache, SharedRuleCache};
 use crate::schema::Replica;
-use crate::{Branch, Ephemeral, NetworkedIndex, RemoteFallback, Revision, Snapshot};
+use crate::{Bindings, Branch, Ephemeral, NetworkedIndex, RemoteFallback, Revision, Snapshot};
 
 /// An owned line to read from: a branch or a snapshot. Query
 /// environments hold these so the only lifetime they carry is the
@@ -40,6 +40,12 @@ pub(crate) enum Source {
     Branch(Arc<Branch>),
     /// A detached line whose head is held by value.
     Snapshot(Arc<Snapshot>),
+    /// A branch read at a captured revision rather than its live head:
+    /// the branch's caches, remote fallback, session store and
+    /// bindings, with the tree root fixed. `None` is a branch captured
+    /// before its first commit. What a [`Stack`](crate::Stack) reads
+    /// every layer beneath its top as.
+    Pinned(Arc<Branch>, Option<Revision>),
 }
 
 impl Source {
@@ -48,6 +54,7 @@ impl Source {
         match self {
             Source::Branch(branch) => SourceRef::Branch(branch),
             Source::Snapshot(snapshot) => SourceRef::Snapshot(snapshot),
+            Source::Pinned(branch, revision) => SourceRef::Pinned(branch, revision.as_ref()),
         }
     }
 }
@@ -72,6 +79,8 @@ pub(crate) enum SourceRef<'a> {
     Branch(&'a Branch),
     /// A detached line whose head is held by value.
     Snapshot(&'a Snapshot),
+    /// A branch read at a captured revision; see [`Source::Pinned`].
+    Pinned(&'a Branch, Option<&'a Revision>),
 }
 
 impl<'a> From<&'a Branch> for SourceRef<'a> {
@@ -98,13 +107,25 @@ impl<'a> SourceRef<'a> {
         match self {
             SourceRef::Branch(branch) => Source::Branch(Arc::new(branch.clone())),
             SourceRef::Snapshot(snapshot) => Source::Snapshot(Arc::new(snapshot.clone())),
+            SourceRef::Pinned(branch, revision) => {
+                Source::Pinned(Arc::new(branch.clone()), revision.cloned())
+            }
+        }
+    }
+
+    /// The branch behind this line, when it is one: a branch read live
+    /// or at a captured revision. A snapshot has none.
+    pub(crate) fn branch(self) -> Option<&'a Branch> {
+        match self {
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => Some(branch),
+            SourceRef::Snapshot(_) => None,
         }
     }
 
     /// The repository this line lives in.
     pub(crate) fn subject(self) -> Subject {
         match self {
-            SourceRef::Branch(branch) => branch.subject(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.subject(),
             SourceRef::Snapshot(snapshot) => snapshot.subject(),
         }
     }
@@ -120,6 +141,7 @@ impl<'a> SourceRef<'a> {
         match self {
             SourceRef::Branch(branch) => branch.revision(),
             SourceRef::Snapshot(snapshot) => Some(snapshot.revision()),
+            SourceRef::Pinned(_, revision) => revision.cloned(),
         }
     }
 
@@ -148,7 +170,7 @@ impl<'a> SourceRef<'a> {
     /// the peer is unreachable instead of a bare not-found.
     pub(crate) fn fallback(self) -> RemoteFallback {
         match self {
-            SourceRef::Branch(branch) => branch.fallback(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.fallback(),
             SourceRef::Snapshot(_) => RemoteFallback::None,
         }
     }
@@ -156,7 +178,7 @@ impl<'a> SourceRef<'a> {
     /// The shared node cache tree reads go through.
     pub(crate) fn node_cache(self) -> ArtifactNodeCache {
         match self {
-            SourceRef::Branch(branch) => branch.node_cache(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.node_cache(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().nodes.clone(),
         }
     }
@@ -164,7 +186,7 @@ impl<'a> SourceRef<'a> {
     /// The shared spilled-value block cache.
     pub(crate) fn spill_cache(self) -> SpillCache {
         match self {
-            SourceRef::Branch(branch) => branch.spill_cache(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.spill_cache(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().spills.clone(),
         }
     }
@@ -172,7 +194,7 @@ impl<'a> SourceRef<'a> {
     /// The shared deductive-rule cache.
     pub(crate) fn rule_cache(self) -> SharedRuleCache {
         match self {
-            SourceRef::Branch(branch) => branch.rule_cache(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.rule_cache(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().rules.clone(),
         }
     }
@@ -180,7 +202,7 @@ impl<'a> SourceRef<'a> {
     /// The shared query-plan cache.
     pub(crate) fn plan_cache(self) -> PlanCache {
         match self {
-            SourceRef::Branch(branch) => branch.plan_cache(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.plan_cache(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().plans.clone(),
         }
     }
@@ -188,7 +210,7 @@ impl<'a> SourceRef<'a> {
     /// The shared verified-record memo.
     pub(crate) fn records(self) -> Cache<Version, RevisionRecord> {
         match self {
-            SourceRef::Branch(branch) => branch.records(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.records(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().records.clone(),
         }
     }
@@ -196,7 +218,7 @@ impl<'a> SourceRef<'a> {
     /// The shared causal-context memo.
     pub(crate) fn contexts(self) -> ContextCache {
         match self {
-            SourceRef::Branch(branch) => branch.contexts(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.contexts(),
             SourceRef::Snapshot(snapshot) => snapshot.caches().contexts.clone(),
         }
     }
@@ -204,16 +226,24 @@ impl<'a> SourceRef<'a> {
     /// The live-spine slot commits on this line reuse.
     pub(crate) fn spine(self) -> &'a SpineSlot {
         match self {
-            SourceRef::Branch(branch) => branch.spine(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.spine(),
             SourceRef::Snapshot(snapshot) => &snapshot.caches().spine,
         }
     }
 
-    /// The transient session overlay every read of this line folds in.
+    /// The ephemeral layer every read of this line folds in.
     pub(crate) fn overlay(self) -> &'a Ephemeral {
         match self {
-            SourceRef::Branch(branch) => branch.overlay(),
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.overlay(),
             SourceRef::Snapshot(snapshot) => snapshot.overlay(),
+        }
+    }
+
+    /// The scope bindings a commit on this line routes by.
+    pub(crate) fn bindings(self) -> &'a Bindings {
+        match self {
+            SourceRef::Branch(branch) | SourceRef::Pinned(branch, _) => branch.bindings(),
+            SourceRef::Snapshot(snapshot) => snapshot.bindings(),
         }
     }
 
@@ -236,6 +266,12 @@ impl<'a> SourceRef<'a> {
         match self {
             SourceRef::Branch(branch) => {
                 let metadata = branch.metadata(operator);
+                let entity = metadata.branch.this.clone();
+                metadata.assert(changes);
+                Some(entity)
+            }
+            SourceRef::Pinned(branch, revision) => {
+                let metadata = branch.metadata_at(operator, revision.cloned());
                 let entity = metadata.branch.this.clone();
                 metadata.assert(changes);
                 Some(entity)
