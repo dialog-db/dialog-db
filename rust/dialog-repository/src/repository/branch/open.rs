@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use crate::{Branch, BranchReference, Ephemeral, HeldCaches, ResolveError};
+use crate::{Bindings, Branch, BranchReference, Ephemeral, HeldCaches, ResolveError};
 use dialog_capability::Provider;
 use dialog_common::Holds;
 use dialog_effects::branch::invalid_name;
@@ -76,6 +76,7 @@ impl OpenBranch {
             metadata_cache: Arc::new(Mutex::new(None)),
             layer_metadata_cache: caches.metadata,
             overlay: Ephemeral::default(),
+            bindings: Bindings::default(),
             answers: Arc::default(),
         })
     }
