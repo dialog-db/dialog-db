@@ -11,12 +11,13 @@ use wasm_bindgen::closure::Closure;
 use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket};
 
 use super::{Routes, unavailable};
-use crate::socket::{Reply, SUBPROTOCOL};
+use crate::socket::{PING, Reply, SUBPROTOCOL};
 
 type Opening = Arc<Mutex<Option<oneshot::Sender<Result<(), String>>>>>;
 
 pub(crate) struct Link {
     socket: WebSocket,
+    routes: Routes,
     _message: Closure<dyn FnMut(MessageEvent)>,
     _open: Closure<dyn FnMut(Event)>,
     _error: Closure<dyn FnMut(Event)>,
@@ -66,6 +67,9 @@ impl Link {
         let on_message = {
             let routes = routes.clone();
             Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
+                // Anything the service sends, a pong among them, says the
+                // connection is alive.
+                routes.heard();
                 if let Ok(buffer) = event.data().dyn_into::<ArrayBuffer>() {
                     let bytes = Uint8Array::new(&buffer).to_vec();
                     if let Ok(reply) = Reply::decode(&bytes) {
@@ -81,6 +85,7 @@ impl Link {
 
         let link = Self {
             socket,
+            routes: routes.clone(),
             _message: on_message,
             _open: on_open,
             _error: on_error,
@@ -96,6 +101,7 @@ impl Link {
                 "the service does not speak {SUBPROTOCOL}"
             )));
         }
+        routes.heard();
         Ok(link)
     }
 
@@ -104,17 +110,31 @@ impl Link {
             .send_with_u8_array(&frame)
             .map_err(|error| unavailable(format!("{error:?}")))
     }
-}
 
-impl Drop for Link {
-    /// Detach the handlers before closing: the socket outlives this link
-    /// in the browser, and its events (the close this causes among them)
-    /// must not reach closures that are gone.
-    fn drop(&mut self) {
+    /// Ask the service whether the connection is alive.
+    pub(crate) fn ping(&self) -> Result<(), MemoryError> {
+        self.socket
+            .send_with_str(PING)
+            .map_err(|error| unavailable(format!("{error:?}")))
+    }
+
+    /// Close the socket, and end every wait on it.
+    ///
+    /// The handlers are detached first: the socket outlives this link in
+    /// the browser, and its events (the close this causes among them) must
+    /// not reach closures that are gone.
+    pub(crate) fn close(&self) {
         self.socket.set_onopen(None);
         self.socket.set_onerror(None);
         self.socket.set_onclose(None);
         self.socket.set_onmessage(None);
         let _ = self.socket.close();
+        self.routes.close();
+    }
+}
+
+impl Drop for Link {
+    fn drop(&mut self) {
+        self.close();
     }
 }

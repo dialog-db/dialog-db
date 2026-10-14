@@ -39,7 +39,7 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 
 use super::{MemoryStore, UcanServiceAddress};
 use crate::server::{Access, Answer, Content, Payload, Request as AccessRequest};
-use crate::socket::{Change, SUBPROTOCOL, Session};
+use crate::socket::{Change, PING, PONG, SUBPROTOCOL, Session};
 
 /// How long a watch's authority stands, once found to hold, before it is
 /// checked again on delivering to it.
@@ -190,6 +190,14 @@ async fn serve_socket(
             message = source.next() => match message {
                 Some(Ok(Message::Binary(bytes))) => {
                     session.receive(&state.access, &bytes).await.into_iter().collect()
+                }
+                // A ping is answered as a hibernating service answers it,
+                // without reading it as a frame.
+                Some(Ok(Message::Text(text))) if text.as_str() == PING => {
+                    if sink.send(Message::text(PONG)).await.is_err() {
+                        return;
+                    }
+                    Vec::new()
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 Some(Ok(_)) => Vec::new(),

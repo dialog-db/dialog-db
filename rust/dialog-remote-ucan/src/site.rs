@@ -38,6 +38,16 @@ impl UcanSite {
     pub(crate) fn sockets(&self) -> &Sockets {
         &self.sockets
     }
+
+    /// A site whose socket connections are kept by `liveness`: how often
+    /// they are pinged, and when one is given up on (see
+    /// [`Liveness`](crate::socket::Liveness)).
+    pub fn with_liveness(liveness: crate::socket::Liveness) -> Self {
+        Self {
+            permits: PermitSite::default(),
+            sockets: Sockets::with_liveness(liveness),
+        }
+    }
 }
 
 impl Site for UcanSite {

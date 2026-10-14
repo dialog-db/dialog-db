@@ -7,6 +7,18 @@ use serde::{Deserialize, Serialize};
 /// connects and a service that speaks it answers with.
 pub const SUBPROTOCOL: &str = "dialog.ucan.v1";
 
+/// What a client sends, as a text message, to learn that a connection is
+/// alive. The service answers it with [`PONG`], also as text.
+///
+/// A fixed text message, apart from the frames, so a service can answer it
+/// without reading it as a frame, or without waking at all: a Cloudflare
+/// Durable Object that hibernates between messages answers it through
+/// `setWebSocketAutoResponse` with the pair `PING`, `PONG`.
+pub const PING: &str = "ping";
+
+/// What a service answers [`PING`] with, as a text message.
+pub const PONG: &str = "pong";
+
 /// A frame a client sends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]

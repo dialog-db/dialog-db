@@ -604,6 +604,118 @@ async fn it_passes_over_a_socket_it_cannot_reach(
     Ok(())
 }
 
+/// A liveness short enough for a test to outlast its deadline.
+fn quick() -> crate::socket::Liveness {
+    crate::socket::Liveness {
+        heartbeat: std::time::Duration::from_millis(100),
+        deadline: std::time::Duration::from_millis(400),
+        answer: std::time::Duration::from_secs(5),
+        idle: std::time::Duration::from_secs(5),
+    }
+}
+
+/// A quiet connection to a service that answers its pings is kept: a
+/// watch over it still delivers a change made long after the deadline a
+/// connection that heard nothing would be given up by. The heartbeat must
+/// tell a cell that does not change from a connection that is gone.
+#[dialog_common::test]
+async fn it_keeps_a_quiet_connection_whose_service_answers_pings(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let cell = CellScope::new(subject, "local", "head");
+    let watch = cell.watch();
+    let authorization = issued(&signer, &watch).await;
+    let address = UcanAddress::new(&service.endpoint).with_socket(&service.socket);
+    let site = UcanSite::with_liveness(quick());
+    let mut editions = Provider::<ForkInvocation<UcanSite, Watch>>::execute(
+        &site,
+        ForkInvocation::new(watch, address, authorization),
+    )
+    .await?;
+    assert_eq!(editions.next().await?, Some(None), "the cell begins empty");
+
+    // Several deadlines pass with nothing to deliver.
+    dialog_common::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let version = perform(&service, &signer, cell.publish(b"late".to_vec(), None)).await?;
+    assert_eq!(
+        editions.next().await?,
+        Some(Some(Edition {
+            content: b"late".to_vec(),
+            version,
+        })),
+        "the watch outlived the quiet"
+    );
+    Ok(())
+}
+
+/// A watch the service refuses is refused when it is begun, not as the
+/// first thing it delivers, so whoever begins it can tell a watch that
+/// runs from one that never will. Here the watch does not say when it was
+/// issued, which a watch over a socket must.
+#[dialog_common::test]
+async fn it_refuses_a_watch_when_it_is_begun(service: UcanServiceAddress) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let watch = CellScope::new(subject, "local", "head").watch();
+    let minted = issued(&signer, &watch).await;
+    let undated = undated(&signer, &watch, &minted).await;
+    let address = UcanAddress::new(&service.endpoint).with_socket(&service.socket);
+    let begun = Provider::<ForkInvocation<UcanSite, Watch>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(watch, address, undated),
+    )
+    .await;
+    assert!(
+        matches!(
+            begun,
+            Err(MemoryError::Authorization(AuthorizeError::Stale {
+                issued_at: None,
+                ..
+            }))
+        ),
+        "{:?}",
+        begun.err()
+    );
+    Ok(())
+}
+
+/// The authorization `minted` carries, minted again by `signer` on its
+/// own authority without saying when it was issued.
+async fn undated<Fx>(
+    signer: &Ed25519Signer,
+    capability: &Capability<Fx>,
+    minted: &UcanAuthorization,
+) -> UcanAuthorization
+where
+    Fx: Effect + Clone,
+    Capability<Fx>: Ability,
+{
+    use dialog_ucan_core::{InvocationBuilder, InvocationChain};
+    let command = capability
+        .ability()
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(String::from)
+        .collect();
+    let invocation = InvocationBuilder::new()
+        .issuer(Signer::from(signer.clone()))
+        .audience(signer)
+        .subject(signer)
+        .command(command)
+        .arguments(minted.invocation().chain().arguments().clone())
+        .proofs(Vec::new())
+        .try_build()
+        .await
+        .expect("the invocation mints");
+    let chain = InvocationChain::new(invocation, Default::default());
+    UcanAuthorization::from(dialog_ucan::UcanInvocation {
+        chain: Box::new(chain),
+        subject: signer.did(),
+        ability: capability.ability(),
+    })
+}
+
 /// A service that names no socket cannot follow a cell: the watch is
 /// refused as unsupported, so the cell is resolved again instead.
 #[dialog_common::test]

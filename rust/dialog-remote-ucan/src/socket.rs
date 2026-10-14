@@ -23,4 +23,5 @@ mod session;
 pub use session::*;
 
 mod client;
-pub use client::Sockets;
+pub(crate) use client::Failed;
+pub use client::{Liveness, Sockets};

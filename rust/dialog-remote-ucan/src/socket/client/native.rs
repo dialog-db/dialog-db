@@ -9,15 +9,17 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 
 use super::{Routes, unavailable};
-use crate::socket::{Reply, SUBPROTOCOL};
+use crate::socket::{PING, Reply, SUBPROTOCOL};
 
 /// The open socket: the queue its writing task sends from, and its
-/// reading task. Dropping it closes the socket, so the service ends the
-/// session and stops delivering to watches nobody reads.
+/// reading task. Closing it, or dropping it, closes the socket, so the
+/// service ends the session and stops delivering to watches nobody reads,
+/// and ends every wait on it.
 #[derive(Debug)]
 pub(crate) struct Link {
     outgoing: UnboundedSender<Message>,
     reader: tokio::task::AbortHandle,
+    routes: Routes,
 }
 
 impl Link {
@@ -38,24 +40,30 @@ impl Link {
                     return;
                 }
             }
-            // The queue ends when the link is dropped: close the socket
+            // The queue ends when the link closes: close the socket
             // cleanly, so the service sees the client go.
             let _ = sink.send(Message::Close(None)).await;
             let _ = sink.close().await;
         });
+        let reading = routes.clone();
         let reader = tokio::spawn(async move {
             while let Some(Ok(message)) = source.next().await {
+                // Anything the service sends, a pong among them, says the
+                // connection is alive.
+                reading.heard();
                 if let Message::Binary(bytes) = message
                     && let Ok(reply) = Reply::decode(&bytes)
                 {
-                    routes.route(reply);
+                    reading.route(reply);
                 }
             }
-            routes.close();
+            reading.close();
         });
+        routes.heard();
         Ok(Self {
             outgoing,
             reader: reader.abort_handle(),
+            routes,
         })
     }
 
@@ -64,13 +72,26 @@ impl Link {
             .unbounded_send(Message::binary(frame))
             .map_err(unavailable)
     }
-}
 
-impl Drop for Link {
-    fn drop(&mut self) {
+    /// Ask the service whether the connection is alive.
+    pub(crate) fn ping(&self) -> Result<(), MemoryError> {
+        self.outgoing
+            .unbounded_send(Message::text(PING))
+            .map_err(unavailable)
+    }
+
+    /// Close the socket, and end every wait on it.
+    pub(crate) fn close(&self) {
         // Ending the queue has the writing task close the socket; the
         // reading task holds the other half of it open until it stops.
         self.outgoing.close_channel();
         self.reader.abort();
+        self.routes.close();
+    }
+}
+
+impl Drop for Link {
+    fn drop(&mut self) {
+        self.close();
     }
 }
