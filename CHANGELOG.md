@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### An entry a read yields is its key and value, and the hash of its key is kept by the segment it is edited in
 
-[#PR](https://github.com/dialog-db/dialog-db/pull/PR)
+[#600](https://github.com/dialog-db/dialog-db/pull/600)
 
 [#569](https://github.com/dialog-db/dialog-db/pull/569) gave every `Entry` the cell the blake3 of its key is kept in. Only the boundary rules read that hash, on the edit path, but every entry a scan yields carried the cell too: about 48 bytes more per entry, enough that moving an entry through the scan's stream adaptors became a `memcpy` call. The cell now lives in a `SegmentEntry`, the entry as a `TransientSegment` holds it, and `Entry` is a key and a value again. A stored leaf still keeps its keys' hashes for every opening of it, a node sealed from ranked entries still opens with their hashes, and an edit's key hashed before it lands still brings its hash into the leaf. Trees are shaped byte for byte as before.
 
