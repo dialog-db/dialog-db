@@ -494,6 +494,61 @@ async fn it_watches_a_cell_over_the_socket(service: UcanServiceAddress) -> anyho
     Ok(())
 }
 
+/// A watch nobody reads holds where its cell stands, not every state the
+/// cell passed through. `Branch::replicate` pauses while its stream is not
+/// read, which a host does on purpose (a hidden tab), and the watch's
+/// replies queue meanwhile: queued without bound, a busy cell grows the
+/// queue by a state per change for as long as the pause lasts.
+/// `EditionSource` lets a watch skip states for exactly this.
+///
+/// Native only, for waiting until the service has delivered every change
+/// before the watch is read again; the browser routes replies through the
+/// same `Routes`.
+#[cfg(not(target_arch = "wasm32"))]
+#[dialog_common::test]
+async fn it_holds_only_the_newest_state_for_a_watch_nobody_reads(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    use std::time::Duration;
+
+    let (signer, subject) = owner().await;
+    let cell = CellScope::new(subject, "local", "head");
+    let watch = cell.watch();
+    let authorization = issued(&signer, &watch).await;
+    let address = UcanAddress::new(&service.endpoint).with_socket(&service.socket);
+    let mut editions = Provider::<ForkInvocation<UcanSite, Watch>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(watch, address, authorization),
+    )
+    .await?;
+    assert_eq!(editions.next().await?, Some(None), "the cell begins empty");
+
+    // Fewer changes than the loopback service's own buffer, so it delivers
+    // every one of them.
+    let changes = 50;
+    let mut version = None;
+    for change in 0..changes {
+        let content = change.to_string().into_bytes();
+        version = Some(perform(&service, &signer, cell.publish(content, version)).await?);
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let newest = (changes - 1).to_string().into_bytes();
+    let mut reads = 0;
+    loop {
+        reads += 1;
+        let state = tokio::time::timeout(Duration::from_secs(5), editions.next()).await??;
+        if state.flatten().map(|edition| edition.content) == Some(newest.clone()) {
+            break;
+        }
+    }
+    assert!(
+        reads <= 2,
+        "a watch read after {changes} changes should reach the newest state at once; it took {reads} reads"
+    );
+    Ok(())
+}
+
 /// Where the address names a socket, a cell's invocations go over it: the
 /// endpoint here answers nothing, so a publish and a resolve that succeed
 /// went over the socket.
