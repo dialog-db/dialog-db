@@ -25,7 +25,7 @@ use dialog_artifacts::tree::rekey::rekey_tree;
 use dialog_artifacts::{ArchiveDelta, DialogArtifactsError, NUMBER_BAND};
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Import as BlobImport;
@@ -179,7 +179,13 @@ impl RekeyStorage<'_> {
         // names them is minted: a revision points only at durable blocks.
         let mut delta = ArchiveDelta::zero();
         let rewritten = rekey_tree(&tree, &store, &mut delta, target, branch.node_cache()).await?;
-        persist(&branch.archive().index(), &mut delta, env).await?;
+        persist(
+            &branch.archive().index(),
+            &branch.node_cache(),
+            &mut delta,
+            env,
+        )
+        .await?;
         // Boxed: the commit is a large future, and this one runs once.
         let revision = Box::pin(
             branch
@@ -216,6 +222,7 @@ impl Migrate<'_> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -227,7 +234,8 @@ impl Migrate<'_> {
 
 /// `tree`, laid out in the band this release writes: the tree itself when
 /// its manifest names the band, else its rewrite under the band, persisted
-/// into the branch's archive and memoized by root for the process.
+/// into the branch's archive and memoized by root in the caches the
+/// environment holds for the repository.
 ///
 /// A pull that merges aligns its sync base, the upstream head and the
 /// local head before it diffs or grafts them, so a tree a release before
@@ -271,7 +279,13 @@ where
     };
     let mut delta = ArchiveDelta::zero();
     let rewritten = rekey_tree(&tree, store, &mut delta, target, branch.node_cache()).await?;
-    persist(&branch.archive().index(), &mut delta, env).await?;
+    persist(
+        &branch.archive().index(),
+        &branch.node_cache(),
+        &mut delta,
+        env,
+    )
+    .await?;
     branch.rewrites().insert(root, rewritten.root().clone());
     Ok(rewritten)
 }

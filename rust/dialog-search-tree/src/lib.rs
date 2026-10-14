@@ -180,6 +180,9 @@ pub use error::*;
 mod distribution;
 pub use distribution::*;
 
+mod hashed;
+pub use hashed::{Hashed, LazyHash, Separator};
+
 mod encoding;
 pub use encoding::*;
 

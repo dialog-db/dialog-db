@@ -1,5 +1,6 @@
 use crate::{Branch, LoadBranchError, OpenBranch};
 use dialog_capability::Provider;
+use dialog_common::Holds;
 use dialog_effects::memory::Resolve;
 
 /// Command to load an existing branch, erroring if it has no revision yet.
@@ -23,7 +24,7 @@ impl LoadBranch {
     /// Execute the load operation.
     pub async fn perform<Env>(self, env: &Env) -> Result<Branch, LoadBranchError>
     where
-        Env: Provider<Resolve>,
+        Env: Provider<Resolve> + Holds,
     {
         let branch = self.open.perform(env).await?;
         if branch.revision().is_none() {

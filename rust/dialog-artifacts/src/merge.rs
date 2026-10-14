@@ -293,15 +293,15 @@ where
                 attribute_key.into_key(),
                 value_key.into_key(),
             ] {
-                screened.push(Change::Remove(Entry {
-                    key: key.clone(),
-                    value: candidate.value.clone(),
-                }));
+                screened.push(Change::Remove(Entry::new(
+                    key.clone(),
+                    candidate.value.clone(),
+                )));
                 if let Some(surviving) = &surviving {
-                    screened.push(Change::Add(Entry {
+                    screened.push(Change::Add(Entry::new(
                         key,
-                        value: State::Added(surviving.clone()),
-                    }));
+                        State::Added(surviving.clone()),
+                    )));
                 }
             }
         }
@@ -373,10 +373,7 @@ where
                         let Some(surviving) = datum.retire_covered(&observed) else {
                             continue;
                         };
-                        yield Change::Add(Entry {
-                            key: entry.key,
-                            value: State::Added(surviving),
-                        });
+                        yield Change::Add(Entry::new(entry.key, State::Added(surviving)));
                     }
                 },
                 // R2: guarded removes pass through; integrate applies
