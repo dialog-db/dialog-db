@@ -14,7 +14,6 @@ pub use emulator::*;
 pub mod resource;
 
 pub mod dup_audit;
-pub use dup_audit::{DUPLICATE_SETS, TOTAL_SETS};
 
 mod encoder;
 pub use encoder::*;

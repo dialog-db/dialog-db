@@ -14,6 +14,26 @@ says how to cut a release.
 
 ## Unreleased
 
+### Measurement counters are compiled in by an `audit` feature
+
+[#570](https://github.com/dialog-db/dialog-db/pull/570)
+
+The search tree counted every hash its shaping paths asked for, and the
+volatile archive looked each block up before storing it to count
+duplicates, in every build. Both now exist only with the `audit` feature
+of `dialog-search-tree`, which turns on `dialog-storage`'s.
+
+What this changes for you:
+
+- `dialog_search_tree::audit::report` and
+  `dialog_storage::dup_audit::drain_sets` exist only with the `audit`
+  feature. The public counter statics are gone.
+- `Volatile` no longer reads a block before storing it unless the
+  feature is on.
+
+Why: measurement plumbing should cost nothing in a build that does not
+measure.
+
 ### The hashes a tree is shaped by are kept by what owns the bytes, not in per-thread memos
 
 [#569](https://github.com/dialog-db/dialog-db/pull/569), fixes
