@@ -507,4 +507,110 @@ mod tests {
         );
         Ok(())
     }
+
+    /// Stand up a service that completes the handshake, answers each
+    /// frame with what `answer` gives for it (nothing, for `None`), and
+    /// then neither answers nor closes: what a client sees of a connection
+    /// that went half-open, as one does when a laptop sleeps or a NAT
+    /// forgets the mapping. Answers the socket's URL.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn silent_after(
+        answer: impl Fn() -> Option<crate::socket::Reply> + Send + Sync + 'static,
+    ) -> anyhow::Result<String> {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("ws://{}/", listener.local_addr()?);
+        let answer = Arc::new(answer);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let answer = answer.clone();
+                tokio::spawn(async move {
+                    let Some(mut socket) = accept(stream).await else {
+                        return;
+                    };
+                    let mut answered = false;
+                    while let Some(Ok(message)) = socket.next().await {
+                        if let Message::Binary(_) = message
+                            && !answered
+                        {
+                            answered = true;
+                            if let Some(reply) = answer() {
+                                let _ = socket.send(Message::binary(reply.encode())).await;
+                            }
+                        }
+                        // Everything after is read and ignored, and the
+                        // connection is held open.
+                    }
+                });
+            }
+        });
+        Ok(url)
+    }
+
+    /// An invocation sent over a connection that has gone silent fails
+    /// within a bounded time rather than waiting for ever. Every resolve
+    /// and publish of a space's cells rides its socket, and
+    /// `Branch::replicate` awaits each pull and push inline, so one silent
+    /// socket stalls the replication of every branch at that space.
+    ///
+    /// The bound here is 10 seconds. A fix that waits longer makes the
+    /// bound (a keepalive deadline, or a per-invocation one) configurable,
+    /// and this test sets it lower.
+    ///
+    /// Native only, for the service it stands up; a browser's WebSocket
+    /// does not surface a half-open connection either, and routes replies
+    /// through the same `Routes`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_does_not_wait_forever_on_a_connection_that_went_silent() -> anyhow::Result<()> {
+        let url = silent_after(|| None).await?;
+        let sockets = Sockets::default();
+        let connection = sockets.connect(&url).await?;
+        let answered = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            connection.invoke("bafy-resolve".into(), b"a resolve".to_vec(), None),
+        )
+        .await;
+        assert!(
+            matches!(answered, Ok(Err(_))),
+            "the invocation must fail rather than wait for ever; got {answered:?}"
+        );
+        Ok(())
+    }
+
+    /// A watch over a connection that went silent after the watch began
+    /// ends within a bounded time. Until it ends, `Branch::replicate`
+    /// counts the upstream as watched, so its ticks merge the head last
+    /// recorded instead of asking the remote, and the branch silently
+    /// stops following its upstream.
+    ///
+    /// Native only, for the service it stands up; see
+    /// `it_does_not_wait_forever_on_a_connection_that_went_silent`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_ends_a_watch_whose_connection_went_silent() -> anyhow::Result<()> {
+        use crate::socket::Reply;
+        use dialog_effects::memory::EditionSource as _;
+
+        let url = silent_after(|| {
+            Some(Reply::State {
+                invocation: "bafy-watch".into(),
+                state: None,
+            })
+        })
+        .await?;
+        let sockets = Sockets::default();
+        let connection = sockets.connect(&url).await?;
+        let mut watching = connection.watch("bafy-watch".into(), b"a watch".to_vec())?;
+        assert_eq!(watching.next().await?, Some(None), "the watch began");
+
+        let next = tokio::time::timeout(std::time::Duration::from_secs(10), watching.next()).await;
+        assert!(
+            matches!(next, Ok(Ok(None)) | Ok(Err(_))),
+            "the watch must end once its connection is found dead; got {next:?}"
+        );
+        Ok(())
+    }
 }
