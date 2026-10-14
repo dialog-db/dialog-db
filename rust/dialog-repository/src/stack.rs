@@ -124,7 +124,7 @@ use crate::repository::branch::QueryLayer;
 use crate::repository::branch::registry::RegistryEnv;
 use crate::repository::branch::resolve::ResolveEnv;
 use crate::repository::branch::session::{Composite, QueryEnv};
-use crate::repository::branch::transaction::induce::{Witness, induce};
+use crate::repository::branch::transaction::induce::{Watermark, Witness, induce};
 use crate::repository::branch::transaction::{refuse_nan, settle_successions};
 use crate::repository::source::{Source, SourceRef};
 use crate::schema::DidExt as _;
@@ -264,6 +264,10 @@ enum Address {
 struct Descriptor {
     address: Address,
     links: Vec<(String, String)>,
+    /// The read-only links, apart from the others, so that a layer with
+    /// none keeps the identity it had before read-only links existed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    read_only: Vec<(String, String)>,
 }
 
 /// A head as a link records it.
@@ -423,6 +427,10 @@ struct Link {
     /// The link entity: `link:<blake3(dagcbor{from, to})>` over the
     /// encloser's address entity and the enclosed layer's identity.
     entity: Entity,
+    /// Whether the stack only reads the enclosed layer through this
+    /// link: it records the layer's head and advances it, but never
+    /// writes, stages, or publishes it.
+    read_only: bool,
 }
 
 /// Why a stack could not be built.
@@ -494,6 +502,13 @@ pub enum StackError {
     /// would be lost. Publish them first.
     #[error("The stack holds staged commits; publish them before its links change")]
     Staged,
+    /// A write is placed on a scope that the stack reads through a
+    /// read-only link. The commit fails before any layer changes.
+    #[error("Scope {scope} is read-only in this stack")]
+    ReadOnly {
+        /// The scope the write is placed on.
+        scope: Entity,
+    },
     /// A write or maintenance names a scope no link of this stack binds.
     #[error("No layer is linked under scope {scope}")]
     UnboundScope {
@@ -625,9 +640,16 @@ impl Topology {
         }
     }
 
-    /// Link layer `from` to layer `to` beneath it under `name`. A
-    /// link that already exists is left alone.
-    fn link(&mut self, from: usize, to: usize, name: Entity) -> Result<(), StackError> {
+    /// Link layer `from` to layer `to` beneath it under `name`, read-only
+    /// or not. A link that already exists keeps its place, and takes the
+    /// access given.
+    fn link(
+        &mut self,
+        from: usize,
+        to: usize,
+        name: Entity,
+        read_only: bool,
+    ) -> Result<(), StackError> {
         let encloser = &self.layers[from];
         let address = encloser.address_entity();
         if matches!(encloser, Layer::Snapshot(_)) {
@@ -646,20 +668,25 @@ impl Topology {
                 to_audience,
             });
         }
-        if let Some(link) = self.links[from].iter().find(|link| link.to == to) {
-            if link.name == name {
+        if let Some(link) = self.links[from].iter_mut().find(|link| link.to == to) {
+            if link.name != name {
+                return Err(StackError::SecondName {
+                    from: Box::new(address),
+                    to: Box::new(target.address_entity()),
+                });
+            }
+            if link.read_only == read_only {
                 return Ok(());
             }
-            return Err(StackError::SecondName {
-                from: Box::new(address),
-                to: Box::new(target.address_entity()),
-            });
+            link.read_only = read_only;
+            return self.identify();
         }
         self.links[from].push(Link {
             to,
             name,
             // Settled by `identify`, once the target's identity is known.
             entity: address,
+            read_only,
         });
         self.identify()
     }
@@ -723,14 +750,22 @@ impl Topology {
         for index in 0..self.layers.len() {
             let from = self.layers[index].address_entity();
             let mut descriptor_links: Vec<(String, String)> = Vec::new();
+            let mut read_only: Vec<(String, String)> = Vec::new();
             for link in &mut self.links[index] {
-                descriptor_links.push((link.name.to_string(), self.ids[link.to].to_string()));
+                let entry = (link.name.to_string(), self.ids[link.to].to_string());
+                if link.read_only {
+                    read_only.push(entry);
+                } else {
+                    descriptor_links.push(entry);
+                }
                 link.entity = link_entity(&from, &self.ids[link.to]);
             }
             descriptor_links.sort();
+            read_only.sort();
             let descriptor = Descriptor {
                 address: self.layers[index].address(),
                 links: descriptor_links,
+                read_only,
             };
             let bytes = serde_ipld_dagcbor::to_vec(&descriptor)
                 .map_err(|error| StackError::Encode(error.to_string()))?;
@@ -789,6 +824,12 @@ impl Topology {
                 Value::Bytes(heads[link.to].bytes()),
                 Pick::Last,
             );
+            changes.associate(
+                link_attr("access"),
+                link.entity.clone(),
+                Value::String(if link.read_only { "read" } else { "write" }.into()),
+                Pick::Last,
+            );
             target.address_facts(&link.entity, changes);
         }
     }
@@ -798,6 +839,54 @@ impl Topology {
         self.links[index]
             .iter()
             .any(|link| moved[link.to] || self.reaches_moved(link.to, moved))
+    }
+
+    /// Whether the stack writes layer `index`: the top, and each layer
+    /// that a path of links other than read-only reaches from the top. A
+    /// layer that the stack reaches only through a read-only link is read:
+    /// never written, staged, published, pulled, or pushed; nor is a layer
+    /// beneath it, whose head it would have to record.
+    fn writable(&self, index: usize) -> bool {
+        let Some(top) = self.layers.len().checked_sub(1) else {
+            return false;
+        };
+        let mut reached = vec![false; self.layers.len()];
+        let mut frontier = vec![top];
+        while let Some(at) = frontier.pop() {
+            if mem::replace(&mut reached[at], true) {
+                continue;
+            }
+            frontier.extend(
+                self.links[at]
+                    .iter()
+                    .filter(|link| !link.read_only)
+                    .map(|link| link.to),
+            );
+        }
+        reached[index]
+    }
+
+    /// The scope a write that lands on the bottom is refused under, when
+    /// the bottom is read-only: the first name that the bottom is linked
+    /// under, else the default scope.
+    fn bottom_scope(&self, default: Option<&Entity>) -> Option<Entity> {
+        self.linked_under(0).or_else(|| default.cloned())
+    }
+
+    /// The first name that layer `index` is linked under.
+    fn linked_under(&self, index: usize) -> Option<Entity> {
+        self.links
+            .iter()
+            .flatten()
+            .find(|link| link.to == index)
+            .map(|link| link.name.clone())
+    }
+
+    /// The scope that names layer `index` in an error: the first name it
+    /// is linked under, or its address entity when no link names it.
+    fn scope_of_layer(&self, index: usize) -> Entity {
+        self.linked_under(index)
+            .unwrap_or_else(|| self.layers[index].address_entity())
     }
 }
 
@@ -813,6 +902,7 @@ enum LinkEdit {
         from: Layer,
         to: Layer,
         name: Entity,
+        read_only: bool,
     },
     /// Drop the link from `from` to `to` under `name`; layers the top
     /// no longer reaches leave the stack.
@@ -826,6 +916,7 @@ enum LinkEdit {
 /// A link as its facts record it, read back from an enclosing layer.
 struct Recorded {
     name: Entity,
+    read_only: bool,
     order: u128,
     to: Entity,
     address: Address,
@@ -852,6 +943,24 @@ impl OpenStack {
             from: from.as_layer(),
             to: to.as_layer(),
             name,
+            read_only: false,
+        });
+        self
+    }
+
+    /// Link `from` to `to` under `name`, read-only, once the stack is
+    /// open, as [`StackTransaction::link_read_only`] would.
+    pub fn link_read_only<F: AsLayer, T: AsLayer>(
+        mut self,
+        from: &F,
+        to: &T,
+        name: Entity,
+    ) -> Self {
+        self.edits.push(LinkEdit::Link {
+            from: from.as_layer(),
+            to: to.as_layer(),
+            name,
+            read_only: true,
         });
         self
     }
@@ -909,6 +1018,12 @@ where
             Some(Value::UnsignedInt(order)) => *order,
             _ => u128::MAX,
         };
+        let read_only = match field("access") {
+            None => false,
+            Some(Value::String(access)) if access == "write" => false,
+            Some(Value::String(access)) if access == "read" => true,
+            Some(_) => return Err(malformed()),
+        };
         let address = match (
             field("repository"),
             field("branch"),
@@ -938,6 +1053,7 @@ where
         };
         recorded.push(Recorded {
             name: name.clone(),
+            read_only,
             order,
             to: to.clone(),
             address,
@@ -1052,8 +1168,9 @@ where
 }
 
 /// A link as the walk resolved it: the target's position among the
-/// expanded layers, the scope name, and the identity the link recorded.
-type Edge = (usize, Entity, Entity);
+/// expanded layers, the scope name, the identity the link recorded, and
+/// whether it is read-only.
+type Edge = (usize, Entity, Entity, bool);
 
 /// A layer the walk expanded, with its resolved links.
 type Expanded = (Layer, Vec<Edge>);
@@ -1068,7 +1185,7 @@ where
     // Expand every reachable layer once, keyed by address; each keeps
     // the addresses its links name, in recorded order.
     let mut expanded: Vec<Expanded> = Vec::new();
-    let mut edges: Vec<Vec<(Entity, Entity, Entity)>> = Vec::new();
+    let mut edges: Vec<Vec<(Entity, Entity, Entity, bool)>> = Vec::new();
     let mut index_of: HashMap<Entity, usize> = HashMap::new();
     let mut pending: Vec<Layer> = vec![top];
     while let Some(layer) = pending.pop() {
@@ -1079,7 +1196,7 @@ where
         let mut own = Vec::new();
         for link in recorded_links(&layer, env).await? {
             let target = resolve_layer(&link, env).await?;
-            own.push((target.address_entity(), link.name, link.to));
+            own.push((target.address_entity(), link.name, link.to, link.read_only));
             pending.push(target);
         }
         index_of.insert(address, expanded.len());
@@ -1089,7 +1206,7 @@ where
     for (index, own) in edges.into_iter().enumerate() {
         expanded[index].1 = own
             .into_iter()
-            .map(|(address, name, to)| (index_of[&address], name, to))
+            .map(|(address, name, to, read_only)| (index_of[&address], name, to, read_only))
             .collect();
     }
 
@@ -1100,7 +1217,7 @@ where
         if mem::replace(&mut visited[index], true) {
             return;
         }
-        for (to, _, _) in &expanded[index].1 {
+        for (to, _, _, _) in &expanded[index].1 {
             visit(*to, expanded, visited, order);
         }
         order.push(index);
@@ -1123,14 +1240,14 @@ where
     };
     for (index, (_, targets)) in expanded.iter().enumerate() {
         let from = placed[&index];
-        for (to, name, _) in targets {
-            topology.link(from, placed[to], name.clone())?;
+        for (to, name, _, read_only) in targets {
+            topology.link(from, placed[to], name.clone(), *read_only)?;
         }
     }
     topology.identify()?;
     // Every recorded identity must be the identity of the shape found.
     for (index, (_, targets)) in expanded.iter().enumerate() {
-        for (to, _, recorded) in targets {
+        for (to, _, recorded, _) in targets {
             if topology.ids[placed[to]] != *recorded {
                 return Err(StackError::Identity {
                     layer: expanded[index].0.address_entity(),
@@ -1179,6 +1296,13 @@ struct State {
     /// leave the watermark behind, and every later commit would fire the
     /// rules over the same lag again.
     induced: Option<(Revision, Option<HistoryVersion>)>,
+    /// The induction watermark of a bottom under a read-only link: the
+    /// head of the bottom that the last published commit induced over. The
+    /// stack never writes a layer that it only reads, so it keeps the
+    /// watermark here, for as long as it lives, and not in the induction
+    /// cell of the bottom. `None` until a commit induces, which adopts the
+    /// head as a branch that never induced does.
+    watermark: Option<Revision>,
 }
 
 impl fmt::Debug for State {
@@ -1252,6 +1376,7 @@ impl Stack {
                 versions,
                 staged,
                 induced: None,
+                watermark: None,
             })),
             divergences: Divergences::default(),
         }
@@ -1350,8 +1475,10 @@ impl Stack {
         self.heads() != self.published()
     }
 
-    /// Bring movement in: pull every layer that tracks an upstream,
-    /// bottom to top, then [`advance`](Self::advance) over the result.
+    /// Bring movement in: pull every layer that the stack writes and that
+    /// tracks an upstream, bottom to top, then [`advance`](Self::advance)
+    /// over the result. A layer that the stack only reads is not pulled:
+    /// its writer moves it, and the advance reads its new head.
     ///
     /// This is the network half of keeping a stack current, and it
     /// costs a round trip per upstream, so it belongs to whatever
@@ -1362,12 +1489,17 @@ impl Stack {
     where
         Env: StackSyncEnv,
     {
-        for layer in self.layers() {
-            if let Layer::Branch(branch) = &layer
+        let topology = self.topology();
+        for (index, layer) in topology.layers.iter().enumerate() {
+            if let Layer::Branch(branch) = layer
                 && !branch.upstreams().is_empty()
             {
                 branch.refresh(env).await?;
-                Box::pin(branch.pull().perform(env)).await?;
+                // A pull merges into the layer, which is a write: a layer
+                // that the stack only reads is advanced to its head alone.
+                if topology.writable(index) {
+                    Box::pin(branch.pull().perform(env)).await?;
+                }
             }
         }
         self.advance(env).await
@@ -1419,16 +1551,18 @@ impl Stack {
         self.publish(env).await
     }
 
-    /// Send movement out: push every branch layer that tracks an
-    /// upstream, bottom to top, so a pushed layer's wiring never names
+    /// Send movement out: push every branch layer that the stack writes
+    /// and that tracks an upstream, bottom to top, so a pushed layer's wiring never names
     /// a head its upstream lacks. Pushes the published heads; staged
     /// commits are not pushed until [`publish`](Self::publish)ed.
     pub async fn push<Env>(&self, env: &Env) -> Result<(), StackError>
     where
         Env: StackSyncEnv,
     {
-        for layer in self.layers() {
-            if let Layer::Branch(branch) = &layer
+        let topology = self.topology();
+        for (index, layer) in topology.layers.iter().enumerate() {
+            if let Layer::Branch(branch) = layer
+                && topology.writable(index)
                 && !branch.upstreams().is_empty()
             {
                 Box::pin(branch.push().perform(env)).await?;
@@ -1487,7 +1621,8 @@ impl Stack {
     /// Moves the induction watermark of the bottom to `induced`, the head
     /// that published commits induced over, while it still stands where it
     /// stood then. A commit that staged the bottom moved it on publish
-    /// already; this is for one that wrote only other layers.
+    /// already; this is for one that wrote only other layers. The
+    /// watermark of a bottom under a read-only link moves in memory.
     async fn catch_up_induction<Env>(
         &self,
         induced: Option<(Revision, Option<HistoryVersion>)>,
@@ -1499,6 +1634,13 @@ impl Stack {
         let (Some((head, base)), Some(bottom)) = (induced, self.primary()) else {
             return Ok(());
         };
+        {
+            let mut state = self.state.write();
+            if !state.topology.writable(0) {
+                state.watermark = Some(head);
+                return Ok(());
+            }
+        }
         let cell = bottom.induction_cell();
         cell.resolve()
             .perform(env)
@@ -1722,7 +1864,13 @@ impl Stack {
         for index in 0..topology.layers.len() {
             let batch = batches.remove(&index).unwrap_or_default();
             let maintenance = upkeep.get(&index);
-            if batch.is_empty() && maintenance.is_none() && !topology.reaches_moved(index, &moved) {
+            // A layer that the stack only reads keeps its head: nothing
+            // routes to it, and its own links are not refreshed.
+            if !topology.writable(index)
+                || (batch.is_empty()
+                    && maintenance.is_none()
+                    && !topology.reaches_moved(index, &moved))
+            {
                 continue;
             }
             if let Some(head) = self
@@ -1754,11 +1902,13 @@ impl Stack {
             versions: live.versions.clone(),
             staged: live.topology.layers.iter().map(|_| None).collect(),
             induced: None,
+            watermark: live.watermark.clone(),
         };
         // An edit applies once its encloser is in the stack, so a
         // transaction may name its links in any order: a layer that a
         // later edit enters beneath the top can be the encloser of an
         // earlier one. An encloser nothing enters is refused.
+        let mut enclosers: Vec<Layer> = Vec::new();
         while !edits.is_empty() {
             let mut deferred = Vec::with_capacity(edits.len());
             let mut applied = false;
@@ -1770,9 +1920,15 @@ impl Stack {
                     deferred.push(edit);
                     continue;
                 }
+                enclosers.push(from.clone());
                 applied = true;
                 match edit {
-                    LinkEdit::Link { from, to, name } => {
+                    LinkEdit::Link {
+                        from,
+                        to,
+                        name,
+                        read_only,
+                    } => {
                         if state.topology.index_of(&to).is_none() {
                             let at = state
                                 .topology
@@ -1788,7 +1944,7 @@ impl Stack {
                             .topology
                             .index_of(&to)
                             .expect("the target is in the stack");
-                        state.topology.link(from_index, to_index, name)?;
+                        state.topology.link(from_index, to_index, name, read_only)?;
                     }
                     LinkEdit::Unlink { from, to, name } => {
                         let Some(to_index) = state.topology.index_of(&to) else {
@@ -1821,6 +1977,28 @@ impl Stack {
         // Keep enclosers available until every edit has been applied.
         // Detached layers leave with their own stored wiring untouched.
         state.leave_unreachable()?;
+        // A layer that the stack only reads, in the shape the edits leave,
+        // holds no link that the stack could write.
+        for encloser in &enclosers {
+            if let Some(index) = state.topology.index_of(encloser)
+                && !state.topology.writable(index)
+            {
+                return Err(StackError::ReadOnly {
+                    scope: state.topology.scope_of_layer(index),
+                });
+            }
+        }
+        // A watermark held in memory is of the bottom that it was held for,
+        // while the stack only reads it.
+        let bottom = |state: &State| {
+            (
+                state.topology.layers.first().map(Layer::address_entity),
+                state.topology.writable(0),
+            )
+        };
+        if bottom(&state) != bottom(&live) {
+            state.watermark = None;
+        }
         let mut retractions = Vec::new();
         for (from, links) in live.topology.layers.iter().zip(&live.topology.links) {
             let Some(index) = state.topology.index_of(from) else {
@@ -1903,11 +2081,45 @@ impl State {
 /// Witnesses a stack transaction's induction rounds: each round's
 /// transients are minted as an instant on the store of every layer
 /// their scope is linked under, or on the bottom's session store when
-/// no link binds the scope, mirroring how the settled batch routes.
+/// no link binds the scope, mirroring how the settled batch routes. The
+/// rounds wait until the commit is sure to route
+/// ([`land`](Self::land)), so a commit that fails changes no layer and
+/// shows no observer a round of it.
 struct StackWitness<'a> {
     topology: &'a Topology,
     placements: &'a Placements,
     bottom: &'a Ephemeral,
+    /// Each round's shares, by layer, or `None` for the bottom's session
+    /// store, in the order induction ran them.
+    rounds: Vec<BTreeMap<Option<usize>, Changes>>,
+}
+
+impl StackWitness<'_> {
+    /// Witness each round, in order, once the settled batch routed. A
+    /// transient that a rule derives onto a scope that the stack only
+    /// reads fails the commit, as a dispatched one does, and nothing is
+    /// witnessed.
+    fn land(self) -> Result<(), StackError> {
+        for shares in &self.rounds {
+            for index in shares.keys().flatten() {
+                if !self.topology.writable(*index) {
+                    return Err(StackError::ReadOnly {
+                        scope: self.topology.scope_of_layer(*index),
+                    });
+                }
+            }
+        }
+        for shares in self.rounds {
+            for (target, share) in shares {
+                let store = match target {
+                    None => self.bottom,
+                    Some(index) => self.topology.layers[index].store(),
+                };
+                store.witness(share);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Witness for StackWitness<'_> {
@@ -1931,13 +2143,7 @@ impl Witness for StackWitness<'_> {
                 );
             }
         }
-        for (target, share) in shares {
-            let store = match target {
-                None => self.bottom,
-                Some(index) => self.topology.layers[index].store(),
-            };
-            store.witness(share);
-        }
+        self.rounds.push(shares);
     }
 }
 
@@ -2023,6 +2229,33 @@ impl<'a> StackTransaction<'a> {
             from: from.as_layer(),
             to: to.as_layer(),
             name,
+            read_only: false,
+        });
+        self
+    }
+
+    /// Link `from` to `to` under `name` as [`link`](Self::link) does,
+    /// read-only: the stack reads `to`, records its head on `from`, and
+    /// advances it, but never writes, stages, publishes, pulls, or pushes
+    /// it, or a layer beneath it.
+    /// A write placed on `name` fails at commit with
+    /// [`StackError::ReadOnly`], before any layer changes. So does a
+    /// transient placed on it, and a `clear` or `forget` of it. A write or
+    /// a transient that a rule derives onto `name` fails too, once
+    /// induction ran: no layer changes, and no observer sees a round of
+    /// the commit. A layer that another link reaches other than read-only
+    /// is written as usual.
+    pub fn link_read_only<F: AsLayer, T: AsLayer>(
+        mut self,
+        from: &F,
+        to: &T,
+        name: Entity,
+    ) -> Self {
+        self.edits.push(LinkEdit::Link {
+            from: from.as_layer(),
+            to: to.as_layer(),
+            name,
+            read_only: true,
         });
         self
     }
@@ -2153,6 +2386,9 @@ impl<'a> StackCommit<'a> {
                 if !matches!(&topology.layers[*index], Layer::Ephemeral(_)) {
                     return Err(StackError::NotEphemeral { scope });
                 }
+                if !topology.writable(*index) {
+                    return Err(StackError::ReadOnly { scope });
+                }
                 let (clear, forgotten) = maintenance.entry(*index).or_default();
                 match &operation {
                     Maintenance::Clear => *clear = true,
@@ -2224,16 +2460,28 @@ impl<'a> StackCommit<'a> {
         let staged = Placements::resolve(source, &changes, env).await?;
         // The bottom's lag is what induction reads past its watermark: the
         // head it reads at, and where the watermark stands, settle once
-        // the commit publishes.
-        let watermark = primary.induction_cell();
-        watermark
-            .resolve()
-            .perform(env)
-            .await
-            .map_err(CommitError::from)?;
-        let lagged = source
-            .revision()
-            .map(|head| (head, watermark.content().map(|revision| revision.version())));
+        // the commit publishes. A bottom under a read-only link is never
+        // written, so the stack holds its watermark in memory.
+        let (watermark, lagged) = if topology.writable(0) {
+            let cell = primary.induction_cell();
+            cell.resolve()
+                .perform(env)
+                .await
+                .map_err(CommitError::from)?;
+            let lagged = source
+                .revision()
+                .map(|head| (head, cell.content().map(|revision| revision.version())));
+            (Watermark::Cell, lagged)
+        } else {
+            let held = match &rewiring {
+                Some(state) => state.watermark.clone(),
+                None => stack.state.read().watermark.clone(),
+            };
+            (
+                Watermark::Held(held),
+                source.revision().map(|head| (head, None)),
+            )
+        };
         // Each round's transients are witnessed on the store of every
         // layer their scope is linked under, else the bottom's session
         // store, so an observer there sees the command that fired a
@@ -2244,13 +2492,32 @@ impl<'a> StackCommit<'a> {
             topology: &topology,
             placements: &staged,
             bottom: primary.overlay(),
+            rounds: Vec::new(),
         };
-        // A transient placed on a scope that no link binds, that is not the
-        // default, and that the bottom does not bind to its tree, has no
-        // store that a read of the stack takes: it is refused, as a write
-        // of it is. A transient that the transaction asserted is one it
-        // dispatched.
-        let unserved = |artifact: &Artifact| match staged.placement_of(&artifact.the) {
+        // A write placed on a read-only scope fails before induction; so
+        // does a dispatched transient, whose witness would land in that
+        // layer. A write that a rule derives onto a read-only scope fails
+        // when the settled batch routes, after induction. Either way no
+        // layer changes, and no observer sees a round of the commit: the
+        // rounds are witnessed only once the batch routes.
+        // A transient with no placement is witnessed in the session store
+        // of the bottom, which is memory of the process: only one placed
+        // on a scope that the stack reads alone is refused. A transient
+        // that the transaction asserted is one it dispatched.
+        let transient = |artifact: &Artifact| match staged.placement_of(&artifact.the) {
+            Some(scope)
+                if topology.bound.get(scope).is_some_and(|indices| {
+                    indices.iter().any(|index| !topology.writable(*index))
+                }) =>
+            {
+                Err(StackError::ReadOnly {
+                    scope: scope.clone(),
+                })
+            }
+            // A transient placed on a scope that no link binds, that is not
+            // the default, and that the bottom does not bind to its tree,
+            // has no store that a read of the stack takes: it is refused,
+            // as a write of it is.
             Some(scope)
                 if !topology.bound.contains_key(scope)
                     && Some(scope) != staged.default_scope()
@@ -2263,23 +2530,34 @@ impl<'a> StackCommit<'a> {
             }
             _ => Ok(()),
         };
-        for instruction in self.transients.export().into_instructions() {
-            let (_, artifact) = split(instruction);
-            unserved(&artifact)?;
-        }
         for instruction in changes.clone().into_instructions() {
             let (_, artifact) = split(instruction);
             if staged.is_transient(&artifact.the) {
-                unserved(&artifact)?;
+                transient(&artifact)?;
+            } else {
+                route(&topology, &staged, &primary, &artifact)?;
             }
+        }
+        for instruction in self.transients.export().into_instructions() {
+            let (_, artifact) = split(instruction);
+            transient(&artifact)?;
         }
         let mut changes = changes;
         // Assets ride apart from the facts: induction and routing rebuild
         // the batch fact by fact, and only a tree can store an asset, so
         // they land on the bottom with the rest of its share below.
         let assets = changes.take_assets();
+        // Only the bottom stores an asset: one over a read-only bottom is
+        // refused with the writes that would land there.
+        if !assets.is_empty() && !topology.writable(0) {
+            return Err(match topology.bottom_scope(staged.default_scope()) {
+                Some(scope) => StackError::ReadOnly { scope },
+                None => CommitError::Detached.into(),
+            });
+        }
         induce(
             source,
+            watermark,
             &composite,
             &staged,
             &mut changes,
@@ -2295,28 +2573,9 @@ impl<'a> StackCommit<'a> {
         // stack routes exactly as the branch would; the primary's own
         // session store is not a layer and gets nothing.
         let placements = Placements::resolve(source, &changes, env).await?;
-        let default = placements.default_scope().cloned();
         for instruction in changes.into_instructions() {
             let (op, artifact) = split(instruction);
-            // A scope that links bind decides first, as for a read, so a
-            // default scope never overrides a placement.
-            let targets: Vec<usize> = match placements.placement_of(&artifact.the) {
-                None => vec![0],
-                Some(scope) => match topology.bound.get(scope) {
-                    Some(indices) => indices.clone(),
-                    None if Some(scope) == default.as_ref() => vec![0],
-                    None => match primary.bindings().target(scope) {
-                        Some(Target::Tree) => vec![0],
-                        Some(Target::Session) | None => {
-                            return Err(CommitError::UnboundScope {
-                                attribute: artifact.the.to_string(),
-                                scope: scope.to_string(),
-                            }
-                            .into());
-                        }
-                    },
-                },
-            };
+            let targets = route(&topology, &placements, &primary, &artifact)?;
             for target in targets {
                 // Nothing reached through a snapshot can write: refused
                 // here, before any layer stages.
@@ -2330,6 +2589,7 @@ impl<'a> StackCommit<'a> {
                 );
             }
         }
+        witness.land()?;
         if !assets.is_empty() {
             let bottom = batches.entry(0).or_default();
             for change in assets {
@@ -2526,6 +2786,51 @@ where
     pub fn maintenances(&self) -> usize {
         self.inner.maintenances()
     }
+}
+
+/// The layers that a write of `artifact` lands in, by its placement: the
+/// layers its scope is linked under, or the bottom for an attribute with
+/// no placement, one on the default scope, or one on a scope no link
+/// binds that the bottom binds to its tree. A write that would land in a
+/// layer the stack only reads fails with [`StackError::ReadOnly`].
+fn route(
+    topology: &Topology,
+    placements: &Placements,
+    primary: &Branch,
+    artifact: &Artifact,
+) -> Result<Vec<usize>, StackError> {
+    let default = placements.default_scope();
+    let (targets, scope): (Vec<usize>, Option<Entity>) =
+        match placements.placement_of(&artifact.the) {
+            None => (vec![0], None),
+            // A scope that links bind decides first, as for a read, so a
+            // default scope never overrides a placement.
+            Some(scope) => match topology.bound.get(scope) {
+                Some(indices) => (indices.clone(), Some(scope.clone())),
+                None if Some(scope) == default => (vec![0], Some(scope.clone())),
+                None => match primary.bindings().target(scope) {
+                    Some(Target::Tree) => (vec![0], Some(scope.clone())),
+                    Some(Target::Session) | None => {
+                        return Err(CommitError::UnboundScope {
+                            attribute: artifact.the.to_string(),
+                            scope: scope.to_string(),
+                        }
+                        .into());
+                    }
+                },
+            },
+        };
+    if targets.iter().any(|index| !topology.writable(*index)) {
+        let scope = match scope {
+            Some(scope) if topology.bound.contains_key(&scope) => Some(scope),
+            _ => topology.bottom_scope(default),
+        };
+        return Err(match scope {
+            Some(scope) => StackError::ReadOnly { scope },
+            None => CommitError::Detached.into(),
+        });
+    }
+    Ok(targets)
 }
 
 /// What an instruction does to its fact, apart from the fact.
@@ -5214,6 +5519,709 @@ mod tests {
             "the session store moves the attribute to the ephemeral layer"
         );
         assert_eq!(stack.divergences().len(), 1);
+        Ok(())
+    }
+
+    /// A stack whose application layer reads `index` through a read-only
+    /// link under `memory:device`, and writes `shared` under
+    /// `memory:shared`. `idx/name` is placed on `memory:device` and
+    /// `app/note` on `memory:application`, by the session store of the
+    /// bottom. The index holds one name.
+    async fn read_only_stack(
+        operator: &impl StackSyncEnv,
+        shared: &Branch,
+        index: &Branch,
+    ) -> Result<(Stack, Ephemeral, Ephemeral)> {
+        index
+            .transaction()
+            .assert(
+                dialog_query::the!("idx/name")
+                    .of("persona:1".parse::<Entity>()?)
+                    .is("Ana".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(operator)
+            .await?;
+        index.refresh(operator).await?;
+        shared
+            .overlay()
+            .assert(Placement::new("idx/name".parse()?, name("device")))?;
+        shared
+            .overlay()
+            .assert(Placement::new("app/note".parse()?, name("application")))?;
+        let application = Ephemeral::create().perform(operator).await;
+        let top = Ephemeral::create().perform(operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &application, name("application"))
+            .link(&application, shared, name("shared"))
+            .link_read_only(&application, index, name("device"))
+            .perform(operator)
+            .await?;
+        Ok((stack, application, top))
+    }
+
+    /// A stack reads facts through a read-only link, and a commit records
+    /// the head of the linked layer on the encloser, but never moves it.
+    #[dialog_common::test]
+    async fn it_reads_through_a_read_only_link_and_records_its_head() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let index = repo.branch("index").open().perform(&operator).await?;
+        let (stack, application, _) = read_only_stack(&operator, &shared, &index).await?;
+        let before = index.revision();
+
+        assert_eq!(
+            values::<String>(&stack, &operator, "idx/name", &"persona:1".parse()?).await?,
+            vec![Value::String("Ana".into())]
+        );
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("app/note")
+                    .of("note:1".parse::<Entity>()?)
+                    .is("hi".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        index.refresh(&operator).await?;
+        assert_eq!(index.revision(), before, "the stack never moves the layer");
+        let recorded =
+            application.scan(&ArtifactSelector::new().the("dialog.link/revision".parse()?));
+        let head = Head::Tree(before).bytes();
+        assert!(
+            recorded
+                .iter()
+                .any(|fact| fact.is == Value::Bytes(head.clone())),
+            "the encloser records the head it read: {recorded:?}"
+        );
+        // Reopened from its top, the stack keeps the link read-only.
+        let identity = stack.identity();
+        let reopened = Stack::open(stack.layers().pop().unwrap())
+            .perform(&operator)
+            .await?;
+        assert_eq!(reopened.identity(), identity);
+        Ok(())
+    }
+
+    /// A write placed on a read-only scope fails at commit, with an error
+    /// that names the scope. No layer changes, and the ephemeral layers
+    /// get no part of the commit.
+    #[dialog_common::test]
+    async fn it_refuses_a_write_placed_on_a_read_only_scope() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let index = repo.branch("index").open().perform(&operator).await?;
+        let (stack, application, _) = read_only_stack(&operator, &shared, &index).await?;
+        let (index_head, shared_head) = (index.revision(), shared.revision());
+        let note: Entity = "note:1".parse()?;
+
+        let refused = stack
+            .transaction()
+            .assert(
+                dialog_query::the!("app/note")
+                    .of(note.clone())
+                    .is("hi".to_string()),
+            )
+            .assert(
+                dialog_query::the!("idx/name")
+                    .of("persona:2".parse::<Entity>()?)
+                    .is("Eve".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await;
+
+        match refused {
+            Err(StackError::ReadOnly { scope }) => assert_eq!(scope, name("device")),
+            other => panic!("a write on a read-only scope is refused: {other:?}"),
+        }
+        index.refresh(&operator).await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(index.revision(), index_head);
+        assert_eq!(shared.revision(), shared_head);
+        assert!(
+            application
+                .scan(&ArtifactSelector::new().of(note))
+                .is_empty(),
+            "the application layer got no part of the commit"
+        );
+        Ok(())
+    }
+
+    /// A `clear` or `forget` of a scope that the stack reads alone fails
+    /// with an error that names the scope, rather than doing nothing.
+    #[dialog_common::test]
+    async fn it_refuses_maintenance_of_a_read_only_scope() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let notes = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &shared, name("shared"))
+            .link_read_only(&top, &notes, name("notes"))
+            .perform(&operator)
+            .await?;
+        let refused = stack
+            .transaction()
+            .clear(name("notes"))
+            .commit()
+            .perform(&operator)
+            .await;
+        match refused {
+            Err(StackError::ReadOnly { scope }) => assert_eq!(scope, name("notes")),
+            other => panic!("a clear of a read-only scope is refused: {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// A write that a rule derives onto a read-only scope fails at commit,
+    /// with an error that names the scope, and no layer changes.
+    #[dialog_common::test]
+    async fn it_refuses_a_derived_write_on_a_read_only_scope() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let index = repo.branch("index").open().perform(&operator).await?;
+        // `idx/name` of a note's entity, from the note.
+        let copy: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "name": { "the": "idx/name", "as": "text:" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "note": { "the": "app/note", "as": "text:" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "note": { "?": { "name": "name" } }
+                }
+            }]
+        }))?;
+        shared
+            .transaction()
+            .assert(copy)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let (stack, application, _) = read_only_stack(&operator, &shared, &index).await?;
+        let (index_head, shared_head) = (index.revision(), shared.revision());
+        let note: Entity = "note:1".parse()?;
+        let observers = [
+            application.observe_everything(),
+            shared.overlay().observe_everything(),
+        ];
+
+        let refused = stack
+            .transaction()
+            .assert(
+                dialog_query::the!("app/note")
+                    .of(note.clone())
+                    .is("Eve".to_string()),
+            )
+            .dispatch(dialog_query::the!("cmd/open").of(note.clone()).is(true))
+            .commit()
+            .perform(&operator)
+            .await;
+        match refused {
+            Err(StackError::ReadOnly { scope }) => assert_eq!(scope, name("device")),
+            other => panic!("a derived write on a read-only scope is refused: {other:?}"),
+        }
+        for observer in &observers {
+            assert!(
+                matches!(observer.drain(), Drained::Instants(instants) if instants.is_empty()),
+                "no observer sees a round of the refused commit"
+            );
+        }
+        index.refresh(&operator).await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(index.revision(), index_head);
+        assert_eq!(shared.revision(), shared_head);
+        assert!(
+            application
+                .scan(&ArtifactSelector::new().of(note))
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    /// A pull merges into a layer, which is a write: `Stack::pull` leaves a
+    /// layer that it reads through a read-only link at its own head.
+    #[dialog_common::test]
+    async fn it_pulls_no_read_only_layer() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let index = repo.branch("index").open().perform(&operator).await?;
+        let (stack, _, _) = read_only_stack(&operator, &shared, &index).await?;
+        let upstream = repo
+            .branch("index.upstream")
+            .open()
+            .perform(&operator)
+            .await?;
+        upstream
+            .transaction()
+            .assert(
+                dialog_query::the!("idx/name")
+                    .of("persona:9".parse::<Entity>()?)
+                    .is("Upstream".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        index.set_upstream(&upstream).perform(&operator).await?;
+        let head = index.revision();
+
+        stack.pull(&operator).await?;
+        index.refresh(&operator).await?;
+        assert_eq!(index.revision(), head, "the read-only layer is not pulled");
+        Ok(())
+    }
+
+    /// A stack whose bottom is under a read-only link commits to its
+    /// ephemeral layers, and refuses a write that would land on the
+    /// bottom, naming the scope the bottom is linked under.
+    #[dialog_common::test]
+    async fn it_commits_to_ephemeral_layers_over_a_read_only_bottom() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let index = repo.branch("index").open().perform(&operator).await?;
+        index
+            .transaction()
+            .assert(
+                dialog_query::the!("idx/name")
+                    .of("persona:1".parse::<Entity>()?)
+                    .is("Ana".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        index.refresh(&operator).await?;
+        index
+            .overlay()
+            .assert(Placement::new("app/note".parse()?, name("application")))?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &application, name("application"))
+            .link_read_only(&application, &index, name("device"))
+            .perform(&operator)
+            .await?;
+        let head = index.revision();
+
+        let note: Entity = "note:1".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("app/note")
+                    .of(note.clone())
+                    .is("hi".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            values::<String>(&stack, &operator, "app/note", &note).await?,
+            vec![Value::String("hi".into())]
+        );
+        index.refresh(&operator).await?;
+        assert_eq!(index.revision(), head);
+
+        let refused = stack
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of("doc:1".parse::<Entity>()?)
+                    .is("Notes".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await;
+        match refused {
+            Err(StackError::ReadOnly { scope }) => assert_eq!(scope, name("device")),
+            other => panic!("a write with no placement lands on the bottom: {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// A stack never writes a bottom under a read-only link, its induction
+    /// cell included: it holds the watermark of that bottom in memory. A
+    /// rule over a fact that another writer adds to the bottom fires once,
+    /// at the next commit, and not again at the one after.
+    #[dialog_common::test]
+    async fn it_holds_the_watermark_of_a_read_only_bottom_in_memory() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let index = repo.branch("index").open().perform(&operator).await?;
+        index
+            .transaction()
+            .assert(
+                dialog_query::the!("idx/name")
+                    .of("persona:1".parse::<Entity>()?)
+                    .is("Ana".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        index.refresh(&operator).await?;
+        index
+            .overlay()
+            .assert(Placement::new(
+                "counter/count".parse()?,
+                name("application"),
+            ))?
+            .assert(Placement::new("app/note".parse()?, name("application")))?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let mut rule = Changes::new();
+        increment_rule().assert(&mut rule);
+        application.apply(rule).unwrap();
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &application, name("application"))
+            .link_read_only(&application, &index, name("device"))
+            .perform(&operator)
+            .await?;
+        let watermark = || async {
+            let cell = index.induction_cell();
+            cell.resolve().perform(&operator).await?;
+            anyhow::Ok(cell.content())
+        };
+        let before = watermark().await?;
+
+        // The first commit adopts the head of the bottom.
+        let counter: Entity = "ctr:1".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        // Another writer of the bottom, as the daemon writes the index.
+        let other = repo.branch("index").open().perform(&operator).await?;
+        other
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "cmd.increment/counter".parse()?,
+                    of: "cmd:1".parse()?,
+                    is: Value::Entity(counter.clone()),
+                    cause: None,
+                },
+                Pick::All,
+            )]))
+            .perform(&operator)
+            .await?;
+        stack.advance(&operator).await?;
+        for _ in 0..2 {
+            stack
+                .transaction()
+                .assert(
+                    dialog_query::the!("app/note")
+                        .of("note:1".parse::<Entity>()?)
+                        .is("hi".to_string()),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        // An ephemeral layer holds no claim for a write to succeed, so the
+        // count that the rule concludes stands beside the first one. A
+        // second firing would add a third.
+        assert_eq!(
+            values::<u64>(&stack, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(1), Value::UnsignedInt(2)],
+            "the rule fired once over what the other writer added"
+        );
+        assert_eq!(
+            watermark().await?,
+            before,
+            "the induction cell of the bottom is unchanged"
+        );
+        Ok(())
+    }
+
+    /// A transient that a transaction asserts is one it dispatches: over a
+    /// read-only bottom, one with no placement is witnessed in the session
+    /// store of the bottom, and the commit lands.
+    #[dialog_common::test]
+    async fn it_dispatches_an_asserted_transient_over_a_read_only_bottom() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let index = repo.branch("index").open().perform(&operator).await?;
+        index
+            .transaction()
+            .assert(
+                dialog_query::the!("idx/name")
+                    .of("persona:1".parse::<Entity>()?)
+                    .is("Ana".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        index.refresh(&operator).await?;
+        index
+            .overlay()
+            .assert(crate::TransientAttribute::new("cmd/open".parse()?))?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &application, name("application"))
+            .link_read_only(&application, &index, name("device"))
+            .perform(&operator)
+            .await?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("cmd/open")
+                    .of("doc:1".parse::<Entity>()?)
+                    .is(true),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        Ok(())
+    }
+
+    /// A layer that the stack reaches only through a read-only link holds
+    /// no link that the stack could write: an edit of its links is
+    /// refused, naming the scope it is read under.
+    #[dialog_common::test]
+    async fn it_refuses_a_link_from_a_layer_it_only_reads() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let index = repo.branch("index").open().perform(&operator).await?;
+        let other = repo.branch("other").open().perform(&operator).await?;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link_read_only(&top, &index, name("device"))
+            .perform(&operator)
+            .await?;
+        let refused = stack
+            .transaction()
+            .link(&index, &other, name("other"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await;
+        match refused {
+            Err(StackError::ReadOnly { scope }) => assert_eq!(scope, name("device")),
+            other => panic!("a read-only encloser takes no link: {other:?}"),
+        }
+        assert_eq!(stack.layers().len(), 2);
+        Ok(())
+    }
+
+    /// An asset is stored only on the bottom: over a read-only bottom, a
+    /// commit that carries one is refused, naming the scope of the bottom.
+    #[dialog_common::test]
+    async fn it_refuses_an_asset_over_a_read_only_bottom() -> Result<()> {
+        use dialog_artifacts::Asset;
+
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let index = repo.branch("index").open().perform(&operator).await?;
+        index
+            .transaction()
+            .assert(
+                dialog_query::the!("idx/name")
+                    .of("persona:1".parse::<Entity>()?)
+                    .is("Ana".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        index.refresh(&operator).await?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &application, name("application"))
+            .link_read_only(&application, &index, name("device"))
+            .perform(&operator)
+            .await?;
+        let head = index.revision();
+
+        let refused = stack
+            .transaction()
+            .assert(Asset::from(vec![7u8; 64]))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await;
+        match refused {
+            Err(StackError::ReadOnly { scope }) => assert_eq!(scope, name("device")),
+            other => panic!("an asset over a read-only bottom is refused: {other:?}"),
+        }
+        index.refresh(&operator).await?;
+        assert_eq!(index.revision(), head);
+        Ok(())
+    }
+
+    /// A push sends no read-only layer to its upstream: only its writer
+    /// moves it.
+    #[dialog_common::test]
+    async fn it_pushes_no_read_only_layer() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let index = repo.branch("index").open().perform(&operator).await?;
+        let (stack, _, _) = read_only_stack(&operator, &shared, &index).await?;
+        let upstream = repo
+            .branch("index.upstream")
+            .open()
+            .perform(&operator)
+            .await?;
+        index.set_upstream(&upstream).perform(&operator).await?;
+
+        stack.push(&operator).await?;
+        upstream.refresh(&operator).await?;
+        assert_eq!(
+            upstream.revision(),
+            None,
+            "the read-only layer is not pushed"
+        );
+        Ok(())
+    }
+
+    /// A transient placed on a read-only scope is refused, whether the
+    /// transaction dispatches it or a rule derives it, and no observer
+    /// sees a round of the refused commit.
+    #[dialog_common::test]
+    async fn it_refuses_a_transient_placed_on_a_read_only_scope() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let index = repo.branch("index").open().perform(&operator).await?;
+        // `idx/sync` of a note's entity, from the note.
+        let derive: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "name": { "the": "idx/sync", "as": "text:" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "note": { "the": "app/note", "as": "text:" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "note": { "?": { "name": "name" } }
+                }
+            }]
+        }))?;
+        shared
+            .transaction()
+            .assert(derive)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        shared
+            .overlay()
+            .assert(Placement::new("idx/sync".parse()?, name("device")))?
+            .assert(crate::TransientAttribute::new("idx/sync".parse()?))?;
+        let (stack, application, _) = read_only_stack(&operator, &shared, &index).await?;
+        let note: Entity = "note:1".parse()?;
+
+        let dispatched = stack
+            .transaction()
+            .dispatch(
+                dialog_query::the!("idx/sync")
+                    .of(note.clone())
+                    .is("now".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await;
+        match dispatched {
+            Err(StackError::ReadOnly { scope }) => assert_eq!(scope, name("device")),
+            other => panic!("a dispatched transient on a read-only scope is refused: {other:?}"),
+        }
+
+        let observer = application.observe_everything();
+        let derived = stack
+            .transaction()
+            .assert(
+                dialog_query::the!("app/note")
+                    .of(note.clone())
+                    .is("hi".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await;
+        match derived {
+            Err(StackError::ReadOnly { scope }) => assert_eq!(scope, name("device")),
+            other => panic!("a derived transient on a read-only scope is refused: {other:?}"),
+        }
+        assert!(
+            matches!(observer.drain(), Drained::Instants(instants) if instants.is_empty()),
+            "no observer sees a round of the refused commit"
+        );
+        Ok(())
+    }
+
+    /// After the head of a read-only layer moves outside the stack, the
+    /// stack reads the new head once it advances.
+    #[dialog_common::test]
+    async fn it_reads_a_read_only_layer_at_its_new_head_after_advance() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let index = repo.branch("index").open().perform(&operator).await?;
+        let (stack, application, _) = read_only_stack(&operator, &shared, &index).await?;
+        let persona: Entity = "persona:2".parse()?;
+
+        index
+            .transaction()
+            .assert(
+                dialog_query::the!("idx/name")
+                    .of(persona.clone())
+                    .is("Ben".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert!(
+            values::<String>(&stack, &operator, "idx/name", &persona)
+                .await?
+                .is_empty(),
+            "a read stays at the captured head"
+        );
+        stack.advance(&operator).await?;
+        assert_eq!(
+            values::<String>(&stack, &operator, "idx/name", &persona).await?,
+            vec![Value::String("Ben".into())]
+        );
+        index.refresh(&operator).await?;
+        let recorded: Vec<Value> = application
+            .scan(&ArtifactSelector::new().the(link_attr("revision")))
+            .into_iter()
+            .map(|fact| fact.is)
+            .collect();
+        assert!(
+            recorded.contains(&Value::Bytes(Head::Tree(index.revision()).bytes())),
+            "the link records the new head of the read-only layer"
+        );
         Ok(())
     }
 

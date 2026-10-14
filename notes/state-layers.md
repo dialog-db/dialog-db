@@ -753,6 +753,27 @@ it needs before its workers move onto stacks. Each is offered upstream.
   with no default is read from every layer, as before. So the fact of
   *Retracts on a linked scope*, which a peer without the placement wrote to
   the bottom, reaches no read of the stack.
+- **Read-only links.** The locked layer of the vocabulary:
+  `link_read_only(&from, &to, name)`. The stack reads `to`, records its head
+  on `from`, and advances it like any layer, but never writes, stages,
+  publishes, pulls, or pushes it, or a layer beneath it. A write placed on
+  `name`, or one that would land on a read-only bottom, fails at commit with
+  `StackError::ReadOnly`, which names the scope, before induction runs and
+  before any layer changes. So do a transient placed on `name`, whether
+  dispatched or asserted, and a `clear` or `forget` of it. A write or a
+  transient that a rule derives onto `name` fails once induction ran: no
+  layer changes, and no observer sees a round of the commit, since the
+  rounds are witnessed only once the settled batch routes. A link or unlink
+  whose encloser the stack only reads is refused the same way. A layer that
+  another link reaches other than read-only is written as usual. The
+  read-only links of a layer are part of its descriptor, apart from the
+  others, so a layer with none keeps its identity; a link records its access
+  as `dialog.link/access`. The induction cell of a read-only bottom is not
+  written either: the stack holds the watermark of that bottom in memory, so
+  a rule fires once over what another writer added to it. A watermark in
+  memory starts at the head that the first commit adopts, as a branch that
+  never induced does: what the other writer added before that commit, or
+  while no stack ran, fires no rule.
 
 ## Order of work
 
