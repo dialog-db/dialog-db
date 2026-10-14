@@ -20,15 +20,17 @@
 //! peer's behalf is logged as that peer's, and a sync to that peer skips
 //! it. Two channels exchanging syncs therefore converge rather than
 //! bouncing each other's writes.
+//!
+//! See [`Channel`] for why a channel waits for the publish of a commit.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
 use dialog_artifacts::{Artifact, Changes, Entity, Pick, Update as _};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use super::{Delta, Ephemeral, Instant, Observer, StoreChange};
+use super::{Delta, Ephemeral, Held, Instant, Observer, StoreChange};
 
 /// How many instants a channel's log holds at most, whatever its
 /// slowest peer has seen. A peer further behind than this resyncs.
@@ -87,9 +89,55 @@ struct Log {
     /// awaiting their drain into the log, where they are logged as that
     /// peer's.
     received: HashMap<u64, Entity>,
+    /// For each peer, the witnesses at or below its offset whose commit
+    /// had not published when a join or a resync placed the peer past
+    /// them: the peer is owed each one once its commit publishes.
+    owed: HashMap<Entity, BTreeSet<u64>>,
 }
 
 /// A replicated ephemeral layer. Cheap to clone: clones share the log.
+///
+/// # A channel waits for the publish
+///
+/// A stack commit stages, then publishes. The share of an ephemeral
+/// layer, and the witness of each round of induction, land at stage
+/// time, so rules and observers in the process see them at once. If a
+/// channel sent them then, a peer could act on a command whose commit
+/// never publishes:
+///
+/// ```text
+/// stage: intent zI, witness create-space
+/// channel sends create-space ──▶ daemon makes Garden, origin zI
+/// publish: compare and set lost (another device moved the head)
+/// the worker crashes before it runs the transaction again
+/// ⇒ Garden exists with origin zI, and no replica holds zI
+/// ```
+///
+/// The space then has no pending row, no follow-up facts, and nothing to
+/// resume. So each instant that a stack commit mints carries the hold of
+/// that commit, and a catch-up stops at the first instant whose commit
+/// has not published. Once the commit publishes, the next catch-up
+/// carries its instants. If the publish fails, or the stack drops the
+/// staged commit on an advance or a pull, its witnesses never leave: the
+/// run again witnesses the command again, and the peer receives it once,
+/// after the intent lands. The facts that such a commit stored in the
+/// layer stay there, and its instants of them still go, so that a peer
+/// holds what the layer holds; the run again stores nothing new of them.
+/// A commit that changes no durable layer, while no earlier commit of the
+/// stack waits to publish, has nothing to wait for, and its instants go at
+/// once.
+///
+/// So a writer sends what must wait for its commit, a command, as a
+/// transient: its witness waits, and goes once, or never. What may go at
+/// once, and must reach every peer that the layer reaches, such as a
+/// result or a notice, is a stored fact of the layer.
+///
+/// A [`Catchup::Resync`] carries the fold, which already holds the facts
+/// of a staged commit: only the instants wait. A command is a witness and
+/// never a fact of the layer, so it reaches no fold. So the log keeps each
+/// instant from the first one that waits, past its ring bound if it must,
+/// and a resync leaves a peer just before that instant, so the held
+/// instants still follow once their commit publishes.
 #[derive(Clone, Debug)]
 pub struct Channel {
     layer: Ephemeral,
@@ -100,17 +148,24 @@ pub struct Channel {
 impl Channel {
     /// Replicate `layer`, keeping at most `capacity` instants for peers
     /// that fall behind. Instants minted before this call are not in
-    /// the log; a peer joining now starts from the fold.
+    /// the log; a peer joining now starts from the fold. The channel
+    /// observes the layer through a queue as large as its log, and no
+    /// smaller than an observer's: more instants than that between two
+    /// calls of the channel make a gap, and every peer resyncs from the
+    /// fold.
     pub fn over(layer: Ephemeral, capacity: usize) -> Self {
-        let observer = Arc::new(layer.observe_everything());
+        let capacity = capacity.max(1);
+        let observer =
+            Arc::new(layer.observe_everything_within(capacity.max(super::QUEUE_CAPACITY)));
         Self {
             layer,
             observer,
             log: Arc::new(Mutex::new(Log {
                 entries: VecDeque::new(),
-                capacity: capacity.max(1),
+                capacity,
                 offsets: HashMap::new(),
                 received: HashMap::new(),
+                owed: HashMap::new(),
             })),
         }
     }
@@ -136,16 +191,77 @@ impl Channel {
     }
 
     /// Admit `peer` claiming to stand at `sequence`. A claim the log no
-    /// longer covers makes the peer's next sync a resync.
+    /// longer covers makes the peer's next sync a resync. A witness at or
+    /// below `sequence` whose commit has not published is owed to the
+    /// peer, and goes once it does.
     pub fn join_at(&self, peer: Entity, sequence: u64) {
         let mut log = self.log.lock();
+        self.drain(&mut log);
+        Self::place(&mut log, peer, sequence);
+    }
+
+    /// Set the offset of `peer` to `sequence`, and owe it each witness at
+    /// or below that whose commit has not published yet.
+    fn place(log: &mut Log, peer: Entity, sequence: u64) {
+        let held: Vec<u64> = log
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.instant.transient
+                    && entry.instant.sequence <= sequence
+                    && entry.instant.hold.state() == Held::Open
+            })
+            .map(|entry| entry.instant.sequence)
+            .collect();
+        // A peer placed lower than before reads again what lies past it,
+        // so it is owed nothing there.
+        if let Some(owed) = log.owed.get_mut(&peer) {
+            owed.retain(|owed| *owed <= sequence);
+        }
+        if !held.is_empty() {
+            log.owed.entry(peer.clone()).or_default().extend(held);
+        }
         log.offsets.insert(peer, sequence);
     }
 
-    /// Forget `peer`: its offset no longer holds instants back.
+    /// The witnesses owed to `peer` whose commits published, oldest
+    /// first; each goes once. One whose commit never publishes is no
+    /// longer owed.
+    fn repay(log: &mut Log, peer: &Entity) -> Vec<Instant> {
+        let Some(owed) = log.owed.remove(peer) else {
+            return Vec::new();
+        };
+        let mut paid = Vec::new();
+        let mut still = BTreeSet::new();
+        for sequence in owed {
+            let Some(entry) = log
+                .entries
+                .iter()
+                .find(|entry| entry.instant.sequence == sequence)
+            else {
+                continue;
+            };
+            match entry.instant.hold.state() {
+                Held::Open => {
+                    still.insert(sequence);
+                }
+                Held::Released => paid.push(entry.instant.clone()),
+                Held::Dropped => {}
+            }
+        }
+        if !still.is_empty() {
+            log.owed.insert(peer.clone(), still);
+        }
+        paid
+    }
+
+    /// Forget `peer`: its offset no longer holds instants back. A transport
+    /// calls this when its link to the peer closes: a peer that never
+    /// reads keeps every witness it has not read in the log.
     pub fn leave(&self, peer: &Entity) -> bool {
         let mut log = self.log.lock();
         let left = log.offsets.remove(peer).is_some();
+        log.owed.remove(peer);
         drop(log);
         self.retain();
         left
@@ -186,9 +302,10 @@ impl Channel {
     }
 
     /// What `peer` needs to be current: the instants past its offset
-    /// that it did not itself send, or the fold if its offset fell off
-    /// the log. Moves the peer's offset to the sequence the sync
-    /// reaches; a peer not admitted is admitted by this.
+    /// that it did not itself send, up to the first one whose stack
+    /// commit has not published, or the fold if its offset fell off the
+    /// log. Moves the peer's offset to the sequence the sync reaches; a
+    /// peer not admitted is admitted by this.
     pub fn since(&self, peer: &Entity) -> Catchup {
         let mut log = self.log.lock();
         let current = self.absorb(&mut log);
@@ -202,19 +319,50 @@ impl Channel {
             None => offset >= current,
         };
         let sync = if covered {
-            let instants: Vec<Instant> = log
+            // The catch-up stops before the first instant whose commit
+            // has not published, and skips each witness whose commit never
+            // will (see the module docs).
+            let mut instants: Vec<Instant> = Self::repay(&mut log, peer);
+            let mut sequence = current;
+            for entry in log
                 .entries
                 .iter()
                 .filter(|entry| entry.instant.sequence > offset)
-                .filter(|entry| entry.origin.as_ref() != Some(peer))
-                .map(|entry| entry.instant.clone())
-                .collect();
-            Catchup::Instants {
-                instants,
-                sequence: current,
+            {
+                match entry.instant.hold.state() {
+                    Held::Open => {
+                        sequence = entry.instant.sequence - 1;
+                        break;
+                    }
+                    // The witness of a commit that never publishes never
+                    // leaves; the facts it stored are the layer's.
+                    Held::Dropped if entry.instant.transient => continue,
+                    Held::Dropped | Held::Released => {}
+                }
+                if entry.origin.as_ref() != Some(peer) {
+                    instants.push(entry.instant.clone());
+                }
             }
+            Catchup::Instants { instants, sequence }
         } else {
-            self.snapshot()
+            // A resync carries the fold, which holds no witness. A peer
+            // stands just before the first instant whose commit has not
+            // published, so the held instants follow it once it does.
+            match (self.snapshot(), Self::first_held(&log)) {
+                (
+                    Catchup::Resync {
+                        facts,
+                        shadowed,
+                        sequence,
+                    },
+                    Some(held),
+                ) => Catchup::Resync {
+                    facts,
+                    shadowed,
+                    sequence: sequence.min(held - 1),
+                },
+                (sync, _) => sync,
+            }
         };
         log.offsets.insert(peer.clone(), sync.sequence());
         drop(log);
@@ -301,15 +449,26 @@ impl Channel {
             log.received.insert(minted.sequence, peer.clone());
         }
         // This snapshot supersedes our earlier writes. Sending those back
-        // to its author would resurrect facts its snapshot just removed.
-        log.offsets.insert(peer.clone(), state.sequence);
+        // to its author would resurrect facts its snapshot just removed. A
+        // witness that waits for its commit is no fact of the fold, and is
+        // owed to the peer still.
+        let sequence = state.sequence;
         drop(state);
         self.absorb(&mut log);
+        Self::place(&mut log, peer.clone(), sequence);
     }
 
     /// Drain the layer's instants into the log, tagging the ones that
     /// were applied on a peer's behalf, and bound the log.
     fn absorb(&self, log: &mut Log) -> u64 {
+        let sequence = self.drain(log);
+        Self::bound(log);
+        sequence
+    }
+
+    /// Drain the layer's instants into the log, as [`absorb`](Self::absorb)
+    /// does, without bounding it.
+    fn drain(&self, log: &mut Log) -> u64 {
         let (drained, sequence) = self.observer.drain_at();
         match drained {
             super::Drained::Instants(instants) => {
@@ -320,12 +479,19 @@ impl Channel {
             }
             super::Drained::Gap { .. } => {
                 // The channel's own observer fell behind: the log has a
-                // hole nothing can fill, so every peer resyncs.
+                // hole nothing can fill, so every peer resyncs. The fold
+                // holds every fact, but no witness: a command that waited
+                // for its commit to publish is lost with the log.
+                if Self::first_held(log).is_some() {
+                    tracing::warn!(
+                        "a channel fell behind its layer with a command waiting; the command is lost"
+                    );
+                }
                 log.entries.clear();
                 log.received.clear();
+                log.owed.clear();
             }
         }
-        Self::bound(log);
         sequence
     }
 
@@ -335,11 +501,38 @@ impl Channel {
         Self::bound(&mut log);
     }
 
+    /// The sequence of the first instant of the log whose commit has not
+    /// published.
+    fn first_held(log: &Log) -> Option<u64> {
+        log.entries
+            .iter()
+            .find(|entry| entry.instant.hold.state() == Held::Open)
+            .map(|entry| entry.instant.sequence)
+    }
+
+    /// Whether some peer is owed the witness at `sequence`.
+    fn is_owed(log: &Log, sequence: u64) -> bool {
+        log.owed.values().any(|owed| owed.contains(&sequence))
+    }
+
+    /// Drop what no peer needs, and what is past the ring bound, but never
+    /// an instant whose commit has not published, or one after it, nor a
+    /// witness that a peer has not read: no peer has those yet, and none
+    /// could get them from the fold, which holds no witness.
     fn bound(log: &mut Log) {
         let slowest = log.offsets.values().copied().min();
         while let Some(front) = log.entries.front() {
+            let held = front.instant.hold.state();
+            // A witness owed to a peer stays until it is repaid, whatever
+            // the offsets say: the peer stands past it already.
+            if held == Held::Open || Self::is_owed(log, front.instant.sequence) {
+                break;
+            }
             let seen_by_all = slowest.is_some_and(|offset| front.instant.sequence <= offset);
-            let over = log.entries.len() > log.capacity;
+            let unread_witness = front.instant.transient
+                && held == Held::Released
+                && slowest.is_some_and(|offset| front.instant.sequence > offset);
+            let over = log.entries.len() > log.capacity && !unread_witness;
             if seen_by_all || over {
                 log.entries.pop_front();
             } else {
@@ -349,7 +542,12 @@ impl Channel {
         if log.offsets.is_empty() {
             // Nobody is waiting: keep only the ring, so a late joiner
             // can still be caught up from it.
-            while log.entries.len() > log.capacity {
+            while log.entries.len() > log.capacity
+                && log.entries.front().is_some_and(|front| {
+                    front.instant.hold.state() != Held::Open
+                        && !Self::is_owed(log, front.instant.sequence)
+                })
+            {
                 log.entries.pop_front();
             }
         }

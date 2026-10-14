@@ -110,6 +110,7 @@ use dialog_effects::blob::{Import as BlobImport, Read as BlobRead, Size as BlobS
 use dialog_effects::memory::{Publish, Resolve, Version as MemoryVersion};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output};
+use futures_util::lock::Mutex as AsyncMutex;
 use parking_lot::RwLock;
 use serde::Serialize;
 use thiserror::Error;
@@ -129,8 +130,9 @@ use crate::repository::branch::transaction::{refuse_nan, settle_successions};
 use crate::repository::source::{Source, SourceRef};
 use crate::schema::DidExt as _;
 use crate::{
-    Branch, CommitError, Delta, Ephemeral, EphemeralError, EphemeralRevision, PullError, PushError,
-    RemoteSite, ResolveError, Revision, Snapshot, Staged, Subscription, TransactionBatch,
+    Branch, CommitError, Delta, Ephemeral, EphemeralError, EphemeralRevision, Hold, PullError,
+    PushError, RemoteSite, ResolveError, Revision, Snapshot, Staged, Subscription,
+    TransactionBatch,
 };
 use dialog_common::Holds;
 
@@ -1260,7 +1262,9 @@ where
 
 /// Layers linked under scope names, read as one composite and written
 /// by placement. Opened by [`Stack::open`]; cheap to clone, and every
-/// clone shares the wiring and the heads.
+/// clone shares the wiring and the heads. A stack runs one commit,
+/// publish, advance, or pull at a time, across its clones; reads run
+/// beside them.
 ///
 /// A stack holds, per layer, the head it last **published** or pulled,
 /// and for branch layers a **staged** chain of commits not yet
@@ -1274,6 +1278,11 @@ pub struct Stack {
     /// The divergences of placement that reads of the stack found, until
     /// its host takes them. Shared by clones.
     divergences: Divergences,
+    /// One commit, publish, advance, or pull at a time, across clones: a
+    /// commit staged while a publish runs could otherwise build on a chain
+    /// that the publish drops, and its instants be released with no part
+    /// of it published.
+    turn: Arc<AsyncMutex<()>>,
 }
 
 /// What a stack knows: its shape, and its layers' heads.
@@ -1303,6 +1312,102 @@ struct State {
     /// cell of the bottom. `None` until a commit induces, which adopts the
     /// head as a branch that never induced does.
     watermark: Option<Revision>,
+    /// The holds of the commits staged and not published yet: their
+    /// instants wait in each channel until the chains publish, and
+    /// never leave if the chains are dropped. See [`Channel`](crate::Channel).
+    holds: Vec<Hold>,
+}
+
+/// The hold of a commit while it stages. A commit that fails, or whose
+/// future is dropped, before it hands the hold to the stack never
+/// publishes: its instants never leave the process, and a channel moves
+/// past them. Once its layers begin to stage, it also drops the staged
+/// chains of the stack, since a chain may hold part of it.
+struct Pending {
+    hold: Option<Hold>,
+    staging: Option<Stack>,
+}
+
+impl Pending {
+    fn open() -> Self {
+        Self {
+            hold: Some(Hold::open()),
+            staging: None,
+        }
+    }
+
+    /// The hold, for the instants the commit mints.
+    fn hold(&self) -> Hold {
+        self.hold
+            .clone()
+            .expect("a pending hold is held until kept")
+    }
+
+    /// The layers of `stack` begin to stage.
+    fn staging(&mut self, stack: &Stack) {
+        self.staging = Some(stack.clone());
+    }
+
+    /// The commit staged: the stack keeps the hold from now on.
+    fn keep(mut self) -> Hold {
+        self.staging = None;
+        self.hold.take().expect("a pending hold is kept once")
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        if let Some(hold) = self.hold.take() {
+            hold.discard();
+        }
+        if let Some(stack) = self.staging.take() {
+            stack.abandon_staged();
+        }
+    }
+}
+
+/// The holds of the commits that a publish settles, taken from the stack
+/// while it runs. A publish that fails, or whose future is dropped, before
+/// every chain lands discards them: those commits never publish whole.
+struct Settling(Vec<Hold>);
+
+impl Settling {
+    /// Every chain published: the instants may leave.
+    fn release(mut self) {
+        for hold in self.0.drain(..) {
+            hold.release();
+        }
+    }
+}
+
+impl Drop for Settling {
+    fn drop(&mut self) {
+        for hold in self.0.drain(..) {
+            hold.discard();
+        }
+    }
+}
+
+/// A stack dropped with commits staged and not published: they never
+/// publish, so their instants never leave the process.
+impl Drop for State {
+    fn drop(&mut self) {
+        for hold in self.holds.drain(..) {
+            hold.discard();
+        }
+    }
+}
+
+impl State {
+    /// The staged chains are dropped: the commits that staged them never
+    /// publish, so their instants never leave the process.
+    fn drop_staged(&mut self) {
+        self.staged = self.staged.iter().map(|_| None).collect();
+        self.induced = None;
+        for hold in self.holds.drain(..) {
+            hold.discard();
+        }
+    }
 }
 
 impl fmt::Debug for State {
@@ -1377,8 +1482,10 @@ impl Stack {
                 staged,
                 induced: None,
                 watermark: None,
+                holds: Vec::new(),
             })),
             divergences: Divergences::default(),
+            turn: Arc::default(),
         }
     }
 
@@ -1489,6 +1596,7 @@ impl Stack {
     where
         Env: StackSyncEnv,
     {
+        let _turn = self.turn.lock().await;
         let topology = self.topology();
         for (index, layer) in topology.layers.iter().enumerate() {
             if let Layer::Branch(branch) = layer
@@ -1502,7 +1610,7 @@ impl Stack {
                 }
             }
         }
-        self.advance(env).await
+        self.advance_in_turn(env).await
     }
 
     /// Capture movement this process can see, without the network:
@@ -1524,6 +1632,15 @@ impl Stack {
     where
         Env: StackSyncEnv,
     {
+        let _turn = self.turn.lock().await;
+        self.advance_in_turn(env).await
+    }
+
+    /// [`advance`](Self::advance), in the turn of the stack.
+    async fn advance_in_turn<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
+    where
+        Env: StackSyncEnv,
+    {
         let topology = self.topology();
         for layer in &topology.layers {
             if let Layer::Branch(branch) = layer {
@@ -1536,8 +1653,7 @@ impl Stack {
             let mut state = self.state.write();
             state.published = live.clone();
             state.versions = versions_of(&topology.layers);
-            state.staged = topology.layers.iter().map(|_| None).collect();
-            state.induced = None;
+            state.drop_staged();
         }
         self.capture(
             &topology,
@@ -1545,10 +1661,11 @@ impl Stack {
             &Upkeep::new(),
             live,
             &previous,
+            &Hold::default(),
             env,
         )
         .await?;
-        self.publish(env).await
+        self.publish_in_turn(env).await
     }
 
     /// Send movement out: push every branch layer that the stack writes
@@ -1577,12 +1694,27 @@ impl Stack {
     /// outside the stack fails the CAS; its chain and every chain
     /// above it are then stale wholesale and dropped (layers beneath
     /// stay published), and the transactions that staged them are
-    /// re-run after a [`pull`](Self::pull).
+    /// re-run after a [`pull`](Self::pull). The instants that those
+    /// commits minted in ephemeral layers never leave the process, even
+    /// when a layer beneath the one that failed did publish its part:
+    /// the run again mints them again.
     pub async fn publish<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
     where
         Env: Provider<Publish> + Provider<Resolve> + ConditionalSync,
     {
+        let _turn = self.turn.lock().await;
+        self.publish_in_turn(env).await
+    }
+
+    /// [`publish`](Self::publish), in the turn of the stack.
+    async fn publish_in_turn<Env>(&self, env: &Env) -> Result<Vec<Head>, StackError>
+    where
+        Env: Provider<Publish> + Provider<Resolve> + ConditionalSync,
+    {
         let layers = self.layers();
+        // The commits staged now are the ones this publish settles: the
+        // turn of the stack keeps any other commit out until it ends.
+        let holds = Settling(mem::take(&mut self.state.write().holds));
         for (index, layer) in layers.iter().enumerate() {
             let Some(batch) = self.state.write().staged[index].take() else {
                 continue;
@@ -1606,6 +1738,9 @@ impl Stack {
                         *stale = None;
                     }
                     state.induced = None;
+                    // The commits did not publish whole: their instants
+                    // never leave the process.
+                    drop(holds);
                     return Err(StackError::Publish {
                         layer: Box::new(layer.address_entity()),
                         source,
@@ -1613,6 +1748,9 @@ impl Stack {
                 }
             }
         }
+        // Every staged chain published: the instants of the commits that
+        // staged them may leave.
+        holds.release();
         let induced = self.state.write().induced.take();
         self.catch_up_induction(induced, env).await?;
         Ok(self.captured())
@@ -1655,6 +1793,21 @@ impl Stack {
         match cell.publish(head).perform(env).await {
             Err(crate::PublishError::VersionMismatch { .. }) => Ok(()),
             other => other.map_err(|error| CommitError::from(error).into()),
+        }
+    }
+
+    /// Hold the instants that a commit minted under `hold` until its
+    /// chains publish, or release them at once when it staged no durable
+    /// layer and nothing waits to publish. A commit with no durable change
+    /// staged behind one that waits shares its fate: if that publish
+    /// fails, its instants never leave either. Publish each commit before
+    /// the next, as `commit().publish()` does, to keep them apart.
+    fn hold_until_published(&self, hold: Hold) {
+        let mut state = self.state.write();
+        if state.staged.iter().any(Option::is_some) {
+            state.holds.push(hold);
+        } else {
+            hold.release();
         }
     }
 
@@ -1770,6 +1923,7 @@ impl Stack {
     /// the same instant as the batch. A layer with nothing to write,
     /// no maintenance and no links is left alone; one whose link facts
     /// already hold stages a no-op and keeps its head.
+    #[allow(clippy::too_many_arguments)]
     async fn refresh_links<Env>(
         &self,
         topology: &Topology,
@@ -1777,6 +1931,7 @@ impl Stack {
         heads: &[Head],
         mut batch: Changes,
         maintenance: Option<&(bool, HashSet<Entity>)>,
+        hold: &Hold,
         env: &Env,
     ) -> Result<Option<Head>, CommitError>
     where
@@ -1823,9 +1978,9 @@ impl Stack {
                     // Maintenance clears user state while the stack keeps
                     // its wiring, re-stamped by the link facts above, and
                     // the layer's share of the commit lands with it.
-                    Some((clear, forgotten)) => ephemeral.maintain(batch, *clear, forgotten),
+                    Some((clear, forgotten)) => ephemeral.maintain(batch, *clear, forgotten, hold),
                     None => {
-                        ephemeral.apply(batch)?;
+                        ephemeral.apply_held(batch, hold)?;
                     }
                 }
                 let head = Head::Ephemeral(ephemeral.revision());
@@ -1844,6 +1999,7 @@ impl Stack {
     /// pass or since `previous`; a layer the pass never reaches is
     /// never asked to write, whatever happened to it outside the
     /// stack. Returns the heads the stack reads at afterwards.
+    #[allow(clippy::too_many_arguments)]
     async fn capture<Env>(
         &self,
         topology: &Topology,
@@ -1851,6 +2007,7 @@ impl Stack {
         upkeep: &Upkeep,
         mut heads: Vec<Head>,
         previous: &[Head],
+        hold: &Hold,
         env: &Env,
     ) -> Result<Vec<Head>, CommitError>
     where
@@ -1874,7 +2031,7 @@ impl Stack {
                 continue;
             }
             if let Some(head) = self
-                .refresh_links(topology, index, &heads, batch, maintenance, env)
+                .refresh_links(topology, index, &heads, batch, maintenance, hold, env)
                 .await?
             {
                 if heads[index] != head {
@@ -1903,6 +2060,7 @@ impl Stack {
             staged: live.topology.layers.iter().map(|_| None).collect(),
             induced: None,
             watermark: live.watermark.clone(),
+            holds: Vec::new(),
         };
         // An edit applies once its encloser is in the stack, so a
         // transaction may name its links in any order: a layer that a
@@ -2030,9 +2188,7 @@ impl Stack {
     /// staging: a chain that holds part of it must never publish, and a
     /// chain cannot be cut back to the commits before it.
     fn abandon_staged(&self) {
-        let mut state = self.state.write();
-        state.staged = state.staged.iter().map(|_| None).collect();
-        state.induced = None;
+        self.state.write().drop_staged();
     }
 }
 
@@ -2089,6 +2245,8 @@ struct StackWitness<'a> {
     topology: &'a Topology,
     placements: &'a Placements,
     bottom: &'a Ephemeral,
+    /// The hold of the commit, which each witness carries.
+    hold: &'a Hold,
     /// Each round's shares, by layer, or `None` for the bottom's session
     /// store, in the order induction ran them.
     rounds: Vec<BTreeMap<Option<usize>, Changes>>,
@@ -2115,7 +2273,7 @@ impl StackWitness<'_> {
                     None => self.bottom,
                     Some(index) => self.topology.layers[index].store(),
                 };
-                store.witness(share);
+                store.witness_held(share, self.hold);
             }
         }
         Ok(())
@@ -2298,6 +2456,12 @@ impl<'a> StackTransaction<'a> {
     /// Finalize into a commit command. Its `perform` stages; chain
     /// [`publish`](StackCommit::publish) to stage and publish in one
     /// step.
+    ///
+    /// A [`Channel`](crate::Channel) holds the instants of a staged
+    /// commit until it publishes, and keeps every later instant in its log
+    /// past its bound meanwhile. A commit that stages should be published,
+    /// or dropped with an advance, a pull, or the stack, or the log grows
+    /// without bound.
     pub fn commit(self) -> StackCommit<'a> {
         StackCommit {
             stack: self.stack,
@@ -2341,6 +2505,7 @@ impl<'a> StackCommit<'a> {
         // A NaN is no value: refused before anything changes, the wiring
         // included, as a branch commit refuses it.
         refuse_nan(self.changes.log().iter().map(|(_, _, change)| change))?;
+        let _turn = stack.turn.lock().await;
         let mut batches: BTreeMap<usize, Changes> = BTreeMap::new();
 
         // Wiring first: a re-shaped stack reads and routes as re-shaped.
@@ -2400,21 +2565,29 @@ impl<'a> StackCommit<'a> {
             Some(state) => state.heads(),
             None => stack.captured(),
         };
+        // Every instant this commit mints in an ephemeral layer carries
+        // its hold, so a channel sends it only once the commit publishes.
+        let mut pending = Pending::open();
+        let hold = pending.hold();
 
         if self.changes.is_empty() && self.transients.is_empty() && !rewired {
             // Maintenance alone: each store's lands as one instant, its
             // wiring re-stamped, through the same staging pass a write
             // takes.
-            return Ok(stack
+            pending.staging(stack);
+            let heads = stack
                 .capture(
                     &topology,
                     batches,
                     &maintenance,
                     captured.clone(),
                     &previous,
+                    &hold,
                     env,
                 )
-                .await?);
+                .await?;
+            stack.hold_until_published(pending.keep());
+            return Ok(heads);
         }
         let Some(primary) = topology.primary() else {
             return Err(CommitError::Detached.into());
@@ -2493,6 +2666,7 @@ impl<'a> StackCommit<'a> {
             placements: &staged,
             bottom: primary.overlay(),
             rounds: Vec::new(),
+            hold: &hold,
         };
         // A write placed on a read-only scope fails before induction; so
         // does a dispatched transient, whose witness would land in that
@@ -2607,6 +2781,7 @@ impl<'a> StackCommit<'a> {
         // it had, and any other drops its staged chains: a chain that holds
         // part of the failed commit must never publish.
         let replaced = rewiring.take().map(|state| stack.install(state));
+        pending.staging(stack);
         let staging = stack
             .capture(
                 &topology,
@@ -2614,24 +2789,28 @@ impl<'a> StackCommit<'a> {
                 &maintenance,
                 captured.clone(),
                 &previous,
+                &hold,
                 env,
             )
             .await;
         let heads = match staging {
             Ok(heads) => heads,
             Err(error) => {
-                match replaced {
-                    Some(state) => {
-                        stack.install(state);
-                    }
-                    None => stack.abandon_staged(),
+                // The pending hold drops the staged chains as it goes.
+                if let Some(state) = replaced {
+                    stack.install(state);
                 }
                 return Err(error.into());
             }
         };
-        if stack.is_staged() {
-            stack.state.write().induced = lagged;
-        } else {
+        // The commit landed: its hold settles before the watermark moves,
+        // so a failure to move it drops nothing that staged.
+        let waits = stack.is_staged();
+        if waits {
+            stack.state.write().induced = lagged.clone();
+        }
+        stack.hold_until_published(pending.keep());
+        if !waits {
             stack.catch_up_induction(lagged, env).await?;
         }
         Ok(heads)
@@ -6222,6 +6401,578 @@ mod tests {
             recorded.contains(&Value::Bytes(Head::Tree(index.revision()).bytes())),
             "the link records the new head of the read-only layer"
         );
+        Ok(())
+    }
+
+    /// A stack whose application layer is shared with a peer, the daemon,
+    /// over a channel: `cmd.create/name` is a transient placed on
+    /// `memory:application`, so a command is a witness of the commit on
+    /// that layer, and `intent/name` lands on the bottom.
+    async fn channel_stack(
+        operator: &impl StackSyncEnv,
+        shared: &Branch,
+    ) -> Result<(Stack, crate::Channel, Entity)> {
+        shared
+            .overlay()
+            .assert(Placement::new(
+                "cmd.create/name".parse()?,
+                name("application"),
+            ))?
+            .assert(crate::TransientAttribute::new("cmd.create/name".parse()?))?;
+        let application = Ephemeral::create().perform(operator).await;
+        let top = Ephemeral::create().perform(operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &application, name("application"))
+            .link(&application, shared, name("shared"))
+            .perform(operator)
+            .await?;
+        let channel = crate::Channel::new(application);
+        let daemon: Entity = "did:key:z6MkDaemon".parse()?;
+        channel.join(daemon.clone());
+        Ok((stack, channel, daemon))
+    }
+
+    /// A commit that records an intent on the bottom and witnesses a
+    /// command on the application layer.
+    fn create_garden(stack: &Stack) -> Result<StackTransaction<'_>> {
+        let intent: Entity = "intent:zI".parse()?;
+        Ok(stack
+            .transaction()
+            .assert(
+                dialog_query::the!("intent/name")
+                    .of(intent.clone())
+                    .is("Garden".to_string()),
+            )
+            .dispatch(
+                dialog_query::the!("cmd.create/name")
+                    .of(intent)
+                    .is("Garden".to_string()),
+            ))
+    }
+
+    /// The commands that a catch-up of `channel` carries to `peer`.
+    fn commands(channel: &crate::Channel, peer: &Entity) -> usize {
+        match channel.since(peer) {
+            crate::Catchup::Instants { instants, .. } => instants
+                .iter()
+                .filter(|instant| {
+                    instant
+                        .asserted
+                        .iter()
+                        .any(|fact| fact.the.as_str() == "cmd.create/name")
+                })
+                .count(),
+            crate::Catchup::Resync { .. } => panic!("the peer is caught up from the log"),
+        }
+    }
+
+    /// The holds that a publish takes from the stack are settled however
+    /// it ends: released when every chain lands, and discarded when the
+    /// publish fails or its future is dropped, so that no hold stays open
+    /// and stalls a channel.
+    #[test]
+    fn it_settles_the_holds_of_a_publish_however_it_ends() {
+        let (released, dropped) = (Hold::open(), Hold::open());
+        Settling(vec![released.clone()]).release();
+        drop(Settling(vec![dropped.clone()]));
+        assert_eq!(released.state(), crate::Held::Released);
+        assert_eq!(dropped.state(), crate::Held::Dropped);
+    }
+
+    /// A channel holds the instants of a commit until it publishes. Here
+    /// the publish loses its compare and set: no catch-up carries the
+    /// command, though a rule and an observer in the process saw it at
+    /// stage time. The run again, after an advance, sends it once.
+    #[dialog_common::test]
+    async fn it_holds_the_instants_of_a_commit_until_it_publishes() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let pending: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "name": { "the": "pending/name", "as": "text:" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "name": { "the": "cmd.create/name", "as": "text:" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "name": { "?": { "name": "name" } }
+                }
+            }]
+        }))?;
+        shared
+            .transaction()
+            .assert(pending)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let (stack, channel, daemon) = channel_stack(&operator, &shared).await?;
+        let observer = channel.layer().observe_everything();
+
+        create_garden(&stack)?.commit().perform(&operator).await?;
+        match observer.drain() {
+            Drained::Instants(instants) => assert!(
+                instants.iter().any(|instant| instant.transient),
+                "an observer in the process sees the command at stage time"
+            ),
+            Drained::Gap { .. } => panic!("no gap"),
+        }
+        let intent: Entity = "intent:zI".parse()?;
+        assert_eq!(
+            values::<String>(&stack, &operator, "pending/name", &intent).await?,
+            vec![Value::String("Garden".into())],
+            "a rule in the process reacts to the command at stage time"
+        );
+        shared.refresh(&operator).await?;
+        assert!(
+            committed(&shared, &operator, "pending/name", &intent)
+                .await?
+                .is_empty(),
+            "while the head of the bottom has not moved"
+        );
+        assert_eq!(commands(&channel, &daemon), 0, "the commit is staged");
+
+        // Another device moves the head: the publish loses.
+        let other = repo.branch("main").open().perform(&operator).await?;
+        other
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of("doc:1".parse::<Entity>()?)
+                    .is("elsewhere".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert!(matches!(
+            stack.publish(&operator).await,
+            Err(StackError::Publish { .. })
+        ));
+        assert_eq!(
+            commands(&channel, &daemon),
+            0,
+            "a lost publish sends no command"
+        );
+
+        // The run again, on the new head.
+        stack.advance(&operator).await?;
+        create_garden(&stack)?
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            commands(&channel, &daemon),
+            1,
+            "the run again sends it once"
+        );
+        assert_eq!(commands(&channel, &daemon), 0);
+        Ok(())
+    }
+
+    /// The facts that a commit stores in an ephemeral layer stay there when
+    /// its publish fails, so a peer of the channel receives them all the
+    /// same, and holds what the layer holds. Only the witness waits for a
+    /// publish.
+    #[dialog_common::test]
+    async fn it_sends_the_facts_of_a_commit_that_lost_its_publish() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        shared
+            .overlay()
+            .assert(Placement::new("app/note".parse()?, name("application")))?;
+        let (stack, channel, daemon) = channel_stack(&operator, &shared).await?;
+        let note: Entity = "note:1".parse()?;
+        let noted = || -> Result<StackTransaction<'_>> {
+            Ok(create_garden(&stack)?.assert(
+                dialog_query::the!("app/note")
+                    .of(note.clone())
+                    .is("hi".to_string()),
+            ))
+        };
+        noted()?.commit().perform(&operator).await?;
+        let other = repo.branch("main").open().perform(&operator).await?;
+        other
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of("doc:1".parse::<Entity>()?)
+                    .is("elsewhere".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert!(stack.publish(&operator).await.is_err(), "the publish loses");
+        stack.advance(&operator).await?;
+        noted()?.commit().publish().perform(&operator).await?;
+
+        let crate::Catchup::Instants { instants, .. } = channel.since(&daemon) else {
+            panic!("the peer is caught up from the log");
+        };
+        assert!(
+            instants.iter().any(|instant| instant
+                .asserted
+                .iter()
+                .any(|fact| fact.the.as_str() == "app/note")),
+            "the peer receives the note that the layer holds"
+        );
+        Ok(())
+    }
+
+    /// A command that waited for its publish is not lost to the ring bound
+    /// of the channel once it is released: a peer that has not read it
+    /// still receives it, since no resync could rebuild it.
+    #[dialog_common::test]
+    async fn it_keeps_a_released_command_past_the_ring_bound() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        shared
+            .overlay()
+            .assert(Placement::new(
+                "cmd.create/name".parse()?,
+                name("application"),
+            ))?
+            .assert(crate::TransientAttribute::new("cmd.create/name".parse()?))?;
+        let application = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &application, name("application"))
+            .link(&application, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        let channel = crate::Channel::over(application.clone(), 4);
+        let daemon: Entity = "did:key:z6MkDaemon".parse()?;
+        channel.join(daemon.clone());
+
+        create_garden(&stack)?.commit().perform(&operator).await?;
+        let result = |index: usize| -> Result<Changes> {
+            let mut result = Changes::new();
+            result.associate(
+                "result/status".parse()?,
+                format!("cmd:{index}").parse()?,
+                Value::String("done".into()),
+                Pick::All,
+            );
+            Ok(result)
+        };
+        for index in 0..5 {
+            application.apply(result(index)?)?;
+        }
+        assert_eq!(commands(&channel, &daemon), 0, "the command waits");
+        for index in 5..10 {
+            application.apply(result(index)?)?;
+        }
+        stack.publish(&operator).await?;
+        assert_eq!(
+            commands(&channel, &daemon),
+            1,
+            "the released command reaches the peer"
+        );
+        Ok(())
+    }
+
+    /// A peer that joins while a command waits for its publish is owed
+    /// the command: it receives it once the commit publishes.
+    #[dialog_common::test]
+    async fn it_owes_a_waiting_command_to_a_peer_that_joins() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let (stack, channel, _) = channel_stack(&operator, &shared).await?;
+        create_garden(&stack)?.commit().perform(&operator).await?;
+        let late: Entity = "did:key:z6MkLate".parse()?;
+        channel.join(late.clone());
+        // A second join, as a reconnect makes, owes the command once.
+        channel.join(late.clone());
+        assert_eq!(commands(&channel, &late), 0, "the command waits");
+        stack.publish(&operator).await?;
+        assert_eq!(commands(&channel, &late), 1, "and goes once it publishes");
+        assert_eq!(commands(&channel, &late), 0);
+        Ok(())
+    }
+
+    /// An advance drops a staged commit: its command never leaves, and
+    /// the run again sends it once.
+    #[dialog_common::test]
+    async fn it_sends_no_command_of_a_commit_that_an_advance_dropped() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let (stack, channel, daemon) = channel_stack(&operator, &shared).await?;
+        create_garden(&stack)?.commit().perform(&operator).await?;
+        stack.advance(&operator).await?;
+        assert!(!stack.is_staged(), "the advance dropped the staged commit");
+        assert_eq!(commands(&channel, &daemon), 0);
+        create_garden(&stack)?
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            commands(&channel, &daemon),
+            1,
+            "the run again sends it once"
+        );
+        Ok(())
+    }
+
+    /// The shape of a stack in Sapling: a wiring layer at the top links the
+    /// space first, so it is the bottom, and the application layer beside
+    /// it, which a channel shares. A command that a rule derives reaches
+    /// the channel once its commit publishes, a fact placed on the
+    /// application scope lands in that layer, a commit with no durable
+    /// change sends at once, and no link enters the application layer.
+    #[dialog_common::test]
+    async fn it_shares_the_application_layer_beside_the_space() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let space = repo.branch("main").open().perform(&operator).await?;
+        let command: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "name": { "the": "cmd.create/name", "as": "text:" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "name": { "the": "intent/name", "as": "text:" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "name": { "?": { "name": "name" } }
+                }
+            }]
+        }))?;
+        space
+            .transaction()
+            .assert(command)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        space.refresh(&operator).await?;
+        space
+            .overlay()
+            .assert(Placement::new(
+                "cmd.create/name".parse()?,
+                name("application"),
+            ))?
+            .assert(crate::TransientAttribute::new("cmd.create/name".parse()?))?
+            .assert(Placement::new(
+                "result/status".parse()?,
+                name("application"),
+            ))?;
+        let wiring = Ephemeral::create().perform(&operator).await;
+        let application = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(wiring.clone())
+            .link(&wiring, &space, name("space"))
+            .link(&wiring, &application, name("application"))
+            .perform(&operator)
+            .await?;
+        assert!(stack.layers()[0].same(&Layer::Branch(space.clone())));
+        let channel = crate::Channel::new(application.clone());
+        let daemon: Entity = "did:key:z6MkDaemon".parse()?;
+        channel.join(daemon.clone());
+
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("intent/name")
+                    .of("intent:zI".parse::<Entity>()?)
+                    .is("Garden".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert_eq!(commands(&channel, &daemon), 0, "the command waits");
+        stack.publish(&operator).await?;
+        assert_eq!(commands(&channel, &daemon), 1, "and goes once it publishes");
+
+        let result: Entity = "cmd:1".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("result/status")
+                    .of(result.clone())
+                    .is("done".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert!(!stack.is_staged(), "the commit changed no durable layer");
+        let crate::Catchup::Instants { instants, .. } = channel.since(&daemon) else {
+            panic!("the peer is caught up from the log");
+        };
+        assert!(
+            instants.iter().any(|instant| instant
+                .asserted
+                .iter()
+                .any(|fact| fact.the.as_str() == "result/status")),
+            "the fact lands in the application layer and goes at once"
+        );
+        assert!(
+            application
+                .scan(&ArtifactSelector::new().the(link_attr("from")))
+                .is_empty(),
+            "no link is a fact of the application layer"
+        );
+        Ok(())
+    }
+
+    /// A peer that is the only one, and that a reconnect places past a
+    /// command that waits, is owed it still: the log keeps the command
+    /// until it is repaid.
+    #[dialog_common::test]
+    async fn it_owes_a_waiting_command_to_the_only_peer_across_a_reconnect() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let (stack, channel, daemon) = channel_stack(&operator, &shared).await?;
+        create_garden(&stack)?.commit().perform(&operator).await?;
+        channel.leave(&daemon);
+        channel.join(daemon.clone());
+        stack.publish(&operator).await?;
+        assert_eq!(commands(&channel, &daemon), 1, "the command goes once");
+        assert_eq!(commands(&channel, &daemon), 0);
+        Ok(())
+    }
+
+    /// A commit whose induction derives a write that fails to route never
+    /// publishes, and its command never leaves: the rounds are witnessed
+    /// only once the batch routes. A later commit still reaches the peer.
+    #[dialog_common::test]
+    async fn it_sends_no_command_of_a_commit_that_failed_to_route() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        // A rule that answers the command with a fact placed on a scope no
+        // layer binds, so the routing of the settled batch fails.
+        let misplace: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "name": { "the": "lost/name", "as": "text:" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "name": { "the": "cmd.create/name", "as": "text:" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "name": { "?": { "name": "name" } }
+                }
+            }]
+        }))?;
+        shared
+            .transaction()
+            .assert(misplace)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        shared
+            .overlay()
+            .assert(Placement::new("lost/name".parse()?, name("nowhere")))?
+            .assert(Placement::new("app/note".parse()?, name("application")))?;
+        let (stack, channel, daemon) = channel_stack(&operator, &shared).await?;
+
+        assert!(
+            create_garden(&stack)?
+                .commit()
+                .perform(&operator)
+                .await
+                .is_err(),
+            "the derived fact routes nowhere"
+        );
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("app/note")
+                    .of("note:1".parse::<Entity>()?)
+                    .is("hi".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        match channel.since(&daemon) {
+            crate::Catchup::Instants { instants, .. } => {
+                assert_eq!(instants.len(), 1, "the later commit reaches the peer");
+                assert!(
+                    instants[0]
+                        .asserted
+                        .iter()
+                        .all(|fact| fact.the.as_str() == "app/note")
+                );
+            }
+            crate::Catchup::Resync { .. } => panic!("the peer is caught up from the log"),
+        }
+        Ok(())
+    }
+
+    /// A peer that falls off the log while a command waits for its
+    /// publish resyncs to just before the command, so the command still
+    /// reaches it once the commit publishes.
+    #[dialog_common::test]
+    async fn it_keeps_a_held_command_through_a_resync() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let (stack, channel, _) = channel_stack(&operator, &shared).await?;
+        let small = crate::Channel::over(channel.layer().clone(), 4);
+        let daemon: Entity = "did:key:z6MkSlow".parse()?;
+        small.join(daemon.clone());
+        // More than the log holds enters before the command.
+        for index in 0..10u32 {
+            let mut changes = Changes::new();
+            changes.associate(
+                "note/n".parse()?,
+                format!("note:{index}").parse()?,
+                Value::UnsignedInt(index.into()),
+                Pick::All,
+            );
+            channel.layer().apply(changes)?;
+        }
+        create_garden(&stack)?.commit().perform(&operator).await?;
+        assert!(
+            matches!(small.since(&daemon), crate::Catchup::Resync { .. }),
+            "the peer fell off the log"
+        );
+
+        stack.publish(&operator).await?;
+        assert_eq!(
+            commands(&small, &daemon),
+            1,
+            "the command follows the resync"
+        );
+        Ok(())
+    }
+
+    /// A commit that changes no durable layer has no publish to wait for:
+    /// a channel sends its instants at once.
+    #[dialog_common::test]
+    async fn it_sends_at_once_the_instants_of_a_commit_with_no_durable_change() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let (stack, channel, daemon) = channel_stack(&operator, &shared).await?;
+
+        stack
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.create/name")
+                    .of("intent:zJ".parse::<Entity>()?)
+                    .is("Office".to_string()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert!(!stack.is_staged(), "no durable layer staged");
+        assert_eq!(commands(&channel, &daemon), 1);
         Ok(())
     }
 

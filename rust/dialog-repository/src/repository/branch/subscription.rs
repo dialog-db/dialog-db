@@ -4911,6 +4911,7 @@ mod tests {
             changes: Vec::new(),
             asserted: vec![fact],
             retracted: Vec::new(),
+            hold: crate::Hold::default(),
         };
         match super::touched_by(&demand, vec![instant.clone()]) {
             super::Touched::Facts { subjects, .. } => {
