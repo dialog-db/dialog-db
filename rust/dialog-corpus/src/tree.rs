@@ -1526,17 +1526,24 @@ where
         // records), written through [`CorpusExt::record`] or a
         // [`WriteScope::Machinery`] stream. At the library level such
         // facts therefore cannot be corrupted through the ordinary
-        // write path. Two prefixes are carved out of the application
-        // gate: `dialog.rule/*` (rule storage) and `dialog.concept/*`
-        // (concept markers), whose integrity is semantic rather than
-        // positional — rules are content-addressed, so a forged rule
-        // fact fails the hydration check upstream and is inert.
+        // write path. Four prefixes are carved out of the application
+        // gate: `dialog.rule/*` (rule storage), `dialog.concept/*`
+        // (concept markers), `dialog.attribute/*` (attribute placement
+        // declarations), and `dialog.link/*` (stack links), whose
+        // integrity is semantic rather than positional — rules are
+        // content-addressed, so a forged rule fact fails the hydration
+        // check upstream and is inert, a marker only ever selects a
+        // behaviour for facts the writer could have written anyway,
+        // and a link is a content-addressed record of a head the
+        // writer observed.
         if scope == WriteScope::Application {
             let (Instruction::Assert(fact, _) | Instruction::Retract(fact)) = &instruction;
             let the = fact.the.as_str();
             if the.starts_with("dialog.")
                 && !the.starts_with("dialog.rule/")
                 && !the.starts_with("dialog.concept/")
+                && !the.starts_with("dialog.attribute/")
+                && !the.starts_with("dialog.link/")
             {
                 return Err(DialogCorpusError::ReservedRelation(fact.the.to_string()));
             }

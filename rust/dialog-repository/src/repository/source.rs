@@ -58,7 +58,7 @@ use crate::repository::branch::LayerMetadataMemo;
 use crate::repository::caches::CacheBudget;
 use crate::rules::{RuleCache, RuleContent, SharedRuleCache};
 use crate::schema::Replica;
-use crate::{Branch, Ephemeral, Index, Revision, Snapshot};
+use crate::{Bindings, Branch, Ephemeral, Index, Revision, Snapshot};
 
 /// The live handle of a line: a branch or a snapshot, where its head is
 /// now. `Copy`, so builders that hold one stay as cheap to pass around
@@ -149,6 +149,14 @@ impl<'a> Live<'a> {
         match self {
             Live::Branch(branch) => branch.overlay(),
             Live::Snapshot(snapshot) => snapshot.overlay(),
+        }
+    }
+
+    /// The scope bindings a commit on this line routes by.
+    pub(crate) fn bindings(self) -> &'a Bindings {
+        match self {
+            Live::Branch(branch) => branch.bindings(),
+            Live::Snapshot(snapshot) => snapshot.bindings(),
         }
     }
 
@@ -256,6 +264,7 @@ impl<'a> View<'a> {
         Source {
             held: self.live.to_owned(),
             revision: self.revision.map(Cow::into_owned),
+            follows: false,
         }
     }
 
@@ -302,6 +311,16 @@ impl<'a> View<'a> {
     ) -> Option<BranchMetadata> {
         self.branch()
             .map(|branch| branch.metadata_at(operator, self.revision()))
+    }
+
+    /// The line's session overlay, read live (see [`Live::overlay`]).
+    pub(crate) fn overlay(&self) -> &'a Ephemeral {
+        self.live.overlay()
+    }
+
+    /// The scope bindings a commit on this line routes by.
+    pub(crate) fn bindings(&self) -> &'a Bindings {
+        self.live.bindings()
     }
 
     /// The shared spilled-value block cache.
@@ -450,9 +469,47 @@ enum Held {
 pub(crate) struct Source {
     held: Held,
     revision: Option<Revision>,
+    /// Whether a standing read pins this source afresh at every poll
+    /// ([`refreshed`](Self::refreshed)): a line it follows, rather than
+    /// one pinned at a revision the caller holds.
+    follows: bool,
 }
 
 impl Source {
+    /// `branch` pinned at `revision`, a head the caller captured rather
+    /// than the one the branch stands at now: what a
+    /// [`Stack`](crate::Stack) reads a layer beneath its top as. `None`
+    /// is a branch captured before its first commit.
+    pub(crate) fn pinned(branch: Branch, revision: Option<Revision>) -> Self {
+        Source {
+            held: Held::Branch(Arc::new(branch)),
+            revision,
+            follows: false,
+        }
+    }
+
+    /// `live` pinned at the head it stands at now, for a standing read
+    /// that follows it: each poll pins it afresh with
+    /// [`refreshed`](Self::refreshed) and reads that one revision
+    /// throughout.
+    pub(crate) fn following(live: Live<'_>) -> Self {
+        Source {
+            follows: true,
+            ..live.pin().into_source()
+        }
+    }
+
+    /// This source as a standing read's next poll reads it: a line it
+    /// follows pinned at the head it stands at now, any other source as
+    /// it is.
+    pub(crate) fn refreshed(&self) -> Self {
+        if self.follows {
+            Self::following(self.live())
+        } else {
+            self.clone()
+        }
+    }
+
     /// The line held, borrowed.
     fn live(&self) -> Live<'_> {
         match &self.held {
@@ -485,6 +542,7 @@ impl From<Branch> for Source {
         Source {
             held: Held::Branch(Arc::new(branch)),
             revision,
+            follows: false,
         }
     }
 }
@@ -496,6 +554,7 @@ impl From<Snapshot> for Source {
         Source {
             held: Held::Snapshot(Arc::new(snapshot)),
             revision,
+            follows: false,
         }
     }
 }

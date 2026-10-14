@@ -33,13 +33,15 @@ use dialog_query::query::Output as _;
 use dialog_query::{Attribute, AttributeStatement, Cardinality, Concept, InductiveRule, Query};
 use dialog_storage::provider::storage::VolatileSpace;
 use futures_util::{StreamExt as _, TryStreamExt as _};
+use std::collections::HashSet;
 use std::future::Future;
 use std::iter::repeat_n;
 use std::pin::Pin;
 use std::slice::from_ref;
 
+use super::session::Composite;
 use super::session::{QueryEnv, shared_metadata};
-use super::transaction::{settle, stored_claims};
+use super::transaction::{settle_successions, stored_claims};
 use crate::helpers::{Interposed, Interposing, Under, test_repo};
 use crate::repository::source::{Live, View};
 use crate::{Branch, CommitError, PublishError, Staged};
@@ -377,7 +379,14 @@ fn succession<'a>(
         let view = Live::from(branch).pin();
         let operator = Identify.perform(env).await?;
         let overlay = shared_metadata(from_ref(&view), &operator);
-        let settled = settle(vec![view.into_source()], overlay, &staged, env).await?;
+        let settled = settle_successions(
+            &Composite::of(view.into_source()),
+            overlay,
+            &staged,
+            &HashSet::new(),
+            env,
+        )
+        .await?;
         let mut rows: Rows = settled
             .iter()
             .map(|(of, the, change)| format!("{of} {the} {change:?}"))
