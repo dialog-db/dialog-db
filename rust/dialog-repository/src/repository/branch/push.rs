@@ -300,7 +300,14 @@ where
                 }
 
                 let current = upstream.revision().map(|r| r.tree);
-                if current != base {
+                // The remote holds this very head already: a push of it
+                // landed though its answer was lost on the way back, or
+                // another replica pushed the same tree. Nothing is left to
+                // send, and the sync point is recorded below, so the next
+                // push fast-forwards from here rather than being refused
+                // for a base the remote has moved past to our own head.
+                let landed = current.as_ref() == Some(&revision.tree);
+                if !landed && current != base {
                     return Err(PushError::NonFastForward {
                         branch: branch.name().to_string(),
                         expected: base,
@@ -308,207 +315,210 @@ where
                     });
                 }
 
-                // Upload tree nodes present in our current tree but not
-                // in the base, so the remote can hydrate the new tree
-                // before we publish the revision pointing at it. A first
-                // push has no base: everything is novel.
-                //
-                // The walk reads the local archive only, and a replica
-                // legitimately holds whole subtrees by reference (a
-                // fast-forward pull adopts the upstream head by root, zero
-                // reads), so absence is information, not a fault
-                // ([`MissingBlocks::Boundary`], both sides):
-                //
-                // - The BASE is the recorded sync point with this very
-                //   upstream — a tree the target itself served or accepted —
-                //   so an absent base-side block is definitionally present
-                //   on the target. Losing its subtraction only over-uploads
-                //   held nodes, which idempotent content-addressed puts
-                //   absorb. Sound at any remote count.
-                // - A block absent under OUR head is not our novelty (a
-                //   replica stores what it mints). Whether the TARGET has
-                //   it is adjudicated below, per unresolved subtree root:
-                //   free attribution when the target is the only tracked
-                //   remote, one existence probe otherwise, and a
-                //   fetch-forward transfer — streamed through, never
-                //   persisted locally — only for content the target
-                //   provably lacks.
-                let missing = MissingPolicy {
-                    source: MissingBlocks::Boundary,
-                    target: MissingBlocks::Boundary,
-                };
+                if !landed {
+                    // Upload tree nodes present in our current tree but not
+                    // in the base, so the remote can hydrate the new tree
+                    // before we publish the revision pointing at it. A first
+                    // push has no base: everything is novel.
+                    //
+                    // The walk reads the local archive only, and a replica
+                    // legitimately holds whole subtrees by reference (a
+                    // fast-forward pull adopts the upstream head by root, zero
+                    // reads), so absence is information, not a fault
+                    // ([`MissingBlocks::Boundary`], both sides):
+                    //
+                    // - The BASE is the recorded sync point with this very
+                    //   upstream — a tree the target itself served or accepted —
+                    //   so an absent base-side block is definitionally present
+                    //   on the target. Losing its subtraction only over-uploads
+                    //   held nodes, which idempotent content-addressed puts
+                    //   absorb. Sound at any remote count.
+                    // - A block absent under OUR head is not our novelty (a
+                    //   replica stores what it mints). Whether the TARGET has
+                    //   it is adjudicated below, per unresolved subtree root:
+                    //   free attribution when the target is the only tracked
+                    //   remote, one existence probe otherwise, and a
+                    //   fetch-forward transfer — streamed through, never
+                    //   persisted locally — only for content the target
+                    //   provably lacks.
+                    let missing = MissingPolicy {
+                        source: MissingBlocks::Boundary,
+                        target: MissingBlocks::Boundary,
+                    };
 
-                let index = branch.archive().index();
-                let store = LocalIndex::new(env, index.clone());
-                let base_tree = match &base {
-                    Some(base) => Index::from_hash(NodeHash::from(*base.hash())),
-                    None => Index::empty(),
-                };
-                let current_tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
-                let tree_store = store;
-                let difference = TreeDifference::compute_with(
-                    &base_tree,
-                    &current_tree,
-                    &tree_store,
-                    &tree_store,
-                    missing,
-                )
-                .await?;
+                    let index = branch.archive().index();
+                    let store = LocalIndex::new(env, index.clone());
+                    let base_tree = match &base {
+                        Some(base) => Index::from_hash(NodeHash::from(*base.hash())),
+                        None => Index::empty(),
+                    };
+                    let current_tree = Index::from_hash(NodeHash::from(*revision.tree.hash()));
+                    let tree_store = store;
+                    let difference = TreeDifference::compute_with(
+                        &base_tree,
+                        &current_tree,
+                        &tree_store,
+                        &tree_store,
+                        missing,
+                    )
+                    .await?;
 
-                let remote_archive = remote.archive();
-                let remote_index = remote_archive.index();
+                    let remote_archive = remote.archive();
+                    let remote_index = remote_archive.index();
 
-                // Everything below lands on the remote in REFERENCE ORDER —
-                // a block's referents (blob bytes, spilled value blocks,
-                // child nodes, forwarded subtrees) are durable before any
-                // block that names them: blobs and spills first, then the
-                // by-reference frontier subtrees, then the held novelty
-                // children-before-parents, then the revision. The ordering
-                // is a protocol invariant, not a nicety: the existence
-                // probes prune a whole subtree on one positive answer, which
-                // is sound only if a block's presence on a protocol-written
-                // store implies the presence of everything it references —
-                // and that holds only if every prefix of every push
-                // (aborted ones included) leaves the store closure-complete.
-                //
-                // Attribution first, since the shipment of by-reference
-                // content depends on it. When the target is the only remote
-                // reachable from the tracked upstream set, everything held
-                // by reference came from it — attribution, zero requests.
-                // Otherwise one probe per item settles it, and only content
-                // the target provably lacks is transferred, fetched from the
-                // remotes that have it and streamed through without being
-                // persisted.
-                //
-                // Reachable means TRANSITIVE: a local upstream shares this
-                // archive, but its head can hold content by reference from
-                // remotes only IT tracks — attribution that stopped at the
-                // local entry would credit that content to this branch's own
-                // remote and silently skip forwarding it.
-                let tracked = tracked_remotes(branch, env).await?;
-                let sole_remote = tracked.iter().all(|other| other.same(remote));
-                let sources = if sole_remote {
-                    Vec::new()
-                } else {
-                    source_remotes(&tracked, remote)
-                };
+                    // Everything below lands on the remote in REFERENCE ORDER —
+                    // a block's referents (blob bytes, spilled value blocks,
+                    // child nodes, forwarded subtrees) are durable before any
+                    // block that names them: blobs and spills first, then the
+                    // by-reference frontier subtrees, then the held novelty
+                    // children-before-parents, then the revision. The ordering
+                    // is a protocol invariant, not a nicety: the existence
+                    // probes prune a whole subtree on one positive answer, which
+                    // is sound only if a block's presence on a protocol-written
+                    // store implies the presence of everything it references —
+                    // and that holds only if every prefix of every push
+                    // (aborted ones included) leaves the store closure-complete.
+                    //
+                    // Attribution first, since the shipment of by-reference
+                    // content depends on it. When the target is the only remote
+                    // reachable from the tracked upstream set, everything held
+                    // by reference came from it — attribution, zero requests.
+                    // Otherwise one probe per item settles it, and only content
+                    // the target provably lacks is transferred, fetched from the
+                    // remotes that have it and streamed through without being
+                    // persisted.
+                    //
+                    // Reachable means TRANSITIVE: a local upstream shares this
+                    // archive, but its head can hold content by reference from
+                    // remotes only IT tracks — attribution that stopped at the
+                    // local entry would credit that content to this branch's own
+                    // remote and silently skip forwarding it.
+                    let tracked = tracked_remotes(branch, env).await?;
+                    let sole_remote = tracked.iter().all(|other| other.same(remote));
+                    let sources = if sole_remote {
+                        Vec::new()
+                    } else {
+                        source_remotes(&tracked, remote)
+                    };
 
-                // Ship the blocks the tree nodes reference but the node
-                // upload does not carry: blob bytes and spilled value
-                // blocks, surfaced by ONE entry-level drain of the SAME
-                // differential the node upload walks (`shipment_refs`), so
-                // the changed paths are read once per push instead of once
-                // per concern. These land FIRST: a node must never be
-                // durable on the remote before the bytes its entries name,
-                // or an aborted push leaves probe-trustable residue that a
-                // later pusher prunes against — publishing a head whose
-                // blobs the remote does not hold.
-                // Shipments are independent of one another, so they cross
-                // together: SHIPMENT_CONCURRENCY at a time, the whole set
-                // awaited before anything that references them lands. On
-                // the sign-in path this loop awaited each shipment in turn
-                // and measured as the single largest cost of the push (one
-                // round trip per spilled value, one after another).
-                let blob_store = LocalIndex::new(env, index.clone());
-                let shipments = shipment_refs(&difference)
-                    .map(|shipment| {
-                        ship(
-                            shipment,
-                            branch,
-                            remote,
-                            &blob_store,
-                            &sources,
-                            sole_remote,
-                            env,
-                        )
-                    })
-                    .buffer_unordered(SHIPMENT_CONCURRENCY)
-                    .try_collect::<()>();
-                // Boxed like the node upload below: the stream carries the
-                // differential and produces a large future.
-                Box::pin(shipments).await?;
-
-                // Adjudicate the by-reference frontier: subtree roots the
-                // novelty walk could not enter. These land BEFORE the held
-                // novelty — held nodes reference frontier roots as children,
-                // and a parent durable before its subtree would be
-                // probe-trustable residue on an aborted push.
-                if !sole_remote {
-                    // A virgin target (no fetched revision) holds nothing:
-                    // every probe would miss, so skip them all and forward
-                    // outright. One shared visited set across roots — a
-                    // block reachable from two frontier links crosses once.
-                    let target_may_have = upstream.revision().is_some();
-                    let mut visited: HashSet<NodeHash> = HashSet::new();
-                    for link in difference.unresolved_target() {
-                        forward_subtree(
-                            link.node.clone(),
-                            branch,
-                            remote,
-                            &sources,
-                            target_may_have,
-                            &mut visited,
-                            env,
-                        )
-                        .await?;
-                    }
-                }
-
-                // Upload the held novelty children-before-parents: waves of
-                // nodes whose in-set children are already durable, concurrent
-                // within a wave, a barrier between waves. Children NOT in the
-                // novelty set are either shared with the base (already on the
-                // target) or by-reference frontier roots (settled above), so
-                // by the time any node lands here its full closure is durable.
-                let mut pending: Vec<_> = {
-                    let novelty = difference.novel_nodes();
-                    futures_util::pin_mut!(novelty);
-                    let mut nodes = Vec::new();
-                    while let Some(node) = novelty.next().await {
-                        nodes.push(node?);
-                    }
-                    nodes
-                };
-                let mut durable: HashSet<NodeHash> = HashSet::new();
-                let in_set: HashSet<NodeHash> =
-                    pending.iter().map(|node| node.hash().clone()).collect();
-                while !pending.is_empty() {
-                    let (wave, rest): (Vec<_>, Vec<_>) = pending.into_iter().partition(|node| {
-                        node_children(node).is_ok_and(|children| {
-                            children
-                                .iter()
-                                .all(|child| !in_set.contains(child) || durable.contains(child))
+                    // Ship the blocks the tree nodes reference but the node
+                    // upload does not carry: blob bytes and spilled value
+                    // blocks, surfaced by ONE entry-level drain of the SAME
+                    // differential the node upload walks (`shipment_refs`), so
+                    // the changed paths are read once per push instead of once
+                    // per concern. These land FIRST: a node must never be
+                    // durable on the remote before the bytes its entries name,
+                    // or an aborted push leaves probe-trustable residue that a
+                    // later pusher prunes against — publishing a head whose
+                    // blobs the remote does not hold.
+                    // Shipments are independent of one another, so they cross
+                    // together: SHIPMENT_CONCURRENCY at a time, the whole set
+                    // awaited before anything that references them lands. On
+                    // the sign-in path this loop awaited each shipment in turn
+                    // and measured as the single largest cost of the push (one
+                    // round trip per spilled value, one after another).
+                    let blob_store = LocalIndex::new(env, index.clone());
+                    let shipments = shipment_refs(&difference)
+                        .map(|shipment| {
+                            ship(
+                                shipment,
+                                branch,
+                                remote,
+                                &blob_store,
+                                &sources,
+                                sole_remote,
+                                env,
+                            )
                         })
-                    });
-                    if wave.is_empty() {
-                        // A cycle cannot exist in a hash tree, so an empty
-                        // wave means a node failed to decode (or the
-                        // invariant broke some other way). Either way,
-                        // continuing would publish a head the target cannot
-                        // serve — fail the push instead.
-                        for node in &rest {
-                            node_children(node)?;
-                        }
-                        return Err(dialog_search_tree::DialogSearchTreeError::Node(
-                            "novelty upload made no progress: children-before-parents \
-                             ordering found no uploadable node"
-                                .into(),
-                        )
-                        .into());
-                    }
-                    for node in &wave {
-                        durable.insert(node.hash().clone());
-                    }
-                    let upload = remote_index
-                        .upload(stream::iter(wave.into_iter().map(Ok)))
-                        .perform(env);
-                    // Boxed because the upload future carries the full
-                    // stream type and produces large futures.
-                    Box::pin(upload).await?;
-                    pending = rest;
-                }
+                        .buffer_unordered(SHIPMENT_CONCURRENCY)
+                        .try_collect::<()>();
+                    // Boxed like the node upload below: the stream carries the
+                    // differential and produces a large future.
+                    Box::pin(shipments).await?;
 
-                upstream.publish(revision.clone()).perform(env).await?;
+                    // Adjudicate the by-reference frontier: subtree roots the
+                    // novelty walk could not enter. These land BEFORE the held
+                    // novelty — held nodes reference frontier roots as children,
+                    // and a parent durable before its subtree would be
+                    // probe-trustable residue on an aborted push.
+                    if !sole_remote {
+                        // A virgin target (no fetched revision) holds nothing:
+                        // every probe would miss, so skip them all and forward
+                        // outright. One shared visited set across roots — a
+                        // block reachable from two frontier links crosses once.
+                        let target_may_have = upstream.revision().is_some();
+                        let mut visited: HashSet<NodeHash> = HashSet::new();
+                        for link in difference.unresolved_target() {
+                            forward_subtree(
+                                link.node.clone(),
+                                branch,
+                                remote,
+                                &sources,
+                                target_may_have,
+                                &mut visited,
+                                env,
+                            )
+                            .await?;
+                        }
+                    }
+
+                    // Upload the held novelty children-before-parents: waves of
+                    // nodes whose in-set children are already durable, concurrent
+                    // within a wave, a barrier between waves. Children NOT in the
+                    // novelty set are either shared with the base (already on the
+                    // target) or by-reference frontier roots (settled above), so
+                    // by the time any node lands here its full closure is durable.
+                    let mut pending: Vec<_> = {
+                        let novelty = difference.novel_nodes();
+                        futures_util::pin_mut!(novelty);
+                        let mut nodes = Vec::new();
+                        while let Some(node) = novelty.next().await {
+                            nodes.push(node?);
+                        }
+                        nodes
+                    };
+                    let mut durable: HashSet<NodeHash> = HashSet::new();
+                    let in_set: HashSet<NodeHash> =
+                        pending.iter().map(|node| node.hash().clone()).collect();
+                    while !pending.is_empty() {
+                        let (wave, rest): (Vec<_>, Vec<_>) =
+                            pending.into_iter().partition(|node| {
+                                node_children(node).is_ok_and(|children| {
+                                    children.iter().all(|child| {
+                                        !in_set.contains(child) || durable.contains(child)
+                                    })
+                                })
+                            });
+                        if wave.is_empty() {
+                            // A cycle cannot exist in a hash tree, so an empty
+                            // wave means a node failed to decode (or the
+                            // invariant broke some other way). Either way,
+                            // continuing would publish a head the target cannot
+                            // serve — fail the push instead.
+                            for node in &rest {
+                                node_children(node)?;
+                            }
+                            return Err(dialog_search_tree::DialogSearchTreeError::Node(
+                                "novelty upload made no progress: children-before-parents \
+                                 ordering found no uploadable node"
+                                    .into(),
+                            )
+                            .into());
+                        }
+                        for node in &wave {
+                            durable.insert(node.hash().clone());
+                        }
+                        let upload = remote_index
+                            .upload(stream::iter(wave.into_iter().map(Ok)))
+                            .perform(env);
+                        // Boxed because the upload future carries the full
+                        // stream type and produces large futures.
+                        Box::pin(upload).await?;
+                        pending = rest;
+                    }
+
+                    upstream.publish(revision.clone()).perform(env).await?;
+                }
             }
         }
 

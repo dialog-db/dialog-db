@@ -75,11 +75,11 @@ pub enum Fault {
     /// Nothing fails.
     #[default]
     None,
-    /// The first `times` connections are cut by the service, `after` each
-    /// opened, without a word: what a deploy, or a Durable Object that was
-    /// evicted, does to a client.
+    /// The first `times` connections that carry a watch are cut by the
+    /// service, `after` the first watch on each began, without a word: what
+    /// a deploy, or a Durable Object that was evicted, does to a client.
     Cut {
-        /// How long after it opened a connection is cut.
+        /// How long after its first watch began a connection is cut.
         after: std::time::Duration,
         /// How many connections are cut.
         times: usize,
@@ -256,29 +256,27 @@ async fn serve_socket(
     let (mut sink, mut source) = socket.split();
     let mut session = Session::new();
     // When this connection fails, if the fault fails it.
-    let failing = match state.fault {
-        Fault::Cut { after, times } | Fault::Freeze { after, times }
-            if state.fault_again(times) =>
-        {
+    // When this connection fails, if the fault fails it: a freeze counts
+    // from when the connection opened, a cut from when the first watch on
+    // it began, so a test knows the watch is on the connection it cuts.
+    let mut failing = match state.fault {
+        Fault::Freeze { after, times } if state.fault_again(times) => {
             Some(tokio::time::Instant::now() + after)
         }
         _ => None,
     };
-    let fails = async {
-        match failing {
-            Some(at) => tokio::time::sleep_until(at).await,
-            None => std::future::pending().await,
-        }
-    };
-    tokio::pin!(fails);
+    let mut cut = matches!(state.fault, Fault::Cut { .. });
     // A fault due already fails the connection before anything on it is
     // answered: a timer due now does not fire before the first frame.
     if failing.is_some_and(|at| at <= tokio::time::Instant::now()) {
-        if let Fault::Freeze { .. } = state.fault {
-            freeze(&mut source, &mut closed).await;
-        }
+        freeze(&mut source, &mut closed).await;
         return;
     }
+    let fails =
+        tokio::time::sleep_until(failing.unwrap_or_else(|| {
+            tokio::time::Instant::now() + std::time::Duration::from_secs(86400)
+        }));
+    tokio::pin!(fails);
     loop {
         let delivered = tokio::select! {
             // In this order, so a fault that is due fails the connection
@@ -290,7 +288,7 @@ async fn serve_socket(
                 let _ = sink.send(Message::Close(None)).await;
                 break;
             }
-            () = &mut fails => {
+            () = &mut fails, if failing.is_some() => {
                 if let Fault::Freeze { .. } = state.fault {
                     freeze(&mut source, &mut closed).await;
                 }
@@ -307,7 +305,19 @@ async fn serve_socket(
                         let _ = session.receive(&state.access, &bytes).await;
                         return;
                     }
-                    session.receive(&state.access, &bytes).await.into_iter().collect()
+                    let reply = session.receive(&state.access, &bytes).await;
+                    if cut
+                        && matches!(reply, Some(crate::socket::Reply::State { .. }))
+                        && let Fault::Cut { after, times } = state.fault
+                    {
+                        cut = false;
+                        if state.fault_again(times) {
+                            let at = tokio::time::Instant::now() + after;
+                            failing = Some(at);
+                            fails.as_mut().reset(at);
+                        }
+                    }
+                    reply.into_iter().collect()
                 }
                 // A ping is answered as a hibernating service answers it,
                 // without reading it as a frame.

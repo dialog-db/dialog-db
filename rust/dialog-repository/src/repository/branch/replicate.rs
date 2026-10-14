@@ -4,6 +4,7 @@
 use async_stream::stream;
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSend;
+use dialog_common::time::{self, Duration, Instant};
 use dialog_effects::Rejection;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
@@ -29,9 +30,10 @@ pub enum Replicated {
     Pulled(Revision),
     /// The branch's head reached its upstreams.
     Pushed(Revision),
-    /// The watch of this upstream ended: it is no longer followed as it
-    /// moves, and is pulled from only on the host's ticks, which begin the
-    /// watch again. Without ticks it is not followed again.
+    /// The watch of this upstream ended (its connection dropped, say). It
+    /// is begun again after a wait that grows each time in a row the watch
+    /// ends or cannot be begun, and meanwhile the upstream is pulled from
+    /// on the host's ticks, if any.
     Unwatched(Target),
 }
 
@@ -40,10 +42,14 @@ pub enum Replicated {
 ///
 /// An upstream that can be watched is followed as it moves: each head it
 /// delivers is recorded (see [`ConnectedBranch::watch`]) and pulled, with
-/// no round trip of its own. One that cannot be watched, a local one, and
-/// one whose watch ended are pulled from on the host's
-/// [`every`](Self::every) ticks, which is also when a watch that ended is
-/// begun again. Each tick also pushes the branch's own commits.
+/// no round trip of its own. A watch that ends, or cannot be begun, is
+/// begun again after a wait, which doubles each time in a row up to a
+/// minute and starts over once a watch delivers; the first state of the
+/// new watch is where the upstream stands, so what it took meanwhile is
+/// pulled then. One that cannot be watched at all, a local one, and one
+/// waiting to be watched again are pulled from on the host's
+/// [`every`](Self::every) ticks. Each tick also pushes the branch's own
+/// commits.
 ///
 /// The stream does the work only while it is read, and holds nothing of
 /// the environment but the borrow: a host that stops reading it pauses
@@ -63,11 +69,11 @@ impl Branch {
     /// Chain [`Replicate::pull`] or [`Replicate::push`] to do only one;
     /// a bare replicate does both.
     ///
-    /// Without [`Replicate::every`] nothing is checked on a schedule: a
-    /// watch that ends (its socket dropped, say) is never begun again, and
-    /// its upstream is not pulled from until the replication is started
-    /// anew. The stream answers [`Replicated::Unwatched`] when that
-    /// happens, so a host can tell.
+    /// Without [`Replicate::every`], upstreams that can be watched are
+    /// still followed, a watch that ends being begun again on its own, but
+    /// an upstream that cannot be watched at all (or a local one) is pulled
+    /// from only as the replication begins. The stream answers
+    /// [`Replicated::Unwatched`] when a watch ends, so a host can tell.
     pub fn replicate(&self) -> Replicate<'_> {
         Replicate {
             branch: self,
@@ -113,11 +119,71 @@ impl<'a, Ticks> Replicate<'a, Ticks> {
 /// What the replication reacts to.
 enum Event {
     /// A watched upstream delivered a head, or failed to.
-    Observed(Result<Observation, WatchRemoteBranchError>),
+    Observed(Target, Result<Observation, WatchRemoteBranchError>),
     /// A watch ended.
     Ended(Target),
+    /// The time to begin again a watch that ended or could not be begun
+    /// came.
+    Rewatch,
     /// The host's tick.
     Tick,
+}
+
+/// How long to wait before beginning again the first watch of an upstream
+/// that ended or could not be begun.
+const FIRST_REWATCH: Duration = Duration::from_secs(1);
+
+/// The longest wait before beginning a watch again, however many times in
+/// a row it ended or could not be begun.
+const LAST_REWATCH: Duration = Duration::from_secs(60);
+
+/// When the watch of each upstream that is not watched may be begun again:
+/// after a wait that doubles each time in a row it ends or cannot be
+/// begun, up to [`LAST_REWATCH`], and starts over once a watch delivers.
+#[derive(Default)]
+struct Rewatch {
+    /// The next wait for each upstream.
+    delays: Vec<(Target, Duration)>,
+    /// When each upstream that is waiting may be watched again.
+    until: Vec<(Target, Instant)>,
+}
+
+impl Rewatch {
+    /// Wait before watching `target` again: answers the event that says
+    /// the wait is over.
+    fn schedule<'a>(&mut self, target: Target) -> Source<'a> {
+        let delay = match self.delays.iter_mut().find(|(known, _)| known == &target) {
+            Some((_, delay)) => {
+                let now = *delay;
+                *delay = (*delay * 2).min(LAST_REWATCH);
+                now
+            }
+            None => {
+                self.delays
+                    .push((target.clone(), (FIRST_REWATCH * 2).min(LAST_REWATCH)));
+                FIRST_REWATCH
+            }
+        };
+        self.until.retain(|(known, _)| known != &target);
+        self.until.push((target.clone(), Instant::now() + delay));
+        source(stream::once(async move {
+            time::sleep(delay).await;
+            Event::Rewatch
+        }))
+    }
+
+    /// A watch of `target` delivered: the next time it ends, wait the
+    /// shortest time again.
+    fn delivered(&mut self, target: &Target) {
+        self.delays.retain(|(known, _)| known != target);
+    }
+
+    /// Whether `target` is waiting to be watched again.
+    fn waiting(&self, target: &Target) -> bool {
+        self.until
+            .iter()
+            .any(|(known, until)| known == target && Instant::now() < *until)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -166,6 +232,7 @@ where
             // running: never begun, refused, or ended.
             let mut unwatched: Vec<Target> = Vec::new();
             let mut unsupported: Vec<Target> = Vec::new();
+            let mut rewatch = Rewatch::default();
             let mut local = false;
             if pull {
                 if let Err(error) = resolve(branch, env).await {
@@ -179,7 +246,7 @@ where
                         _ => local = true,
                     }
                 }
-                for item in begin(branch, env, &mut unwatched, &mut unsupported, &mut sources).await {
+                for item in begin(branch, env, &mut unwatched, &mut unsupported, &mut rewatch, &mut sources).await {
                     yield item;
                 }
             }
@@ -197,12 +264,14 @@ where
                     // recorded it. Merging the recorded head asks nothing
                     // of the remote, and takes nothing when the branch has
                     // it.
-                    Event::Observed(Ok(Observation::Advanced(_) | Observation::Stale)) => {
+                    Event::Observed(target, Ok(Observation::Advanced(_) | Observation::Stale)) => {
+                        rewatch.delivered(&target);
                         for item in sync(branch, env, pull, push, false).await {
                             yield item;
                         }
                     }
-                    Event::Observed(Ok(Observation::Diverged)) => {
+                    Event::Observed(target, Ok(Observation::Diverged)) => {
+                        rewatch.delivered(&target);
                         for item in sync(branch, env, pull, push, true).await {
                             yield item;
                         }
@@ -210,21 +279,32 @@ where
                     // A head that could not be recorded may still be the
                     // remote's newest, and the upstream counts as watched,
                     // so no tick asks where it stands: ask now.
-                    Event::Observed(Err(error)) => {
+                    Event::Observed(_, Err(error)) => {
                         yield Err(error.into());
                         for item in sync(branch, env, pull, push, true).await {
                             yield item;
                         }
                     }
+                    // The watch is begun again after a while, whether or
+                    // not the host ticks: a socket that dropped is not the
+                    // end of following the upstream. Its first state is
+                    // where the upstream stands, so what it took meanwhile
+                    // is pulled then.
                     Event::Ended(target) => {
                         if !unwatched.contains(&target) {
                             unwatched.push(target.clone());
                         }
+                        sources.push(rewatch.schedule(target.clone()));
                         yield Ok(Replicated::Unwatched(target));
+                    }
+                    Event::Rewatch => {
+                        for item in begin(branch, env, &mut unwatched, &mut unsupported, &mut rewatch, &mut sources).await {
+                            yield item;
+                        }
                     }
                     Event::Tick => {
                         if pull {
-                            for item in begin(branch, env, &mut unwatched, &mut unsupported, &mut sources).await {
+                            for item in begin(branch, env, &mut unwatched, &mut unsupported, &mut rewatch, &mut sources).await {
                                 yield item;
                             }
                         }
@@ -240,12 +320,14 @@ where
 }
 
 /// Begin a watch of each remote upstream that has none running, except
-/// those whose remote cannot follow a cell.
+/// those whose remote cannot follow a cell and those waiting to be watched
+/// again. One that cannot be begun waits, longer each time in a row.
 async fn begin<'a, Env>(
     branch: &'a Branch,
     env: &'a Env,
     unwatched: &mut Vec<Target>,
     unsupported: &mut Vec<Target>,
+    rewatch: &mut Rewatch,
     sources: &mut SelectAll<Source<'a>>,
 ) -> Vec<Result<Replicated, ReplicateError>>
 where
@@ -262,12 +344,14 @@ where
             continue;
         };
         let target = upstream.target();
-        if !unwatched.contains(&target) || unsupported.contains(&target) {
+        if !unwatched.contains(&target) || unsupported.contains(&target) || rewatch.waiting(&target)
+        {
             continue;
         }
         let watched = match remote.branch(name.clone()).open().perform(env).await {
             Ok(watched) => watched,
             Err(error) => {
+                sources.push(rewatch.schedule(target));
                 failures.push(Err(error.into()));
                 continue;
             }
@@ -282,7 +366,10 @@ where
             }))) => {
                 unsupported.push(target);
             }
-            Err(error) => failures.push(Err(error.into())),
+            Err(error) => {
+                sources.push(rewatch.schedule(target));
+                failures.push(Err(error.into()));
+            }
         }
     }
     failures
@@ -298,9 +385,10 @@ where
     Env: ResolveEnv + Provider<Fork<RemoteSite, memory::Watch>>,
 {
     let observations = branch.watch().perform(env).await?;
+    let observed = target.clone();
     Ok(source(
         observations
-            .map(Event::Observed)
+            .map(move |observation| Event::Observed(observed.clone(), observation))
             .chain(stream::once(async move { Event::Ended(target) })),
     ))
 }
@@ -505,6 +593,73 @@ mod tests {
             bail!("expected the tick to push");
         };
         assert_eq!(reached.tree, mine.tree);
+        Ok(())
+    }
+
+    /// A branch replicating from a watched upstream follows it again after
+    /// the connection carrying the watch is cut, with no ticks at all: the
+    /// watch is begun again on its own, and a head pushed while it was
+    /// down is pulled.
+    #[dialog_common::test(
+        fault = dialog_remote_ucan::helpers::Fault::Cut {
+            after: std::time::Duration::from_millis(300),
+            times: 1,
+        }
+    )]
+    async fn it_follows_an_upstream_again_after_its_connection_is_cut(
+        service: UcanServiceAddress,
+    ) -> Result<()> {
+        let site =
+            SiteAddress::Ucan(UcanAddress::new(&service.endpoint).with_socket(&service.socket));
+        rig!(operator, profile, site, writer, mirror);
+
+        let first = commit(&writer, "first", &operator).await?;
+        writer.push().perform(&operator).await?;
+
+        let events = mirror.replicate().pull().perform(&operator);
+        pin_mut!(events);
+        let Replicated::Pulled(caught_up) = next(&mut events).await? else {
+            bail!("expected the mirror to catch up first");
+        };
+        assert_eq!(caught_up.tree, first.tree);
+
+        // The connection carrying the watch is cut.
+        loop {
+            if let Replicated::Unwatched(_) = next(&mut events).await? {
+                break;
+            }
+        }
+
+        let second = commit(&writer, "second", &operator).await?;
+        writer.push().perform(&operator).await?;
+        loop {
+            match next(&mut events).await? {
+                Replicated::Pulled(head) if head.tree == second.tree => break,
+                _ => {}
+            }
+        }
+        assert_eq!(mirror.revision().map(|head| head.tree), Some(second.tree));
+        Ok(())
+    }
+
+    /// A push whose publish landed at the remote but whose answer was lost
+    /// with its connection is found to have landed by the next push, which
+    /// then has nothing to send, and a branch pulling from the upstream
+    /// takes the head.
+    #[dialog_common::test(fault = dialog_remote_ucan::helpers::Fault::LosePublish { times: 1 })]
+    async fn it_heals_a_push_whose_answer_was_lost(service: UcanServiceAddress) -> Result<()> {
+        let site =
+            SiteAddress::Ucan(UcanAddress::new(&service.endpoint).with_socket(&service.socket));
+        rig!(operator, profile, site, writer, mirror);
+
+        let head = commit(&writer, "lost", &operator).await?;
+        let lost = writer.push().perform(&operator).await;
+        assert!(lost.is_err(), "the push's answer was lost: {lost:?}");
+
+        let pushed = writer.push().perform(&operator).await?;
+        assert_eq!(pushed.map(|pushed| pushed.tree), Some(head.tree.clone()));
+        mirror.pull().perform(&operator).await?;
+        assert_eq!(mirror.revision().map(|pulled| pulled.tree), Some(head.tree));
         Ok(())
     }
 }
