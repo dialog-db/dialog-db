@@ -462,6 +462,21 @@ impl Subscription {
         &self.invocation
     }
 
+    /// The subject whose cell the watch follows.
+    pub fn subject(&self) -> &Did {
+        &self.subject
+    }
+
+    /// The space the cell the watch follows is in.
+    pub fn space(&self) -> &str {
+        &self.space
+    }
+
+    /// The cell the watch follows.
+    pub fn cell(&self) -> &str {
+        &self.cell
+    }
+
     /// Whether the watch follows the cell `cell` in `space` of `subject`.
     pub fn follows(&self, subject: &Did, space: &str, cell: &str) -> bool {
         &self.subject == subject && self.space == space && self.cell == cell

@@ -23,11 +23,11 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 
 use async_trait::async_trait;
-use dialog_capability::{Capability, Did, Provider as Perform};
+use dialog_capability::{Capability, Did, Provider as Perform, Subject};
 use dialog_common::time::{self, UNIX_EPOCH};
 use dialog_effects::archive::{self, ArchiveError};
 use dialog_effects::blob::{self, BlobWriter};
-use dialog_effects::memory::prelude::{PublishExt as _, RetractExt as _};
+use dialog_effects::memory::prelude::{CellScope, PublishExt as _, RetractExt as _};
 use dialog_effects::memory::{self, CellState, Edition, MemoryError, Version};
 use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::sync::broadcast;
@@ -174,44 +174,82 @@ async fn serve_socket(
     let (mut sink, mut source) = socket.split();
     let mut session = Session::new();
     loop {
-        tokio::select! {
+        let delivered = tokio::select! {
             message = source.next() => match message {
                 Some(Ok(Message::Binary(bytes))) => {
-                    if let Some(reply) = session.receive(&state.access, &bytes).await
-                        && sink.send(Message::binary(reply.encode())).await.is_err()
-                    {
-                        break;
-                    }
+                    session.receive(&state.access, &bytes).await.into_iter().collect()
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                Some(Ok(_)) => {}
+                Some(Ok(_)) => Vec::new(),
             },
             change = changes.recv() => match change {
-                Ok(change) => {
-                    let delivered = session
-                        .deliver(
-                            &state.access,
-                            Change {
-                                subject: &change.subject,
-                                space: &change.space,
-                                cell: &change.cell,
-                                state: &change.state,
-                            },
-                            RECHECK,
-                            now_s(),
-                        )
-                        .await;
-                    for reply in delivered {
-                        if sink.send(Message::binary(reply.encode())).await.is_err() {
-                            return;
-                        }
+                Ok(change) => deliver(&mut session, &state, &change).await,
+                // Changes were missed: what each watched cell holds now is
+                // delivered instead, so no watch misses the last state its
+                // cell reached.
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let mut cells: Vec<(Did, String, String)> = session
+                        .watches()
+                        .map(|watch| {
+                            (
+                                watch.subject().clone(),
+                                watch.space().to_string(),
+                                watch.cell().to_string(),
+                            )
+                        })
+                        .collect();
+                    cells.sort();
+                    cells.dedup();
+                    let mut delivered = Vec::new();
+                    for (subject, space, cell) in cells {
+                        let resolve =
+                            CellScope::new(Subject::from(subject.clone()), &space, &cell).resolve();
+                        let Ok(state_now) =
+                            Perform::<memory::Resolve>::execute(&state.access.provider().store, resolve)
+                                .await
+                        else {
+                            continue;
+                        };
+                        let change = Changed {
+                            subject,
+                            space,
+                            cell,
+                            state: state_now,
+                        };
+                        delivered.extend(deliver(&mut session, &state, &change).await);
                     }
+                    delivered
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => break,
             },
+        };
+        for reply in delivered {
+            if sink.send(Message::binary(reply.encode())).await.is_err() {
+                return;
+            }
         }
     }
+}
+
+/// Deliver `change` to the session's watches that follow its cell.
+async fn deliver(
+    session: &mut Session,
+    state: &ServerState,
+    change: &Changed,
+) -> Vec<crate::socket::Reply> {
+    session
+        .deliver(
+            &state.access,
+            Change {
+                subject: &change.subject,
+                space: &change.space,
+                cell: &change.cell,
+                state: &change.state,
+            },
+            RECHECK,
+            now_s(),
+        )
+        .await
 }
 
 fn now_s() -> u64 {
