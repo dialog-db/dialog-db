@@ -61,8 +61,8 @@ pub use placement::{Bindings, DefaultScope, Placement, TransientAttribute, attri
 
 pub mod stack;
 pub use stack::{
-    AsLayer, Audience, Head, Layer, OpenStack, Stack, StackCommit, StackEnv, StackError,
-    StackPublish, StackQuery, StackSelect, StackSubscription, StackTransaction,
+    AsLayer, Audience, Divergence, Head, Layer, OpenStack, Stack, StackCommit, StackEnv,
+    StackError, StackPublish, StackQuery, StackSelect, StackSubscription, StackTransaction,
 };
 
 pub use dialog_corpus::{Exporter, Importer};
