@@ -5,6 +5,7 @@ use dialog_storage::provider::storage::{Storage, VolatileSpace};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dialog_repository::HeldCaches;
 
     #[dialog_common::test]
     async fn it_builds_operator_from_profile() {
@@ -53,8 +54,6 @@ mod tests {
     /// own.
     #[dialog_common::test]
     async fn it_holds_the_caches_it_is_built_with() {
-        use dialog_repository::HeldCaches;
-
         let profile = open_peer(test_storage().await, Location::profile(unique_name("test")))
             .await
             .unwrap();

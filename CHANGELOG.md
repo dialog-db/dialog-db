@@ -14,6 +14,33 @@ says how to cut a release.
 
 ## Unreleased
 
+### A formula derived `#[formula(cached)]` is computed once per input
+
+[#576](https://github.com/dialog-db/dialog-db/pull/576)
+
+A formula says it wants caching where it is derived, and the engine
+keeps its outputs by the formula and its input values in the
+`FormulaCache` the environment holds, bounded at 4,096 applications and
+evicting by SIEVE. A computation that fails is not remembered. The
+revision formulas are marked cached, and the process-wide memo of
+verified revision records they used is gone.
+
+What this changes for you:
+
+- `Scope` requires `Holds`: an environment a query runs through has to
+  hold things, which a wrapper does by forwarding to its operator.
+- `FormulaQuery::evaluate` takes the environment. `expand_with` expands
+  through a given cache; `expand` still works without one.
+- `Formula` gains `resolve_with` and `formula::emit`.
+- `HeldCaches::formulas()` is the cache, and `clear()` clears it.
+- An environment that holds nothing remembers nothing across
+  evaluations.
+
+Why: verification dominates projecting a record and the fixpoint
+evaluator re-applies these formulas every round; any costly formula
+needs the same, and each hand-written memo was another static nobody
+owned.
+
 ### Branch writers and in-flight block reads belong to the environment
 
 [#575](https://github.com/dialog-db/dialog-db/pull/575)
