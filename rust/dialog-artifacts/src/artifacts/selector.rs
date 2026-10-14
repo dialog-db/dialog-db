@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::str::FromStr as _;
 
-use crate::{Attribute, Entity, Name, NameShape, Symbol, Value};
+use crate::{Entity, Name, NameShape, Relation, Symbol, Value, ValueDataType};
 
 /// A marker type that represents a totally open-ended [`ArtifactSelector`]
 #[derive(Clone)]
@@ -31,6 +31,50 @@ pub struct ValueBound {
     /// Whether the bound is inclusive (`>=` / `<=`) rather than exclusive
     /// (`>` / `<`).
     pub inclusive: bool,
+    /// Whether the bound compares every number as it is, rather than
+    /// reading each through the lens its type names: an integer bound sees
+    /// 34.5 as 34, and a natural bound does not see -3 (see
+    /// [`ArtifactSelector::across_numbers`]).
+    pub across: bool,
+    /// The bound as a number-band key encodes it. The scan sets it when it
+    /// fits the selector to a tree that keys numbers in one band
+    /// ([`ArtifactSelector::for_manifest`]), so each row is compared with
+    /// these bytes rather than encoding the bound per row; leave it `None`.
+    pub encoded: Option<Vec<u8>>,
+}
+
+impl ValueBound {
+    /// The number type this bound reads rows through before comparing, if
+    /// any: its own type, for a natural or an integer bound that is not
+    /// across number types. A float bound reads every number as a float,
+    /// which is the number as it is, and a bound across number types
+    /// compares as it is, so neither needs a lens.
+    pub fn lens(&self) -> Option<ValueDataType> {
+        if self.across {
+            return None;
+        }
+        match self.value.data_type().storage() {
+            view @ (ValueDataType::UnsignedInt | ValueDataType::SignedInt) => Some(view),
+            _ => None,
+        }
+    }
+
+    /// The value a number-band scan ends at when this is the upper bound: the
+    /// bound itself, or the next whole number for an inclusive bound read
+    /// through an integer lens, which admits every number that floors to the
+    /// bound (`at_most(2)` sees 2.5 as 2, and 2.5 is keyed above 2). The
+    /// per-row check keeps the result exact.
+    pub fn upper_edge(&self) -> Value {
+        match (&self.value, self.inclusive && self.lens().is_some()) {
+            (Value::UnsignedInt(natural), true) => {
+                Value::UnsignedInt(natural.checked_add(1).unwrap_or(*natural))
+            }
+            (Value::SignedInt(integer), true) => {
+                Value::SignedInt(integer.checked_add(1).unwrap_or(*integer))
+            }
+            (value, _) => value.clone(),
+        }
+    }
 }
 
 /// The basic query system for selecting [`Artifact`]s from an artifact index.
@@ -52,7 +96,7 @@ where
     State: ArtifactSelectorState,
 {
     entity: Option<Entity>,
-    attribute: Option<Attribute>,
+    attribute: Option<Relation>,
     value: Option<Value>,
 
     /// Prefix bound on the entity URI: selected [`Artifact`]s'
@@ -118,7 +162,7 @@ impl Default for ArtifactSelector<Unconstrained> {
 #[derive(PartialEq, Eq, Hash)]
 struct SelectorIdentity<'a> {
     entity: Option<&'a Entity>,
-    attribute: Option<&'a Attribute>,
+    attribute: Option<&'a Relation>,
     value: Option<Vec<u8>>,
     entity_prefix: Option<&'a str>,
     attribute_prefix: Option<&'a str>,
@@ -202,13 +246,41 @@ impl<State> ArtifactSelector<State>
 where
     State: ArtifactSelectorState,
 {
+    /// The cells this selector reads from: its entity and attribute
+    /// bounds alone, with every bound on the value dropped. `None` when
+    /// it bounds only the value, and so reads from every cell.
+    pub fn cells(&self) -> Option<ArtifactSelector<Constrained>> {
+        if self.entity.is_none()
+            && self.attribute.is_none()
+            && self.entity_prefix.is_none()
+            && self.attribute_prefix.is_none()
+            && self.attribute_name.is_none()
+            && self.name_shape.is_none()
+        {
+            return None;
+        }
+        Some(ArtifactSelector {
+            entity: self.entity.clone(),
+            attribute: self.attribute.clone(),
+            value: None,
+            entity_prefix: self.entity_prefix.clone(),
+            attribute_prefix: self.attribute_prefix.clone(),
+            attribute_name: self.attribute_name.clone(),
+            name_shape: self.name_shape,
+            value_prefix: None,
+            value_lower: None,
+            value_upper: None,
+            state_type: PhantomData,
+        })
+    }
+
     /// The [`Entity`] (or subject) that selected [`Artifact`]s should refer to
     pub fn entity(&self) -> Option<&Entity> {
         self.entity.as_ref()
     }
 
-    /// The [`Attribute`] (or predicate) used in any selected [`Artifact`]s
-    pub fn attribute(&self) -> Option<&Attribute> {
+    /// The [`Relation`] (or predicate) used in any selected [`Artifact`]s
+    pub fn attribute(&self) -> Option<&Relation> {
         self.attribute.as_ref()
     }
 
@@ -252,8 +324,8 @@ where
         self.value_upper.as_ref()
     }
 
-    /// Set the [`Attribute`] field (the predicate) of the [`ArtifactSelector`]
-    pub fn the(self, attribute: Attribute) -> ArtifactSelector<Constrained> {
+    /// Set the [`Relation`] field (the predicate) of the [`ArtifactSelector`]
+    pub fn the(self, attribute: Relation) -> ArtifactSelector<Constrained> {
         ArtifactSelector::<Constrained> {
             attribute: Some(attribute),
             entity: self.entity,
@@ -333,7 +405,7 @@ where
                 .as_deref()
                 .and_then(|prefix| prefix.strip_suffix('/'))
             && let Ok(domain) = Symbol::from_str(domain)
-            && let Ok(composed) = Attribute::compose(&domain, name.clone())
+            && let Ok(composed) = Relation::compose(&domain, name.clone())
         {
             // The domain plus an exact name is an exact attribute — a
             // point lookup rather than a domain-wide scan. (A joint
@@ -431,6 +503,8 @@ where
         self.with_value_lower(ValueBound {
             value,
             inclusive: true,
+            across: false,
+            encoded: None,
         })
     }
 
@@ -440,6 +514,8 @@ where
         self.with_value_lower(ValueBound {
             value,
             inclusive: false,
+            across: false,
+            encoded: None,
         })
     }
 
@@ -449,6 +525,8 @@ where
         self.with_value_upper(ValueBound {
             value,
             inclusive: true,
+            across: false,
+            encoded: None,
         })
     }
 
@@ -458,6 +536,8 @@ where
         self.with_value_upper(ValueBound {
             value,
             inclusive: false,
+            across: false,
+            encoded: None,
         })
     }
 
@@ -497,5 +577,112 @@ where
             value_upper: Some(bound),
             state_type: PhantomData,
         }
+    }
+}
+
+impl ArtifactSelector<Constrained> {
+    /// Let the value bounds compare every number as it is. Without this a
+    /// bound reads each number through the lens its type names before
+    /// comparing, as a field declared with that type reads it: an integer
+    /// bound `<= 3` admits `3.5`, which it sees as `3`, and a natural bound
+    /// never admits `-2`, which it does not see; a float bound sees every
+    /// number as it is. With it a natural bound `<= 3` leaves `3.5` out. A
+    /// tree that keys every number in one band scans the bounded range of
+    /// it; one that keys each type in its own band cannot bound one range
+    /// across them, so it scans without the bounds and leaves them to the
+    /// caller.
+    pub fn across_numbers(mut self) -> Self {
+        for bound in [&mut self.value_lower, &mut self.value_upper]
+            .into_iter()
+            .flatten()
+        {
+            bound.across = bound.value.data_type().is_number();
+        }
+        self
+    }
+
+    /// This selector as a tree written under `manifest` can scan it: bounds
+    /// across number types are dropped where the tree keys each type in its
+    /// own band.
+    pub fn for_manifest(mut self, manifest: &dialog_search_tree::Manifest) -> Self {
+        let across = [&self.value_lower, &self.value_upper]
+            .into_iter()
+            .flatten()
+            .any(|bound| bound.across);
+        if across && manifest.value_encoding != crate::NUMBER_BAND {
+            self.value_lower = None;
+            self.value_upper = None;
+        }
+        // In the band an exact number is the range of that one number, read
+        // through the lens of its type like any bound: `is(4)` as an integer
+        // finds the stored 4, 4.0 and 4.3 (which the lens reads as 4), and
+        // `is(4.0)` finds the number 4 alone. The per-type bands key each
+        // type apart, so there the exact value stays a key.
+        if manifest.value_encoding == crate::NUMBER_BAND
+            && self
+                .value
+                .as_ref()
+                .is_some_and(|value| value.data_type().is_number())
+            && let Some(value) = self.value.take()
+        {
+            let bound = ValueBound {
+                value,
+                inclusive: true,
+                across: false,
+                encoded: None,
+            };
+            self.value_lower = Some(bound.clone());
+            self.value_upper = Some(bound);
+        }
+        if manifest.value_encoding == crate::NUMBER_BAND {
+            for bound in [&mut self.value_lower, &mut self.value_upper]
+                .into_iter()
+                .flatten()
+                .filter(|bound| bound.value.data_type().is_number())
+            {
+                bound.encoded = Some(crate::encode_key_value_owned(
+                    &bound.value,
+                    crate::NUMBER_BAND,
+                ));
+            }
+        }
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ArtifactSelector;
+    use crate::{Entity, Relation, Value};
+
+    /// A selector's cells keep its entity and attribute bounds and
+    /// drop its value bounds; a selector bounding only the value has
+    /// none.
+    #[dialog_common::test]
+    fn it_keeps_the_cell_bounds_alone() {
+        let the: Relation = "person/name".parse().expect("an attribute");
+        let of: Entity = "id:alice".parse().expect("an entity");
+        let cells = ArtifactSelector::new()
+            .the(the.clone())
+            .of(of.clone())
+            .is(Value::String("Alice".into()))
+            .cells()
+            .expect("bounded cells");
+        assert_eq!(cells.attribute(), Some(&the));
+        assert_eq!(cells.entity(), Some(&of));
+        assert_eq!(cells.value(), None);
+        let cells = ArtifactSelector::new()
+            .the_starting_with("person/")
+            .is_at_least(Value::UnsignedInt(1))
+            .cells()
+            .expect("bounded cells");
+        assert_eq!(cells.attribute_prefix(), Some("person/"));
+        assert_eq!(cells.value(), None);
+        assert!(
+            ArtifactSelector::new()
+                .is(Value::String("Alice".into()))
+                .cells()
+                .is_none()
+        );
     }
 }

@@ -27,8 +27,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, Attribute, DialogArtifactsError, Instruction,
-    LoadBlob, Select, Value,
+    Artifact, ArtifactSelector, ArtifactStream, DialogArtifactsError, Instruction, LoadBlob,
+    Relation as ArtifactsRelation, Select, Value,
 };
 use dialog_capability::{Fork, Provider, Subject};
 use dialog_common::Buffer;
@@ -46,20 +46,19 @@ use dialog_peer::helpers::test_owned;
 use dialog_peer::helpers::{generate_data, open_peer, test_storage, unique_name};
 use dialog_peer::{Peer, Session};
 use dialog_repository::{
-    Branch, NetworkedIndex, PeersEnv, RemoteSite, Repository, RepositoryExt as _,
+    Branch, HeldCaches, NetworkedIndex, PeersEnv, RemoteSite, Repository, RepositoryExt as _,
 };
 use dialog_search_tree::audit as tree_audit;
 use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
 use dialog_storage::Blake3Hash;
+use dialog_storage::dup_audit;
 use dialog_storage::provider::storage::{Storage, VolatileSpace};
-use dialog_storage::{DUPLICATE_SETS, TOTAL_SETS, dup_audit};
-use std::sync::atomic::Ordering;
 // The platform temp filesystem (and the on-disk `BenchEnv::temp` variant
 // built on it) only exists off wasm — there is no native temp directory in
 // the browser, so the whole on-disk path is gated to non-wasm targets.
 #[cfg(not(target_arch = "wasm32"))]
 use dialog_storage::NativeTempSpace;
-use futures_util::{TryStreamExt as _, stream};
+use futures_util::TryStreamExt as _;
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs::read_to_string;
@@ -75,6 +74,7 @@ use tracing_subscriber::registry::LookupSpan;
 
 use ::dialog_query::concept::query::ConceptRules;
 use ::dialog_query::error::EvaluationError;
+use ::dialog_query::recall::{BodyMemo, Memo};
 use ::dialog_query::source::SelectRules;
 use ::dialog_query::{Concept, ConceptDescriptor, Entity, Output, Query, RuleRegistry, Term};
 
@@ -414,6 +414,28 @@ pub struct JoinEnv<'a, Env> {
     operator: &'a Env,
     rules: RuleRegistry,
     journal: ReadJournal,
+    memo: Memo,
+}
+
+impl<Env> BodyMemo for JoinEnv<'_, Env> {
+    fn memo(&self) -> Option<&Memo> {
+        Some(&self.memo)
+    }
+}
+
+/// What evaluation keeps between queries is the operator's to hold.
+impl<Env: Holds> Holds for JoinEnv<'_, Env> {
+    fn held(&self, key: &str) -> Option<dialog_common::Held> {
+        self.operator.held(key)
+    }
+
+    fn hold(&self, key: String, handle: dialog_common::Held) {
+        self.operator.hold(key, handle)
+    }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> dialog_common::Held) -> dialog_common::Held {
+        self.operator.held_or(key, make)
+    }
 }
 
 impl<'a, Env> JoinEnv<'a, Env> {
@@ -586,7 +608,7 @@ fn parse_value(value_type: &str, raw: &str) -> Option<Value> {
         "integer" => raw.parse().ok().map(Value::SignedInt),
         "float" => raw.parse().ok().map(Value::Float),
         "boolean" => bool::from_str(raw).ok().map(Value::Boolean),
-        "attribute" => Attribute::from_str(raw).ok().map(Value::Symbol),
+        "attribute" => ArtifactsRelation::from_str(raw).ok().map(Value::Symbol),
         _ => None,
     }
 }
@@ -600,6 +622,11 @@ pub struct BenchEnv<Env> {
     operator: Env,
     repo: Repository,
     branch: String,
+    /// The rules every rule benchmark reads under, registered once:
+    /// registering a rule is install-time work (the rule compiles once
+    /// per head), not part of a query, and the repository caches the
+    /// result the same way.
+    rules: RuleRegistry,
 }
 
 impl BenchEnv<Peer<VolatileSpace, Session>> {
@@ -681,12 +708,31 @@ where
             .perform(&self.operator)
             .await?;
 
-        let instructions: Vec<Instruction> = data.into_iter().map(Instruction::Assert).collect();
+        let instructions: Vec<Instruction> = data
+            .into_iter()
+            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+            .collect();
         branch
-            .commit(stream::iter(instructions))
+            .transaction()
+            .integrate(instructions.into_iter().collect())
+            .commit()
+            .publish()
             .perform(&self.operator)
             .await?;
         Ok(count)
+    }
+
+    /// Loads the branch on cold caches: what the environment holds for the
+    /// repository is released first, so the reads a query reports are the
+    /// blocks a reader with nothing warm would fetch.
+    async fn cold(&self) -> Result<Branch> {
+        HeldCaches::of(&self.operator).release(&self.repo.did());
+        Ok(self
+            .repo
+            .branch(&self.branch)
+            .load()
+            .perform(&self.operator)
+            .await?)
     }
 
     /// Run a select-by-attribute query against the seeded branch,
@@ -697,13 +743,8 @@ where
     /// scan so warm-up reads (e.g. the eager root probe inside
     /// `execute`) are excluded from the recorded counts.
     pub async fn run_query(&self, attribute: &str) -> Result<QueryRun> {
-        let the: Attribute = attribute.parse()?;
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .load()
-            .perform(&self.operator)
-            .await?;
+        let the: ArtifactsRelation = attribute.parse()?;
+        let branch = self.cold().await?;
 
         let select = branch
             .claims()
@@ -787,18 +828,14 @@ where
     /// [`Query<Stuff>`]: Query
     /// [`Application::perform`]: ::dialog_query::Application::perform
     pub async fn query_stuff(&self) -> Result<JoinRun> {
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .load()
-            .perform(&self.operator)
-            .await?;
+        let branch = self.cold().await?;
 
         let env = JoinEnv {
             branch: &branch,
             operator: &self.operator,
             rules: RuleRegistry::new(),
             journal: ReadJournal::default(),
+            memo: Memo::default(),
         };
 
         env.journal().clear();
@@ -823,17 +860,13 @@ where
     /// meaningful COLD (before any scan warms the node cache); see
     /// `it_keeps_probe_queries_block_frugal`.
     pub async fn probe_reads(&self, of: &Entity) -> Result<JoinRun> {
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .load()
-            .perform(&self.operator)
-            .await?;
+        let branch = self.cold().await?;
         let env = JoinEnv {
             branch: &branch,
             operator: &self.operator,
             rules: RuleRegistry::new(),
             journal: ReadJournal::default(),
+            memo: Memo::default(),
         };
         env.journal().clear();
         let selector = ArtifactSelector::new()
@@ -851,17 +884,13 @@ where
     /// Runs a full `stuff/name` attribute scan through a counting store and
     /// reports its block reads: the frugality test's contrast arm.
     pub async fn scan_reads(&self) -> Result<JoinRun> {
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .load()
-            .perform(&self.operator)
-            .await?;
+        let branch = self.cold().await?;
         let env = JoinEnv {
             branch: &branch,
             operator: &self.operator,
             rules: RuleRegistry::new(),
             journal: ReadJournal::default(),
+            memo: Memo::default(),
         };
         env.journal().clear();
         let selector = ArtifactSelector::new().the("stuff/name".parse().expect("valid attribute"));
@@ -1123,7 +1152,7 @@ where
                 current = Some(row[txn_at].clone());
             }
 
-            let Ok(the) = Attribute::from_str(&row[the_at]) else {
+            let Ok(the) = ArtifactsRelation::from_str(&row[the_at]) else {
                 continue;
             };
             let Ok(of) = Entity::from_str(&row[of_at]) else {
@@ -1136,12 +1165,15 @@ where
             if seen.insert(row[of_at].clone()) {
                 entities.push(of.clone());
             }
-            pending.push(Instruction::Assert(Artifact {
-                the,
-                of,
-                is,
-                cause: None,
-            }));
+            pending.push(Instruction::Assert(
+                Artifact {
+                    the,
+                    of,
+                    is,
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ));
         }
 
         if !pending.is_empty() {
@@ -1167,6 +1199,9 @@ where
         held: &mut Option<Branch>,
     ) -> Result<()> {
         if held.is_none() || !reuse {
+            // Reopening is only cold once what the environment holds for
+            // the repository is let go.
+            HeldCaches::of(&self.operator).release(&self.repo.did());
             *held = Some(
                 self.repo
                     .branch(&self.branch)
@@ -1177,7 +1212,10 @@ where
         }
         let branch = held.as_ref().expect("branch handle");
         branch
-            .commit(stream::iter(instructions))
+            .transaction()
+            .integrate(instructions.into_iter().collect())
+            .commit()
+            .publish()
             .perform(&self.operator)
             .await?;
         Ok(())
@@ -1193,18 +1231,14 @@ where
         status: Option<&str>,
         assignee: Option<&str>,
     ) -> Result<JoinRun> {
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .load()
-            .perform(&self.operator)
-            .await?;
+        let branch = self.cold().await?;
 
         let env = JoinEnv {
             branch: &branch,
             operator: &self.operator,
             rules: RuleRegistry::new(),
             journal: ReadJournal::default(),
+            memo: Memo::default(),
         };
 
         let status_term = match status {
@@ -1411,18 +1445,14 @@ where
     /// constant (the "bugs with status X" query the app issues; `None` leaves
     /// status free for an all-bugs join). Reports the join's block reads.
     pub async fn query_bugs_by_status(&self, status: Option<&str>) -> Result<JoinRun> {
-        let branch = self
-            .repo
-            .branch(&self.branch)
-            .load()
-            .perform(&self.operator)
-            .await?;
+        let branch = self.cold().await?;
 
         let env = JoinEnv {
             branch: &branch,
             operator: &self.operator,
             rules: RuleRegistry::new(),
             journal: ReadJournal::default(),
+            memo: Memo::default(),
         };
 
         let status_term = match status {
@@ -1579,6 +1609,9 @@ where
         for index in 0..depth {
             let entity = Entity::new()?;
             if held.is_none() || !reuse {
+                // Reopening is only cold once what the environment holds
+                // for the repository is let go.
+                HeldCaches::of(&self.operator).release(&self.repo.did());
                 held = Some(
                     self.repo
                         .branch(&self.branch)
@@ -1622,10 +1655,15 @@ where
             .open()
             .perform(&operator)
             .await?;
+        let mut rules = RuleRegistry::new();
+        rules
+            .register(member_rule())
+            .expect("the member rule registers");
         Ok(Self {
             operator,
             repo,
             branch: "main".to_string(),
+            rules,
         })
     }
 }
@@ -1785,11 +1823,10 @@ mod test {
         let elapsed = start.elapsed();
 
         if env::var("DIALOG_TXN_AUDIT").is_ok() {
+            let (dup_sets, total_sets) = dup_audit::drain_sets();
             eprintln!(
-                "TXNAUDIT {} dup_sets={} total_sets={}{}",
+                "TXNAUDIT {} dup_sets={dup_sets} total_sets={total_sets}{}",
                 tree_audit::report(),
-                DUPLICATE_SETS.swap(0, Ordering::Relaxed),
-                TOTAL_SETS.swap(0, Ordering::Relaxed),
                 dup_audit::report(),
             );
         }
@@ -2048,7 +2085,7 @@ mod test {
         let root = *revision.tree.hash();
         // Any constrained selector works here; the catalog it names is the
         // branch's archive index, which is where the tree nodes live.
-        let the: Attribute = "se.post/title".parse()?;
+        let the: ArtifactsRelation = "se.post/title".parse()?;
         let select = branch
             .claims()
             .select(ArtifactSelector::new().the(the))
@@ -2328,5 +2365,200 @@ mod test {
             probe.unique_reads
         );
         Ok(())
+    }
+}
+
+/// Attribute markers for the derived [`Member`] concept the rule
+/// benchmarks conclude from [`Stuff`].
+pub mod member {
+    use ::dialog_query::Attribute;
+
+    /// The `member/title` attribute.
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Title(pub String);
+
+    /// The `member/level` attribute.
+    #[derive(Attribute, Clone, PartialEq)]
+    pub struct Level(pub String);
+}
+
+/// A concept derived from [`Stuff`] by [`member_rule`]: nothing is ever
+/// stored under `member/*`, so every row comes from the rule.
+#[derive(Clone, Debug, PartialEq, Concept)]
+pub struct Member {
+    /// The entity the member facts hang off.
+    pub this: Entity,
+    /// The member's title (the stuff name).
+    pub title: member::Title,
+    /// The member's level (the stuff role).
+    pub level: member::Level,
+}
+
+/// A subset of [`Member`]'s head: the attribute-level resolution case,
+/// where a query over one derived attribute must see the rule
+/// concluding both.
+#[derive(Clone, Debug, PartialEq, Concept)]
+pub struct Titled {
+    /// The entity the title hangs off.
+    pub this: Entity,
+    /// The member's title.
+    pub title: member::Title,
+}
+
+/// `Member { title, level } :- Stuff { name: title, role: level }`.
+pub fn member_rule() -> ::dialog_query::DeductiveRule {
+    ::dialog_query::DeductiveRule::new(
+        Member::descriptor().clone(),
+        vec![
+            Query::<Stuff> {
+                this: Term::var("this"),
+                name: Term::var("title"),
+                role: Term::var("level"),
+            }
+            .into(),
+        ],
+    )
+    .expect("the member rule compiles")
+}
+
+impl<Env> BenchEnv<Env>
+where
+    Env: Provider<BlobSize>
+        + Provider<BlobImport>
+        + Provider<Get>
+        + Provider<BlobRead>
+        + Provider<Put>
+        + Provider<Import>
+        + Provider<Resolve>
+        + Provider<Publish>
+        + Provider<Identify>
+        + Provider<Attest>
+        + Provider<SpaceLoad>
+        + Provider<SpaceCreate>
+        + Provider<List>
+        + PeersEnv
+        + Provider<dialog_repository::Hydrate>
+        + Provider<dialog_artifacts::Preload>
+        + Provider<dialog_artifacts::Speculation>
+        + Provider<Fork<RemoteSite, Resolve>>
+        + Holds
+        + ConditionalSync
+        + 'static,
+{
+    async fn rule_env(&self) -> Result<(Branch, RuleRegistry)> {
+        let branch = self
+            .repo
+            .branch(&self.branch)
+            .load()
+            .perform(&self.operator)
+            .await?;
+        Ok((branch, self.rules.clone()))
+    }
+
+    /// [`query_stuff`](Self::query_stuff) with [`member_rule`] registered:
+    /// the rule reads `stuff/*` but derives nothing the query selects, so
+    /// the read counts must match the rule-free join exactly.
+    pub async fn query_stuff_with_rule(&self) -> Result<JoinRun> {
+        let (branch, rules) = self.rule_env().await?;
+        let env = JoinEnv {
+            branch: &branch,
+            operator: &self.operator,
+            rules,
+            journal: ReadJournal::default(),
+            memo: Memo::default(),
+        };
+        env.journal().clear();
+        let results = Query::<Stuff> {
+            this: Term::var("this"),
+            name: Term::var("name"),
+            role: Term::var("role"),
+        }
+        .perform(&env)
+        .try_vec()
+        .await?;
+        Ok(JoinRun {
+            results_len: results.len(),
+            reads: env.journal().reads(),
+            unique_reads: env.journal().unique_reads(),
+        })
+    }
+
+    /// The exact-head derived query: every [`Member`] row comes from
+    /// [`member_rule`].
+    pub async fn query_member(&self) -> Result<JoinRun> {
+        let (branch, rules) = self.rule_env().await?;
+        let env = JoinEnv {
+            branch: &branch,
+            operator: &self.operator,
+            rules,
+            journal: ReadJournal::default(),
+            memo: Memo::default(),
+        };
+        env.journal().clear();
+        let results = Query::<Member> {
+            this: Term::var("this"),
+            title: Term::var("title"),
+            level: Term::var("level"),
+        }
+        .perform(&env)
+        .try_vec()
+        .await?;
+        Ok(JoinRun {
+            results_len: results.len(),
+            reads: env.journal().reads(),
+            unique_reads: env.journal().unique_reads(),
+        })
+    }
+
+    /// The subset query: [`Titled`] selects one of [`Member`]'s two
+    /// derived attributes.
+    pub async fn query_titled(&self) -> Result<JoinRun> {
+        let (branch, rules) = self.rule_env().await?;
+        let env = JoinEnv {
+            branch: &branch,
+            operator: &self.operator,
+            rules,
+            journal: ReadJournal::default(),
+            memo: Memo::default(),
+        };
+        env.journal().clear();
+        let results = Query::<Titled> {
+            this: Term::var("this"),
+            title: Term::var("title"),
+        }
+        .perform(&env)
+        .try_vec()
+        .await?;
+        Ok(JoinRun {
+            results_len: results.len(),
+            reads: env.journal().reads(),
+            unique_reads: env.journal().unique_reads(),
+        })
+    }
+
+    /// The point-shaped derived query: one [`Member`] by entity.
+    pub async fn query_member_of(&self, of: &Entity) -> Result<JoinRun> {
+        let (branch, rules) = self.rule_env().await?;
+        let env = JoinEnv {
+            branch: &branch,
+            operator: &self.operator,
+            rules,
+            journal: ReadJournal::default(),
+            memo: Memo::default(),
+        };
+        env.journal().clear();
+        let results = Query::<Member> {
+            this: Term::from(of.clone()),
+            title: Term::var("title"),
+            level: Term::var("level"),
+        }
+        .perform(&env)
+        .try_vec()
+        .await?;
+        Ok(JoinRun {
+            results_len: results.len(),
+            reads: env.journal().reads(),
+            unique_reads: env.journal().unique_reads(),
+        })
     }
 }

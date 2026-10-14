@@ -8,7 +8,7 @@
 //! ```rust,ignore
 //! /// A person's full name
 //! #[derive(Attribute)]
-//! #[cardinality(one)]
+//! #[pick(last)]
 //! struct FullName(String);
 //! ```
 //!
@@ -20,9 +20,9 @@
 //!     type Type = String;
 //!
 //!     fn descriptor() -> AttributeDescriptor {
-//!         // Builds descriptor from domain/name with description, cardinality, type
+//!         // Builds descriptor from domain/name with description, type and pick
 //!         AttributeDescriptor::new(/* domain/full-name */, "A person's full name",
-//!             Cardinality::One, <String as Typed>::TYPE)
+//!             Cardinality::One, <String as Typed>::DECLARED).with_pick(Pick::Last)
 //!     }
 //!
 //!     fn value(&self) -> &String { &self.0 }
@@ -39,7 +39,7 @@ use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
 use super::helpers::{
-    extract_doc_comments, parse_cardinality_attribute, parse_domain_attribute, to_kebab_case,
+    extract_doc_comments, parse_domain_attribute, parse_pick_attribute, to_kebab_case,
 };
 
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -93,8 +93,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let description = extract_doc_comments(&input.attrs);
     let description_lit = syn::LitStr::new(&description, proc_macro2::Span::call_site());
 
-    // Parse cardinality
-    let cardinality = match parse_cardinality_attribute(&input.attrs) {
+    // Parse the pick
+    let pick = match parse_pick_attribute(&input.attrs) {
         Ok(c) => c,
         Err(e) => return e.to_compile_error().into(),
     };
@@ -225,14 +225,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 static DESCRIPTOR: std::sync::OnceLock<dialog_query::AttributeDescriptor> = std::sync::OnceLock::new();
                 DESCRIPTOR.get_or_init(|| {
                     let the = format!("{}/{}", #domain_expr, #attr_name_lit)
-                        .parse::<dialog_query::The>()
+                        .parse::<dialog_query::Relation>()
                         .expect("attribute selector must be valid");
                     dialog_query::AttributeDescriptor::new(
                         the,
                         #description_lit,
-                        #cardinality,
-                        <<#wrapped_type as dialog_query::Typed>::Descriptor as dialog_query::TypeDescriptor>::TYPE,
+                        dialog_query::Cardinality::One,
+                        <#wrapped_type as dialog_query::Typed>::DECLARED,
                     )
+                    .with_pick(#pick)
                 })
             }
         }
@@ -270,9 +271,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
             /// Returns the attribute identifier. A derived attribute
             /// always names one attribute — the keyed-collection
             /// relation has no derive path.
-            pub fn the() -> dialog_query::The {
+            pub fn the() -> dialog_query::Relation {
                 match Self::descriptor().the() {
-                    dialog_query::Relation::Attribute(the) => the.clone(),
+                    dialog_query::The::Relation(the) => the.clone(),
                     _ => unreachable!("a derived attribute names one relation"),
                 }
             }

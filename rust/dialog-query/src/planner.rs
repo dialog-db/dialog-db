@@ -404,7 +404,7 @@ mod plan_ordering {
 
     use super::*;
     use crate::Conjunction;
-    use crate::attribute::The;
+    use crate::attribute::Relation;
     use crate::attribute::query::AttributeQuery;
     use crate::concept::query::ConceptQuery;
     use crate::formula::Formula;
@@ -542,11 +542,12 @@ mod plan_ordering {
                 Plan::Concept(..) => "concept",
                 Plan::Resolver(..) => "resolver",
                 Plan::Negate(..) => "negate",
+                Plan::Recall(..) => "recall",
             })
             .collect()
     }
 
-    fn attribute(the: Term<The>, entity: &str, value: &str) -> Premise {
+    fn attribute(the: Term<Relation>, entity: &str, value: &str) -> Premise {
         AttributeQuery::new(
             the,
             Term::<Entity>::var(entity),

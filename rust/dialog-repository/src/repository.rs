@@ -22,6 +22,9 @@ pub use archive::*;
 pub(crate) mod branch;
 pub use branch::*;
 
+mod caches;
+pub use caches::HeldCaches;
+
 mod create;
 pub use create::*;
 
@@ -319,12 +322,15 @@ mod tests {
         // A branch only materializes once it has a commit — open + no commits
         // leaves no revision for load to find.
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:1".parse()?,
-            is: Value::String("Alice".into()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:1".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -347,7 +353,10 @@ mod tests {
             cause: None,
         };
         let _hash = branch
-            .commit(stream::iter(vec![Instruction::Assert(artifact)]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                artifact,
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -453,24 +462,33 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let artifacts = vec![
-            Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:1".parse()?,
-                is: Value::String("Alice".into()),
-                cause: None,
-            }),
-            Instruction::Assert(Artifact {
-                the: "user/email".parse()?,
-                of: "user:1".parse()?,
-                is: Value::String("alice@example.com".into()),
-                cause: None,
-            }),
-            Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:2".parse()?,
-                is: Value::String("Bob".into()),
-                cause: None,
-            }),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:1".parse()?,
+                    is: Value::String("Alice".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/email".parse()?,
+                    of: "user:1".parse()?,
+                    is: Value::String("alice@example.com".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:2".parse()?,
+                    is: Value::String("Bob".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ),
         ];
 
         branch
@@ -511,24 +529,33 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let artifacts = vec![
-            Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:alice".parse()?,
-                is: Value::String("Alice".into()),
-                cause: None,
-            }),
-            Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:bob".parse()?,
-                is: Value::String("Bob".into()),
-                cause: None,
-            }),
-            Instruction::Assert(Artifact {
-                the: "user/email".parse()?,
-                of: "user:alice".parse()?,
-                is: Value::String("alice@example.com".into()),
-                cause: None,
-            }),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:alice".parse()?,
+                    is: Value::String("Alice".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:bob".parse()?,
+                    is: Value::String("Bob".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/email".parse()?,
+                    of: "user:alice".parse()?,
+                    is: Value::String("alice@example.com".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ),
         ];
 
         branch
@@ -590,7 +617,10 @@ mod tests {
         };
 
         branch
-            .commit(stream::iter(vec![Instruction::Assert(artifact.clone())]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                artifact.clone(),
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -928,7 +958,7 @@ mod tests {
             // (entity, attribute) inside a single transaction must keep
             // both — cardinality-many accumulates, it does not collapse.
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[cardinality(many)]
+            #[pick(all)]
             #[domain("app.meta")]
             pub struct Tag(pub String);
 
@@ -2048,8 +2078,8 @@ mod tests {
             let alice: Entity = "id:alice".parse()?;
             let bob: Entity = "id:bob".parse()?;
             let charlie: Entity = "id:charlie".parse()?;
-            let name_attr = "test/name".parse::<dialog_artifacts::Attribute>()?;
-            let role_attr = "test/role".parse::<dialog_artifacts::Attribute>()?;
+            let name_attr = "test/name".parse::<dialog_artifacts::Relation>()?;
+            let role_attr = "test/role".parse::<dialog_artifacts::Relation>()?;
 
             // Mix of:
             //   - same entity, multiple attrs
@@ -2063,7 +2093,7 @@ mod tests {
             //     (alice, role). If `sort_key` mistakenly ordered VAE
             //     output by entity it would flip these two, and this
             //     test would catch it.
-            let facts: Vec<(Entity, dialog_artifacts::Attribute, Value)> = vec![
+            let facts: Vec<(Entity, dialog_artifacts::Relation, Value)> = vec![
                 (
                     alice.clone(),
                     name_attr.clone(),
@@ -2108,7 +2138,7 @@ mod tests {
             // both the branch commit and the overlay query from clones.
             let mut changes = Changes::new();
             for (e, a, v) in &facts {
-                changes.associate(a.clone(), e.clone(), v.clone());
+                changes.associate(a.clone(), e.clone(), v.clone(), dialog_artifacts::Pick::All);
             }
 
             // Commit a clone to the branch (Changes itself is a Statement now).

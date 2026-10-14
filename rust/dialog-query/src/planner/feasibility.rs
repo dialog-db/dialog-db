@@ -101,7 +101,7 @@ mod tests {
     use super::*;
     use crate::artifact::Entity;
     use crate::attribute::query::AttributeQuery;
-    use crate::attribute::{Cardinality, The};
+    use crate::attribute::{Cardinality, Relation};
     use crate::formula::Formula;
     use crate::formula::string::Length;
     use crate::proposition::Proposition;
@@ -259,7 +259,7 @@ mod tests {
         }
     }
 
-    fn attribute_for(the: The, value: &str) -> Premise {
+    fn attribute_for(the: Relation, value: &str) -> Premise {
         Premise::Assert(Proposition::Attribute(Box::new(AttributeQuery::new(
             Term::from(the),
             Term::<Entity>::var("this"),

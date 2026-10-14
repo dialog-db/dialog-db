@@ -80,7 +80,10 @@ where
         // cloned only when a cached permit makes a retry possible.
         let retry = from_cache.then(|| invocation.capability.clone());
         let presented = key.map(|key| (key, permit.clone()));
-        let outcome = permit.invoke(invocation.capability).perform(&S3).await;
+        let outcome = permit
+            .invoke(invocation.capability)
+            .perform(self.s3())
+            .await;
 
         // The two halves of every remote effect, separately attributed:
         // a slow sync can be blamed on the redeem (access service, one
@@ -115,7 +118,7 @@ where
                     Some(capability) => {
                         let fresh = invocation.authorization.redeem(&invocation.address).await?;
                         cache.store(key, &fresh, now);
-                        fresh.invoke(capability).perform(&S3).await
+                        fresh.invoke(capability).perform(self.s3()).await
                     }
                     // The rejected permit was redeemed moments ago;
                     // redeeming again would present the same material.

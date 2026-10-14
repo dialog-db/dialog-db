@@ -33,6 +33,21 @@ impl Disjunction {
     }
 
     /// Creates a new join of two plans.
+    /// Every alternative, in order.
+    pub fn conjunctions(&self) -> Vec<&Conjunction> {
+        match self {
+            Self::Empty => Vec::new(),
+            Self::Solo(one) => vec![one],
+            Self::Duet(left, right) => vec![left, right],
+            Self::Or(left, right) => {
+                let mut all = left.conjunctions();
+                all.push(right);
+                all
+            }
+        }
+    }
+
+    /// This disjunction with `right` as one more alternative.
     pub fn or(self, right: Conjunction) -> Self {
         match self {
             Self::Empty => Self::Solo(right),

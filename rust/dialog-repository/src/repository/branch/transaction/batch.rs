@@ -20,20 +20,24 @@
 //! versions; nothing staged is ever rewritten.
 
 use super::induce::induce;
+use super::succession;
 use super::{Transaction, TransactionCommit, carry_footprint, touches_rules};
+use crate::Ephemeral;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
-    SelectQuery, Snapshot, SnapshotClaims, TransactionQuery, origin_of,
+    SelectQuery, Snapshot, SnapshotClaims, Staged, TransactionQuery, origin_of,
 };
 use dialog_artifacts::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
 use dialog_artifacts::tree::WriteScope;
-use dialog_artifacts::{Changes, Entity, Statement};
+use dialog_artifacts::{
+    Artifact, ArtifactSelector, Change, Changes, Entity, Statement, Update as _,
+};
 use dialog_capability::history::Origin;
 use dialog_capability::{Did, Fork, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::blob::Import as BlobImport;
@@ -99,6 +103,51 @@ pub struct TransactionBatch {
     /// links, across every round of every link. See
     /// [`induced`](Self::induced).
     induced: Changes,
+    /// The branch's session overlay, and the facts the staged links
+    /// retract that only it holds: retracted from it once the publish
+    /// lands, so what a transaction read is what its publish leaves.
+    overlay: Ephemeral,
+    overlay_retractions: Vec<Artifact>,
+}
+
+/// The facts `changes` retracts that `overlay` holds. A transaction's
+/// read hides such a fact, and the commit's retraction of it lands
+/// nothing in the tree, which never held it: the publish retracts it
+/// from the overlay, so the session's row does not come back.
+fn overlay_retractions(changes: &Staged, overlay: &Ephemeral) -> Vec<Artifact> {
+    let mut retracted = Vec::new();
+    for (the, of, change) in changes.log() {
+        let Change::Retract(value) = change else {
+            continue;
+        };
+        let selector = ArtifactSelector::new()
+            .the(the.clone())
+            .of(of.clone())
+            .is(value.clone());
+        if !overlay.scan(&selector).is_empty() {
+            retracted.push(Artifact {
+                the: the.clone(),
+                of: of.clone(),
+                is: value.clone(),
+                cause: None,
+            });
+        }
+    }
+    retracted
+}
+
+/// Retract `facts` from the session overlay, once the publish that
+/// retracted them landed.
+fn retract_from_overlay(overlay: &Ephemeral, facts: Vec<Artifact>) -> Result<(), CommitError> {
+    if facts.is_empty() {
+        return Ok(());
+    }
+    let mut changes = Changes::new();
+    for fact in facts {
+        changes.dissociate(fact.the, fact.of, fact.is);
+    }
+    overlay.apply(changes)?;
+    Ok(())
 }
 
 impl TransactionBatch {
@@ -219,6 +268,8 @@ impl BatchPublish {
             records,
             contexts,
             induced: _,
+            overlay,
+            overlay_retractions,
         } = self.batch;
         let tip = snapshot.revision();
 
@@ -241,10 +292,12 @@ impl BatchPublish {
             if induction.content().as_ref() != Some(&tip) {
                 induction.publish(tip.clone()).perform(env).await?;
             }
+            retract_from_overlay(&overlay, overlay_retractions)?;
             return Ok(tip);
         }
 
         head.publish(tip.clone(), env).await?;
+        retract_from_overlay(&overlay, overlay_retractions)?;
 
         // Only now that the head has actually advanced do the staged
         // records and context enter the branch's shared memos: they are
@@ -324,6 +377,7 @@ impl TransactionPublish<&Branch> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -351,6 +405,7 @@ impl TransactionPublish<TransactionBatch> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -391,6 +446,7 @@ impl TransactionCommit<&Branch> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -410,6 +466,8 @@ impl TransactionCommit<&Branch> {
         // it for the links that follow.
         let authority = Identify.perform(env).await?;
         let (line, _) = branch.commit_identity(authority.profile(), &authority.did());
+        let overlay = branch.overlay().clone();
+        let retractions = overlay_retractions(&self.changes, &overlay);
 
         let (outcome, induced) = Box::pin(mint_link(
             SourceRef::Branch(branch),
@@ -446,6 +504,8 @@ impl TransactionCommit<&Branch> {
                 records: branch.records(),
                 contexts: branch.contexts(),
                 induced,
+                overlay,
+                overlay_retractions: retractions,
             },
             Outcome::Minted(minted) => {
                 let Minted {
@@ -468,6 +528,8 @@ impl TransactionCommit<&Branch> {
                     records: branch.records(),
                     contexts: branch.contexts(),
                     induced,
+                    overlay,
+                    overlay_retractions: retractions,
                 }
             }
         })
@@ -493,6 +555,7 @@ impl TransactionCommit<TransactionBatch> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -511,6 +574,7 @@ impl TransactionCommit<TransactionBatch> {
             _ => None,
         };
         let amending = amend.is_some();
+        let retractions = overlay_retractions(&self.changes, &batch.overlay);
 
         let (outcome, induced) = Box::pin(mint_link(
             SourceRef::Snapshot(&batch.snapshot),
@@ -525,6 +589,7 @@ impl TransactionCommit<TransactionBatch> {
         ))
         .await?;
         induced.assert(&mut batch.induced);
+        batch.overlay_retractions.extend(retractions);
 
         if let Outcome::Minted(minted) = outcome {
             let Minted {
@@ -556,6 +621,22 @@ impl TransactionCommit<TransactionBatch> {
     }
 }
 
+/// NaN is not a value: a commit that would write one is refused before
+/// anything lands, as deserialization and the rule compiler refuse it.
+fn refuse_nan<'a>(changes: impl Iterator<Item = &'a Change>) -> Result<(), CommitError> {
+    for change in changes {
+        if let Change::Assert(dialog_artifacts::Value::Float(float), _) = change
+            && float.is_nan()
+        {
+            return Err(dialog_artifacts::DialogArtifactsError::InvalidValue(
+                "NaN is not a value".into(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Mint one staged link: run commit-time induction over the batch, then
 /// [`Mint`] the settled changes on the line `line` names, carrying the
 /// trigger footprint forward. Nothing is published or adopted — the
@@ -566,7 +647,7 @@ async fn mint_link<Env>(
     source: SourceRef<'_>,
     base: Option<Revision>,
     line: impl FnOnce(&Did, &Did) -> (Entity, Origin),
-    mut changes: Changes,
+    changes: Staged,
     transients: Changes,
     allow_empty: bool,
     canonicalize: bool,
@@ -587,9 +668,19 @@ where
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Holds
         + ConditionalSync
         + 'static,
 {
+    refuse_nan(changes.log().iter().map(|(_, _, change)| change))?;
+    let operator = Identify.perform(env).await?;
+    let mut changes = Box::pin(succession::settle(
+        vec![source.to_source()],
+        QueryLayer::from(source).overlay(&operator),
+        &changes,
+        env,
+    ))
+    .await?;
     let induced = induce(source, &mut changes, transients, env).await?;
     let touches = touches_rules(&changes);
     let previous = base.clone();
@@ -604,6 +695,7 @@ where
         allow_empty,
         canonicalize,
         amend,
+        rebuild: None,
     }
     .perform(env, line)
     .await?;
@@ -1060,17 +1152,22 @@ mod tests {
     /// nothing.
     #[dialog_common::test]
     async fn it_folds_history_across_amends() -> Result<()> {
-        use dialog_artifacts::{Attribute, Changes, Update as _, Value};
+        use dialog_artifacts::{Changes, Relation, Update as _, Value};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let the: Attribute = "note/body".parse()?;
+        let the: Relation = "note/body".parse()?;
         let of = dialog_artifacts::Entity::new()?;
         let replace = |value: &str| {
             let mut changes = Changes::new();
-            changes.associate_unique(the.clone(), of.clone(), Value::String(value.into()));
+            changes.associate(
+                the.clone(),
+                of.clone(),
+                Value::String(value.into()),
+                dialog_artifacts::Pick::Last,
+            );
             changes
         };
         let retract = |value: &str| {

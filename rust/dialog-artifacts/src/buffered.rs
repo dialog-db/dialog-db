@@ -697,21 +697,27 @@ mod tests {
     }
 
     fn assert_of(entity: &str, value: &str) -> Instruction {
-        Instruction::Assert(Artifact {
-            the: "test/field".parse().unwrap(),
-            of: entity.parse().unwrap(),
-            is: Value::String(value.to_string()),
-            cause: None,
-        })
+        Instruction::Assert(
+            Artifact {
+                the: "test/field".parse().unwrap(),
+                of: entity.parse().unwrap(),
+                is: Value::String(value.to_string()),
+                cause: None,
+            },
+            crate::Pick::All,
+        )
     }
 
     fn replace_of(entity: &str, value: &str) -> Instruction {
-        Instruction::Replace(Artifact {
-            the: "test/field".parse().unwrap(),
-            of: entity.parse().unwrap(),
-            is: Value::String(value.to_string()),
-            cause: None,
-        })
+        Instruction::Assert(
+            Artifact {
+                the: "test/field".parse().unwrap(),
+                of: entity.parse().unwrap(),
+                is: Value::String(value.to_string()),
+                cause: None,
+            },
+            crate::Pick::Last,
+        )
     }
 
     fn retract_of(entity: &str, value: &str) -> Instruction {
@@ -1107,7 +1113,7 @@ mod tests {
             .then_apply(
                 &store,
                 Stamp::Amend(asset_version()),
-                stream::iter(vec![Instruction::Assert(asset.fact()?)]),
+                stream::iter(vec![Instruction::Assert(asset.fact()?, crate::Pick::All)]),
                 WriteScope::Machinery,
             )
             .await?;
@@ -1138,13 +1144,13 @@ mod tests {
             &ArtifactTree::empty(),
             &store,
             Some(asset_version()),
-            stream::iter(vec![Instruction::Assert(asset.fact()?)]),
+            stream::iter(vec![Instruction::Assert(asset.fact()?, crate::Pick::All)]),
             WriteScope::Application,
         )
         .await;
         assert!(matches!(
             refused,
-            Err(DialogArtifactsError::ReservedAttribute(_))
+            Err(DialogArtifactsError::ReservedRelation(_))
         ));
         Ok(())
     }

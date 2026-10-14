@@ -48,6 +48,38 @@ jobs:
         run: |
           nix develop --accept-flake-config --command lint
 
+  # The engine's cost matrix (rust/dialog-perf): every scenario under
+  # callgrind, its instruction count and exact step counts gated against
+  # the baselines under perf/baseline. A regression here is a change in
+  # what the engine does for a workload, caught before it lands.
+  perf:
+    name: 'Perf gate'
+    needs: ['lint_nix']
+    runs-on: 'ubuntu-latest'
+    steps:
+      - uses: cisagov/action-disable-apparmor@v1
+      - uses: actions/checkout@v4
+      - uses: wimpysworld/nothing-but-nix@main
+        with:
+          root-safe-haven: '16384'
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - uses: cachix/cachix-action@v16
+        with:
+          name: tonk-ops
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+      - name: 'Run the perf gate'
+        shell: bash
+        run: |
+          nix develop --accept-flake-config --command perf:gate
+      - name: 'Upload the sweep'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 'perf-current'
+          path: 'target/perf-current'
+
   lints:
     name: 'Lints'
     needs: ['lint_nix', 'lint_rust']

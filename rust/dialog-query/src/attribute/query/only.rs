@@ -2,8 +2,8 @@ use super::all::AttributeQueryAll;
 use super::pipelined;
 use crate::Claim;
 use crate::Value;
-use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained};
-use crate::attribute::The;
+use crate::artifact::{ArtifactSelector, ArtifactsRelation, Constrained};
+use crate::attribute::Relation;
 use crate::environment::Environment;
 use crate::query::Application;
 use crate::query::Output;
@@ -12,20 +12,25 @@ use crate::selection::{Match, Selection};
 use crate::type_system::Type as Kind;
 use crate::types::{Any, Record};
 use crate::{Entity, EvaluationError, Parameters, Schema, Term, try_stream};
+use dialog_artifacts::history::Edition;
 use dialog_artifacts::{Artifact, ArtifactView, Cause, DialogArtifactsError, Select};
 use dialog_capability::Provider;
 use std::fmt::Display;
 use std::fmt::{Formatter, Result as FmtResult};
 use std::pin::Pin;
 
+/// An election winner: the artifact and the standing it was stored with.
+type Winner = (Artifact, Option<(Edition, [u8; 32])>);
+
 /// Materializes an election winner, treating a corrupt stored row
 /// ([`DialogArtifactsError::CorruptEntry`]) as an ignorable non-result
 /// (`Ok(None)`, with a warning) rather than a query failure: a corrupt or
 /// foreign-written tree entry must not poison every query that ranges over
 /// it. All other errors propagate.
-fn materialize_winner(winner: ArtifactView) -> Result<Option<Artifact>, DialogArtifactsError> {
+fn materialize_winner(winner: ArtifactView) -> Result<Option<Winner>, DialogArtifactsError> {
+    let standing = winner.standing();
     match winner.to_owned() {
-        Ok(artifact) => Ok(Some(artifact)),
+        Ok(artifact) => Ok(Some((artifact, standing))),
         Err(DialogArtifactsError::CorruptEntry(reason)) => {
             tracing::warn!(%reason, "ignoring corrupt stored row in election");
             Ok(None)
@@ -55,7 +60,7 @@ where
         // term (e.g. an unconstrained entity) never stores a binding,
         // so term lookups cannot recover the fact.
         let claim = candidate.prove(selector.source())?;
-        let attribute = ArtifactsAttribute::try_from(Value::from(claim.the().clone()))?;
+        let attribute = ArtifactsRelation::try_from(Value::from(claim.the().clone()))?;
         let entity = claim.of().clone();
         let value = claim.is().clone();
         let cause_term = selector.cause();
@@ -82,9 +87,12 @@ where
         }
 
         // Only the surviving winner decodes its value; the losing
-        // challengers never materialized anything.
+        // challengers never materialized anything. The candidate's value
+        // may be the query's constant, which the winner matches through
+        // the lens of the constant's type (see `Value::reads_as`), as the
+        // scan that found the candidate did.
         if let Some(winner) = winner
-            && winner.value()? == value
+            && winner.value()?.reads_as(&value)
         {
             let winner_cause = winner.cause().cloned().unwrap_or(Cause([0; 32]));
             if cause.is_none() || cause == Some(winner_cause) {
@@ -109,14 +117,14 @@ pub struct AttributeQueryOnly {
 impl AttributeQueryOnly {
     /// Create a new winner-selecting attribute query. Scalar like
     /// every associative-layer lookup: zero rows on miss.
-    pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
+    pub fn new(the: Term<Relation>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         Self {
             query: AttributeQueryAll::new(the, of, is, cause),
         }
     }
 
     /// Get the 'the' (attribute) term.
-    pub fn the(&self) -> &Term<The> {
+    pub fn the(&self) -> &Term<Relation> {
         self.query.the()
     }
 
@@ -155,8 +163,8 @@ impl AttributeQueryOnly {
         self.query.source()
     }
 
-    /// Map `Term<The>` to `Term<ArtifactsAttribute>`.
-    pub fn attribute(&self) -> Term<ArtifactsAttribute> {
+    /// Map `Term<Relation>` to `Term<ArtifactsRelation>`.
+    pub fn attribute(&self) -> Term<ArtifactsRelation> {
         self.query.attribute()
     }
 
@@ -258,7 +266,10 @@ impl AttributeQueryOnly {
                 let value_known = resolved.is().is_constant();
 
                 if entity_known || (attribute_known && !value_known) {
-                    // Sliding window path.
+                    // Sliding window path. A constant value admits the
+                    // winner a reader of the constant's type observes as
+                    // it (see `Value::reads_as`), as the scan's own exact
+                    // bound does.
                     let value_constraint = resolved.is().as_constant().cloned();
 
                     let scan = AttributeQueryAll::lookup(
@@ -291,14 +302,18 @@ impl AttributeQueryOnly {
                                     // (`CorruptEntry`) is a corrupt tree
                                     // entry: drop the group's yield rather
                                     // than failing the query.
-                                    match materialize_winner(current)? {
-                                        Some(winner)
-                                            if (value_constraint.is_none()
-                                                || value_constraint.as_ref() == Some(&winner.is))
-                                                && selector.admits(&winner) =>
+                                    match materialize_winner(current)?.and_then(
+                                        |(winner, standing)| {
+                                            selector.admit(winner).map(|winner| (winner, standing))
+                                        },
+                                    ) {
+                                        Some((winner, standing))
+                                            if value_constraint
+                                                .as_ref()
+                                                .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
                                         {
                                             let mut extension = base.clone();
-                                            selector.merge(&mut extension, winner)?;
+                                            selector.merge(&mut extension, winner, standing)?;
                                             yield extension;
                                         }
                                         _ => {}
@@ -313,14 +328,16 @@ impl AttributeQueryOnly {
                     // Yield the final group's winner (unless its stored
                     // bytes are corrupt; see the group-close arm above).
                     if let Some(winner) = candidate.take() {
-                        match materialize_winner(winner)? {
-                            Some(winner)
-                                if (value_constraint.is_none()
-                                    || value_constraint.as_ref() == Some(&winner.is))
-                                    && selector.admits(&winner) =>
+                        match materialize_winner(winner)?.and_then(|(winner, standing)| {
+                            selector.admit(winner).map(|winner| (winner, standing))
+                        }) {
+                            Some((winner, standing))
+                                if value_constraint
+                                    .as_ref()
+                                    .is_none_or(|constraint| winner.is.reads_as(constraint)) =>
                             {
                                 let mut extension = base.clone();
-                                selector.merge(&mut extension, winner)?;
+                                selector.merge(&mut extension, winner, standing)?;
                                 yield extension;
                             }
                             _ => {}
@@ -835,7 +852,7 @@ mod tests {
         };
 
         // {of, is} with the LOSER value -- should return nothing.
-        let results = Term::<The>::var("relation")
+        let results = Term::<Relation>::var("relation")
             .of(entity.clone())
             .is(looser.clone())
             .cardinality(Cardinality::One)
@@ -851,7 +868,7 @@ mod tests {
         );
 
         // {of, is} with the WINNER value -- should return the winner.
-        let results = Term::<The>::var("relation")
+        let results = Term::<Relation>::var("relation")
             .of(entity.clone())
             .is(winner.clone())
             .cardinality(Cardinality::One)
@@ -923,7 +940,7 @@ mod tests {
         };
 
         // {is} with the LOSER value -- should return nothing.
-        let results = Term::<The>::var("relation")
+        let results = Term::<Relation>::var("relation")
             .of(Term::var("person"))
             .is(looser.clone())
             .cardinality(Cardinality::One)
@@ -939,7 +956,7 @@ mod tests {
         );
 
         // {is} with the WINNER value -- should return the winner.
-        let results = Term::<The>::var("relation")
+        let results = Term::<Relation>::var("relation")
             .of(Term::var("person"))
             .is(winner.clone())
             .cardinality(Cardinality::One)

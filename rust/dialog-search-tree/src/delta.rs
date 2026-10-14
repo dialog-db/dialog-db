@@ -68,6 +68,11 @@ where
         contents.get(key).cloned()
     }
 
+    /// The keys of every entry currently in this delta, in no order.
+    pub fn keys(&self) -> Vec<K> {
+        self.contents.read().keys().cloned().collect()
+    }
+
     /// Returns the number of entries currently in this delta.
     pub fn len(&self) -> usize {
         self.contents.read().len()

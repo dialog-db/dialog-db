@@ -5,9 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::artifacts::decode_value;
 use crate::key::varkey::{self, ValuePayload};
-use crate::{
-    Attribute, Datum, DialogArtifactsError, Entity, Key, State, coverage_key, history_key,
-};
+use crate::{Datum, DialogArtifactsError, Entity, Key, Relation, State, coverage_key, history_key};
 use dialog_search_tree::Manifest;
 
 use super::{Cause, Claim, Version};
@@ -138,8 +136,8 @@ impl Record {
         let of = Entity::from_str(from_utf8(&parts.entity).map_err(|error| {
             DialogArtifactsError::InvalidEntity(format!("entity key is not UTF-8: {error}"))
         })?)?;
-        let the = Attribute::from_str(from_utf8(&parts.attribute).map_err(|error| {
-            DialogArtifactsError::InvalidAttribute(format!("attribute key is not UTF-8: {error}"))
+        let the = Relation::from_str(from_utf8(&parts.attribute).map_err(|error| {
+            DialogArtifactsError::InvalidRelation(format!("attribute key is not UTF-8: {error}"))
         })?)?;
         let is = match &parts.value {
             ValuePayload::Spilled { .. } => {

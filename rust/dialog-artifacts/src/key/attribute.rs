@@ -14,7 +14,7 @@ use super::{Key, KeyView, KeyViewConstruct, KeyViewMut};
 /// Tag byte that identifies attribute-based index keys
 pub const ATTRIBUTE_KEY_TAG: u8 = 1;
 
-/// A [`KeyType`] that is used when constructing an index of the [`Attribute`]s
+/// A [`KeyType`] that is used when constructing an index of the [`Relation`]s
 /// of [`Artifact`]s.
 #[repr(transparent)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -57,7 +57,7 @@ where
         AttributeKeyPart(varkey::field(
             self.0.as_ref(),
             ATTRIBUTE_KEY_TAG,
-            varkey::Field::Attribute,
+            varkey::Field::Relation,
         ))
     }
 
@@ -149,7 +149,10 @@ impl AttributeKey<Key> {
         AttributeKey::<Key>::default()
             .set_entity(EntityKeyPart::from(&fact.of))
             .set_attribute(AttributeKeyPart::from(&fact.the))
-            .set_value(fact.is.data_type(), value_payload(&fact.is, manifest))
+            .set_value(
+                fact.is.data_type().band(manifest.value_encoding),
+                value_payload(&fact.is, manifest),
+            )
     }
 }
 
