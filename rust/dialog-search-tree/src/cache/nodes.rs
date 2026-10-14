@@ -240,6 +240,8 @@ impl<Key, Value> Shard<Key, Value> {
 struct Store<Key, Value> {
     shards: Box<[Mutex<Shard<Key, Value>>]>,
     /// The bytes each shard may hold.
+    share: usize,
+    /// The bytes the whole cache may hold.
     budget: usize,
 }
 
@@ -313,7 +315,8 @@ impl<Key, Value> NodeCache<Key, Value> {
         Self {
             store: Arc::new(Store {
                 shards: (0..shards).map(|_| Mutex::new(Shard::new())).collect(),
-                budget: budget / shards,
+                share: budget / shards,
+                budget,
             }),
             scope: Scope::default(),
         }
@@ -375,10 +378,10 @@ impl<Key, Value> NodeCache<Key, Value> {
             slot.visited = true;
             return (slot.node.clone(), false);
         }
-        if weight > self.store.budget {
+        if weight > self.store.share {
             return (node, true);
         }
-        while shard.bytes + weight > self.store.budget && shard.evict() {}
+        while shard.bytes + weight > self.store.share && shard.evict() {}
         shard.admit(Slot {
             hash,
             node: node.clone(),
@@ -433,6 +436,18 @@ impl<Key, Value> NodeCache<Key, Value> {
                 at = next;
             }
         }
+    }
+
+    /// Drops every node, for every scope.
+    pub fn clear(&self) {
+        for shard in self.store.shards.iter() {
+            *shard.lock() = Shard::new();
+        }
+    }
+
+    /// The bytes of nodes the cache may hold.
+    pub fn budget(&self) -> usize {
+        self.store.budget
     }
 
     /// How many nodes the cache holds, for every scope.

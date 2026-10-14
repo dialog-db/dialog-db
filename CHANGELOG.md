@@ -14,6 +14,38 @@ says how to cut a release.
 
 ## Unreleased
 
+### A branch's caches are held by the environment it is opened through
+
+[#574](https://github.com/dialog-db/dialog-db/pull/574)
+
+Tree nodes, spilled values, verified revision records, causal verdicts,
+contexts, plans, rule sets, the live spine and the memo of trees
+rewritten under the number band were made with each branch handle and
+died with it, so a service that opened the branch per request reused
+nothing. The environment now holds them as one `HeldCaches`, each at the
+width it is sound to share: tree nodes under one byte budget for every
+repository, each reading through its own scope; what is addressed by
+content or version per repository; what is tagged by a head per branch.
+Opening a branch again through the same environment finds them warm.
+
+What this changes for you:
+
+- `OpenBranch::perform` and `LoadBranch::perform` require the
+  environment to implement `Holds`. Peers and sessions do. A bare
+  `Volatile` holds nothing, so a branch opened on it directly starts
+  cold every time, as before.
+- Build a peer `.with(HeldCaches::with_budget(bytes))` to bound its node
+  cache. `peer.caches()` gives `release(&repository)`, `clear()` and
+  `bytes()`. A session shares its peer's caches unless given its own.
+- Code that reopened a branch to get cold caches has to release them
+  first: `HeldCaches::of(env).release(&repository)`.
+- The process-wide root-manifest memo is gone.
+- The per-repository caches accumulate until the repository is released
+  or the environment dropped.
+
+Why: whoever owns the environment decides how long its caches live, and
+can bound or drop them; a cache nobody owns can be neither.
+
 ### The node cache is bounded by bytes and shared between scopes
 
 [#573](https://github.com/dialog-db/dialog-db/pull/573)

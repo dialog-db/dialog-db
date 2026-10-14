@@ -9,6 +9,7 @@
 use dialog_baseline::metered::Tally;
 use dialog_baseline::repo::DialogRepo;
 use dialog_baseline::se::{SeLog, se_instructions};
+use dialog_repository::BranchReference;
 
 fn main() -> anyhow::Result<()> {
     let count: usize = std::env::args()
@@ -23,14 +24,31 @@ fn main() -> anyhow::Result<()> {
         let tally = Tally::default();
         let repo = DialogRepo::metered(tally.clone()).await?;
         let started = std::time::Instant::now();
+        // `HASH_AUDIT_REOPEN` opens the branch afresh for every commit, the
+        // way a service that keeps no handle between requests does.
+        let reopen = std::env::var("HASH_AUDIT_REOPEN").is_ok();
         for commit in &log.transactions {
-            repo.branch()
-                .transaction()
-                .integrate(se_instructions(commit)?.into_iter().collect())
-                .commit()
-                .publish()
-                .perform(repo.operator())
-                .await?;
+            let instructions = se_instructions(commit)?.into_iter().collect();
+            if reopen {
+                BranchReference::from(repo.branch())
+                    .open()
+                    .perform(repo.operator())
+                    .await?
+                    .transaction()
+                    .integrate(instructions)
+                    .commit()
+                    .publish()
+                    .perform(repo.operator())
+                    .await?;
+            } else {
+                repo.branch()
+                    .transaction()
+                    .integrate(instructions)
+                    .commit()
+                    .publish()
+                    .perform(repo.operator())
+                    .await?;
+            }
         }
         let elapsed = started.elapsed();
         println!(

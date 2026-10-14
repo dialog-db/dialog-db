@@ -22,6 +22,9 @@ pub use archive::*;
 pub(crate) mod branch;
 pub use branch::*;
 
+mod caches;
+pub use caches::HeldCaches;
+
 mod create;
 pub use create::*;
 

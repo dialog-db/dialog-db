@@ -558,14 +558,12 @@ where
         match &self.root {
             TreeRoot::Empty { manifest, .. } => Ok(manifest.clone()),
             TreeRoot::Node(hash) => {
-                if let Some(manifest) = manifest_memo::get(hash) {
-                    return Ok(manifest);
-                }
+                // The root is read through the tree's node cache, so a tree
+                // whose cache holds its root answers without a load or a
+                // check; the header itself is a handful of bytes to read.
                 let accessor = Accessor::new(self.node_cache.clone(), storage);
                 let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
-                let manifest = node.manifest()?;
-                manifest_memo::insert(hash, manifest.clone());
-                Ok(manifest)
+                Ok(node.manifest()?)
             }
         }
     }
@@ -657,43 +655,6 @@ where
 {
     fn from(tree: &PersistentTree<Key, Value, D>) -> Self {
         tree.edit()
-    }
-}
-
-/// Root hash to manifest, remembered across trees and caches.
-///
-/// Reading a tree's manifest decodes its root node, which validates the whole
-/// node; a query session and every scan read it, so a small root that did not
-/// change was re-validated per query. A node's bytes are fixed by its hash and
-/// its header is the tree's manifest, so an entry can never go stale; only
-/// manifests that passed [`Manifest::check`] are remembered. Bounded by
-/// clearing when full: every entry is cheap to recover from the root.
-mod manifest_memo {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-
-    use dialog_common::Blake3Hash;
-
-    use crate::Manifest;
-
-    const CAPACITY: usize = 4096;
-
-    fn memo() -> &'static Mutex<HashMap<Blake3Hash, Manifest>> {
-        static MEMO: OnceLock<Mutex<HashMap<Blake3Hash, Manifest>>> = OnceLock::new();
-        MEMO.get_or_init(|| Mutex::new(HashMap::new()))
-    }
-
-    pub(super) fn get(root: &Blake3Hash) -> Option<Manifest> {
-        memo().lock().ok()?.get(root).cloned()
-    }
-
-    pub(super) fn insert(root: &Blake3Hash, manifest: Manifest) {
-        if let Ok(mut memo) = memo().lock() {
-            if memo.len() >= CAPACITY {
-                memo.clear();
-            }
-            memo.insert(root.clone(), manifest);
-        }
     }
 }
 

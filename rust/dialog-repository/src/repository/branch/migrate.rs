@@ -227,7 +227,8 @@ impl Migrate<'_> {
 
 /// `tree`, laid out in the band this release writes: the tree itself when
 /// its manifest names the band, else its rewrite under the band, persisted
-/// into the branch's archive and memoized by root for the process.
+/// into the branch's archive and memoized by root in the caches the
+/// environment holds for the repository.
 ///
 /// A pull that merges aligns its sync base, the upstream head and the
 /// local head before it diffs or grafts them, so a tree a release before
