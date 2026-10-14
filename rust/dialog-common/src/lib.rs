@@ -56,7 +56,7 @@ mod impossible;
 pub use impossible::*;
 
 mod holds;
-pub use holds::{Held, Holdings, Holds};
+pub use holds::{Held, Holdings, Holds, held_key};
 
 pub mod flight;
 pub use flight::{Flight, WeakFlight};

@@ -3,7 +3,7 @@ use crate::rules::SharedRuleCache;
 use crate::{Ephemeral, RemoteFallback, ResolveError, Revision};
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
@@ -26,7 +26,7 @@ use dialog_query::query::Application;
 use futures_util::lock::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 mod asset;
 pub use asset::*;
@@ -149,20 +149,22 @@ pub struct Branch {
     /// `None` (never induced) adopts the current head *without*
     /// retroactive firing.
     induction: Cell<Revision>,
-    /// Shared node cache for tree reads. Created once per opened branch and
-    /// carried (as a shared handle) into every `Select`'s tree, so blocks read
-    /// by one query stay warm for the next instead of being re-fetched from
-    /// storage. Content-addressed keys make sharing across revisions safe.
+    /// Node cache for tree reads: this repository's view of the one the
+    /// environment holds (see [`HeldCaches`](crate::HeldCaches)), carried as
+    /// a shared handle into every `Select`'s tree, so blocks read by one
+    /// query stay warm for the next, and for the next open of the branch,
+    /// instead of being re-fetched from storage. Content-addressed keys make
+    /// sharing across revisions safe.
     node_cache: ArtifactNodeCache,
     /// Shared cache of spilled value blocks, keyed by their 32-byte content
-    /// reference. Like `node_cache`, created once per opened branch and carried
+    /// reference. Held by the environment for the repository and carried
     /// into every select so a repeated read of the same large (spilled) value
     /// skips the store fetch. Content-addressed, so it never serves stale bytes.
     spill_cache: SpillCache,
     /// Shared deductive-rule cache (discovery by head + hydrated bodies).
-    /// Like `node_cache`, created once per opened branch and carried into
-    /// every query's durable rule resolution, so the `dialog.rule/*` scan is
-    /// paid once per (concept, head) rather than per query.
+    /// Held by the environment for this branch and carried into every
+    /// query's durable rule resolution, so the `dialog.rule/*` scan is paid
+    /// once per (concept, head) rather than per query.
     rule_cache: SharedRuleCache,
     /// The branch's ephemeral line: session facts folded into every
     /// read of this branch, never committed. Shared across clones like
@@ -232,7 +234,7 @@ pub struct Branch {
     /// shared by every clone, so a remote built from a route fails over
     /// as the host's connection does rather than starting afresh.
     answers: Answers,
-    /// What every handle of this branch in the process shares as its
+    /// What every handle of this branch in the environment shares as its
     /// writer: the lock the head moves under, and the head the writer's
     /// last pull adopted. See [`Writer`].
     writer: Arc<Writer>,
@@ -242,9 +244,15 @@ pub struct Branch {
 /// connections keeps, collected as a branch connects.
 pub(crate) type Answers = Arc<Mutex<HashMap<Entity, Arc<AtomicUsize>>>>;
 
-/// The writer of a branch in this process, shared by every handle of
-/// the branch: origins are unique per process, so the handles mint under
-/// one origin and must take turns moving the head.
+/// The writers of the branches open through an environment, by branch.
+/// Weak, so a writer lives as long as some handle of its branch does.
+pub(crate) type Writers = Mutex<HashMap<String, Weak<Writer>>>;
+
+/// The writer of a branch in an environment, shared by every handle of
+/// the branch opened through it, and through any environment that shares
+/// its held caches (a session of a peer): they write to one archive, so
+/// their handles must take turns moving the head, whichever of them mints
+/// the edition.
 #[derive(Debug)]
 pub(crate) struct Writer {
     /// Held while the head moves, by a commit, a pull or a reset, so two
@@ -258,24 +266,31 @@ pub(crate) struct Writer {
 }
 
 impl Writer {
-    /// The writer of the branch `key` names, shared with every handle of
-    /// it that is open. Origins are unique per process, so no sharing is
-    /// needed beyond it.
-    fn shared(key: String) -> Arc<Self> {
-        static WRITERS: OnceLock<Mutex<HashMap<String, Weak<Writer>>>> = OnceLock::new();
-        let mut writers = WRITERS
-            .get_or_init(Mutex::default)
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+    fn new() -> Self {
+        Self {
+            lock: AsyncMutex::new(()),
+            adopted: Mutex::new(None),
+        }
+    }
+
+    /// The writer of the branch `key` names among `writers`, shared with
+    /// every handle of it that is open through the environments that hold
+    /// `writers` (see [`HeldCaches::writer`](crate::HeldCaches)).
+    ///
+    /// Two environments that hold nothing in common do not share a
+    /// writer; a race between them as one issuer is a writer racing
+    /// itself, which a merging commit refuses rather than mint an edition
+    /// twice (see `merge`). An environment that holds nothing, such as a
+    /// bare storage provider, gives every handle a writer of its own, as
+    /// two environments would.
+    pub(crate) fn among(writers: &Writers, key: String) -> Arc<Self> {
+        let mut writers = writers.lock().unwrap_or_else(|poison| poison.into_inner());
         if let Some(writer) = writers.get(&key).and_then(Weak::upgrade) {
             return writer;
         }
         // Drop the entries of branches no handle is open for any more.
         writers.retain(|_, writer| writer.strong_count() > 0);
-        let writer = Arc::new(Writer {
-            lock: AsyncMutex::new(()),
-            adopted: Mutex::new(None),
-        });
+        let writer = Arc::new(Self::new());
         writers.insert(key, Arc::downgrade(&writer));
         writer
     }
@@ -426,19 +441,20 @@ impl Branch {
             .insert(peer, answered);
     }
 
-    /// This branch's writer in the process: the lock a commit, a pull or
-    /// a reset holds while it moves the head, and the head the last pull
-    /// adopted. Every handle of the branch shares it, so a commit and a
-    /// pull by one writer take turns instead of minting the same edition
-    /// twice.
+    /// This branch's writer in the environment it was opened through: the
+    /// lock a commit, a pull or a reset holds while it moves the head, and
+    /// the head the last pull adopted. Every handle of the branch opened
+    /// through that environment shares it, so a commit and a pull by one
+    /// writer take turns instead of minting the same edition twice.
     pub(crate) fn writer(&self) -> Arc<Writer> {
         self.writer.clone()
     }
 
-    /// The writer shared by every open handle of the branch `reference`
-    /// names.
-    pub(crate) fn writer_of(reference: &BranchReference) -> Arc<Writer> {
-        Writer::shared(format!("{}:{}", reference.subject(), reference.name()))
+    /// The writer shared by every handle of the branch `reference` names
+    /// that is open through `env`, or through an environment sharing what
+    /// `env` holds.
+    pub(crate) fn writer_of<Env: Holds>(env: &Env, reference: &BranchReference) -> Arc<Writer> {
+        crate::HeldCaches::of(env).writer(format!("{}:{}", reference.subject(), reference.name()))
     }
 
     /// Where a read of content this branch holds by reference falls back
@@ -586,6 +602,7 @@ impl Branch {
             causality: self.causality_cache.clone(),
             contexts: self.context_cache.clone(),
             records: self.record_cache.clone(),
+            rewrites: self.rewrite_cache.clone(),
             spine: self.spine.clone(),
         }
     }

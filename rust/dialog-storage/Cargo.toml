@@ -19,6 +19,9 @@ helpers = [
   "dep:tower",
   "dep:tower-http",
 ]
+# Counts archive block stores and attributes byte-identical re-stores, for
+# measurement harnesses. Off, the hooks are empty and keep nothing.
+audit = []
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests

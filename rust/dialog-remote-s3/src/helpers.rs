@@ -56,6 +56,9 @@ pub struct PublicS3Address {
 pub struct S3Network {
     /// Optional S3 credentials for authenticated access.
     credentials: Option<S3Credential>,
+    /// The site every fork runs through, so concurrent reads through this
+    /// environment join one another's in-flight block GETs.
+    site: S3,
 }
 
 impl S3Network {
@@ -69,6 +72,7 @@ impl From<S3Credential> for S3Network {
     fn from(credentials: S3Credential) -> Self {
         Self {
             credentials: Some(credentials),
+            site: S3::default(),
         }
     }
 }
@@ -92,7 +96,7 @@ where
             Some(credential) => request.attest(credential),
             None => S3Authorization::public(request),
         };
-        fork.attest(authorization).perform(&S3).await
+        fork.attest(authorization).perform(&self.site).await
     }
 }
 

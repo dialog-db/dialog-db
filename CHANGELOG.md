@@ -77,6 +77,196 @@ What this changes for you:
 
 Why: a delivered head can arrive after a newer one was fetched or delivered. Recorded as it came, it would move the sync point back and make the next push fail or upload what the remote holds.
 
+### A flush that fails leaves nothing in the held caches, and environments sharing them share branch writers
+
+[#579](https://github.com/dialog-db/dialog-db/pull/579)
+
+A seal keeps the nodes it produces in the node cache before they reach
+the archive, and that cache outlives the handle. A commit, merge or pull
+whose flush failed left those nodes held for the repository, so a later
+read of them was answered from the cache and never fetched. They are now
+forgotten when the flush fails. Separately, a session works through its
+peer's archive and caches, so its handles of a branch and its peer's now
+share one writer: the writers live in `HeldCaches` beside the caches.
+
+What this changes for you:
+
+- A failed flush no longer leaves the repository's scope holding blocks
+  its archive never received.
+- A peer and its sessions take turns moving a branch's head. `release`
+  and `clear` leave writers alone.
+- One `HeldCaches` is for one archive: environments over different
+  storages must not share a set.
+- `NodeCache::forget` and `Delta::keys` are new.
+
+Why: a scope must hold only what its archive has, and every handle that
+writes to one archive must take turns.
+
+### A formula derived `#[formula(cached)]` is computed once per input
+
+[#576](https://github.com/dialog-db/dialog-db/pull/576)
+
+A formula says it wants caching where it is derived, and the engine
+keeps its outputs by the formula and its input values in the
+`FormulaCache` the environment holds, bounded at 4,096 applications and
+evicting by SIEVE. A computation that fails is not remembered. The
+revision formulas are marked cached, and the process-wide memo of
+verified revision records they used is gone.
+
+What this changes for you:
+
+- `Scope` requires `Holds`: an environment a query runs through has to
+  hold things, which a wrapper does by forwarding to its operator.
+- `FormulaQuery::evaluate` takes the environment. `expand_with` expands
+  through a given cache; `expand` still works without one.
+- `Formula` gains `resolve_with` and `formula::emit`.
+- `HeldCaches::formulas()` is the cache, and `clear()` clears it.
+- An environment that holds nothing remembers nothing across
+  evaluations.
+
+Why: verification dominates projecting a record and the fixpoint
+evaluator re-applies these formulas every round; any costly formula
+needs the same, and each hand-written memo was another static nobody
+owned.
+
+### Branch writers and in-flight block reads belong to the environment
+
+[#575](https://github.com/dialog-db/dialog-db/pull/575)
+
+The writers of open branches and the in-flight block GETs of the S3 and
+filesystem transports were process-wide statics: they outlived every
+environment, and two environments in one process shared them whether
+they meant to or not. A branch's writer is now held by the environment,
+and each `S3` and `Fs` site owns its in-flight GETs, so readers join one
+another's requests only through the same site.
+
+What this changes for you:
+
+- `S3` and `Fs` are no longer `Copy`, and are built with `default()`.
+- `Holds` gains `held_or`, which `Holdings` answers under its lock, and
+  `held_key::<T>(name)` names a key by its type. An environment that
+  forwards `Holds` should forward `held_or` too, or two first opens at
+  once may each make their own writer.
+- Two environments in one process that hold nothing in common no longer
+  share a writer or join each other's block reads. A race between them
+  as one issuer is refused by a merging commit rather than minting an
+  edition twice.
+
+Why: none of the three registries had an owner, so none could be
+scoped, bounded or released with the work it served.
+
+### A branch's caches are held by the environment it is opened through
+
+[#574](https://github.com/dialog-db/dialog-db/pull/574)
+
+Tree nodes, spilled values, verified revision records, causal verdicts,
+contexts, plans, rule sets, the live spine and the memo of trees
+rewritten under the number band were made with each branch handle and
+died with it, so a service that opened the branch per request reused
+nothing. The environment now holds them as one `HeldCaches`, each at the
+width it is sound to share: tree nodes under one byte budget for every
+repository, each reading through its own scope; what is addressed by
+content or version per repository; what is tagged by a head per branch.
+Opening a branch again through the same environment finds them warm.
+
+What this changes for you:
+
+- `OpenBranch::perform` and `LoadBranch::perform` require the
+  environment to implement `Holds`. Peers and sessions do. A bare
+  `Volatile` holds nothing, so a branch opened on it directly starts
+  cold every time, as before.
+- Build a peer `.with(HeldCaches::with_budget(bytes))` to bound its node
+  cache. `peer.caches()` gives `release(&repository)`, `clear()` and
+  `bytes()`. A session shares its peer's caches unless given its own.
+- Code that reopened a branch to get cold caches has to release them
+  first: `HeldCaches::of(env).release(&repository)`.
+- The process-wide root-manifest memo is gone.
+- The per-repository caches accumulate until the repository is released
+  or the environment dropped.
+
+Why: whoever owns the environment decides how long its caches live, and
+can bound or drop them; a cache nobody owns can be neither.
+
+### The node cache is bounded by bytes and shared between scopes
+
+[#573](https://github.com/dialog-db/dialog-db/pull/573)
+
+`NodeCache` is its own type. It holds up to a budget of stored node
+bytes (`NODE_CACHE_BUDGET`, 128 MiB, unless built with another), evicts
+by SIEVE, allocates nothing until a node is kept, and serves a node
+larger than it can keep without keeping it. A handle has a `Scope` and
+is answered only with nodes its scope holds: `scoped` hands out a handle
+on the same cache for another scope, and `release` forgets what a scope
+held. A node two scopes hold is kept once.
+
+What this changes for you:
+
+- `NodeCache` is no longer an alias of `Cache`. Build it with
+  `NodeCache::new()` or `NodeCache::with_budget(bytes)`.
+- A cache that held 2,048 nodes of any size now holds 128 MiB of node
+  bytes, whatever their count. What a node derives from its bytes
+  (decoded keys, key hashes, its summary) is not charged, so resident
+  memory can run to about twice the budget.
+- `Cache<K, V>` is unchanged and still serves the count-bounded caches of
+  small values.
+
+Why: nodes differ in size by orders of magnitude, so a count bounded
+nothing; and a cache that repositories share must never answer one with
+a block only another holds.
+
+### Measurement counters are compiled in by an `audit` feature
+
+[#570](https://github.com/dialog-db/dialog-db/pull/570)
+
+The search tree counted every hash its shaping paths asked for, and the
+volatile archive looked each block up before storing it to count
+duplicates, in every build. Both now exist only with the `audit` feature
+of `dialog-search-tree`, which turns on `dialog-storage`'s.
+
+What this changes for you:
+
+- `dialog_search_tree::audit::report` and
+  `dialog_storage::dup_audit::drain_sets` exist only with the `audit`
+  feature. The public counter statics are gone.
+- `Volatile` no longer reads a block before storing it unless the
+  feature is on.
+
+Why: measurement plumbing should cost nothing in a build that does not
+measure.
+
+### The hashes a tree is shaped by are kept by what owns the bytes, not in per-thread memos
+
+[#569](https://github.com/dialog-db/dialog-db/pull/569), fixes
+[#566](https://github.com/dialog-db/dialog-db/issues/566)
+
+The boundary rules decide from the blake3 of a key or a separator, and
+ask again on every regroup. Two thread-local memos answered them: every
+thread that committed filled its own and kept it for the thread's life,
+with no way to see, bound or release it. A full one held about 46 MiB at
+257-byte keys, per thread. Now an entry keeps the hash of its key, a
+separator its own, and a stored node the hashes of its keys and its
+piece summary, each computed on first ask and dropped with its owner. A
+node a persist seals is kept in the tree's node cache. Trees are shaped
+byte for byte as before; nothing stored changes.
+
+What this changes for you:
+
+- An `Entry` is built with `Entry::new(key, value)`. It keeps its key's
+  hash, so replace an entry whose key changes rather than assigning the
+  key in place.
+- `Link::separator` is a `Separator`, which derefs to `[u8]` and is
+  built `From<Vec<u8>>`. `Link` no longer derives its rkyv form.
+- `Distribution::rank`, `seam_rank` and `leaf_cut` take a `Hashed<'_>`:
+  the bytes with wherever their hash is kept. `Hashed::from(&bytes)`
+  wraps bytes with none.
+- `TransientNode::persist` and `persist_mut` take the node cache the
+  sealed nodes are kept in.
+- A process that commits on many threads no longer grows a memo per
+  thread.
+
+Why: a memo with no owner cannot be bounded or released, and one per
+thread multiplies whatever it holds by the size of the thread pool.
+
 ### Compatibility and migration
 
 - `UcanAddress` encodes an optional `socket`, left out when absent, so an address without one keeps its bytes. An older replica reads an address that names a socket and drops the socket, reaching the peer over requests.
