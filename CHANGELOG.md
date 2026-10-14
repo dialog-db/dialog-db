@@ -14,6 +14,31 @@ says how to cut a release.
 
 ## Unreleased
 
+### A flush that fails leaves nothing in the held caches, and environments sharing them share branch writers
+
+[#579](https://github.com/dialog-db/dialog-db/pull/579)
+
+A seal keeps the nodes it produces in the node cache before they reach
+the archive, and that cache outlives the handle. A commit, merge or pull
+whose flush failed left those nodes held for the repository, so a later
+read of them was answered from the cache and never fetched. They are now
+forgotten when the flush fails. Separately, a session works through its
+peer's archive and caches, so its handles of a branch and its peer's now
+share one writer: the writers live in `HeldCaches` beside the caches.
+
+What this changes for you:
+
+- A failed flush no longer leaves the repository's scope holding blocks
+  its archive never received.
+- A peer and its sessions take turns moving a branch's head. `release`
+  and `clear` leave writers alone.
+- One `HeldCaches` is for one archive: environments over different
+  storages must not share a set.
+- `NodeCache::forget` and `Delta::keys` are new.
+
+Why: a scope must hold only what its archive has, and every handle that
+writes to one archive must take turns.
+
 ### A formula derived `#[formula(cached)]` is computed once per input
 
 [#576](https://github.com/dialog-db/dialog-db/pull/576)
