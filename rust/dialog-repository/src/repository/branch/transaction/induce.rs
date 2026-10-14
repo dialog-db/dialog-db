@@ -92,7 +92,8 @@ impl Witness for &Ephemeral {
 /// they are visible to rule bodies for exactly one round, and each
 /// round's are handed to `witness` as they become visible.
 ///
-/// `source` is the line whose watermark the lag is measured against;
+/// `source` is the line whose watermark the lag is measured against,
+/// read from where `watermark` says;
 /// `view` is every line a rule body reads and every line whose rules
 /// dispatch, which is `source` alone for a transaction on one branch
 /// and the whole composite for a [`Stack`](crate::Stack).
@@ -102,6 +103,7 @@ impl Witness for &Ephemeral {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn induce<Env, W: Witness>(
     source: SourceRef<'_>,
+    watermark: Watermark,
     view: &Composite,
     placements: &Placements,
     changes: &mut Changes,
@@ -143,7 +145,7 @@ where
     // missed one is caught up.
     let mut stimulus: Vec<Instruction> = changes.clone().into_instructions();
     stimulus.extend(transients.clone().into_instructions());
-    let mut lag = lag_delta(source, env).await?;
+    let mut lag = lag_delta(source, watermark, env).await?;
     // In a stack, the lag is what entered the bottom, and a read of the
     // bottom is guided by placement: a fact of an attribute placed on
     // another scope fires no rule, as it answers no query.
@@ -1003,6 +1005,19 @@ impl<'a> Dispatch<'a> {
     }
 }
 
+/// Where the induction watermark of a line stands.
+#[derive(Debug, Clone)]
+pub(crate) enum Watermark {
+    /// In the induction cell of the line, which a commit of the line
+    /// moves.
+    Cell,
+    /// In the memory of a stack whose bottom is under a read-only link:
+    /// the head of the line that its last commit induced over, if any. A
+    /// stack never writes a layer that it only reads, its induction cell
+    /// included.
+    Held(Option<Revision>),
+}
+
 /// The watermark lag: instructions for every fact that entered or
 /// left the branch between the induction watermark and the current
 /// head — arrivals as `Assert`, departures as `Retract`. Empty when
@@ -1019,7 +1034,11 @@ impl<'a> Dispatch<'a> {
 /// records, which every commit writes) are excluded from the lag, so
 /// catching up over N commits stimulates rules with the *data* those
 /// commits changed, not their bookkeeping.
-async fn lag_delta<Env>(source: SourceRef<'_>, env: &Env) -> Result<Vec<Instruction>, CommitError>
+async fn lag_delta<Env>(
+    source: SourceRef<'_>,
+    watermark: Watermark,
+    env: &Env,
+) -> Result<Vec<Instruction>, CommitError>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
@@ -1043,9 +1062,15 @@ where
     let Some(head) = source.revision() else {
         return Ok(Vec::new());
     };
-    let cell = branch.induction_cell();
-    cell.resolve().perform(env).await?;
-    let Some(watermark) = cell.content() else {
+    let watermark = match watermark {
+        Watermark::Cell => {
+            let cell = branch.induction_cell();
+            cell.resolve().perform(env).await?;
+            cell.content()
+        }
+        Watermark::Held(held) => held,
+    };
+    let Some(watermark) = watermark else {
         // Never induced: adopt the head, fire-forward only.
         return Ok(Vec::new());
     };
