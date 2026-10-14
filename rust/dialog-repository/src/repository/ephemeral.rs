@@ -58,6 +58,7 @@ use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::RangeInclusive;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
 use dialog_artifacts::selector::Constrained;
@@ -127,6 +128,77 @@ pub struct Instant {
     /// Facts that stopped being readable: removed, or shadowed
     /// beneath by a tombstone.
     pub retracted: Vec<Artifact>,
+    /// Whether the instant may leave this process yet: the hold of the
+    /// stack commit that minted it, if any. Never sent to a peer.
+    #[serde(skip)]
+    pub hold: Hold,
+}
+
+/// The hold of one stack commit on the instants it mints in an ephemeral
+/// layer. Observers in the process see such an instant at once; a
+/// [`Channel`] sends it to a peer only once the commit publishes, and
+/// never if the publish fails. See [`Channel`] for the hazard this
+/// prevents. An instant minted outside a stack commit has no hold, and
+/// counts as released.
+#[derive(Clone, Debug, Default)]
+pub struct Hold(Option<Arc<AtomicU8>>);
+
+/// Where a [`Hold`] stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Held {
+    /// The commit has not published yet.
+    Open,
+    /// The commit published, or there was nothing to wait for.
+    Released,
+    /// The publish failed, or the stack dropped the staged commit: the
+    /// instants never leave the process.
+    Dropped,
+}
+
+const HOLD_OPEN: u8 = 0;
+const HOLD_RELEASED: u8 = 1;
+const HOLD_DROPPED: u8 = 2;
+
+impl Hold {
+    /// A new hold, open until it is released or dropped.
+    pub(crate) fn open() -> Self {
+        Self(Some(Arc::new(AtomicU8::new(HOLD_OPEN))))
+    }
+
+    /// The commit published: its instants may leave. A hold that was
+    /// dropped stays dropped.
+    pub(crate) fn release(&self) {
+        self.settle(HOLD_RELEASED);
+    }
+
+    /// The commit will never publish: its instants never leave. A hold
+    /// that was released stays released.
+    pub(crate) fn discard(&self) {
+        self.settle(HOLD_DROPPED);
+    }
+
+    fn settle(&self, to: u8) {
+        if let Some(state) = &self.0 {
+            let _ = state.compare_exchange(HOLD_OPEN, to, Ordering::SeqCst, Ordering::SeqCst);
+        }
+    }
+
+    /// Where the hold stands now.
+    pub(crate) fn state(&self) -> Held {
+        match self.0.as_ref().map(|state| state.load(Ordering::SeqCst)) {
+            Some(HOLD_OPEN) => Held::Open,
+            Some(HOLD_DROPPED) => Held::Dropped,
+            _ => Held::Released,
+        }
+    }
+}
+
+/// Two instants are equal by what they carry: a hold is where the
+/// instant may go, not what it is.
+impl PartialEq for Hold {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 /// One mutation of an ephemeral store, carried by an [`Instant`].
@@ -675,6 +747,12 @@ impl State {
     /// to every observer. Returns the instant, or `None` when nothing
     /// readers see changed.
     fn mint(&mut self, delta: Delta) -> Option<Instant> {
+        self.mint_held(delta, &Hold::default())
+    }
+
+    /// Mint as [`mint`](Self::mint) does, under the hold of a stack
+    /// commit.
+    fn mint_held(&mut self, delta: Delta, hold: &Hold) -> Option<Instant> {
         if delta.is_empty() {
             return None;
         }
@@ -729,6 +807,7 @@ impl State {
             changes: delta.changes,
             asserted: delta.asserted,
             retracted: delta.retracted,
+            hold: hold.clone(),
         };
         if self.log.len() == LOG_CAPACITY {
             self.log.pop_front();
@@ -754,7 +833,7 @@ impl State {
             let Some(matched) = queue.filter.matched(instant, manifest) else {
                 continue;
             };
-            if queue.instants.len() == QUEUE_CAPACITY {
+            if queue.instants.len() == queue.capacity {
                 queue.instants.clear();
                 queue.gapped = true;
             } else {
@@ -817,6 +896,7 @@ impl Filter {
                         .collect(),
                     asserted,
                     retracted,
+                    hold: instant.hold.clone(),
                 })
             }
         }
@@ -830,6 +910,8 @@ struct Queue {
     filter: Filter,
     instants: VecDeque<Instant>,
     gapped: bool,
+    /// How many instants it holds before it gaps.
+    capacity: usize,
 }
 
 /// What an observer finds when it drains.
@@ -1031,6 +1113,16 @@ impl Ephemeral {
     /// and nothing in it lands, rather than landing its facts and
     /// dropping its assets.
     pub fn apply(&self, changes: Changes) -> Result<Option<Instant>, DialogArtifactsError> {
+        self.apply_held(changes, &Hold::default())
+    }
+
+    /// Land a batch as [`apply`](Self::apply) does, under the hold of a
+    /// stack commit.
+    pub(crate) fn apply_held(
+        &self,
+        changes: Changes,
+        hold: &Hold,
+    ) -> Result<Option<Instant>, DialogArtifactsError> {
         if changes.has_assets() {
             return Err(DialogArtifactsError::AssetsUnsupported(
                 "an ephemeral layer".into(),
@@ -1044,14 +1136,21 @@ impl Ephemeral {
         for instruction in changes.into_instructions() {
             state.apply(instruction, &mut delta);
         }
-        Ok(state.mint(delta))
+        Ok(state.mint_held(delta, hold))
     }
 
     /// Apply scope maintenance and its replacement facts under one
     /// write lock and mint one instant, so a re-stamp has no empty
     /// intermediate: drop everything when `clear`, else every fact and
-    /// tombstone of a `forgotten` entity, then land `changes`.
-    pub(crate) fn maintain(&self, changes: Changes, clear: bool, forgotten: &HashSet<Entity>) {
+    /// tombstone of a `forgotten` entity, then land `changes`, under the
+    /// hold of the stack commit.
+    pub(crate) fn maintain(
+        &self,
+        changes: Changes,
+        clear: bool,
+        forgotten: &HashSet<Entity>,
+        hold: &Hold,
+    ) {
         let mut state = self.state.write();
         let mut delta = Delta::default();
         let dropped: Vec<Artifact> = state
@@ -1075,7 +1174,7 @@ impl Ephemeral {
         for instruction in changes.into_instructions() {
             state.apply(instruction, &mut delta);
         }
-        state.mint(delta);
+        state.mint_held(delta, hold);
     }
 
     /// Everything this layer holds, as one batch: each tombstone as
@@ -1196,19 +1295,26 @@ impl Ephemeral {
     /// instant minted from now on is queued for it, filtered to the
     /// covered facts; see [`Observer`].
     pub fn observe(&self, demand: Demand) -> Observer {
-        self.register(Filter::Demand(demand))
+        self.register(Filter::Demand(demand), QUEUE_CAPACITY)
     }
 
     /// Register an observer of every instant, whole.
     pub fn observe_everything(&self) -> Observer {
-        self.register(Filter::Everything)
+        self.register(Filter::Everything, QUEUE_CAPACITY)
     }
 
-    fn register(&self, filter: Filter) -> Observer {
+    /// Register an observer of every instant, whole, whose queue holds
+    /// `capacity` instants before it gaps.
+    pub(crate) fn observe_everything_within(&self, capacity: usize) -> Observer {
+        self.register(Filter::Everything, capacity)
+    }
+
+    fn register(&self, filter: Filter, capacity: usize) -> Observer {
         let queue = Arc::new(Mutex::new(Queue {
             filter,
             instants: VecDeque::new(),
             gapped: false,
+            capacity,
         }));
         self.state.write().observers.push(Arc::downgrade(&queue));
         Observer {
@@ -1226,6 +1332,12 @@ impl Ephemeral {
     /// hash like any instant: a revision is an identity of what
     /// happened, not of what is held.
     pub(crate) fn witness(&self, changes: Changes) -> Option<Instant> {
+        self.witness_held(changes, &Hold::default())
+    }
+
+    /// Witness as [`witness`](Self::witness) does, under the hold of a
+    /// stack commit.
+    pub(crate) fn witness_held(&self, changes: Changes, hold: &Hold) -> Option<Instant> {
         if changes.is_empty() {
             return None;
         }
@@ -1242,7 +1354,7 @@ impl Ephemeral {
                 Instruction::Retract(fact) => delta.retracted.push(fact),
             }
         }
-        self.state.write().mint(delta)
+        self.state.write().mint_held(delta, hold)
     }
 
     /// How many observers are registered and alive.
