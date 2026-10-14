@@ -191,12 +191,17 @@ where
 
             while let Some(event) = sources.next().await {
                 match event {
-                    Event::Observed(Ok(Observation::Advanced(_))) => {
+                    // A stale head is one already recorded, not one this
+                    // branch already took: another handle of the upstream
+                    // (another branch's push or pull, say) may have
+                    // recorded it. Merging the recorded head asks nothing
+                    // of the remote, and takes nothing when the branch has
+                    // it.
+                    Event::Observed(Ok(Observation::Advanced(_) | Observation::Stale)) => {
                         for item in sync(branch, env, pull, push, false).await {
                             yield item;
                         }
                     }
-                    Event::Observed(Ok(Observation::Stale)) => {}
                     Event::Observed(Ok(Observation::Diverged)) => {
                         for item in sync(branch, env, pull, push, true).await {
                             yield item;
