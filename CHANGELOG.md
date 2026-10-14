@@ -14,6 +14,25 @@ says how to cut a release.
 
 ## Unreleased
 
+### A revoked delegation's match is boxed in `Invalid::Revoked`
+
+[#599](https://github.com/dialog-db/dialog-db/pull/599)
+
+`Invalid::Revoked` carried the revoked delegation's CID and the matching
+`RevocationMatch` (a second CID and its issuer) inline, which made every
+result of `Invocation::check` and `Chain::check` at least 208 bytes. The
+match is now behind a `Box`.
+
+What this changes for you:
+
+- `Invalid::Revoked { found, .. }` is a `Box<RevocationMatch>`. Reading
+  its fields (`found.principal`, `found.revocation`) is unchanged; code
+  that builds the variant wraps the match in `Box::new`, and code that
+  needs the `RevocationMatch` itself takes `*found`.
+
+Why: Rust 1.99's clippy flags the size as `result_large_err`, and every
+verification paid to move it, on success as well as on refusal.
+
 ### A flush that fails leaves nothing in the held caches, and environments sharing them share branch writers
 
 [#579](https://github.com/dialog-db/dialog-db/pull/579)
