@@ -6,7 +6,7 @@
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-use dialog_search_tree::{Cache, Manifest, MemoryBlocks, PersistentTree};
+use dialog_search_tree::{Manifest, MemoryBlocks, NodeCache, PersistentTree};
 use futures_util::{TryStreamExt as _, stream};
 
 use super::{ArtifactTree, ArtifactTreeExt as _, SpillCache};
@@ -28,7 +28,7 @@ async fn tree(
         value_encoding,
         ..Manifest::default()
     };
-    let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(manifest, Cache::new());
+    let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(manifest, NodeCache::new());
     let mut delta = ArchiveDelta::zero();
     let instructions = facts
         .into_iter()

@@ -1,13 +1,10 @@
 use std::sync::{Arc, Mutex};
 
-use crate::rules::RuleCache;
-use crate::{Branch, BranchReference, Ephemeral, ResolveError};
-use dialog_artifacts::history::{CausalityCache, ContextCache};
-use dialog_artifacts::tree::spill_cache;
+use crate::{Branch, BranchReference, Ephemeral, HeldCaches, ResolveError};
 use dialog_capability::Provider;
+use dialog_common::Holds;
 use dialog_effects::branch::invalid_name;
 use dialog_effects::memory::Resolve;
-use dialog_query::concept::query::PlanCache;
 
 /// Command to open a branch. Resolves the branch's revision and upstream
 /// cells without ever erroring on a missing revision — a freshly-opened
@@ -30,9 +27,13 @@ impl OpenBranch {
     /// before any cell is touched: a store lays a branch's cells out under
     /// its name, and a name such as `meta?x` or `x/../meta` would open
     /// another branch's cells, however it got here.
+    ///
+    /// The branch reads and commits through the caches `env` holds for it
+    /// (see [`HeldCaches`](crate::HeldCaches)), so opening it again through
+    /// the same environment finds them warm.
     pub async fn perform<Env>(self, env: &Env) -> Result<Branch, ResolveError>
     where
-        Env: Provider<Resolve>,
+        Env: Provider<Resolve> + Holds,
     {
         if let Some(reason) = invalid_name(self.branch.name()) {
             return Err(ResolveError::Storage(format!(
@@ -50,21 +51,23 @@ impl OpenBranch {
         let induction = self.branch.induction();
         induction.resolve().perform(env).await?;
 
+        let caches = HeldCaches::of(env).branch(&self.branch);
+
         Ok(Branch {
-            writer: Branch::writer_of(&self.branch),
+            writer: Branch::writer_of(env, &self.branch),
             reference: self.branch,
             revision,
             tracking,
             induction,
-            node_cache: dialog_search_tree::Cache::new(),
-            spill_cache: spill_cache(),
-            rule_cache: Arc::new(RuleCache::new()),
-            plan_cache: PlanCache::default(),
-            causality_cache: CausalityCache::new(),
-            context_cache: ContextCache::new(),
-            record_cache: dialog_search_tree::Cache::new(),
-            rewrite_cache: dialog_search_tree::Cache::new(),
-            spine: dialog_artifacts::SpineSlot::new(),
+            node_cache: caches.nodes,
+            spill_cache: caches.spills,
+            rule_cache: caches.rules,
+            plan_cache: caches.plans,
+            causality_cache: caches.causality,
+            context_cache: caches.contexts,
+            record_cache: caches.records,
+            rewrite_cache: caches.rewrites,
+            spine: caches.spine,
             identity_cache: Arc::new(Mutex::new(None)),
             metadata_cache: Arc::new(Mutex::new(None)),
             layer_metadata_cache: Arc::new(Mutex::new(None)),
@@ -80,12 +83,49 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use std::sync::Arc;
+
     use anyhow::Result;
-    use dialog_capability::Subject;
+    use dialog_capability::{Command, Provider, Subject};
+    use dialog_common::{Held, Holdings, Holds};
+    use dialog_effects::memory::Resolve;
     use dialog_storage::provider::Volatile;
     use dialog_varsig::did;
 
     use crate::RepositoryMemoryExt;
+
+    /// A volatile store as an environment that holds what its branches
+    /// leave with it, the way a peer does. `Volatile` alone holds nothing.
+    #[derive(Default)]
+    struct Holding {
+        storage: Volatile,
+        holdings: Holdings,
+    }
+
+    impl Holds for Holding {
+        fn held(&self, key: &str) -> Option<Held> {
+            self.holdings.held(key)
+        }
+
+        fn hold(&self, key: String, handle: Held) {
+            self.holdings.hold(key, handle)
+        }
+
+        fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+            self.holdings.held_or(key, make)
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<Resolve> for Holding {
+        async fn execute(
+            &self,
+            input: <Resolve as Command>::Input,
+        ) -> <Resolve as Command>::Output {
+            Provider::<Resolve>::execute(&self.storage, input).await
+        }
+    }
 
     #[dialog_common::test]
     async fn it_opens_branch_with_no_revision() -> Result<()> {
@@ -110,6 +150,58 @@ mod tests {
         let branch = subject.branch("main").open().perform(&provider).await?;
 
         assert_eq!(branch.name(), "main");
+        Ok(())
+    }
+
+    /// The handles of a branch opened through one environment share its
+    /// writer, so their commits and pulls take turns. Another branch has
+    /// its own, and so does the same branch opened through another
+    /// environment.
+    #[dialog_common::test]
+    async fn it_shares_a_writer_between_handles_of_one_environment() -> Result<()> {
+        let provider = Holding::default();
+        let elsewhere = Holding::default();
+        let subject = Subject::from(did!("key:zBranchWriterTest"));
+
+        let first = subject.branch("main").open().perform(&provider).await?;
+        let second = subject.branch("main").open().perform(&provider).await?;
+        let other = subject.branch("feature").open().perform(&provider).await?;
+        let apart = subject.branch("main").open().perform(&elsewhere).await?;
+
+        assert!(Arc::ptr_eq(&first.writer(), &second.writer()));
+        assert!(!Arc::ptr_eq(&first.writer(), &other.writer()));
+        assert!(!Arc::ptr_eq(&first.writer(), &apart.writer()));
+        Ok(())
+    }
+
+    /// Two environments sharing one set of held caches write to one
+    /// archive (a peer and its session), so a branch opened through
+    /// either has one writer: their commits and pulls take turns. A set
+    /// of its own keeps an environment's writers apart.
+    #[dialog_common::test]
+    async fn it_shares_a_writer_between_environments_sharing_held_caches() -> Result<()> {
+        let peer = Holding::default();
+        let session = Holding::default();
+        let elsewhere = Holding::default();
+        let caches = crate::HeldCaches::new();
+        caches.hold(&peer);
+        caches.hold(&session);
+        let subject = Subject::from(did!("key:zSharedWriterTest"));
+
+        let through_peer = subject.branch("main").open().perform(&peer).await?;
+        let through_session = subject.branch("main").open().perform(&session).await?;
+        let apart = subject.branch("main").open().perform(&elsewhere).await?;
+
+        assert!(Arc::ptr_eq(
+            &through_peer.writer(),
+            &through_session.writer()
+        ));
+        assert!(!Arc::ptr_eq(&through_peer.writer(), &apart.writer()));
+
+        // The writer is not a cache: letting the caches go leaves it.
+        caches.clear();
+        let after = subject.branch("main").open().perform(&session).await?;
+        assert!(Arc::ptr_eq(&through_peer.writer(), &after.writer()));
         Ok(())
     }
 

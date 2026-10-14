@@ -41,6 +41,25 @@ pub(crate) mod test {
         memo: Memo,
     }
 
+    /// What evaluation keeps between queries is the operator's to hold.
+    impl dialog_common::Holds for TestEnv<'_> {
+        fn held(&self, key: &str) -> Option<dialog_common::Held> {
+            self.operator.held(key)
+        }
+
+        fn hold(&self, key: String, handle: dialog_common::Held) {
+            self.operator.hold(key, handle)
+        }
+
+        fn held_or(
+            &self,
+            key: &str,
+            make: &dyn Fn() -> dialog_common::Held,
+        ) -> dialog_common::Held {
+            self.operator.held_or(key, make)
+        }
+    }
+
     impl<'b> TestEnv<'b> {
         pub fn new(branch: &'b Branch, operator: &'b Operator, rules: RuleRegistry) -> Self {
             Self {

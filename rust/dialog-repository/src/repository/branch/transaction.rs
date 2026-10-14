@@ -23,7 +23,7 @@ use crate::rules::{SharedRuleCache, TriggerFootprint, on_attr, reads_attr};
 use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot, Staged};
 use dialog_artifacts::{Changes, Statement};
 use dialog_capability::{Fork, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Import as BlobImport;
@@ -246,6 +246,7 @@ impl TransactionCommit<&Snapshot> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -358,6 +359,7 @@ impl Branch {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {

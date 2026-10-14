@@ -8,6 +8,10 @@ license.workspace = true
 [features]
 default = []
 helpers = []
+# Counts the hashes the shaping paths ask for and compute, and attributes
+# duplicate block stores, for measurement harnesses. Off, the counters are
+# not compiled.
+audit = ["dialog-storage/audit"]
 integration-tests = []
 web-integration-tests = []
 

@@ -321,6 +321,9 @@ pub(crate) struct Caches {
     pub(crate) contexts: ContextCache,
     /// Verified revision records by version.
     pub(crate) records: Cache<Version, RevisionRecord>,
+    /// Trees rewritten under the current number band, by the root of the
+    /// tree they rewrite.
+    pub(crate) rewrites: Cache<dialog_common::Blake3Hash, dialog_common::Blake3Hash>,
     /// The live buffered spine between commits, keyed by the root it was
     /// persisted as.
     pub(crate) spine: SpineSlot,
@@ -330,13 +333,14 @@ impl Caches {
     /// A cold set.
     pub(crate) fn new() -> Self {
         Self {
-            nodes: Cache::new(),
+            nodes: dialog_search_tree::NodeCache::new(),
             spills: spill_cache(),
             rules: Arc::new(RuleCache::new()),
             plans: PlanCache::default(),
             causality: CausalityCache::new(),
             contexts: ContextCache::new(),
             records: Cache::new(),
+            rewrites: Cache::new(),
             spine: SpineSlot::new(),
         }
     }

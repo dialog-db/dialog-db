@@ -5,6 +5,7 @@ use dialog_storage::provider::storage::{Storage, VolatileSpace};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dialog_repository::HeldCaches;
 
     #[dialog_common::test]
     async fn it_builds_operator_from_profile() {
@@ -46,6 +47,37 @@ mod tests {
             .unwrap();
 
         assert_ne!(op1.did(), op2.did());
+    }
+
+    /// A peer holds the caches it is built with. A session works on its
+    /// peer's repositories, so it shares its peer's unless it is given its
+    /// own.
+    #[dialog_common::test]
+    async fn it_holds_the_caches_it_is_built_with() {
+        let profile = open_peer(test_storage().await, Location::profile(unique_name("test")))
+            .await
+            .unwrap();
+        let shared = profile
+            .session(b"shared")
+            .space(profile.state())
+            .await
+            .unwrap();
+        let bounded = profile
+            .session(b"bounded")
+            .space(profile.state())
+            .with(HeldCaches::with_budget(4096))
+            .await
+            .unwrap();
+
+        assert_eq!(profile.caches().budget(), HeldCaches::new().budget());
+        assert_eq!(bounded.caches().budget(), 4096);
+
+        // Opening the peer wrote its state branch, so its caches hold nodes;
+        // the session sees the same ones and clears the same ones.
+        assert!(profile.caches().bytes() > 0);
+        assert_eq!(shared.caches().bytes(), profile.caches().bytes());
+        shared.caches().clear();
+        assert_eq!(profile.caches().bytes(), 0);
     }
 
     mod delegation_tests {

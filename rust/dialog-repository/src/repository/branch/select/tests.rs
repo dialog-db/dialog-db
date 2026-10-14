@@ -32,7 +32,7 @@ use parking_lot::Mutex;
 
 use crate::helpers::{Counting, test_repo};
 use crate::repository::archive::local::read_all;
-use crate::{Branch, Hydrate, LocalIndex, RemoteSite, Repository, Revision};
+use crate::{Branch, HeldCaches, Hydrate, LocalIndex, RemoteSite, Repository, Revision};
 
 /// The session every test commits and reads through.
 type Operator = Peer<VolatileSpace, Session>;
@@ -129,14 +129,15 @@ fn writes<P>(counting: &Counting<P>) -> u64 {
     .sum()
 }
 
-/// Selects through a fresh handle on `main` (its node and spill caches
-/// start empty), and reports the rows with the archive block reads and
-/// the writes the select cost.
+/// Selects through a handle on `main` whose caches start empty (what the
+/// environment held for the repository is released first), and reports
+/// the rows with the archive block reads and the writes the select cost.
 async fn cold_select(
     repo: &Repository<Credential>,
     selector: ArtifactSelector<Constrained>,
     operator: &Operator,
 ) -> Result<(Vec<Artifact>, u64, u64)> {
+    HeldCaches::of(operator).release(&repo.did());
     let branch = repo.branch("main").load().perform(operator).await?;
     let counting = Counting::new(operator.clone());
     let rows = select(&branch, selector, &counting).await?;
