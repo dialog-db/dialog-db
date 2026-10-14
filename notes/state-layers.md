@@ -726,6 +726,34 @@ in the forms of that release, with no fallback to the older ones:
   is the only report of it. A write that routes to a snapshot is refused
   before any layer stages.
 
+## On the `sapling` branch
+
+Sapling builds on the port parts that the proposal lists as open, or that
+it needs before its workers move onto stacks. Each is offered upstream.
+
+- **Reads guided by placement.** A stack reads an attribute placed on a
+  scope that a link binds only from the layers linked under that scope. One
+  placed on the default scope, or on a scope that no link binds and that the
+  bottom binds to its tree, and one with no placement where a default scope
+  is declared, belongs to the bottom, where a write of it lands. One placed
+  on any other scope has no layer in the stack: a write of it, or a
+  transient, is refused, and no layer is read for it. The placement decides
+  first, for reads and for routing, so a default scope never overrides it. A
+  fact found in any other layer is a *divergence of placement*: no query,
+  subscription, settlement, or rule reads it, and a retraction that a layer
+  holds hides nothing beneath it unless the read takes the attribute from
+  that layer. The stack reports it once, with the attribute and the layer
+  (`Stack::divergences`), when a read or a commit meets it: a commit meets
+  what a pull brought to the bottom when it induces over the lag. The
+  placements are those of the bottom, its session store first, as for
+  routing; a default scope that the session store declares outranks the
+  committed one too. The bottom is the lowest layer: of the layers that the
+  top links side by side, the first linked. The machinery under `dialog.` is
+  read from every layer, and an attribute with no placement in a repository
+  with no default is read from every layer, as before. So the fact of
+  *Retracts on a linked scope*, which a peer without the placement wrote to
+  the bottom, reaches no read of the stack.
+
 ## Order of work
 
 1. ~~Ephemeral layer.~~ Done: increment 2.
