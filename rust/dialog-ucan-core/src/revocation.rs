@@ -40,7 +40,9 @@ impl<'a> RevocationSelector<'a> {
 /// A revocation that matched a [`RevocationSelector`].
 ///
 /// Carries the revocation's own address rather than just a verdict, so a
-/// refusal can be audited back to the document that caused it.
+/// refusal can be audited back to the document that caused it, and the
+/// document itself when the checker keeps it, so whoever is refused can
+/// check the revocation rather than take the verifier's word for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevocationMatch {
     /// The revocation document.
@@ -49,6 +51,17 @@ pub struct RevocationMatch {
     /// The principal that issued it. Always one of the `by` set in the
     /// [`RevocationSelector`] that produced this match.
     pub principal: Did,
+
+    /// The signed revocation, as a UCAN container's DAG-CBOR bytes (what
+    /// [`RevocationChain::to_bytes`](crate::RevocationChain::to_bytes)
+    /// writes): the `/ucan/revoke` invocation together with the
+    /// delegations it names. `None` when the checker knows a revocation
+    /// was recorded but does not keep the document.
+    ///
+    /// A verifier that refuses a chain hands this to the holder, which
+    /// verifies it before acting on the refusal: a revocation with no
+    /// verifiable document is a claim, not evidence.
+    pub proof: Option<Vec<u8>>,
 }
 
 /// Queries whether a delegation has been revoked by anyone who could.
@@ -186,6 +199,7 @@ mod tests {
             Ok(Some(RevocationMatch {
                 revocation: cid(),
                 principal: selector.by.first().cloned().unwrap_or_else(did),
+                proof: None,
             }))
         }
     }

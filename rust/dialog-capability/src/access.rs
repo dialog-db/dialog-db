@@ -802,6 +802,20 @@ pub enum AuthorizeError {
         /// responder that predates the field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         certificate: Option<String>,
+        /// The signed revocation of that certificate, as a UCAN container
+        /// in its base64url tagged form (`C` followed by the unpadded
+        /// base64url of the container's DAG-CBOR bytes), when the
+        /// responder keeps the document.
+        ///
+        /// The evidence for [`certificate`](Self::Revoked::certificate):
+        /// a holder retracts the named certificate only once this verifies
+        /// as a revocation of it, signed by a principal entitled to revoke
+        /// it. A refusal without it, or with one that does not verify,
+        /// names a certificate the holder has no reason to believe was
+        /// revoked, so the holder retracts nothing and reports the refusal
+        /// as it came. Absent from a responder that predates the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revocation: Option<String>,
     },
 
     /// The chain authorizes the request and the responder declined it
@@ -962,6 +976,14 @@ mod tests {
                 AuthorizeError::Revoked {
                     subject: subject.clone(),
                     certificate: None,
+                    revocation: None,
+                },
+                AuthorizeError::Revoked {
+                    subject: subject.clone(),
+                    certificate: Some(
+                        "bafyreigdmqpykrgxyaxtlafqpqhzrb7qy2rh75nldvfd4tucqmqqme5yje".into(),
+                    ),
+                    revocation: Some("Cg2ZjdG4tdjGA".into()),
                 },
                 AuthorizeError::InvalidSignature {
                     issuer: subject.clone(),
@@ -974,6 +996,30 @@ mod tests {
             }
         }
 
+        // The fields a refusal gained are additive both ways: a payload
+        // from a responder that predates them reads with neither, and a
+        // refusal with neither writes the payload such a responder sent.
+        #[dialog_common::test]
+        async fn it_reads_a_revocation_refusal_from_an_older_responder() {
+            let subject = did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX");
+            let older = format!(r#"{{"kind":"Revoked","subject":"{subject}"}}"#);
+
+            let decoded: AuthorizeError = serde_json::from_str(&older).expect("deserializes");
+            assert_eq!(
+                decoded,
+                AuthorizeError::Revoked {
+                    subject,
+                    certificate: None,
+                    revocation: None,
+                }
+            );
+            assert_eq!(
+                serde_json::to_string(&decoded).expect("serializes"),
+                older,
+                "absent fields are not written"
+            );
+        }
+
         // The tag is part of the protocol: renaming a variant renames
         // the wire form, so this pins what the service must emit.
         #[dialog_common::test]
@@ -981,6 +1027,7 @@ mod tests {
             let encoded = serde_json::to_string(&AuthorizeError::Revoked {
                 subject: did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
                 certificate: None,
+                revocation: None,
             })
             .expect("serializes");
             assert!(
@@ -1050,6 +1097,7 @@ mod tests {
             let withdrawn = AuthorizeError::Revoked {
                 subject: did!("key:zSubject"),
                 certificate: None,
+                revocation: None,
             };
 
             assert!(matches!(lapsed, AuthorizeError::Expired { .. }));

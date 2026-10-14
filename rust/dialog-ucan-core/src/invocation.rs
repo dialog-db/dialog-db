@@ -2600,6 +2600,7 @@ mod tests {
             Ok(Some(RevocationMatch {
                 revocation: selector.delegation,
                 principal: self.0.clone(),
+                proof: None,
             }))
         }
     }

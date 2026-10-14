@@ -129,7 +129,7 @@ impl<S: Signature> InvocationChain<S> {
                     Invalid::Chain(check_err) => check_failed_to_container_error(check_err),
                     Invalid::Revoked { cid, found } => ContainerError::Revoked {
                         cid,
-                        revoker: found.principal,
+                        found: Box::new(found),
                     },
                 },
                 // Our own setup being unable to check says nothing about
@@ -665,11 +665,13 @@ pub(crate) mod tests {
         }
     }
 
-    /// Reports one specific delegation as revoked, by a named principal.
+    /// Reports one specific delegation as revoked, by a named principal,
+    /// with a revocation document when it holds one.
     #[derive(Debug, Clone)]
     struct RevokedLink {
         cid: Cid,
         principal: Did,
+        proof: Option<Vec<u8>>,
     }
 
     impl RevocationChecker for RevokedLink {
@@ -683,6 +685,7 @@ pub(crate) mod tests {
                 return Ok(Some(RevocationMatch {
                     revocation: selector.delegation,
                     principal: self.principal.clone(),
+                    proof: self.proof.clone(),
                 }));
             }
             Ok(None)
@@ -787,6 +790,7 @@ pub(crate) mod tests {
             RevokedLink {
                 cid,
                 principal: subject_did.clone(),
+                proof: Some(b"the revocation document".to_vec()),
             },
         );
         let ctx = VerificationContext::new(&environment);
@@ -799,6 +803,18 @@ pub(crate) mod tests {
         assert!(
             rendered.contains(&cid.to_string()),
             "the refusal must name the revoked link: {rendered}"
+        );
+        // The checker's document reaches the refusal untouched, so the
+        // boundary can hand it to the holder.
+        assert!(
+            matches!(
+                &error,
+                ContainerError::Revoked { cid: revoked, found }
+                    if *revoked == cid
+                        && found.principal == subject_did
+                        && found.proof.as_deref() == Some(b"the revocation document".as_slice())
+            ),
+            "the refusal carries the revocation document: {error:?}"
         );
     }
 
@@ -840,6 +856,7 @@ pub(crate) mod tests {
             RevokedLink {
                 cid,
                 principal: subject_did,
+                proof: None,
             }
             .tolerate_unavailable(),
         );
