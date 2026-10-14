@@ -470,7 +470,10 @@ where
         // size, and replacing a fact with the value it holds is a no-op.
         Box::pin(
             branch
-                .commit(stream::iter(vec![Instruction::Replace(asset.fact()?)]))
+                .commit(stream::iter(vec![Instruction::Assert(
+                    asset.fact()?,
+                    dialog_artifacts::Pick::Last,
+                )]))
                 .machinery()
                 .perform(env),
         )

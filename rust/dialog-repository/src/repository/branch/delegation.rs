@@ -69,8 +69,8 @@ use crate::repository::branch::blob::index_store;
 use crate::repository::source::SourceRef;
 use crate::{Branch, CommitError, Index, RemoteSite};
 use dialog_artifacts::{
-    Artifact, Asset, Attribute, BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity,
-    Instruction, Value,
+    Artifact, Asset, BlobIndexExt as _, BlobRecord, DialogArtifactsError, Entity, Instruction,
+    Relation, Value,
 };
 use dialog_capability::access::{Certificate as _, Delegation as _};
 use dialog_capability::{ANY_SUBJECT, Fork, Provider};
@@ -149,7 +149,7 @@ impl<'a> Delegations<'a> {
 /// One fact on the delegation's entity.
 fn field(entity: &Entity, attribute: &str, value: Value) -> Result<Artifact, DialogArtifactsError> {
     Ok(Artifact {
-        the: Attribute::try_from(attribute.to_string())?,
+        the: Relation::try_from(attribute.to_string())?,
         of: entity.clone(),
         is: value,
         cause: None,
@@ -277,10 +277,13 @@ impl RetainDelegation<'_> {
 
             let entity = Entity::from_blob(&index_hash)?;
             for artifact in field_artifacts(&entity, &certificate)? {
-                instructions.push(Instruction::Assert(artifact));
+                instructions.push(Instruction::Assert(artifact, dialog_artifacts::Pick::All));
             }
             let envelope = Asset::stored(index_hash, bytes.len() as u64);
-            instructions.push(Instruction::Replace(envelope.fact()?));
+            instructions.push(Instruction::Assert(
+                envelope.fact()?,
+                dialog_artifacts::Pick::Last,
+            ));
             retained.push(entity);
         }
 
@@ -490,14 +493,17 @@ mod tests {
         // below the root before the retraction lands there.
         for round in 0..64 {
             let facts = (0..32).map(|fact| {
-                Instruction::Assert(Artifact {
-                    the: "test/fact".parse().expect("a valid attribute"),
-                    of: format!("test:{round}-{fact}")
-                        .parse()
-                        .expect("a valid entity"),
-                    is: Value::UnsignedInt(fact),
-                    cause: None,
-                })
+                Instruction::Assert(
+                    Artifact {
+                        the: "test/fact".parse().expect("a valid attribute"),
+                        of: format!("test:{round}-{fact}")
+                            .parse()
+                            .expect("a valid entity"),
+                        is: Value::UnsignedInt(fact),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
+                )
             });
             branch
                 .commit(stream::iter(facts.collect::<Vec<_>>()))
@@ -751,7 +757,7 @@ mod tests {
             let hash = *sink.finish().await?.as_bytes();
             let entity = Entity::from_legacy_blob(&hash)?;
             for artifact in field_artifacts(&entity, &certificate)? {
-                instructions.push(Instruction::Assert(artifact));
+                instructions.push(Instruction::Assert(artifact, dialog_artifacts::Pick::All));
             }
             entries.push(BlobRecord::new(bytes.len() as u64).legacy_entry(&hash));
             legacy.push(entity);
@@ -804,12 +810,15 @@ mod tests {
         let (branch, operator) = open_branch("delegation-reserved").await?;
 
         let result = branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: DELEGATION_AUDIENCE.parse()?,
-                of: "user:mallory".parse()?,
-                is: Value::String("did:key:zForged".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: DELEGATION_AUDIENCE.parse()?,
+                    of: "user:mallory".parse()?,
+                    is: Value::String("did:key:zForged".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await;
 
@@ -817,7 +826,7 @@ mod tests {
             matches!(
                 result,
                 Err(CommitError::Artifact(
-                    DialogArtifactsError::ReservedAttribute(_)
+                    DialogArtifactsError::ReservedRelation(_)
                 ))
             ),
             "application commits must not write dialog.ucan facts"

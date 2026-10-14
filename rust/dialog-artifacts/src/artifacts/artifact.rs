@@ -19,18 +19,18 @@ use crate::{
     ATTRIBUTE_KEY_TAG, AttributeKey, Datum, DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, Key,
     KeyView, VALUE_KEY_TAG, ValueKey, decode_value,
     history::{Edition, Version},
-    key::varkey::{self, KeyRef, ValueRef},
+    key::varkey::{self, KeyLayout, KeyRef, ValueRef},
     make_reference,
 };
 
-use super::{Attribute, Cause, Entity, Value};
+use super::{Cause, Entity, Relation, Value};
 
 /// A [`Artifact`] embodies a datum - a semantic triple - that may be stored in or
 /// retrieved from a [`ArtifactStore`].
 #[derive(Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Artifact {
-    /// The [`Attribute`] of the [`Artifact`]; the predicate of the triple
-    pub the: Attribute,
+    /// The [`Relation`] of the [`Artifact`]; the predicate of the triple
+    pub the: Relation,
     /// The [`Entity`] of the [`Artifact`]; the subject of the triple
     #[serde(
         serialize_with = "dialog_capability::identity::to_utf8",
@@ -220,32 +220,67 @@ enum Backing {
     /// no per-row key copy.
     Scanned {
         key: KeyHandle,
+        /// Where the key's components sit, read once when the row was
+        /// scanned, so its fields are read without walking the key again.
+        layout: KeyLayout,
         datum: Datum,
         spilled: Option<Vec<u8>>,
     },
     /// A row synthesized without a stored key (e.g. an uncommitted overlay
     /// fact), carried as the owned [`Artifact`] it was made from. Boxed so
-    /// the common scanned row doesn't pay the owned form's footprint.
-    Owned(Box<Artifact>),
+    /// the common scanned row doesn't pay the owned form's footprint. A
+    /// pending write carries the standing the commit will give it (see
+    /// [`ArtifactView::pending`]); any other owned row has none.
+    Owned {
+        artifact: Box<Artifact>,
+        standing: Option<(Edition, [u8; 32])>,
+    },
 }
 
 impl From<Artifact> for ArtifactView {
     fn from(artifact: Artifact) -> Self {
         Self {
-            backing: Backing::Owned(Box::new(artifact)),
+            backing: Backing::Owned {
+                artifact: Box::new(artifact),
+                standing: None,
+            },
         }
     }
 }
 
 impl ArtifactView {
-    /// Assembles a view from a scanned entry's key handle, its payload, and
-    /// (for a spilled value) the fetched block bytes.
-    pub(crate) fn new(key: KeyHandle, datum: Datum, spilled: Option<Vec<u8>>) -> Self {
+    /// Assembles a view from a scanned entry's key handle, the layout the
+    /// scan read from it, its payload, and (for a spilled value) the
+    /// fetched block bytes.
+    pub(crate) fn new(
+        key: KeyHandle,
+        layout: KeyLayout,
+        datum: Datum,
+        spilled: Option<Vec<u8>>,
+    ) -> Self {
         Self {
             backing: Backing::Scanned {
                 key,
+                layout,
                 datum,
                 spilled,
+            },
+        }
+    }
+
+    /// A view over a write the transaction holding it will commit: it
+    /// stands at `edition`, the edition that commit mints, so a read over
+    /// the transaction elects it as the commit will, over every row the
+    /// line holds. Every write of one transaction lands in one commit
+    /// and shares its version, so they stand equal here too, with the
+    /// version's hash, not known yet, read as zero; what the commit
+    /// orders among them by cause and value, a read over the
+    /// transaction orders the same way.
+    pub fn pending(artifact: Artifact, edition: Edition) -> Self {
+        Self {
+            backing: Backing::Owned {
+                artifact: Box::new(artifact),
+                standing: Some((edition, [0; 32])),
             },
         }
     }
@@ -255,7 +290,7 @@ impl ArtifactView {
     pub fn key(&self) -> Option<&[u8]> {
         match &self.backing {
             Backing::Scanned { key, .. } => Some(key.as_ref()),
-            Backing::Owned(_) => None,
+            Backing::Owned { .. } => None,
         }
     }
 
@@ -264,7 +299,7 @@ impl ArtifactView {
     pub fn datum(&self) -> Option<&Datum> {
         match &self.backing {
             Backing::Scanned { datum, .. } => Some(datum),
-            Backing::Owned(_) => None,
+            Backing::Owned { .. } => None,
         }
     }
 
@@ -279,9 +314,12 @@ impl ArtifactView {
 
     /// The standing this row brings to the cardinality-one election: its
     /// deepest claim version, as the pair the election compares (the
-    /// edition, then the hash of the whole version). `None` for a row no
-    /// revision tagged.
-    fn standing(&self) -> Option<(Edition, [u8; 32])> {
+    /// edition, then the hash of the whole version), or the standing a
+    /// pending write will have. `None` for a row no revision tagged.
+    pub fn standing(&self) -> Option<(Edition, [u8; 32])> {
+        if let Backing::Owned { standing, .. } = &self.backing {
+            return *standing;
+        }
         self.versions()
             .map(|version| (version.edition, make_reference(version.key_bytes())))
             .max()
@@ -291,7 +329,7 @@ impl ArtifactView {
     pub fn cause(&self) -> Option<&Cause> {
         match &self.backing {
             Backing::Scanned { datum, .. } => datum.cause.as_ref(),
-            Backing::Owned(artifact) => artifact.cause.as_ref(),
+            Backing::Owned { artifact, .. } => artifact.cause.as_ref(),
         }
     }
 
@@ -300,22 +338,20 @@ impl ArtifactView {
     pub fn spilled(&self) -> Option<&[u8]> {
         match &self.backing {
             Backing::Scanned { spilled, .. } => spilled.as_deref(),
-            Backing::Owned(_) => None,
+            Backing::Owned { .. } => None,
         }
     }
 
-    /// Parses the key into borrowed components: entity, attribute, value
-    /// type, and value payload, borrowing from the key bytes (owning only an
-    /// escaped entity/attribute). One walk of the key; call this once and
-    /// read every field a consumer needs off the result. Errors for a row
+    /// The key's borrowed components: entity, attribute, value type, and
+    /// value payload, borrowing from the key bytes (owning only an escaped
+    /// entity/attribute). The scan read the key's layout once, so this
+    /// slices the key without walking it again. Errors for a row
     /// backed by an owned [`Artifact`], which has no stored key — the
     /// field accessors below work on both backings.
     pub fn parts(&self) -> Result<KeyRef<'_>, DialogArtifactsError> {
         match &self.backing {
-            Backing::Scanned { key, .. } => varkey::parse_key_ref(key.as_ref()).ok_or_else(|| {
-                DialogArtifactsError::InvalidKey("key did not parse into components".to_string())
-            }),
-            Backing::Owned(_) => Err(DialogArtifactsError::InvalidKey(
+            Backing::Scanned { key, layout, .. } => Ok(layout.view(key.as_ref())),
+            Backing::Owned { .. } => Err(DialogArtifactsError::InvalidKey(
                 "owned-backed view has no index key to parse".to_string(),
             )),
         }
@@ -326,7 +362,7 @@ impl ArtifactView {
     pub fn the_bytes(&self) -> Result<Cow<'_, [u8]>, DialogArtifactsError> {
         match &self.backing {
             Backing::Scanned { .. } => Ok(self.parts()?.attribute),
-            Backing::Owned(artifact) => Ok(Cow::Borrowed(artifact.the.as_str().as_bytes())),
+            Backing::Owned { artifact, .. } => Ok(Cow::Borrowed(artifact.the.as_str().as_bytes())),
         }
     }
 
@@ -335,7 +371,7 @@ impl ArtifactView {
     pub fn of_bytes(&self) -> Result<Cow<'_, [u8]>, DialogArtifactsError> {
         match &self.backing {
             Backing::Scanned { .. } => Ok(self.parts()?.entity),
-            Backing::Owned(artifact) => Ok(Cow::Borrowed(artifact.of.as_str().as_bytes())),
+            Backing::Owned { artifact, .. } => Ok(Cow::Borrowed(artifact.of.as_str().as_bytes())),
         }
     }
 
@@ -344,7 +380,7 @@ impl ArtifactView {
     pub fn value(&self) -> Result<Value, DialogArtifactsError> {
         match &self.backing {
             Backing::Scanned { spilled, .. } => decode_value_parts(&self.parts()?, spilled.clone()),
-            Backing::Owned(artifact) => Ok(artifact.is.clone()),
+            Backing::Owned { artifact, .. } => Ok(artifact.is.clone()),
         }
     }
 
@@ -380,7 +416,7 @@ impl ArtifactView {
                     tail,
                 ))
             }
-            Backing::Owned(artifact) => Ok(crate::sort_key(artifact, manifest)),
+            Backing::Owned { artifact, .. } => Ok(crate::sort_key(artifact, manifest)),
         }
     }
 
@@ -392,7 +428,7 @@ impl ArtifactView {
             Backing::Scanned { datum, spilled, .. } => {
                 reconstruct(&self.parts()?, datum, spilled.clone())
             }
-            Backing::Owned(artifact) => Ok(artifact.as_ref().clone()),
+            Backing::Owned { artifact, .. } => Ok(artifact.as_ref().clone()),
         }
     }
 
@@ -424,11 +460,15 @@ impl ArtifactView {
     /// cannot separate (both unversioned, or both written by the same
     /// revision) fall to the older rule: the higher cause wins, a caused
     /// row beats an uncaused one, and equal (including absent) causes fall
-    /// to the fact hash. Every tier is deterministic and commutative:
-    /// folding any set of rows in any order elects the same row, which is
-    /// what lets every replica agree on the observed value without
-    /// coordination. Versions and causes read straight off the rows; only
-    /// a genuine tie pays for the materialization the fact hash needs.
+    /// to the value, the greater winning. This is the order
+    /// [`Pick::prefers`](crate::Pick::prefers) elects by under `last`,
+    /// in the tree, in a commit's settlement and in a concept read, so
+    /// every read of a cell under `last` returns the same claim. Every
+    /// tier is deterministic and commutative: folding any set of rows in
+    /// any order elects the same row, which is what lets every replica
+    /// agree on the observed value without coordination. Versions and
+    /// causes read straight off the rows; only a genuine tie pays for the
+    /// materialization the value needs.
     pub fn elect(self, challenger: ArtifactView) -> Result<ArtifactView, DialogArtifactsError> {
         match (self.standing(), challenger.standing()) {
             (Some(a), Some(b)) if a > b => return Ok(self),
@@ -443,9 +483,10 @@ impl ArtifactView {
             (Some(_), None) => self,
             (None, Some(_)) => challenger,
             _ => {
-                // Causes are equal: the fact hash is the deterministic
-                // tiebreaker. The hash needs materialization, which is where
-                // a corrupt stored row (`CorruptEntry`) surfaces — such a row
+                // Causes are equal: the value is the deterministic
+                // tiebreaker, as it is for every other election of the
+                // cell. The value needs materialization, which is where a
+                // corrupt stored row (`CorruptEntry`) surfaces — such a row
                 // must be invisible to readers, so it LOSES to any
                 // materializable rival. Two corrupt rows elect either (the
                 // winner fails materialization downstream and is skipped
@@ -453,10 +494,10 @@ impl ArtifactView {
                 use DialogArtifactsError::CorruptEntry;
                 match (self.to_owned(), challenger.to_owned()) {
                     (Ok(a), Ok(b)) => {
-                        if Cause::from(&a) >= Cause::from(&b) {
-                            self
-                        } else {
+                        if super::update::value_beats(&b.is, &a.is) {
                             challenger
+                        } else {
+                            self
                         }
                     }
                     (Ok(_), Err(CorruptEntry(_))) => self,
@@ -512,7 +553,7 @@ impl<S> ArtifactViewStream for S where
 
 /// Extracts the entity and attribute from a key view, decoding the raw UTF-8
 /// key columns.
-fn entity_attribute<K: KeyView>(key: K) -> Result<(Entity, Attribute), DialogArtifactsError> {
+fn entity_attribute<K: KeyView>(key: K) -> Result<(Entity, Relation), DialogArtifactsError> {
     // These bytes came out of the tree: every validation failure here —
     // non-UTF-8 columns, a non-canonical entity, an attribute breaking the
     // attribute invariants — marks a corrupt or foreign-written entry, so it
@@ -520,7 +561,7 @@ fn entity_attribute<K: KeyView>(key: K) -> Result<(Entity, Attribute), DialogArt
     let of = Entity::from_stored(from_utf8(key.entity().raw()).map_err(|error| {
         DialogArtifactsError::CorruptEntry(format!("entity key is not UTF-8: {error}"))
     })?)?;
-    let the = Attribute::from_str(from_utf8(key.attribute().raw()).map_err(|error| {
+    let the = Relation::from_str(from_utf8(key.attribute().raw()).map_err(|error| {
         DialogArtifactsError::CorruptEntry(format!("attribute key is not UTF-8: {error}"))
     })?)
     .map_err(as_corrupt_entry)?;
@@ -556,7 +597,7 @@ fn reconstruct(
     let of = Entity::from_stored(from_utf8(&parts.entity).map_err(|error| {
         DialogArtifactsError::CorruptEntry(format!("entity key is not UTF-8: {error}"))
     })?)?;
-    let the = Attribute::from_str(from_utf8(&parts.attribute).map_err(|error| {
+    let the = Relation::from_str(from_utf8(&parts.attribute).map_err(|error| {
         DialogArtifactsError::CorruptEntry(format!("attribute key is not UTF-8: {error}"))
     })?)
     .map_err(as_corrupt_entry)?;
@@ -635,8 +676,11 @@ mod tests {
             value: ValuePayload::Inline(encode_value_owned(&Value::String(value.into()))),
             version: None,
         };
+        let key = build_key(&parts);
+        let layout = varkey::parse_key_layout(&key).expect("a built key parses");
         ArtifactView::new(
-            KeyHandle::Owned(build_key(&parts)),
+            KeyHandle::Owned(key),
+            layout,
             Datum {
                 cause,
                 blob: None,
@@ -751,7 +795,7 @@ mod tests {
         let mut shared = row(b"user:alice", "Alice", Some(version(1, 1)), None);
         match &mut shared.backing {
             Backing::Scanned { datum, .. } => datum.absorb_versions([&version(2, 5)]),
-            Backing::Owned(_) => unreachable!("scanned row"),
+            Backing::Owned { .. } => unreachable!("scanned row"),
         }
         let rival = row(b"user:alice", "Alicia", Some(version(3, 4)), None);
         assert_eq!(

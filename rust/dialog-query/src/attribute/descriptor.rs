@@ -1,6 +1,6 @@
 use crate::Parameters;
-use crate::artifact::{ArtifactsAttribute, Entity, Value};
-use crate::attribute::The;
+use crate::artifact::{ArtifactsRelation, Entity, Value};
+use crate::attribute::Relation;
 use crate::attribute::query::AttributeQuery;
 use crate::error::{FieldTypeError, TypeError};
 use crate::schema::Cardinality;
@@ -8,28 +8,35 @@ use crate::term::Term;
 use crate::type_system::Type as Kind;
 use crate::types::Any;
 use crate::types::Type;
-use dialog_artifacts::{NameShape, Symbol};
+use dialog_artifacts::{NameShape, Pick, Symbol};
 
+use crate::identity::{self, ATTRIBUTE, field};
 use base58::ToBase58;
+use dialog_artifacts::identity::{ENTITY, SYMBOL};
+use merkle_reference::{Reference, Type as ReferenceType};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::iter;
 use std::str::FromStr;
 
-/// A validated attribute–value pair with its cardinality, produced by
-/// [`AttributeDescriptor::resolve`]. Used inside [`ConceptStatement`](crate::concept::descriptor::ConceptStatement)
-/// to represent the set of facts that make up a concept instance.
+/// A validated attribute–value pair with the pick it is written under,
+/// produced by [`AttributeDescriptor::resolve`]. Used inside
+/// [`ConceptStatement`](crate::concept::descriptor::ConceptStatement) to
+/// represent the set of facts that make up a concept instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attribution {
     /// The fully-qualified attribute selector.
-    pub the: ArtifactsAttribute,
+    pub the: ArtifactsRelation,
     /// The resolved value for this attribute.
     pub is: Value,
-    /// Whether this attribute allows one or many values per entity.
-    pub cardinality: Cardinality,
+    /// The pick the attribute reads under, which its write elects under:
+    /// a `last` field's write succeeds the claim the cell holds, an
+    /// `all` field's lands beside the others.
+    pub pick: Pick,
 }
 
-/// What an attribute descriptor selects: one attribute, or every
-/// entry of a keyed collection.
+/// What an attribute's `the` holds: one relation, or every entry of a
+/// keyed collection.
 ///
 /// Dialog stores a collection as facts sharing a domain whose *name*
 /// half is the entry's key — `todo.list/title` for a dictionary
@@ -43,9 +50,9 @@ pub struct Attribution {
 /// is no state to validate.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum Relation {
-    /// One attribute, named in full: `todo.list/title`.
-    Attribute(The),
+pub enum The {
+    /// One relation, named in full: `todo.list/title`.
+    Relation(Relation),
     /// Every entry of one domain, keyed by name.
     Collection {
         /// The domain the entries share, without a trailing separator.
@@ -56,7 +63,7 @@ pub enum Relation {
     },
 }
 
-/// Which half of a domain a [`Relation::Collection`] selects.
+/// Which half of a domain a [`The::Collection`] selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Keyed {
@@ -75,17 +82,17 @@ impl From<Keyed> for NameShape {
     }
 }
 
-impl Relation {
+impl The {
     /// A collection of `domain`, keyed as `keyed`.
     pub fn collection(domain: Symbol, keyed: Keyed) -> Self {
-        Relation::Collection { domain, keyed }
+        The::Collection { domain, keyed }
     }
 
     /// The domain these facts live under.
     pub fn domain(&self) -> &str {
         match self {
-            Relation::Attribute(the) => the.domain(),
-            Relation::Collection { domain, .. } => domain.as_str(),
+            The::Relation(the) => the.domain(),
+            The::Collection { domain, .. } => domain.as_str(),
         }
     }
 
@@ -94,8 +101,8 @@ impl Relation {
     /// part of the selector.
     pub fn name(&self) -> Option<&str> {
         match self {
-            Relation::Attribute(the) => Some(the.name()),
-            Relation::Collection { .. } => None,
+            The::Relation(the) => Some(the.name()),
+            The::Collection { .. } => None,
         }
     }
 
@@ -108,10 +115,10 @@ impl Relation {
     /// The variable is named after the field (`<field>/the`) so two
     /// collection fields on one concept scan independently rather
     /// than unifying on a shared name.
-    pub fn term(&self, field: &str) -> Term<The> {
+    pub fn term(&self, field: &str) -> Term<Relation> {
         match self {
-            Relation::Attribute(the) => Term::Constant(Value::from(the.clone())),
-            Relation::Collection { .. } => Term::<The>::var(Self::attribute_variable(field))
+            The::Relation(the) => Term::Constant(Value::from(the.clone())),
+            The::Collection { .. } => Term::<Relation>::var(Self::attribute_variable(field))
                 .with_kind(
                     self.kind()
                         .expect("a collection is refined by construction"),
@@ -124,8 +131,8 @@ impl Relation {
     /// `None` for a plain attribute, which is selected by constant.
     pub fn kind(&self) -> Option<Kind> {
         match self {
-            Relation::Attribute(_) => None,
-            Relation::Collection { domain, keyed } => Some(
+            The::Relation(_) => None,
+            The::Collection { domain, keyed } => Some(
                 Kind::from(Type::Symbol)
                     .with_prefix(format!("{}/", domain.as_str()))
                     .expect("symbol is textual")
@@ -152,14 +159,14 @@ impl Relation {
     }
 }
 
-impl Relation {
+impl The {
     /// The concrete attribute to write a fact under, when there is
     /// one. A collection has none: its facts are keyed per entry, so
     /// the key has to come from the writer rather than the schema.
-    pub fn attribute(&self) -> Option<ArtifactsAttribute> {
+    pub fn attribute(&self) -> Option<ArtifactsRelation> {
         match self {
-            Relation::Attribute(the) => Some(ArtifactsAttribute::from(the)),
-            Relation::Collection { .. } => None,
+            The::Relation(the) => Some(ArtifactsRelation::from(the)),
+            The::Collection { .. } => None,
         }
     }
 
@@ -167,16 +174,16 @@ impl Relation {
     /// `domain/key`, where the key must have the collection's name
     /// shape — a position for a sequence, a symbol for a dictionary.
     /// A plain attribute ignores the key and is its own entry.
-    pub fn entry(&self, key: &str) -> Result<ArtifactsAttribute, FieldTypeError> {
+    pub fn entry(&self, key: &str) -> Result<ArtifactsRelation, FieldTypeError> {
         match self {
-            Relation::Attribute(the) => Ok(ArtifactsAttribute::from(the)),
-            Relation::Collection { domain, keyed } => {
+            The::Relation(the) => Ok(ArtifactsRelation::from(the)),
+            The::Collection { domain, keyed } => {
                 let mismatch = || FieldTypeError::KeyShape {
                     domain: domain.as_str().to_owned(),
                     key: key.to_owned(),
                     keyed: *keyed,
                 };
-                let attribute = ArtifactsAttribute::try_from(format!("{}/{key}", domain.as_str()))
+                let attribute = ArtifactsRelation::try_from(format!("{}/{key}", domain.as_str()))
                     .map_err(|_| mismatch())?;
                 let (_, name) = attribute.split().map_err(|_| mismatch())?;
                 if name.shape() != NameShape::from(*keyed) {
@@ -188,9 +195,9 @@ impl Relation {
     }
 }
 
-impl From<The> for Relation {
-    fn from(the: The) -> Self {
-        Relation::Attribute(the)
+impl From<Relation> for The {
+    fn from(the: Relation) -> Self {
+        The::Relation(the)
     }
 }
 
@@ -200,11 +207,11 @@ impl From<The> for Relation {
 /// dictionary — the same bracket the declaration form uses. A
 /// bracketed name can never be a stored attribute's name, so the two
 /// forms are disjoint and the spelling round-trips.
-impl Display for Relation {
+impl Display for The {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
-            Relation::Attribute(the) => write!(f, "{the}"),
-            Relation::Collection { domain, keyed } => {
+            The::Relation(the) => write!(f, "{the}"),
+            The::Collection { domain, keyed } => {
                 write!(f, "{}/{}", domain.as_str(), keyed.bracketed())
             }
         }
@@ -230,22 +237,30 @@ impl Keyed {
     }
 }
 
-impl FromStr for Relation {
-    type Err = <The as FromStr>::Err;
+impl FromStr for The {
+    type Err = <Relation as FromStr>::Err;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         if let Some((domain, name)) = text.split_once('/')
             && let Some(keyed) = Keyed::from_bracketed(name)
             && let Ok(domain) = Symbol::from_str(domain)
         {
-            return Ok(Relation::Collection { domain, keyed });
+            return Ok(The::Collection { domain, keyed });
         }
-        text.parse::<The>().map(Relation::Attribute)
+        text.parse::<Relation>().map(The::Relation)
     }
 }
 
-/// Static metadata for a single attribute: its storage-level selector
-/// ([`The`]), human-readable description, value type, and cardinality.
+/// Static metadata for an attribute: the relation it reads, or several
+/// ranked, its human-readable description, value type or listed value
+/// domain, and the pick it reads under.
+///
+/// An attribute is a relation read under a type and a pick. A list
+/// is a ranked choice: `the: [a, b]` reads the first listed relation
+/// holding a candidate, `as: [v1, v2]` the first listed value a
+/// candidate holds, and either implies `pick: top`. Rules derive
+/// into relations and are found by them, so two attributes over one
+/// relation under different types or picks are two attributes.
 ///
 /// `AttributeDescriptor` is used in two contexts:
 /// 1. Inside a [`ConceptDescriptor`](crate::concept::descriptor::ConceptDescriptor)
@@ -254,50 +269,328 @@ impl FromStr for Relation {
 ///    validates a runtime value against the descriptor's type and produces
 ///    an [`Attribution`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Wire", into = "Wire")]
 pub struct AttributeDescriptor {
-    the: Relation,
-    #[serde(default)]
+    /// The relation read first.
+    the: The,
+    /// The relations read after it, in rank order: a candidate from an
+    /// earlier relation outranks one from a later.
+    then: Vec<The>,
     description: String,
-    #[serde(default)]
-    cardinality: Cardinality,
-    #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
     content_type: Option<Type>,
+    /// The values `as` lists, best first: the domain a value is one
+    /// of, which a `top` pick ranks by.
+    among: Vec<Value>,
+    /// Which of the relation's candidates the attribute picks; a `top`
+    /// carries [`among`](Self::among). The cardinality is the pick's
+    /// arity.
+    pick: Pick,
+}
+
+/// The wire form of an [`AttributeDescriptor`]: `the` is one relation
+/// or a ranked list, `as` a type or a ranked value list, `pick` the
+/// pick where it says more than the lists imply, and `cardinality`
+/// the older spelling of `last` and `all`, read but never written.
+#[derive(Serialize, Deserialize)]
+struct Wire {
+    the: OneOrMany<The>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cardinality: Option<Cardinality>,
+    #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
+    content: Option<As>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pick: Option<PickName>,
+    /// The preview spelling of `pick`, read and never written.
+    #[serde(default, skip_serializing)]
+    select: Option<PickName>,
+}
+
+/// A pick as the wire spells it: its entity alone (`all:`), the values
+/// a `top` ranks being the `as` list. The plain name a 0.2 release
+/// wrote (`all`) is still read.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum PickName {
+    #[serde(rename = "last:", alias = "last")]
+    Last,
+    #[serde(rename = "all:", alias = "all")]
+    All,
+    #[serde(rename = "top:", alias = "top")]
+    Top,
+    #[serde(rename = "max:", alias = "max")]
+    Max,
+    #[serde(rename = "min:", alias = "min")]
+    Min,
+}
+
+impl PickName {
+    fn of(pick: &Pick) -> Self {
+        match pick {
+            Pick::Last => PickName::Last,
+            Pick::All => PickName::All,
+            Pick::Top(_) => PickName::Top,
+            Pick::Max => PickName::Max,
+            Pick::Min => PickName::Min,
+        }
+    }
+
+    fn with(self, ranked: Vec<Value>) -> Pick {
+        match self {
+            PickName::Last => Pick::Last,
+            PickName::All => Pick::All,
+            PickName::Top => Pick::Top(ranked),
+            PickName::Max => Pick::Max,
+            PickName::Min => Pick::Min,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum OneOrMany<T> {
+    One(T),
+    Many(Vec<T>),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum As {
+    Kind(Type),
+    Domain(Vec<Value>),
+}
+
+impl TryFrom<Wire> for AttributeDescriptor {
+    type Error = String;
+
+    fn try_from(wire: Wire) -> Result<Self, Self::Error> {
+        let (the, then) = match wire.the {
+            OneOrMany::One(the) => (the, Vec::new()),
+            OneOrMany::Many(mut list) => {
+                if list.is_empty() {
+                    return Err("`the` lists no relation".to_string());
+                }
+                let the = list.remove(0);
+                (the, list)
+            }
+        };
+        let (content_type, among) = match wire.content {
+            None => (None, Vec::new()),
+            Some(As::Kind(kind)) => (Some(kind), Vec::new()),
+            Some(As::Domain(mut values)) => {
+                if values.is_empty() {
+                    return Err("`as` lists no value".to_string());
+                }
+                // A bare string reads as an entity when it parses as a
+                // URI, so a list of text written bare reads as text and
+                // entities mixed; it is text.
+                if values.iter().any(|value| matches!(value, Value::String(_)))
+                    && values
+                        .iter()
+                        .all(|value| matches!(value, Value::String(_) | Value::Entity(_)))
+                {
+                    values = values
+                        .into_iter()
+                        .map(|value| value.conform(Type::String))
+                        .collect();
+                }
+                let kind = values[0].data_type();
+                if values.iter().any(|value| value.data_type() != kind) {
+                    return Err("`as` lists values of more than one type".to_string());
+                }
+                (Some(kind), values)
+            }
+        };
+        // A listed domain or relation chain is a ranked choice, `top`
+        // unless the pick says otherwise; `cardinality` is the older
+        // spelling of `last` and `all`.
+        let pick = match wire.pick.or(wire.select) {
+            Some(name) => name.with(among.clone()),
+            None if !then.is_empty() || !among.is_empty() => Pick::Top(among.clone()),
+            None => wire.cardinality.unwrap_or_default().pick(),
+        };
+        let descriptor = AttributeDescriptor {
+            the,
+            then,
+            description: wire.description,
+            content_type,
+            among,
+            pick,
+        };
+        match descriptor.pick_error() {
+            Some(reason) => Err(reason),
+            None => Ok(descriptor),
+        }
+    }
+}
+
+impl From<AttributeDescriptor> for Wire {
+    fn from(descriptor: AttributeDescriptor) -> Self {
+        let the = if descriptor.then.is_empty() {
+            OneOrMany::One(descriptor.the)
+        } else {
+            OneOrMany::Many(iter::once(descriptor.the).chain(descriptor.then).collect())
+        };
+        let name = PickName::of(&descriptor.pick);
+        let content = if descriptor.among.is_empty() {
+            descriptor.content_type.map(As::Kind)
+        } else {
+            Some(As::Domain(descriptor.among))
+        };
+        // The pick is written where it says more than the lists imply:
+        // a ranked choice is `top` by itself, and a plain attribute is
+        // `last` by itself.
+        let implied = if matches!(the, OneOrMany::Many(_)) || matches!(content, Some(As::Domain(_)))
+        {
+            PickName::Top
+        } else {
+            PickName::Last
+        };
+        Wire {
+            the,
+            description: descriptor.description,
+            cardinality: None,
+            content,
+            pick: Some(name).filter(|name| *name != implied),
+            select: None,
+        }
+    }
 }
 
 impl AttributeDescriptor {
-    /// Creates a new descriptor from a validated [`The`] selector.
+    /// Creates a new descriptor from a validated [`Relation`] selector.
     pub fn new(
-        the: The,
+        the: Relation,
         description: impl Into<String>,
         cardinality: Cardinality,
         content_type: Option<Type>,
     ) -> Self {
-        Self::over(
-            Relation::Attribute(the),
-            description,
-            cardinality,
-            content_type,
-        )
+        Self::over(The::Relation(the), description, cardinality, content_type)
     }
 
-    /// Creates a descriptor over any [`Relation`] — one attribute, or
+    /// Creates a descriptor over any [`The`] — one attribute, or
     /// every entry of a keyed collection.
     pub fn over(
-        the: Relation,
+        the: The,
         description: impl Into<String>,
         cardinality: Cardinality,
         content_type: Option<Type>,
     ) -> Self {
         Self {
             the,
+            then: Vec::new(),
             description: description.into(),
-            cardinality,
             content_type,
+            among: Vec::new(),
+            pick: cardinality.pick(),
+        }
+    }
+
+    /// This descriptor reading `then` after its relation, in rank
+    /// order: a ranked choice by relation, read as `top`.
+    pub fn with_then(mut self, then: Vec<The>) -> Self {
+        self.then = then;
+        self.pick = Pick::Top(self.among.clone());
+        self
+    }
+
+    /// This descriptor over the listed value domain, best first: a
+    /// ranked choice by value, read as `top` unless it is picked
+    /// otherwise.
+    pub fn with_domain(mut self, ranked: Vec<Value>) -> Self {
+        if matches!(self.pick, Pick::Last | Pick::Top(_)) {
+            self.pick = Pick::Top(ranked.clone());
+        }
+        self.among = ranked;
+        self
+    }
+
+    /// The values `as` lists, best first, if it lists any.
+    pub fn among(&self) -> &[Value] {
+        &self.among
+    }
+
+    /// Every relation this attribute reads, the first ranked highest.
+    pub fn relations(&self) -> impl Iterator<Item = &The> {
+        iter::once(&self.the).chain(self.then.iter())
+    }
+
+    /// Whether this attribute reads several relations, ranked.
+    pub fn is_chain(&self) -> bool {
+        !self.then.is_empty()
+    }
+
+    /// This descriptor under `pick`. The pick is checked against the
+    /// descriptor by [`pick_error`](Self::pick_error) wherever a concept
+    /// is built. A `top` with no values of its own ranks by the listed
+    /// domain; one with values lists them as the domain.
+    pub fn with_pick(mut self, pick: Pick) -> Self {
+        self.pick = match pick {
+            Pick::Top(ranked) if ranked.is_empty() => Pick::Top(self.among.clone()),
+            Pick::Top(ranked) => {
+                self.among = ranked.clone();
+                Pick::Top(ranked)
+            }
+            pick => pick,
+        };
+        self
+    }
+
+    /// Which of its relation's candidates this attribute picks. A write
+    /// through the attribute carries it: any pick but `all` succeeds
+    /// the claim a read returns, retracted beside the written value;
+    /// `all` appends.
+    pub fn pick(&self) -> &Pick {
+        &self.pick
+    }
+
+    /// Whether a field over this attribute must read through the
+    /// attribute concept to be read as declared: its pick is not the
+    /// plain stored read (`last` or `all`), or it reads several
+    /// relations, so the candidates have to be gathered and elected
+    /// even where nothing derives them.
+    pub fn reads_elected(&self) -> bool {
+        !matches!(self.pick, Pick::Last | Pick::All) || self.is_chain()
+    }
+
+    /// This descriptor's first relation read plainly, under its pick's
+    /// arity alone: the relation itself, which is what rules derive
+    /// into.
+    pub fn without_pick(mut self) -> Self {
+        self.pick = Cardinality::of(&self.pick).pick();
+        self.among = Vec::new();
+        self.then = Vec::new();
+        self
+    }
+
+    /// Why the pick does not fit this attribute, if it does not: `top`
+    /// ranks listed values or relations, and `max` and `min` order a
+    /// comparable value type.
+    pub fn pick_error(&self) -> Option<String> {
+        if self.is_chain() && !matches!(self.pick, Pick::Top(_)) {
+            return Some(
+                "a list of relations is a ranked choice: it reads as `top` only".to_string(),
+            );
+        }
+        let content = self.content_type;
+        match &self.pick {
+            Pick::Top(ranked) if ranked.is_empty() && !self.is_chain() => {
+                Some("`top` ranks listed values or relations, and none are listed".to_string())
+            }
+            Pick::Top(_) => None,
+            pick @ (Pick::Max | Pick::Min) => match content {
+                Some(Type::Bytes) | Some(Type::Boolean) => Some(format!(
+                    "`{pick}` orders a comparable value type, not {:?}",
+                    content.expect("checked")
+                )),
+                _ => None,
+            },
+            Pick::Last | Pick::All => None,
         }
     }
 
     /// Returns a relation identifier comprised of the attribute's domain and name.
-    pub fn the(&self) -> &Relation {
+    pub fn the(&self) -> &The {
         &self.the
     }
 
@@ -312,14 +605,36 @@ impl AttributeDescriptor {
         self.the.name()
     }
 
+    /// This descriptor with no description: what identity sees.
+    pub(crate) fn without_description(&self) -> Self {
+        Self {
+            description: String::new(),
+            ..self.clone()
+        }
+    }
+
     /// Returns the human-readable description.
     pub fn description(&self) -> &str {
         &self.description
     }
 
-    /// Returns the cardinality.
+    /// Returns the cardinality: the pick's arity, `all` being many
+    /// and every other pick one. `cardinality` is the older spelling
+    /// of `last` and `all`, so the two never disagree.
     pub fn cardinality(&self) -> Cardinality {
-        self.cardinality
+        Cardinality::of(&self.pick)
+    }
+
+    /// The arity the stored scan of this attribute reads under. A
+    /// `last` read is the stored scan itself: one claim per entity, the
+    /// newest. Every other pick elects among the claims, so the scan
+    /// hands over every claim and the election chooses; a scan that
+    /// kept one would choose by `last` before the pick saw the rest.
+    pub fn scan_cardinality(&self) -> Cardinality {
+        match self.pick {
+            Pick::Last => Cardinality::One,
+            _ => Cardinality::Many,
+        }
     }
 
     /// Returns the expected value type, or `None` if any type is accepted.
@@ -350,7 +665,7 @@ impl AttributeDescriptor {
     /// triple ready for storage.
     pub fn resolve(&self, value: Value) -> Result<Attribution, FieldTypeError> {
         let type_matches = match self.content_type() {
-            Some(expected) => value.data_type() == expected,
+            Some(expected) => expected.holds(&value),
             None => true,
         };
 
@@ -367,7 +682,7 @@ impl AttributeDescriptor {
             Ok(Attribution {
                 the,
                 is: value.clone(),
-                cardinality: self.cardinality(),
+                pick: self.pick.clone(),
             })
         } else {
             Err(FieldTypeError::TypeMismatch {
@@ -443,79 +758,49 @@ impl AttributeDescriptor {
         ))
     }
 
-    /// Encode this attribute descriptor as CBOR for hashing
+    /// The attribute's identity: its merkle reference under
+    /// [`ATTRIBUTE`](crate::identity::ATTRIBUTE).
     ///
-    /// Creates a CBOR-encoded representation with fields:
-    /// - domain: domain
-    /// - name: name
-    /// - cardinality: cardinality
-    /// - type: content_type
-    ///
-    /// Description is excluded from the encoding.
-    pub fn to_cbor_bytes(&self) -> Vec<u8> {
-        use serde::Serialize;
-
-        // `name` carries the attribute's name half for a plain
-        // attribute and the key kind for a collection — the two are
-        // the same slot because they are the same thing: what the
-        // name half of these facts holds. A plain attribute therefore
-        // encodes exactly as it did before collections existed, so
-        // every existing identity is preserved.
-        #[derive(Serialize)]
-        struct CborAttributeDescriptor<'a> {
-            domain: &'a str,
-            name: &'a str,
-            cardinality: Cardinality,
-            #[serde(rename = "type")]
-            content_type: Option<Type>,
+    /// It maps `the` to the relations the attribute reads, best first, each
+    /// a symbol; `as` to the entity naming its type, when it declares one;
+    /// `pick` to the entity naming its pick; and `among` to the values it
+    /// lists, when it lists any. A collection reads as the symbol its
+    /// relation slot spells, `todo.list/[symbol]`, which no relation can
+    /// spell. The description is not part of it. Two reads of one relation
+    /// under different types or picks are two attributes.
+    pub fn reference(&self) -> Reference {
+        let relations = iter::once(&self.the)
+            .chain(&self.then)
+            .map(|the| SYMBOL.reference_of(the.to_string().as_bytes()));
+        let mut entries = vec![
+            (field::THE, ReferenceType::LIST.list(relations)),
+            (field::PICK, ENTITY.reference_of(self.pick.uri().as_bytes())),
+        ];
+        if let Some(content_type) = self.content_type {
+            entries.push((
+                field::AS,
+                ENTITY.reference_of(content_type.uri().as_bytes()),
+            ));
         }
-
-        let name = match &self.the {
-            Relation::Attribute(the) => the.name(),
-            Relation::Collection { keyed, .. } => match keyed {
-                Keyed::Dictionary => "<dictionary>",
-                Keyed::Sequence => "<sequence>",
-            },
-        };
-        let schema = CborAttributeDescriptor {
-            domain: self.domain(),
-            name,
-            cardinality: self.cardinality(),
-            content_type: self.content_type(),
-        };
-
-        serde_ipld_dagcbor::to_vec(&schema).expect("CBOR encoding should not fail")
+        if !self.among.is_empty() {
+            entries.push((
+                field::AMONG,
+                ReferenceType::LIST.list(self.among.iter().map(Value::reference)),
+            ));
+        }
+        ATTRIBUTE.map(entries)
     }
 
-    /// Compute blake3 hash of this attribute descriptor
-    ///
-    /// Returns a 32-byte blake3 hash of the CBOR-encoded descriptor
-    pub fn hash(&self) -> blake3::Hash {
-        let cbor_bytes = self.to_cbor_bytes();
-        blake3::hash(&cbor_bytes)
-    }
-
-    /// Format this attribute's hash as a URI
-    ///
-    /// Returns a string in the format: `the:{base58(blake3)}`
+    /// The attribute's entity: `the:` followed by its
+    /// [reference](Self::reference) in base58.
     pub fn to_uri(&self) -> String {
-        let encoded = self.hash().as_bytes().as_ref().to_base58();
-        format!("the:{encoded}")
+        format!("the:{}", self.reference().as_bytes().to_base58())
     }
 
-    /// Parse an attribute URI and extract the hash
-    ///
-    /// Expects format: `the:{base58(blake3)}`
-    /// Returns None if the format is invalid
-    pub fn parse_uri(uri: &str) -> Option<blake3::Hash> {
-        let encoded = uri.strip_prefix("the:")?;
-        let bytes = base58::FromBase58::from_base58(encoded).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        Some(blake3::Hash::from(arr))
+    /// The reference an attribute entity, `the:{base58}`, names, or
+    /// `None` if `uri` is not one.
+    pub fn parse_uri(uri: &str) -> Option<Reference> {
+        identity::parse("the:", uri)
     }
 }
 
@@ -527,9 +812,9 @@ impl From<AttributeDescriptor> for Entity {
 
 /// A descriptor's concrete attribute. Panics for a keyed collection,
 /// which has no single attribute — use
-/// [`Relation::attribute`](Relation::attribute) where that is
+/// [`The::attribute`](Relation::attribute) where that is
 /// possible.
-impl From<&AttributeDescriptor> for ArtifactsAttribute {
+impl From<&AttributeDescriptor> for ArtifactsRelation {
     fn from(descriptor: &AttributeDescriptor) -> Self {
         descriptor
             .the
@@ -538,16 +823,247 @@ impl From<&AttributeDescriptor> for ArtifactsAttribute {
     }
 }
 
-impl From<AttributeDescriptor> for ArtifactsAttribute {
+impl From<AttributeDescriptor> for ArtifactsRelation {
     fn from(descriptor: AttributeDescriptor) -> Self {
-        ArtifactsAttribute::from(&descriptor)
+        ArtifactsRelation::from(&descriptor)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ConceptFieldDescriptor;
     use crate::the;
+
+    fn ranked(values: Vec<Value>, content_type: Type) -> AttributeDescriptor {
+        AttributeDescriptor::new(
+            "job/status".parse().expect("a relation"),
+            "",
+            Cardinality::One,
+            Some(content_type),
+        )
+        .with_domain(values)
+    }
+
+    /// A ranked list keeps the type of each value it lists through dag-cbor,
+    /// alone and as a concept's field, where the field's options are read
+    /// beside it in one map.
+    #[dialog_common::test]
+    fn it_keeps_the_type_of_each_listed_value_through_dag_cbor() {
+        let lists = [
+            (
+                vec![Value::UnsignedInt(1), Value::UnsignedInt(2)],
+                Type::UnsignedInt,
+            ),
+            (
+                vec![Value::SignedInt(1), Value::SignedInt(-2)],
+                Type::SignedInt,
+            ),
+            (
+                vec![
+                    Value::String("https://example.com".into()),
+                    Value::String("foo:".into()),
+                ],
+                Type::String,
+            ),
+        ];
+        for (values, content_type) in lists {
+            let descriptor = ranked(values.clone(), content_type);
+            let bytes = serde_ipld_dagcbor::to_vec(&descriptor).expect("encodes");
+            let decoded: AttributeDescriptor =
+                serde_ipld_dagcbor::from_slice(&bytes).expect("decodes");
+            assert_eq!(decoded.among(), values.as_slice());
+
+            let field = ConceptFieldDescriptor::optional(descriptor);
+            let bytes = serde_ipld_dagcbor::to_vec(&field).expect("encodes");
+            let decoded: ConceptFieldDescriptor =
+                serde_ipld_dagcbor::from_slice(&bytes).expect("decodes");
+            assert_eq!(decoded.descriptor().among(), values.as_slice());
+        }
+    }
+
+    /// A list of text written bare reads as text, though some of its
+    /// entries parse as URIs.
+    #[dialog_common::test]
+    fn it_reads_a_bare_list_of_text_as_text() {
+        let descriptor: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": "page/link",
+            "as": ["https://example.com", "home"]
+        }))
+        .expect("descriptor parses");
+        assert_eq!(descriptor.content_type(), Some(Type::String));
+        assert_eq!(
+            descriptor.among(),
+            &[
+                Value::String("https://example.com/".into()),
+                Value::String("home".into())
+            ]
+        );
+    }
+
+    /// Two attributes that list the same spelling under different types
+    /// are two attributes.
+    #[dialog_common::test]
+    fn it_tells_attributes_apart_by_the_type_of_their_listed_values() {
+        let text = ranked(vec![Value::String("case:active".into())], Type::String);
+        let entity = ranked(
+            vec![Value::Entity("case:active".parse().expect("an entity"))],
+            Type::Entity,
+        );
+        assert_ne!(text.to_uri(), entity.to_uri());
+        let natural = ranked(vec![Value::UnsignedInt(1)], Type::UnsignedInt);
+        let integer = ranked(vec![Value::SignedInt(1)], Type::SignedInt);
+        assert_ne!(natural.to_uri(), integer.to_uri());
+    }
+
+    /// A list is a ranked choice: `as: [..]` ranks values, `the: [..]`
+    /// ranks relations, and either reads as `top` without saying so.
+    /// `cardinality` is read as the older spelling of `last` and `all`
+    /// and never written; a pick is written where it says more than
+    /// the lists imply.
+    #[dialog_common::test]
+    fn it_reads_a_list_as_a_ranked_choice() {
+        let ranked: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": "job/status",
+            "as": ["case:suspended", "case:active"]
+        }))
+        .expect("descriptor parses");
+        assert!(matches!(ranked.pick(), Pick::Top(_)));
+        assert_eq!(
+            ranked.content_type(),
+            Some(Type::Entity),
+            "the domain's type"
+        );
+        assert_eq!(ranked.among().len(), 2);
+        assert!(ranked.reads_elected());
+        assert_eq!(
+            serde_json::to_value(&ranked).expect("serializes"),
+            serde_json::json!({ "the": "job/status", "as": ["case:suspended", "case:active"] })
+        );
+
+        let chain: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": ["user/email", "user/phone"],
+            "as": "text:"
+        }))
+        .expect("descriptor parses");
+        assert!(matches!(chain.pick(), Pick::Top(_)));
+        assert!(chain.is_chain());
+        assert_eq!(chain.relations().count(), 2);
+        assert_eq!(
+            serde_json::to_value(&chain).expect("serializes"),
+            serde_json::json!({ "the": ["user/email", "user/phone"], "as": "text:" })
+        );
+        assert!(
+            serde_json::from_value::<AttributeDescriptor>(serde_json::json!({
+                "the": ["user/email", "user/phone"],
+                "as": "text:",
+                "pick": "all:"
+            }))
+            .is_err(),
+            "a relation chain reads as top only"
+        );
+
+        let many: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": "job/tag",
+            "as": "text:",
+            "cardinality": "many"
+        }))
+        .expect("descriptor parses");
+        assert_eq!(many.pick(), &Pick::All, "the older spelling");
+        assert_eq!(
+            serde_json::to_value(&many).expect("serializes"),
+            serde_json::json!({ "the": "job/tag", "as": "text:", "pick": "all:" })
+        );
+        let named: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": "job/tag",
+            "as": "text:",
+            "pick": "all"
+        }))
+        .expect("descriptor parses");
+        assert_eq!(named.pick(), &Pick::All, "the spelling 0.2 wrote");
+        assert_eq!(named.to_uri(), many.to_uri());
+        let one: AttributeDescriptor = serde_json::from_value(serde_json::json!({
+            "the": "job/tag",
+            "as": "text:"
+        }))
+        .expect("descriptor parses");
+        assert_eq!(one.pick(), &Pick::Last);
+        assert!(
+            serde_json::to_value(&one)
+                .expect("serializes")
+                .get("pick")
+                .is_none()
+        );
+    }
+
+    /// A pick is part of the attribute: two reads of one relation
+    /// under different picks are two attributes. `last` and `all`
+    /// are what `cardinality: one` and `many` always said, so they
+    /// are the same attributes, whichever way they are spelled.
+    #[dialog_common::test]
+    fn it_tells_attributes_apart_by_policy() {
+        let one =
+            AttributeDescriptor::new(the!("job/status"), "", Cardinality::One, Some(Type::Entity));
+        let many = AttributeDescriptor::new(
+            the!("job/status"),
+            "",
+            Cardinality::Many,
+            Some(Type::Entity),
+        );
+        let ranked = one.clone().with_domain(vec![Value::Boolean(true)]);
+        let chained = one
+            .clone()
+            .with_then(vec!["job/fallback".parse().expect("a relation")]);
+        let newest = many.clone().with_pick(Pick::Last);
+        let every = one.clone().with_pick(Pick::All);
+        assert_ne!(one.to_uri(), ranked.to_uri());
+        assert_ne!(one.to_uri(), chained.to_uri());
+        assert_ne!(one.to_uri(), many.to_uri());
+        assert_eq!(newest.to_uri(), one.to_uri(), "`last` is cardinality one");
+        assert_eq!(every.to_uri(), many.to_uri(), "`all` is cardinality many");
+        assert_eq!(newest.cardinality(), Cardinality::One);
+        assert_eq!(every.cardinality(), Cardinality::Many);
+        assert_eq!(
+            ranked.cardinality(),
+            Cardinality::One,
+            "a ranked read is one value"
+        );
+        assert!(
+            matches!(ranked.pick(), Pick::Top(_)),
+            "a listed domain reads as top"
+        );
+        assert!(
+            matches!(chained.pick(), Pick::Top(_)),
+            "a relation chain reads as top"
+        );
+    }
+
+    /// A pick that does not fit its attribute is named: `top` without
+    /// listed values or relations, `max` over an unordered carrier.
+    #[dialog_common::test]
+    fn it_names_a_policy_its_attribute_cannot_read_under() {
+        let status = |pick: Pick, among: Vec<Value>, kind: Type| {
+            AttributeDescriptor::new(the!("job/status"), "", Cardinality::One, Some(kind))
+                .with_domain(among)
+                .with_pick(pick)
+                .pick_error()
+        };
+        assert!(status(Pick::Top(Vec::new()), Vec::new(), Type::Entity).is_some());
+        assert!(
+            status(
+                Pick::Top(Vec::new()),
+                vec![Value::Boolean(true)],
+                Type::Entity
+            )
+            .is_none()
+        );
+        assert!(
+            status(Pick::All, vec![Value::Boolean(true)], Type::Entity).is_none(),
+            "a listed domain read as a set is an enum-typed set"
+        );
+        assert!(status(Pick::Max, Vec::new(), Type::Boolean).is_some());
+        assert!(status(Pick::Max, Vec::new(), Type::String).is_none());
+    }
 
     #[dialog_common::test]
     fn it_serializes_all_fields() {
@@ -560,8 +1076,11 @@ mod tests {
         let json: serde_json::Value = serde_json::to_value(&attr).unwrap();
         assert_eq!(json["the"], "io.gozala.person/name");
         assert_eq!(json["description"], "Name of the person");
-        assert_eq!(json["cardinality"], "one");
-        assert_eq!(json["as"], "Text");
+        assert_eq!(json["as"], "text:");
+        assert!(
+            json.get("cardinality").is_none() && json.get("pick").is_none(),
+            "`last` is the pick a plain attribute implies: {json}"
+        );
     }
 
     #[dialog_common::test]
@@ -573,7 +1092,8 @@ mod tests {
             Some(Type::String),
         );
         let json: serde_json::Value = serde_json::to_value(&attr).unwrap();
-        assert_eq!(json["cardinality"], "many");
+        assert_eq!(json["pick"], "all:", "many is spelled as its pick");
+        assert!(json.get("cardinality").is_none(), "{json}");
     }
 
     #[dialog_common::test]
@@ -591,14 +1111,15 @@ mod tests {
     #[dialog_common::test]
     fn it_serializes_all_value_types() {
         let cases: Vec<(Type, &str)> = vec![
-            (Type::Bytes, "Bytes"),
-            (Type::Entity, "Entity"),
-            (Type::Boolean, "Boolean"),
-            (Type::String, "Text"),
-            (Type::UnsignedInt, "UnsignedInteger"),
-            (Type::SignedInt, "SignedInteger"),
-            (Type::Float, "Float"),
-            (Type::Symbol, "Symbol"),
+            (Type::Bytes, "bytes:"),
+            (Type::Entity, "entity:"),
+            (Type::Boolean, "boolean:"),
+            (Type::String, "text:"),
+            (Type::UnsignedInt, "natural:"),
+            (Type::SignedInt, "integer:"),
+            (Type::Float, "float:"),
+            (Type::Record, "record:"),
+            (Type::Symbol, "symbol:"),
         ];
         for (ty, expected_name) in cases {
             let attr =
@@ -618,7 +1139,7 @@ mod tests {
             "the": "io.gozala.person/name",
             "description": "Name of the person",
             "cardinality": "one",
-            "as": "Text"
+            "as": "text:"
         }"#;
         let attr: AttributeDescriptor = serde_json::from_str(json).unwrap();
         assert_eq!(attr.domain(), "io.gozala.person");
@@ -644,7 +1165,7 @@ mod tests {
         let json = r#"{
             "the": "person/email",
             "cardinality": "many",
-            "as": "Text"
+            "as": "text:"
         }"#;
         let attr: AttributeDescriptor = serde_json::from_str(json).unwrap();
         assert_eq!(attr.cardinality(), Cardinality::Many);
@@ -665,7 +1186,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_rejects_missing_the() {
-        let json = r#"{ "description": "oops", "as": "Text" }"#;
+        let json = r#"{ "description": "oops", "as": "text:" }"#;
         let result = serde_json::from_str::<AttributeDescriptor>(json);
         assert!(result.is_err(), "should reject attribute without 'the'");
     }
@@ -769,7 +1290,7 @@ mod collection_tests {
 
     fn collection(keyed: Keyed) -> AttributeDescriptor {
         AttributeDescriptor::over(
-            Relation::collection(domain(), keyed),
+            The::collection(domain(), keyed),
             "the list's members",
             Cardinality::Many,
             Some(Type::Entity),
@@ -780,25 +1301,25 @@ mod collection_tests {
     /// kind bracketed, and either form parses back.
     #[dialog_common::test]
     fn it_spells_and_parses_a_relation() {
-        let sequence = Relation::collection(
+        let sequence = The::collection(
             Symbol::from_str("todo.list").expect("a valid domain"),
             Keyed::Sequence,
         );
         assert_eq!(sequence.to_string(), "todo.list/[position]");
-        let parse = |text: &str| text.parse::<Relation>().expect("a relation parses");
+        let parse = |text: &str| text.parse::<The>().expect("a relation parses");
         assert_eq!(parse("todo.list/[position]"), sequence);
         assert_eq!(
             parse("todo.list/[symbol]"),
-            Relation::collection(
+            The::collection(
                 Symbol::from_str("todo.list").expect("a valid domain"),
                 Keyed::Dictionary
             )
         );
         assert_eq!(
             parse("todo.list/title"),
-            Relation::Attribute(the!("todo.list/title"))
+            The::Relation(the!("todo.list/title"))
         );
-        assert!("todo.list/[list]".parse::<Relation>().is_err());
+        assert!("todo.list/[list]".parse::<The>().is_err());
     }
 
     /// A plain attribute selects itself: the query pins `the` to a
@@ -894,21 +1415,87 @@ mod collection_tests {
         let sequence = collection(Keyed::Sequence);
         let dictionary = collection(Keyed::Dictionary);
 
-        assert_ne!(sequence.hash(), dictionary.hash(), "key kinds differ");
         assert_ne!(
-            sequence.hash(),
-            attribute.hash(),
+            sequence.reference(),
+            dictionary.reference(),
+            "key kinds differ"
+        );
+        assert_ne!(
+            sequence.reference(),
+            attribute.reference(),
             "a collection is not an attribute"
         );
 
-        // The encoding a plain attribute produces is the one it
-        // produced before collections existed: domain, name,
-        // cardinality, type — nothing added, nothing reordered.
-        let cbor = attribute.to_cbor_bytes();
-        let decoded: serde_json::Value =
-            serde_ipld_dagcbor::from_slice(&cbor).expect("valid dag-cbor");
-        assert_eq!(decoded["domain"], "todo.list");
-        assert_eq!(decoded["name"], "title");
+        // A collection reads as the symbol its relation slot spells.
+        let symbol = |text: &str| SYMBOL.reference_of(text.as_bytes());
+        let pick = ENTITY.reference_of(sequence.pick().uri().as_bytes());
+        let mut entries = vec![
+            (
+                field::THE,
+                ReferenceType::LIST.list([symbol("todo.list/[position]")]),
+            ),
+            (field::PICK, pick),
+        ];
+        if let Some(content_type) = sequence.content_type() {
+            entries.push((
+                field::AS,
+                ENTITY.reference_of(content_type.uri().as_bytes()),
+            ));
+        }
+        assert_eq!(sequence.reference(), ATTRIBUTE.map(entries));
+    }
+
+    /// An attribute is referenced as a map from field names under
+    /// `the:`: the relations it reads, its pick, its type, and the values
+    /// it lists. Nothing else, the description included.
+    #[dialog_common::test]
+    fn it_references_an_attribute_by_its_fields() {
+        let attribute = AttributeDescriptor::new(
+            the!("todo.list/title"),
+            "The list's title",
+            Cardinality::One,
+            Some(Type::String),
+        );
+        let expected = ATTRIBUTE.map([
+            (
+                field::THE,
+                ReferenceType::LIST.list([SYMBOL.reference_of(b"todo.list/title")]),
+            ),
+            (field::PICK, ENTITY.reference_of(b"last:")),
+            (field::AS, ENTITY.reference_of(b"text:")),
+        ]);
+        assert_eq!(attribute.reference(), expected);
+        assert_eq!(
+            attribute.to_uri(),
+            format!("the:{}", expected.as_bytes().to_base58())
+        );
+
+        // Listed values enter by their own references, in order.
+        let listed = attribute.clone().with_domain(vec![
+            Value::String("todo".into()),
+            Value::String("done".into()),
+        ]);
+        let reordered = attribute.with_domain(vec![
+            Value::String("done".into()),
+            Value::String("todo".into()),
+        ]);
+        assert_ne!(listed.reference(), reordered.reference());
+    }
+
+    /// Listed numbers are hashed by value alone: a natural, an integer and
+    /// a float of the same number are one value. The value index still
+    /// keeps them apart, so these attributes share an identity while
+    /// reading different claims until it moves to one band.
+    #[dialog_common::test]
+    fn it_hashes_listed_numbers_by_value_alone() {
+        let status = || AttributeDescriptor::new(the!("task/priority"), "", Cardinality::One, None);
+        let natural = status().with_domain(vec![Value::UnsignedInt(1), Value::UnsignedInt(2)]);
+        let integer = status().with_domain(vec![Value::SignedInt(1), Value::SignedInt(2)]);
+        let float = status().with_domain(vec![Value::Float(1.0), Value::Float(2.0)]);
+        let halves = status().with_domain(vec![Value::Float(1.5), Value::Float(2.0)]);
+        assert_eq!(natural.reference(), integer.reference());
+        assert_eq!(integer.reference(), float.reference());
+        assert_ne!(float.reference(), halves.reference());
     }
 
     /// The wire form round-trips, and a stored attribute still reads

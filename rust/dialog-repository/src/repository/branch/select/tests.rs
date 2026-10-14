@@ -7,6 +7,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use dialog_effects::blob::{BlobError, Read as BlobRead};
 use std::collections::BTreeSet;
+use std::iter;
 use std::pin::pin;
 use std::sync::Arc;
 
@@ -14,8 +15,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Changes, DialogArtifactsError, Entity, Exporter,
-    Instruction, LoadBlob, NameShape, Symbol, Update as _, Value, encode_value_owned,
+    Artifact, ArtifactSelector, Changes, DialogArtifactsError, Entity, Exporter, Instruction,
+    LoadBlob, NameShape, Relation, Symbol, Update as _, Value, encode_value_owned,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::{Blake3Hash, Buffer, ConditionalSync};
@@ -66,7 +67,10 @@ async fn assert_all(
 ) -> Result<Revision> {
     commit(
         branch,
-        facts.into_iter().map(Instruction::Assert).collect(),
+        facts
+            .into_iter()
+            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
+            .collect(),
         operator,
     )
     .await
@@ -273,7 +277,7 @@ async fn it_leaves_no_key_when_assert_and_retract_a_novel_fact_in_one_batch() ->
     commit(
         &branch,
         vec![
-            Instruction::Assert(transient.clone()),
+            Instruction::Assert(transient.clone(), dialog_artifacts::Pick::All),
             Instruction::Retract(transient.clone()),
         ],
         &operator,
@@ -579,10 +583,13 @@ async fn it_selects_by_value_prefix() -> Result<()> {
     Ok(())
 }
 
-/// A range predicate is a filter, never a type assertion: values of a
-/// different type than the bound simply do not match (no error, no stream
-/// abort) and the matching-type values still come back. Degenerate ranges
-/// (mismatched bound types, inverted bounds) select nothing, silently.
+/// A numeric bound reads each number through the lens its type names, as
+/// a field declared with that type does: a natural bound `>= 20` finds the
+/// stored `30.0` and `50`, and `25.5`, which it sees as `25`. A value of
+/// another kind beside them (a string, a boolean) is a non-match, not an
+/// error, over the value index and over the entity-pinned route alike;
+/// bounds of two number types form one range; inverted bounds match
+/// nothing.
 #[dialog_common::test]
 async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
@@ -595,6 +602,7 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
         Value::UnsignedInt(50),
         Value::String("forty".into()),
         Value::Float(30.0),
+        Value::Float(25.5),
         Value::Boolean(true),
     ]
     .into_iter()
@@ -602,20 +610,29 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
     .collect::<Result<Vec<_>>>()?;
     assert_all(&branch, data, &operator).await?;
 
-    // An unsigned range matches only the unsigned values; the string,
-    // float, and boolean neighbors are non-matches, not errors.
+    let numbers = |selected: &[dialog_artifacts::Artifact]| -> Vec<f64> {
+        let mut numbers: Vec<f64> = selected
+            .iter()
+            .map(|fact| match &fact.is {
+                Value::UnsignedInt(natural) => *natural as f64,
+                Value::SignedInt(integer) => *integer as f64,
+                Value::Float(float) => *float,
+                other => panic!("a number matched the bound, not {other:?}"),
+            })
+            .collect();
+        numbers.sort_by(f64::total_cmp);
+        numbers
+    };
+
+    // A natural range sees every number through the natural lens; the
+    // string and the boolean beside them are non-matches, not errors.
     let selected = select(
         &branch,
         ArtifactSelector::new().is_at_least(Value::UnsignedInt(20)),
         &operator,
     )
     .await?;
-    assert_eq!(
-        selected.len(),
-        1,
-        "only UnsignedInt(50) is >= 20u: {selected:?}"
-    );
-    assert_eq!(selected[0].is, Value::UnsignedInt(50));
+    assert_eq!(numbers(&selected), vec![25.5, 30.0, 50.0], "{selected:?}");
 
     // Same over the entity-pinned (EAV) route, where every type of the
     // entity's values passes through the filter.
@@ -642,14 +659,13 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
     )
     .await?;
     assert_eq!(
-        selected.len(),
-        1,
+        numbers(&selected),
+        vec![40.0],
         "the string label is a non-match: {selected:?}"
     );
-    assert_eq!(selected[0].is, Value::UnsignedInt(40));
 
-    // Degenerate ranges: mismatched bound types and inverted bounds are
-    // empty, not errors.
+    // Bounds of two number types form one range, each read through its
+    // own lens.
     let selected = select(
         &branch,
         ArtifactSelector::new()
@@ -658,8 +674,9 @@ async fn it_treats_type_mismatched_values_as_non_matches_not_errors() -> Result<
         &operator,
     )
     .await?;
-    assert!(selected.is_empty(), "mixed-type bounds match nothing");
+    assert_eq!(numbers(&selected), vec![25.5, 30.0, 40.0], "{selected:?}");
 
+    // Inverted bounds are empty, not an error.
     let selected = select(
         &branch,
         ArtifactSelector::new()
@@ -978,12 +995,24 @@ async fn it_round_trips_many_float_values() -> Result<()> {
     )
     .await?;
     assert_eq!(selected.len(), expected, "every float fact reads back");
-    assert!(
-        selected
-            .iter()
-            .all(|fact| matches!(fact.is, Value::Float(_))),
-        "every value round-trips as a float"
-    );
+    // The band does not record that a float wrote a whole number: `5.0`
+    // reads back as the natural `5`, the same number.
+    let mut written: Vec<f64> = (0..400u64)
+        .map(|index| index as f64 * 1.5 - 100.0)
+        .chain(iter::once(1783112056217.0))
+        .collect();
+    let mut read: Vec<f64> = selected
+        .iter()
+        .map(|fact| match &fact.is {
+            Value::Float(float) => *float,
+            Value::UnsignedInt(natural) => *natural as f64,
+            Value::SignedInt(integer) => *integer as f64,
+            other => panic!("a number reads back as a number, not {other:?}"),
+        })
+        .collect();
+    written.sort_by(f64::total_cmp);
+    read.sort_by(f64::total_cmp);
+    assert_eq!(read, written, "every value round-trips as the same number");
     Ok(())
 }
 
@@ -1148,7 +1177,7 @@ async fn it_can_query_efficiently_by_entity_and_value() -> Result<()> {
     branch
         .commit(stream::iter(
             data.into_iter()
-                .map(Instruction::Assert)
+                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
@@ -1202,14 +1231,14 @@ async fn it_can_query_efficiently_by_attribute_and_value() -> Result<()> {
     branch
         .commit(stream::iter(
             data.into_iter()
-                .map(Instruction::Assert)
+                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
         .perform(&operator)
         .await?;
 
-    let attribute: Attribute = "item/name".parse()?;
+    let attribute: Relation = "item/name".parse()?;
     let (rows, reads, writes) = cold_select(
         &repo,
         ArtifactSelector::new()
@@ -1248,7 +1277,7 @@ async fn it_uses_indexes_to_optimize_reads() -> Result<()> {
         .commit(stream::iter(
             generate_data(512)?
                 .into_iter()
-                .map(Instruction::Assert)
+                .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
                 .collect::<Vec<_>>(),
         ))
         .canonicalize()
@@ -1342,11 +1371,21 @@ async fn it_produces_the_same_version_with_different_insertion_order() -> Result
 
     let mut forward = Changes::new();
     for artifact in data.iter().cloned() {
-        forward.associate(artifact.the, artifact.of, artifact.is);
+        forward.associate(
+            artifact.the,
+            artifact.of,
+            artifact.is,
+            dialog_artifacts::Pick::All,
+        );
     }
     let mut backward = Changes::new();
     for artifact in data.into_iter().rev() {
-        backward.associate(artifact.the, artifact.of, artifact.is);
+        backward.associate(
+            artifact.the,
+            artifact.of,
+            artifact.is,
+            dialog_artifacts::Pick::All,
+        );
     }
 
     let one = branch
@@ -1390,11 +1429,10 @@ async fn it_can_upsert_facts() -> Result<()> {
     .await?;
     commit(
         &branch,
-        vec![Instruction::Replace(fact(
-            "test/attribute",
-            entity.clone(),
-            Value::Boolean(true),
-        )?)],
+        vec![Instruction::Assert(
+            fact("test/attribute", entity.clone(), Value::Boolean(true))?,
+            dialog_artifacts::Pick::Last,
+        )],
         &operator,
     )
     .await?;
@@ -1455,11 +1493,14 @@ async fn it_avoids_unnecessary_storage_writes() -> Result<()> {
     );
 
     reopened
-        .commit(stream::iter(vec![Instruction::Assert(fact(
-            "test/attribute",
-            Entity::new()?,
-            Value::String("another value".into()),
-        )?)]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            fact(
+                "test/attribute",
+                Entity::new()?,
+                Value::String("another value".into()),
+            )?,
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&counting)
         .await?;
     assert!(counting.count("archive::Import") > 0);
@@ -1597,11 +1638,10 @@ async fn it_replaces_a_spilled_prior() -> Result<()> {
         for value in [spilled_prior.clone(), new_value.clone()] {
             commit(
                 &branch,
-                vec![Instruction::Replace(fact(
-                    "doc/body",
-                    entity.clone(),
-                    value,
-                )?)],
+                vec![Instruction::Assert(
+                    fact("doc/body", entity.clone(), value)?,
+                    dialog_artifacts::Pick::Last,
+                )],
                 &operator,
             )
             .await?;
@@ -1785,6 +1825,7 @@ async fn it_commits_identically_when_the_spine_is_reused() -> Result<()> {
             "test/value".parse()?,
             format!("entity:00000000-0000-0000-0000-{:012}", n % 40).parse()?,
             Value::String(format!("value {n}")),
+            dialog_artifacts::Pick::All,
         );
 
         // The oracle opens a fresh handle (and therefore reads the root

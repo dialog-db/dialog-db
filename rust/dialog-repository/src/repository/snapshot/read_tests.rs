@@ -491,9 +491,9 @@ async fn it_resolves_committed_rules() -> Result<()> {
     // employee(this, name) :- person-name(this, name)
     let rule = {
         let json = serde_json::json!({
-            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                "assert": { "with": { "name": { "the": "org/person-name", "as": "text:" } } },
                 "where": {
                     "this": { "?": { "name": "this" } },
                     "name": { "?": { "name": "name" } }

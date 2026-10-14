@@ -6,7 +6,7 @@
 use std::str::FromStr as _;
 
 use dialog_artifacts::tree::{ArtifactTree, ArtifactTreeExt as _, spill_cache};
-use dialog_artifacts::{Artifact, ArtifactSelector, Attribute, Entity, Value};
+use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Relation, Value};
 use dialog_common::Blake3Hash;
 use dialog_search_tree::MemoryBlocks;
 use futures_util::TryStreamExt as _;
@@ -22,7 +22,7 @@ fn unhex(text: &str) -> Vec<u8> {
 
 fn expected(n: u32) -> Artifact {
     Artifact {
-        the: Attribute::from_str(if n.is_multiple_of(2) {
+        the: Relation::from_str(if n.is_multiple_of(2) {
             "fixture/name"
         } else {
             "fixture/bio"
@@ -60,7 +60,7 @@ async fn it_reads_an_artifact_tree_written_in_the_legacy_layout() -> anyhow::Res
             .scan(
                 store.clone(),
                 spill_cache(),
-                ArtifactSelector::new().the(Attribute::from_str(attribute)?),
+                ArtifactSelector::new().the(Relation::from_str(attribute)?),
             )
             .and_then(|row| async move { row.to_owned() })
             .try_collect()

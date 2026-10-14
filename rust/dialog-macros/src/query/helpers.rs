@@ -205,30 +205,53 @@ pub fn parse_dialog_field_attributes(
     Ok(parsed)
 }
 
-/// Parse the `#[cardinality(one)]` or `#[cardinality(many)]` attribute.
-/// Returns the appropriate Cardinality token stream, defaulting to `One`.
-pub fn parse_cardinality_attribute(attrs: &[Attribute]) -> Result<TokenStream, syn::Error> {
+/// Parse the `#[pick(last)]`, `#[pick(all)]`, `#[pick(max)]` or
+/// `#[pick(min)]` attribute into the `dialog_query::Pick` the attribute
+/// is read under, defaulting to `Last`. `#[cardinality(..)]`, the
+/// spelling before picks, is refused with the pick that replaces it.
+pub fn parse_pick_attribute(attrs: &[Attribute]) -> Result<TokenStream, syn::Error> {
     for attr in attrs {
         if attr.path().is_ident("cardinality") {
-            let mut is_many = false;
+            let mut replacement = "last";
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("many") {
-                    is_many = true;
-                    Ok(())
-                } else if meta.path.is_ident("one") {
-                    Ok(())
-                } else {
-                    Err(meta.error("cardinality must be 'one' or 'many'"))
+                    replacement = "all";
                 }
+                Ok(())
             })?;
-
-            return if is_many {
-                Ok(quote! { dialog_query::Cardinality::Many })
-            } else {
-                Ok(quote! { dialog_query::Cardinality::One })
-            };
+            return Err(syn::Error::new_spanned(
+                attr,
+                format!("`#[cardinality(..)]` is now `#[pick({replacement})]`"),
+            ));
+        }
+        if attr.path().is_ident("pick") {
+            let mut pick = None;
+            attr.parse_nested_meta(|meta| {
+                let variant = if meta.path.is_ident("last") {
+                    quote! { Last }
+                } else if meta.path.is_ident("all") {
+                    quote! { All }
+                } else if meta.path.is_ident("max") {
+                    quote! { Max }
+                } else if meta.path.is_ident("min") {
+                    quote! { Min }
+                } else if meta.path.is_ident("top") {
+                    return Err(meta.error(
+                        "`top` ranks listed values, which a derived attribute cannot list; \
+                         build the descriptor with `with_pick`",
+                    ));
+                } else {
+                    return Err(meta.error("pick must be `last`, `all`, `max` or `min`"));
+                };
+                pick = Some(variant);
+                Ok(())
+            })?;
+            let variant = pick.ok_or_else(|| {
+                syn::Error::new_spanned(attr, "pick must be `last`, `all`, `max` or `min`")
+            })?;
+            return Ok(quote! { dialog_query::Pick::#variant });
         }
     }
 
-    Ok(quote! { dialog_query::Cardinality::One })
+    Ok(quote! { dialog_query::Pick::Last })
 }

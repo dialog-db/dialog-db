@@ -13,7 +13,7 @@ pub use query::{AttributeQuery, DynamicAttributeQuery, StaticAttributeQuery};
 pub use statement::*;
 pub use the::*;
 
-pub use crate::artifact::{ArtifactsAttribute, Cause, DialogArtifactsError, Entity, Value};
+pub use crate::artifact::{ArtifactsRelation, Cause, DialogArtifactsError, Entity, Value};
 pub use crate::schema::Cardinality;
 pub use crate::types::{Scalar, Type, Typed};
 pub use crate::{Predicate, Premise, Term};
@@ -30,6 +30,36 @@ pub use crate::{Predicate, Premise, Term};
 ///
 /// For schema metadata, see [`Descriptor<AttributeDescriptor>`](crate::Descriptor).
 /// For the fluent `::of()` expression builder, see [`StaticAttributeExpressionBuilder`].
+///
+/// The derive reads the pick from `#[pick(last)]` (the default),
+/// `#[pick(all)]`, `#[pick(max)]` or `#[pick(min)]`:
+///
+/// ```rust
+/// use dialog_query::Descriptor;
+///
+/// #[derive(dialog_macros::Attribute, Clone)]
+/// #[domain("note")]
+/// #[pick(all)]
+/// pub struct Tag(pub String);
+///
+/// assert_eq!(Tag::descriptor().pick(), &dialog_query::Pick::All);
+/// ```
+///
+/// The spelling before picks no longer compiles:
+///
+/// ```compile_fail
+/// #[derive(dialog_macros::Attribute, Clone)]
+/// #[cardinality(many)]
+/// pub struct Tag(pub String);
+/// ```
+///
+/// Nor does `top`, which ranks values a derived attribute cannot list:
+///
+/// ```compile_fail
+/// #[derive(dialog_macros::Attribute, Clone)]
+/// #[pick(top)]
+/// pub struct Status(pub String);
+/// ```
 pub trait Attribute: Predicate + Sized {
     /// The Rust scalar type of this attribute's values.
     type Type: Scalar;
@@ -137,8 +167,13 @@ mod tests {
 
         /// Employees managed by this person
         #[derive(Attribute, Clone)]
-        #[cardinality(many)]
+        #[pick(all)]
         pub struct Manages(pub crate::Entity);
+
+        /// The person's highest grade
+        #[derive(Attribute, Clone)]
+        #[pick(max)]
+        pub struct Grade(pub u32);
     }
 
     #[dialog_common::test]
@@ -215,6 +250,17 @@ mod tests {
             "person-derive/name"
         );
         assert_eq!(name.value(), "Bob");
+    }
+
+    #[dialog_common::test]
+    fn it_derives_the_pick_it_names() {
+        assert_eq!(person_derive::Grade::descriptor().pick(), &crate::Pick::Max);
+        assert_eq!(person_derive::Grade::cardinality(), Cardinality::One);
+        assert_eq!(person_derive::Name::descriptor().pick(), &crate::Pick::Last);
+        assert_eq!(
+            person_derive::Manages::descriptor().pick(),
+            &crate::Pick::All
+        );
     }
 
     #[dialog_common::test]
@@ -442,8 +488,8 @@ mod tests {
 
     #[dialog_common::test]
     fn it_produces_stable_hash() {
-        let hash1 = employee_ident::Name::descriptor().hash();
-        let hash2 = employee_ident::Name::descriptor().hash();
+        let hash1 = employee_ident::Name::descriptor().reference();
+        let hash2 = employee_ident::Name::descriptor().reference();
 
         assert_eq!(
             hash1, hash2,
@@ -453,9 +499,9 @@ mod tests {
 
     #[dialog_common::test]
     fn it_hashes_differently_for_different_attributes() {
-        let name_hash = employee_ident::Name::descriptor().hash();
-        let salary_hash = employee_ident::Salary::descriptor().hash();
-        let job_hash = employee_ident::Job::descriptor().hash();
+        let name_hash = employee_ident::Name::descriptor().reference();
+        let salary_hash = employee_ident::Salary::descriptor().reference();
+        let job_hash = employee_ident::Job::descriptor().reference();
 
         assert_ne!(
             name_hash, salary_hash,
@@ -473,8 +519,8 @@ mod tests {
 
     #[dialog_common::test]
     fn it_hashes_differently_for_different_domains() {
-        let employee_name_hash = employee_ident::Name::descriptor().hash();
-        let person_name_hash = person_ident::Name::descriptor().hash();
+        let employee_name_hash = employee_ident::Name::descriptor().reference();
+        let person_name_hash = person_ident::Name::descriptor().reference();
 
         assert_ne!(
             employee_name_hash, person_name_hash,
@@ -501,7 +547,7 @@ mod tests {
         assert!(parsed_hash.is_some(), "Should be able to parse valid URI");
         assert_eq!(
             parsed_hash.unwrap(),
-            employee_ident::Name::descriptor().hash(),
+            employee_ident::Name::descriptor().reference(),
             "Parsed hash should match original hash"
         );
     }
@@ -526,22 +572,13 @@ mod tests {
 
     #[dialog_common::test]
     fn it_produces_stable_schema_hash() {
-        let schema_hash = employee_ident::Name::descriptor().hash();
-        let trait_hash = employee_ident::Name::descriptor().hash();
+        let schema_hash = employee_ident::Name::descriptor().reference();
+        let trait_hash = employee_ident::Name::descriptor().reference();
 
         assert_eq!(
             schema_hash, trait_hash,
             "Schema hash and trait hash should match"
         );
-    }
-
-    #[dialog_common::test]
-    fn it_encodes_to_cbor() {
-        let cbor1 = employee_ident::Name::descriptor().to_cbor_bytes();
-        let cbor2 = employee_ident::Name::descriptor().to_cbor_bytes();
-
-        assert_eq!(cbor1, cbor2, "CBOR encoding should be deterministic");
-        assert!(!cbor1.is_empty(), "CBOR encoding should not be empty");
     }
 
     #[dialog_common::test]
@@ -561,8 +598,8 @@ mod tests {
         );
 
         assert_eq!(
-            attr1.hash(),
-            attr2.hash(),
+            attr1.reference(),
+            attr2.reference(),
             "Attributes with different descriptions should have the same hash"
         );
 

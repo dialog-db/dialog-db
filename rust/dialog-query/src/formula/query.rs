@@ -80,6 +80,12 @@ macro_rules! define_formulas {
             pub fn parameters(&self) -> Parameters {
                 match self { $( Self::$variant(q) => q.clone().into(), )* }
             }
+
+            /// This formula applied to `terms` instead of its own: the
+            /// same formula, re-bound, validated as a fresh application.
+            pub fn with_parameters(&self, terms: Parameters) -> Result<Self, crate::error::TypeError> {
+                match self { $( Self::$variant(_) => Ok(Self::$variant(<$ty>::apply(terms)?)), )* }
+            }
         }
 
         $(
