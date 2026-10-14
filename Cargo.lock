@@ -1156,6 +1156,7 @@ dependencies = [
  "dialog-macros",
  "futures-util",
  "getrandom 0.2.16",
+ "js-sys",
  "parking_lot",
  "rand 0.8.5",
  "rkyv",
