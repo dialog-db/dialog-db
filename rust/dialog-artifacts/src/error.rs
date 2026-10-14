@@ -1,4 +1,4 @@
-use dialog_capability::access::AuthorizeError;
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_capability::identity::IdentityError;
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
@@ -102,8 +102,8 @@ pub enum DialogArtifactsError {
     IncompleteHistory(String),
 }
 
-impl dialog_capability::access::AuthorizationFailure for DialogArtifactsError {
-    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+impl AuthorizationFailure for DialogArtifactsError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
         match self {
             Self::Authorization(reason) => Some(reason),
             _ => None,

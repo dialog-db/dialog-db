@@ -1,4 +1,4 @@
-use dialog_capability::access::AuthorizeError;
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::memory::MemoryError;
@@ -33,8 +33,8 @@ pub enum DialogStorageError {
     Verification(String),
 }
 
-impl dialog_capability::access::AuthorizationFailure for DialogStorageError {
-    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+impl AuthorizationFailure for DialogStorageError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
         match self {
             Self::Authorization(reason) => Some(reason),
             _ => None,

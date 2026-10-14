@@ -1,6 +1,6 @@
 use crate::{Fetched, Revision, Target, TreeReference};
 use dialog_artifacts::DialogArtifactsError;
-use dialog_capability::access::AuthorizeError;
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_capability::identity::IdentityError;
 use dialog_common::Blake3Hash;
 use dialog_credentials::Ed25519SignerError;
@@ -751,8 +751,8 @@ pub enum ResolveError {
     Decode(String),
 }
 
-impl dialog_capability::access::AuthorizationFailure for ResolveError {
-    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+impl AuthorizationFailure for ResolveError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
         match self {
             Self::Authorization(reason) => Some(reason),
             _ => None,
@@ -807,8 +807,8 @@ pub enum PublishError {
     Encode(String),
 }
 
-impl dialog_capability::access::AuthorizationFailure for PublishError {
-    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+impl AuthorizationFailure for PublishError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
         match self {
             Self::Authorization(reason) => Some(reason),
             _ => None,
@@ -852,8 +852,8 @@ pub enum RetractError {
     Rejected(#[from] Rejection),
 }
 
-impl dialog_capability::access::AuthorizationFailure for RetractError {
-    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+impl AuthorizationFailure for RetractError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
         match self {
             Self::Authorization(reason) => Some(reason),
             _ => None,

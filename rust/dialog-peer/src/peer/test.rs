@@ -1079,6 +1079,8 @@ mod tests {
     mod ucan_fork_tests {
         use super::*;
         use dialog_capability::Subject;
+        use dialog_capability::access::Retain;
+        use dialog_common::time::{self, UNIX_EPOCH};
         use dialog_common::{Blake3Hash, Buffer};
         use dialog_effects::MethodExt as _;
         use dialog_effects::UseExt as _;
@@ -1087,6 +1089,8 @@ mod tests {
         use dialog_network::NetworkAddress as SiteAddress;
         use dialog_remote_ucan::{Exchange, UcanAddress};
         use dialog_remote_ucan_s3::helpers::UcanS3Address;
+        use dialog_ucan_core::time::timestamp::Timestamp;
+        use ipld_core::cid::Cid;
 
         fn ucan_address(s3: &UcanS3Address) -> SiteAddress {
             SiteAddress::Ucan(UcanAddress::new(&s3.access_service_url))
@@ -1571,10 +1575,7 @@ mod tests {
         }
 
         /// Have the helper service treat `certificate` as revoked.
-        async fn revoke_at(
-            s3: &UcanS3Address,
-            certificate: ipld_core::cid::Cid,
-        ) -> anyhow::Result<()> {
+        async fn revoke_at(s3: &UcanS3Address, certificate: Cid) -> anyhow::Result<()> {
             let response = dialog_remote_s3::http_client()
                 .post(format!(
                     "{}/revocations/{certificate}",
@@ -1594,14 +1595,12 @@ mod tests {
         /// archive reads and writes below hang from) to `holder`, bounded
         /// by `expiration` when given; the certificate's CID.
         async fn retain_use_grant(
-            operator: &impl dialog_capability::Provider<
-                dialog_capability::access::Retain<dialog_ucan::Ucan>,
-            >,
+            operator: &impl dialog_capability::Provider<Retain<dialog_ucan::Ucan>>,
             holder: &dialog_capability::Did,
             space: &dialog_credentials::Ed25519Signer,
-            expiration: Option<dialog_ucan_core::time::timestamp::Timestamp>,
-        ) -> anyhow::Result<ipld_core::cid::Cid> {
-            use dialog_capability::access::{Access, Retain};
+            expiration: Option<Timestamp>,
+        ) -> anyhow::Result<Cid> {
+            use dialog_capability::access::Access;
             use dialog_ucan_core::subject::Subject as UcanSubject;
             use dialog_varsig::Principal as _;
 
@@ -1643,7 +1642,6 @@ mod tests {
         ) -> anyhow::Result<()> {
             use dialog_capability::access::{AuthorizeError, Proof as _};
             use dialog_effects::archive::ArchiveError;
-            use dialog_ucan_core::time::timestamp::Timestamp;
             use dialog_varsig::Principal as _;
 
             let storage = test_storage().await;
@@ -1662,9 +1660,7 @@ mod tests {
             // Two grants of the space's storage to the profile, distinct by
             // their bounds (the builder mints no nonce).
             let space = dialog_credentials::Ed25519Signer::generate().await?;
-            let now = dialog_common::time::now()
-                .duration_since(dialog_common::time::UNIX_EPOCH)?
-                .as_secs();
+            let now = time::now().duration_since(UNIX_EPOCH)?.as_secs();
             let open = retain_use_grant(&operator, &profile.did(), &space, None).await?;
             let bounded = retain_use_grant(
                 &operator,

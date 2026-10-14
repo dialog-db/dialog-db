@@ -23,7 +23,7 @@ use std::str;
 
 use crate::Rejection;
 use base58::ToBase58;
-use dialog_capability::access::AuthorizeError;
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 pub use dialog_capability::{
     Attenuate, Attenuation, Capability, Constraint, Effect, Policy, StorageError, Subject,
 };
@@ -367,8 +367,8 @@ pub enum MemoryError {
     Authorization(#[from] AuthorizeError),
 }
 
-impl dialog_capability::access::AuthorizationFailure for MemoryError {
-    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+impl AuthorizationFailure for MemoryError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
         match self {
             Self::Authorization(reason) => Some(reason),
             _ => None,

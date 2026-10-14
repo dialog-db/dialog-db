@@ -1,6 +1,6 @@
 //! Error types for S3 operations.
 
-use dialog_capability::access::AuthorizeError;
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::blob::BlobError;
@@ -40,8 +40,8 @@ pub enum S3Error {
     Serialization(String),
 }
 
-impl dialog_capability::access::AuthorizationFailure for S3Error {
-    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+impl AuthorizationFailure for S3Error {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
         match self {
             Self::Authorization(reason) => Some(reason),
             _ => None,

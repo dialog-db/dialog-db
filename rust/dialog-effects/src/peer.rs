@@ -23,7 +23,7 @@
 use crate::Rejection;
 use crate::memory::MemoryError;
 use crate::method;
-use dialog_capability::access::AuthorizeError;
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_capability::identity::Entity;
 use dialog_capability::{Attenuate, Attenuation, Constraint, Effect};
 use serde::{Deserialize, Serialize};
@@ -312,8 +312,8 @@ pub enum PeerError {
     Authorization(#[from] AuthorizeError),
 }
 
-impl dialog_capability::access::AuthorizationFailure for PeerError {
-    fn authorization_failure(&self) -> Option<&dialog_capability::access::AuthorizeError> {
+impl AuthorizationFailure for PeerError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
         match self {
             Self::Authorization(reason) => Some(reason),
             _ => None,
