@@ -14,6 +14,19 @@ says how to cut a release.
 
 ## Unreleased
 
+### `dialog-network`, `dialog-repository` and `dialog-peer` are built as `rlib` only
+
+[#PR](https://github.com/dialog-db/dialog-db/pull/PR)
+
+The three crates declared `crate-type = ["cdylib", "rlib"]` since they were created. Nothing in the workspace, its CI or tonk consumes the dynamic library the `cdylib` target produced: the wasm test jobs build `wasm-bindgen-test` binaries, and tonk's worker crates are cdylibs of their own that link these as `rlib`s. They are now `rlib` only.
+
+What this changes for you:
+
+- `cargo build` no longer emits a `libdialog_network`, `libdialog_repository` or `libdialog_peer` dynamic library. A build that needs one declares its own wrapper crate with that crate type.
+- A clean release build of `dialog-peer` overlaps the compilation of `dialog-query`, `dialog-repository` and `dialog-peer` instead of running them one after another.
+
+Why: with a `cdylib` target, cargo waits for every upstream crate's full object code before starting a crate, rather than starting on its metadata. A crate type nobody consumed serialized the slowest part of every build that reaches the peer.
+
 ### A revoked delegation's match is boxed in `Invalid::Revoked`
 
 [#599](https://github.com/dialog-db/dialog-db/pull/599)
