@@ -1274,6 +1274,26 @@ impl Ephemeral {
         )
     }
 
+    /// The tombstones of the facts whose attribute `keep` takes, keyed
+    /// under `manifest`: what this store hides in a read guided by
+    /// placement, which takes no tombstone of an attribute placed
+    /// elsewhere.
+    pub(crate) fn tombstones_where(
+        &self,
+        manifest: &Manifest,
+        keep: impl Fn(&str) -> bool,
+    ) -> Arc<HashSet<SortKey>> {
+        let state = self.state.read();
+        Arc::new(
+            state
+                .shadowed
+                .values()
+                .filter(|fact| keep(fact.the.as_str()))
+                .map(|fact| sort_key(fact, manifest))
+                .collect(),
+        )
+    }
+
     /// Whether the store holds no facts (tombstones aside).
     pub fn is_empty(&self) -> bool {
         self.state.read().facts.is_empty()
