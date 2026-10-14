@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A certificate a remote refuses as revoked is retracted only on a signed revocation that verifies
 
-[#PR](https://github.com/dialog-db/dialog-db/pull/PR)
+[#602](https://github.com/dialog-db/dialog-db/pull/602)
 
 A refusal of a revoked certificate now carries the signed revocation,
 and a peer retracts the certificate only once that revocation verifies.
