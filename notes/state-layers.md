@@ -774,6 +774,32 @@ it needs before its workers move onto stacks. Each is offered upstream.
   memory starts at the head that the first commit adopts, as a branch that
   never induced does: what the other writer added before that commit, or
   while no stack ran, fires no rule.
+- **A channel waits for the publish.** The share of an ephemeral layer lands
+  at stage time, so rules and observers in the process see it at once. A
+  channel must not send it then: a peer could act on a command whose commit
+  then loses its compare and set, and the intent that caused the command
+  would never land. Each instant that a stack commit mints carries the hold
+  of the commit; a catch-up stops at the first instant whose commit has not
+  published, and the instants go once it publishes. If the publish fails, or
+  an advance or a pull drops the staged chain, the witnesses never go; the
+  facts the commit stored stay in the layer, so their instants go, and a
+  peer holds what the layer holds. A publish that fails or is dropped
+  partway discards the holds it took. A commit that changes no durable layer
+  releases at once, unless an earlier commit of the stack still waits to
+  publish.
+- **The log of a channel.** The log keeps each instant from the first one
+  that waits, and each witness until every peer read it, past its ring bound
+  if it must, since the fold holds no witness; a resync leaves a peer just
+  before the first instant that waits. A peer that a join or a resync it
+  sends places past a witness that waits is owed it, and receives it once
+  its commit publishes. A transport calls `Channel::leave` when its link
+  closes, since a peer that never reads holds its witnesses in the log. So a
+  writer sends a command as a transient, and a result or a notice as a
+  stored fact. A commit future dropped while its layers stage drops the
+  staged chains, as a failed one does. The channel observes its layer
+  through a queue as large as its log; more instants than that between two
+  calls of the channel make a gap, every peer resyncs, and a command that
+  waited is lost with the log. See the docs of `Channel` for the timeline.
 
 ## Order of work
 
