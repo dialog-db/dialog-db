@@ -61,7 +61,7 @@ arbitrary = { version = "1", features = ["derive"] }
 arrayref = "0.3"
 async-signature = "0.5"
 async-stream = "0.3"
-async-trait = "0.1"
+async-trait = "0.1.92"
 auto_enums = { version = "0.8", features = ["futures03"] }
 axum = "0.8"
 aes-gcm = "0.10"

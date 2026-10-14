@@ -13,8 +13,6 @@ use crate::key::ExtractableKey;
 // Re-import WebCrypto types on WASM
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use super::web;
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-use crate::key::WebCryptoError;
 
 /// A signer whose key material cannot be read out. The default.
 ///
