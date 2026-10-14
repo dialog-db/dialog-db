@@ -14,6 +14,32 @@ says how to cut a release.
 
 ## Unreleased
 
+### Branch writers and in-flight block reads belong to the environment
+
+[#575](https://github.com/dialog-db/dialog-db/pull/575)
+
+The writers of open branches and the in-flight block GETs of the S3 and
+filesystem transports were process-wide statics: they outlived every
+environment, and two environments in one process shared them whether
+they meant to or not. A branch's writer is now held by the environment,
+and each `S3` and `Fs` site owns its in-flight GETs, so readers join one
+another's requests only through the same site.
+
+What this changes for you:
+
+- `S3` and `Fs` are no longer `Copy`, and are built with `default()`.
+- `Holds` gains `held_or`, which `Holdings` answers under its lock, and
+  `held_key::<T>(name)` names a key by its type. An environment that
+  forwards `Holds` should forward `held_or` too, or two first opens at
+  once may each make their own writer.
+- Two environments in one process that hold nothing in common no longer
+  share a writer or join each other's block reads. A race between them
+  as one issuer is refused by a merging commit rather than minting an
+  edition twice.
+
+Why: none of the three registries had an owner, so none could be
+scoped, bounded or released with the work it served.
+
 ### A branch's caches are held by the environment it is opened through
 
 [#574](https://github.com/dialog-db/dialog-db/pull/574)
