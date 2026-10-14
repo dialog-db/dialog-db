@@ -363,6 +363,7 @@ where
     let staged = Placements::resolve(source, &changes, env).await?;
     let induced = induce::induce(
         source,
+        induce::Watermark::Cell,
         view,
         &staged,
         &mut changes,
