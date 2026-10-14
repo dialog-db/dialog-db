@@ -30,7 +30,7 @@ use dialog_effects::blob::{self, BlobWriter};
 use dialog_effects::memory::prelude::{CellScope, PublishExt as _, RetractExt as _};
 use dialog_effects::memory::{self, CellState, Edition, MemoryError, Version};
 use futures_util::{SinkExt as _, StreamExt as _};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as Handshake, Response as Accepted,
@@ -55,6 +55,8 @@ pub struct UcanServer {
     pub store: MemoryStore,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     socket_shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    /// Tells every open socket to close.
+    closing: watch::Sender<bool>,
 }
 
 struct ServerState {
@@ -121,6 +123,7 @@ impl UcanServer {
         let sockets = TcpListener::bind("127.0.0.1:0").await?;
         let socket = format!("ws://{}/", sockets.local_addr()?);
         let (socket_shutdown_tx, mut socket_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let (closing, closed) = watch::channel(false);
         tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -129,7 +132,7 @@ impl UcanServer {
                         let Ok((stream, _)) = accepted else { continue };
                         let state = socket_state.clone();
                         let changes = changes.subscribe();
-                        tokio::spawn(serve_socket(stream, state, changes));
+                        tokio::spawn(serve_socket(stream, state, changes, closed.clone()));
                     }
                 }
             }
@@ -141,16 +144,19 @@ impl UcanServer {
             store,
             shutdown_tx,
             socket_shutdown_tx,
+            closing,
         })
     }
 }
 
 /// One connection to the socket: a session answering its frames, and
-/// delivering each change the store announces to the watches it began.
+/// delivering each change the store announces to the watches it began,
+/// until either side closes it or the service stops.
 async fn serve_socket(
     stream: tokio::net::TcpStream,
     state: Arc<ServerState>,
     mut changes: broadcast::Receiver<Changed>,
+    mut closed: watch::Receiver<bool>,
 ) {
     let speaks = |request: &Handshake, mut response: Accepted| -> Result<Accepted, ErrorResponse> {
         let asked = request
@@ -175,6 +181,12 @@ async fn serve_socket(
     let mut session = Session::new();
     loop {
         let delivered = tokio::select! {
+            // The flag only ever turns on: any change is the service
+            // stopping.
+            _ = closed.changed() => {
+                let _ = sink.send(Message::Close(None)).await;
+                break;
+            }
             message = source.next() => match message {
                 Some(Ok(Message::Binary(bytes))) => {
                     session.receive(&state.access, &bytes).await.into_iter().collect()
@@ -477,6 +489,9 @@ impl Provider for UcanServer {
     async fn stop(self) -> anyhow::Result<()> {
         let _ = self.shutdown_tx.send(());
         let _ = self.socket_shutdown_tx.send(());
+        // The sockets already open are the service's too: close them, so
+        // a stopped service delivers nothing more.
+        let _ = self.closing.send(true);
         Ok(())
     }
 }
