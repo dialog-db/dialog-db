@@ -32,8 +32,16 @@ pub trait Resolver<S: Signature, Index = Here> {
 
     /// Combine with another resolver that handles a different signature type.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use dialog_varsig::{Resolver, Signature};
+    /// # fn example<S: Signature, Ed25519: Resolver<S>, P256, Rsa>(
+    /// #     ed25519_resolver: Ed25519,
+    /// #     p256_resolver: P256,
+    /// #     rsa_resolver: Rsa,
+    /// # ) {
     /// let resolver = ed25519_resolver.or(p256_resolver).or(rsa_resolver);
+    /// # let _ = resolver;
+    /// # }
     /// ```
     fn or<R>(self, other: R) -> CompositeResolver<Self, R>
     where
