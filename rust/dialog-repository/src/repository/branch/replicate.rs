@@ -192,7 +192,15 @@ where
                             yield item;
                         }
                     }
-                    Event::Observed(Err(error)) => yield Err(error.into()),
+                    // A head that could not be recorded may still be the
+                    // remote's newest, and the upstream counts as watched,
+                    // so no tick asks where it stands: ask now.
+                    Event::Observed(Err(error)) => {
+                        yield Err(error.into());
+                        for item in sync(branch, env, pull, push, true).await {
+                            yield item;
+                        }
+                    }
                     Event::Ended(target) => {
                         if !unwatched.contains(&target) {
                             unwatched.push(target);
