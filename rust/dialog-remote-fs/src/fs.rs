@@ -15,20 +15,50 @@ pub mod simulation;
 pub use address::FsAddress;
 pub use authorization::FsAuthorization;
 
+use std::sync::Arc;
+
 use dialog_capability::Effect;
 use dialog_capability::Fork;
 use dialog_capability::Site;
+use dialog_common::Flight;
+
+/// In-flight block GETs, joined by `(vault URL, digest)`.
+///
+/// A block is immutable content, so every caller reading the same digest
+/// from the same vault gets the same bytes — the one read that is always
+/// safe to share. The vault URL scopes the join: two vaults can disagree
+/// about *holding* a block (a `None` from one must never answer the
+/// other), so joins never cross vaults even for equal digests.
+///
+/// Errors are shared as their rendering (`ArchiveError::Storage`): the
+/// site is host-trusted, so a `Get` has no authorization decision to
+/// preserve. Mutable reads (memory cells) deliberately do not come
+/// through here.
+pub(crate) type BlockGets = Flight<String, Result<Option<Arc<Vec<u8>>>, String>>;
 
 /// Local-filesystem-backed site.
 ///
-/// Marker for fork dispatch — the actual I/O is performed by `dialog_storage`'s
+/// Dispatches forks — the actual I/O is performed by `dialog_storage`'s
 /// [`FileSystem`](dialog_storage::provider::FileSystem) provider, to which the
 /// [`Provider`](dialog_capability::Provider) impls in [`provider`] delegate.
 /// The site is host-trusted: there is no on-the-wire authorization step. The
 /// directory referenced by an [`FsAddress`] must be registered with the
 /// provider (via [`crate::register_directory`]) before any invocation fires.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Fs;
+///
+/// The site owns its in-flight block GETs, so readers join one another's
+/// requests only through the same site (one `Network`, hence one
+/// environment), and nothing outlives it. Clones share them.
+#[derive(Debug, Clone, Default)]
+pub struct Fs {
+    gets: Arc<BlockGets>,
+}
+
+impl Fs {
+    /// The in-flight block GETs shared by clones of this site.
+    pub(crate) fn gets(&self) -> &BlockGets {
+        &self.gets
+    }
+}
 
 /// Site-owned fork wrapper for [`Fs`].
 ///
