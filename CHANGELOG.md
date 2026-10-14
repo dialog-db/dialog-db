@@ -14,6 +14,39 @@ says how to cut a release.
 
 ## Unreleased
 
+### The hashes a tree is shaped by are kept by what owns the bytes, not in per-thread memos
+
+[#569](https://github.com/dialog-db/dialog-db/pull/569), fixes
+[#566](https://github.com/dialog-db/dialog-db/issues/566)
+
+The boundary rules decide from the blake3 of a key or a separator, and
+ask again on every regroup. Two thread-local memos answered them: every
+thread that committed filled its own and kept it for the thread's life,
+with no way to see, bound or release it. A full one held about 46 MiB at
+257-byte keys, per thread. Now an entry keeps the hash of its key, a
+separator its own, and a stored node the hashes of its keys and its
+piece summary, each computed on first ask and dropped with its owner. A
+node a persist seals is kept in the tree's node cache. Trees are shaped
+byte for byte as before; nothing stored changes.
+
+What this changes for you:
+
+- An `Entry` is built with `Entry::new(key, value)`. It keeps its key's
+  hash, so replace an entry whose key changes rather than assigning the
+  key in place.
+- `Link::separator` is a `Separator`, which derefs to `[u8]` and is
+  built `From<Vec<u8>>`. `Link` no longer derives its rkyv form.
+- `Distribution::rank`, `seam_rank` and `leaf_cut` take a `Hashed<'_>`:
+  the bytes with wherever their hash is kept. `Hashed::from(&bytes)`
+  wraps bytes with none.
+- `TransientNode::persist` and `persist_mut` take the node cache the
+  sealed nodes are kept in.
+- A process that commits on many threads no longer grows a memo per
+  thread.
+
+Why: a memo with no owner cannot be bounded or released, and one per
+thread multiplies whatever it holds by the size of the thread pool.
+
 ## 0.3.0 (2026-10-13)
 
 ### Every number is keyed in one band, and a branch an earlier release wrote is migrated in one pass
