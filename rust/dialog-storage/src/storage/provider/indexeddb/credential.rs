@@ -1,6 +1,6 @@
 //! Credential capability providers for IndexedDb.
 
-use super::{IndexedDb, IndexedDbError, to_uint8array};
+use super::{IndexedDb, to_uint8array};
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_credentials::Credential;
@@ -168,6 +168,7 @@ impl Provider<Retract<Secret>> for IndexedDb {
 mod tests {
     use super::*;
     use crate::helpers::{test_credential, unique_did, unique_name};
+    use crate::provider::indexeddb::IndexedDbError;
     use dialog_effects::prelude::*;
     use dialog_varsig::Principal;
 
