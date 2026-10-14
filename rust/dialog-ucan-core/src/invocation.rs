@@ -155,6 +155,9 @@ impl<S: Signature> Invocation<S> {
     /// Returns a [`VerifyError`] if the chain does not check out,
     /// a signature does not verify, an issuer cannot be resolved, or a link
     /// has been revoked.
+    // The error is only built when verification refuses, so its size is
+    // not worth boxing `Invalid::Revoked` and changing its public shape.
+    #[allow(clippy::result_large_err)]
     pub async fn check<K, T, St, C>(
         &self,
         ctx: &VerificationContext<'_, C>,
@@ -519,6 +522,9 @@ impl InvocationPayload {
     ///
     /// Returns an [`Invalid`] if a proof is missing from the store or
     /// the chain does not check out.
+    // The error is only built when verification refuses, so its size is
+    // not worth boxing `Invalid::Revoked` and changing its public shape.
+    #[allow(clippy::result_large_err)]
     pub async fn check<K, S, T, St, C, RE>(
         &self,
         ctx: &VerificationContext<'_, C>,

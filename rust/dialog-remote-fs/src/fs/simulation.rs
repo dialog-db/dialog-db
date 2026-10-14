@@ -268,7 +268,7 @@ impl GetLedger {
             .filter(|(_, record)| record.requests > 1)
             .map(|(key, record)| (key.clone(), *record))
             .collect();
-        rows.sort_by(|a, b| b.1.requests.cmp(&a.1.requests));
+        rows.sort_by_key(|(_, record)| std::cmp::Reverse(record.requests));
         rows
     }
 }

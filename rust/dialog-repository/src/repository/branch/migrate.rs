@@ -358,7 +358,7 @@ mod tests {
             .into_iter()
             .map(|view| view.to_owned().map(|fact| (fact.of, fact.is)))
             .collect::<Result<_, _>>()?;
-        sizes.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        sizes.sort_by_key(|(entity, _)| entity.to_string());
         Ok(sizes)
     }
 

@@ -38,6 +38,7 @@ mod invocation_conformance {
     ///
     /// The fixtures carry the instant each case is meant to be evaluated at,
     /// so the check runs against that rather than the wall clock.
+    #[allow(clippy::result_large_err)]
     async fn check_at(
         invocation: &Invocation<Ed25519Signature>,
         store: &DelegationStore,
