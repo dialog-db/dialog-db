@@ -84,7 +84,7 @@ dialog-ucan = { workspace = true }
 wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

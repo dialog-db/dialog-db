@@ -121,12 +121,15 @@ mod tests {
         Env: ResolveEnv,
     {
         branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: format!("user:{name}").parse()?,
-                is: Value::String(name.into()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: format!("user:{name}").parse()?,
+                    is: Value::String(name.into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(env)
             .await?;
         Ok(branch.revision().expect("a commit leaves a head"))
@@ -243,6 +246,59 @@ mod tests {
         );
         let remote = origin.branch("main").open().perform(&operator).await?;
         assert_eq!(remote.revision(), None);
+        Ok(())
+    }
+
+    /// A remote branch is reached through more than one handle: the one a
+    /// watch holds for as long as it runs, and the one each pull opens.
+    /// A head recorded through one must not stop the other from recording
+    /// the next: the watch handle compares a delivered head against what
+    /// it last saw and writes the cache against that, so once a pull has
+    /// written the cache past it, every head it delivers is refused as a
+    /// version mismatch and is never recorded.
+    ///
+    /// In `Branch::replicate` this is the watch handle (opened once in
+    /// `begin`) and the handle the first confirmed `sync` fetches through;
+    /// the loopback service masks it because it delivers every state and
+    /// the cache store accepts an identical re-publish, but a service that
+    /// coalesces states (which `EditionSource` permits) does not.
+    #[dialog_common::test]
+    async fn it_records_a_head_through_a_handle_another_handle_wrote_past() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let writer = repo.branch("writer").open().perform(&operator).await?;
+        let first = commit(&writer, "first", &operator).await?;
+        let second = commit(&writer, "second", &operator).await?;
+        let third = commit(&writer, "third", &operator).await?;
+
+        let origin = connect("origin", unreachable(), repo.did(), &operator).await?;
+        let watching = origin.branch("main").open().perform(&operator).await?;
+        let observed = watching
+            .observe(edition(&first, b"first"))
+            .perform(&operator)
+            .await?;
+        assert_eq!(observed, Observation::Advanced(first));
+
+        // A pull opens its own handle and records the next head through it.
+        let pulling = origin.branch("main").open().perform(&operator).await?;
+        let observed = pulling
+            .observe(edition(&second, b"second"))
+            .perform(&operator)
+            .await?;
+        assert_eq!(observed, Observation::Advanced(second));
+
+        // The watch delivers the head after that.
+        let observed = watching
+            .observe(edition(&third, b"third"))
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(observed, Ok(Observation::Advanced(ref head)) if head == &third),
+            "a head ahead of everything known must be recorded; got {observed:?}"
+        );
+        let remote = origin.branch("main").open().perform(&operator).await?;
+        assert_eq!(remote.revision(), Some(third));
         Ok(())
     }
 }

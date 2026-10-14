@@ -277,6 +277,26 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Accept `stream` as a WebSocket that speaks the subprotocol a client
+    /// asks for, as the service does.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn accept(
+        stream: tokio::net::TcpStream,
+    ) -> Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>> {
+        use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+        use tokio_tungstenite::tungstenite::http::HeaderValue;
+        let speaks = |_: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
+            response.headers_mut().insert(
+                "Sec-WebSocket-Protocol",
+                HeaderValue::from_static(crate::socket::SUBPROTOCOL),
+            );
+            Ok(response)
+        };
+        tokio_tungstenite::accept_hdr_async(stream, speaks)
+            .await
+            .ok()
+    }
+
     /// A socket that could not be opened is not tried again at once: the
     /// second connect is answered as unavailable without reaching it.
     ///
@@ -310,6 +330,104 @@ mod tests {
             again.err()
         );
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "it was not tried again");
+        Ok(())
+    }
+
+    /// A service that answers a frame it cannot attribute to an invocation
+    /// (one whose container it could not read, say) answers with no
+    /// invocation named, and the client has no way to match that answer to
+    /// what it sent: whoever sent the frame waits for an answer that never
+    /// reaches them. An invocation over the socket must be answered, or
+    /// fail, within a bounded time, as a request would.
+    ///
+    /// Native only, for the service it stands up; the browser routes
+    /// replies through the same `Routes`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_does_not_wait_forever_on_an_answer_naming_no_invocation() -> anyhow::Result<()> {
+        use crate::socket::Reply;
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("ws://{}/", listener.local_addr()?);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let Some(mut socket) = accept(stream).await else {
+                        return;
+                    };
+                    while let Some(Ok(message)) = socket.next().await {
+                        if let Message::Binary(_) = message {
+                            let reply = Reply::Answer {
+                                invocation: None,
+                                status: 400,
+                                version: None,
+                                body: br#"{"kind":"Malformed","detail":"unreadable"}"#.to_vec(),
+                            };
+                            if socket.send(Message::binary(reply.encode())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+
+        let sockets = Sockets::default();
+        let connection = sockets.connect(&url).await?;
+        let answered = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            connection.invoke("bafy-unreadable".into(), b"not a container".to_vec(), None),
+        )
+        .await;
+        assert!(
+            matches!(answered, Ok(Err(_))),
+            "the invocation must fail rather than wait forever; got {answered:?}"
+        );
+        Ok(())
+    }
+
+    /// A client that is done with a service (its site dropped, with every
+    /// watch) closes the connection, so the service stops delivering to,
+    /// and checking the authority of, watches nobody reads.
+    ///
+    /// Native only, for the service it stands up; the browser's link closes
+    /// its socket when it is dropped.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_closes_the_connection_when_the_client_is_dropped() -> anyhow::Result<()> {
+        use futures_util::StreamExt as _;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("ws://{}/", listener.local_addr()?);
+        let (closed, saw_close) = tokio::sync::oneshot::channel::<bool>();
+        tokio::spawn(async move {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let Some(mut socket) = accept(stream).await else {
+                return;
+            };
+            // The next thing the service reads is the client going away.
+            let close = match socket.next().await {
+                None | Some(Ok(Message::Close(_))) | Some(Err(_)) => true,
+                Some(Ok(_)) => false,
+            };
+            let _ = closed.send(close);
+        });
+
+        let sockets = Sockets::default();
+        let connection = sockets.connect(&url).await?;
+        drop(connection);
+        drop(sockets);
+
+        let seen = tokio::time::timeout(std::time::Duration::from_secs(2), saw_close).await;
+        assert!(
+            matches!(seen, Ok(Ok(true))),
+            "the service must see the connection close once the client is gone; got {seen:?}"
+        );
         Ok(())
     }
 }

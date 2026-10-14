@@ -365,12 +365,15 @@ mod tests {
 
     async fn commit<Env: ResolveEnv>(branch: &Branch, name: &str, env: &Env) -> Result<Revision> {
         branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: format!("user:{name}").parse()?,
-                is: Value::String(name.into()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: format!("user:{name}").parse()?,
+                    is: Value::String(name.into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(env)
             .await?;
         Ok(branch.revision().expect("a commit leaves a head"))
