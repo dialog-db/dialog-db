@@ -500,11 +500,6 @@ async fn it_watches_a_cell_over_the_socket(service: UcanServiceAddress) -> anyho
 /// replies queue meanwhile: queued without bound, a busy cell grows the
 /// queue by a state per change for as long as the pause lasts.
 /// `EditionSource` lets a watch skip states for exactly this.
-///
-/// Native only, for waiting until the service has delivered every change
-/// before the watch is read again; the browser routes replies through the
-/// same `Routes`.
-#[cfg(not(target_arch = "wasm32"))]
 #[dialog_common::test]
 async fn it_holds_only_the_newest_state_for_a_watch_nobody_reads(
     service: UcanServiceAddress,
@@ -531,13 +526,14 @@ async fn it_holds_only_the_newest_state_for_a_watch_nobody_reads(
         let content = change.to_string().into_bytes();
         version = Some(perform(&service, &signer, cell.publish(content, version)).await?);
     }
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Long enough for the service to have delivered every change.
+    dialog_common::time::sleep(Duration::from_millis(500)).await;
 
     let newest = (changes - 1).to_string().into_bytes();
     let mut reads = 0;
     loop {
         reads += 1;
-        let state = tokio::time::timeout(Duration::from_secs(5), editions.next()).await??;
+        let state = editions.next().await?;
         if state.flatten().map(|edition| edition.content) == Some(newest.clone()) {
             break;
         }

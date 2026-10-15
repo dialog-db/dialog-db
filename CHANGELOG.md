@@ -14,6 +14,28 @@ says how to cut a release.
 
 ## Unreleased
 
+### A socket that fails is noticed, and every way it fails has an answer a caller can act on
+
+[#564](https://github.com/dialog-db/dialog-db/pull/564)
+
+A space's resolves, publishes and watches share one long-lived socket, and a connection that went quiet (a laptop that slept, a changed network, a NAT that forgot the mapping) was never closed: the platform reports nothing until something it sends fails, and a watch sends nothing. Every invocation for the space then waited for ever, and replication went on counting the upstream as watched while it no longer followed it. The client now keeps each connection honest, says what became of a frame it sent, and recovers from each way a connection fails: silent, cut, lost in flight, refused, behind, or judged by a clock that differs. The socket module's documentation lists each case and what the client does.
+
+What this changes for you:
+
+- The client pings each connection with a text `ping` every `Liveness::heartbeat` (15 seconds by default) and closes one it heard nothing from for `Liveness::deadline` (45 seconds). A service answers `ping` with `pong`, as text, without reading it as a frame; a hibernating Durable Object answers it through `setWebSocketAutoResponse` with the pair `PING`, `PONG`. A service that does not answer has its connections closed every deadline.
+- An invocation waits for its answer, and a watch for its first state, no longer than `Liveness::answer` (30 seconds). A connection nothing waits on is closed after `Liveness::idle` (a minute). Invocations that race to open a socket share one connection. `UcanSite::with_liveness` and `Sockets::with_liveness` set these.
+- A frame that never left goes as a request instead, whatever it does. A read sent and not answered is `Rejection::Unavailable`, so a peer's next address is tried with a fresh invocation; a write sent and not answered is `Rejection::Unclassified`, not known to have failed.
+- A push whose publish landed but whose answer was lost no longer leaves every later push refused as `PushError::NonFastForward`: a remote already at the head being pushed is taken as the push having landed, and the sync point is recorded.
+- A watch's states are coalesced to the newest while it is not read, instead of queued per change; the last state before it ends is never dropped.
+- A watch the service refuses is an error of the `Watch` effect, not the first item of its `EditionSource`.
+- `branch.replicate()` begins an ended watch, or one it could not begin, again on its own, after a wait that doubles each time in a row from a second up to a minute and starts over once a watch delivers. Host ticks do not jump the wait.
+- An effect at a peer refused as `AuthorizeError::Stale` is sent once more, stamped by the clock the refusal said the service read. `dialog_ucan::clock` keeps the difference per subject, for the process.
+- `Access::with_clock` sets the clock a service judges by (the system's by default), and `Access::now` reads it; hand it to `Access::recheck` and `Session::deliver`. `Presented::record` is told the time by it, as a third argument.
+- `dialog_common::time::sleep` waits on native and in a browser or worker alike, and `dialog_common::time::Instant` is a clock that only moves forward.
+- Test helpers: `UcanSettings::fault` has the loopback service's socket fail on cue (`Fault::Cut`, `Fault::Freeze`, `Fault::LosePublish`), and `UcanSettings::clock_offset` sets its clock ahead or behind.
+
+Why: a socket is worth having only if a caller can rely on it as it relies on a request: an answer or an error it can act on, in bounded time. Each of these was a way it gave neither.
+
 ### A peer is reached where its DID document says
 
 [#564](https://github.com/dialog-db/dialog-db/pull/564)
@@ -39,7 +61,7 @@ What this changes for you:
 - New refusals: `AuthorizeError::Stale { issued_at, at }`, which carries the service's time, and `AuthorizeError::Replayed { invocation }`. Both answer 401. An exhaustive match on `AuthorizeError` needs the arms.
 - The record of accepted invocations (`RecentInvocations` by default) is per `Access`, so per process. An embedder that builds a service per request, or runs several processes, shares one record across them with `Access::with_presented`, or a replay can reach another instance; `Access::with_freshness` sets the window.
 - A test that presents one invocation twice to one `Access` now gets `Replayed`.
-- A client whose clock is more than the window off from the service's has every invocation refused as `Stale`.
+- A client whose clock is more than the window off from the service's has its first invocation for a subject refused as `Stale`; the refusal says what the service's clock read, and the effect is sent once more stamped by it (see the entry on the socket's failures).
 
 Why: an invocation carried no time of its own and the service never asked how old one was, so a captured invocation held for as long as its delegations did.
 
@@ -71,7 +93,7 @@ What this changes for you:
 - `Revision::precedence` orders two heads of one branch (`Precedence::{Same, Before, After, Concurrent}`) by their signed contexts, falling back to editions for heads without one.
 - `ConnectedBranch::observe` answers `Observation::{Advanced, Stale, Diverged}`; a diverged head is not recorded, and `replicate` asks the remote where it stands instead.
 - `Pull::assuming_upstream` merges the head recorded for a remote upstream without asking the remote.
-- `replicate` answers `Replicated::Pulled`, `Replicated::Pushed`, and `Replicated::Unwatched(target)` when a watch ends. Without `every`, an ended watch is never begun again.
+- `replicate` answers `Replicated::Pulled`, `Replicated::Pushed`, and `Replicated::Unwatched(target)` when a watch ends. An ended watch is begun again on its own after a wait that doubles each time in a row, up to a minute; without `every`, an upstream that cannot be watched at all is pulled from only as the replication begins.
 - A watched head that cannot be recorded is answered as an error, and the remote is then asked where it stands, so the head is still pulled.
 - `Cell::watch` and `Cell::decode` give any cell a watch.
 
@@ -271,6 +293,7 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 - `UcanAddress` encodes an optional `socket`, left out when absent, so an address without one keeps its bytes. An older replica reads an address that names a socket and drops the socket, reaching the peer over requests.
 - Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
+- The socket carries text `ping` and `pong` messages beside its frames. A service's socket must answer `ping` with `pong`, or a client closes the connection every `Liveness::deadline`; no released service has a socket, so none predates this.
 - Nothing stored is rewritten.
 
 ## 0.3.0 (2026-10-13)
