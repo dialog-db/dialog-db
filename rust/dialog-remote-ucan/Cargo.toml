@@ -59,9 +59,11 @@ tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-# The socket client in a browser or worker: the platform's WebSocket.
+# The socket client in a browser or worker: the platform's WebSocket, and
+# the keeper that runs beside each connection on the event loop.
 js-sys = { workspace = true }
 wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
 web-sys = { workspace = true, features = [
     "BinaryType",
     "CloseEvent",
