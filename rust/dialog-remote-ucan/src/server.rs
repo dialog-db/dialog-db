@@ -46,6 +46,11 @@ use crate::direct::{OBJECT_MEDIA_TYPE, credential_container, is_credential};
 /// shape the client reads back.
 pub const REFUSAL_MEDIA_TYPE: &str = "application/json";
 
+/// The media type of a conflict's body: what the cell a write named holds
+/// instead, its [`memory::CellState`] as DAG-CBOR, so the writer can
+/// rebase onto it and write again without a read of its own.
+pub const CELL_STATE_MEDIA_TYPE: &str = "application/vnd.dialog.cell-state+cbor";
+
 /// How long after it was issued an invocation is accepted, and how far
 /// ahead of the service's clock its issue time may be: an invocation is
 /// good when it is made, and the window allows for its trip and for
@@ -351,6 +356,9 @@ pub struct Response {
     pub version: Option<String>,
     /// The body's length, when known before the body is read.
     pub length: Option<u64>,
+    /// How many seconds a refused request should wait before it is tried
+    /// again, for the `Retry-After` header, when the refusal said.
+    pub retry_after: Option<u64>,
     /// The body.
     pub body: Content,
 }
@@ -362,6 +370,7 @@ impl Response {
             content_type: OBJECT_MEDIA_TYPE,
             version: None,
             length: Some(body.len() as u64),
+            retry_after: None,
             body: Content::Bytes(body),
         }
     }
@@ -383,6 +392,7 @@ impl Response {
             content_type: OBJECT_MEDIA_TYPE,
             version: None,
             length,
+            retry_after: None,
             body: Content::Stream(body),
         }
     }
@@ -394,12 +404,37 @@ impl Response {
             content_type: REFUSAL_MEDIA_TYPE,
             version: None,
             length: Some(body.len() as u64),
+            retry_after: None,
             body: Content::Bytes(body),
         }
     }
 
     fn rejected(status: u16, rejection: Rejection) -> Self {
-        Self::json(status, &rejection)
+        Self {
+            retry_after: rejection.retry_after(),
+            ..Self::json(status, &rejection)
+        }
+    }
+
+    /// A write refused because the cell is not at the version it named,
+    /// carrying what the cell holds instead, when that is known: the
+    /// state as the body, and its version as the `ETag`.
+    fn conflict(current: Option<memory::CellState>) -> Self {
+        let Some(state) = current else {
+            return Self::status(412);
+        };
+        let version = state
+            .as_ref()
+            .and_then(|edition| String::from_utf8(edition.version.as_bytes().to_vec()).ok());
+        let body = serde_ipld_dagcbor::to_vec(&state).unwrap_or_default();
+        Self {
+            status: 412,
+            content_type: CELL_STATE_MEDIA_TYPE,
+            version,
+            length: Some(body.len() as u64),
+            retry_after: None,
+            body: Content::Bytes(body),
+        }
     }
 
     /// Whether the status reports success.
@@ -906,13 +941,31 @@ where
         if Checksum::sha256(&payload) != bound.checksum {
             return Err(Failure::checksum_mismatch());
         }
+        let space = Space::of(&attenuated).space.clone();
+        let cell = Cell::of(&attenuated).cell.clone();
         let capability = Subject::from(subject.clone())
             .writer()
             .memory()
             .attenuate(Space::of(&attenuated).clone())
             .attenuate(Cell::of(&attenuated).clone())
             .invoke(memory::Publish::new(payload, bound.when.clone()));
-        let version = Provider::<memory::Publish>::execute(&self.provider, capability).await?;
+        let version = match Provider::<memory::Publish>::execute(&self.provider, capability).await {
+            Ok(version) => version,
+            // The cell is not at the version the write named. One that
+            // holds what the write would leave is where the writer wanted
+            // it, whoever wrote it: a publish whose answer was lost, sent
+            // again, finds its own write. Otherwise the writer is told
+            // what the cell holds, to rebase onto.
+            Err(memory::MemoryError::VersionMismatch { current: None, .. }) => {
+                match self.held(subject, &space, &cell).await? {
+                    Some(edition) if Checksum::sha256(&edition.content) == bound.checksum => {
+                        edition.version
+                    }
+                    current => return Err(Failure::conflict(Some(current))),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(Response::versioned(200, render(&version)?, Vec::new()))
     }
 
@@ -921,8 +974,37 @@ where
         P: Store,
     {
         let capability = memory::Retract::capability_from_args(subject, args)?;
-        Provider::<memory::Retract>::execute(&self.provider, capability).await?;
-        Ok(Response::status(204))
+        let space = Space::of(&capability).space.clone();
+        let cell = Cell::of(&capability).cell.clone();
+        match Provider::<memory::Retract>::execute(&self.provider, capability).await {
+            Ok(()) => Ok(Response::status(204)),
+            // A cell already empty is where the retract would leave it.
+            Err(memory::MemoryError::VersionMismatch { current: None, .. }) => {
+                match self.held(subject, &space, &cell).await? {
+                    None => Ok(Response::status(204)),
+                    current => Err(Failure::conflict(Some(current))),
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// What the cell holds now, read on behalf of a write whose authority
+    /// verified, to tell the writer where the cell stands.
+    async fn held(
+        &self,
+        subject: &Did,
+        space: &str,
+        cell: &str,
+    ) -> Result<memory::CellState, Failure>
+    where
+        P: Store,
+    {
+        let resolve =
+            memory::prelude::CellScope::new(Subject::from(subject.clone()), space, cell).resolve();
+        Provider::<memory::Resolve>::execute(&self.provider, resolve)
+            .await
+            .map_err(Failure::from)
     }
 }
 
@@ -1000,10 +1082,13 @@ impl Failure {
     }
 
     fn storage(detail: String) -> Self {
-        Self::Answered(Response::rejected(
-            503,
-            Rejection::Unavailable { reason: detail },
-        ))
+        Self::Answered(Response::rejected(503, Rejection::unavailable(detail)))
+    }
+
+    /// A write refused for naming a version the cell is not at, with what
+    /// the cell holds instead when that is known.
+    fn conflict(current: Option<memory::CellState>) -> Self {
+        Self::Answered(Response::conflict(current))
     }
 }
 
@@ -1064,7 +1149,7 @@ impl From<BlobError> for Failure {
 impl From<memory::MemoryError> for Failure {
     fn from(error: memory::MemoryError) -> Self {
         match error {
-            memory::MemoryError::VersionMismatch { .. } => Self::Answered(Response::status(412)),
+            memory::MemoryError::VersionMismatch { current, .. } => Self::conflict(current),
             memory::MemoryError::Authorization(reason) => Self::Refused(Refusal(reason)),
             memory::MemoryError::Rejected(rejection) => {
                 Self::Answered(Response::rejected(503, rejection))

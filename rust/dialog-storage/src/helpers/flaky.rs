@@ -103,6 +103,7 @@ where
             return Err(MemoryError::VersionMismatch {
                 expected: effect.when().cloned(),
                 actual: None,
+                current: None,
             });
         }
         effect.perform(&self.inner).await

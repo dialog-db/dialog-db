@@ -712,38 +712,196 @@ async fn it_answers_a_read_over_a_silent_connection_as_unavailable(
 }
 
 /// A publish the service carried out, but whose answer was lost with its
-/// connection, is not answered as a failure the caller may simply retry:
-/// it is not known to have failed, and here it landed.
+/// connection, is answered as unavailable: the caller may send it again,
+/// with an invocation of its own, and the publish sent again finds its own
+/// write and is answered as done, at the version it left.
 #[dialog_common::test(fault = crate::helpers::Fault::LosePublish { times: 1 })]
-async fn it_answers_a_lost_publish_as_not_known_to_have_failed(
+async fn it_answers_a_lost_publish_as_retryable_and_the_retry_finds_it(
     service: UcanServiceAddress,
 ) -> anyhow::Result<()> {
     let (signer, subject) = owner().await;
     let cell = CellScope::new(subject, "local", "head");
-    let publish = cell.publish(b"landed".to_vec(), None);
-    let authorization = issued(&signer, &publish).await;
     let address = UcanAddress::new(&service.endpoint).with_socket(&service.socket);
-    let published = Provider::<ForkInvocation<UcanSite, Publish>>::execute(
-        &UcanSite::default(),
-        ForkInvocation::new(publish, address, authorization),
+    let published = perform_at(
+        address.clone(),
+        &signer,
+        cell.publish(b"landed".to_vec(), None),
     )
     .await;
     assert!(
         matches!(
             published,
             Err(MemoryError::Rejected(
-                dialog_effects::Rejection::Unclassified { .. }
+                dialog_effects::Rejection::Unavailable { .. }
             ))
         ),
         "{published:?}"
     );
 
-    let resolved = perform(&service, &signer, cell.resolve()).await?;
+    let landed = perform(&service, &signer, cell.resolve())
+        .await?
+        .expect("the publish landed");
+    assert_eq!(landed.content, b"landed".to_vec());
+    let again = perform_at(address, &signer, cell.publish(b"landed".to_vec(), None)).await?;
     assert_eq!(
-        resolved.map(|edition| edition.content),
-        Some(b"landed".to_vec()),
-        "the publish landed"
+        again, landed.version,
+        "the retry is done, at the same version"
     );
+    Ok(())
+}
+
+/// `capability`, invoked by `signer` at `address`.
+async fn perform_at<Fx>(
+    address: UcanAddress,
+    signer: &Ed25519Signer,
+    capability: Capability<Fx>,
+) -> Fx::Output
+where
+    Fx: Effect + Clone,
+    Capability<Fx>: Ability,
+    UcanSite: Provider<ForkInvocation<UcanSite, Fx>>,
+{
+    let authorization = issued(signer, &capability).await;
+    UcanSite::default()
+        .execute(ForkInvocation::new(capability, address, authorization))
+        .await
+}
+
+/// The service's endpoint, and the same endpoint with its socket: what a
+/// cell's invocations are carried over either way.
+fn transports(service: &UcanServiceAddress) -> [(&'static str, UcanAddress); 2] {
+    [
+        ("a request", UcanAddress::new(&service.endpoint)),
+        (
+            "the socket",
+            UcanAddress::new(&service.endpoint).with_socket(&service.socket),
+        ),
+    ]
+}
+
+/// A publish of what the cell already holds, at a version the cell is no
+/// longer at, is done: the cell is where the writer wanted it, so it is
+/// answered with the version the cell is at, and nothing is written.
+#[dialog_common::test]
+async fn it_publishes_what_a_cell_holds_as_done(service: UcanServiceAddress) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    for (carried, address) in transports(&service) {
+        let cell = CellScope::new(subject.clone(), "local", carried);
+        let first = perform_at(
+            address.clone(),
+            &signer,
+            cell.publish(b"head".to_vec(), None),
+        )
+        .await?;
+        let again = perform_at(address, &signer, cell.publish(b"head".to_vec(), None)).await?;
+        assert_eq!(again, first, "over {carried}, the same head is done");
+        let held = perform(&service, &signer, cell.resolve()).await?;
+        assert_eq!(
+            held,
+            Some(Edition {
+                content: b"head".to_vec(),
+                version: first
+            }),
+            "over {carried}, nothing was written"
+        );
+    }
+    Ok(())
+}
+
+/// A publish at a version the cell is no longer at, of content other than
+/// what it holds, is refused as a conflict that says what the cell holds:
+/// the writer rebases onto it without a read of its own. The cell keeps
+/// what it held.
+#[dialog_common::test]
+async fn it_answers_a_conflict_with_what_the_cell_holds(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    for (carried, address) in transports(&service) {
+        let cell = CellScope::new(subject.clone(), "local", carried);
+        let version = perform_at(
+            address.clone(),
+            &signer,
+            cell.publish(b"theirs".to_vec(), None),
+        )
+        .await?;
+        let conflict = perform_at(address, &signer, cell.publish(b"ours".to_vec(), None)).await;
+        let Err(MemoryError::VersionMismatch {
+            actual, current, ..
+        }) = conflict
+        else {
+            panic!("over {carried}, expected a conflict, got {conflict:?}");
+        };
+        let held = Edition {
+            content: b"theirs".to_vec(),
+            version: version.clone(),
+        };
+        assert_eq!(current, Some(Some(held.clone())), "over {carried}");
+        assert_eq!(actual, Some(version), "over {carried}");
+        assert_eq!(
+            perform(&service, &signer, cell.resolve()).await?,
+            Some(held),
+            "over {carried}, the conflict wrote nothing"
+        );
+    }
+    Ok(())
+}
+
+/// A retract of a cell already empty is done: it is where the retract
+/// would leave it.
+#[dialog_common::test]
+async fn it_retracts_an_empty_cell_as_done(service: UcanServiceAddress) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    for (carried, address) in transports(&service) {
+        let cell = CellScope::new(subject.clone(), "local", carried);
+        let version = perform_at(
+            address.clone(),
+            &signer,
+            cell.publish(b"gone".to_vec(), None),
+        )
+        .await?;
+        perform_at(address.clone(), &signer, cell.retract(version.clone())).await?;
+        perform_at(address, &signer, cell.retract(version)).await?;
+        assert_eq!(
+            perform(&service, &signer, cell.resolve()).await?,
+            None,
+            "over {carried}"
+        );
+    }
+    Ok(())
+}
+
+/// A write without authority over the cell is refused for its authority,
+/// and learns nothing of what the cell holds: what a conflict says is
+/// told only to a writer whose invocation verified. Nothing is written.
+#[dialog_common::test]
+async fn it_tells_a_writer_without_authority_nothing_of_the_cell(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let (outsider, _) = owner().await;
+    for (carried, address) in transports(&service) {
+        let cell = CellScope::new(subject.clone(), "local", carried);
+        let version = perform_at(
+            address.clone(),
+            &signer,
+            cell.publish(b"held".to_vec(), None),
+        )
+        .await?;
+        let refused = perform_at(address, &outsider, cell.publish(b"theirs".to_vec(), None)).await;
+        assert!(
+            matches!(refused, Err(MemoryError::Authorization(_))),
+            "over {carried}, the write is refused for its authority: {refused:?}"
+        );
+        assert_eq!(
+            perform(&service, &signer, cell.resolve()).await?,
+            Some(Edition {
+                content: b"held".to_vec(),
+                version
+            }),
+            "over {carried}, nothing was written"
+        );
+    }
     Ok(())
 }
 

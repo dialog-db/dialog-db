@@ -266,6 +266,7 @@ impl Provider<memory::Publish> for MemoryStore {
             return Err(MemoryError::VersionMismatch {
                 expected: capability.when().cloned(),
                 actual: current,
+                current: None,
             });
         }
         inner.editions += 1;
@@ -288,6 +289,7 @@ impl Provider<memory::Retract> for MemoryStore {
             return Err(MemoryError::VersionMismatch {
                 expected: Some(capability.when().clone()),
                 actual: current,
+                current: None,
             });
         }
         inner.cells.remove(&key);

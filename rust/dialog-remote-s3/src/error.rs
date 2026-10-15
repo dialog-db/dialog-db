@@ -61,6 +61,7 @@ impl From<reqwest::Error> for S3Error {
         if error.is_connect() {
             return S3Error::Rejected(Rejection::Unavailable {
                 reason: error.to_string(),
+                retry_after: None,
             });
         }
         S3Error::Transport(error.to_string())

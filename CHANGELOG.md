@@ -14,6 +14,23 @@ says how to cut a release.
 
 ## Unreleased
 
+### A write is safe to send again, and a refused one says what to do next
+
+[#564](https://github.com/dialog-db/dialog-db/pull/564)
+
+A refused request now tells its caller what to do next: try again (and when), rebase onto what the cell holds and write again, or get authority and try again. The access service's writes are made safe to send again to get there. A write that would leave the cell as it already is succeeds, so a publish whose answer was lost, sent again, finds its own write instead of a conflict. A write that does conflict says what the cell holds, so the writer rebases without a read of its own. The cell's state is told only after the write's authority verified; a write without authority is refused for that, and learns nothing of the cell.
+
+What this changes for you:
+
+- `MemoryError::VersionMismatch`, `PublishError::VersionMismatch` and `RetractError::VersionMismatch` have a `current: Option<CellState>` field: what the cell holds instead, `Some(None)` for an empty cell, `None` when the store did not say. Code that builds the variant adds it; a match with `..` is unaffected.
+- The access service answers a publish of the content the cell already holds as done, with the version the cell is at, and a retract of an empty cell as done, whatever version either named.
+- It answers any other conflict with `412`, the cell's state as a DAG-CBOR `CellState` in the body (`CELL_STATE_MEDIA_TYPE`) and its version as the `ETag`. Over the socket the `Answer` carries the same. The client decodes it into `current`; an older service's bare `412` decodes as `None`.
+- `push` onto a remote that answers with its head reports `PushError::NonFastForward` naming that head and records it, verified, so `pull().assuming_upstream()` rebases onto it without asking the remote again.
+- `Rejection::Unavailable` has a `retry_after: Option<u64>` (seconds), left out of the encoding when unsaid, so an older peer reads and writes it as before; `Rejection::unavailable(reason)` builds one without it and `Rejection::retry_after()` reads it. The service sends it as `Retry-After` too (`Response::retry_after`).
+- An invocation sent and not answered is `Rejection::Unavailable`, a write included, where a write was `Rejection::Unclassified` before.
+
+Why: an error is useful when the caller can act on it. A bare conflict made every writer read the cell before it could rebase, a lost answer left it unable to tell a write that landed from one that did not, and a retryable refusal gave no hint of when.
+
 ### A socket that fails is noticed, and every way it fails has an answer a caller can act on
 
 [#564](https://github.com/dialog-db/dialog-db/pull/564)
@@ -24,7 +41,7 @@ What this changes for you:
 
 - The client pings each connection with a text `ping` every `Liveness::heartbeat` (15 seconds by default) and closes one it heard nothing from for `Liveness::deadline` (45 seconds). A service answers `ping` with `pong`, as text, without reading it as a frame; a hibernating Durable Object answers it through `setWebSocketAutoResponse` with the pair `PING`, `PONG`. A service that does not answer has its connections closed every deadline.
 - An invocation waits for its answer, and a watch for its first state, no longer than `Liveness::answer` (30 seconds). A connection nothing waits on is closed after `Liveness::idle` (a minute). Invocations that race to open a socket share one connection. `UcanSite::with_liveness` and `Sockets::with_liveness` set these.
-- A frame that never left goes as a request instead, whatever it does. A read sent and not answered is `Rejection::Unavailable`, so a peer's next address is tried with a fresh invocation; a write sent and not answered is `Rejection::Unclassified`, not known to have failed.
+- A frame that never left goes as a request instead, whatever it does. An invocation sent and not answered, over the socket or as a request, is `Rejection::Unavailable`, so a peer's next address is tried with a fresh invocation. That is safe for a write too (see the entry on writes that are safe to send again).
 - A push whose publish landed but whose answer was lost no longer leaves every later push refused as `PushError::NonFastForward`: a remote already at the head being pushed is taken as the push having landed, and the sync point is recorded.
 - A watch's states are coalesced to the newest while it is not read, instead of queued per change; the last state before it ends is never dropped.
 - A watch the service refuses is an error of the `Watch` effect, not the first item of its `EditionSource`.
@@ -464,6 +481,7 @@ thread multiplies whatever it holds by the size of the thread pool.
 - `UcanAddress` encodes an optional `socket`, left out when absent, so an address without one keeps its bytes. An older replica reads an address that names a socket and drops the socket, reaching the peer over requests.
 - Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
 - The socket carries text `ping` and `pong` messages beside its frames. A service's socket must answer `ping` with `pong`, or a client closes the connection every `Liveness::deadline`; no released service has a socket, so none predates this.
+- A conflict's `412` now has a body, and `Rejection::Unavailable` may carry `retry_after`. An older client ignores both; this client reads an older service's bare `412` as a conflict that does not say what the cell holds.
 - Nothing stored is rewritten.
 - Nothing new is stored by the rewrite fix: a blob-index entry keeps the
   key and value it had, so the tree reads as the older release wrote it

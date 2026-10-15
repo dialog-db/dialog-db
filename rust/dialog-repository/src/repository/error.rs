@@ -8,7 +8,7 @@ use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::authority::AuthorityError;
 use dialog_effects::blob::BlobError;
-use dialog_effects::memory::{MemoryError, Version};
+use dialog_effects::memory::{CellState, MemoryError, Version};
 use dialog_effects::peer::PeerError as ContactError;
 use dialog_effects::storage::StorageError;
 use dialog_search_tree::DialogSearchTreeError;
@@ -50,6 +50,16 @@ pub enum ObserveRemoteBranchError {
     /// Recording the observed head in the local cache failed.
     #[error("Failed to record observed revision in local cache: {0}")]
     Publish(#[from] PublishError),
+}
+
+impl From<ObserveRemoteBranchError> for PushError {
+    fn from(error: ObserveRemoteBranchError) -> Self {
+        match error {
+            ObserveRemoteBranchError::Artifact(error) => Self::Artifact(error),
+            ObserveRemoteBranchError::Resolve(error) => Self::Resolve(error),
+            ObserveRemoteBranchError::Publish(error) => Self::Publish(error),
+        }
+    }
 }
 
 /// Errors a watch of a remote branch answers.
@@ -849,9 +859,9 @@ impl AuthorizationFailure for ResolveError {
 impl From<MemoryError> for ResolveError {
     fn from(error: MemoryError) -> Self {
         match error {
-            MemoryError::VersionMismatch { expected, actual } => {
-                Self::VersionMismatch { expected, actual }
-            }
+            MemoryError::VersionMismatch {
+                expected, actual, ..
+            } => Self::VersionMismatch { expected, actual },
             MemoryError::Storage(message) => Self::Storage(message),
             MemoryError::Rejected(error) => Self::Rejected(error),
             MemoryError::Authorization(error) => Self::Authorization(error),
@@ -869,6 +879,9 @@ pub enum PublishError {
         expected: Option<Version>,
         /// The edition the backing store actually had.
         actual: Option<Version>,
+        /// What the cell holds instead, when the store said (see
+        /// [`MemoryError::VersionMismatch`]).
+        current: Option<CellState>,
     },
 
     /// Storage backend failure.
@@ -922,6 +935,9 @@ pub enum RetractError {
         expected: Option<Version>,
         /// The edition the backing store actually had.
         actual: Option<Version>,
+        /// What the cell holds instead, when the store said (see
+        /// [`MemoryError::VersionMismatch`]).
+        current: Option<CellState>,
     },
 
     /// Storage backend failure.
@@ -950,9 +966,15 @@ impl AuthorizationFailure for RetractError {
 impl From<MemoryError> for RetractError {
     fn from(error: MemoryError) -> Self {
         match error {
-            MemoryError::VersionMismatch { expected, actual } => {
-                Self::VersionMismatch { expected, actual }
-            }
+            MemoryError::VersionMismatch {
+                expected,
+                actual,
+                current,
+            } => Self::VersionMismatch {
+                expected,
+                actual,
+                current,
+            },
             MemoryError::Storage(message) => Self::Storage(message),
             MemoryError::Rejected(error) => Self::Rejected(error),
             MemoryError::Authorization(error) => Self::Authorization(error),
@@ -963,9 +985,15 @@ impl From<MemoryError> for RetractError {
 impl From<MemoryError> for PublishError {
     fn from(error: MemoryError) -> Self {
         match error {
-            MemoryError::VersionMismatch { expected, actual } => {
-                Self::VersionMismatch { expected, actual }
-            }
+            MemoryError::VersionMismatch {
+                expected,
+                actual,
+                current,
+            } => Self::VersionMismatch {
+                expected,
+                actual,
+                current,
+            },
             MemoryError::Storage(message) => Self::Storage(message),
             MemoryError::Rejected(error) => Self::Rejected(error),
             MemoryError::Authorization(error) => Self::Authorization(error),

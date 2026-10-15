@@ -110,6 +110,7 @@ impl Provider<Publish> for IndexedDb {
                             actual: format_edition(
                                 current_edition.as_ref().map(|h| h.as_bytes().as_slice()),
                             ),
+                            current: None,
                         });
                     }
                     // Updating existing: require edition matches
@@ -118,6 +119,7 @@ impl Provider<Publish> for IndexedDb {
                             return Err(MemoryError::VersionMismatch {
                                 expected: format_edition(Some(expected)),
                                 actual: format_edition(Some(current.as_bytes())),
+                                current: None,
                             });
                         }
                     }
@@ -126,6 +128,7 @@ impl Provider<Publish> for IndexedDb {
                         return Err(MemoryError::VersionMismatch {
                             expected: format_edition(Some(expected)),
                             actual: None,
+                            current: None,
                         });
                     }
                     // Creating new when cell doesn't exist: valid
@@ -173,6 +176,7 @@ impl Provider<Retract> for IndexedDb {
                     return Err(MemoryError::VersionMismatch {
                         expected: format_edition(Some(&expected_edition)),
                         actual: format_edition(Some(current_edition.as_bytes())),
+                        current: None,
                     });
                 }
 

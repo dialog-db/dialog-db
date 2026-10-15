@@ -396,13 +396,19 @@ pub mod prelude;
 /// Errors that can occur during memory operations.
 #[derive(Debug, Error)]
 pub enum MemoryError {
-    /// CAS edition mismatch.
+    /// CAS edition mismatch: the write named a version the cell is no
+    /// longer at.
     #[error("Version mismatch: expected {expected:?}, got {actual:?}")]
     VersionMismatch {
         /// The expected version.
         expected: Option<Version>,
         /// The actual version found.
         actual: Option<Version>,
+        /// What the cell holds instead, when whoever refused the write
+        /// said: `Some(None)` for a cell that is empty, `None` when it did
+        /// not say. A writer rebases onto it and writes again, with no
+        /// read of its own in between.
+        current: Option<CellState>,
     },
 
     /// Storage backend error.

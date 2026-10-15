@@ -632,6 +632,7 @@ impl Drop for Watching {
 pub(crate) fn unavailable(reason: impl std::fmt::Display) -> MemoryError {
     Rejection::Unavailable {
         reason: format!("the socket could not be used: {reason}"),
+        retry_after: None,
     }
     .into()
 }

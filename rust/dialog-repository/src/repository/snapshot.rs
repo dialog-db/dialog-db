@@ -330,6 +330,7 @@ impl Snapshot {
             return Err(PublishError::VersionMismatch {
                 expected: Some(memory::Version::from(base.tree.hash())),
                 actual: Some(memory::Version::from(head.revision.tree.hash())),
+                current: None,
             });
         }
         head.revision = next;

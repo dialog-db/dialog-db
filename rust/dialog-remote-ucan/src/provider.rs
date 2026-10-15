@@ -19,7 +19,7 @@ use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, BlobSink, BlobWriter, Import, Read};
 use dialog_effects::memory::prelude::{PublishExt, RetractExt};
 use dialog_effects::memory::{
-    Edition, Editions, MemoryError, Publish, Resolve, Retract, Version, Watch,
+    CellState, Edition, Editions, MemoryError, Publish, Resolve, Retract, Version, Watch,
 };
 use dialog_remote_s3::S3Error;
 use dialog_remote_ucan_s3::UcanAuthorization;
@@ -114,14 +114,7 @@ impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
-        let answer = exchange(
-            self,
-            Operation::Read,
-            &invocation.address,
-            &invocation.authorization,
-            None,
-        )
-        .await?;
+        let answer = exchange(self, &invocation.address, &invocation.authorization, None).await?;
         match answer {
             answer if answer.is_success() => {
                 let version = Version::from(answer.version()?);
@@ -153,7 +146,6 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
         let payload = invocation.capability.content().to_vec();
         let answer = exchange(
             self,
-            Operation::Write,
             &invocation.address,
             &invocation.authorization,
             Some(payload),
@@ -161,10 +153,14 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
         .await?;
         match answer {
             answer if answer.is_success() => Ok(Version::from(answer.version()?)),
-            answer if answer.status == 412 => Err(MemoryError::VersionMismatch {
-                expected: invocation.capability.when().cloned(),
-                actual: None,
-            }),
+            answer if answer.status == 412 => {
+                let current = conflicting(answer).await;
+                Err(MemoryError::VersionMismatch {
+                    expected: invocation.capability.when().cloned(),
+                    actual: current.clone().flatten().map(|edition| edition.version),
+                    current,
+                })
+            }
             answer if answer.is_refusal() => Err(answer.refusal().await.into()),
             answer => Err(MemoryError::Storage(format!(
                 "Failed to publish value: {}",
@@ -184,20 +180,17 @@ impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
-        let answer = exchange(
-            self,
-            Operation::Write,
-            &invocation.address,
-            &invocation.authorization,
-            None,
-        )
-        .await?;
+        let answer = exchange(self, &invocation.address, &invocation.authorization, None).await?;
         match answer {
             answer if answer.is_success() => Ok(()),
-            answer if answer.status == 412 => Err(MemoryError::VersionMismatch {
-                expected: Some(invocation.capability.when().clone()),
-                actual: None,
-            }),
+            answer if answer.status == 412 => {
+                let current = conflicting(answer).await;
+                Err(MemoryError::VersionMismatch {
+                    expected: Some(invocation.capability.when().clone()),
+                    actual: current.clone().flatten().map(|edition| edition.version),
+                    current,
+                })
+            }
             answer if answer.is_refusal() => Err(answer.refusal().await.into()),
             answer => Err(MemoryError::Storage(format!(
                 "Failed to retract value: {}",
@@ -323,36 +316,29 @@ impl Provider<ForkInvocation<UcanSite, Watch>> for UcanSite {
     }
 }
 
-/// Whether an operation reads or writes, which decides what may be done
-/// once it was sent over a socket and no answer came.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Operation {
-    /// Reading changes nothing: one that was lost may be tried again.
-    Read,
-    /// Writing may have happened: one that was lost is not known to have
-    /// failed.
-    Write,
-}
-
 /// Carry a cell's invocation to the service: over its socket when the
 /// address names one, as a request otherwise.
 ///
 /// A socket that cannot be reached, or that could not take the frame, is
-/// passed over for a request: the invocation never left. One that fails
-/// once the frame is sent is not, since the same invocation sent again
-/// would be refused as presented before. A read lost that way is answered
-/// as unavailable, so whoever asked may try it again, at this address or
-/// the next, with an invocation of its own. A write lost that way may have
-/// been carried out, so it is answered as not known to have failed.
+/// passed over for a request: the invocation never left. One sent and not
+/// answered, over the socket or as a request, is not sent again, since the
+/// service would refuse the same invocation as presented before. It is
+/// answered as unavailable, so whoever asked may try it again, at this
+/// address or the next, with an invocation of its own. That is safe for a
+/// write too: a service answers a write that would leave the cell as it
+/// already is as done, and one that conflicts with what the cell holds
+/// with that state, so a write that landed before its answer was lost
+/// finds itself.
 async fn exchange(
     site: &UcanSite,
-    operation: Operation,
     address: &UcanAddress,
     authorization: &UcanAuthorization,
     payload: Option<Vec<u8>>,
 ) -> Result<direct::Answer, S3Error> {
     let Some(socket) = address.socket() else {
-        return direct::invoke(address, authorization, payload).await;
+        return direct::invoke(address, authorization, payload)
+            .await
+            .map_err(unanswered);
     };
     let chain = authorization.invocation().chain();
     let Ok(connection) = site
@@ -360,7 +346,9 @@ async fn exchange(
         .connect(&per_space(socket, chain.subject().as_str()))
         .await
     else {
-        return direct::invoke(address, authorization, payload).await;
+        return direct::invoke(address, authorization, payload)
+            .await
+            .map_err(unanswered);
     };
     let container = Container::from(chain)
         .to_bytes()
@@ -376,18 +364,35 @@ async fn exchange(
         Ok(other) => Err(S3Error::Rejected(Rejection::Unclassified {
             detail: format!("the service answered an invocation with {other:?}"),
         })),
-        Err(Failed::NotSent) => direct::invoke(address, authorization, payload).await,
-        Err(Failed::Lost(error)) => Err(match operation {
-            Operation::Read => S3Error::Rejected(Rejection::Unavailable {
-                reason: error.to_string(),
-            }),
-            Operation::Write => S3Error::Rejected(Rejection::Unclassified {
-                detail: format!(
-                    "the write was sent and not answered, so it may have been carried out: {error}"
-                ),
-            }),
-        }),
+        Err(Failed::NotSent) => direct::invoke(address, authorization, payload)
+            .await
+            .map_err(unanswered),
+        Err(Failed::Lost(error)) => Err(S3Error::Rejected(Rejection::unavailable(format!(
+            "the invocation was sent and not answered: {error}"
+        )))),
     }
+}
+
+/// A request that failed once it was sent is answered as unavailable, to
+/// be tried again with an invocation of its own (see [`exchange`]); one
+/// that failed otherwise is answered as it failed.
+fn unanswered(error: S3Error) -> S3Error {
+    match error {
+        S3Error::Transport(detail) => S3Error::Rejected(Rejection::unavailable(format!(
+            "the request was sent and not answered: {detail}"
+        ))),
+        error => error,
+    }
+}
+
+/// What a conflict says the cell holds instead, when the service said: an
+/// older service answers a conflict with no body.
+async fn conflicting(answer: direct::Answer) -> Option<CellState> {
+    let body = answer.bytes().await.ok()?;
+    if body.is_empty() {
+        return None;
+    }
+    serde_ipld_dagcbor::from_slice(&body).ok()
 }
 
 /// The socket of the space `subject` names: a service answers each space

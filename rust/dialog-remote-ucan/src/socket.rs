@@ -43,11 +43,14 @@
 //! - **A frame leaves and no answer comes** (the connection failed after,
 //!   or the service did not answer within [`Liveness::answer`]). The same
 //!   invocation cannot be sent again: the service would refuse it as
-//!   presented before. A read is answered as unavailable, so the caller
-//!   sends it again, with an invocation of its own, here or at the peer's
-//!   next address. A write may have landed, so it is answered as not known
-//!   to have failed. A push whose publish landed unanswered is found to
-//!   have landed by the next push, which then has nothing to send.
+//!   presented before. It is answered as unavailable, so the caller sends
+//!   it again, with an invocation of its own, here or at the peer's next
+//!   address. That holds for a write too, since the service's writes are
+//!   safe to send again: one that would leave the cell as it already is
+//!   is answered as done, and one that conflicts with what the cell holds
+//!   is answered with that state. A write that landed before its answer
+//!   was lost finds itself, and one that did not lands or learns where
+//!   the cell went. A request sent and not answered is answered the same.
 //! - **The service cannot read a frame.** Its answer names the frame by
 //!   the `id` the client gave it, so it reaches the one invocation it
 //!   answers. An answer naming no frame and no invocation (to bytes that
