@@ -636,7 +636,21 @@ pub(crate) fn unavailable(reason: impl std::fmt::Display) -> MemoryError {
     .into()
 }
 
-#[cfg(test)]
+/// Each test here stands up a service that misbehaves one way (refuses
+/// the connection, goes silent, answers a frame it cannot name), which
+/// takes a tokio listener, so they run natively. The browser's connection
+/// shares this module's routing, deadlines and keeper; what it does with
+/// a socket that fails is pinned on both targets in `crate::test`
+/// against the loopback service's `Fault`s:
+/// `it_passes_over_a_socket_it_cannot_reach`,
+/// `it_answers_a_read_over_a_silent_connection_as_unavailable`,
+/// `it_ends_a_watch_once_its_connection_went_silent`,
+/// `it_answers_a_lost_publish_as_not_known_to_have_failed` and
+/// `it_keeps_a_quiet_connection_whose_service_answers_pings`. Sharing one
+/// connection between racing invocations, closing one nothing waits on,
+/// closing on drop, and failing every waiter on an answer naming none
+/// are covered natively only.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::Sockets;
     use dialog_effects::Rejection;
@@ -646,7 +660,6 @@ mod tests {
 
     /// Accept `stream` as a WebSocket that speaks the subprotocol a client
     /// asks for, as the service does.
-    #[cfg(not(target_arch = "wasm32"))]
     // The handshake callback's error type is tungstenite's, not ours.
     #[allow(clippy::result_large_err)]
     async fn accept(
@@ -672,7 +685,6 @@ mod tests {
     /// Native only, for the listener that counts attempts; the browser
     /// connects through the same `Sockets`, whose memory of failures this
     /// pins.
-    #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
     async fn it_does_not_try_a_failed_socket_again_at_once() -> anyhow::Result<()> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -711,7 +723,6 @@ mod tests {
     ///
     /// Native only, for the service it stands up; the browser routes
     /// replies through the same `Routes`.
-    #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
     async fn it_does_not_wait_forever_on_an_answer_naming_no_invocation() -> anyhow::Result<()> {
         use crate::socket::Reply;
@@ -764,7 +775,6 @@ mod tests {
     ///
     /// Native only, for the service it stands up; the browser's link closes
     /// its socket when it is dropped.
-    #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
     async fn it_closes_the_connection_when_the_client_is_dropped() -> anyhow::Result<()> {
         use futures_util::StreamExt as _;
@@ -816,7 +826,6 @@ mod tests {
     /// then neither answers nor closes: what a client sees of a connection
     /// that went half-open, as one does when a laptop sleeps or a NAT
     /// forgets the mapping. Answers the socket's URL.
-    #[cfg(not(target_arch = "wasm32"))]
     async fn silent_after(
         answer: impl Fn() -> Option<crate::socket::Reply>
         + dialog_common::ConditionalSend
@@ -868,7 +877,6 @@ mod tests {
     /// Native only, for the service it stands up; a browser's WebSocket
     /// does not surface a half-open connection either, and routes replies
     /// through the same `Routes`.
-    #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
     async fn it_does_not_wait_forever_on_a_connection_that_went_silent() -> anyhow::Result<()> {
         let url = silent_after(|| None).await?;
@@ -894,7 +902,6 @@ mod tests {
     ///
     /// Native only, for the service it stands up; see
     /// `it_does_not_wait_forever_on_a_connection_that_went_silent`.
-    #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
     async fn it_ends_a_watch_whose_connection_went_silent() -> anyhow::Result<()> {
         use crate::socket::Reply;
@@ -923,7 +930,6 @@ mod tests {
     /// Accept connections at a fresh address, counting how many were
     /// opened and saying when each one closes. Answers the socket's URL,
     /// how many connections were opened, and a receiver of closes.
-    #[cfg(not(target_arch = "wasm32"))]
     async fn counted() -> anyhow::Result<(
         String,
         Arc<AtomicUsize>,
@@ -965,7 +971,6 @@ mod tests {
     /// Invocations that race to a socket nobody has opened share one
     /// connection, rather than each opening its own and all but one being
     /// left open beside the one kept.
-    #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
     async fn it_opens_one_connection_for_invocations_that_race_to_it() -> anyhow::Result<()> {
         let (url, opened, _) = counted().await?;
@@ -989,7 +994,6 @@ mod tests {
     /// A connection nothing waits on is closed once it has been idle for
     /// the idle time, though the site that opened it is still held: a site
     /// that has touched many spaces does not keep a socket open to each.
-    #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
     async fn it_closes_a_connection_nothing_waits_on() -> anyhow::Result<()> {
         let (url, opened, mut closes) = counted().await?;
@@ -1014,7 +1018,6 @@ mod tests {
 
     /// A connection to a service that answers its pings is kept while
     /// something waits on it, however long nothing else is said.
-    #[cfg(not(target_arch = "wasm32"))]
     #[dialog_common::test]
     async fn it_keeps_a_connection_whose_service_answers_pings() -> anyhow::Result<()> {
         let (url, opened, mut closes) = counted().await?;
