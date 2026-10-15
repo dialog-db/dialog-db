@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::FromKey as _;
-use dialog_artifacts::history::Context;
+use dialog_artifacts::history::{Context, History as _};
 use dialog_artifacts::merge;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_capability::Provider;
@@ -383,6 +383,43 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             .context
             .as_ref()
             .is_some_and(|theirs| merge::unacquainted(&local_context, theirs));
+
+        // Rival merges: two replicas that pulled each other at the same
+        // moment each minted a merge of the same history. The two hold
+        // the same data and differ only by their own revision records, so
+        // a merge of them matches neither tree, and minting it would hand
+        // the other side a new rival, round after round. Settle on the
+        // greater version instead, which both sides choose alike: the
+        // greater side keeps its head and advances only the sync base; the
+        // lesser adopts the greater head by its root, as a fast-forward
+        // does. The lesser merge holds no claim of its own, so dropping it
+        // loses nothing, and its version is never minted again: the next
+        // revision of its origin sits above the adopted head's edition.
+        if let Some(local) = &local_revision
+            && let Some(theirs) = &upstream_revision.context
+            && rival_merges(
+                branch,
+                &store,
+                (local, &local_context),
+                (&upstream_revision, theirs),
+            )
+            .await?
+        {
+            let new_revision = if upstream_revision.version() > local.version() {
+                contexts.insert(upstream_revision.version(), theirs.clone());
+                upstream_revision.clone()
+            } else {
+                local.clone()
+            };
+            return Ok(PreparedPull::Merged(Box::new(Merged {
+                branch,
+                head,
+                new_revision,
+                merges: upstream_revision.clone(),
+                sync: upstream.with_tree(upstream_revision.tree.clone()),
+                base,
+            })));
+        }
 
         // The upstream published its watermark with its head: two frugal
         // paths can short-circuit the tree merge entirely, both gated on
@@ -1088,6 +1125,43 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             base,
         })))
     }
+}
+
+/// Whether the local head and the upstream head are rival merges of one
+/// history: each is the one revision the other side has not seen, and
+/// both are merges. Their parents then summarize the same ancestry, so
+/// the two hold the same data.
+///
+/// The contexts decide most pulls at no reads; only a pair that passes
+/// them reads the two revision records, to tell a merge from a commit of
+/// its own claims, which two concurrent commits on a shared base would be.
+async fn rival_merges<Env: ResolveEnv>(
+    branch: &Branch,
+    store: &NetworkedIndex<'_, Env>,
+    (local, ours): (&Revision, &Context),
+    (upstream, theirs): (&Revision, &Context),
+) -> Result<bool, PullError> {
+    let (local_version, upstream_version) = (local.version(), upstream.version());
+    let one_apart = ours.divergence(theirs) == 1
+        && theirs.divergence(ours) == 1
+        && !theirs.observes(&local_version)
+        && !ours.observes(&upstream_version);
+    if !one_apart {
+        return Ok(false);
+    }
+    for (revision, version) in [(local, local_version), (upstream, upstream_version)] {
+        let record = TreeHistory::from_root_with_cache(
+            revision.tree.hash(),
+            store.clone(),
+            branch.node_cache(),
+        )
+        .revision_record(&version)
+        .await?;
+        if !record.is_some_and(|record| record.parents.len() > 1) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// A rebased pull awaiting its cell advance — the output of
@@ -2132,6 +2206,69 @@ mod history_tests {
             }
         }
         assert!(quiesced, "mutual pulls must reach a fixed point");
+        assert_eq!(
+            a.revision().map(|r| r.tree),
+            b.revision().map(|r| r.tree),
+            "both replicas converge on the same tree"
+        );
+        Ok(())
+    }
+
+    /// Convergence when two replicas pull each other at the same moment:
+    /// each prepares its pull before the other's lands, so each mints a
+    /// merge of the same two heads. The two merges hold the same data but
+    /// differ by their own revision records, so a merge of them matches
+    /// neither tree. Unless the pull settles the two rivals on one head,
+    /// every round of simultaneous pulls mints two new merges, forever.
+    #[dialog_common::test]
+    async fn it_quiesces_after_simultaneous_mutual_pulls() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let a = repo.branch("a").open().perform(&operator).await?;
+        let b = repo.branch("b").open().perform(&operator).await?;
+
+        a.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Sword",
+        )]))
+        .perform(&operator)
+        .await?;
+        b.pull().from(&a).perform(&operator).await?;
+        a.pull().from(&b).perform(&operator).await?;
+
+        a.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Mace",
+        )]))
+        .perform(&operator)
+        .await?;
+        b.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Spear",
+        )]))
+        .perform(&operator)
+        .await?;
+
+        let mut quiesced = false;
+        for _ in 0..4 {
+            // Both prepare before either commits: the two pulls run at once.
+            let into_a = a.pull().from(&b).prepare(&operator).await?;
+            let into_b = b.pull().from(&a).prepare(&operator).await?;
+            let pulled_a = into_a.commit(&operator).await?;
+            let pulled_b = into_b.commit(&operator).await?;
+            if pulled_a.is_none() && pulled_b.is_none() {
+                quiesced = true;
+                break;
+            }
+        }
+        assert!(
+            quiesced,
+            "simultaneous mutual pulls must reach a fixed point"
+        );
         assert_eq!(
             a.revision().map(|r| r.tree),
             b.revision().map(|r| r.tree),
