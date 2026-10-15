@@ -35,6 +35,7 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_search_tree::Manifest;
 use futures_util::stream;
 
+use crate::repository::archive::networked::Reads;
 use crate::repository::archive::persist;
 use crate::{Branch, CommitError, Index, NetworkedIndex, RemoteSite, Revision, RulesUpgraded};
 
@@ -161,7 +162,7 @@ impl RekeyStorage<'_> {
         let Some(revision) = branch.revision() else {
             return Ok(None);
         };
-        let store = NetworkedIndex::new(env, branch.archive().index(), branch.fallback());
+        let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
         let tree =
             Index::from_hash_with_cache(NodeHash::from(*revision.tree.hash()), branch.node_cache());
         let manifest = tree
@@ -250,7 +251,7 @@ impl Migrate<'_> {
 pub(crate) async fn aligned<Env>(
     branch: &Branch,
     tree: Index,
-    store: &NetworkedIndex<'_, Env>,
+    store: &NetworkedIndex<'_, dyn Reads>,
     env: &Env,
 ) -> Result<Index, DialogArtifactsError>
 where
@@ -358,7 +359,7 @@ mod tests {
             .into_iter()
             .map(|view| view.to_owned().map(|fact| (fact.of, fact.is)))
             .collect::<Result<_, _>>()?;
-        sizes.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        sizes.sort_by_key(|(entity, _)| entity.to_string());
         Ok(sizes)
     }
 

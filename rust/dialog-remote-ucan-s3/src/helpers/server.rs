@@ -6,20 +6,80 @@
 //! `Authorization`) or returns presigned S3 request descriptors (a
 //! container in the body).
 
-use super::UcanS3Address;
-use crate::{FromUcanArgs, UcanAuthorizer};
+use super::{REVOCATIONS_PATH, UcanS3Address};
+use crate::{DefaultResolver, FromUcanArgs, UcanAuthorizer};
 use dialog_capability::access::AuthorizeError;
 use dialog_common::helpers::{Provider, Service};
 use dialog_remote_s3::helpers::LocalS3;
 use dialog_remote_s3::{Address, S3Credential, S3Error};
+use dialog_ucan_core::revocation::{RevocationChecker, RevocationMatch, RevocationSelector};
+use dialog_ucan_core::{InvocationChain, Revocation};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use ipld_core::cid::Cid;
+use std::collections::HashMap;
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
+
+/// The certificates the service treats as revoked, by CID, each with the
+/// revocation document it was posted with, if any.
+///
+/// Test-only, and deliberately credulous. A revocation here counts
+/// whoever is asked about, where a real index answers only for the
+/// principals entitled to revoke the link, and a posted document is kept
+/// without being verified. The service stands in for a remote whose word
+/// a holder must not take, so a test can have it refuse a certificate on
+/// a document that does not hold up and check that the holder is not
+/// moved by it. Nothing is revoked until a test posts to
+/// [`REVOCATIONS_PATH`].
+#[derive(Debug, Clone, Default)]
+pub struct RevocationList(Arc<Mutex<HashMap<Cid, Option<Vec<u8>>>>>);
+
+impl RevocationList {
+    fn revoke(&self, certificate: Cid, proof: Option<Vec<u8>>) {
+        self.0
+            .lock()
+            .expect("revocation list poisoned")
+            .insert(certificate, proof);
+    }
+}
+
+impl RevocationChecker for RevocationList {
+    type Error = std::convert::Infallible;
+
+    async fn query(
+        &self,
+        selector: RevocationSelector<'_>,
+    ) -> Result<Option<RevocationMatch>, Self::Error> {
+        let proof = self
+            .0
+            .lock()
+            .expect("revocation list poisoned")
+            .get(&selector.delegation)
+            .cloned();
+        Ok(proof.map(|proof| RevocationMatch {
+            revocation: selector.delegation,
+            principal: selector
+                .by
+                .first()
+                .cloned()
+                .expect("a chain link has an issuer"),
+            proof,
+        }))
+    }
+}
+
+/// The certificate a posted revocation names, read without verifying
+/// the revocation.
+fn revoked_by(document: &[u8]) -> Result<Cid, String> {
+    let chain = InvocationChain::try_from(document).map_err(|error| error.to_string())?;
+    let revocation = Revocation::try_from(chain.invocation).map_err(|error| error.to_string())?;
+    Ok(*revocation.revoked())
+}
 
 /// A running UCAN access service test server instance.
 pub struct UcanAccessServer {
@@ -33,7 +93,8 @@ pub struct UcanAccessServer {
 /// What the service holds across requests: the authorizer, and how it
 /// has answered so far.
 struct ServerState {
-    authorizer: RwLock<UcanAuthorizer>,
+    authorizer: RwLock<UcanAuthorizer<DefaultResolver, RevocationList>>,
+    revocations: RevocationList,
     stats: Stats,
 }
 
@@ -73,8 +134,13 @@ impl UcanAccessServer {
 
         let credential = S3Credential::new(access_key, secret_key);
 
+        let revocations = RevocationList::default();
         let authorizer = Arc::new(ServerState {
-            authorizer: RwLock::new(UcanAuthorizer::new(address, Some(credential))),
+            authorizer: RwLock::new(
+                UcanAuthorizer::new(address, Some(credential))
+                    .with_revocations(revocations.clone()),
+            ),
+            revocations,
             stats: Stats::default(),
         });
 
@@ -165,6 +231,42 @@ async fn handle_request(
             .status(StatusCode::METHOD_NOT_ALLOWED)
             .body(Full::new(Bytes::from("Method not allowed")))
             .unwrap());
+    }
+
+    // `POST /revocations` and `POST /revocations/<cid>` mark a
+    // certificate revoked for every later invocation. A test's hook, not
+    // part of the access protocol.
+    if let Some(rest) = req.uri().path().strip_prefix(REVOCATIONS_PATH) {
+        let recorded = match rest {
+            "" => {
+                use http_body_util::BodyExt;
+                match req.into_body().collect().await {
+                    Ok(body) => {
+                        let document = body.to_bytes().to_vec();
+                        revoked_by(&document).map(|certificate| (certificate, Some(document)))
+                    }
+                    Err(error) => Err(format!("unreadable body: {error}")),
+                }
+            }
+            cid => match cid.strip_prefix('/').map(str::parse::<Cid>) {
+                Some(Ok(certificate)) => Ok((certificate, None)),
+                Some(Err(error)) => Err(format!("not a CID: {error}")),
+                None => Err(format!("no such route: {REVOCATIONS_PATH}{rest}")),
+            },
+        };
+        return Ok(match recorded {
+            Ok((certificate, proof)) => {
+                state.revocations.revoke(certificate, proof);
+                add_cors_headers(Response::builder())
+                    .status(StatusCode::NO_CONTENT)
+                    .body(Full::new(Bytes::new()))
+                    .unwrap()
+            }
+            Err(error) => add_cors_headers(Response::builder())
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::new(Bytes::from(error)))
+                .unwrap(),
+        });
     }
 
     state.stats.requests.fetch_add(1, Ordering::SeqCst);

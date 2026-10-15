@@ -43,11 +43,12 @@ impl CreateRepository {
     /// # where Env: dialog_capability::Provider<dialog_effects::space::Create>
     /// #     + dialog_capability::Provider<dialog_effects::memory::Publish>
     /// #     + dialog_common::ConditionalSync {
-    /// use dialog_credentials::{Ed25519Signer, Extractable, ExtractableKey as _};
+    /// use dialog_credentials::key::ExtractableKey;
+    /// use dialog_credentials::{Ed25519Signer, Extractable};
     /// use dialog_repository::RepositoryExt;
     /// use dialog_varsig::Principal;
     ///
-    /// let key = <Ed25519Signer<Extractable> as dialog_credentials::ExtractableKey>::generate().await?;
+    /// let key = <Ed25519Signer<Extractable> as ExtractableKey>::generate().await?;
     /// let did = key.did().to_string();
     /// let name = &did[did.len() - 8..];
     ///

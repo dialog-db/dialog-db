@@ -1364,7 +1364,7 @@ fn collect_stored_plan<Key, Value, R>(
         TransientNode::Segment(segment) => {
             for entry in segment.entries() {
                 if bounds.contains(&entry.key) {
-                    plan.push(StoredStep::Entry(entry.clone()));
+                    plan.push(StoredStep::Entry(Entry::clone(entry)));
                 }
             }
         }

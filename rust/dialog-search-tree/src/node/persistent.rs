@@ -18,6 +18,7 @@ use crate::{
     node::codec::{common_prefix, encode_keys},
     node::columnar::{ColumnData, StreamingLeaf, column_slices, encode_column_values},
 };
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 use std::sync::{Arc, OnceLock};
@@ -1545,10 +1546,10 @@ where
     /// with [`MIXED_LAYOUT`], so decode stays correct without a tree-shape
     /// change; such leaves are rare (one per layout boundary in the tree).
     pub fn from_entries<Key: self::Key>(
-        entries: Vec<Entry<Key, Value>>,
+        entries: Vec<impl Borrow<Entry<Key, Value>> + Into<Entry<Key, Value>>>,
     ) -> Result<Self, DialogSearchTreeError> {
         let count = entries.len() as u32;
-        let Some(first_layout) = entries.first().map(|entry| entry.key.layout()) else {
+        let Some(first_layout) = entries.first().map(|entry| entry.borrow().key.layout()) else {
             // The empty tree's node: the manifest with no entries (and, being
             // a leaf, no children or novelty). This is the persisted form of
             // an empty tree under every manifest — the format must survive
@@ -1561,7 +1562,7 @@ where
         };
         let uniform = entries
             .iter()
-            .all(|entry| entry.key.layout() == first_layout);
+            .all(|entry| entry.borrow().key.layout() == first_layout);
 
         let (layout, schema) = if uniform {
             (first_layout, Key::schema(first_layout))
@@ -1574,19 +1575,25 @@ where
         // would push its (varying) components, so the whole key is encoded as
         // the single opaque component directly.
         let columns = if layout == MIXED_LAYOUT {
-            let keys: Vec<&[u8]> = entries.iter().map(|entry| entry.key.as_ref()).collect();
+            let keys: Vec<&[u8]> = entries
+                .iter()
+                .map(|entry| entry.borrow().key.as_ref())
+                .collect();
             let (prefix, stream) = encode_keys(&keys);
             vec![ColumnData::Arena { prefix, stream }]
         } else {
             encode_split_keys::<Key>(
                 &schema,
                 layout,
-                entries.iter().map(|entry| entry.key.as_ref()),
+                entries.iter().map(|entry| entry.borrow().key.as_ref()),
                 entries.len(),
             )?
         };
 
-        let values = entries.into_iter().map(|entry| entry.value).collect();
+        let values = entries
+            .into_iter()
+            .map(|entry| entry.into().value)
+            .collect();
         Ok(Self {
             count,
             layout,
@@ -1818,7 +1825,7 @@ where
     /// manifest-carrying format marker (see [`PersistentSegment::empty`]),
     /// legitimate only as the root of an empty tree, never interior.
     pub fn segment_from_entries<Key>(
-        entries: Vec<Entry<Key, Value>>,
+        entries: Vec<impl Borrow<Entry<Key, Value>> + Into<Entry<Key, Value>>>,
         manifest: Manifest,
     ) -> Result<Self, DialogSearchTreeError>
     where
@@ -1985,7 +1992,8 @@ mod tests {
     }
 
     fn segment_under(manifest: Manifest) -> Buffer {
-        let entries = (0u8..4).map(|i| Entry::new([i; 4], vec![i; 8])).collect();
+        let entries: Vec<Entry<[u8; 4], Vec<u8>>> =
+            (0u8..4).map(|i| Entry::new([i; 4], vec![i; 8])).collect();
         let body: PersistentNodeBody<Vec<u8>> =
             PersistentNodeBody::segment_from_entries::<[u8; 4]>(entries, manifest)
                 .expect("a segment encodes");

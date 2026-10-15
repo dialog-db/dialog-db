@@ -47,10 +47,16 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_repository::{Branch, RemoteSite};
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Ucan, UcanCertificate, UcanDelegation, UcanProof};
+use dialog_ucan_core::DelegationChain;
 use dialog_ucan_core::subject::Subject as UcanSubject;
-use std::collections::HashMap;
+use ipld_core::cid::Cid;
+use std::collections::{HashMap, HashSet};
 
 use dialog_artifacts::history::Version;
+
+pub(crate) mod revocation;
+
+use revocation::{Claimed, Unverified};
 
 /// The current moment in unix seconds, the unit delegation bounds use.
 ///
@@ -574,6 +580,49 @@ where
     }
 }
 
+/// The principals that stand above `revoked` in the chains `branch`
+/// retains: its issuer, the issuers of the retained certificates that
+/// delegate the same subject to that issuer, and so on up, and the subject
+/// itself when the certificate names one, since every chain for a subject
+/// starts with it. Only these may revoke `revoked` with effect: a
+/// revocation counts when its issuer is in the chain above the link.
+///
+/// Read only on a refusal, so it pays a read of the certificates issued to
+/// each principal it reaches rather than keeping an index.
+async fn above<S: PeerSpace, M: Mode>(
+    branch: &Branch,
+    revoked: &UcanCertificate,
+    env: &AccessEnv<S, M>,
+) -> Result<HashSet<Did>, AuthorizeError> {
+    let subject = revoked.0.subject();
+    let mut entitled = HashSet::new();
+    if let UcanSubject::Specific(owner) = subject {
+        entitled.insert(owner.clone());
+    }
+    let mut frontier = vec![revoked.0.issuer().clone()];
+    while let Some(holder) = frontier.pop() {
+        if !entitled.insert(holder.clone()) {
+            continue;
+        }
+        let grants = Box::pin(branch.delegations().issued_to(holder).perform(env)).await?;
+        for grant in &grants {
+            for granted in grant.chain().proofs() {
+                // A link for the same subject, or a powerline above one
+                // for a specific subject. A specific grant is not above a
+                // powerline.
+                let same = match subject {
+                    UcanSubject::Specific(owner) => granted.subject().allows(owner),
+                    UcanSubject::Any => matches!(granted.subject(), UcanSubject::Any),
+                };
+                if same {
+                    frontier.push(granted.issuer().clone());
+                }
+            }
+        }
+    }
+    Ok(entitled)
+}
+
 impl<S: PeerSpace, M: Mode> Peer<S, M> {
     /// The delegations retained where this peer proves from that `issuer`
     /// issued.
@@ -630,6 +679,98 @@ impl<S: PeerSpace, M: Mode> Peer<S, M> {
                 .perform(&env),
         )
         .await
+    }
+
+    /// Retract the retained certificate a remote refused as revoked, once
+    /// the revocation the refusal carries holds up, so no later walk
+    /// presents it: the next claim resolves through another grant when one
+    /// is retained. `Ok(true)` when the certificate was retained here and
+    /// is now retracted. `Ok(false)` when nothing was retracted, which
+    /// tells a caller that proving again cannot change the answer: the
+    /// refusal is not a revocation naming a certificate, this peer retains
+    /// no such certificate, or the revocation does not hold up.
+    ///
+    /// The remote's word is not taken for the revocation. The refusal must
+    /// carry the signed revocation of the certificate it names, issued by
+    /// a principal that stands above that certificate in a chain retained
+    /// here, and verify (see [`revocation`]). A refusal with no revocation,
+    /// as an older responder sends, or with one that does not hold up,
+    /// retracts nothing: a responder that could have a certificate
+    /// retracted by naming it could make a holder discard grants that
+    /// still stand.
+    ///
+    /// The retraction is a commit on the branch this peer proves from, so
+    /// it outlives this handle and reaches the replicas the branch syncs
+    /// to. The commit moves the branch head, which retires every cached
+    /// chain.
+    pub(crate) async fn retract_revoked(
+        &self,
+        refusal: &AuthorizeError,
+    ) -> Result<bool, AuthorizeError> {
+        let AuthorizeError::Revoked {
+            certificate: Some(certificate),
+            revocation,
+            ..
+        } = refusal
+        else {
+            return Ok(false);
+        };
+        let Ok(certificate) = certificate.parse::<Cid>() else {
+            return Ok(false);
+        };
+        let claimed = revocation
+            .as_deref()
+            .ok_or(Unverified::Absent)
+            .and_then(|document| Claimed::decode(document, certificate));
+        let claimed = match claimed {
+            Ok(claimed) => claimed,
+            Err(reason) => {
+                tracing::warn!(
+                    %certificate,
+                    %reason,
+                    "not retracting a certificate a remote refused as revoked"
+                );
+                return Ok(false);
+            }
+        };
+
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
+        let branch = self.delegations();
+        branch
+            .refresh(&env)
+            .await
+            .map_err(|error| AuthorizeError::Unavailable {
+                detail: format!("failed to refresh the access branch: {error}"),
+            })?;
+        let Some(retained) =
+            Box::pin(branch.delegations().retained(certificate).perform(&env)).await?
+        else {
+            return Ok(false);
+        };
+
+        let entitled = Box::pin(above(branch, &retained, &env)).await?;
+        if let Err(reason) = claimed.verify(&entitled).await {
+            tracing::warn!(
+                %certificate,
+                %reason,
+                "not retracting a certificate a remote refused as revoked"
+            );
+            return Ok(false);
+        }
+
+        Box::pin(
+            branch
+                .delegations()
+                .retract(UcanDelegation::new(DelegationChain::new(retained.0)))
+                .perform(&env),
+        )
+        .await
+        .map_err(|error| AuthorizeError::Malformed {
+            detail: format!("failed to retract the revoked delegation: {error}"),
+        })?;
+        Ok(true)
     }
 
     /// Stop proving from `delegation`: retract it where this peer retains
@@ -720,7 +861,8 @@ mod tests {
     use dialog_ucan_core::DelegationChain;
     use dialog_ucan_core::command::Command as UcanCommand;
     use dialog_ucan_core::time::timestamp::Timestamp;
-    use dialog_varsig::Principal as _;
+    use dialog_varsig::{AnySignature, Principal as _};
+    use revocation::mint;
 
     fn unique(prefix: &str) -> String {
         unique_name(prefix)
@@ -1007,6 +1149,267 @@ mod tests {
             expiration: Some(now + 7200),
         };
         assert!(operator.resolve(widened).await.is_err());
+        Ok(())
+    }
+
+    /// The certificate a single-link grant carries.
+    fn certificate(grant: &UcanDelegation) -> &dialog_ucan_core::Delegation<AnySignature> {
+        grant.chain().proofs().next().expect("a grant has a link")
+    }
+
+    /// A remote's refusal of `grant` as revoked by `space`, carrying
+    /// `document` as its revocation, or none.
+    fn refused(
+        space: &Ed25519Signer,
+        grant: &UcanDelegation,
+        document: Option<&[u8]>,
+    ) -> AuthorizeError {
+        AuthorizeError::Revoked {
+            subject: space.did(),
+            certificate: Some(certificate(grant).to_cid().to_string()),
+            revocation: document.map(mint::tagged),
+        }
+    }
+
+    /// A certificate a remote refused as revoked, on a revocation the
+    /// space signed, is retracted: the next claim resolves through the
+    /// other retained grant, the grant is no longer among the ones the
+    /// holder is issued, and retracting it again finds nothing. With every
+    /// grant retracted the claim is refused as unproven.
+    #[dialog_common::test]
+    async fn it_retracts_the_grant_a_remote_revoked() -> Result<()> {
+        let (operator, _profile) = operator("revoked-beside-live").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        let live = Timestamp::try_from((now_s() + 3600) as i128).unwrap();
+        let open = retain_grant(&operator, &space, &holder, None).await;
+        let bounded = retain_grant(&operator, &space, &holder, Some(live)).await;
+        assert_ne!(certificate(&open).to_cid(), certificate(&bounded).to_cid());
+
+        let link = |proof: UcanProof| proof.proofs()[0].0.to_cid();
+        let held = |grants: Vec<UcanDelegation>| {
+            grants
+                .iter()
+                .map(|grant| grant.chain().proof_cids()[0])
+                .collect::<Vec<_>>()
+        };
+        let first = link(operator.resolve(claim(&holder, &space)).await?);
+        let (first, second) = if first == certificate(&open).to_cid() {
+            (&open, &bounded)
+        } else {
+            (&bounded, &open)
+        };
+        assert_eq!(operator.cached_chains(), 1, "the walk's chain is cached");
+
+        // The remote refuses the grant the walk picked, on the space's
+        // revocation of it.
+        let signer = dialog_credentials::Signer::from(space.clone());
+        let revoked = mint::document(signer.clone(), certificate(first)).await;
+        let refusal = refused(&space, first, Some(&revoked));
+        assert!(
+            operator.retract_revoked(&refusal).await?,
+            "retained, now retracted"
+        );
+        let resolved = link(operator.resolve(claim(&holder, &space)).await?);
+        assert_eq!(
+            resolved,
+            certificate(second).to_cid(),
+            "the claim resolves through the other grant"
+        );
+        let grants = held(operator.issued_to(&holder.did()).await?);
+        assert!(
+            !grants.contains(&certificate(first).to_cid()),
+            "the revoked grant is no longer held"
+        );
+        assert!(
+            grants.contains(&certificate(second).to_cid()),
+            "the other grant still is"
+        );
+        assert!(
+            !operator.retract_revoked(&refusal).await?,
+            "nothing left to retract"
+        );
+
+        let revoked = mint::document(signer, certificate(second)).await;
+        assert!(
+            operator
+                .retract_revoked(&refused(&space, second, Some(&revoked)))
+                .await?
+        );
+        let refused = operator.resolve(claim(&holder, &space)).await.err();
+        assert!(
+            matches!(refused, Some(AuthorizeError::UnprovenSubject { .. })),
+            "with every grant retracted nothing proves the claim, got {refused:?}"
+        );
+        Ok(())
+    }
+
+    /// A refusal whose revocation does not hold up retracts nothing: none
+    /// at all (an older responder), one that is not a container, one
+    /// signed by a stranger, one whose signature is not the principal it
+    /// claims (the space, here), one of another certificate, and one the
+    /// holder signed (it may decline its own grant, but it does not stand
+    /// above the grant in the chain, so its word does not count for it).
+    /// After each the grant is still held and still proves the claim.
+    #[dialog_common::test]
+    async fn it_retracts_nothing_on_a_revocation_that_does_not_hold_up() -> Result<()> {
+        let (operator, _profile) = operator("revoked-unverified").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        let stranger = Ed25519Signer::generate().await?;
+        let grant = retain_grant(&operator, &space, &holder, None).await;
+        let revoked = certificate(&grant);
+
+        let stranger = dialog_credentials::Signer::from(stranger);
+        let unrelated = DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(space.clone()))
+            .audience(&stranger.did())
+            .subject(UcanSubject::Specific(space.did()))
+            .command(vec!["storage".to_string()])
+            .try_build()
+            .await?;
+        let cases = [
+            ("absent", refused(&space, &grant, None)),
+            (
+                "not a container",
+                AuthorizeError::Revoked {
+                    subject: space.did(),
+                    certificate: Some(revoked.to_cid().to_string()),
+                    revocation: Some("Cnot a container".into()),
+                },
+            ),
+            (
+                "signed by a stranger",
+                refused(
+                    &space,
+                    &grant,
+                    Some(&mint::document(stranger.clone(), revoked).await),
+                ),
+            ),
+            (
+                "claiming the space, signed by a stranger",
+                refused(
+                    &space,
+                    &grant,
+                    Some(
+                        &mint::document(
+                            mint::Impostor {
+                                claims: space.did(),
+                                signer: stranger.clone(),
+                            },
+                            revoked,
+                        )
+                        .await,
+                    ),
+                ),
+            ),
+            (
+                "of another certificate",
+                refused(
+                    &space,
+                    &grant,
+                    Some(
+                        &mint::document(
+                            dialog_credentials::Signer::from(space.clone()),
+                            &unrelated,
+                        )
+                        .await,
+                    ),
+                ),
+            ),
+            (
+                "signed by the holder",
+                refused(
+                    &space,
+                    &grant,
+                    Some(
+                        &mint::document(dialog_credentials::Signer::from(holder.clone()), revoked)
+                            .await,
+                    ),
+                ),
+            ),
+        ];
+
+        for (case, refusal) in cases {
+            let retracted = operator.retract_revoked(&refusal).await;
+            assert!(
+                matches!(retracted, Ok(false)),
+                "a revocation {case} retracts nothing, got {retracted:?}"
+            );
+            let held = operator
+                .issued_to(&holder.did())
+                .await?
+                .iter()
+                .map(|grant| grant.chain().proof_cids()[0])
+                .collect::<Vec<_>>();
+            assert!(
+                held.contains(&revoked.to_cid()),
+                "after a revocation {case} the grant is still held"
+            );
+            operator
+                .resolve(claim(&holder, &space))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("after a revocation {case} the grant still proves: {error}")
+                });
+        }
+        Ok(())
+    }
+
+    /// The principals above a link are the issuers up every retained
+    /// chain that reaches it for its subject, and the subject: not its
+    /// audience, and not the issuer of a grant to an ancestor for another
+    /// subject.
+    #[dialog_common::test]
+    async fn it_finds_the_principals_above_a_link() -> Result<()> {
+        let (operator, _profile) = operator("revoked-above").await;
+        let space = Ed25519Signer::generate().await?;
+        let account = Ed25519Signer::generate().await?;
+        let device = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        let elsewhere = Ed25519Signer::generate().await?;
+
+        // space -> account -> device -> holder, all for the space, and a
+        // grant of another space's storage to the account beside them.
+        retain_grant(&operator, &space, &account, None).await;
+        let onward = |issuer: &Ed25519Signer, audience: &Ed25519Signer| {
+            DelegationBuilder::new()
+                .issuer(dialog_credentials::Signer::from(issuer.clone()))
+                .audience(audience)
+                .subject(UcanSubject::Specific(space.did()))
+                .command(vec!["storage".to_string()])
+        };
+        let mut link = None;
+        for (issuer, audience) in [(&account, &device), (&device, &holder)] {
+            let built = onward(issuer, audience).try_build().await?;
+            link = Some(built.to_cid());
+            Subject::from(operator.home().clone())
+                .attenuate(Access)
+                .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+                    DelegationChain::new(built),
+                )))
+                .perform(&operator)
+                .await?;
+        }
+        let link = link.expect("the last link was built");
+        retain_grant(&operator, &elsewhere, &account, None).await;
+
+        let env = AccessEnv {
+            operator: operator.clone(),
+        };
+        let branch = operator.delegations();
+        branch.refresh(&env).await?;
+        let retained = branch
+            .delegations()
+            .retained(link)
+            .perform(&env)
+            .await?
+            .expect("the link is retained");
+        let entitled = above(branch, &retained, &env).await?;
+        assert_eq!(
+            entitled,
+            HashSet::from([space.did(), account.did(), device.did()]),
+        );
         Ok(())
     }
 

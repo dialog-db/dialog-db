@@ -1,6 +1,6 @@
 use crate::{Fetched, Revision, Target, TreeReference};
 use dialog_artifacts::DialogArtifactsError;
-use dialog_capability::access::AuthorizeError;
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_capability::identity::IdentityError;
 use dialog_common::Blake3Hash;
 use dialog_credentials::Ed25519SignerError;
@@ -837,6 +837,15 @@ pub enum ResolveError {
     Decode(String),
 }
 
+impl AuthorizationFailure for ResolveError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 impl From<MemoryError> for ResolveError {
     fn from(error: MemoryError) -> Self {
         match error {
@@ -884,6 +893,15 @@ pub enum PublishError {
     Encode(String),
 }
 
+impl AuthorizationFailure for PublishError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 /// Errors returned by cell retract operations.
 #[derive(Error, Debug)]
 pub enum RetractError {
@@ -918,6 +936,15 @@ pub enum RetractError {
     /// access decision.
     #[error(transparent)]
     Rejected(#[from] Rejection),
+}
+
+impl AuthorizationFailure for RetractError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 impl From<MemoryError> for RetractError {
@@ -978,6 +1005,8 @@ mod tests {
             subject: dialog_capability::did!(
                 "did:key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"
             ),
+            certificate: None,
+            revocation: None,
         }
     }
 

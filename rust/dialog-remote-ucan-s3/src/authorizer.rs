@@ -418,8 +418,19 @@ where
         ContainerError::InvalidDelegationSignature { issuer, .. } => {
             AuthorizeError::InvalidSignature { issuer }
         }
-        ContainerError::Revoked { .. } => AuthorizeError::Revoked {
+        ContainerError::Revoked { cid, found } => AuthorizeError::Revoked {
             subject: chain.subject().clone(),
+            certificate: Some(cid.to_string()),
+            // The holder retracts the certificate only on this evidence,
+            // so a document that will not re-encode is dropped rather
+            // than sent half-formed: the refusal then reads as one with
+            // no proof, which is what it is.
+            revocation: found.proof.and_then(|proof| {
+                let encoded = dialog_ucan_core::Container::from_bytes(&proof)
+                    .and_then(|container| container.encode(dialog_ucan_core::Tag::Base64Url))
+                    .ok()?;
+                String::from_utf8(encoded).ok()
+            }),
         },
         ContainerError::Unauthorized(reason) => check_failed_to_authorize_error(reason),
         ContainerError::Invocation(detail) => AuthorizeError::Malformed {
@@ -1041,11 +1052,13 @@ mod tests {
 
     /// An authorizer built with an explicit resolver still authorizes a normal
     /// did:key invocation: the injected [`MethodResolver`] routes did:key
-    /// Reports one delegation as revoked, by a named principal.
+    /// Reports one delegation as revoked, by a named principal, with the
+    /// revocation document when it is given one.
     #[derive(Debug, Clone)]
     struct RevokedLink {
         cid: ipld_core::cid::Cid,
         principal: dialog_capability::Did,
+        proof: Option<Vec<u8>>,
     }
 
     #[derive(Debug, thiserror::Error)]
@@ -1063,6 +1076,7 @@ mod tests {
                 return Ok(Some(dialog_ucan_core::revocation::RevocationMatch {
                     revocation: selector.delegation,
                     principal: self.principal.clone(),
+                    proof: self.proof.clone(),
                 }));
             }
             Ok(None)
@@ -1125,11 +1139,13 @@ mod tests {
             "the chain itself is sound"
         );
 
-        // With one, the revoked proof refuses it.
-        let checked =
-            UcanAuthorizer::new(address, Some(credentials)).with_revocations(RevokedLink {
+        // With one, the revoked proof refuses it, naming the certificate.
+        // A checker that keeps no document sends no revocation.
+        let checked = UcanAuthorizer::new(address.clone(), Some(credentials.clone()))
+            .with_revocations(RevokedLink {
                 cid,
                 principal: subject.did(),
+                proof: None,
             });
         let error = checked
             .authorize(&container)
@@ -1137,11 +1153,97 @@ mod tests {
             .expect_err("a revoked proof must refuse the chain");
         assert!(
             matches!(
-                error,
-                S3Error::Authorization(dialog_capability::access::AuthorizeError::Revoked { .. })
+                &error,
+                S3Error::Authorization(dialog_capability::access::AuthorizeError::Revoked {
+                    certificate: Some(certificate),
+                    revocation: None,
+                    ..
+                }) if *certificate == cid.to_string()
             ),
-            "expected a revocation refusal, got: {error:?}"
+            "expected a revocation refusal naming the certificate, got: {error:?}"
         );
+    }
+
+    /// A refusal on a revocation the checker keeps the document of hands
+    /// that document to the holder, in the container's base64url form,
+    /// and it reads back as the same revocation.
+    #[dialog_common::test]
+    async fn it_hands_back_the_revocation_it_refused_on() {
+        let subject = test_signer().await;
+        let operator = Ed25519Signer::generate().await.expect("operator key");
+
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&operator.did())
+            .subject(DelegatedSubject::Specific(subject.did()))
+            .command(vec!["archive".to_string()])
+            .try_build()
+            .await
+            .expect("delegation");
+        let cid = delegation.to_cid();
+
+        let mut args = BTreeMap::new();
+        args.insert("catalog".to_string(), Promised::String("blobs".to_string()));
+        args.insert(
+            "digest".to_string(),
+            Promised::Bytes(Blake3Hash::hash(b"test").as_bytes().to_vec()),
+        );
+        let invocation = InvocationBuilder::new()
+            .issuer(operator.clone())
+            .audience(&subject.did())
+            .subject(&subject.did())
+            .command(vec!["archive".to_string(), "get".to_string()])
+            .arguments(args)
+            .proofs(vec![cid])
+            .try_build()
+            .await
+            .expect("invocation");
+
+        let delegation = std::sync::Arc::new(delegation);
+        let mut delegations = std::collections::HashMap::new();
+        delegations.insert(cid, delegation.clone());
+        let container = InvocationChain::new(invocation, delegations.clone())
+            .to_bytes()
+            .expect("container");
+
+        let revocation = dialog_ucan_core::RevocationBuilder::new(subject.clone(), cid)
+            .try_build()
+            .await
+            .expect("revocation");
+        let document = dialog_ucan_core::RevocationChain::assemble(revocation, delegations)
+            .expect("the revocation names a block it carries")
+            .to_bytes()
+            .expect("revocation container");
+
+        let address = Address::builder("https://s3.us-east-1.amazonaws.com")
+            .region("us-east-1")
+            .bucket("test-bucket")
+            .build()
+            .unwrap();
+        let credentials = S3Credential::new("access-key-id", "secret-access-key");
+        let checked =
+            UcanAuthorizer::new(address, Some(credentials)).with_revocations(RevokedLink {
+                cid,
+                principal: subject.did(),
+                proof: Some(document.clone()),
+            });
+        let error = checked
+            .authorize(&container)
+            .await
+            .expect_err("a revoked proof must refuse the chain");
+        let S3Error::Authorization(dialog_capability::access::AuthorizeError::Revoked {
+            revocation: Some(revocation),
+            ..
+        }) = error
+        else {
+            panic!("expected a revocation refusal carrying the document, got: {error:?}");
+        };
+        assert!(revocation.starts_with('C'), "the base64url tagged form");
+        let decoded = dialog_ucan_core::Container::decode(revocation.as_bytes())
+            .expect("the document decodes")
+            .into_bytes()
+            .expect("re-encodes");
+        assert_eq!(decoded, document, "the document the checker kept");
     }
 
     /// Asking beyond what a delegation grants is named as escalation.

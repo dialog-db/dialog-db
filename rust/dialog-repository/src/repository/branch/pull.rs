@@ -110,17 +110,7 @@ impl<'a> Pull<'a> {
     /// # use dialog_repository::{Branch, PullError};
     /// # async fn example<Env>(branch: &Branch, env: &Env) -> Result<(), PullError>
     /// # where
-    /// #     Env: dialog_capability::Provider<dialog_effects::archive::Get>
-    /// #         + dialog_capability::Provider<dialog_effects::archive::Put>
-    /// #         + dialog_capability::Provider<dialog_effects::archive::Import>
-    /// #         + dialog_capability::Provider<dialog_effects::memory::Resolve>
-    /// #         + dialog_capability::Provider<dialog_effects::memory::Publish>
-    /// #         + dialog_capability::Provider<dialog_effects::authority::Identify>
-    /// #         + dialog_capability::Provider<dialog_effects::authority::Attest>
-    /// #         + dialog_capability::Provider<dialog_capability::Fork<dialog_repository::RemoteSite, dialog_effects::archive::Get>>
-    /// #         + dialog_capability::Provider<dialog_capability::Fork<dialog_repository::RemoteSite, dialog_effects::memory::Resolve>>
-    /// #         + dialog_common::ConditionalSync
-    /// #         + 'static,
+    /// #     Env: dialog_repository::ResolveEnv,
     /// # {
     /// let prepared = branch.pull().prepare(env).await?; // fetch + rebase, no cell writes
     /// let revision = prepared.commit(env).await?;       // advance the cells
@@ -358,7 +348,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // when the upstream is remote, falls back to the remote
         // archive for blocks that haven't been replicated. With
         // `remote: None` it degrades to a plain local index.
-        let store = NetworkedIndex::new(env, branch.archive().index(), remote);
+        let store = NetworkedIndex::erased(env, branch.archive().index(), remote);
 
         // The three trees: last-sync base, the upstream revision we're
         // merging in, and the local tree the merge integrates onto — an

@@ -24,6 +24,7 @@
 //! let digest = Blake3Hash::hash(b"hello");
 //!
 //! let effect = Subject::from(did!("key:z6Mk..."))
+//!     .reader()
 //!     .archive()
 //!     .catalog("index")
 //!     .get(digest);

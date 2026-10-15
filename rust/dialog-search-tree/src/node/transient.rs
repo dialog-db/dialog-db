@@ -13,8 +13,8 @@ use std::ops::Bound;
 use crate::{
     ArchivedIndex, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Hashed, Key,
     LazyHash, Link, Manifest, Node, NodeBody, NodeCache, NoveltyBuffer, NoveltyEntry, NoveltyOp,
-    PersistentNode, PersistentNodeBody, Rank, Separator, Value, distribution::cap, into_owned,
-    resolve_pending,
+    PersistentNode, PersistentNodeBody, Rank, SegmentEntry, Separator, Value, distribution::cap,
+    into_owned, resolve_pending,
 };
 
 /// The rank threshold for grouping entries into leaf segments (level 0). Every
@@ -1128,7 +1128,7 @@ pub struct TransientSegment<Key, Value> {
     /// The key-value entries stored in this segment. Private so every
     /// mutation flows through a method that keeps the cached total weight
     /// exact; readers borrow through [`TransientSegment::entries`].
-    entries: Vec<Entry<Key, Value>>,
+    entries: Vec<SegmentEntry<Key, Value>>,
     /// The separator at this segment's left edge: the shortest byte string
     /// above everything left of the seam and at or below this segment's
     /// first key. Empty for the tree's global leftmost segment. This is the
@@ -1147,7 +1147,7 @@ pub struct TransientSegment<Key, Value> {
 
 impl<Key, Value> TransientSegment<Key, Value> {
     /// Builds a segment from its entries and left-edge separator.
-    pub fn new(entries: Vec<Entry<Key, Value>>, separator: impl Into<Separator>) -> Self {
+    pub fn new(entries: Vec<SegmentEntry<Key, Value>>, separator: impl Into<Separator>) -> Self {
         Self {
             entries,
             separator: separator.into(),
@@ -1156,7 +1156,7 @@ impl<Key, Value> TransientSegment<Key, Value> {
     }
 
     /// The key-value entries stored in this segment.
-    pub fn entries(&self) -> &[Entry<Key, Value>] {
+    pub fn entries(&self) -> &[SegmentEntry<Key, Value>] {
         &self.entries
     }
 
@@ -1164,23 +1164,23 @@ impl<Key, Value> TransientSegment<Key, Value> {
     /// Invalidates the cached total weight; the targeted edit methods
     /// ([`upsert`](Self::upsert), [`delete`](Self::delete)) maintain it
     /// incrementally instead and should be preferred on hot paths.
-    pub fn entries_mut(&mut self) -> &mut Vec<Entry<Key, Value>> {
+    pub fn entries_mut(&mut self) -> &mut Vec<SegmentEntry<Key, Value>> {
         self.weight = None;
         &mut self.entries
     }
 
     /// Consumes the segment, returning its entries.
-    pub fn into_entries(self) -> Vec<Entry<Key, Value>> {
+    pub fn into_entries(self) -> Vec<SegmentEntry<Key, Value>> {
         self.entries
     }
 
     /// Consumes the segment, returning its entries and separator.
-    pub fn into_parts(self) -> (Vec<Entry<Key, Value>>, Separator) {
+    pub fn into_parts(self) -> (Vec<SegmentEntry<Key, Value>>, Separator) {
         (self.entries, self.separator)
     }
 
     /// Takes the entries out of the segment, leaving it empty.
-    pub fn take_entries(&mut self) -> Vec<Entry<Key, Value>> {
+    pub fn take_entries(&mut self) -> Vec<SegmentEntry<Key, Value>> {
         self.weight = None;
         std::mem::take(&mut self.entries)
     }
@@ -1201,7 +1201,7 @@ where
         let raw = match self.weight {
             Some(weight) => weight,
             None => {
-                let weight = self.entries.iter().map(Entry::raw_weight).sum();
+                let weight = self.entries.iter().map(|entry| entry.raw_weight()).sum();
                 self.weight = Some(weight);
                 weight
             }
@@ -1211,14 +1211,17 @@ where
 
     /// Inserts or replaces the entry for `entry.key`, keeping the cached
     /// total weight exact: a replacement adjusts by the weight delta, an
-    /// insert adds the entry's weight.
-    pub fn upsert(&mut self, entry: Entry<Key, Value>) {
+    /// insert adds the entry's weight. An inserted entry brings the hash of
+    /// its key along, if it was asked for already; a replacement keeps the
+    /// hash the stored key has.
+    pub fn upsert(&mut self, entry: impl Into<SegmentEntry<Key, Value>>) {
+        let entry = entry.into();
         match self.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
             Ok(at) => {
                 if let Some(weight) = self.weight.as_mut() {
                     *weight = *weight + entry.raw_weight() - self.entries[at].raw_weight();
                 }
-                self.entries[at].value = entry.value;
+                self.entries[at].set_value(entry.into_entry().value);
             }
             Err(at) => {
                 if let Some(weight) = self.weight.as_mut() {
@@ -1417,7 +1420,7 @@ where
                 // finds, for as long as the node is held.
                 let hashes = node.hashes();
                 while let Some((at, key)) = keys.next_key()? {
-                    entries.push(Entry::opened(
+                    entries.push(SegmentEntry::opened(
                         Key::try_from_bytes(key)?,
                         into_owned(segment.value_at(at)?)?,
                         LazyHash::stored(&hashes, at),
@@ -1478,7 +1481,11 @@ where
         };
         let (body, hashes) = match self {
             TransientNode::Segment(segment) => {
-                let hashes = segment.entries.iter().map(Entry::known_hash).collect();
+                let hashes = segment
+                    .entries
+                    .iter()
+                    .map(SegmentEntry::known_hash)
+                    .collect();
                 let body =
                     PersistentNodeBody::segment_from_entries(segment.entries, manifest.clone())?;
                 (body, hashes)
@@ -1538,11 +1545,17 @@ where
         };
         let (body, hashes) = match self {
             TransientNode::Segment(segment) => {
-                let hashes = segment.entries().iter().map(Entry::known_hash).collect();
-                let body = PersistentNodeBody::segment_from_entries(
-                    segment.entries().to_vec(),
-                    manifest.clone(),
-                )?;
+                let hashes = segment
+                    .entries()
+                    .iter()
+                    .map(SegmentEntry::known_hash)
+                    .collect();
+                let entries: Vec<Entry<Key, Value>> = segment
+                    .entries()
+                    .iter()
+                    .map(|entry| Entry::clone(entry))
+                    .collect();
+                let body = PersistentNodeBody::segment_from_entries(entries, manifest.clone())?;
                 (body, hashes)
             }
             TransientNode::Index(TransientIndex { children, novelty }) => {
@@ -1852,7 +1865,7 @@ pub(crate) struct PieceOrigin {
 }
 
 pub(crate) fn regroup_entries<Key, Value, D>(
-    entries: Vec<Entry<Key, Value>>,
+    entries: Vec<SegmentEntry<Key, Value>>,
     floor: Vec<u8>,
     manifest: &Manifest,
 ) -> Vec<Node<Key, Value>>
@@ -1985,7 +1998,7 @@ where
 /// separator — is emitted as its original persistent link instead of a
 /// fresh transient segment. See [`PieceOrigin`].
 pub(crate) fn regroup_entries_reusing<Key, Value, D>(
-    entries: Vec<Entry<Key, Value>>,
+    entries: Vec<SegmentEntry<Key, Value>>,
     floor: Vec<u8>,
     manifest: &Manifest,
     origins: &[PieceOrigin],
@@ -1996,7 +2009,7 @@ where
     D: Distribution,
 {
     let mut groups: Vec<Node<Key, Value>> = vec![];
-    let mut pending: Vec<Entry<Key, Value>> = vec![];
+    let mut pending: Vec<SegmentEntry<Key, Value>> = vec![];
     // The last key of the previously sealed group; None while sealing the
     // first group, whose separator comes from the floor instead.
     let mut previous_last: Option<Key> = None;
@@ -2023,7 +2036,7 @@ where
     } else {
         entries.iter().map(|entry| entry.weight(manifest)).collect()
     };
-    let keys: Vec<Hashed<'_>> = entries.iter().map(Entry::hashed).collect();
+    let keys: Vec<Hashed<'_>> = entries.iter().map(SegmentEntry::hashed).collect();
     let (cut_after, forced_start) = cut_plan::<D>(&keys, &weights, manifest);
     drop(keys);
 
@@ -2089,7 +2102,7 @@ where
 /// seeds the sealed segment's weight cache.
 #[allow(clippy::too_many_arguments)]
 fn seal<Key, Value, D>(
-    pending: &mut Vec<Entry<Key, Value>>,
+    pending: &mut Vec<SegmentEntry<Key, Value>>,
     previous_last: &mut Option<Key>,
     groups: &mut Vec<Node<Key, Value>>,
     floor: &[u8],
@@ -2146,7 +2159,10 @@ fn seal<Key, Value, D>(
     if let Some(weight) = weight {
         debug_assert_eq!(
             weight,
-            entries.iter().map(Entry::raw_weight).sum::<usize>(),
+            entries
+                .iter()
+                .map(|entry| entry.raw_weight())
+                .sum::<usize>(),
             "a sealed group's cached weight must equal the sum of its entry raw weights"
         );
     }
@@ -2168,7 +2184,7 @@ mod tests {
     use dialog_common::Blake3Hash;
 
     use super::{BOTTOM_RANK, regroup_entries};
-    use crate::{Entry, Geometric, Manifest, Rank, distribution};
+    use crate::{Entry, Geometric, Manifest, Rank, SegmentEntry, distribution};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -2182,14 +2198,14 @@ mod tests {
     }
 
     /// One regrouped leaf segment's worth of entries.
-    type Segment = Vec<Entry<[u8; 4], Vec<u8>>>;
+    type Segment = Vec<SegmentEntry<[u8; 4], Vec<u8>>>;
 
     /// Regroups `keys` (as little-endian `[u8; 4]` entries) into leaf segments
     /// with the geometric distribution, returning each segment's entries.
     fn segments_of(keys: &[u32]) -> Result<Vec<Segment>> {
-        let entries: Vec<Entry<[u8; 4], Vec<u8>>> = keys
+        let entries: Vec<SegmentEntry<[u8; 4], Vec<u8>>> = keys
             .iter()
-            .map(|&i| Entry::new(i.to_le_bytes(), vec![i as u8]))
+            .map(|&i| Entry::new(i.to_le_bytes(), vec![i as u8]).into())
             .collect();
 
         // Byte pacing off: this pins the pure geometric coin's segment cuts,
@@ -2319,20 +2335,22 @@ mod kept_hash_tests {
 
     use super::{Novelty, TransientIndex, TransientNode, TransientSegment};
     use crate::distribution::summary::PieceSummary;
-    use crate::{Delta, Entry, Geometric, Hashed, Manifest, Node, NodeCache, PersistentNode};
+    use crate::{
+        Delta, Entry, Geometric, Hashed, Manifest, Node, NodeCache, PersistentNode, SegmentEntry,
+    };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     type Leaf = PersistentNode<[u8; 4], Vec<u8>>;
 
-    fn entries_of(keys: std::ops::Range<u32>) -> Vec<Entry<[u8; 4], Vec<u8>>> {
-        keys.map(|key| Entry::new(key.to_be_bytes(), key.to_be_bytes().to_vec()))
+    fn entries_of(keys: std::ops::Range<u32>) -> Vec<SegmentEntry<[u8; 4], Vec<u8>>> {
+        keys.map(|key| Entry::new(key.to_be_bytes(), key.to_be_bytes().to_vec()).into())
             .collect()
     }
 
     fn seal(
-        entries: Vec<Entry<[u8; 4], Vec<u8>>>,
+        entries: Vec<SegmentEntry<[u8; 4], Vec<u8>>>,
         cache: &NodeCache<[u8; 4], Vec<u8>>,
     ) -> Result<Leaf> {
         Ok(
@@ -2389,6 +2407,49 @@ mod kept_hash_tests {
         assert_eq!(opened.entries()[5].known_hash(), Some(ranked));
         assert_eq!(opened.entries()[4].known_hash(), None);
         Ok(())
+    }
+
+    /// An edit whose key was ranked before it landed brings the hash into
+    /// the leaf, and on into the node the leaf is sealed as. An update of a
+    /// stored key keeps the hash the stored key had.
+    #[dialog_common::test]
+    fn it_keeps_the_hashes_edits_bring_into_a_leaf() -> Result<()> {
+        let cache = NodeCache::new();
+        let mut segment = open(&seal(entries_of(0..8), &cache)?)?;
+        let stored = segment.entries()[2].key_hash();
+
+        let incoming = SegmentEntry::from(Entry::new(9u32.to_be_bytes(), vec![9]));
+        let ranked = incoming.key_hash();
+        segment.upsert(incoming);
+        segment.upsert(Entry::new(2u32.to_be_bytes(), vec![2]));
+
+        assert_eq!(segment.entries()[8].known_hash(), Some(ranked.clone()));
+        assert_eq!(segment.entries()[2].known_hash(), Some(stored.clone()));
+        assert_eq!(segment.entries()[2].value, vec![2]);
+
+        let sealed = TransientNode::Segment(segment).persist(
+            &mut Delta::zero(),
+            &Manifest::default(),
+            &cache,
+        )?;
+        let reopened = open(&sealed)?;
+        assert_eq!(reopened.entries()[8].known_hash(), Some(ranked));
+        assert_eq!(reopened.entries()[2].known_hash(), Some(stored));
+        assert_eq!(reopened.entries()[3].known_hash(), None);
+        Ok(())
+    }
+
+    /// An entry a read yields is its key and its value: the hash cell stays
+    /// with the segment, so moving an entry along a scan moves nothing else.
+    #[dialog_common::test]
+    fn it_carries_nothing_but_the_key_and_value_in_an_entry() {
+        type Key = [u8; 4];
+        type Value = Vec<u8>;
+
+        assert_eq!(
+            std::mem::size_of::<Entry<Key, Value>>(),
+            std::mem::size_of::<(Key, Value)>()
+        );
     }
 
     /// An index keeps its separators' hashes the same way: sealed with the
@@ -2463,7 +2524,7 @@ mod kept_hash_tests {
         assert!(leaf.summary(&manifest).is_none());
 
         let segment = open(&leaf)?;
-        let keys: Vec<Hashed<'_>> = segment.entries().iter().map(Entry::hashed).collect();
+        let keys: Vec<Hashed<'_>> = segment.entries().iter().map(SegmentEntry::hashed).collect();
         let weights: Vec<usize> = segment
             .entries()
             .iter()

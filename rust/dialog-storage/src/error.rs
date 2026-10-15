@@ -1,4 +1,4 @@
-use dialog_capability::access::AuthorizeError;
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::memory::MemoryError;
@@ -31,6 +31,15 @@ pub enum DialogStorageError {
     /// An error that occurs when byte hash verification fails
     #[error("Byte hash verification failed: {0}")]
     Verification(String),
+}
+
+impl AuthorizationFailure for DialogStorageError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 impl From<ArchiveError> for DialogStorageError {

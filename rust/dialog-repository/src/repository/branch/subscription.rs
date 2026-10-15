@@ -751,7 +751,7 @@ where
         // still satisfy the poll, and a read that misses fails with the
         // load failure as its cause instead of a bare not-found.
         let remote = self.branch.fallback();
-        let store = NetworkedIndex::new(
+        let store = NetworkedIndex::erased(
             env,
             ArchiveScope::new(self.branch.subject()).index(),
             remote,
