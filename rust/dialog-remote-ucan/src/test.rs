@@ -851,6 +851,8 @@ async fn it_refuses_a_watch_where_the_service_names_no_socket(
 /// a socket that closes in flight the same way, through the same
 /// `exchange`.
 #[cfg(not(target_arch = "wasm32"))]
+// The handshake callback's error type is tungstenite's, not ours.
+#[allow(clippy::result_large_err)]
 #[dialog_common::test]
 async fn it_answers_a_resolve_lost_on_the_socket_as_unavailable() -> anyhow::Result<()> {
     use futures_util::StreamExt as _;

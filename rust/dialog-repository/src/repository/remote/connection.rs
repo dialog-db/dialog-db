@@ -16,6 +16,7 @@ use dialog_effects::Rejection;
 use dialog_effects::archive::{self, ArchiveError};
 use dialog_effects::blob::{self, BlobError};
 use dialog_effects::memory::{self, MemoryError};
+use dialog_ucan::clock;
 
 use super::repository::Unreachable;
 use crate::{ConnectedReplica, RemoteSite};
@@ -94,7 +95,7 @@ where
         match attempt().await {
             Err(error) => match error.stale() {
                 Some(at) => {
-                    dialog_ucan::clock::correct(&subject, at);
+                    clock::correct(&subject, at);
                     attempt().await
                 }
                 None => Err(error),
