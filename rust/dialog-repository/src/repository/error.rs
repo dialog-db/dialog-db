@@ -920,6 +920,7 @@ mod tests {
                 "did:key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"
             ),
             certificate: None,
+            revocation: None,
         }
     }
 

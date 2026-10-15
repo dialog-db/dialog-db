@@ -14,6 +14,56 @@ says how to cut a release.
 
 ## Unreleased
 
+### A certificate a remote refuses as revoked is retracted only on a signed revocation that verifies
+
+[#602](https://github.com/dialog-db/dialog-db/pull/602)
+
+A refusal of a revoked certificate now carries the signed revocation,
+and a peer retracts the certificate only once that revocation verifies.
+Before, a peer retracted whatever certificate a remote named as revoked,
+so a remote could make a holder discard grants that still stand just by
+naming them. A revocation checker now returns the revocation document
+with its match (`RevocationMatch::proof`, a UCAN container's DAG-CBOR
+bytes). The UCAN access service hands it to the holder in
+`AuthorizeError::Revoked`'s new `revocation` field, in the container's
+base64url tagged form. The peer decodes it and checks four things
+before it retracts. The document is a `/ucan/revoke` of the very
+certificate named. Its issuer stands above that certificate in a chain
+the peer retains. Its signature and proofs verify. Its evidence shows
+the issuer could withdraw what it names. A refusal with no revocation,
+or with one that fails any check, retracts nothing and is reported as it
+came.
+
+What this changes for you:
+
+- `RevocationMatch` has a new field, `proof: Option<Vec<u8>>`. A
+  checker that builds one needs `proof: None`, or the document when it
+  keeps one.
+- `ContainerError::Revoked` is now `{ cid, found: Box<RevocationMatch> }`.
+  The revoker that was its `revoker` field is `found.principal`.
+- `AuthorizeError::Revoked` has a new field, `revocation:
+  Option<String>`. A pattern that spells out its fields needs `..` or
+  the field; a constructor needs `revocation: None`.
+- A fork refused as revoked by a responder that sends no revocation
+  (any responder before this release, and a revocation index that does
+  not keep documents) retracts nothing and fails with the refusal, where
+  it used to retract the named certificate and retry.
+- A revocation the peer accepts must be signed by a `did:key`
+  principal, the way the proof walk checks the certificates it admits.
+- The UCAN test service (`dialog-remote-ucan-s3`'s `helpers`) takes
+  `POST /revocations` with a signed revocation container in the body and
+  returns it with each refusal. `POST /revocations/<cid>` still refuses
+  the certificate, with no document, as an older service would.
+  `REVOCATIONS_PATH` moves from the native-only server module to
+  `helpers` itself, so a client test can name it on wasm.
+
+Why: a refusal naming a certificate is a claim, and a holder that acts
+on it discards authority it may still have. The signed revocation is the
+evidence the claim rests on, and only the holder can tell whether its
+issuer was entitled to withdraw that link, since only the holder knows
+the chains it retains. A lenient fallback that retracted when no
+revocation came would let a remote omit it and be believed anyway.
+
 ### A certificate a remote refuses as revoked is retracted, and the request is proved again through another grant
 
 [#598](https://github.com/dialog-db/dialog-db/pull/598)
@@ -309,6 +359,12 @@ thread multiplies whatever it holds by the size of the thread pool.
   without it, and a peer on this release reports that refusal as
   before, without retracting or retrying. An older peer reading this
   release's answer ignores the field.
+- Nothing stored changes for a refusal's revocation either. The
+  `revocation` field is additive on the wire: an older access service
+  answers `Revoked` without it, and a peer on this release reads that
+  refusal and retracts nothing. An older peer reading this release's
+  answer ignores the field and retracts the named certificate on the
+  service's word, as it did before.
 
 
 ## 0.3.0 (2026-10-13)

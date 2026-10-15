@@ -5,8 +5,10 @@
 //! wrapper fetches identity from the env via `authority::Identify`.
 //!
 //! A remote that refuses the invocation because a certificate in its
-//! chain was revoked names that certificate. The peer retracts it (see
-//! [`Peer::retract_revoked`](super::Peer)) and authorizes the fork again:
+//! chain was revoked names that certificate and hands over the signed
+//! revocation. The peer verifies the revocation, retracts the certificate
+//! (see [`Peer::retract_revoked`](super::Peer)) and authorizes the fork
+//! again:
 //! the proof walk admits the first retained grant that verifies, in
 //! content hash order, so a holder that retained a fresh grant beside the
 //! revoked one was presenting whichever the order put first. With the
@@ -14,6 +16,9 @@
 //! other route exists the refusal stands, and it is the one reported: it
 //! names the authority that was withdrawn, where the walk's own failure
 //! would only say the key holds nothing.
+//!
+//! A refusal whose revocation is absent or does not verify retracts
+//! nothing and is reported as it came.
 
 use super::{Mode, Peer, PeerSpace};
 use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
@@ -33,9 +38,9 @@ use std::collections::HashSet;
 trait ForkOutput {
     fn from_auth_error(e: AuthorizeError) -> Self;
 
-    /// The certificate a remote refused as revoked, when this output is
-    /// such a refusal and the remote named it.
-    fn revoked_certificate(&self) -> Option<Cid>;
+    /// The refusal, when this output is a remote's refusal of a revoked
+    /// certificate it names, with the certificate's CID.
+    fn revoked_certificate(&self) -> Option<(Cid, &AuthorizeError)>;
 }
 
 impl<T, E> ForkOutput for Result<T, E>
@@ -46,18 +51,19 @@ where
         Err(E::from(e))
     }
 
-    fn revoked_certificate(&self) -> Option<Cid> {
+    fn revoked_certificate(&self) -> Option<(Cid, &AuthorizeError)> {
         let Err(error) = self else {
             return None;
         };
+        let refusal = error.authorization_failure()?;
         let AuthorizeError::Revoked {
             certificate: Some(certificate),
             ..
-        } = error.authorization_failure()?
+        } = refusal
         else {
             return None;
         };
-        certificate.parse().ok()
+        Some((certificate.parse().ok()?, refusal))
     }
 }
 
@@ -92,14 +98,14 @@ where
         // Each round retracts one more certificate the remote named, so
         // the loop ends when the remote stops naming new ones: either the
         // invocation goes through, or the refusal names a certificate this
-        // peer does not retain (or already retracted), or no chain proves
-        // the claim without it.
+        // peer does not retain (or already retracted), or its revocation
+        // does not verify, or no chain proves the claim without it.
         let mut retracted = HashSet::new();
-        while let Some(certificate) = output.revoked_certificate() {
+        while let Some((certificate, refusal)) = output.revoked_certificate() {
             if !retracted.insert(certificate) {
                 break;
             }
-            match self.retract_revoked(certificate).await {
+            match self.retract_revoked(refusal).await {
                 Ok(true) => {}
                 Ok(false) => break,
                 Err(error) => {
