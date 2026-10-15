@@ -24,7 +24,8 @@ use crate::key::varkey::{ValuePayload, build_key, parse_key};
 use crate::merge::full_scope;
 use crate::tree::{ArtifactNodeCache, ArtifactTree, ArtifactTreeExt as _};
 use crate::{
-    ArchiveDelta, ArchiveReader, DialogArtifactsError, Key, ValueDataType, encode_key_value_owned,
+    ArchiveDelta, ArchiveReader, BLOB_KEY_TAG, DialogArtifactsError, Key, ValueDataType,
+    encode_key_value_owned,
 };
 
 /// How many entries one edit batch of the rewrite inserts.
@@ -32,8 +33,13 @@ const BATCH: usize = 4096;
 
 /// `key`, as the same key reads under `value_encoding`: a number in its
 /// value slot is decoded from the band the key carries and encoded in the
-/// band the target keys it in; every other value slot is as it was.
+/// band the target keys it in; every other value slot is as it was. A
+/// blob-index key names a blob by its hash and has no value slot, so it
+/// is as it was.
 pub fn rekey(key: &[u8], value_encoding: u32) -> Result<Key, DialogArtifactsError> {
+    if key.first() == Some(&BLOB_KEY_TAG) {
+        return Ok(Key::from(key.to_vec()));
+    }
     let mut parts = parse_key(key).ok_or_else(|| {
         DialogArtifactsError::InvalidKey("a stored key does not parse".to_string())
     })?;
@@ -106,8 +112,8 @@ mod tests {
     use super::rekey_tree;
     use crate::tree::{ArtifactTree, ArtifactTreeExt as _, SpillCache};
     use crate::{
-        ArchiveDelta, Artifact, ArtifactSelector, Entity, Instruction, NUMBER_BAND, Pick, Relation,
-        Value,
+        ArchiveDelta, Artifact, ArtifactSelector, BlobIndexExt as _, BlobRecord, Entity,
+        Instruction, NUMBER_BAND, Pick, Relation, Value,
     };
 
     fn size() -> Relation {
@@ -231,6 +237,44 @@ mod tests {
             again.root(),
             restored.root(),
             "the rewrite is deterministic"
+        );
+        Ok(())
+    }
+
+    /// A tree an earlier release wrote can hold blob-index entries, whose
+    /// keys are a tag and a hash rather than an entity, attribute and
+    /// value. The rewrite carries them over as they are, beside the facts
+    /// it re-keys.
+    #[dialog_common::test]
+    async fn it_rewrites_a_tree_holding_blob_index_entries() -> anyhow::Result<()> {
+        let store = MemoryBlocks::new();
+        let values = vec![Value::UnsignedInt(3), Value::Float(2.5)];
+        let original = tree(&store, items(&values)?).await?;
+        let mut legacy = rekeyed(&original, &store, 0).await?;
+
+        let hash = [7u8; 32];
+        let (key, state) = BlobRecord::new(4096).legacy_entry(&hash);
+        let mut delta = ArchiveDelta::zero();
+        legacy = legacy
+            .edit()
+            .insert(key, state, &store)
+            .await?
+            .persist(delta.blocks())?;
+        delta.flush_into(&store);
+
+        let upgraded = rekeyed(&legacy, &store, NUMBER_BAND).await?;
+        assert_eq!(upgraded.manifest(&store).await?.value_encoding, NUMBER_BAND);
+        for (read, written) in sizes(&upgraded, &store)
+            .await?
+            .iter()
+            .zip(sizes(&original, &store).await?.iter())
+        {
+            assert!(read.same_number(written), "{read:?} is {written:?}");
+        }
+        assert_eq!(
+            upgraded.get_blob(&store, &hash).await?,
+            Some(BlobRecord::new(4096)),
+            "the blob-index entry survives the rewrite"
         );
         Ok(())
     }
