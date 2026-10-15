@@ -68,6 +68,7 @@
 //! # }
 //! ```
 
+use crate::repository::archive::networked::Reads;
 use crate::repository::branch::asset::recorded_size;
 use crate::repository::remote::Step;
 use crate::repository::source::SourceRef;
@@ -233,13 +234,13 @@ fn blob_hash(entity: &Entity) -> Result<Blake3Hash, BlobError> {
 pub(crate) async fn index_store<'s, 'e, Env>(
     source: impl Into<SourceRef<'s>>,
     env: &'e Env,
-) -> NetworkedIndex<'e, Env>
+) -> NetworkedIndex<'e, dyn Reads>
 where
-    Env: Provider<Resolve> + ConditionalSync + 'static,
+    Env: Reads + 'static,
 {
     let source = source.into();
     let remote = source.fallback();
-    NetworkedIndex::new(env, source.archive().index(), remote)
+    NetworkedIndex::erased(env, source.archive().index(), remote)
 }
 
 /// The size of the content the line's current tree vouches for under `hash`,

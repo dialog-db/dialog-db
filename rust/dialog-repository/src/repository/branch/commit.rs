@@ -568,7 +568,7 @@ where
         // — with its cause — on the first read that needed it, while a
         // commit every block of which is local proceeds untouched.
         let remote = source.fallback();
-        let store = NetworkedIndex::new(env, source.archive().index(), remote);
+        let store = NetworkedIndex::erased(env, source.archive().index(), remote);
 
         // Discover who we are up front: the revision is attributed to the
         // profile / operator, and the commit's `Version` — the identifier

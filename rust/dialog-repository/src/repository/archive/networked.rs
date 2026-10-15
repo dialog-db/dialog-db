@@ -137,9 +137,47 @@ impl<'a, Env: ?Sized> NetworkedIndex<'a, Env> {
     }
 }
 
+/// What a [`NetworkedIndex`] reads through, as one trait object.
+///
+/// The tree code a read or a commit runs is generic over its store, and
+/// the store names the environment it reads through. An index built over
+/// each concrete environment therefore copies that tree code once per
+/// environment type, in every crate that names one: a peer's storage and
+/// mode, and each wrapper an embedder puts around it. Built over this
+/// object instead, the copies collapse into one.
+///
+/// The index's own impls do not ask `Env: 'static`, and must not. The
+/// object's lifetime is a region, which rustc erases when it checks that
+/// a future holding the index is `Send` for every lifetime it borrows;
+/// an outlives bound on it then cannot be shown, and every provider that
+/// commits stops being `Send` (rust-lang/rust#100013).
+pub(crate) trait Reads:
+    Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync
+{
+}
+
+impl<T> Reads for T where T: Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync
+{}
+
+impl<'a> NetworkedIndex<'a, dyn Reads> {
+    /// [`NetworkedIndex::new`], reading through `env` as a [`Reads`]
+    /// object, so every environment shares one copy of the tree code
+    /// that reads through the index.
+    pub(crate) fn erased<Env>(
+        env: &'a Env,
+        index: CatalogScope,
+        remote: impl Into<RemoteFallback>,
+    ) -> Self
+    where
+        Env: Reads + 'static,
+    {
+        Self::new(env, index, remote)
+    }
+}
+
 impl<Env> NetworkedIndex<'_, Env>
 where
-    Env: ?Sized + Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<Hydrate> + ConditionalSync,
 {
     /// The block stored under `hash`: the local archive's copy, or else the
     /// tracked remote's, hydrated into the local archive as it is read.
@@ -203,8 +241,7 @@ where
 
 impl<Env> NetworkedIndex<'_, Env>
 where
-    Env:
-        ?Sized + Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync,
 {
     /// The spilled value stored under `hash`: the local copy (blob store,
     /// then the block catalog for values spilled before they moved to
@@ -224,7 +261,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<LoadBlock> for NetworkedIndex<'_, Env>
 where
-    Env: ?Sized + Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<Hydrate> + ConditionalSync,
 {
     async fn execute(
         &self,
@@ -243,8 +280,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<LoadBlob> for NetworkedIndex<'_, Env>
 where
-    Env:
-        ?Sized + Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync,
 {
     async fn execute(
         &self,
