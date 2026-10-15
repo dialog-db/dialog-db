@@ -662,4 +662,47 @@ mod tests {
         assert_eq!(mirror.revision().map(|pulled| pulled.tree), Some(head.tree));
         Ok(())
     }
+
+    /// A service whose clock reads ten minutes behind this one refuses
+    /// the first invocation it is sent as issued too far ahead. The refusal
+    /// says what its clock read, and the branch's push and the mirror's
+    /// pull go through, stamped by the service's clock.
+    #[dialog_common::test(clock_offset = -600i64)]
+    async fn it_pushes_and_pulls_through_a_service_whose_clock_differs(
+        service: UcanServiceAddress,
+    ) -> Result<()> {
+        let site =
+            SiteAddress::Ucan(UcanAddress::new(&service.endpoint).with_socket(&service.socket));
+        rig!(operator, profile, site, writer, mirror);
+
+        let head = commit(&writer, "skewed", &operator).await?;
+        writer.push().perform(&operator).await?;
+        mirror.pull().perform(&operator).await?;
+        assert_eq!(mirror.revision().map(|pulled| pulled.tree), Some(head.tree));
+        Ok(())
+    }
+
+    /// A watch over the socket of a service whose clock reads ten minutes
+    /// ahead is begun, the refusal of its first invocation having said
+    /// what the clock read, and delivers what is pushed after.
+    #[dialog_common::test(clock_offset = 600i64)]
+    async fn it_watches_an_upstream_whose_service_clock_differs(
+        service: UcanServiceAddress,
+    ) -> Result<()> {
+        let site =
+            SiteAddress::Ucan(UcanAddress::new(&service.endpoint).with_socket(&service.socket));
+        rig!(operator, profile, site, writer, mirror);
+
+        let events = mirror.replicate().pull().perform(&operator);
+        pin_mut!(events);
+        let pushed = commit(&writer, "ahead", &operator).await?;
+        writer.push().perform(&operator).await?;
+        loop {
+            match next(&mut events).await? {
+                Replicated::Pulled(head) if head.tree == pushed.tree => break,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 }
