@@ -240,6 +240,8 @@ impl UcanServer {
 /// One connection to the socket: a session answering its frames, and
 /// delivering each change the store announces to the watches it began,
 /// until either side closes it or the service stops.
+// The handshake callback's error type is tungstenite's, not ours.
+#[allow(clippy::result_large_err)]
 async fn serve_socket(
     stream: tokio::net::TcpStream,
     state: Arc<ServerState>,
