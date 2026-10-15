@@ -116,6 +116,22 @@ impl<'a, Ticks> Replicate<'a, Ticks> {
     }
 }
 
+/// `delay` moved to somewhere in its second half, by `seed`.
+fn spread(delay: Duration, seed: u32) -> Duration {
+    let half = delay / 2;
+    let span = u32::try_from(half.as_millis()).unwrap_or(u32::MAX).max(1);
+    half + Duration::from_millis(u64::from(seed % span))
+}
+
+/// The nanoseconds of the clock's current second: enough to tell one
+/// replica's moment from another's.
+fn nanoseconds() -> u32 {
+    time::now()
+        .duration_since(time::UNIX_EPOCH)
+        .map(|since| since.subsec_nanos())
+        .unwrap_or_default()
+}
+
 /// What the replication reacts to.
 enum Event {
     /// A watched upstream delivered a head, or failed to.
@@ -164,6 +180,9 @@ impl Rewatch {
                 FIRST_REWATCH
             }
         };
+        // Spread over the second half of the wait, so the watches a
+        // deploy ended everywhere at once are not all begun again at once.
+        let delay = spread(delay, nanoseconds());
         self.until.retain(|(known, _)| known != &target);
         self.until.push((target.clone(), Instant::now() + delay));
         source(stream::once(async move {
@@ -454,6 +473,26 @@ fn ahead(branch: &Branch) -> bool {
         .pushes()
         .iter()
         .any(|upstream| upstream.tree() != Some(&head.tree))
+}
+
+#[cfg(test)]
+mod spread_tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::{Duration, spread};
+
+    /// A wait is moved to somewhere in its second half, never past it, so
+    /// watches ended together are begun again apart.
+    #[dialog_common::test]
+    fn it_spreads_a_wait_over_its_second_half() {
+        let wait = Duration::from_secs(8);
+        for seed in [0, 1, 1_999, 4_000, 3_999, u32::MAX] {
+            let spread = spread(wait, seed);
+            assert!(spread >= wait / 2 && spread <= wait, "{seed}: {spread:?}");
+        }
+        assert_ne!(spread(wait, 1), spread(wait, 2_001));
+    }
 }
 
 #[cfg(all(
