@@ -99,6 +99,165 @@ What this changes for you:
 
 Why: a delivered head can arrive after a newer one was fetched or delivered. Recorded as it came, it would move the sync point back and make the next push fail or upload what the remote holds.
 
+### `dialog-network`, `dialog-repository` and `dialog-peer` are built as `rlib` only
+
+[#601](https://github.com/dialog-db/dialog-db/pull/601)
+
+The three crates declared `crate-type = ["cdylib", "rlib"]` since they were created. Nothing in the workspace, its CI or tonk consumes the dynamic library the `cdylib` target produced: the wasm test jobs build `wasm-bindgen-test` binaries, and tonk's worker crates are cdylibs of their own that link these as `rlib`s. They are now `rlib` only.
+
+What this changes for you:
+
+- `cargo build` no longer emits a `libdialog_network`, `libdialog_repository` or `libdialog_peer` dynamic library. A build that needs one declares its own wrapper crate with that crate type.
+- A clean release build of `dialog-peer` overlaps the compilation of `dialog-query`, `dialog-repository` and `dialog-peer` instead of running them one after another.
+
+Why: with a `cdylib` target, cargo waits for every upstream crate's full object code before starting a crate, rather than starting on its metadata. A crate type nobody consumed serialized the slowest part of every build that reaches the peer.
+
+### A certificate a remote refuses as revoked is retracted only on a signed revocation that verifies
+
+[#602](https://github.com/dialog-db/dialog-db/pull/602)
+
+A refusal of a revoked certificate now carries the signed revocation,
+and a peer retracts the certificate only once that revocation verifies.
+Before, a peer retracted whatever certificate a remote named as revoked,
+so a remote could make a holder discard grants that still stand just by
+naming them. A revocation checker now returns the revocation document
+with its match (`RevocationMatch::proof`, a UCAN container's DAG-CBOR
+bytes). The UCAN access service hands it to the holder in
+`AuthorizeError::Revoked`'s new `revocation` field, in the container's
+base64url tagged form. The peer decodes it and checks four things
+before it retracts. The document is a `/ucan/revoke` of the very
+certificate named. Its issuer stands above that certificate in a chain
+the peer retains. Its signature and proofs verify. Its evidence shows
+the issuer could withdraw what it names. A refusal with no revocation,
+or with one that fails any check, retracts nothing and is reported as it
+came.
+
+What this changes for you:
+
+- `RevocationMatch` has a new field, `proof: Option<Vec<u8>>`. A
+  checker that builds one needs `proof: None`, or the document when it
+  keeps one.
+- `ContainerError::Revoked` is now `{ cid, found: Box<RevocationMatch> }`.
+  The revoker that was its `revoker` field is `found.principal`.
+- `AuthorizeError::Revoked` has a new field, `revocation:
+  Option<String>`. A pattern that spells out its fields needs `..` or
+  the field; a constructor needs `revocation: None`.
+- A fork refused as revoked by a responder that sends no revocation
+  (any responder before this release, and a revocation index that does
+  not keep documents) retracts nothing and fails with the refusal, where
+  it used to retract the named certificate and retry.
+- A revocation the peer accepts must be signed by a `did:key`
+  principal, the way the proof walk checks the certificates it admits.
+- The UCAN test service (`dialog-remote-ucan-s3`'s `helpers`) takes
+  `POST /revocations` with a signed revocation container in the body and
+  returns it with each refusal. `POST /revocations/<cid>` still refuses
+  the certificate, with no document, as an older service would.
+  `REVOCATIONS_PATH` moves from the native-only server module to
+  `helpers` itself, so a client test can name it on wasm.
+
+Why: a refusal naming a certificate is a claim, and a holder that acts
+on it discards authority it may still have. The signed revocation is the
+evidence the claim rests on, and only the holder can tell whether its
+issuer was entitled to withdraw that link, since only the holder knows
+the chains it retains. A lenient fallback that retracted when no
+revocation came would let a remote omit it and be believed anyway.
+
+### A certificate a remote refuses as revoked is retracted, and the request is proved again through another grant
+
+[#598](https://github.com/dialog-db/dialog-db/pull/598)
+
+A peer that retains two grants for the same claim, one revoked and one
+fresh, presented whichever the proof walk admitted first, and the walk
+admits candidates in content hash order: half the time it presented the
+revoked one, and the remote refused a request the peer had every right
+to make. A device linked to an account again, after the account revoked
+its earlier grant, holds exactly that pair until the revocation reaches
+it, which is how this surfaced as a flaky sync.
+
+The refusal now names the certificate. `AuthorizeError::Revoked` carries
+`certificate`, the CID text of the revoked link, when the responder
+knows which it was (the UCAN access service does). A `Peer` performing
+a fork that comes back `Revoked` with a certificate retracts that
+certificate where it retains grants, as one commit on the branch it
+proves from, and authorizes the fork again; the walk no longer sees the
+revoked link and admits the other grant. The loop ends when the request
+goes through, when the named certificate is not retained here (the
+original refusal is reported, since it names the authority that was
+withdrawn), or when the remote names one already retracted.
+`Delegations::retained(cid)` finds a retained certificate by the CID a
+refusal names, and the new `AuthorizationFailure` trait, implemented by
+every effect error that wraps an `AuthorizeError`, is how a caller reads
+the refusal back out of an effect's error without matching each enum.
+
+What this changes for you:
+
+- `AuthorizeError::Revoked` has a new field, `certificate:
+  Option<String>`. A pattern that spells out its fields needs `..` or
+  the field; a constructor needs `certificate: None`.
+- A fork refused as revoked retracts the named certificate from the
+  peer's access branch and is retried once per named certificate,
+  through the peer's remaining grants. A caller that retried on
+  `Revoked` itself can stop; a caller that counted requests to the
+  access service sees one more per revoked link in a presented chain;
+  a caller that lists the grants a principal holds no longer sees a
+  grant a remote refused as revoked.
+- The retraction takes the remote at its word. Only a certificate the
+  peer retains can be named to any effect, and a certificate retracted
+  this way comes back if a later sync re-retains it, to be retracted
+  again on the next refusal.
+- `Delegations::retained(cid)` on a branch reads back the retained
+  certificate with that CID, or `None`.
+- `AuthorizationFailure::authorization_failure(&self) ->
+  Option<&AuthorizeError>` on `ArchiveError`, `BlobError`, `MemoryError`,
+  `BranchError`, `PeerError`, `ForkError`, `DialogStorageError`,
+  `DialogArtifactsError`, `ResolveError`, `PublishError`,
+  `RetractError`, `S3Error` and `AuthorizeError` itself.
+- The UCAN test service (`dialog-remote-ucan-s3`'s `helpers`) accepts
+  `POST /revocations/<cid>` and refuses that certificate from then on.
+
+Why: the retaining replica is the one that learns of a revocation, and
+until it does the revoked grant is a valid candidate on every other
+replica. The remote is the first to know; it says which link it refused,
+and the peer that asked is in the best position to drop that grant and
+try the others rather than report a refusal that a different grant would
+have avoided. Retracting rather than remembering the refusal in memory
+makes the answer outlive the process and reach the replicas the branch
+syncs to, through the one mechanism a grant already leaves a replica by.
+
+### An entry a read yields is its key and value, and the hash of its key is kept by the segment it is edited in
+
+[#600](https://github.com/dialog-db/dialog-db/pull/600)
+
+[#569](https://github.com/dialog-db/dialog-db/pull/569) gave every `Entry` the cell the blake3 of its key is kept in. Only the boundary rules read that hash, on the edit path, but every entry a scan yields carried the cell too: about 48 bytes more per entry, enough that moving an entry through the scan's stream adaptors became a `memcpy` call. The cell now lives in a `SegmentEntry`, the entry as a `TransientSegment` holds it, and `Entry` is a key and a value again. A stored leaf still keeps its keys' hashes for every opening of it, a node sealed from ranked entries still opens with their hashes, and an edit's key hashed before it lands still brings its hash into the leaf. Trees are shaped byte for byte as before.
+
+What this changes for you:
+
+- `TransientSegment::entries`, `entries_mut`, `into_entries`, `into_parts` and `take_entries` hold `SegmentEntry`s. A `SegmentEntry` derefs to its `Entry`, `into_entry` takes the entry out, and `set_value` replaces the value and keeps the key's hash. `TransientSegment::new` takes `SegmentEntry`s, built `From<Entry>`; `upsert` takes either.
+- `Entry::hashed` is gone: `SegmentEntry::hashed` and `SegmentEntry::key_hash` read the kept hash. `Entry::key_hash` computes the hash each time it is called, as in 0.3.0.
+- `PersistentSegment::from_entries` and `PersistentNodeBody::segment_from_entries` take `Entry`s or `SegmentEntry`s.
+- An `Entry` can be built with a struct literal again.
+
+Why: a scan moves every entry in its range and never asks for a hash; the edit path asks for few. Measured on a cold reopen against 0.3.0 the cell cost `number-range-mixed` 6.0% more instructions and `number-range-wide` 3.4%.
+
+### A revoked delegation's match is boxed in `Invalid::Revoked`
+
+[#599](https://github.com/dialog-db/dialog-db/pull/599)
+
+`Invalid::Revoked` carried the revoked delegation's CID and the matching
+`RevocationMatch` (a second CID and its issuer) inline, which made every
+result of `Invocation::check` and `Chain::check` at least 208 bytes. The
+match is now behind a `Box`.
+
+What this changes for you:
+
+- `Invalid::Revoked { found, .. }` is a `Box<RevocationMatch>`. Reading
+  its fields (`found.principal`, `found.revocation`) is unchanged; code
+  that builds the variant wraps the match in `Box::new`, and code that
+  needs the `RevocationMatch` itself takes `*found`.
+
+Why: Rust 1.99's clippy flags the size as `result_large_err`, and every
+verification paid to move it, on success as well as on refusal.
+
 ### A flush that fails leaves nothing in the held caches, and environments sharing them share branch writers
 
 [#579](https://github.com/dialog-db/dialog-db/pull/579)
@@ -265,7 +424,7 @@ The boundary rules decide from the blake3 of a key or a separator, and
 ask again on every regroup. Two thread-local memos answered them: every
 thread that committed filled its own and kept it for the thread's life,
 with no way to see, bound or release it. A full one held about 46 MiB at
-257-byte keys, per thread. Now an entry keeps the hash of its key, a
+257-byte keys, per thread. Now an entry in a segment keeps the hash of its key, a
 separator its own, and a stored node the hashes of its keys and its
 piece summary, each computed on first ask and dropped with its owner. A
 node a persist seals is kept in the tree's node cache. Trees are shaped
@@ -273,9 +432,8 @@ byte for byte as before; nothing stored changes.
 
 What this changes for you:
 
-- An `Entry` is built with `Entry::new(key, value)`. It keeps its key's
-  hash, so replace an entry whose key changes rather than assigning the
-  key in place.
+- The entries a `TransientSegment` holds keep their key's hash, so
+  replace one whose key changes rather than assigning the key in place.
 - `Link::separator` is a `Separator`, which derefs to `[u8]` and is
   built `From<Vec<u8>>`. `Link` no longer derives its rkyv form.
 - `Distribution::rank`, `seam_rank` and `leaf_cut` take a `Hashed<'_>`:
@@ -295,6 +453,20 @@ thread multiplies whatever it holds by the size of the thread pool.
 - Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
 - The socket carries text `ping` and `pong` messages beside its frames. A service's socket must answer `ping` with `pong`, or a client closes the connection every `Liveness::deadline`; no released service has a socket, so none predates this.
 - Nothing stored is rewritten.
+- Nothing new is stored. A certificate a remote refuses as revoked is
+  retracted with the ordinary delegation retract, the same facts and
+  blob tombstone a `Delegations::retract` by hand writes, so an older
+  release reads the branch as before. The `certificate` field is
+  additive on the wire: an older access service answers `Revoked`
+  without it, and a peer on this release reports that refusal as
+  before, without retracting or retrying. An older peer reading this
+  release's answer ignores the field.
+- Nothing stored changes for a refusal's revocation either. The
+  `revocation` field is additive on the wire: an older access service
+  answers `Revoked` without it, and a peer on this release reads that
+  refusal and retracts nothing. An older peer reading this release's
+  answer ignores the field and retracts the named certificate on the
+  service's word, as it did before.
 
 ## 0.3.0 (2026-10-13)
 

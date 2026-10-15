@@ -3,8 +3,9 @@
 //! The coins, the ladders and the anchor elections all decide from
 //! `blake3(bytes)` of a key or a separator, and they ask again every time a
 //! window is regrouped. The hash is a pure function of the bytes, so whatever
-//! owns the bytes keeps it: an entry keeps the hash of its key, a separator
-//! its own, and a stored leaf the hashes of the keys in it. It is computed
+//! owns the bytes keeps it: an entry a segment holds keeps the hash of its
+//! key (see [`SegmentEntry`](crate::SegmentEntry)), a separator its own, and
+//! a stored leaf the hashes of the keys in it. It is computed
 //! the first time it is asked for, and it lives exactly as long as its owner.
 
 use std::ops::Deref;

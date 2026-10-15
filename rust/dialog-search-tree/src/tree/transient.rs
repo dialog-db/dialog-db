@@ -17,7 +17,7 @@ use crate::{
     Accessor, BOTTOM_RANK, Buffer, Change, Delta, DialogSearchTreeError, Differential,
     Distribution, Entry, Geometric, Hashed, IndexPieceOrigin, Key, Link, LoadBlock, Manifest, Node,
     NodeCache, Novelty, NoveltyEntry, NoveltyOp, PersistentIndex, PersistentNode,
-    PersistentNodeBody, PersistentTree, PieceOrigin, Rank, Separator, TransientIndex,
+    PersistentNodeBody, PersistentTree, PieceOrigin, Rank, SegmentEntry, Separator, TransientIndex,
     TransientNode, TransientSegment, TreeWalker, Value, link_bounds, regroup_children,
     regroup_children_reusing, regroup_entries, regroup_entries_reusing,
 };
@@ -317,7 +317,7 @@ where
     where
         Env: Provider<LoadBlock> + ConditionalSync,
     {
-        let entry = Entry::new(key, value);
+        let entry = SegmentEntry::from(Entry::new(key, value));
         let accessor = Accessor::new(self.cache.clone(), storage);
         let (loaded, manifest) = Self::load(self.root, &accessor, self.manifest.take()).await?;
         self.manifest = Some(manifest.clone());
@@ -415,10 +415,10 @@ where
 
         // Keep only each key's last op; a surviving retract on an empty
         // tree is a no-op and drops out.
-        let mut entries: Vec<Entry<Key, Value>> = Vec::with_capacity(ops.len());
+        let mut entries: Vec<SegmentEntry<Key, Value>> = Vec::with_capacity(ops.len());
         let mut push = |op: NoveltyEntry<Value>| -> Result<(), DialogSearchTreeError> {
             if let NoveltyOp::Assert(value) = op.op {
-                entries.push(Entry::new(Key::try_from_bytes(&op.key)?, value));
+                entries.push(Entry::new(Key::try_from_bytes(&op.key)?, value).into());
             }
             Ok(())
         };
@@ -1090,6 +1090,7 @@ where
                 }
                 Piece::Entries(entries) => {
                     if !entries.is_empty() {
+                        let entries = entries.into_iter().map(SegmentEntry::from).collect();
                         let run = regroup_entries::<Key, Value, D>(entries, Vec::new(), &manifest);
                         parts.push((
                             TransientNode::Index(TransientIndex {
@@ -1272,7 +1273,7 @@ where
 /// A single keyed edit applied to a [`TransientTree`].
 enum Edit<Key, Value> {
     /// Insert the entry, or update the value if the key already exists.
-    Upsert(Entry<Key, Value>),
+    Upsert(SegmentEntry<Key, Value>),
     /// Remove the key if present.
     Delete(Key),
 }
@@ -2069,7 +2070,7 @@ where
 /// banks its weight). The appended key's own weight is not counted here;
 /// `Distribution::leaf_cut` adds it.
 fn trailing_stretch_weight<Key, Value, D>(
-    entries: &[Entry<Key, Value>],
+    entries: &[SegmentEntry<Key, Value>],
     manifest: &Manifest,
 ) -> usize
 where
@@ -2100,7 +2101,7 @@ where
 /// seam around the gap turning accepted) resets the bank at the split, as
 /// the regroup would.
 fn trailing_stretch_weight_skipping<Key, Value, D>(
-    entries: &[Entry<Key, Value>],
+    entries: &[SegmentEntry<Key, Value>],
     skip: usize,
     manifest: &Manifest,
 ) -> usize
@@ -2625,7 +2626,7 @@ where
             _ => return Ok(false),
         };
         piece_lens.push(entries.len());
-        keys.extend(entries.iter().map(Entry::hashed));
+        keys.extend(entries.iter().map(SegmentEntry::hashed));
         weights.extend(entries.iter().map(|entry| entry.weight(manifest)));
     }
 
@@ -2794,7 +2795,8 @@ where
                     },
                     Node::Transient(TransientNode::Segment(segment)) => {
                         let entries = segment.entries();
-                        let keys: Vec<Hashed<'_>> = entries.iter().map(Entry::hashed).collect();
+                        let keys: Vec<Hashed<'_>> =
+                            entries.iter().map(SegmentEntry::hashed).collect();
                         let weights: Vec<usize> =
                             entries.iter().map(|entry| entry.weight(manifest)).collect();
                         pieces.push(Pending::Ready(Arc::new(PieceSummary::build::<D>(
@@ -2822,7 +2824,7 @@ where
                     return Ok(None);
                 };
                 let entries = segment.entries();
-                let keys: Vec<Hashed<'_>> = entries.iter().map(Entry::hashed).collect();
+                let keys: Vec<Hashed<'_>> = entries.iter().map(SegmentEntry::hashed).collect();
                 let weights: Vec<usize> =
                     entries.iter().map(|entry| entry.weight(manifest)).collect();
                 persistent.summarize(
@@ -4586,7 +4588,7 @@ where
 ///     inside a vetoed stretch may move the stretch's forced anchors, so
 ///     inserts and deletes whose adjacent seam is vetoed always re-shape.
 fn fast_path_keeps_canonical<Key, Value, D>(
-    entries: &[Entry<Key, Value>],
+    entries: &[SegmentEntry<Key, Value>],
     edit: &Edit<Key, Value>,
     manifest: &Manifest,
 ) -> bool
@@ -4800,7 +4802,7 @@ fn collect_stream_plan<Key, Value>(
         TransientNode::Segment(segment) => {
             for entry in segment.entries() {
                 if bounds.contains(&entry.key) {
-                    plan.push(StreamStep::Entry(entry.clone()));
+                    plan.push(StreamStep::Entry(Entry::clone(entry)));
                 }
             }
         }

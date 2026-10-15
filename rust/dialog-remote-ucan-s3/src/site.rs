@@ -380,6 +380,8 @@ mod tests {
     async fn it_reads_back_the_reason_the_responder_sent() {
         let sent = AuthorizeError::Revoked {
             subject: did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
+            certificate: None,
+            revocation: None,
         };
         let body = serde_json::to_vec(&sent).expect("serializes");
 
@@ -496,6 +498,8 @@ mod tests {
             // What a responder sends now: the reason itself.
             let reason = AuthorizeError::Revoked {
                 subject: did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
+                certificate: None,
+                revocation: None,
             };
             let body = serde_json::to_string(&reason).expect("serializes");
             let response = format!(
@@ -516,7 +520,7 @@ mod tests {
         server.await.expect("server task");
         // End to end over a real socket: the reason the responder built
         // is the reason the caller receives.
-        let S3Error::Authorization(AuthorizeError::Revoked { subject }) = error else {
+        let S3Error::Authorization(AuthorizeError::Revoked { subject, .. }) = error else {
             panic!("expected a revoked authorization, got {error:?}");
         };
         assert_eq!(

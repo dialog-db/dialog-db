@@ -111,8 +111,10 @@ impl TryFrom<&[u8]> for Cause {
         }
         Ok(Self::new(
             bytes
-                .chunks_exact(VERSION_LENGTH)
-                .map(Version::from_key_bytes)
+                .as_chunks::<VERSION_LENGTH>()
+                .0
+                .iter()
+                .map(|chunk| Version::from_key_bytes(chunk))
                 .collect::<Result<Vec<_>, _>>()?,
         ))
     }

@@ -238,7 +238,10 @@ impl<S: Signature> Invocation<S> {
                 {
                     Ok(None) => Ok(()),
                     Ok(Some(found)) => Err(VerifyError::<K, S, T, St, _, _>::Invalid(
-                        Invalid::Revoked { cid, found },
+                        Invalid::Revoked {
+                            cid,
+                            found: Box::new(found),
+                        },
                     )),
                     // The question went unanswered. A caller willing to
                     // proceed without the answer says so by wrapping the
@@ -1003,7 +1006,10 @@ pub enum Invalid<
         /// The revoked delegation.
         cid: Cid,
         /// The revocation that matched: its document and its issuer.
-        found: RevocationMatch,
+        ///
+        /// Boxed so a revocation does not make every verification result
+        /// carry two CIDs inline.
+        found: Box<RevocationMatch>,
     },
 }
 
@@ -2606,6 +2612,7 @@ mod tests {
             Ok(Some(RevocationMatch {
                 revocation: selector.delegation,
                 principal: self.0.clone(),
+                proof: None,
             }))
         }
     }

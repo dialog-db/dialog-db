@@ -127,7 +127,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    let store = NetworkedIndex::new(env, branch.archive().index(), branch.fallback());
+    let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
     let tree = |reference: &TreeReference| {
         Index::from_hash_with_cache(NodeHash::from(*reference.hash()), branch.node_cache())
     };

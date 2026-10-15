@@ -8,7 +8,6 @@ use crate::storage::idb::KeyRange;
 use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::UseExt as _;
 use dialog_effects::memory::prelude::{ListExt, PublishExt, ResolveExt, RetractExt};
 use dialog_effects::memory::{Edition, List, MemoryError, Publish, Resolve, Retract, Version};
 use js_sys::Uint8Array;

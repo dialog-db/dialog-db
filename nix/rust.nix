@@ -238,6 +238,20 @@ let
       }
     );
 
+    # nextest runs no doctests, so a broken example would otherwise only
+    # surface when someone happens to run `cargo test --doc`.
+    doctest = craneLib.cargoDocTest (
+      commonAttributes
+      // {
+        pname = "dialog-db-cargo-doctest-check";
+        cargoArtifacts = nativeArtifacts;
+        cargoTestExtraArgs = "--workspace --all-features";
+        # The doctests run in the check phase, which the shared attributes
+        # turn off.
+        doCheck = true;
+      }
+    );
+
     rustfmt = craneLib.cargoFmt {
       src = rustSource;
       pname = "dialog-db-cargo-fmt-check";

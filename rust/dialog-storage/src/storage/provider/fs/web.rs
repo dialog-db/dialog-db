@@ -17,7 +17,6 @@
 //! [fsapi]: https://developer.mozilla.org/en-US/docs/Web/API/File_System_API
 
 use super::{FileReader, FileSystem, FileSystemError, FileSystemHandle};
-use dialog_effects::MethodExt as _;
 use futures_util::StreamExt;
 use js_sys::Uint8Array;
 use std::rc::Rc;
