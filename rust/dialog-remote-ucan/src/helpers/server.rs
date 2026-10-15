@@ -158,13 +158,25 @@ impl UcanServer {
     /// Start the service on a free loopback port, refusing bodies over
     /// `max_body_bytes`, its socket playing out `fault`.
     pub async fn start_with(max_body_bytes: u64, fault: Fault) -> anyhow::Result<Self> {
+        Self::start_with_clock(max_body_bytes, fault, 0).await
+    }
+
+    /// Start the service on a free loopback port, refusing bodies over
+    /// `max_body_bytes`, its socket playing out `fault`, and its clock
+    /// reading `clock_offset` seconds ahead of the system's.
+    pub async fn start_with_clock(
+        max_body_bytes: u64,
+        fault: Fault,
+        clock_offset: i64,
+    ) -> anyhow::Result<Self> {
         let store = MemoryStore::default();
         let (changes, _) = broadcast::channel(64);
         let state = Arc::new(ServerState {
             access: Access::new(Announcing {
                 store: store.clone(),
                 changes: changes.clone(),
-            }),
+            })
+            .with_clock(move || now_s().saturating_add_signed(clock_offset)),
             max_body_bytes,
             fault,
             faulted: Default::default(),
@@ -414,7 +426,7 @@ async fn deliver(
                 state: &change.state,
             },
             RECHECK,
-            now_s(),
+            state.access.now(),
         )
         .await
 }
@@ -659,6 +671,10 @@ pub struct UcanSettings {
     pub max_body_bytes: u64,
     /// A failure the service's socket plays out. Defaults to none.
     pub fault: Fault,
+    /// How many seconds the service's clock reads ahead of the system's,
+    /// or behind it when negative: a service whose clock its clients do
+    /// not share. Defaults to none.
+    pub clock_offset: i64,
 }
 
 impl Default for UcanSettings {
@@ -666,6 +682,7 @@ impl Default for UcanSettings {
         Self {
             max_body_bytes: 32 * 1024 * 1024,
             fault: Fault::None,
+            clock_offset: 0,
         }
     }
 }
@@ -675,7 +692,12 @@ impl Default for UcanSettings {
 pub async fn ucan(
     settings: UcanSettings,
 ) -> anyhow::Result<Service<UcanServiceAddress, UcanServer>> {
-    let server = UcanServer::start_with(settings.max_body_bytes, settings.fault).await?;
+    let server = UcanServer::start_with_clock(
+        settings.max_body_bytes,
+        settings.fault,
+        settings.clock_offset,
+    )
+    .await?;
     let address = UcanServiceAddress {
         endpoint: server.endpoint.clone(),
         socket: server.socket.clone(),

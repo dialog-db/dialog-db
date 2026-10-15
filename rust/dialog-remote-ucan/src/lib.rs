@@ -40,7 +40,7 @@ pub use address::{ACCESS_SERVICE, ACCESS_SOCKET, Exchange, UcanAddress};
 pub use dialog_remote_ucan_s3::{Ucan, UcanAuthorization, UcanInvocation};
 pub use direct::{OBJECT_MEDIA_TYPE, SCHEME, credential, credential_container, is_credential};
 pub use server::{
-    Access, Answer, Content, FRESHNESS, Issuance, Payload, Presented, RecentInvocations, Refusal,
-    Request, Response, Store, Subscription, Verified,
+    Access, Answer, Clock, Content, FRESHNESS, Issuance, Payload, Presented, RecentInvocations,
+    Refusal, Request, Response, Store, Subscription, Verified,
 };
 pub use site::{UcanFork, UcanSite};

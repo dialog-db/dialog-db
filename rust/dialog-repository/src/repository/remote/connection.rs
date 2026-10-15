@@ -9,6 +9,7 @@
 
 use std::fmt;
 
+use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Capability, Constraint, Effect, Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::Rejection;
@@ -75,15 +76,79 @@ where
     Env: Provider<Fork<RemoteSite, E>> + ConditionalSync,
     T: ConditionalSend,
     E: Resend<Error>,
-    Error: ConditionalSend,
+    Error: Skewed + ConditionalSend,
 {
+    /// Perform `input` at the peer. One refused because the peer's clock
+    /// is far from this one is performed once more, with an invocation
+    /// stamped by the peer's clock: the refusal says what it read, and the
+    /// peer refused before doing anything, so sending it again is safe
+    /// whatever it does.
     async fn execute(&self, input: Capability<E>) -> Result<T, Error> {
-        self.replica
-            .reach_unless(E::resend, |address| {
+        let subject = input.subject().clone();
+        let attempt = || {
+            self.replica.reach_unless(E::resend, |address| {
                 let input = input.clone();
                 async move { input.fork(address.site()).perform(self.env).await }
             })
-            .await
+        };
+        match attempt().await {
+            Err(error) => match error.stale() {
+                Some(at) => {
+                    dialog_ucan::clock::correct(&subject, at);
+                    attempt().await
+                }
+                None => Err(error),
+            },
+            done => done,
+        }
+    }
+}
+
+/// When an effect was refused because the peer judged its invocation
+/// issued too long ago, what the peer's clock read: the invocation was
+/// fresh here, so the two clocks differ by about that much.
+pub trait Skewed {
+    /// What the peer's clock read, when this refused a fresh invocation
+    /// as stale.
+    fn stale(&self) -> Option<u64>;
+}
+
+fn stale(refusal: &AuthorizeError) -> Option<u64> {
+    match refusal {
+        // An invocation that did say when it was issued: one that did not
+        // was refused for not saying, which no clock corrects.
+        AuthorizeError::Stale {
+            issued_at: Some(_),
+            at,
+        } => Some(*at),
+        _ => None,
+    }
+}
+
+impl Skewed for MemoryError {
+    fn stale(&self) -> Option<u64> {
+        match self {
+            MemoryError::Authorization(refusal) => stale(refusal),
+            _ => None,
+        }
+    }
+}
+
+impl Skewed for ArchiveError {
+    fn stale(&self) -> Option<u64> {
+        match self {
+            ArchiveError::Authorization(refusal) => stale(refusal),
+            _ => None,
+        }
+    }
+}
+
+impl Skewed for BlobError {
+    fn stale(&self) -> Option<u64> {
+        match self {
+            BlobError::Authorization(refusal) => stale(refusal),
+            _ => None,
+        }
     }
 }
 

@@ -24,7 +24,7 @@ use std::time::Duration;
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Did, Policy, Provider, Subject};
 use dialog_common::time::{self, UNIX_EPOCH};
-use dialog_common::{Blake3Hash, Buffer, Checksum, ConditionalSync};
+use dialog_common::{Blake3Hash, Buffer, Checksum, ConditionalSend, ConditionalSync};
 use dialog_did_web::{CachingResolver, Resolve, WebResolver};
 use dialog_effects::MethodExt as _;
 use dialog_effects::Rejection;
@@ -79,8 +79,29 @@ pub enum Issuance {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Presented: ConditionalSync {
     /// Remember `invocation`, its content identifier, until `until` (Unix
-    /// seconds), answering `false` when it is remembered already.
-    async fn record(&self, invocation: &str, until: u64) -> bool;
+    /// seconds), answering `false` when it is remembered already. `now` is
+    /// what the service's clock reads, by which what was remembered until
+    /// before now may be forgotten.
+    async fn record(&self, invocation: &str, until: u64, now: u64) -> bool;
+}
+
+/// What a service's clock reads, in Unix seconds: the time it judges how
+/// long ago an invocation was issued by, and checks a running watch's
+/// authority as of.
+///
+/// The system clock by default ([`Access::with_clock`] to change it).
+pub trait Clock: ConditionalSend + ConditionalSync {
+    /// What the clock reads now, in Unix seconds.
+    fn now(&self) -> u64;
+}
+
+impl<F> Clock for F
+where
+    F: Fn() -> u64 + ConditionalSend + ConditionalSync,
+{
+    fn now(&self) -> u64 {
+        self()
+    }
 }
 
 /// Presented invocations remembered in the memory of one process: what
@@ -93,8 +114,7 @@ pub struct RecentInvocations(Mutex<HashMap<String, u64>>);
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Presented for RecentInvocations {
-    async fn record(&self, invocation: &str, until: u64) -> bool {
-        let now = now_s();
+    async fn record(&self, invocation: &str, until: u64, now: u64) -> bool {
         let mut presented = self
             .0
             .lock()
@@ -115,6 +135,7 @@ pub struct Access<P, Resolver = CachingResolver<WebResolver>, Revocations = Unve
     revocations: Arc<Revocations>,
     freshness: Duration,
     presented: Arc<dyn Presented>,
+    clock: Arc<dyn Clock>,
 }
 
 impl<P: std::fmt::Debug, Resolver, Revocations> std::fmt::Debug
@@ -152,6 +173,7 @@ impl<P, Resolver> Access<P, Resolver> {
             revocations: Arc::new(UnverifiedRevocations),
             freshness: FRESHNESS,
             presented: Arc::new(RecentInvocations::default()),
+            clock: Arc::new(now_s),
         }
     }
 }
@@ -166,7 +188,23 @@ impl<P, Resolver, Revocations> Access<P, Resolver, Revocations> {
             revocations: Arc::new(revocations),
             freshness: self.freshness,
             presented: self.presented,
+            clock: self.clock,
         }
+    }
+
+    /// The same service, judging time by `clock` rather than the system
+    /// clock: an embedder whose platform keeps time its own way, or a test
+    /// of a service whose clock differs from its clients'.
+    pub fn with_clock(mut self, clock: impl Clock + 'static) -> Self {
+        self.clock = Arc::new(clock);
+        self
+    }
+
+    /// What the service's clock reads, in Unix seconds: the time to hand
+    /// [`Access::recheck`], and a session's deliveries, so a watch's
+    /// authority is checked by the clock it was accepted by.
+    pub fn now(&self) -> u64 {
+        self.clock.now()
     }
 
     /// The same service, accepting an invocation for `freshness` after it
@@ -552,7 +590,7 @@ where
     ) -> Result<Verified, Refusal> {
         let chain =
             verify_invocation(container, self.resolver.as_ref(), &*self.revocations).await?;
-        let at = now_s();
+        let at = self.clock.now();
         let window = self.freshness.as_secs();
         let issued_at = chain.invocation.issued_at().map(|issued| issued.to_unix());
         let fresh = match issued_at {
@@ -566,7 +604,7 @@ where
         }
         let invocation = chain.invocation.to_cid().to_string();
         let until = issued_at.unwrap_or(at).saturating_add(window);
-        if !self.presented.record(&invocation, until).await {
+        if !self.presented.record(&invocation, until, at).await {
             return Err(AuthorizeError::Replayed { invocation }.into());
         }
         Ok(Verified { chain })
@@ -632,7 +670,7 @@ where
             space,
             cell,
             container: bytes,
-            checked: now_s(),
+            checked: self.clock.now(),
         };
         Ok((subscription, state))
     }
