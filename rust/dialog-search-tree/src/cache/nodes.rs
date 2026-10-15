@@ -509,7 +509,7 @@ mod tests {
     /// A leaf holding one entry whose value is `size` bytes of `fill`, so
     /// the node is a little over `size` bytes and distinct per `fill`.
     fn node(fill: u8, size: usize) -> Result<Node> {
-        let entries = vec![Entry::new([fill; 4], vec![fill; size])];
+        let entries = vec![Entry::new([fill; 4], vec![fill; size]).into()];
         Ok(
             TransientNode::Segment(TransientSegment::new(entries, Vec::new())).persist(
                 &mut Delta::zero(),

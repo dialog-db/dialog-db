@@ -14,6 +14,21 @@ says how to cut a release.
 
 ## Unreleased
 
+### An entry a read yields is its key and value, and the hash of its key is kept by the segment it is edited in
+
+[#600](https://github.com/dialog-db/dialog-db/pull/600)
+
+[#569](https://github.com/dialog-db/dialog-db/pull/569) gave every `Entry` the cell the blake3 of its key is kept in. Only the boundary rules read that hash, on the edit path, but every entry a scan yields carried the cell too: about 48 bytes more per entry, enough that moving an entry through the scan's stream adaptors became a `memcpy` call. The cell now lives in a `SegmentEntry`, the entry as a `TransientSegment` holds it, and `Entry` is a key and a value again. A stored leaf still keeps its keys' hashes for every opening of it, a node sealed from ranked entries still opens with their hashes, and an edit's key hashed before it lands still brings its hash into the leaf. Trees are shaped byte for byte as before.
+
+What this changes for you:
+
+- `TransientSegment::entries`, `entries_mut`, `into_entries`, `into_parts` and `take_entries` hold `SegmentEntry`s. A `SegmentEntry` derefs to its `Entry`, `into_entry` takes the entry out, and `set_value` replaces the value and keeps the key's hash. `TransientSegment::new` takes `SegmentEntry`s, built `From<Entry>`; `upsert` takes either.
+- `Entry::hashed` is gone: `SegmentEntry::hashed` and `SegmentEntry::key_hash` read the kept hash. `Entry::key_hash` computes the hash each time it is called, as in 0.3.0.
+- `PersistentSegment::from_entries` and `PersistentNodeBody::segment_from_entries` take `Entry`s or `SegmentEntry`s.
+- An `Entry` can be built with a struct literal again.
+
+Why: a scan moves every entry in its range and never asks for a hash; the edit path asks for few. Measured on a cold reopen against 0.3.0 the cell cost `number-range-mixed` 6.0% more instructions and `number-range-wide` 3.4%.
+
 ### A revoked delegation's match is boxed in `Invalid::Revoked`
 
 [#599](https://github.com/dialog-db/dialog-db/pull/599)
@@ -199,7 +214,7 @@ The boundary rules decide from the blake3 of a key or a separator, and
 ask again on every regroup. Two thread-local memos answered them: every
 thread that committed filled its own and kept it for the thread's life,
 with no way to see, bound or release it. A full one held about 46 MiB at
-257-byte keys, per thread. Now an entry keeps the hash of its key, a
+257-byte keys, per thread. Now an entry in a segment keeps the hash of its key, a
 separator its own, and a stored node the hashes of its keys and its
 piece summary, each computed on first ask and dropped with its owner. A
 node a persist seals is kept in the tree's node cache. Trees are shaped
@@ -207,9 +222,8 @@ byte for byte as before; nothing stored changes.
 
 What this changes for you:
 
-- An `Entry` is built with `Entry::new(key, value)`. It keeps its key's
-  hash, so replace an entry whose key changes rather than assigning the
-  key in place.
+- The entries a `TransientSegment` holds keep their key's hash, so
+  replace one whose key changes rather than assigning the key in place.
 - `Link::separator` is a `Separator`, which derefs to `[u8]` and is
   built `From<Vec<u8>>`. `Link` no longer derives its rkyv form.
 - `Distribution::rank`, `seam_rank` and `leaf_cut` take a `Hashed<'_>`:
