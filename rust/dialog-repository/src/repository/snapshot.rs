@@ -652,7 +652,7 @@ impl SnapshotExport {
             // With an upstream a read-miss falls through to the remote and
             // is cached; without one the index is exactly what this store
             // holds.
-            let index = NetworkedIndex::new(env, catalog, upstream);
+            let index = NetworkedIndex::erased(env, catalog, upstream);
             let storage = index.clone();
             let tree = Index::from_hash(root);
 

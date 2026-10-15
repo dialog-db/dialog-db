@@ -27,6 +27,118 @@ What this changes for you:
 
 Why: with a `cdylib` target, cargo waits for every upstream crate's full object code before starting a crate, rather than starting on its metadata. A crate type nobody consumed serialized the slowest part of every build that reaches the peer.
 
+### A certificate a remote refuses as revoked is retracted only on a signed revocation that verifies
+
+[#602](https://github.com/dialog-db/dialog-db/pull/602)
+
+A refusal of a revoked certificate now carries the signed revocation,
+and a peer retracts the certificate only once that revocation verifies.
+Before, a peer retracted whatever certificate a remote named as revoked,
+so a remote could make a holder discard grants that still stand just by
+naming them. A revocation checker now returns the revocation document
+with its match (`RevocationMatch::proof`, a UCAN container's DAG-CBOR
+bytes). The UCAN access service hands it to the holder in
+`AuthorizeError::Revoked`'s new `revocation` field, in the container's
+base64url tagged form. The peer decodes it and checks four things
+before it retracts. The document is a `/ucan/revoke` of the very
+certificate named. Its issuer stands above that certificate in a chain
+the peer retains. Its signature and proofs verify. Its evidence shows
+the issuer could withdraw what it names. A refusal with no revocation,
+or with one that fails any check, retracts nothing and is reported as it
+came.
+
+What this changes for you:
+
+- `RevocationMatch` has a new field, `proof: Option<Vec<u8>>`. A
+  checker that builds one needs `proof: None`, or the document when it
+  keeps one.
+- `ContainerError::Revoked` is now `{ cid, found: Box<RevocationMatch> }`.
+  The revoker that was its `revoker` field is `found.principal`.
+- `AuthorizeError::Revoked` has a new field, `revocation:
+  Option<String>`. A pattern that spells out its fields needs `..` or
+  the field; a constructor needs `revocation: None`.
+- A fork refused as revoked by a responder that sends no revocation
+  (any responder before this release, and a revocation index that does
+  not keep documents) retracts nothing and fails with the refusal, where
+  it used to retract the named certificate and retry.
+- A revocation the peer accepts must be signed by a `did:key`
+  principal, the way the proof walk checks the certificates it admits.
+- The UCAN test service (`dialog-remote-ucan-s3`'s `helpers`) takes
+  `POST /revocations` with a signed revocation container in the body and
+  returns it with each refusal. `POST /revocations/<cid>` still refuses
+  the certificate, with no document, as an older service would.
+  `REVOCATIONS_PATH` moves from the native-only server module to
+  `helpers` itself, so a client test can name it on wasm.
+
+Why: a refusal naming a certificate is a claim, and a holder that acts
+on it discards authority it may still have. The signed revocation is the
+evidence the claim rests on, and only the holder can tell whether its
+issuer was entitled to withdraw that link, since only the holder knows
+the chains it retains. A lenient fallback that retracted when no
+revocation came would let a remote omit it and be believed anyway.
+
+### A certificate a remote refuses as revoked is retracted, and the request is proved again through another grant
+
+[#598](https://github.com/dialog-db/dialog-db/pull/598)
+
+A peer that retains two grants for the same claim, one revoked and one
+fresh, presented whichever the proof walk admitted first, and the walk
+admits candidates in content hash order: half the time it presented the
+revoked one, and the remote refused a request the peer had every right
+to make. A device linked to an account again, after the account revoked
+its earlier grant, holds exactly that pair until the revocation reaches
+it, which is how this surfaced as a flaky sync.
+
+The refusal now names the certificate. `AuthorizeError::Revoked` carries
+`certificate`, the CID text of the revoked link, when the responder
+knows which it was (the UCAN access service does). A `Peer` performing
+a fork that comes back `Revoked` with a certificate retracts that
+certificate where it retains grants, as one commit on the branch it
+proves from, and authorizes the fork again; the walk no longer sees the
+revoked link and admits the other grant. The loop ends when the request
+goes through, when the named certificate is not retained here (the
+original refusal is reported, since it names the authority that was
+withdrawn), or when the remote names one already retracted.
+`Delegations::retained(cid)` finds a retained certificate by the CID a
+refusal names, and the new `AuthorizationFailure` trait, implemented by
+every effect error that wraps an `AuthorizeError`, is how a caller reads
+the refusal back out of an effect's error without matching each enum.
+
+What this changes for you:
+
+- `AuthorizeError::Revoked` has a new field, `certificate:
+  Option<String>`. A pattern that spells out its fields needs `..` or
+  the field; a constructor needs `certificate: None`.
+- A fork refused as revoked retracts the named certificate from the
+  peer's access branch and is retried once per named certificate,
+  through the peer's remaining grants. A caller that retried on
+  `Revoked` itself can stop; a caller that counted requests to the
+  access service sees one more per revoked link in a presented chain;
+  a caller that lists the grants a principal holds no longer sees a
+  grant a remote refused as revoked.
+- The retraction takes the remote at its word. Only a certificate the
+  peer retains can be named to any effect, and a certificate retracted
+  this way comes back if a later sync re-retains it, to be retracted
+  again on the next refusal.
+- `Delegations::retained(cid)` on a branch reads back the retained
+  certificate with that CID, or `None`.
+- `AuthorizationFailure::authorization_failure(&self) ->
+  Option<&AuthorizeError>` on `ArchiveError`, `BlobError`, `MemoryError`,
+  `BranchError`, `PeerError`, `ForkError`, `DialogStorageError`,
+  `DialogArtifactsError`, `ResolveError`, `PublishError`,
+  `RetractError`, `S3Error` and `AuthorizeError` itself.
+- The UCAN test service (`dialog-remote-ucan-s3`'s `helpers`) accepts
+  `POST /revocations/<cid>` and refuses that certificate from then on.
+
+Why: the retaining replica is the one that learns of a revocation, and
+until it does the revoked grant is a valid candidate on every other
+replica. The remote is the first to know; it says which link it refused,
+and the peer that asked is in the best position to drop that grant and
+try the others rather than report a refusal that a different grant would
+have avoided. Retracting rather than remembering the refusal in memory
+makes the answer outlive the process and reach the replicas the branch
+syncs to, through the one mechanism a grant already leaves a replica by.
+
 ### An entry a read yields is its key and value, and the hash of its key is kept by the segment it is edited in
 
 [#600](https://github.com/dialog-db/dialog-db/pull/600)
@@ -249,6 +361,24 @@ What this changes for you:
 
 Why: a memo with no owner cannot be bounded or released, and one per
 thread multiplies whatever it holds by the size of the thread pool.
+
+### Compatibility and migration
+
+- Nothing new is stored. A certificate a remote refuses as revoked is
+  retracted with the ordinary delegation retract, the same facts and
+  blob tombstone a `Delegations::retract` by hand writes, so an older
+  release reads the branch as before. The `certificate` field is
+  additive on the wire: an older access service answers `Revoked`
+  without it, and a peer on this release reports that refusal as
+  before, without retracting or retrying. An older peer reading this
+  release's answer ignores the field.
+- Nothing stored changes for a refusal's revocation either. The
+  `revocation` field is additive on the wire: an older access service
+  answers `Revoked` without it, and a peer on this release reads that
+  refusal and retracts nothing. An older peer reading this release's
+  answer ignores the field and retracts the named certificate on the
+  service's word, as it did before.
+
 
 ## 0.3.0 (2026-10-13)
 

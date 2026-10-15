@@ -303,7 +303,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // when the upstream is remote, falls back to the remote
         // archive for blocks that haven't been replicated. With
         // `remote: None` it degrades to a plain local index.
-        let store = NetworkedIndex::new(env, branch.archive().index(), remote);
+        let store = NetworkedIndex::erased(env, branch.archive().index(), remote);
 
         // The three trees: last-sync base, the upstream revision we're
         // merging in, and the local tree the merge integrates onto — an
