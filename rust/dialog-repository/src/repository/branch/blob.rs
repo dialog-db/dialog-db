@@ -19,7 +19,9 @@
 //! # use dialog_capability::{Fork, Provider};
 //! # use dialog_effects::archive::{Get, Import, Put};
 //! # use dialog_effects::authority::{Attest, Identify};
-//! # use dialog_effects::blob::{//! #     BlobError, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite, //! #};
+//! # use dialog_effects::blob::{
+//! #     BlobError, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
+//! # };
 //! # use dialog_effects::memory::{Publish, Resolve};
 //! # use dialog_repository::{Blob, Branch, CommitError, RemoteSite};
 //! # async fn example<Env>(
@@ -40,7 +42,7 @@
 //! #         + Provider<BlobRead>
 //! #         + Provider<BlobWrite>
 //! #         + Provider<BlobImport>
-//! #         + Provider<crate::Hydrate>
+//! #         + Provider<dialog_repository::Hydrate>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + Provider<Fork<RemoteSite, BlobRead>>
 //! #         + dialog_common::ConditionalSync

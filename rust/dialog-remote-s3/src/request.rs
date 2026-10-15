@@ -21,6 +21,7 @@
 //! // Build a capability to get content from the "index" catalog
 //! let digest = Blake3Hash::hash(b"hello");
 //! let get = Subject::from(subject.clone())
+//!     .reader()
 //!     .archive()
 //!     .catalog("index")
 //!     .get(digest);
