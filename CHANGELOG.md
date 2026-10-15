@@ -99,6 +99,18 @@ What this changes for you:
 
 Why: a delivered head can arrive after a newer one was fetched or delivered. Recorded as it came, it would move the sync point back and make the next push fail or upload what the remote holds.
 
+### The storage rewrite carries blob-index keys over as they are
+
+[#605](https://github.com/dialog-db/dialog-db/pull/605), forward-ported from `release/0.3.x`
+
+The rewrite that moves every number into one band (`rekey`, run by `Branch::migrate`) parses each stored key as entity, attribute and value. A tree written before the blob index was retired can still hold blob-index keys, a tag and a hash with no value slot, and those did not parse, so the whole rewrite aborted. `rekey` now copies a blob-index key unchanged.
+
+What this changes for you:
+
+- A branch an 0.2.x release wrote with blob-index entries migrates instead of failing with `Could not convert bytes into key: a stored key does not parse`. For tonk, that was every pull of such an account's `main`.
+
+Why: 0.3.1 ships this fix from `release/0.3.x`; without it on `main`, the next release would bring the failure back.
+
 ### `dialog-network`, `dialog-repository` and `dialog-peer` are built as `rlib` only
 
 [#601](https://github.com/dialog-db/dialog-db/pull/601)
@@ -453,6 +465,10 @@ thread multiplies whatever it holds by the size of the thread pool.
 - Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
 - The socket carries text `ping` and `pong` messages beside its frames. A service's socket must answer `ping` with `pong`, or a client closes the connection every `Liveness::deadline`; no released service has a socket, so none predates this.
 - Nothing stored is rewritten.
+- Nothing new is stored by the rewrite fix: a blob-index entry keeps the
+  key and value it had, so the tree reads as the older release wrote it
+  apart from the numbers the rewrite moves. A branch whose migration
+  failed on such an entry wrote nothing, and migrates on upgrade.
 - Nothing new is stored. A certificate a remote refuses as revoked is
   retracted with the ordinary delegation retract, the same facts and
   blob tombstone a `Delegations::retract` by hand writes, so an older
