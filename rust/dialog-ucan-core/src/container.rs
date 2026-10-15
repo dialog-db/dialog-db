@@ -54,12 +54,18 @@ pub enum ContainerError {
     /// A delegation in the chain has been revoked by a principal entitled
     /// to revoke it. Kept distinct from a signature failure so the authorize
     /// boundary can say the authority was withdrawn rather than forged.
-    #[error("Delegation '{cid}' was revoked by '{revoker}'")]
+    #[error("Delegation '{cid}' was revoked by '{}'", found.principal)]
     Revoked {
         /// The revoked delegation.
         cid: Cid,
-        /// The principal that revoked it.
-        revoker: Did,
+        /// The revocation that matched: its address, the principal that
+        /// issued it, and the signed document when the checker keeps it
+        /// ([`RevocationMatch::proof`](crate::RevocationMatch::proof)), so
+        /// the authorize boundary can hand the holder the evidence.
+        ///
+        /// Boxed so a revocation does not widen every `Result` carrying
+        /// this error by the document and two CIDs.
+        found: Box<crate::RevocationMatch>,
     },
 
     /// The chain does not authorize the invocation: a link's audience,

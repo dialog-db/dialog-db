@@ -381,6 +381,7 @@ mod tests {
         let sent = AuthorizeError::Revoked {
             subject: did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
             certificate: None,
+            revocation: None,
         };
         let body = serde_json::to_vec(&sent).expect("serializes");
 
@@ -498,6 +499,7 @@ mod tests {
             let reason = AuthorizeError::Revoked {
                 subject: did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
                 certificate: None,
+                revocation: None,
             };
             let body = serde_json::to_string(&reason).expect("serializes");
             let response = format!(

@@ -17,6 +17,23 @@ mod server;
 #[cfg(all(not(target_arch = "wasm32"), feature = "helpers"))]
 pub use server::*;
 
+/// The path a test posts revocations to.
+///
+/// `POST /revocations` carries a signed revocation in its body, a UCAN
+/// container's DAG-CBOR bytes as
+/// [`RevocationChain::to_bytes`](dialog_ucan_core::RevocationChain::to_bytes)
+/// writes them, and the service refuses the certificate it names from
+/// then on, handing the document back with every refusal.
+///
+/// `POST /revocations/<cid>` refuses the certificate with that CID and
+/// keeps no document, the way a responder that predates
+/// [`RevocationMatch::proof`](dialog_ucan_core::RevocationMatch::proof) answers.
+///
+/// Shared with the client side, which posts from wasm as well as native,
+/// so it lives beside [`UcanS3Address`] rather than in the native-only
+/// server.
+pub const REVOCATIONS_PATH: &str = "/revocations";
+
 /// UCAN+S3 test server connection info.
 ///
 /// Combines a UCAN access service endpoint with the backing S3 server details.

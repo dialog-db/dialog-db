@@ -1110,6 +1110,7 @@ mod tests {
 
     mod ucan_fork_tests {
         use super::*;
+        use crate::peer::access::revocation::mint;
         use dialog_capability::Subject;
         use dialog_capability::access::Retain;
         use dialog_common::time::{self, UNIX_EPOCH};
@@ -1120,7 +1121,7 @@ mod tests {
         use dialog_effects::memory::prelude::*;
         use dialog_network::NetworkAddress as SiteAddress;
         use dialog_remote_ucan::{Exchange, UcanAddress};
-        use dialog_remote_ucan_s3::helpers::UcanS3Address;
+        use dialog_remote_ucan_s3::helpers::{REVOCATIONS_PATH, UcanS3Address};
         use dialog_ucan_core::time::timestamp::Timestamp;
         use ipld_core::cid::Cid;
 
@@ -1606,13 +1607,39 @@ mod tests {
             Ok(())
         }
 
-        /// Have the helper service treat `certificate` as revoked.
-        async fn revoke_at(s3: &UcanS3Address, certificate: Cid) -> anyhow::Result<()> {
+        /// Post `document`, a signed revocation, to the helper service,
+        /// which refuses the certificate it names from then on and hands
+        /// the document back with each refusal.
+        async fn revoke_at(s3: &UcanS3Address, document: Vec<u8>) -> anyhow::Result<()> {
+            post_revocation(s3, REVOCATIONS_PATH.to_string(), document).await
+        }
+
+        /// Have the helper service refuse `certificate` as revoked with no
+        /// document to show for it, as a service that predates the
+        /// revocation in the refusal does.
+        async fn revoke_without_document(
+            s3: &UcanS3Address,
+            certificate: Cid,
+        ) -> anyhow::Result<()> {
+            post_revocation(
+                s3,
+                format!("{}/{certificate}", REVOCATIONS_PATH),
+                Vec::new(),
+            )
+            .await
+        }
+
+        async fn post_revocation(
+            s3: &UcanS3Address,
+            path: String,
+            body: Vec<u8>,
+        ) -> anyhow::Result<()> {
             let response = dialog_remote_s3::http_client()
                 .post(format!(
-                    "{}/revocations/{certificate}",
+                    "{}{path}",
                     s3.access_service_url.trim_end_matches('/')
                 ))
+                .body(body)
                 .send()
                 .await?;
             anyhow::ensure!(
@@ -1625,13 +1652,13 @@ mod tests {
 
         /// Retain a grant of every use of `space` (`/use`, which the
         /// archive reads and writes below hang from) to `holder`, bounded
-        /// by `expiration` when given; the certificate's CID.
+        /// by `expiration` when given; the certificate.
         async fn retain_use_grant(
             operator: &impl dialog_capability::Provider<Retain<dialog_ucan::Ucan>>,
             holder: &dialog_capability::Did,
             space: &dialog_credentials::Ed25519Signer,
             expiration: Option<Timestamp>,
-        ) -> anyhow::Result<Cid> {
+        ) -> anyhow::Result<dialog_ucan_core::Delegation<dialog_varsig::AnySignature>> {
             use dialog_capability::access::Access;
             use dialog_ucan_core::subject::Subject as UcanSubject;
             use dialog_varsig::Principal as _;
@@ -1645,21 +1672,21 @@ mod tests {
                 builder = builder.expiration(expiration);
             }
             let delegation = builder.try_build().await?;
-            let certificate = delegation.to_cid();
             Subject::from(holder.clone())
                 .attenuate(Access)
                 .invoke(Retain::<dialog_ucan::Ucan>::new(
                     dialog_ucan::UcanDelegation::new(dialog_ucan_core::DelegationChain::new(
-                        delegation,
+                        delegation.clone(),
                     )),
                 ))
                 .perform(operator)
                 .await?;
-            Ok(certificate)
+            Ok(delegation)
         }
 
-        /// A certificate the service refuses as revoked is retracted and
-        /// the fork is proved again through another retained grant.
+        /// A certificate the service refuses as revoked, on a revocation
+        /// the space signed, is retracted and the fork is proved again
+        /// through another retained grant.
         ///
         /// The holder retained a fresh grant beside the one that was
         /// revoked (a device linked again holds the old and the new grant
@@ -1701,7 +1728,7 @@ mod tests {
                 Some(Timestamp::try_from((now + 3600) as i128)?),
             )
             .await?;
-            assert_ne!(open, bounded);
+            assert_ne!(open.to_cid(), bounded.to_cid());
 
             // Revoke the grant the walk presents, whichever the order put
             // first: the fork below would be refused without the retry.
@@ -1720,10 +1747,12 @@ mod tests {
                 .proofs()
                 .iter()
                 .find(|certificate| *certificate.0.issuer() == space.did())
-                .map(|certificate| certificate.0.to_cid())
+                .map(|certificate| certificate.0.clone())
                 .expect("the chain links the space to the profile");
-            assert!(picked == open || picked == bounded);
-            revoke_at(&s3, picked).await?;
+            let signer = dialog_credentials::Signer::from(space.clone());
+            revoke_at(&s3, mint::document(signer.clone(), &picked).await).await?;
+            let picked = picked.to_cid();
+            assert!(picked == open.to_cid() || picked == bounded.to_cid());
 
             let content = b"stored through the grant that still stands".to_vec();
             let digest = Blake3Hash::hash(&content);
@@ -1758,8 +1787,12 @@ mod tests {
             // With the other grant revoked too, the refusal is reported as
             // the revocation it is, not as a missing proof, and the write
             // did not happen.
-            let other = if picked == open { bounded } else { open };
-            revoke_at(&s3, other).await?;
+            let other = if picked == open.to_cid() {
+                bounded
+            } else {
+                open
+            };
+            revoke_at(&s3, mint::document(signer, &other).await).await?;
             let content = b"refused outright".to_vec();
             let digest = Blake3Hash::hash(&content);
             let refused = Subject::from(space.did())
@@ -1775,6 +1808,7 @@ mod tests {
                     refused,
                     Err(ArchiveError::Authorization(AuthorizeError::Revoked {
                         certificate: Some(_),
+                        revocation: Some(_),
                         ..
                     }))
                 ),
@@ -1799,6 +1833,104 @@ mod tests {
                 .perform(&operator)
                 .await?;
             assert_eq!(unwritten, None, "the refused write stored nothing");
+            Ok(())
+        }
+
+        /// A refusal whose revocation the peer cannot verify retracts
+        /// nothing: the service refuses the only grant with no revocation
+        /// to show (a service that predates the field), then with one a
+        /// stranger signed, then with one claiming the space but signed by
+        /// the stranger. Each time the fork fails with the refusal as it
+        /// came and the grant is still held, so the remote's word alone
+        /// does not make the peer give it up.
+        #[dialog_common::test]
+        async fn fork_retracts_nothing_on_a_revocation_it_cannot_verify(
+            s3: UcanS3Address,
+        ) -> anyhow::Result<()> {
+            use dialog_capability::access::AuthorizeError;
+            use dialog_effects::archive::ArchiveError;
+            use dialog_varsig::Principal as _;
+
+            let storage = test_storage().await;
+            let profile = open_peer(
+                storage.clone(),
+                Location::profile(unique_name("ucan-unverified-revocation")),
+            )
+            .await?;
+            let operator = profile
+                .session(b"test")
+                .space(profile.state())
+                .allow(Subject::any())
+                .await?;
+            let address = ucan_address(&s3);
+
+            let space = dialog_credentials::Ed25519Signer::generate().await?;
+            let stranger = dialog_credentials::Signer::from(
+                dialog_credentials::Ed25519Signer::generate().await?,
+            );
+            let grant = retain_use_grant(&operator, &profile.did(), &space, None).await?;
+            let certificate = grant.to_cid();
+
+            let cases: [(&str, Option<Vec<u8>>); 3] = [
+                ("with no revocation", None),
+                (
+                    "on a revocation a stranger signed",
+                    Some(mint::document(stranger.clone(), &grant).await),
+                ),
+                (
+                    "on a revocation claiming the space, signed by a stranger",
+                    Some(
+                        mint::document(
+                            mint::Impostor {
+                                claims: space.did(),
+                                signer: stranger.clone(),
+                            },
+                            &grant,
+                        )
+                        .await,
+                    ),
+                ),
+            ];
+            for (case, document) in cases {
+                let carried = document.is_some();
+                match document {
+                    Some(document) => revoke_at(&s3, document).await?,
+                    None => revoke_without_document(&s3, certificate).await?,
+                }
+
+                let content = format!("refused {case}").into_bytes();
+                let refused = Subject::from(space.did())
+                    .writer()
+                    .archive()
+                    .catalog("data")
+                    .put(Buffer::from(content))
+                    .fork(&address)
+                    .perform(&operator)
+                    .await;
+                assert!(
+                    matches!(
+                        &refused,
+                        Err(ArchiveError::Authorization(AuthorizeError::Revoked {
+                            certificate: Some(named),
+                            revocation,
+                            ..
+                        })) if *named == certificate.to_string()
+                            && revocation.is_some() == carried
+                    ),
+                    "refused {case}: the refusal is reported as it came, got {refused:?}"
+                );
+
+                let held = operator
+                    .issued_to(&profile.did())
+                    .await?
+                    .iter()
+                    .map(|grant| grant.chain().proof_cids()[0])
+                    .collect::<Vec<_>>();
+                assert!(
+                    held.contains(&certificate),
+                    "refused {case}: the grant is still held"
+                );
+            }
             Ok(())
         }
     }
