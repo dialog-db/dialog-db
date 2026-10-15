@@ -333,6 +333,7 @@ where
                     return Err(PublishError::VersionMismatch {
                         expected: base_version,
                         actual,
+                        current: None,
                     }
                     .into());
                 }

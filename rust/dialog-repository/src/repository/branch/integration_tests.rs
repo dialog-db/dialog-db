@@ -2370,6 +2370,7 @@ where
     ) -> Result<BlobWriter, BlobError> {
         Err(BlobError::Rejected(Rejection::Unavailable {
             reason: "rigged abort: this push dies at its first remote blob import".into(),
+            retry_after: None,
         }))
     }
 }

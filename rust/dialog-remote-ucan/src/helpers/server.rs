@@ -546,7 +546,10 @@ fn respond(status: StatusCode) -> hyper::http::response::Builder {
             "Access-Control-Allow-Headers",
             "Authorization, Content-Type, Accept",
         )
-        .header("Access-Control-Expose-Headers", "Content-Type, ETag")
+        .header(
+            "Access-Control-Expose-Headers",
+            "Content-Type, ETag, Retry-After",
+        )
         .header("Cache-Control", "no-store")
 }
 
@@ -636,6 +639,9 @@ async fn handle(
         .header("Content-Type", response.content_type);
     if let Some(version) = &response.version {
         builder = builder.header("ETag", format!("\"{version}\""));
+    }
+    if let Some(seconds) = response.retry_after {
+        builder = builder.header("Retry-After", seconds.to_string());
     }
     let content = match response.body {
         Content::Bytes(bytes) => body(bytes),

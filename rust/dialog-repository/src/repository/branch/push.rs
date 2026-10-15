@@ -23,8 +23,8 @@ use crate::repository::archive::local::read_all;
 use crate::repository::archive::networked::fill_import;
 use crate::repository::remote::Step;
 use crate::{
-    Branch, ConnectedReplica, Index, LocalIndex, PublishError, PushError, RemoteSite,
-    RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
+    Branch, ConnectedReplica, Index, LocalIndex, PublishError, PublishRemoteBranchError, PushError,
+    RemoteEdition, RemoteSite, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
 };
 use futures_util::future::join_all;
 
@@ -69,10 +69,12 @@ impl<'a> Push<'a> {
     /// - The novelty upload ships before the rejection. Those blocks are
     ///   content-addressed, so the target absorbs them idempotently and
     ///   nothing is corrupted, but the bandwidth is spent.
-    /// - The refusal arrives as
-    ///   [`PublishError::VersionMismatch`](crate::PublishError) rather
-    ///   than [`PushError::NonFastForward`]. A caller that reports
-    ///   conflicts must recognize both.
+    /// - The refusal arrives from the head write. A remote that says
+    ///   where it is (an access service does) gives
+    ///   [`PushError::NonFastForward`] naming its head, which is recorded
+    ///   for the pull that rebases onto it. One that does not gives
+    ///   [`PublishError::VersionMismatch`](crate::PublishError), so a
+    ///   caller that reports conflicts must recognize both.
     pub fn assuming_upstream(mut self) -> Self {
         self.confirm_upstream = false;
         self
@@ -517,7 +519,39 @@ where
                         pending = rest;
                     }
 
-                    upstream.publish(revision.clone()).perform(env).await?;
+                    match upstream.publish(revision.clone()).perform(env).await {
+                        Ok(_) => {}
+                        // The remote moved since it was read, and said
+                        // where it is: that head is recorded, verified as
+                        // a fetched one is, so the pull that rebases onto
+                        // it asks the remote for nothing more.
+                        Err(PublishRemoteBranchError::Publish(PublishError::VersionMismatch {
+                            current: Some(current),
+                            ..
+                        })) => {
+                            let actual = match current {
+                                Some(edition) => {
+                                    let head = upstream.upstream().decode(&edition.content).await?;
+                                    let tree = head.tree.clone();
+                                    upstream
+                                        .observe(RemoteEdition {
+                                            content: head,
+                                            version: edition.version,
+                                        })
+                                        .perform(env)
+                                        .await?;
+                                    Some(tree)
+                                }
+                                None => None,
+                            };
+                            return Err(PushError::NonFastForward {
+                                branch: branch.name().to_string(),
+                                expected: base,
+                                actual,
+                            });
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
             }
         }

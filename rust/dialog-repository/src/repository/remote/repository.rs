@@ -363,6 +363,7 @@ mod tests {
                     Err(MemoryError::VersionMismatch {
                         expected: None,
                         actual: None,
+                        current: None,
                     })
                 }
             })
@@ -424,6 +425,7 @@ mod tests {
                     if first {
                         Err(PublishError::Rejected(Rejection::Unavailable {
                             reason: "connection refused".into(),
+                            retry_after: None,
                         }))
                     } else {
                         Ok(())

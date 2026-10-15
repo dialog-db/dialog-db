@@ -750,4 +750,52 @@ mod tests {
         }
         Ok(())
     }
+
+    /// A push onto a remote that moved since this replica last read it,
+    /// made without asking the remote first, is refused as not a
+    /// fast-forward that names the head the remote holds, as the remote's
+    /// conflict said. That head is recorded, verified, so the pull that
+    /// rebases onto it asks the remote for nothing, and the push after it
+    /// lands.
+    #[dialog_common::test]
+    async fn it_learns_where_the_remote_is_from_a_conflicting_push(
+        service: UcanServiceAddress,
+    ) -> Result<()> {
+        let site = SiteAddress::Ucan(UcanAddress::new(&service.endpoint));
+        rig!(operator, profile, site.clone(), writer, _mirror);
+        commit(&writer, "base", &operator).await?;
+        writer.push().perform(&operator).await?;
+
+        // Another replica of the space, which last read the remote here.
+        let replica = profile
+            .space(unique_name("conflicting"))
+            .open()
+            .perform(&operator)
+            .await?;
+        let origin = connect("origin", site, writer.subject().did().clone(), &operator).await?;
+        let theirs = replica.branch("main").open().perform(&operator).await?;
+        theirs
+            .set_upstream(origin.branch("main").open().perform(&operator).await?)
+            .perform(&operator)
+            .await?;
+        theirs.pull().perform(&operator).await?;
+
+        let ahead = commit(&writer, "ahead", &operator).await?;
+        writer.push().perform(&operator).await?;
+
+        commit(&theirs, "theirs", &operator).await?;
+        let refused = theirs.push().assuming_upstream().perform(&operator).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(crate::PushError::NonFastForward { actual: Some(tree), .. })
+                    if *tree == ahead.tree
+            ),
+            "the refusal names the remote's head: {refused:?}"
+        );
+
+        theirs.pull().assuming_upstream().perform(&operator).await?;
+        theirs.push().perform(&operator).await?;
+        Ok(())
+    }
 }
