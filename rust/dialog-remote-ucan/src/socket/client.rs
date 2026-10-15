@@ -647,6 +647,8 @@ mod tests {
     /// Accept `stream` as a WebSocket that speaks the subprotocol a client
     /// asks for, as the service does.
     #[cfg(not(target_arch = "wasm32"))]
+    // The handshake callback's error type is tungstenite's, not ours.
+    #[allow(clippy::result_large_err)]
     async fn accept(
         stream: tokio::net::TcpStream,
     ) -> Option<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>> {
@@ -816,7 +818,10 @@ mod tests {
     /// forgets the mapping. Answers the socket's URL.
     #[cfg(not(target_arch = "wasm32"))]
     async fn silent_after(
-        answer: impl Fn() -> Option<crate::socket::Reply> + Send + Sync + 'static,
+        answer: impl Fn() -> Option<crate::socket::Reply>
+        + dialog_common::ConditionalSend
+        + dialog_common::ConditionalSync
+        + 'static,
     ) -> anyhow::Result<String> {
         use futures_util::{SinkExt as _, StreamExt as _};
         use tokio_tungstenite::tungstenite::Message;

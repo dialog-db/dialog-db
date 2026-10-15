@@ -511,7 +511,13 @@ mod tests {
     use dialog_peer::helpers::{test_session_with_peer, unique_name};
     use dialog_remote_ucan::UcanAddress;
     use dialog_remote_ucan::helpers::UcanServiceAddress;
+    // Only what a test's attribute names, which provisions the service
+    // natively: the browser half of a test never sees it.
+    #[cfg(not(target_arch = "wasm32"))]
+    use dialog_remote_ucan::helpers::Fault;
     use futures_util::{Stream, StreamExt as _, pin_mut, stream};
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::Duration;
     use tokio::sync::mpsc::unbounded_channel;
 
     async fn commit<Env: ResolveEnv>(branch: &Branch, name: &str, env: &Env) -> Result<Revision> {
@@ -640,8 +646,8 @@ mod tests {
     /// watch is begun again on its own, and a head pushed while it was
     /// down is pulled.
     #[dialog_common::test(
-        fault = dialog_remote_ucan::helpers::Fault::Cut {
-            after: std::time::Duration::from_millis(300),
+        fault = Fault::Cut {
+            after: Duration::from_millis(300),
             times: 1,
         }
     )]
@@ -685,7 +691,7 @@ mod tests {
     /// with its connection is found to have landed by the next push, which
     /// then has nothing to send, and a branch pulling from the upstream
     /// takes the head.
-    #[dialog_common::test(fault = dialog_remote_ucan::helpers::Fault::LosePublish { times: 1 })]
+    #[dialog_common::test(fault = Fault::LosePublish { times: 1 })]
     async fn it_heals_a_push_whose_answer_was_lost(service: UcanServiceAddress) -> Result<()> {
         let site =
             SiteAddress::Ucan(UcanAddress::new(&service.endpoint).with_socket(&service.socket));
