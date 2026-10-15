@@ -35,7 +35,7 @@
 use crate::Rejection;
 use crate::method;
 use crate::{Method, Void};
-use dialog_capability::access::AuthorizeError;
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_capability::identity::{Entity, Revision};
 use dialog_capability::{Attenuate, Attenuation, Constraint, Effect, Policy};
 use serde::{Deserialize, Serialize};
@@ -321,6 +321,15 @@ pub enum BranchError {
     /// The request was not authorized.
     #[error(transparent)]
     Authorization(#[from] AuthorizeError),
+}
+
+impl AuthorizationFailure for BranchError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

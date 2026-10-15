@@ -1,6 +1,6 @@
 //! Error types for S3 operations.
 
-use dialog_capability::access::AuthorizeError;
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::blob::BlobError;
@@ -38,6 +38,15 @@ pub enum S3Error {
     /// Error during serialization or deserialization of data.
     #[error("Serialization error: {0}")]
     Serialization(String),
+}
+
+impl AuthorizationFailure for S3Error {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 impl From<reqwest::Error> for S3Error {
@@ -172,6 +181,7 @@ mod tests {
             subject: dialog_capability::did!(
                 "did:key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"
             ),
+            certificate: None,
         }
     }
 

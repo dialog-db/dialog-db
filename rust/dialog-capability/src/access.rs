@@ -794,6 +794,14 @@ pub enum AuthorizeError {
     Revoked {
         /// The subject whose authority was withdrawn.
         subject: Did,
+        /// The revoked certificate, as the text of its CID, when the
+        /// responder knows which link of the presented chain it was.
+        /// A holder that retains more than one chain for the subject
+        /// can then retract this one and prove through another; with
+        /// no certificate named it can only stop. Absent from a
+        /// responder that predates the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        certificate: Option<String>,
     },
 
     /// The chain authorizes the request and the responder declined it
@@ -884,6 +892,23 @@ impl From<crate::StorageError> for AuthorizeError {
     }
 }
 
+/// An error that may carry a responder's refusal.
+///
+/// Every effect's error type wraps [`AuthorizeError`] in some variant, so
+/// a caller that performs effects generically (a fork dispatcher) can read
+/// the reason a responder gave through this trait and act on it, where
+/// `From<AuthorizeError>` only lets it build one.
+pub trait AuthorizationFailure {
+    /// The refusal this error carries, if it is one.
+    fn authorization_failure(&self) -> Option<&AuthorizeError>;
+}
+
+impl AuthorizationFailure for AuthorizeError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        Some(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_arch = "wasm32")]
@@ -936,6 +961,7 @@ mod tests {
                 },
                 AuthorizeError::Revoked {
                     subject: subject.clone(),
+                    certificate: None,
                 },
                 AuthorizeError::InvalidSignature {
                     issuer: subject.clone(),
@@ -954,6 +980,7 @@ mod tests {
         async fn it_names_the_reason_in_the_payload() {
             let encoded = serde_json::to_string(&AuthorizeError::Revoked {
                 subject: did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
+                certificate: None,
             })
             .expect("serializes");
             assert!(
@@ -1022,6 +1049,7 @@ mod tests {
             };
             let withdrawn = AuthorizeError::Revoked {
                 subject: did!("key:zSubject"),
+                certificate: None,
             };
 
             assert!(matches!(lapsed, AuthorizeError::Expired { .. }));

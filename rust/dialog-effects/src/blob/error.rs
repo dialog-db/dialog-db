@@ -5,7 +5,7 @@ use std::error::Error;
 use thiserror::Error as ThisError;
 
 use crate::Rejection;
-use dialog_capability::access::AuthorizeError;
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_capability::{DialogCapabilityPerformError, StorageError};
 
 /// Errors that can occur during blob operations.
@@ -50,6 +50,15 @@ pub enum BlobError {
     /// The storage backend failed.
     #[error("Storage error: {0}")]
     Storage(String),
+}
+
+impl AuthorizationFailure for BlobError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 impl From<StorageError> for BlobError {

@@ -1,4 +1,4 @@
-use crate::access::AuthorizeError;
+use crate::access::{AuthorizationFailure, AuthorizeError};
 use crate::subject::Did;
 use std::error::Error as StdError;
 use std::fmt::{self, Debug, Display, Formatter};
@@ -37,6 +37,13 @@ pub enum ForkError {
     /// Authorization was denied.
     #[error(transparent)]
     Authorization(#[from] AuthorizeError),
+}
+
+impl AuthorizationFailure for ForkError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        let Self::Authorization(reason) = self;
+        Some(reason)
+    }
 }
 
 /// Error type for capability execution failures.

@@ -47,7 +47,9 @@ use dialog_effects::memory::{Publish, Resolve};
 use dialog_repository::{Branch, RemoteSite};
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Ucan, UcanCertificate, UcanDelegation, UcanProof};
+use dialog_ucan_core::DelegationChain;
 use dialog_ucan_core::subject::Subject as UcanSubject;
+use ipld_core::cid::Cid;
 use std::collections::HashMap;
 
 use dialog_artifacts::history::Version;
@@ -632,6 +634,49 @@ impl<S: PeerSpace, M: Mode> Peer<S, M> {
         .await
     }
 
+    /// Retract the retained certificate a remote refused as revoked, so
+    /// no later walk presents it: the next claim resolves through another
+    /// grant when one is retained. `Ok(true)` when it was retained here
+    /// and is now retracted; `Ok(false)` when this peer retains no such
+    /// certificate, which tells a caller that proving again cannot change
+    /// the answer.
+    ///
+    /// The retraction is a commit on the branch this peer proves from, so
+    /// it outlives this handle and reaches the replicas the branch syncs
+    /// to. The remote's word is taken for the revocation: a certificate
+    /// is retracted because a responder named it, and the bound on that
+    /// trust is that only a certificate retained here can be named to any
+    /// effect. The commit moves the branch head, which retires every
+    /// cached chain.
+    pub(crate) async fn retract_revoked(&self, certificate: Cid) -> Result<bool, AuthorizeError> {
+        let env = AccessEnv {
+            operator: self.clone(),
+        };
+        let branch = self.delegations();
+        branch
+            .refresh(&env)
+            .await
+            .map_err(|error| AuthorizeError::Unavailable {
+                detail: format!("failed to refresh the access branch: {error}"),
+            })?;
+        let Some(retained) =
+            Box::pin(branch.delegations().retained(certificate).perform(&env)).await?
+        else {
+            return Ok(false);
+        };
+        Box::pin(
+            branch
+                .delegations()
+                .retract(UcanDelegation::new(DelegationChain::new(retained.0)))
+                .perform(&env),
+        )
+        .await
+        .map_err(|error| AuthorizeError::Malformed {
+            detail: format!("failed to retract the revoked delegation: {error}"),
+        })?;
+        Ok(true)
+    }
+
     /// Stop proving from `delegation`: retract it where this peer retains
     /// delegations.
     pub(crate) async fn retract(&self, delegation: UcanDelegation) -> Result<(), AuthorizeError> {
@@ -1007,6 +1052,61 @@ mod tests {
             expiration: Some(now + 7200),
         };
         assert!(operator.resolve(widened).await.is_err());
+        Ok(())
+    }
+
+    /// A certificate a remote refused as revoked is retracted: the next
+    /// claim resolves through the other retained grant, the grant is no
+    /// longer among the ones the holder is issued, and retracting it again
+    /// finds nothing. With every grant retracted the claim is refused as
+    /// unproven.
+    #[dialog_common::test]
+    async fn it_retracts_the_grant_a_remote_revoked() -> Result<()> {
+        let (operator, _profile) = operator("revoked-beside-live").await;
+        let space = Ed25519Signer::generate().await?;
+        let holder = Ed25519Signer::generate().await?;
+        let live = Timestamp::try_from((now_s() + 3600) as i128).unwrap();
+        let open = retain_grant(&operator, &space, &holder, None).await;
+        let open = open.chain().proof_cids()[0];
+        let bounded = retain_grant(&operator, &space, &holder, Some(live)).await;
+        let bounded = bounded.chain().proof_cids()[0];
+        assert_ne!(open, bounded);
+
+        let link = |proof: UcanProof| proof.proofs()[0].0.to_cid();
+        let held = |grants: Vec<UcanDelegation>| {
+            grants
+                .iter()
+                .map(|grant| grant.chain().proof_cids()[0])
+                .collect::<Vec<_>>()
+        };
+        let first = link(operator.resolve(claim(&holder, &space)).await?);
+        assert!(first == open || first == bounded);
+        assert_eq!(operator.cached_chains(), 1, "the walk's chain is cached");
+
+        // The remote refuses the grant the walk picked.
+        assert!(
+            operator.retract_revoked(first).await?,
+            "retained, now retracted"
+        );
+        let second = link(operator.resolve(claim(&holder, &space)).await?);
+        assert_ne!(second, first, "the claim resolves through the other grant");
+        let grants = held(operator.issued_to(&holder.did()).await?);
+        assert!(
+            !grants.contains(&first),
+            "the revoked grant is no longer held"
+        );
+        assert!(grants.contains(&second), "the other grant still is");
+        assert!(
+            !operator.retract_revoked(first).await?,
+            "nothing left to retract"
+        );
+
+        assert!(operator.retract_revoked(second).await?);
+        let refused = operator.resolve(claim(&holder, &space)).await.err();
+        assert!(
+            matches!(refused, Some(AuthorizeError::UnprovenSubject { .. })),
+            "with every grant retracted nothing proves the claim, got {refused:?}"
+        );
         Ok(())
     }
 

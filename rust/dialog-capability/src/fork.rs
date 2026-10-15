@@ -50,6 +50,20 @@ where
     type Output = Fx::Output;
 }
 
+// Manual rather than derived so the bound falls on the capability (the
+// field) and not on `Fx` itself; `Site::Address` is `Clone` by the trait.
+impl<S: Site, Fx: Effect> Clone for Fork<S, Fx>
+where
+    Capability<Fx>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            capability: self.capability.clone(),
+            address: self.address.clone(),
+        }
+    }
+}
+
 impl<S: Site, Fx: Effect> Command for ForkInvocation<S, Fx>
 where
     Fx::Of: Constraint,

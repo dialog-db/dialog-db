@@ -1111,6 +1111,8 @@ mod tests {
     mod ucan_fork_tests {
         use super::*;
         use dialog_capability::Subject;
+        use dialog_capability::access::Retain;
+        use dialog_common::time::{self, UNIX_EPOCH};
         use dialog_common::{Blake3Hash, Buffer};
         use dialog_effects::MethodExt as _;
         use dialog_effects::UseExt as _;
@@ -1119,6 +1121,8 @@ mod tests {
         use dialog_network::NetworkAddress as SiteAddress;
         use dialog_remote_ucan::{Exchange, UcanAddress};
         use dialog_remote_ucan_s3::helpers::UcanS3Address;
+        use dialog_ucan_core::time::timestamp::Timestamp;
+        use ipld_core::cid::Cid;
 
         fn ucan_address(s3: &UcanS3Address) -> SiteAddress {
             SiteAddress::Ucan(UcanAddress::new(&s3.access_service_url))
@@ -1599,6 +1603,202 @@ mod tests {
             assert_eq!(performed, 0, "the service performed nothing");
             assert_eq!(redeemed, 2, "the put and the get were each redeemed once");
             assert_eq!(requests, 2, "one redeem each");
+            Ok(())
+        }
+
+        /// Have the helper service treat `certificate` as revoked.
+        async fn revoke_at(s3: &UcanS3Address, certificate: Cid) -> anyhow::Result<()> {
+            let response = dialog_remote_s3::http_client()
+                .post(format!(
+                    "{}/revocations/{certificate}",
+                    s3.access_service_url.trim_end_matches('/')
+                ))
+                .send()
+                .await?;
+            anyhow::ensure!(
+                response.status().is_success(),
+                "the service did not record the revocation: {}",
+                response.status()
+            );
+            Ok(())
+        }
+
+        /// Retain a grant of every use of `space` (`/use`, which the
+        /// archive reads and writes below hang from) to `holder`, bounded
+        /// by `expiration` when given; the certificate's CID.
+        async fn retain_use_grant(
+            operator: &impl dialog_capability::Provider<Retain<dialog_ucan::Ucan>>,
+            holder: &dialog_capability::Did,
+            space: &dialog_credentials::Ed25519Signer,
+            expiration: Option<Timestamp>,
+        ) -> anyhow::Result<Cid> {
+            use dialog_capability::access::Access;
+            use dialog_ucan_core::subject::Subject as UcanSubject;
+            use dialog_varsig::Principal as _;
+
+            let mut builder = dialog_ucan_core::DelegationBuilder::new()
+                .issuer(dialog_credentials::Signer::from(space.clone()))
+                .audience(holder)
+                .subject(UcanSubject::Specific(space.did()))
+                .command(vec!["use".to_string()]);
+            if let Some(expiration) = expiration {
+                builder = builder.expiration(expiration);
+            }
+            let delegation = builder.try_build().await?;
+            let certificate = delegation.to_cid();
+            Subject::from(holder.clone())
+                .attenuate(Access)
+                .invoke(Retain::<dialog_ucan::Ucan>::new(
+                    dialog_ucan::UcanDelegation::new(dialog_ucan_core::DelegationChain::new(
+                        delegation,
+                    )),
+                ))
+                .perform(operator)
+                .await?;
+            Ok(certificate)
+        }
+
+        /// A certificate the service refuses as revoked is retracted and
+        /// the fork is proved again through another retained grant.
+        ///
+        /// The holder retained a fresh grant beside the one that was
+        /// revoked (a device linked again holds the old and the new grant
+        /// until the revocation reaches it), and the walk admits whichever
+        /// content hash order puts first. The service names the one it
+        /// refused; the peer retracts it and the retry presents the other.
+        /// With every grant revoked the refusal stands, it is reported as
+        /// the revocation it is, and nothing is stored.
+        #[dialog_common::test]
+        async fn fork_proves_through_another_grant_when_the_service_revokes_one(
+            s3: UcanS3Address,
+        ) -> anyhow::Result<()> {
+            use dialog_capability::access::{AuthorizeError, Proof as _};
+            use dialog_effects::archive::ArchiveError;
+            use dialog_varsig::Principal as _;
+
+            let storage = test_storage().await;
+            let profile = open_peer(
+                storage.clone(),
+                Location::profile(unique_name("ucan-revoked")),
+            )
+            .await?;
+            let operator = profile
+                .session(b"test")
+                .space(profile.state())
+                .allow(Subject::any())
+                .await?;
+            let address = ucan_address(&s3);
+
+            // Two grants of the space's storage to the profile, distinct by
+            // their bounds (the builder mints no nonce).
+            let space = dialog_credentials::Ed25519Signer::generate().await?;
+            let now = time::now().duration_since(UNIX_EPOCH)?.as_secs();
+            let open = retain_use_grant(&operator, &profile.did(), &space, None).await?;
+            let bounded = retain_use_grant(
+                &operator,
+                &profile.did(),
+                &space,
+                Some(Timestamp::try_from((now + 3600) as i128)?),
+            )
+            .await?;
+            assert_ne!(open, bounded);
+
+            // Revoke the grant the walk presents, whichever the order put
+            // first: the fork below would be refused without the retry.
+            let presented = profile
+                .access()
+                .prove(
+                    Subject::from(space.did())
+                        .writer()
+                        .archive()
+                        .catalog("data"),
+                )
+                .audience(&operator)
+                .perform(&operator)
+                .await?;
+            let picked = presented
+                .proofs()
+                .iter()
+                .find(|certificate| *certificate.0.issuer() == space.did())
+                .map(|certificate| certificate.0.to_cid())
+                .expect("the chain links the space to the profile");
+            assert!(picked == open || picked == bounded);
+            revoke_at(&s3, picked).await?;
+
+            let content = b"stored through the grant that still stands".to_vec();
+            let digest = Blake3Hash::hash(&content);
+            Subject::from(space.did())
+                .writer()
+                .archive()
+                .catalog("data")
+                .put(Buffer::from(content.clone()))
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+            let retrieved = Subject::from(space.did())
+                .reader()
+                .archive()
+                .catalog("data")
+                .get(digest)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+            assert_eq!(retrieved, Some(content));
+            let held = operator
+                .issued_to(&profile.did())
+                .await?
+                .iter()
+                .map(|grant| grant.chain().proof_cids()[0])
+                .collect::<Vec<_>>();
+            assert!(
+                !held.contains(&picked),
+                "the revoked grant is retracted where the peer retains grants"
+            );
+
+            // With the other grant revoked too, the refusal is reported as
+            // the revocation it is, not as a missing proof, and the write
+            // did not happen.
+            let other = if picked == open { bounded } else { open };
+            revoke_at(&s3, other).await?;
+            let content = b"refused outright".to_vec();
+            let digest = Blake3Hash::hash(&content);
+            let refused = Subject::from(space.did())
+                .writer()
+                .archive()
+                .catalog("data")
+                .put(Buffer::from(content))
+                .fork(&address)
+                .perform(&operator)
+                .await;
+            assert!(
+                matches!(
+                    refused,
+                    Err(ArchiveError::Authorization(AuthorizeError::Revoked {
+                        certificate: Some(_),
+                        ..
+                    }))
+                ),
+                "every grant revoked is reported as a revocation, got {refused:?}"
+            );
+
+            // A grant retained after the refusals proves the claim again,
+            // and finds nothing stored by the refused write.
+            retain_use_grant(
+                &operator,
+                &profile.did(),
+                &space,
+                Some(Timestamp::try_from((now + 7200) as i128)?),
+            )
+            .await?;
+            let unwritten = Subject::from(space.did())
+                .reader()
+                .archive()
+                .catalog("data")
+                .get(digest)
+                .fork(&address)
+                .perform(&operator)
+                .await?;
+            assert_eq!(unwritten, None, "the refused write stored nothing");
             Ok(())
         }
     }
