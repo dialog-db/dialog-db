@@ -127,10 +127,7 @@ impl<S: Signature> InvocationChain<S> {
                         ContainerError::Invocation(format!("proof not found: {get_err}"))
                     }
                     Invalid::Chain(check_err) => check_failed_to_container_error(check_err),
-                    Invalid::Revoked { cid, found } => ContainerError::Revoked {
-                        cid,
-                        found: Box::new(found),
-                    },
+                    Invalid::Revoked { cid, found } => ContainerError::Revoked { cid, found },
                 },
                 // Our own setup being unable to check says nothing about
                 // their request, so it must not read as a denial.
