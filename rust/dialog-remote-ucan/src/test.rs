@@ -849,7 +849,9 @@ async fn it_refuses_a_watch_where_the_service_names_no_socket(
 ///
 /// Native only, for the service it stands up; the browser's link answers
 /// a socket that closes in flight the same way, through the same
-/// `exchange`.
+/// `exchange`, which
+/// `it_answers_a_read_over_a_silent_connection_as_unavailable` pins on
+/// both targets.
 #[cfg(not(target_arch = "wasm32"))]
 // The handshake callback's error type is tungstenite's, not ours.
 #[allow(clippy::result_large_err)]
@@ -1332,6 +1334,9 @@ mod layer {
             Ok(revoked.then(|| RevocationMatch {
                 revocation: selector.delegation,
                 principal: self.principal.clone(),
+                // The checker knows the delegation is revoked but keeps no
+                // signed document of it.
+                proof: None,
             }))
         }
     }
