@@ -44,7 +44,7 @@ async fn delegated_publish(content: &[u8], proofs: &[usize]) -> Container {
     let subject = Ed25519Signer::generate().await.expect("a subject");
     let middle = Ed25519Signer::generate().await.expect("a middle");
     let operator = Ed25519Signer::generate().await.expect("an operator");
-    let command = ["memory", "cell", "publish"].map(String::from).to_vec();
+    let command: Vec<String> = PUBLISH.iter().map(|segment| segment.to_string()).collect();
     let root = DelegationBuilder::new()
         .issuer(subject.clone())
         .audience(&middle.did())
@@ -61,7 +61,7 @@ async fn delegated_publish(content: &[u8], proofs: &[usize]) -> Container {
         .try_build()
         .await
         .expect("the leaf mints");
-    let delegations = [leaf, root];
+    let delegations = [root, leaf];
     let cids: Vec<_> = delegations.iter().map(|d| d.to_cid()).collect();
     let invocation = InvocationBuilder::new()
         .issuer(operator.clone())
@@ -391,5 +391,215 @@ async fn it_refuses_a_length_past_any_block_before_reading_it() {
             frame: 0,
             length: u64::MAX
         })
+    );
+}
+
+/// A publish of `arguments` to `subject`'s cell, signed by `issuer` with
+/// no delegation, issued now unless `undated`.
+async fn signed_by(
+    issuer: &Ed25519Signer,
+    subject: &Ed25519Signer,
+    command: &[&str],
+    arguments: BTreeMap<String, Promised>,
+    undated: bool,
+) -> Container {
+    let builder = InvocationBuilder::new()
+        .issuer(issuer.clone())
+        .audience(&subject.did())
+        .subject(&subject.did())
+        .command(command.iter().map(|segment| segment.to_string()).collect())
+        .arguments(arguments)
+        .proofs(Vec::new());
+    let builder = if undated {
+        builder
+    } else {
+        builder.issued_at(Timestamp::now())
+    };
+    let invocation = builder.try_build().await.expect("the invocation mints");
+    Container::from(&InvocationChain::new(invocation, HashMap::new()))
+}
+
+const PUBLISH: &[&str] = &["use", "put", "memory", "cell"];
+
+fn resolver() -> dialog_remote_ucan_s3::DefaultResolver {
+    dialog_remote_ucan_s3::DefaultResolver::new(dialog_did_web::WebResolver::new())
+}
+
+async fn verified(container: &Container, subject: &Ed25519Signer) -> Result<(), Unproven> {
+    let record =
+        Record::decode(&encode(container, Some(CONTENT)).expect("encodes")).expect("decodes");
+    record
+        .verify(&subject.did(), "sync", "head", &resolver())
+        .await
+}
+
+#[dialog_common::test]
+async fn it_proves_a_publish_the_subject_signed() {
+    let owner = Ed25519Signer::generate().await.expect("an owner");
+    let container = Container::from(&owned_publish(&owner, CONTENT).await);
+
+    assert_eq!(verified(&container, &owner).await, Ok(()));
+}
+
+#[dialog_common::test]
+async fn it_proves_a_publish_the_subject_delegated() {
+    let container = delegated_publish(CONTENT, &[0, 1]).await;
+    let record =
+        Record::decode(&encode(&container, Some(CONTENT)).expect("encodes")).expect("decodes");
+    let invocation: Invocation<AnySignature> =
+        serde_ipld_dagcbor::from_slice(&container.tokens()[0]).expect("an invocation");
+
+    assert_eq!(
+        record
+            .verify(invocation.subject(), "sync", "head", &resolver())
+            .await,
+        Ok(())
+    );
+}
+
+/// A publish signed by someone the subject never authorized proves
+/// nothing, though it names the cell and its content is intact.
+#[dialog_common::test]
+async fn it_refuses_a_publish_by_someone_the_subject_did_not_authorize() {
+    let owner = Ed25519Signer::generate().await.expect("an owner");
+    let stranger = Ed25519Signer::generate().await.expect("a stranger");
+    let arguments = owned_publish(&owner, CONTENT).await.arguments().clone();
+    let container = signed_by(&stranger, &owner, PUBLISH, arguments, false).await;
+
+    assert!(matches!(
+        verified(&container, &owner).await,
+        Err(Unproven::Chain(_))
+    ));
+}
+
+/// A delegation that leaves out a link of the chain proves nothing.
+#[dialog_common::test]
+async fn it_refuses_a_publish_whose_chain_skips_a_delegation() {
+    let container = delegated_publish(CONTENT, &[0]).await;
+    let invocation: Invocation<AnySignature> =
+        serde_ipld_dagcbor::from_slice(&container.tokens()[0]).expect("an invocation");
+    let record =
+        Record::decode(&encode(&container, Some(CONTENT)).expect("encodes")).expect("decodes");
+
+    assert!(matches!(
+        record
+            .verify(invocation.subject(), "sync", "head", &resolver())
+            .await,
+        Err(Unproven::Chain(_))
+    ));
+}
+
+/// A genuine publish to another of the subject's cells does not prove
+/// what this one holds: a service cannot answer one cell with another's.
+#[dialog_common::test]
+async fn it_refuses_a_publish_to_another_cell() {
+    let owner = Ed25519Signer::generate().await.expect("an owner");
+    let container = Container::from(&owned_publish(&owner, CONTENT).await);
+    let record =
+        Record::decode(&encode(&container, Some(CONTENT)).expect("encodes")).expect("decodes");
+
+    assert!(matches!(
+        record
+            .verify(&owner.did(), "sync", "tail", &resolver())
+            .await,
+        Err(Unproven::Elsewhere { .. })
+    ));
+    let other = Ed25519Signer::generate().await.expect("another subject");
+    assert!(matches!(
+        record
+            .verify(&other.did(), "sync", "head", &resolver())
+            .await,
+        Err(Unproven::Elsewhere { .. })
+    ));
+}
+
+/// An invocation the subject signed that is not a publish (a watch of
+/// the cell, carrying the same arguments) does not prove a write.
+#[dialog_common::test]
+async fn it_refuses_an_invocation_that_is_not_a_publish() {
+    let owner = Ed25519Signer::generate().await.expect("an owner");
+    let arguments = owned_publish(&owner, CONTENT).await.arguments().clone();
+    let container = signed_by(
+        &owner,
+        &owner,
+        &["use", "get", "memory", "cell", "watch"],
+        arguments,
+        false,
+    )
+    .await;
+
+    assert!(matches!(
+        verified(&container, &owner).await,
+        Err(Unproven::Command(_))
+    ));
+}
+
+#[dialog_common::test]
+async fn it_refuses_a_publish_that_does_not_say_when_it_was_issued() {
+    let owner = Ed25519Signer::generate().await.expect("an owner");
+    let arguments = owned_publish(&owner, CONTENT).await.arguments().clone();
+    let container = signed_by(&owner, &owner, PUBLISH, arguments, true).await;
+
+    assert_eq!(verified(&container, &owner).await, Err(Unproven::Undated));
+}
+
+/// A site hands on the content a cell's record proves, and refuses one
+/// whose content was swapped for other bytes, as unproven.
+#[dialog_common::test]
+async fn it_opens_a_proven_cell_and_refuses_a_tampered_one() {
+    let owner = Ed25519Signer::generate().await.expect("an owner");
+    let container = Container::from(&owned_publish(&owner, CONTENT).await);
+    let stored = encode(&container, Some(CONTENT)).expect("encodes");
+    let site = crate::UcanSite::default();
+    let state = |content: Vec<u8>| {
+        Some(dialog_effects::memory::Edition {
+            content,
+            version: "v1".into(),
+        })
+    };
+
+    let opened = site
+        .open(&owner.did(), "sync", "head", state(stored.clone()))
+        .await
+        .expect("the record proves the content");
+    assert_eq!(opened, state(CONTENT.to_vec()));
+
+    let mut tampered = stored[..stored.len() - CONTENT.len()].to_vec();
+    tampered.extend_from_slice(b"the revision a cell points to");
+    assert!(matches!(
+        site.open(&owner.did(), "sync", "head", state(tampered))
+            .await,
+        Err(dialog_effects::memory::MemoryError::Unproven { .. })
+    ));
+}
+
+/// A cell that holds content and no record, as cells did before they
+/// held records, is read as it was unless the site refuses it.
+#[dialog_common::test]
+async fn it_reads_a_cell_with_no_record_only_where_that_is_accepted() {
+    let owner = Ed25519Signer::generate().await.expect("an owner");
+    let state = Some(dialog_effects::memory::Edition {
+        content: CONTENT.to_vec(),
+        version: "v1".into(),
+    });
+
+    let accepting = crate::UcanSite::default();
+    assert_eq!(
+        accepting
+            .open(&owner.did(), "sync", "head", state.clone())
+            .await
+            .expect("accepted"),
+        state
+    );
+
+    let refusing = crate::UcanSite::default().with_unrecorded(crate::Unrecorded::Refuse);
+    assert!(matches!(
+        refusing.open(&owner.did(), "sync", "head", state).await,
+        Err(dialog_effects::memory::MemoryError::Unproven { .. })
+    ));
+    assert_eq!(
+        refusing.open(&owner.did(), "sync", "head", None).await.ok(),
+        Some(None),
+        "an empty cell needs no record"
     );
 }

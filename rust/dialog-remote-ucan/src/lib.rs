@@ -44,4 +44,4 @@ pub use server::{
     Access, Answer, Clock, Content, FRESHNESS, Issuance, Payload, Presented, RecentInvocations,
     Refusal, Request, Response, Store, Subscription, Verified,
 };
-pub use site::{UcanFork, UcanSite};
+pub use site::{UcanFork, UcanSite, Unrecorded};
