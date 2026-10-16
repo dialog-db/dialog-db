@@ -1,0 +1,26 @@
+[package]
+name = "dialog-sapling"
+description = "The pure rules of Sapling that its formulas call: names, selectors, suffixes, cause keys, DID URLs, and invites"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+dialog-credentials = { workspace = true }
+dialog-ucan-core = { workspace = true }
+dialog-varsig = { workspace = true }
+icu_properties = { workspace = true }
+ipld-core = { workspace = true }
+percent-encoding = { workspace = true }
+serde_ipld_dagcbor = { workspace = true }
+unicode-normalization = { workspace = true }
+
+[features]
+# Invites for the tests of other crates.
+helpers = []
+
+[dev-dependencies]
+dialog-credentials = { workspace = true, features = ["ed25519"] }
+tokio = { workspace = true, features = ["macros", "rt"] }

@@ -8,7 +8,9 @@ use crate::formula::conversions::{self, ParseFloat, ParseSignedInteger, ParseUns
 use crate::formula::logic::{And, Not, Or};
 use crate::formula::math::{Difference, Modulo, Product, Quotient, Sum};
 use crate::formula::number::Numeric;
-use crate::formula::string::{Concatenate, Length, Like, Lowercase, Uppercase};
+use crate::formula::string::{
+    CommonSuffixLength, Concatenate, Length, Like, Lowercase, Suffix, Uppercase,
+};
 use crate::selection::{Match, Selection};
 use crate::term::Term;
 use crate::types::Any;
@@ -35,7 +37,7 @@ pub const PARAM_COST: usize = 10;
 /// very `From` impls this macro generates — naming the struct breaks
 /// that cycle.
 macro_rules! define_formulas {
-    ( $( $name:literal => $variant:ident($ty:ty, $q:ty) ),* $(,)? ) => {
+    ( $( $(#[$meta:meta])* $name:literal => $variant:ident($ty:ty, $q:ty) ),* $(,)? ) => {
         /// A formula premise bound to specific term arguments.
         ///
         /// Each variant wraps the typed `Query<T>` struct (e.g. `SumQuery`) generated
@@ -50,6 +52,7 @@ macro_rules! define_formulas {
         pub enum FormulaQuery {
             $(
                 #[doc = concat!("Formula `", $name, "`")]
+                $(#[$meta])*
                 #[serde(rename = $name)]
                 $variant($q),
             )*
@@ -58,37 +61,38 @@ macro_rules! define_formulas {
         impl FormulaQuery {
             /// Returns the formal notation name (e.g. `"math/sum"`).
             pub fn name(&self) -> &'static str {
-                match self { $( Self::$variant(_) => $name, )* }
+                match self { $( $(#[$meta])* Self::$variant(_) => $name, )* }
             }
 
             /// Returns the static cell definitions for this formula.
             pub(crate) fn cells(&self) -> &'static Cells {
-                match self { $( Self::$variant(_) => <$ty>::cells(), )* }
+                match self { $( $(#[$meta])* Self::$variant(_) => <$ty>::cells(), )* }
             }
 
             /// Runs the formula's resolve logic against the given bindings.
             fn resolve(&self, bindings: &mut Bindings) -> Result<Vec<Match>, EvaluationError> {
-                match self { $( Self::$variant(_) => <$ty>::resolve(bindings), )* }
+                match self { $( $(#[$meta])* Self::$variant(_) => <$ty>::resolve(bindings), )* }
             }
 
             /// Returns the base cost of evaluating this formula.
             pub fn cost(&self) -> usize {
-                match self { $( Self::$variant(_) => <$ty>::cost(), )* }
+                match self { $( $(#[$meta])* Self::$variant(_) => <$ty>::cost(), )* }
             }
 
             /// Returns the parameters for this formula application.
             pub fn parameters(&self) -> Parameters {
-                match self { $( Self::$variant(q) => q.clone().into(), )* }
+                match self { $( $(#[$meta])* Self::$variant(q) => q.clone().into(), )* }
             }
 
             /// This formula applied to `terms` instead of its own: the
             /// same formula, re-bound, validated as a fresh application.
             pub fn with_parameters(&self, terms: Parameters) -> Result<Self, crate::error::TypeError> {
-                match self { $( Self::$variant(_) => Ok(Self::$variant(<$ty>::apply(terms)?)), )* }
+                match self { $( $(#[$meta])* Self::$variant(_) => Ok(Self::$variant(<$ty>::apply(terms)?)), )* }
             }
         }
 
         $(
+            $(#[$meta])*
             impl From<$q> for FormulaQuery {
                 fn from(q: $q) -> Self { Self::$variant(q) }
             }
@@ -107,6 +111,8 @@ define_formulas! {
     "text/upper-case"         => Uppercase(Uppercase, super::string::UppercaseQuery),
     "text/lower-case"         => Lowercase(Lowercase, super::string::LowercaseQuery),
     "text/like"               => Like(Like, super::string::LikeQuery),
+    "text/suffix"             => Suffix(Suffix, super::string::SuffixQuery),
+    "text/common-suffix-length" => CommonSuffixLength(CommonSuffixLength, super::string::CommonSuffixLengthQuery),
 
     "boolean/and"             => And(And, super::logic::AndQuery),
     "boolean/or"              => Or(Or, super::logic::OrQuery),
@@ -125,6 +131,25 @@ define_formulas! {
     "dialog/position"         => Position(super::position::Position, super::position::PositionQuery),
     "dialog/position-parts"   => PositionParts(super::position::PositionParts, super::position::PositionPartsQuery),
     "dialog/attribute-parts"  => AttributeParts(super::attribute::AttributeParts, super::attribute::AttributePartsQuery),
+
+    // The formulas of Sapling, which its guest kernel calls from its rules.
+    // A build without the feature `sapling` carries none of them.
+    #[cfg(feature = "sapling")]
+    "sapling/name"             => SaplingName(super::sapling::Name, super::sapling::NameQuery),
+    #[cfg(feature = "sapling")]
+    "sapling/name-problem"     => SaplingNameProblem(super::sapling::NameProblem, super::sapling::NameProblemQuery),
+    #[cfg(feature = "sapling")]
+    "sapling/cause-key"        => SaplingCauseKey(super::sapling::CauseKey, super::sapling::CauseKeyQuery),
+    #[cfg(feature = "sapling")]
+    "sapling/selector"         => SaplingSelector(super::sapling::Selector, super::sapling::SelectorQuery),
+    #[cfg(feature = "sapling")]
+    "sapling/selector-problem" => SaplingSelectorProblem(super::sapling::SelectorProblem, super::sapling::SelectorProblemQuery),
+    #[cfg(feature = "sapling")]
+    "sapling/did-url"          => SaplingDidUrl(super::sapling::DidUrl, super::sapling::DidUrlQuery),
+    #[cfg(feature = "sapling")]
+    "sapling/did-url-problem"  => SaplingDidUrlProblem(super::sapling::DidUrlProblem, super::sapling::DidUrlProblemQuery),
+    #[cfg(feature = "sapling")]
+    "sapling/invite"           => SaplingInvite(super::sapling::Invite, super::sapling::InviteQuery),
 }
 
 impl FormulaQuery {
@@ -672,5 +697,36 @@ mod tests {
         let deserialized: FormulaQuery = serde_json::from_value(json).unwrap();
 
         assert!(matches!(deserialized, FormulaQuery::Length(_)));
+    }
+}
+
+#[cfg(all(test, not(feature = "sapling")))]
+mod without_sapling {
+    use super::FormulaQuery;
+
+    /// A build of `dialog-query` without the feature `sapling` has no
+    /// formula under `sapling/`, and keeps the two generic `text/` ones.
+    #[dialog_common::test]
+    fn it_has_no_formula_of_sapling_without_the_feature() {
+        let parse = |name: &str| {
+            serde_json::from_value::<FormulaQuery>(serde_json::json!({
+                "assert": name,
+                "where": { "of": "ana", "with": "b", "length": 1, "is": { "?": { "name": "is" } } }
+            }))
+        };
+        for name in [
+            "sapling/name",
+            "sapling/name-problem",
+            "sapling/cause-key",
+            "sapling/selector",
+            "sapling/selector-problem",
+            "sapling/did-url",
+            "sapling/did-url-problem",
+            "sapling/invite",
+        ] {
+            assert!(parse(name).is_err(), "{name}");
+        }
+        assert!(parse("text/suffix").is_ok());
+        assert!(parse("text/common-suffix-length").is_ok());
     }
 }

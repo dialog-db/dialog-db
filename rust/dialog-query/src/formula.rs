@@ -32,6 +32,10 @@ pub mod math;
 /// String manipulation formulas (concatenate, length, uppercase, lowercase, like)
 pub mod string;
 
+/// The formulas of Sapling.
+#[cfg(feature = "sapling")]
+pub mod sapling;
+
 /// Attribute decomposition (attribute-parts)
 pub mod attribute;
 /// Index-key decomposition formulas (key-part, separator-part)
@@ -48,7 +52,7 @@ pub use logic::{And, Not, Or};
 pub use math::{Difference, Modulo, Product, Quotient, Sum};
 pub use position::{Position as PositionFormula, PositionParts as PositionPartsFormula};
 pub use revision::{Revision as RevisionFormula, RevisionParent as RevisionParentFormula};
-pub use string::{Concatenate, Length, Like, Lowercase, Uppercase};
+pub use string::{CommonSuffixLength, Concatenate, Length, Like, Lowercase, Suffix, Uppercase};
 
 use crate::Parameters;
 use crate::Predicate;
