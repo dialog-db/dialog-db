@@ -1548,7 +1548,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base58",
- "bijoux",
  "bytes",
  "dialog-capability",
  "dialog-common",
