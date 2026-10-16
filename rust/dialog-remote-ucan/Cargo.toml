@@ -33,7 +33,6 @@ dialog-ucan-core = { workspace = true }
 dialog-varsig = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true, features = ["sink"] }
-ipld-core = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_bytes = { workspace = true }

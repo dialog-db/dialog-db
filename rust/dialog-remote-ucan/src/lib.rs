@@ -30,7 +30,6 @@ mod direct;
 #[cfg(any(test, feature = "helpers"))]
 pub mod helpers;
 mod provider;
-pub mod record;
 pub mod server;
 mod site;
 pub mod socket;
@@ -44,4 +43,4 @@ pub use server::{
     Access, Answer, Clock, Content, FRESHNESS, Issuance, Payload, Presented, RecentInvocations,
     Refusal, Request, Response, Store, Subscription, Verified,
 };
-pub use site::{UcanFork, UcanSite, Unrecorded};
+pub use site::{UcanFork, UcanSite};

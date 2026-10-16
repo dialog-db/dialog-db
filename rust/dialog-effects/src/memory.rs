@@ -415,16 +415,6 @@ pub enum MemoryError {
     #[error("Storage error: {0}")]
     Storage(String),
 
-    /// What a remote cell holds does not prove that someone its subject
-    /// authorized wrote it: its record does not verify, or names another
-    /// cell, or, where a record is required, there is none. The content
-    /// is not handed on.
-    #[error("The cell's content is unproven: {reason}")]
-    Unproven {
-        /// Why the record does not prove the content.
-        reason: String,
-    },
-
     /// The request was not carried out, for a reason that is not an
     /// access decision.
     #[error(transparent)]

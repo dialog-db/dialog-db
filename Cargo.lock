@@ -1564,7 +1564,6 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "ipld-core",
  "js-sys",
  "reqwest",
  "serde",
