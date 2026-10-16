@@ -14,6 +14,26 @@ says how to cut a release.
 
 ## Unreleased
 
+### A cell written through an access service holds the invocation that wrote it, and a reader verifies it
+
+[#564](https://github.com/dialog-db/dialog-db/pull/564)
+
+A cell the access service writes now stores a record: the signed publish invocation, the delegations it proves with, and the content it signed. Whoever reads the cell, through the service or straight from its store, can then check that someone the subject authorized wrote what it holds, without trusting the service or the store. Before, a cell held its content alone, and who wrote it was the service's word. The client verifies each cell it reads at the remote boundary and hands on the content only once it does.
+
+A record is a stream of frames after the magic `dialog-cell/1`: the invocation first, then each delegation its `prf` lists, then the content. No frame claims an address. Its position says what it is and the reader hashes it to check, so a record carries nothing the invocation does not name, and it is checked as it arrives. A cell is stored with every block carried, so its bytes, and the version a store computes from them (an S3 or R2 `ETag`), are the same for every reader.
+
+What this changes for you:
+
+- A publish through `Access` stores `record::encode(container, content)`, not the content. A resolve, a watch's states and a conflict's `CellState` answer with what the cell stores. `UcanSite` decodes each and verifies it before it returns `Edition { content, .. }`. The version is still the store's.
+- A record is verified as of the time its invocation says it was issued: the chain verifies at that time, the command is a publish (`/use/put/memory/cell`, or the older `/memory/publish`), and it names the subject, space and cell that were read. No revocation is consulted.
+- One that fails is `MemoryError::Unproven { reason }`, a new variant, and a branch's resolve reports it as `ResolveError::Unproven`: a `match` on either without a wildcard adds an arm. A conflict whose state does not verify reads as one that did not say what the cell holds (`current: None`).
+- A cell holding content and no record (one written before this release, or through the permit exchange) is read as before by default. `UcanSite::with_unrecorded(Unrecorded::Refuse)` refuses it as `Unproven`.
+- `dialog_remote_ucan::record` holds the codec (`encode`, `encode_eliding`, `decode`, the streaming `Decoder`) and `Record`, with `Record::verify`. A block the reader already holds may be elided in one byte when a record is carried to it, never when one is stored.
+- `Verified::container` is the container as it was presented: the token bytes the signatures cover, which a record carries.
+- The access service compares a publish against what the cell holds by the record's content, so a publish sent again still finds its own write.
+
+Why: a cell is the one place a replica learns where a branch stands, and trusting whoever serves it to say who wrote it made every reader as trustworthy as its least trustworthy service. Storing the proof with the content lets a reader decide for itself.
+
 ### A write is safe to send again, and a refused one says what to do next
 
 [#564](https://github.com/dialog-db/dialog-db/pull/564)
@@ -482,6 +502,7 @@ thread multiplies whatever it holds by the size of the thread pool.
 - Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
 - The socket carries text `ping` and `pong` messages beside its frames. A service's socket must answer `ping` with `pong`, or a client closes the connection every `Liveness::deadline`; no released service has a socket, so none predates this.
 - A conflict's `412` now has a body, and `Rejection::Unavailable` may carry `retry_after`. An older client ignores both; this client reads an older service's bare `412` as a conflict that does not say what the cell holds.
+- A cell the access service writes holds a record, where it held the content alone. A cell written before keeps its bytes and is not rewritten: this release reads it as unproven content, accepted unless the site refuses unrecorded cells, and its next publish stores a record. An older release reads a record as the cell's content, which it cannot decode as a revision, so every replica that reads a cell through a service must be on this release before the service is. Until the service is, its cells hold content alone and read as unproven.
 - Nothing stored is rewritten.
 - Nothing new is stored by the rewrite fix: a blob-index entry keeps the
   key and value it had, so the tree reads as the older release wrote it

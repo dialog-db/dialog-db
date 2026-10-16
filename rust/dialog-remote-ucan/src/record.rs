@@ -34,9 +34,13 @@
 
 use std::collections::VecDeque;
 
-use dialog_common::Checksum;
+use dialog_capability::access::AuthorizeError;
+use dialog_capability::{Did, Policy as _, Provider};
+use dialog_common::{Checksum, ConditionalSync};
+use dialog_effects::memory::{self, Cell, Space};
+use dialog_remote_ucan_s3::{FromUcanArgs as _, verify_invocation_at};
 use dialog_ucan_core::cid::dagcbor_cid;
-use dialog_ucan_core::{Container, Invocation};
+use dialog_ucan_core::{Container, Invocation, UnverifiedRevocations};
 use dialog_varsig::AnySignature;
 use ipld_core::cid::Cid;
 use ipld_core::ipld::Ipld;
@@ -152,6 +156,10 @@ pub enum RecordError {
     /// The bytes end before the record does.
     #[error("the record ends before {0:?}")]
     Truncated(Option<Reference>),
+    /// A record read whole elides a block, which only a record carried to
+    /// a reader holding it may.
+    #[error("the record elides {0:?}")]
+    Elided(Reference),
 }
 
 /// Encode the record of `container`'s invocation writing `content`, with
@@ -202,6 +210,163 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Frame>, RecordError> {
     let mut frames = decoder.push(bytes)?;
     frames.extend(decoder.finish()?);
     Ok(frames)
+}
+
+/// What a cell holds, read whole: the invocation that wrote it, with the
+/// delegations it proves with, and the content it signed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Record {
+    container: Container,
+    content: Option<Vec<u8>>,
+}
+
+impl Record {
+    /// Whether `bytes` are a record, rather than what a cell held before
+    /// cells held records: its content alone.
+    pub fn is_record(bytes: &[u8]) -> bool {
+        bytes.starts_with(MAGIC)
+    }
+
+    /// Read a record a cell stores, which carries every block.
+    pub fn decode(bytes: &[u8]) -> Result<Self, RecordError> {
+        let mut tokens = Vec::new();
+        let mut content = None;
+        for frame in decode(bytes)? {
+            match frame {
+                Frame::Invocation(token) => tokens.push(token),
+                Frame::Block {
+                    reference: Reference::Delegation(_),
+                    bytes,
+                } => tokens.push(bytes),
+                Frame::Block {
+                    reference: Reference::Content(_),
+                    bytes,
+                } => content = Some(bytes),
+                Frame::Elided(reference) => return Err(RecordError::Elided(reference)),
+            }
+        }
+        Ok(Self {
+            container: Container::new(tokens),
+            content,
+        })
+    }
+
+    /// The invocation and the delegations it proves with, as a container
+    /// to verify.
+    pub fn container(&self) -> &Container {
+        &self.container
+    }
+
+    /// The content the invocation wrote, when it wrote any.
+    pub fn content(&self) -> Option<&[u8]> {
+        self.content.as_deref()
+    }
+
+    /// The content the invocation wrote, when it wrote any.
+    pub fn into_content(self) -> Option<Vec<u8>> {
+        self.content
+    }
+
+    /// Check that the record proves its content was written to the cell
+    /// `cell` of the space `space` of `subject`, by someone `subject`
+    /// authorized to.
+    ///
+    /// The chain is judged as of the time the invocation says it was
+    /// issued, the only time the record carries: no one vouches for when
+    /// it was presented, and authority that lapsed or was revoked since
+    /// does not unmake a write made while it held. A revocation is not
+    /// consulted, as a reader knows of none. An invocation that does not
+    /// say when it was issued proves nothing.
+    pub async fn verify<Resolver>(
+        &self,
+        subject: &Did,
+        space: &str,
+        cell: &str,
+        resolver: &Resolver,
+    ) -> Result<(), Unproven>
+    where
+        Resolver: Provider<dialog_did_web::Resolve> + ConditionalSync,
+    {
+        let token = &self.container.tokens()[0];
+        let invocation: Invocation<AnySignature> = serde_ipld_dagcbor::from_slice(token)
+            .map_err(|error| Unproven::Record(RecordError::Invocation(error.to_string())))?;
+        let Some(issued) = invocation.issued_at() else {
+            return Err(Unproven::Undated);
+        };
+        let chain = verify_invocation_at(
+            self.container.clone(),
+            resolver,
+            &UnverifiedRevocations,
+            issued,
+        )
+        .await
+        .map_err(Unproven::Chain)?;
+        let command: Vec<&str> = chain.command().0.iter().map(String::as_str).collect();
+        if !matches!(
+            command.as_slice(),
+            ["use", "put", "memory", "cell"] | ["memory", "publish"]
+        ) {
+            return Err(Unproven::Command(command.join("/")));
+        }
+        let publish = memory::Publish::capability_from_args(chain.subject(), chain.arguments())
+            .map_err(|error| Unproven::Record(RecordError::Invocation(error.to_string())))?;
+        let written = (
+            chain.subject(),
+            Space::of(&publish).space.as_str(),
+            Cell::of(&publish).cell.as_str(),
+        );
+        if written != (subject, space, cell) {
+            return Err(Unproven::Elsewhere {
+                expected: format!("{subject}/{space}/{cell}"),
+                written: format!("{}/{}/{}", written.0, written.1, written.2),
+            });
+        }
+        if self.content.is_none() {
+            return Err(Unproven::Empty);
+        }
+        Ok(())
+    }
+}
+
+/// Why a cell's record does not prove its content.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum Unproven {
+    /// The bytes are not a record a cell stores.
+    #[error(transparent)]
+    Record(RecordError),
+    /// The invocation does not say when it was issued, so there is no
+    /// time to judge its chain at.
+    #[error("the invocation does not say when it was issued")]
+    Undated,
+    /// The invocation's chain does not verify as of its issue time.
+    #[error("the invocation's authority does not verify: {0}")]
+    Chain(AuthorizeError),
+    /// The invocation is not a publish.
+    #[error("the invocation is /{0}, not a publish")]
+    Command(String),
+    /// The invocation publishes to another cell than the one read.
+    #[error("the invocation publishes to {written}, not {expected}")]
+    Elsewhere {
+        /// The cell read.
+        expected: String,
+        /// The cell the invocation publishes to.
+        written: String,
+    },
+    /// The record carries no content.
+    #[error("the record carries no content")]
+    Empty,
+    /// The cell holds content and no record, as cells did before they
+    /// held records, where a record is required.
+    #[error("the cell holds content no record proves")]
+    Unrecorded,
+}
+
+impl From<Unproven> for memory::MemoryError {
+    fn from(unproven: Unproven) -> Self {
+        memory::MemoryError::Unproven {
+            reason: unproven.to_string(),
+        }
+    }
 }
 
 /// A record read as its bytes arrive: each frame is checked and handed on
