@@ -43,6 +43,9 @@ futures = { workspace = true }
 # Macro utilities
 dialog-macros = { workspace = true }
 
+# The pure rules that the formulas of Sapling call, with the feature `sapling`.
+dialog-sapling = { workspace = true, optional = true }
+
 # Tokio with platform-specific features
 # wasm32 only supports: sync, macros, io-util, rt, time
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -54,6 +57,8 @@ wasm-bindgen-futures = { workspace = true }
 
 
 [dev-dependencies]
+# Invites, for the tests of `sapling/invite`.
+dialog-sapling = { workspace = true, features = ["helpers"] }
 ed25519-dalek = { workspace = true }
 tokio-test = { workspace = true }
 dialog-artifacts = { workspace = true }
@@ -69,6 +74,9 @@ wasm-bindgen-test = { workspace = true }
 
 [features]
 default = []
+# The formulas of Sapling (`sapling/*`), which its guest kernel calls from
+# its rules. A build without it carries none of them, nor their crates.
+sapling = ["dep:dialog-sapling"]
 # Marker feature so benchmarks (which depend on `BenchEnv` in
 # `src/helpers.rs`) are only built when explicitly requested. The helper
 # itself lives behind `#[cfg(any(test, feature = "helpers"))]` and is

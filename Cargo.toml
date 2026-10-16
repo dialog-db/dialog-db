@@ -43,6 +43,7 @@ members = [
     "rust/dialog-peer",
     "rust/dialog-perf",
     "rust/dialog-repository",
+    "rust/dialog-sapling",
     "rust/dialog-soak",
     "rust/dialog-varsig",
     "rust/merkle-reference",
@@ -93,6 +94,9 @@ http-body-util = "0.1"
 hyper = "1"
 hyper-util = "0.1"
 ipld-core = { version = "0.4", features = ["serde"] }
+# The Unicode tables of the rules for names of Sapling. See `rust/dialog-sapling`.
+icu_properties = "2"
+unicode-normalization = "0.1"
 # Pinned exactly, not by caret: `tonk-rtc` builds its endpoint with iroh's
 # `unstable-custom-transports`, and an `Endpoint` from a different iroh is a
 # different type. An exact pin makes a divergence a resolver error rather than
@@ -299,6 +303,10 @@ version = "0.4.0-rc.3"
 
 [workspace.dependencies.dialog-repository]
 path = "./rust/dialog-repository"
+version = "0.4.0-rc.3"
+
+[workspace.dependencies.dialog-sapling]
+path = "./rust/dialog-sapling"
 version = "0.4.0-rc.3"
 
 [workspace.dependencies.dialog-ucan-core]
