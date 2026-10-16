@@ -7,9 +7,15 @@
 //!
 //! ```text
 //! "dialog-cell/1" frame frame …
-//! frame = 0x00 varint(length) bytes     ; a block, carried
-//!       | 0x01                          ; a block, elided: the reader holds it
+//! frame = bijou64(codec) bijou64(length) bytes
 //! ```
+//!
+//! Integers are [bijou64](https://crates.io/crates/bijoux), as the search
+//! tree's are: an integer has one encoding, so a record has one byte form.
+//! `codec` is the [multicodec](https://github.com/multiformats/multicodec)
+//! code of the block's encoding: DAG-CBOR (`0x71`) for the invocation and
+//! each delegation, raw (`0x55`) for the content, which the access service
+//! carries without reading.
 //!
 //! The first frame is the invocation's token, always carried. It names
 //! everything else the record holds, and in what order: each delegation
@@ -25,15 +31,15 @@
 //! So the record carries nothing unaccounted for, and a reader verifies
 //! each block as it arrives, without waiting for the rest.
 //!
-//! A block may be elided, in one byte, where the reader is known to hold
-//! it already (a delegation an earlier record on the same connection
-//! carried, say): its position names the reference, which the reader
-//! resolves from what it holds. A cell is stored with every block carried,
-//! so its bytes, and the version a store computes from them, are the same
-//! whoever reads it; eliding is for carrying a record, not storing one.
+//! No signature covers a codec. It lets a reader that does not know this
+//! layout tell how to read each block, and the reader that does refuses a
+//! frame whose codec is not the one its reference implies, before reading
+//! the block: a delegation's is the codec its CID names, the content's is
+//! raw, as its checksum names bytes and not a value.
 
 use std::collections::VecDeque;
 
+use bijoux::{Decode as _, Encode as _};
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Did, Policy as _, Provider};
 use dialog_common::{Checksum, ConditionalSync};
@@ -49,12 +55,6 @@ use thiserror::Error;
 /// What a record's bytes begin with.
 pub const MAGIC: &[u8] = b"dialog-cell/1";
 
-/// A frame that carries its block.
-const CARRIED: u8 = 0x00;
-
-/// A frame that elides its block.
-const ELIDED: u8 = 0x01;
-
 /// The largest block a frame carries. A record holds a cell's content and
 /// the tokens that wrote it, which are small; a length past this is not a
 /// record, and reading it would only cost memory.
@@ -63,8 +63,11 @@ pub const MAX_BLOCK: u64 = 4 * 1024 * 1024;
 /// The multihash code of SHA2-256, the hash a delegation's CID names.
 const SHA2_256: u64 = 0x12;
 
-/// The DAG-CBOR codec, which a delegation's CID names.
-const DAG_CBOR: u64 = 0x71;
+/// The DAG-CBOR codec: an invocation's and a delegation's encoding.
+pub const DAG_CBOR: u64 = 0x71;
+
+/// The raw codec: the content's, which a record carries as bytes.
+pub const RAW: u64 = 0x55;
 
 /// What a block of a record is, as the invocation names it.
 #[derive(Debug, Clone, PartialEq)]
@@ -76,6 +79,14 @@ pub enum Reference {
 }
 
 impl Reference {
+    /// The codec of the block this names.
+    pub fn codec(&self) -> u64 {
+        match self {
+            Reference::Delegation(cid) => cid.codec(),
+            Reference::Content(_) => RAW,
+        }
+    }
+
     /// Whether `bytes` are the block this names.
     fn names(&self, bytes: &[u8]) -> bool {
         match self {
@@ -102,9 +113,6 @@ pub enum Frame {
         /// The block.
         bytes: Vec<u8>,
     },
-    /// A block the record elides, for the reader to resolve from what it
-    /// holds.
-    Elided(Reference),
 }
 
 /// Why bytes are not a record.
@@ -113,13 +121,21 @@ pub enum RecordError {
     /// The bytes do not begin as a record does.
     #[error("not a cell record")]
     NotARecord,
-    /// A frame begins with a byte that is not a frame's.
-    #[error("frame {frame} begins with 0x{tag:02x}, not a frame's")]
-    Frame {
+    /// A frame holds an integer past 64 bits.
+    #[error("frame {frame} holds an integer past 64 bits")]
+    Integer {
         /// Which frame.
         frame: usize,
-        /// The byte it begins with.
-        tag: u8,
+    },
+    /// A frame's codec is not the one the block it answers is in.
+    #[error("frame {frame} is in codec 0x{codec:x}, not 0x{expected:x}")]
+    Codec {
+        /// Which frame.
+        frame: usize,
+        /// The codec it gives.
+        codec: u64,
+        /// The codec the block it answers is in.
+        expected: u64,
     },
     /// A frame's length is past what a record carries.
     #[error("frame {frame} is {length} bytes, past the {MAX_BLOCK} a record carries")]
@@ -129,10 +145,6 @@ pub enum RecordError {
         /// The length it gives.
         length: u64,
     },
-    /// The first frame elides the invocation, which a record always
-    /// carries.
-    #[error("the invocation is elided")]
-    InvocationElided,
     /// The first frame is not an invocation's token.
     #[error("the first frame is not an invocation: {0}")]
     Invocation(String),
@@ -156,39 +168,21 @@ pub enum RecordError {
     /// The bytes end before the record does.
     #[error("the record ends before {0:?}")]
     Truncated(Option<Reference>),
-    /// A record read whole elides a block, which only a record carried to
-    /// a reader holding it may.
-    #[error("the record elides {0:?}")]
-    Elided(Reference),
 }
 
-/// Encode the record of `container`'s invocation writing `content`, with
-/// every block carried: what a cell holds.
+/// Encode the record of `container`'s invocation writing `content`: what
+/// a cell holds.
 ///
 /// `content` is `None` for an invocation that carries none.
 pub fn encode(container: &Container, content: Option<&[u8]>) -> Result<Vec<u8>, RecordError> {
-    encode_eliding(container, content, |_| false)
-}
-
-/// Encode a record as [`encode`] does, eliding each block `held` says the
-/// reader holds.
-pub fn encode_eliding(
-    container: &Container,
-    content: Option<&[u8]>,
-    held: impl Fn(&Reference) -> bool,
-) -> Result<Vec<u8>, RecordError> {
     let tokens = container.tokens();
     let Some(invocation) = tokens.first() else {
         return Err(RecordError::Invocation("the container is empty".into()));
     };
     let mut out = Vec::with_capacity(MAGIC.len() + tokens.iter().map(Vec::len).sum::<usize>());
     out.extend_from_slice(MAGIC);
-    carry(&mut out, invocation);
+    carry(&mut out, DAG_CBOR, invocation);
     for reference in references(invocation)? {
-        if held(&reference) {
-            out.push(ELIDED);
-            continue;
-        }
         let block = match &reference {
             Reference::Delegation(cid) => tokens[1..]
                 .iter()
@@ -197,7 +191,7 @@ pub fn encode_eliding(
             Reference::Content(_) => content,
         };
         match block {
-            Some(block) if reference.names(block) => carry(&mut out, block),
+            Some(block) if reference.names(block) => carry(&mut out, reference.codec(), block),
             _ => return Err(RecordError::Truncated(Some(reference))),
         }
     }
@@ -227,7 +221,7 @@ impl Record {
         bytes.starts_with(MAGIC)
     }
 
-    /// Read a record a cell stores, which carries every block.
+    /// Read a record a cell stores.
     pub fn decode(bytes: &[u8]) -> Result<Self, RecordError> {
         let mut tokens = Vec::new();
         let mut content = None;
@@ -242,7 +236,6 @@ impl Record {
                     reference: Reference::Content(_),
                     bytes,
                 } => content = Some(bytes),
-                Frame::Elided(reference) => return Err(RecordError::Elided(reference)),
             }
         }
         Ok(Self {
@@ -425,51 +418,55 @@ impl Decoder {
     }
 
     /// The next whole frame in what is pending, when there is one.
+    ///
+    /// A frame's codec, and whether it answers any reference, are checked
+    /// as soon as they are read, before the block they head arrives.
     fn frame(&mut self) -> Result<Option<Frame>, RecordError> {
         let frame = self.frames;
-        let Some(&tag) = self.pending.first() else {
+        let mut at = 0;
+        let Some(codec) = integer(&self.pending, &mut at, frame)? else {
             return Ok(None);
         };
-        let carried = match tag {
-            CARRIED => {
-                let mut at = 1;
-                let Some(length) = varint(&self.pending, &mut at) else {
-                    return Ok(None);
-                };
-                if length > MAX_BLOCK {
-                    return Err(RecordError::TooLarge { frame, length });
-                }
-                let end = at + length as usize;
-                if self.pending.len() < end {
-                    return Ok(None);
-                }
-                let block = self.pending[at..end].to_vec();
-                self.pending.drain(..end);
-                Some(block)
-            }
-            ELIDED => {
-                self.pending.drain(..1);
-                None
-            }
-            tag => return Err(RecordError::Frame { frame, tag }),
+        let reference = match &self.expected {
+            None => None,
+            Some(expected) => match expected.front() {
+                Some(reference) => Some(reference.clone()),
+                None => return Err(RecordError::Unexpected { frame }),
+            },
         };
+        let wanted = reference.as_ref().map_or(DAG_CBOR, Reference::codec);
+        if codec != wanted {
+            return Err(RecordError::Codec {
+                frame,
+                codec,
+                expected: wanted,
+            });
+        }
+        let Some(length) = integer(&self.pending, &mut at, frame)? else {
+            return Ok(None);
+        };
+        if length > MAX_BLOCK {
+            return Err(RecordError::TooLarge { frame, length });
+        }
+        let end = at + length as usize;
+        if self.pending.len() < end {
+            return Ok(None);
+        }
+        let bytes = self.pending[at..end].to_vec();
+        self.pending.drain(..end);
         self.frames += 1;
 
-        let Some(expected) = self.expected.as_mut() else {
-            let Some(invocation) = carried else {
-                return Err(RecordError::InvocationElided);
-            };
-            self.expected = Some(references(&invocation)?.into());
-            return Ok(Some(Frame::Invocation(invocation)));
+        let Some(reference) = reference else {
+            self.expected = Some(references(&bytes)?.into());
+            return Ok(Some(Frame::Invocation(bytes)));
         };
-        let Some(reference) = expected.pop_front() else {
-            return Err(RecordError::Unexpected { frame });
-        };
-        Ok(Some(match carried {
-            Some(bytes) if reference.names(&bytes) => Frame::Block { reference, bytes },
-            Some(_) => return Err(RecordError::Mismatch { frame, reference }),
-            None => Frame::Elided(reference),
-        }))
+        if let Some(expected) = self.expected.as_mut() {
+            expected.pop_front();
+        }
+        if !reference.names(&bytes) {
+            return Err(RecordError::Mismatch { frame, reference });
+        }
+        Ok(Some(Frame::Block { reference, bytes }))
     }
 }
 
@@ -496,39 +493,23 @@ fn references(bytes: &[u8]) -> Result<Vec<Reference>, RecordError> {
     Ok(references)
 }
 
-/// Write `block` as a carried frame.
-fn carry(out: &mut Vec<u8>, block: &[u8]) {
-    out.push(CARRIED);
-    let mut length = block.len() as u64;
-    loop {
-        let byte = (length & 0x7f) as u8;
-        length >>= 7;
-        if length == 0 {
-            out.push(byte);
-            break;
-        }
-        out.push(byte | 0x80);
-    }
+/// Write `block`, in `codec`, as a frame.
+fn carry(out: &mut Vec<u8>, codec: u64, block: &[u8]) {
+    codec.encode(out);
+    (block.len() as u64).encode(out);
     out.extend_from_slice(block);
 }
 
-/// The unsigned LEB128 varint at `at` in `bytes`, advancing past it, or
-/// `None` when `bytes` end before it does. One that runs past 64 bits
-/// reads as a length past any block.
-fn varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
-    let mut value: u64 = 0;
-    let mut shift = 0;
-    loop {
-        let byte = *bytes.get(*at)?;
-        *at += 1;
-        if shift >= 64 {
-            return Some(u64::MAX);
+/// The bijou64 integer at `at` in `bytes`, advancing past it, or `None`
+/// when `bytes` end before it does.
+fn integer(bytes: &[u8], at: &mut usize, frame: usize) -> Result<Option<u64>, RecordError> {
+    match u64::decode(&bytes[*at..]) {
+        Ok((value, read)) => {
+            *at += read;
+            Ok(Some(value))
         }
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Some(value);
-        }
-        shift += 7;
+        Err(bijoux::u64::DecodeError::BufferTooShort) => Ok(None),
+        Err(bijoux::u64::DecodeError::Overflow) => Err(RecordError::Integer { frame }),
     }
 }
 
