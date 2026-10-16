@@ -122,6 +122,68 @@ impl Like {
     }
 }
 
+/// Suffix formula: the last `length` characters of a text, or all of it
+/// when it is shorter. Registered as `text/suffix`.
+#[derive(Debug, Clone, Formula)]
+pub struct Suffix {
+    /// The text to cut
+    pub of: String,
+    /// How many characters to keep, from the end
+    pub length: u32,
+    /// The last `length` characters of `of`
+    #[output]
+    pub is: String,
+}
+
+impl Suffix {
+    /// Cut `of` to its last `length` characters
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
+        let count = input.of.chars().count();
+        let skip = count.saturating_sub(input.length as usize);
+        let start = input
+            .of
+            .char_indices()
+            .nth(skip)
+            .map_or(input.of.len(), |(at, _)| at);
+        vec![Suffix {
+            of: input.of.clone(),
+            length: input.length,
+            is: input.of[start..].to_string(),
+        }]
+    }
+}
+
+/// Common suffix length formula: the number of characters at the end
+/// that two texts share. Registered as `text/common-suffix-length`.
+#[derive(Debug, Clone, Formula)]
+pub struct CommonSuffixLength {
+    /// The first text
+    pub of: String,
+    /// The second text
+    pub with: String,
+    /// The number of characters at the end of both
+    #[output]
+    pub is: u32,
+}
+
+impl CommonSuffixLength {
+    /// Count the characters that `of` and `with` share at their ends
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
+        let shared = input
+            .of
+            .chars()
+            .rev()
+            .zip(input.with.chars().rev())
+            .take_while(|(left, right)| left == right)
+            .count();
+        vec![CommonSuffixLength {
+            of: input.of.clone(),
+            with: input.with.clone(),
+            is: u32::try_from(shared).unwrap_or(u32::MAX),
+        }]
+    }
+}
+
 /// Matches a string against a simple glob pattern.
 ///
 /// `*` matches zero or more characters, `?` matches exactly one character.
