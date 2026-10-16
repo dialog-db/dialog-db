@@ -5,41 +5,34 @@
 //!
 //! # Layout
 //!
+//! A record is a [CARv1](https://ipld.io/specs/transport/car/carv1/):
+//!
 //! ```text
-//! "dialog-cell/1" frame frame …
-//! frame = bijou64(codec) bijou64(length) bytes
+//! varint | {version: 1, roots: [invocation]}
+//! varint | CID | the invocation's token
+//! varint | CID | a delegation           ; each its prf lists, once, in order
+//! varint | CID | the content            ; when its checksum signed one
 //! ```
 //!
-//! Integers are [bijou64](https://crates.io/crates/bijoux), as the search
-//! tree's are: an integer has one encoding, so a record has one byte form.
-//! `codec` is the [multicodec](https://github.com/multiformats/multicodec)
-//! code of the block's encoding: DAG-CBOR (`0x71`) for the invocation and
-//! each delegation, raw (`0x55`) for the content, which the access service
-//! carries without reading.
+//! Its one root is the invocation, which names everything else the record
+//! holds. Each block's CID names its codec: DAG-CBOR for the tokens, raw
+//! for the content, which the access service carries without reading. The
+//! content's CID is SHA2-256, the digest the invocation's `checksum`
+//! signed, so it is addressed by what was signed.
 //!
-//! The first frame is the invocation's token, always carried. It names
-//! everything else the record holds, and in what order: each delegation
-//! its `prf` lists, once and in that order, then the content its
-//! `checksum` argument signed, when it has one. Each later frame is the
-//! block for the next of those references.
-//!
-//! Nothing in the stream claims an address. A frame's position says which
-//! reference it answers, and the reader hashes it to check: a delegation
-//! by its DAG-CBOR/SHA2-256 CID, the content by its SHA-256. A frame that
-//! does not hash to the reference it answers, one past the last
-//! reference, or a stream that ends before the last, refuses the record.
-//! So the record carries nothing unaccounted for, and a reader verifies
-//! each block as it arrives, without waiting for the rest.
-//!
-//! No signature covers a codec. It lets a reader that does not know this
-//! layout tell how to read each block, and the reader that does refuses a
-//! frame whose codec is not the one its reference implies, before reading
-//! the block: a delegation's is the codec its CID names, the content's is
-//! raw, as its checksum names bytes and not a value.
+//! CARv1 leaves the order of blocks, duplicates, extra blocks and a
+//! canonical form open, and a record closes each: its blocks come in the
+//! order above and nothing else. A block whose CID is not the next
+//! reference's or whose bytes do not hash to it, one past the last
+//! reference, or a record that ends before the last refuses the record.
+//! Varints are minimal and the header is exactly `{version, roots}`, so a
+//! record has one byte form, and its bytes, and the version a store
+//! computes from them, are the same for every reader. The header holds
+//! nothing else: CARv1 defines no other field, and `@ipld/car` refuses a
+//! header that has one.
 
 use std::collections::VecDeque;
 
-use bijoux::{Decode as _, Encode as _};
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Did, Policy as _, Provider};
 use dialog_common::{Checksum, ConditionalSync};
@@ -49,18 +42,19 @@ use dialog_ucan_core::cid::dagcbor_cid;
 use dialog_ucan_core::{Container, Invocation, UnverifiedRevocations};
 use dialog_varsig::AnySignature;
 use ipld_core::cid::Cid;
+use ipld_core::cid::multihash::Multihash;
 use ipld_core::ipld::Ipld;
 use thiserror::Error;
 
-/// What a record's bytes begin with.
-pub const MAGIC: &[u8] = b"dialog-cell/1";
+/// The media type a record's bytes are.
+pub const MEDIA_TYPE: &str = "application/vnd.ipld.car";
 
-/// The largest block a frame carries. A record holds a cell's content and
-/// the tokens that wrote it, which are small; a length past this is not a
-/// record, and reading it would only cost memory.
+/// The largest section a record holds. A record holds a cell's content
+/// and the tokens that wrote it, which are small; a length past this is
+/// not a record, and reading it would only cost memory.
 pub const MAX_BLOCK: u64 = 4 * 1024 * 1024;
 
-/// The multihash code of SHA2-256, the hash a delegation's CID names.
+/// The multihash code of SHA2-256, the hash every CID in a record names.
 const SHA2_256: u64 = 0x12;
 
 /// The DAG-CBOR codec: an invocation's and a delegation's encoding.
@@ -79,11 +73,16 @@ pub enum Reference {
 }
 
 impl Reference {
-    /// The codec of the block this names.
-    pub fn codec(&self) -> u64 {
+    /// The CID a record addresses this block by.
+    pub fn cid(&self) -> Cid {
         match self {
-            Reference::Delegation(cid) => cid.codec(),
-            Reference::Content(_) => RAW,
+            Reference::Delegation(cid) => *cid,
+            Reference::Content(Checksum::Sha256(digest)) => {
+                #[allow(clippy::expect_used)]
+                let multihash =
+                    Multihash::wrap(SHA2_256, digest).expect("a SHA2-256 digest fits a multihash");
+                Cid::new_v1(RAW, multihash)
+            }
         }
     }
 
@@ -100,12 +99,12 @@ impl Reference {
     }
 }
 
-/// One frame of a record, read and checked.
+/// One block of a record, read and checked.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Frame {
-    /// The invocation's token: the record's first frame.
+pub enum Section {
+    /// The invocation's token: the record's root and first block.
     Invocation(Vec<u8>),
-    /// A block the record carries, which hashes to the reference it
+    /// A block the invocation names, which hashes to the reference it
     /// answers.
     Block {
         /// What the block is.
@@ -118,56 +117,73 @@ pub enum Frame {
 /// Why bytes are not a record.
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum RecordError {
-    /// The bytes do not begin as a record does.
-    #[error("not a cell record")]
-    NotARecord,
-    /// A frame holds an integer past 64 bits.
-    #[error("frame {frame} holds an integer past 64 bits")]
-    Integer {
-        /// Which frame.
-        frame: usize,
+    /// The bytes do not begin with a CARv1 header.
+    #[error("not a cell record: {0}")]
+    NotARecord(String),
+    /// The header names other than one root.
+    #[error("the record names {0} roots, not one")]
+    Roots(usize),
+    /// The header is not exactly `{version: 1, roots}` in its one byte
+    /// form.
+    #[error("the record's header is not in its canonical form")]
+    Header,
+    /// A varint is not minimal, or runs past 64 bits.
+    #[error("the varint at byte {at} is not a minimal one")]
+    Varint {
+        /// Where it begins.
+        at: usize,
     },
-    /// A frame's codec is not the one the block it answers is in.
-    #[error("frame {frame} is in codec 0x{codec:x}, not 0x{expected:x}")]
-    Codec {
-        /// Which frame.
-        frame: usize,
-        /// The codec it gives.
-        codec: u64,
-        /// The codec the block it answers is in.
-        expected: u64,
-    },
-    /// A frame's length is past what a record carries.
-    #[error("frame {frame} is {length} bytes, past the {MAX_BLOCK} a record carries")]
+    /// A section's length is past what a record holds.
+    #[error("section {section} is {length} bytes, past the {MAX_BLOCK} a record holds")]
     TooLarge {
-        /// Which frame.
-        frame: usize,
+        /// Which section.
+        section: usize,
         /// The length it gives.
         length: u64,
     },
-    /// The first frame is not an invocation's token.
-    #[error("the first frame is not an invocation: {0}")]
+    /// A section does not begin with a CID.
+    #[error("section {section} does not begin with a CID: {reason}")]
+    Cid {
+        /// Which section.
+        section: usize,
+        /// Why.
+        reason: String,
+    },
+    /// The first block is not the root, or does not hash to it.
+    #[error("the first block is not the record's root")]
+    Root,
+    /// The root is not an invocation's token.
+    #[error("the root is not an invocation: {0}")]
     Invocation(String),
     /// The invocation's checksum argument is not a checksum.
     #[error("the invocation's checksum is not one: {0}")]
     Checksum(String),
-    /// A frame does not hash to the reference it answers.
-    #[error("frame {frame} is not the block {reference:?}")]
+    /// A section's CID is not the reference it answers, or its block does
+    /// not hash to it.
+    #[error("section {section} is not the block {reference:?}")]
     Mismatch {
-        /// Which frame.
-        frame: usize,
+        /// Which section.
+        section: usize,
         /// The reference it answers.
         reference: Reference,
     },
-    /// A frame follows the last reference the invocation names.
-    #[error("frame {frame} answers no reference the invocation names")]
+    /// A section follows the last reference the invocation names.
+    #[error("section {section} answers no reference the invocation names")]
     Unexpected {
-        /// Which frame.
-        frame: usize,
+        /// Which section.
+        section: usize,
     },
     /// The bytes end before the record does.
     #[error("the record ends before {0:?}")]
     Truncated(Option<Reference>),
+}
+
+/// The CARv1 header: `{version: 1, roots: [...]}`.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CarHeader {
+    version: u64,
+    roots: Vec<Cid>,
 }
 
 /// Encode the record of `container`'s invocation writing `content`: what
@@ -179,9 +195,12 @@ pub fn encode(container: &Container, content: Option<&[u8]>) -> Result<Vec<u8>, 
     let Some(invocation) = tokens.first() else {
         return Err(RecordError::Invocation("the container is empty".into()));
     };
-    let mut out = Vec::with_capacity(MAGIC.len() + tokens.iter().map(Vec::len).sum::<usize>());
-    out.extend_from_slice(MAGIC);
-    carry(&mut out, DAG_CBOR, invocation);
+    let root = dagcbor_cid(invocation);
+    let mut out =
+        Vec::with_capacity(64 + tokens.iter().map(|token| token.len() + 40).sum::<usize>());
+    put_varint(&mut out, header(root).len() as u64);
+    out.extend_from_slice(&header(root));
+    section(&mut out, &root, invocation);
     for reference in references(invocation)? {
         let block = match &reference {
             Reference::Delegation(cid) => tokens[1..]
@@ -191,19 +210,56 @@ pub fn encode(container: &Container, content: Option<&[u8]>) -> Result<Vec<u8>, 
             Reference::Content(_) => content,
         };
         match block {
-            Some(block) if reference.names(block) => carry(&mut out, reference.codec(), block),
+            Some(block) if reference.names(block) => section(&mut out, &reference.cid(), block),
             _ => return Err(RecordError::Truncated(Some(reference))),
         }
     }
     Ok(out)
 }
 
-/// Read a whole record, frame by frame.
-pub fn decode(bytes: &[u8]) -> Result<Vec<Frame>, RecordError> {
-    let mut decoder = Decoder::new();
-    let mut frames = decoder.push(bytes)?;
-    frames.extend(decoder.finish()?);
-    Ok(frames)
+/// Read a record, block by block, checking each against what the
+/// invocation names.
+pub fn decode(bytes: &[u8]) -> Result<Vec<Section>, RecordError> {
+    let mut at = 0;
+    let root = read_header(bytes, &mut at)?;
+    let mut sections = Vec::new();
+    let mut expected: Option<VecDeque<Reference>> = None;
+    while at < bytes.len() {
+        let index = sections.len();
+        let Some((cid, block)) = read_section(bytes, &mut at, index)? else {
+            return Err(RecordError::Truncated(
+                expected.and_then(|mut expected| expected.pop_front()),
+            ));
+        };
+        let Some(expected) = expected.as_mut() else {
+            if cid != root || dagcbor_cid(block) != root {
+                return Err(RecordError::Root);
+            }
+            expected = Some(references(block)?.into());
+            sections.push(Section::Invocation(block.to_vec()));
+            continue;
+        };
+        let Some(reference) = expected.pop_front() else {
+            return Err(RecordError::Unexpected { section: index });
+        };
+        if cid != reference.cid() || !reference.names(block) {
+            return Err(RecordError::Mismatch {
+                section: index,
+                reference,
+            });
+        }
+        sections.push(Section::Block {
+            reference,
+            bytes: block.to_vec(),
+        });
+    }
+    match expected {
+        None => Err(RecordError::Truncated(None)),
+        Some(mut expected) if !expected.is_empty() => {
+            Err(RecordError::Truncated(expected.pop_front()))
+        }
+        Some(_) => Ok(sections),
+    }
 }
 
 /// What a cell holds, read whole: the invocation that wrote it, with the
@@ -216,9 +272,10 @@ pub struct Record {
 
 impl Record {
     /// Whether `bytes` are a record, rather than what a cell held before
-    /// cells held records: its content alone.
+    /// cells held records: its content alone. Bytes that begin with a
+    /// record's header are a record, to be read whole or refused.
     pub fn is_record(bytes: &[u8]) -> bool {
-        bytes.starts_with(MAGIC)
+        read_header(bytes, &mut 0).is_ok()
     }
 
     /// Read a record a cell stores.
@@ -227,12 +284,12 @@ impl Record {
         let mut content = None;
         for frame in decode(bytes)? {
             match frame {
-                Frame::Invocation(token) => tokens.push(token),
-                Frame::Block {
+                Section::Invocation(token) => tokens.push(token),
+                Section::Block {
                     reference: Reference::Delegation(_),
                     bytes,
                 } => tokens.push(bytes),
-                Frame::Block {
+                Section::Block {
                     reference: Reference::Content(_),
                     bytes,
                 } => content = Some(bytes),
@@ -362,114 +419,6 @@ impl From<Unproven> for memory::MemoryError {
     }
 }
 
-/// A record read as its bytes arrive: each frame is checked and handed on
-/// as soon as it is whole.
-#[derive(Debug, Default)]
-pub struct Decoder {
-    /// Bytes received and not yet read into a frame.
-    pending: Vec<u8>,
-    /// Whether the magic has been read.
-    begun: bool,
-    /// How many frames have been read.
-    frames: usize,
-    /// The references still to be answered, once the invocation is read.
-    expected: Option<VecDeque<Reference>>,
-}
-
-impl Decoder {
-    /// A decoder at the start of a record.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Read `bytes`, answering the frames they complete.
-    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Frame>, RecordError> {
-        self.pending.extend_from_slice(bytes);
-        let mut frames = Vec::new();
-        if !self.begun {
-            let have = self.pending.len().min(MAGIC.len());
-            if self.pending[..have] != MAGIC[..have] {
-                return Err(RecordError::NotARecord);
-            }
-            if have < MAGIC.len() {
-                return Ok(frames);
-            }
-            self.pending.drain(..MAGIC.len());
-            self.begun = true;
-        }
-        while let Some(frame) = self.frame()? {
-            frames.push(frame);
-        }
-        Ok(frames)
-    }
-
-    /// The end of the bytes: whatever the record still lacks refuses it.
-    pub fn finish(self) -> Result<Vec<Frame>, RecordError> {
-        if !self.begun {
-            return Err(RecordError::NotARecord);
-        }
-        let Some(mut expected) = self.expected else {
-            return Err(RecordError::Truncated(None));
-        };
-        if !self.pending.is_empty() || !expected.is_empty() {
-            return Err(RecordError::Truncated(expected.pop_front()));
-        }
-        Ok(Vec::new())
-    }
-
-    /// The next whole frame in what is pending, when there is one.
-    ///
-    /// A frame's codec, and whether it answers any reference, are checked
-    /// as soon as they are read, before the block they head arrives.
-    fn frame(&mut self) -> Result<Option<Frame>, RecordError> {
-        let frame = self.frames;
-        let mut at = 0;
-        let Some(codec) = integer(&self.pending, &mut at, frame)? else {
-            return Ok(None);
-        };
-        let reference = match &self.expected {
-            None => None,
-            Some(expected) => match expected.front() {
-                Some(reference) => Some(reference.clone()),
-                None => return Err(RecordError::Unexpected { frame }),
-            },
-        };
-        let wanted = reference.as_ref().map_or(DAG_CBOR, Reference::codec);
-        if codec != wanted {
-            return Err(RecordError::Codec {
-                frame,
-                codec,
-                expected: wanted,
-            });
-        }
-        let Some(length) = integer(&self.pending, &mut at, frame)? else {
-            return Ok(None);
-        };
-        if length > MAX_BLOCK {
-            return Err(RecordError::TooLarge { frame, length });
-        }
-        let end = at + length as usize;
-        if self.pending.len() < end {
-            return Ok(None);
-        }
-        let bytes = self.pending[at..end].to_vec();
-        self.pending.drain(..end);
-        self.frames += 1;
-
-        let Some(reference) = reference else {
-            self.expected = Some(references(&bytes)?.into());
-            return Ok(Some(Frame::Invocation(bytes)));
-        };
-        if let Some(expected) = self.expected.as_mut() {
-            expected.pop_front();
-        }
-        if !reference.names(&bytes) {
-            return Err(RecordError::Mismatch { frame, reference });
-        }
-        Ok(Some(Frame::Block { reference, bytes }))
-    }
-}
-
 /// What the invocation token `bytes` names, in the order a record answers
 /// it: each delegation its `prf` lists, once, then the content its
 /// `checksum` argument signed, when it has one.
@@ -493,24 +442,115 @@ fn references(bytes: &[u8]) -> Result<Vec<Reference>, RecordError> {
     Ok(references)
 }
 
-/// Write `block`, in `codec`, as a frame.
-fn carry(out: &mut Vec<u8>, codec: u64, block: &[u8]) {
-    codec.encode(out);
-    (block.len() as u64).encode(out);
+/// The header of a record whose root is `root`, in its one byte form.
+fn header(root: Cid) -> Vec<u8> {
+    #[allow(clippy::expect_used)]
+    serde_ipld_dagcbor::to_vec(&CarHeader {
+        version: 1,
+        roots: vec![root],
+    })
+    .expect("a header encodes")
+}
+
+/// Read a record's header at `at`, answering its one root.
+fn read_header(bytes: &[u8], at: &mut usize) -> Result<Cid, RecordError> {
+    let Some(length) = take_varint(bytes, at)? else {
+        return Err(RecordError::NotARecord("it ends before a header".into()));
+    };
+    if length > MAX_BLOCK {
+        return Err(RecordError::NotARecord(format!("a {length} byte header")));
+    }
+    let Some(encoded) = bytes.get(*at..*at + length as usize) else {
+        return Err(RecordError::NotARecord("it ends inside its header".into()));
+    };
+    let car: CarHeader = serde_ipld_dagcbor::from_slice(encoded)
+        .map_err(|error| RecordError::NotARecord(error.to_string()))?;
+    if car.version != 1 {
+        return Err(RecordError::NotARecord(format!(
+            "CAR version {}",
+            car.version
+        )));
+    }
+    let [root] = car.roots.as_slice() else {
+        return Err(RecordError::Roots(car.roots.len()));
+    };
+    if header(*root) != encoded {
+        return Err(RecordError::Header);
+    }
+    *at += length as usize;
+    Ok(*root)
+}
+
+/// The section at `at`, as its CID and block, or `None` when the bytes
+/// end inside it.
+fn read_section<'a>(
+    bytes: &'a [u8],
+    at: &mut usize,
+    section: usize,
+) -> Result<Option<(Cid, &'a [u8])>, RecordError> {
+    let Some(length) = take_varint(bytes, at)? else {
+        return Ok(None);
+    };
+    if length > MAX_BLOCK {
+        return Err(RecordError::TooLarge { section, length });
+    }
+    let Some(mut body) = bytes.get(*at..*at + length as usize) else {
+        return Ok(None);
+    };
+    *at += length as usize;
+    let cid = Cid::read_bytes(&mut body).map_err(|error| RecordError::Cid {
+        section,
+        reason: error.to_string(),
+    })?;
+    Ok(Some((cid, body)))
+}
+
+/// Append one section: `varint(len(cid) + len(block)) | cid | block`.
+fn section(out: &mut Vec<u8>, cid: &Cid, block: &[u8]) {
+    let cid = cid.to_bytes();
+    put_varint(out, (cid.len() + block.len()) as u64);
+    out.extend_from_slice(&cid);
     out.extend_from_slice(block);
 }
 
-/// The bijou64 integer at `at` in `bytes`, advancing past it, or `None`
-/// when `bytes` end before it does.
-fn integer(bytes: &[u8], at: &mut usize, frame: usize) -> Result<Option<u64>, RecordError> {
-    match u64::decode(&bytes[*at..]) {
-        Ok((value, read)) => {
-            *at += read;
-            Ok(Some(value))
+/// Append an unsigned LEB128 varint, in its minimal form.
+fn put_varint(out: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            return;
         }
-        Err(bijoux::u64::DecodeError::BufferTooShort) => Ok(None),
-        Err(bijoux::u64::DecodeError::Overflow) => Err(RecordError::Integer { frame }),
+        out.push(byte | 0x80);
     }
+}
+
+/// Read the unsigned LEB128 varint at `at`, advancing past it, or `None`
+/// when the bytes end before it does. One that is not minimal (a last
+/// byte of zero after the first), or runs past 64 bits, is refused, so a
+/// length has one encoding.
+fn take_varint(bytes: &[u8], at: &mut usize) -> Result<Option<u64>, RecordError> {
+    let start = *at;
+    let mut value: u64 = 0;
+    for index in 0..10 {
+        let Some(&byte) = bytes.get(start + index) else {
+            return Ok(None);
+        };
+        let shift = index * 7;
+        if index == 9 && byte > 1 {
+            return Err(RecordError::Varint { at: start });
+        }
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            if index > 0 && byte == 0 {
+                return Err(RecordError::Varint { at: start });
+            }
+            *at = start + index + 1;
+            return Ok(Some(value));
+        }
+    }
+    Err(RecordError::Varint { at: start })
 }
 
 #[cfg(test)]

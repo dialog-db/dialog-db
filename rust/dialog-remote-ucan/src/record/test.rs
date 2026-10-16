@@ -122,28 +122,41 @@ fn references_of(container: &Container) -> Vec<Reference> {
         .collect()
 }
 
-/// The frames a record of `container` writing `content` reads as.
-fn carried(container: &Container, content: &[u8]) -> Vec<Frame> {
-    let mut frames = vec![Frame::Invocation(container.tokens()[0].clone())];
+/// The sections a record of `container` writing `content` reads as.
+fn carried(container: &Container, content: &[u8]) -> Vec<Section> {
+    let mut sections = vec![Section::Invocation(container.tokens()[0].clone())];
     for (reference, bytes) in delegations(container) {
-        frames.push(Frame::Block { reference, bytes });
+        sections.push(Section::Block { reference, bytes });
     }
-    frames.push(Frame::Block {
+    sections.push(Section::Block {
         reference: Reference::Content(Checksum::sha256(content)),
         bytes: content.to_vec(),
     });
-    frames
+    sections
 }
 
-/// The bytes a frame of `block`, in DAG-CBOR, is.
-fn frame(block: &[u8]) -> Vec<u8> {
-    framed(DAG_CBOR, block)
-}
-
-/// The bytes a frame of `block`, in `codec`, is.
-fn framed(codec: u64, block: &[u8]) -> Vec<u8> {
+/// The bytes of a CARv1 header naming `roots`.
+fn car_header(roots: Vec<Cid>) -> Vec<u8> {
+    let header = serde_ipld_dagcbor::to_vec(&CarHeader { version: 1, roots }).expect("encodes");
     let mut out = Vec::new();
-    carry(&mut out, codec, block);
+    put_varint(&mut out, header.len() as u64);
+    out.extend(header);
+    out
+}
+
+/// The bytes of a section addressing `block` by `cid`.
+fn sectioned(cid: &Cid, block: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    section(&mut out, cid, block);
+    out
+}
+
+/// The header and invocation section a record of `container` begins with.
+fn rooted(container: &Container) -> Vec<u8> {
+    let invocation = &container.tokens()[0];
+    let root = dagcbor_cid(invocation);
+    let mut out = car_header(vec![root]);
+    out.extend(sectioned(&root, invocation));
     out
 }
 
@@ -152,7 +165,7 @@ async fn it_reads_back_the_invocation_its_delegations_and_its_content() {
     let container = delegated_publish(CONTENT, &[0, 1]).await;
     let record = encode(&container, Some(CONTENT)).expect("encodes");
 
-    assert!(record.starts_with(MAGIC));
+    assert!(Record::is_record(&record));
     assert_eq!(decode(&record), Ok(carried(&container, CONTENT)));
 }
 
@@ -172,7 +185,7 @@ async fn it_records_an_invocation_that_writes_nothing() {
 
     assert_eq!(
         decode(&record),
-        Ok(vec![Frame::Invocation(container.tokens()[0].clone())])
+        Ok(vec![Section::Invocation(container.tokens()[0].clone())])
     );
 }
 
@@ -185,51 +198,35 @@ async fn it_carries_a_delegation_the_invocation_lists_twice_once() {
 }
 
 #[dialog_common::test]
-async fn it_hands_on_each_frame_as_it_completes() {
+async fn it_is_a_car_rooted_at_the_invocation_with_each_block_by_its_cid() {
     let container = delegated_publish(CONTENT, &[0, 1]).await;
     let record = encode(&container, Some(CONTENT)).expect("encodes");
+    let tokens = container.tokens();
 
-    for size in [1, 2, 7, 64] {
-        let mut decoder = Decoder::new();
-        let mut frames = Vec::new();
-        for chunk in record.chunks(size) {
-            frames.extend(decoder.push(chunk).expect("reads"));
-        }
-        frames.extend(decoder.finish().expect("ends whole"));
-        assert_eq!(frames, carried(&container, CONTENT), "in chunks of {size}");
-    }
-}
-
-#[dialog_common::test]
-async fn it_answers_the_invocation_before_the_rest_arrives() {
-    let container = delegated_publish(CONTENT, &[0, 1]).await;
-    let record = encode(&container, Some(CONTENT)).expect("encodes");
-    let invocation = &container.tokens()[0];
-    let through = MAGIC.len() + frame(invocation).len();
-
-    let mut decoder = Decoder::new();
-    assert_eq!(
-        decoder.push(&record[..through]),
-        Ok(vec![Frame::Invocation(invocation.clone())])
-    );
-}
-
-#[dialog_common::test]
-async fn it_tags_each_block_with_its_codec() {
-    let container = delegated_publish(CONTENT, &[0, 1]).await;
-    let record = encode(&container, Some(CONTENT)).expect("encodes");
-
-    let mut expected = MAGIC.to_vec();
-    expected.extend(frame(&container.tokens()[0]));
-    expected.extend(frame(&container.tokens()[1]));
-    expected.extend(frame(&container.tokens()[2]));
-    expected.extend(framed(RAW, CONTENT));
+    let mut expected = rooted(&container);
+    expected.extend(sectioned(&dagcbor_cid(&tokens[1]), &tokens[1]));
+    expected.extend(sectioned(&dagcbor_cid(&tokens[2]), &tokens[2]));
+    let content = Reference::Content(Checksum::sha256(CONTENT)).cid();
+    expected.extend(sectioned(&content, CONTENT));
     assert_eq!(record, expected);
-    // A codec under 248 is one byte, then the length.
-    assert_eq!(record[MAGIC.len()], 0x71);
+
+    // The content is raw, by the very digest the invocation's checksum
+    // signed.
+    assert_eq!(content.codec(), RAW);
+    assert_eq!(content.hash().code(), SHA2_256);
     assert_eq!(
-        &record[record.len() - CONTENT.len() - 2..][..2],
-        &[0x55, CONTENT.len() as u8]
+        content.hash().digest(),
+        Checksum::sha256(CONTENT).as_bytes()
+    );
+    // The header is exactly `{version, roots}`, as a strict CAR reader
+    // requires.
+    let mut at = 0;
+    let length = take_varint(&record, &mut at).unwrap().unwrap() as usize;
+    let header: BTreeMap<String, Ipld> =
+        serde_ipld_dagcbor::from_slice(&record[at..at + length]).expect("a map");
+    assert_eq!(
+        header.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["roots", "version"]
     );
 }
 
@@ -265,25 +262,110 @@ async fn it_refuses_bytes_that_are_not_a_record() {
     let container = delegated_publish(CONTENT, &[0, 1]).await;
     let container_bytes = container.to_bytes().expect("encodes");
 
-    assert_eq!(decode(&container_bytes), Err(RecordError::NotARecord));
-    assert_eq!(decode(b""), Err(RecordError::NotARecord));
-    assert_eq!(decode(&MAGIC[..4]), Err(RecordError::NotARecord));
-    assert_eq!(decode(MAGIC), Err(RecordError::Truncated(None)));
+    for bytes in [&container_bytes[..], b"", CONTENT] {
+        assert!(!Record::is_record(bytes));
+        assert!(matches!(decode(bytes), Err(RecordError::NotARecord(_))));
+    }
+    let header = car_header(vec![dagcbor_cid(&container.tokens()[0])]);
+    assert!(Record::is_record(&header));
+    assert_eq!(decode(&header), Err(RecordError::Truncated(None)));
 }
 
 #[dialog_common::test]
-async fn it_refuses_a_block_that_does_not_hash_to_its_reference() {
+async fn it_refuses_a_header_with_other_than_one_root() {
+    let container = delegated_publish(CONTENT, &[0, 1]).await;
+    let tokens = container.tokens();
+    let root = dagcbor_cid(&tokens[0]);
+
+    for roots in [vec![], vec![root, dagcbor_cid(&tokens[1])]] {
+        let count = roots.len();
+        let mut record = car_header(roots);
+        record.extend(sectioned(&root, &tokens[0]));
+        assert_eq!(decode(&record), Err(RecordError::Roots(count)));
+    }
+}
+
+#[dialog_common::test]
+async fn it_refuses_a_header_with_a_field_past_version_and_roots() {
+    #[derive(serde::Serialize)]
+    struct Extended {
+        version: u64,
+        roots: Vec<Cid>,
+        meta: String,
+    }
+    let container = delegated_publish(CONTENT, &[0, 1]).await;
+    let root = dagcbor_cid(&container.tokens()[0]);
+    let header = serde_ipld_dagcbor::to_vec(&Extended {
+        version: 1,
+        roots: vec![root],
+        meta: "dialog".into(),
+    })
+    .expect("encodes");
+    let mut record = Vec::new();
+    put_varint(&mut record, header.len() as u64);
+    record.extend(header);
+    record.extend(sectioned(&root, &container.tokens()[0]));
+
+    assert!(matches!(decode(&record), Err(RecordError::NotARecord(_))));
+}
+
+#[dialog_common::test]
+async fn it_refuses_a_header_in_other_than_its_one_byte_form() {
+    let container = delegated_publish(CONTENT, &[0, 1]).await;
+    let root = dagcbor_cid(&container.tokens()[0]);
+    // `{version: 1, roots: [root]}` with `version` first: the same header
+    // to a lax reader, and not DAG-CBOR's key order.
+    let mut header = vec![0xa2, 0x67];
+    header.extend(b"version");
+    header.extend([0x01, 0x65]);
+    header.extend(b"roots");
+    let cid = root.to_bytes();
+    header.extend([0x81, 0xd8, 0x2a, 0x58, cid.len() as u8 + 1, 0x00]);
+    header.extend(cid);
+    let mut record = Vec::new();
+    put_varint(&mut record, header.len() as u64);
+    record.extend(header);
+    record.extend(sectioned(&root, &container.tokens()[0]));
+
+    assert_eq!(decode(&record), Err(RecordError::Header));
+}
+
+#[dialog_common::test]
+async fn it_refuses_a_first_block_that_is_not_the_root() {
+    let container = delegated_publish(CONTENT, &[0, 1]).await;
+    let tokens = container.tokens();
+    let mut record = car_header(vec![dagcbor_cid(&tokens[0])]);
+    record.extend(sectioned(&dagcbor_cid(&tokens[1]), &tokens[1]));
+    assert_eq!(decode(&record), Err(RecordError::Root));
+
+    // The root's CID over other bytes.
+    let mut record = car_header(vec![dagcbor_cid(&tokens[0])]);
+    record.extend(sectioned(&dagcbor_cid(&tokens[0]), &tokens[1]));
+    assert_eq!(decode(&record), Err(RecordError::Root));
+}
+
+#[dialog_common::test]
+async fn it_refuses_a_root_that_is_not_an_invocation() {
+    let container = delegated_publish(CONTENT, &[0, 1]).await;
+    let delegation = &container.tokens()[1];
+    let mut record = car_header(vec![dagcbor_cid(delegation)]);
+    record.extend(sectioned(&dagcbor_cid(delegation), delegation));
+
+    assert!(matches!(decode(&record), Err(RecordError::Invocation(_))));
+}
+
+#[dialog_common::test]
+async fn it_refuses_blocks_out_of_the_order_the_invocation_names() {
     let container = delegated_publish(CONTENT, &[0, 1]).await;
     let [leaf, _] = references_of(&container).try_into().expect("two");
-    let mut record = MAGIC.to_vec();
-    record.extend(frame(&container.tokens()[0]));
-    // The root where the leaf belongs: the blocks out of order.
-    record.extend(frame(&container.tokens()[2]));
+    let tokens = container.tokens();
+    let mut record = rooted(&container);
+    record.extend(sectioned(&dagcbor_cid(&tokens[2]), &tokens[2]));
 
     assert_eq!(
         decode(&record),
         Err(RecordError::Mismatch {
-            frame: 1,
+            section: 1,
             reference: leaf
         })
     );
@@ -292,16 +374,45 @@ async fn it_refuses_a_block_that_does_not_hash_to_its_reference() {
 #[dialog_common::test]
 async fn it_refuses_content_other_than_what_the_invocation_signed() {
     let container = delegated_publish(CONTENT, &[0, 1]).await;
+    let content = Reference::Content(Checksum::sha256(CONTENT));
     let whole = encode(&container, Some(CONTENT)).expect("encodes");
-    let content = framed(RAW, CONTENT);
-    let mut record = whole[..whole.len() - content.len()].to_vec();
-    record.extend(framed(RAW, b"the revision a cell points to"));
+    let prefix = &whole[..whole.len() - sectioned(&content.cid(), CONTENT).len()];
+    let other = b"the revision a cell points to";
+
+    // Other bytes under the signed CID, and other bytes under their own.
+    for cid in [
+        content.cid(),
+        Reference::Content(Checksum::sha256(other)).cid(),
+    ] {
+        let mut record = prefix.to_vec();
+        record.extend(sectioned(&cid, other));
+        assert_eq!(
+            decode(&record),
+            Err(RecordError::Mismatch {
+                section: 3,
+                reference: content.clone()
+            })
+        );
+    }
+}
+
+#[dialog_common::test]
+async fn it_refuses_a_block_in_a_codec_other_than_its_reference_names() {
+    let container = delegated_publish(CONTENT, &[0, 1]).await;
+    let content = Reference::Content(Checksum::sha256(CONTENT));
+    let whole = encode(&container, Some(CONTENT)).expect("encodes");
+    let prefix = &whole[..whole.len() - sectioned(&content.cid(), CONTENT).len()];
+    // The content's digest, claimed as DAG-CBOR: its bytes hash right,
+    // its CID does not.
+    let claimed = Cid::new_v1(DAG_CBOR, *content.cid().hash());
+    let mut record = prefix.to_vec();
+    record.extend(sectioned(&claimed, CONTENT));
 
     assert_eq!(
         decode(&record),
         Err(RecordError::Mismatch {
-            frame: 3,
-            reference: Reference::Content(Checksum::sha256(CONTENT))
+            section: 3,
+            reference: content
         })
     );
 }
@@ -310,9 +421,9 @@ async fn it_refuses_content_other_than_what_the_invocation_signed() {
 async fn it_refuses_a_block_past_the_last_reference() {
     let container = delegated_publish(CONTENT, &[0, 1]).await;
     let mut record = encode(&container, Some(CONTENT)).expect("encodes");
-    record.extend(frame(b"smuggled"));
+    record.extend(sectioned(&dagcbor_cid(b"smuggled"), b"smuggled"));
 
-    assert_eq!(decode(&record), Err(RecordError::Unexpected { frame: 4 }));
+    assert_eq!(decode(&record), Err(RecordError::Unexpected { section: 4 }));
 }
 
 #[dialog_common::test]
@@ -321,8 +432,8 @@ async fn it_refuses_a_record_that_ends_early() {
     let record = encode(&container, Some(CONTENT)).expect("encodes");
     let content = Reference::Content(Checksum::sha256(CONTENT));
 
-    // Ending between frames, and inside one.
-    let between = record.len() - framed(RAW, CONTENT).len();
+    // Ending between sections, and inside one.
+    let between = record.len() - sectioned(&content.cid(), CONTENT).len();
     assert_eq!(
         decode(&record[..between]),
         Err(RecordError::Truncated(Some(content.clone())))
@@ -334,90 +445,36 @@ async fn it_refuses_a_record_that_ends_early() {
 }
 
 #[dialog_common::test]
-async fn it_refuses_an_invocation_in_another_codec_before_reading_it() {
-    let mut record = MAGIC.to_vec();
-    // Raw, then a length and no block: the codec alone refuses it.
-    record.extend([0x55, 0x10]);
-
-    assert_eq!(
-        Decoder::new().push(&record),
-        Err(RecordError::Codec {
-            frame: 0,
-            codec: RAW,
-            expected: DAG_CBOR
-        })
-    );
-}
-
-#[dialog_common::test]
-async fn it_refuses_a_first_block_that_is_not_an_invocation() {
+async fn it_refuses_a_varint_that_is_not_minimal() {
     let container = delegated_publish(CONTENT, &[0, 1]).await;
-    let mut record = MAGIC.to_vec();
-    record.extend(frame(&container.tokens()[1]));
+    let record = encode(&container, Some(CONTENT)).expect("encodes");
+    let mut at = 0;
+    let length = take_varint(&record, &mut at).unwrap().unwrap();
+    assert_eq!(at, 1, "a header's length is one byte");
 
-    assert!(matches!(decode(&record), Err(RecordError::Invocation(_))));
-}
+    // The same header length in two bytes: the same CAR to a lax reader.
+    let mut padded = vec![(length as u8) | 0x80, 0x00];
+    padded.extend(&record[1..]);
+    assert_eq!(decode(&padded), Err(RecordError::Varint { at: 0 }));
+    assert!(!Record::is_record(&padded));
 
-#[dialog_common::test]
-async fn it_refuses_a_block_in_a_codec_other_than_its_reference_names() {
-    let container = delegated_publish(CONTENT, &[0, 1]).await;
-    let [leaf, _] = references_of(&container).try_into().expect("two");
-    let content = Reference::Content(Checksum::sha256(CONTENT));
-
-    // A delegation tagged raw.
-    let mut record = MAGIC.to_vec();
-    record.extend(frame(&container.tokens()[0]));
-    record.extend(framed(RAW, &container.tokens()[1]));
-    assert_eq!(
-        decode(&record),
-        Err(RecordError::Codec {
-            frame: 1,
-            codec: RAW,
-            expected: leaf.codec()
-        })
-    );
-
-    // The content tagged DAG-CBOR: its bytes hash right, its codec does
-    // not.
-    let whole = encode(&container, Some(CONTENT)).expect("encodes");
-    let mut record = whole[..whole.len() - framed(RAW, CONTENT).len()].to_vec();
-    record.extend(frame(CONTENT));
-    assert_eq!(content.codec(), RAW);
-    assert_eq!(
-        decode(&record),
-        Err(RecordError::Codec {
-            frame: 3,
-            codec: DAG_CBOR,
-            expected: RAW
-        })
-    );
+    let mut overflowing = vec![0xff; 9];
+    overflowing.push(0x02);
+    assert_eq!(decode(&overflowing), Err(RecordError::Varint { at: 0 }));
 }
 
 #[dialog_common::test]
 async fn it_refuses_a_length_past_any_block_before_reading_it() {
-    let mut record = MAGIC.to_vec();
-    DAG_CBOR.encode(&mut record);
-    (MAX_BLOCK + 1).encode(&mut record);
+    let container = delegated_publish(CONTENT, &[0, 1]).await;
+    let mut record = car_header(vec![dagcbor_cid(&container.tokens()[0])]);
+    put_varint(&mut record, MAX_BLOCK + 1);
 
     assert_eq!(
-        Decoder::new().push(&record),
+        decode(&record),
         Err(RecordError::TooLarge {
-            frame: 0,
+            section: 0,
             length: MAX_BLOCK + 1
         })
-    );
-}
-
-#[dialog_common::test]
-async fn it_refuses_an_integer_past_64_bits() {
-    let mut record = MAGIC.to_vec();
-    DAG_CBOR.encode(&mut record);
-    // The longest bijou64 integer, past `u64::MAX`.
-    record.extend([0xff; 9]);
-
-    assert_eq!(
-        Decoder::new().push(&record),
-        Err(RecordError::Integer { frame: 0 })
     );
 }
 
