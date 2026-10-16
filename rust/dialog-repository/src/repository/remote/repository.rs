@@ -300,7 +300,7 @@ mod tests {
     use dialog_artifacts::Entity;
     use dialog_capability::Subject;
     use dialog_effects::Rejection;
-    use dialog_effects::memory::MemoryError;
+    use dialog_effects::memory::{Current, MemoryError};
     use dialog_remote_s3::Address as S3Address;
     use dialog_varsig::did;
     use std::sync::Mutex;
@@ -362,8 +362,7 @@ mod tests {
                 async {
                     Err(MemoryError::VersionMismatch {
                         expected: None,
-                        actual: None,
-                        current: None,
+                        current: Current::Unknown,
                     })
                 }
             })

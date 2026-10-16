@@ -20,7 +20,7 @@ use dialog_effects::archive::prelude::*;
 use dialog_effects::blob::BlobError;
 use dialog_effects::blob::prelude::*;
 use dialog_effects::memory::prelude::CellScope;
-use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Version, Watch};
+use dialog_effects::memory::{Current, Edition, MemoryError, Publish, Resolve, Version, Watch};
 use dialog_ucan::Scope;
 use dialog_ucan_core::{Container, Tag};
 use dialog_varsig::Principal as _;
@@ -826,18 +826,14 @@ async fn it_answers_a_conflict_with_what_the_cell_holds(
         )
         .await?;
         let conflict = perform_at(address, &signer, cell.publish(b"ours".to_vec(), None)).await;
-        let Err(MemoryError::VersionMismatch {
-            actual, current, ..
-        }) = conflict
-        else {
+        let Err(MemoryError::VersionMismatch { current, .. }) = conflict else {
             panic!("over {carried}, expected a conflict, got {conflict:?}");
         };
         let held = Edition {
             content: b"theirs".to_vec(),
             version: version.clone(),
         };
-        assert_eq!(current, Some(Some(held.clone())), "over {carried}");
-        assert_eq!(actual, Some(version), "over {carried}");
+        assert_eq!(current, Current::Holds(held.clone()), "over {carried}");
         assert_eq!(
             perform(&service, &signer, cell.resolve()).await?,
             Some(held),

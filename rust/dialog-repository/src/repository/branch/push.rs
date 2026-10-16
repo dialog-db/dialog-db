@@ -10,7 +10,7 @@ use dialog_effects::archive::prelude::{CatalogExt as _, GetBlockExt as _};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::prelude::{ArchiveBlobExt as _, ReadBlobExt as _, WriteBlobExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, Import as BlobImport, Read as BlobRead};
-use dialog_effects::memory::{Publish, Resolve};
+use dialog_effects::memory::{Current, Publish, Resolve};
 use dialog_search_tree::{
     MissingBlocks, MissingPolicy, NodeBody, NoveltyOp, PersistentNode, TreeDifference, into_owned,
 };
@@ -526,11 +526,11 @@ where
                         // a fetched one is, so the pull that rebases onto
                         // it asks the remote for nothing more.
                         Err(PublishRemoteBranchError::Publish(PublishError::VersionMismatch {
-                            current: Some(current),
+                            current: current @ (Current::Holds(_) | Current::Empty),
                             ..
                         })) => {
                             let actual = match current {
-                                Some(edition) => {
+                                Current::Holds(edition) => {
                                     let head = upstream.upstream().decode(&edition.content).await?;
                                     let tree = head.tree.clone();
                                     upstream
@@ -542,7 +542,7 @@ where
                                         .await?;
                                     Some(tree)
                                 }
-                                None => None,
+                                Current::Empty | Current::Unknown => None,
                             };
                             return Err(PushError::NonFastForward {
                                 branch: branch.name().to_string(),

@@ -19,7 +19,7 @@ use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, BlobSink, BlobWriter, Import, Read};
 use dialog_effects::memory::prelude::{PublishExt, RetractExt};
 use dialog_effects::memory::{
-    CellState, Edition, Editions, MemoryError, Publish, Resolve, Retract, Version, Watch,
+    CellState, Current, Edition, Editions, MemoryError, Publish, Resolve, Retract, Version, Watch,
 };
 use dialog_remote_s3::S3Error;
 use dialog_remote_ucan_s3::UcanAuthorization;
@@ -153,14 +153,10 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
         .await?;
         match answer {
             answer if answer.is_success() => Ok(Version::from(answer.version()?)),
-            answer if answer.status == 412 => {
-                let current = conflicting(answer).await;
-                Err(MemoryError::VersionMismatch {
-                    expected: invocation.capability.when().cloned(),
-                    actual: current.clone().flatten().map(|edition| edition.version),
-                    current,
-                })
-            }
+            answer if answer.status == 412 => Err(MemoryError::VersionMismatch {
+                expected: invocation.capability.when().cloned(),
+                current: conflicting(answer).await,
+            }),
             answer if answer.is_refusal() => Err(answer.refusal().await.into()),
             answer => Err(MemoryError::Storage(format!(
                 "Failed to publish value: {}",
@@ -183,14 +179,10 @@ impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
         let answer = exchange(self, &invocation.address, &invocation.authorization, None).await?;
         match answer {
             answer if answer.is_success() => Ok(()),
-            answer if answer.status == 412 => {
-                let current = conflicting(answer).await;
-                Err(MemoryError::VersionMismatch {
-                    expected: Some(invocation.capability.when().clone()),
-                    actual: current.clone().flatten().map(|edition| edition.version),
-                    current,
-                })
-            }
+            answer if answer.status == 412 => Err(MemoryError::VersionMismatch {
+                expected: Some(invocation.capability.when().clone()),
+                current: conflicting(answer).await,
+            }),
             answer if answer.is_refusal() => Err(answer.refusal().await.into()),
             answer => Err(MemoryError::Storage(format!(
                 "Failed to retract value: {}",
@@ -385,14 +377,17 @@ fn unanswered(error: S3Error) -> S3Error {
     }
 }
 
-/// What a conflict says the cell holds instead, when the service said: an
-/// older service answers a conflict with no body.
-async fn conflicting(answer: direct::Answer) -> Option<CellState> {
-    let body = answer.bytes().await.ok()?;
+/// What a conflict says the cell holds instead: unknown when the service
+/// did not say, as an older service, which answers a conflict with no
+/// body, does not.
+async fn conflicting(answer: direct::Answer) -> Current {
+    let Ok(body) = answer.bytes().await else {
+        return Current::Unknown;
+    };
     if body.is_empty() {
-        return None;
+        return Current::Unknown;
     }
-    serde_ipld_dagcbor::from_slice(&body).ok()
+    serde_ipld_dagcbor::from_slice::<CellState>(&body).map_or(Current::Unknown, Current::from)
 }
 
 /// The socket of the space `subject` names: a service answers each space

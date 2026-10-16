@@ -285,6 +285,59 @@ impl Effect for Watch {
 /// What a watched cell holds: its edition, or nothing when it is empty.
 pub type CellState = Option<Edition<Vec<u8>>>;
 
+/// What a cell holds instead of the version a refused write named, as far
+/// as whoever refused it could tell.
+///
+/// A writer that is told rebases onto it and writes again, with no read of
+/// its own in between; one that is not reads the cell first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Current {
+    /// Whoever refused the write did not say, as S3 does not.
+    Unknown,
+    /// The cell is empty.
+    Empty,
+    /// The cell holds this content, at this version.
+    Holds(Edition<Vec<u8>>),
+}
+
+impl Current {
+    /// The version the cell is at, when it is known to hold content.
+    pub fn version(&self) -> Option<&Version> {
+        match self {
+            Current::Holds(edition) => Some(&edition.version),
+            Current::Unknown | Current::Empty => None,
+        }
+    }
+
+    /// What the cell holds, when it is known: `None` when it is not.
+    pub fn state(self) -> Option<CellState> {
+        match self {
+            Current::Unknown => None,
+            Current::Empty => Some(None),
+            Current::Holds(edition) => Some(Some(edition)),
+        }
+    }
+}
+
+impl From<CellState> for Current {
+    fn from(state: CellState) -> Self {
+        match state {
+            Some(edition) => Current::Holds(edition),
+            None => Current::Empty,
+        }
+    }
+}
+
+impl fmt::Display for Current {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Current::Unknown => f.write_str("an unknown state"),
+            Current::Empty => f.write_str("an empty cell"),
+            Current::Holds(edition) => write!(f, "version {}", edition.version),
+        }
+    }
+}
+
 /// The states a watched cell takes, in order, as a [`Watch`] answers
 /// them. The first is what the cell holds when the watch begins.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -398,17 +451,13 @@ pub mod prelude;
 pub enum MemoryError {
     /// CAS edition mismatch: the write named a version the cell is no
     /// longer at.
-    #[error("Version mismatch: expected {expected:?}, got {actual:?}")]
+    #[error("Version mismatch: expected {expected:?}, found {current}")]
     VersionMismatch {
-        /// The expected version.
+        /// The version the write named.
         expected: Option<Version>,
-        /// The actual version found.
-        actual: Option<Version>,
-        /// What the cell holds instead, when whoever refused the write
-        /// said: `Some(None)` for a cell that is empty, `None` when it did
-        /// not say. A writer rebases onto it and writes again, with no
-        /// read of its own in between.
-        current: Option<CellState>,
+        /// What the cell holds instead, as far as whoever refused the
+        /// write could tell.
+        current: Current,
     },
 
     /// Storage backend error.

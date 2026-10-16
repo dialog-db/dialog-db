@@ -8,7 +8,7 @@ use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::authority::AuthorityError;
 use dialog_effects::blob::BlobError;
-use dialog_effects::memory::{CellState, MemoryError, Version};
+use dialog_effects::memory::{Current, MemoryError, Version};
 use dialog_effects::peer::PeerError as ContactError;
 use dialog_effects::storage::StorageError;
 use dialog_search_tree::DialogSearchTreeError;
@@ -817,12 +817,12 @@ pub enum PushError {
 #[derive(Error, Debug)]
 pub enum ResolveError {
     /// CAS edition mismatch — the backing store saw a different edition.
-    #[error("Version mismatch: expected {expected:?}, got {actual:?}")]
+    #[error("Version mismatch: expected {expected:?}, found {current}")]
     VersionMismatch {
         /// The edition we held locally.
         expected: Option<Version>,
-        /// The edition the backing store actually had.
-        actual: Option<Version>,
+        /// What the cell holds instead, as far as the store could tell.
+        current: Current,
     },
 
     /// Storage backend failure.
@@ -859,9 +859,9 @@ impl AuthorizationFailure for ResolveError {
 impl From<MemoryError> for ResolveError {
     fn from(error: MemoryError) -> Self {
         match error {
-            MemoryError::VersionMismatch {
-                expected, actual, ..
-            } => Self::VersionMismatch { expected, actual },
+            MemoryError::VersionMismatch { expected, current } => {
+                Self::VersionMismatch { expected, current }
+            }
             MemoryError::Storage(message) => Self::Storage(message),
             MemoryError::Rejected(error) => Self::Rejected(error),
             MemoryError::Authorization(error) => Self::Authorization(error),
@@ -873,15 +873,13 @@ impl From<MemoryError> for ResolveError {
 #[derive(Error, Debug)]
 pub enum PublishError {
     /// CAS edition mismatch — another writer won the race.
-    #[error("Version mismatch: expected {expected:?}, got {actual:?}")]
+    #[error("Version mismatch: expected {expected:?}, found {current}")]
     VersionMismatch {
         /// The edition we held locally.
         expected: Option<Version>,
-        /// The edition the backing store actually had.
-        actual: Option<Version>,
-        /// What the cell holds instead, when the store said (see
-        /// [`MemoryError::VersionMismatch`]).
-        current: Option<CellState>,
+        /// What the cell holds instead, as far as the store could tell
+        /// (see [`MemoryError::VersionMismatch`]).
+        current: Current,
     },
 
     /// Storage backend failure.
@@ -929,15 +927,13 @@ pub enum RetractError {
     Unobserved,
 
     /// CAS edition mismatch -- the cell moved under us.
-    #[error("Version mismatch: expected {expected:?}, got {actual:?}")]
+    #[error("Version mismatch: expected {expected:?}, found {current}")]
     VersionMismatch {
         /// The edition we expected to remove.
         expected: Option<Version>,
-        /// The edition the backing store actually had.
-        actual: Option<Version>,
-        /// What the cell holds instead, when the store said (see
-        /// [`MemoryError::VersionMismatch`]).
-        current: Option<CellState>,
+        /// What the cell holds instead, as far as the store could tell
+        /// (see [`MemoryError::VersionMismatch`]).
+        current: Current,
     },
 
     /// Storage backend failure.
@@ -966,15 +962,9 @@ impl AuthorizationFailure for RetractError {
 impl From<MemoryError> for RetractError {
     fn from(error: MemoryError) -> Self {
         match error {
-            MemoryError::VersionMismatch {
-                expected,
-                actual,
-                current,
-            } => Self::VersionMismatch {
-                expected,
-                actual,
-                current,
-            },
+            MemoryError::VersionMismatch { expected, current } => {
+                Self::VersionMismatch { expected, current }
+            }
             MemoryError::Storage(message) => Self::Storage(message),
             MemoryError::Rejected(error) => Self::Rejected(error),
             MemoryError::Authorization(error) => Self::Authorization(error),
@@ -985,15 +975,9 @@ impl From<MemoryError> for RetractError {
 impl From<MemoryError> for PublishError {
     fn from(error: MemoryError) -> Self {
         match error {
-            MemoryError::VersionMismatch {
-                expected,
-                actual,
-                current,
-            } => Self::VersionMismatch {
-                expected,
-                actual,
-                current,
-            },
+            MemoryError::VersionMismatch { expected, current } => {
+                Self::VersionMismatch { expected, current }
+            }
             MemoryError::Storage(message) => Self::Storage(message),
             MemoryError::Rejected(error) => Self::Rejected(error),
             MemoryError::Authorization(error) => Self::Authorization(error),

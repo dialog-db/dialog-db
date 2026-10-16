@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::ConditionalSync;
 use dialog_effects::memory::prelude::PublishExt as _;
-use dialog_effects::memory::{Edition, List, MemoryError, Publish, Resolve, Retract, Version};
+use dialog_effects::memory::{
+    Current, Edition, List, MemoryError, Publish, Resolve, Retract, Version,
+};
 use dialog_effects::storage::Location;
 use parking_lot::Mutex;
 
@@ -102,8 +104,7 @@ where
         if self.loses(effect.space(), effect.cell()) {
             return Err(MemoryError::VersionMismatch {
                 expected: effect.when().cloned(),
-                actual: None,
-                current: None,
+                current: Current::Unknown,
             });
         }
         effect.perform(&self.inner).await

@@ -13,7 +13,7 @@ use dialog_effects::archive::{self, ArchiveError, Catalog};
 use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
 use dialog_effects::blob::{self, BlobError, BlobReader, BlobSink, BlobSource, BlobWriter};
 use dialog_effects::memory::prelude::{PublishExt, RetractExt};
-use dialog_effects::memory::{self, Cell, Edition, MemoryError, Space, Version};
+use dialog_effects::memory::{self, Cell, Current, Edition, MemoryError, Space, Version};
 
 /// How many bytes a blob read yields per chunk, small enough that a
 /// test blob streams as several.
@@ -36,6 +36,17 @@ struct Inner {
 /// as. A publish with no version expects the cell to be empty and a
 /// publish or retract with one expects the cell to stand at exactly
 /// that version, which is the compare-and-swap an object store gives
+/// What a cell holds, as a write the store refused reports it.
+fn holding(cell: Option<&(Vec<u8>, Version)>) -> Current {
+    match cell {
+        Some((content, version)) => Current::Holds(Edition {
+            content: content.clone(),
+            version: version.clone(),
+        }),
+        None => Current::Empty,
+    }
+}
+
 /// through `If-None-Match: *` and `If-Match`.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryStore {
@@ -265,8 +276,7 @@ impl Provider<memory::Publish> for MemoryStore {
         if current.as_ref() != capability.when() {
             return Err(MemoryError::VersionMismatch {
                 expected: capability.when().cloned(),
-                actual: current,
-                current: None,
+                current: holding(inner.cells.get(&key)),
             });
         }
         inner.editions += 1;
@@ -288,8 +298,7 @@ impl Provider<memory::Retract> for MemoryStore {
         if current.as_ref() != Some(capability.when()) {
             return Err(MemoryError::VersionMismatch {
                 expected: Some(capability.when().clone()),
-                actual: current,
-                current: None,
+                current: holding(inner.cells.get(&key)),
             });
         }
         inner.cells.remove(&key);
