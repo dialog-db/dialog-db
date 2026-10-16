@@ -20,7 +20,7 @@ says how to cut a release.
 
 A cell the access service writes now stores a record: the signed publish invocation, the delegations it proves with, and the content it signed. Whoever reads the cell, through the service or straight from its store, can then check that someone the subject authorized wrote what it holds, without trusting the service or the store. Before, a cell held its content alone, and who wrote it was the service's word. The client verifies each cell it reads at the remote boundary and hands on the content only once it does.
 
-A record is a stream of frames after the magic `dialog-cell/1`: the invocation first, then each delegation its `prf` lists, then the content. No frame claims an address. Its position says what it is and the reader hashes it to check, so a record carries nothing the invocation does not name, and it is checked as it arrives. A cell is stored with every block carried, so its bytes, and the version a store computes from them (an S3 or R2 `ETag`), are the same for every reader.
+A record is a stream of frames after the magic `dialog-cell/1`: the invocation first, then each delegation its `prf` lists, then the content. A frame is its block's multicodec code (DAG-CBOR for the tokens, raw for the content), its length, and the block, both integers bijou64, as the search tree's are, so a record has one byte form. No frame claims an address. Its position says what it is and the reader hashes it to check, so a record carries nothing the invocation does not name, and it is checked as it arrives. The codec is unsigned: a reader refuses one that is not the codec its reference implies. A record's bytes, and the version a store computes from them (an S3 or R2 `ETag`), are the same for every reader.
 
 What this changes for you:
 
@@ -28,7 +28,7 @@ What this changes for you:
 - A record is verified as of the time its invocation says it was issued: the chain verifies at that time, the command is a publish (`/use/put/memory/cell`, or the older `/memory/publish`), and it names the subject, space and cell that were read. No revocation is consulted.
 - One that fails is `MemoryError::Unproven { reason }`, a new variant, and a branch's resolve reports it as `ResolveError::Unproven`: a `match` on either without a wildcard adds an arm. A conflict whose state does not verify reads as one that did not say what the cell holds (`current: None`).
 - A cell holding content and no record (one written before this release, or through the permit exchange) is read as before by default. `UcanSite::with_unrecorded(Unrecorded::Refuse)` refuses it as `Unproven`.
-- `dialog_remote_ucan::record` holds the codec (`encode`, `encode_eliding`, `decode`, the streaming `Decoder`) and `Record`, with `Record::verify`. A block the reader already holds may be elided in one byte when a record is carried to it, never when one is stored.
+- `dialog_remote_ucan::record` holds the codec (`encode`, `decode`, the streaming `Decoder`) and `Record`, with `Record::verify`.
 - `Verified::container` is the container as it was presented: the token bytes the signatures cover, which a record carries.
 - The access service compares a publish against what the cell holds by the record's content, so a publish sent again still finds its own write.
 

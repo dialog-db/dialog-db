@@ -122,8 +122,7 @@ fn references_of(container: &Container) -> Vec<Reference> {
         .collect()
 }
 
-/// The frames a record of `container` writing `content` reads as, with
-/// every block carried.
+/// The frames a record of `container` writing `content` reads as.
 fn carried(container: &Container, content: &[u8]) -> Vec<Frame> {
     let mut frames = vec![Frame::Invocation(container.tokens()[0].clone())];
     for (reference, bytes) in delegations(container) {
@@ -136,10 +135,15 @@ fn carried(container: &Container, content: &[u8]) -> Vec<Frame> {
     frames
 }
 
-/// The bytes a carried frame of `block` is.
+/// The bytes a frame of `block`, in DAG-CBOR, is.
 fn frame(block: &[u8]) -> Vec<u8> {
+    framed(DAG_CBOR, block)
+}
+
+/// The bytes a frame of `block`, in `codec`, is.
+fn framed(codec: u64, block: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
-    carry(&mut out, block);
+    carry(&mut out, codec, block);
     out
 }
 
@@ -211,22 +215,21 @@ async fn it_answers_the_invocation_before_the_rest_arrives() {
 }
 
 #[dialog_common::test]
-async fn it_elides_in_one_byte_what_the_reader_holds() {
+async fn it_tags_each_block_with_its_codec() {
     let container = delegated_publish(CONTENT, &[0, 1]).await;
-    let [leaf, root] = references_of(&container).try_into().expect("two");
-    let whole = encode(&container, Some(CONTENT)).expect("encodes");
-    let record =
-        encode_eliding(&container, Some(CONTENT), |reference| *reference == root).expect("encodes");
+    let record = encode(&container, Some(CONTENT)).expect("encodes");
 
+    let mut expected = MAGIC.to_vec();
+    expected.extend(frame(&container.tokens()[0]));
+    expected.extend(frame(&container.tokens()[1]));
+    expected.extend(frame(&container.tokens()[2]));
+    expected.extend(framed(RAW, CONTENT));
+    assert_eq!(record, expected);
+    // A codec under 248 is one byte, then the length.
+    assert_eq!(record[MAGIC.len()], 0x71);
     assert_eq!(
-        whole.len() - record.len(),
-        frame(&container.tokens()[2]).len() - 1
-    );
-    let mut expected = carried(&container, CONTENT);
-    expected[2] = Frame::Elided(root);
-    assert_eq!(decode(&record), Ok(expected));
-    assert!(
-        matches!(&decode(&record).unwrap()[1], Frame::Block { reference, .. } if *reference == leaf)
+        &record[record.len() - CONTENT.len() - 2..][..2],
+        &[0x55, CONTENT.len() as u8]
     );
 }
 
@@ -290,9 +293,9 @@ async fn it_refuses_a_block_that_does_not_hash_to_its_reference() {
 async fn it_refuses_content_other_than_what_the_invocation_signed() {
     let container = delegated_publish(CONTENT, &[0, 1]).await;
     let whole = encode(&container, Some(CONTENT)).expect("encodes");
-    let content = frame(CONTENT);
+    let content = framed(RAW, CONTENT);
     let mut record = whole[..whole.len() - content.len()].to_vec();
-    record.extend(frame(b"the revision a cell points to"));
+    record.extend(framed(RAW, b"the revision a cell points to"));
 
     assert_eq!(
         decode(&record),
@@ -319,7 +322,7 @@ async fn it_refuses_a_record_that_ends_early() {
     let content = Reference::Content(Checksum::sha256(CONTENT));
 
     // Ending between frames, and inside one.
-    let between = record.len() - frame(CONTENT).len();
+    let between = record.len() - framed(RAW, CONTENT).len();
     assert_eq!(
         decode(&record[..between]),
         Err(RecordError::Truncated(Some(content.clone())))
@@ -331,11 +334,19 @@ async fn it_refuses_a_record_that_ends_early() {
 }
 
 #[dialog_common::test]
-async fn it_refuses_an_elided_invocation() {
+async fn it_refuses_an_invocation_in_another_codec_before_reading_it() {
     let mut record = MAGIC.to_vec();
-    record.push(ELIDED);
+    // Raw, then a length and no block: the codec alone refuses it.
+    record.extend([0x55, 0x10]);
 
-    assert_eq!(decode(&record), Err(RecordError::InvocationElided));
+    assert_eq!(
+        Decoder::new().push(&record),
+        Err(RecordError::Codec {
+            frame: 0,
+            codec: RAW,
+            expected: DAG_CBOR
+        })
+    );
 }
 
 #[dialog_common::test]
@@ -348,17 +359,36 @@ async fn it_refuses_a_first_block_that_is_not_an_invocation() {
 }
 
 #[dialog_common::test]
-async fn it_refuses_a_frame_it_does_not_know() {
+async fn it_refuses_a_block_in_a_codec_other_than_its_reference_names() {
     let container = delegated_publish(CONTENT, &[0, 1]).await;
+    let [leaf, _] = references_of(&container).try_into().expect("two");
+    let content = Reference::Content(Checksum::sha256(CONTENT));
+
+    // A delegation tagged raw.
     let mut record = MAGIC.to_vec();
     record.extend(frame(&container.tokens()[0]));
-    record.push(0x02);
-
+    record.extend(framed(RAW, &container.tokens()[1]));
     assert_eq!(
         decode(&record),
-        Err(RecordError::Frame {
+        Err(RecordError::Codec {
             frame: 1,
-            tag: 0x02
+            codec: RAW,
+            expected: leaf.codec()
+        })
+    );
+
+    // The content tagged DAG-CBOR: its bytes hash right, its codec does
+    // not.
+    let whole = encode(&container, Some(CONTENT)).expect("encodes");
+    let mut record = whole[..whole.len() - framed(RAW, CONTENT).len()].to_vec();
+    record.extend(frame(CONTENT));
+    assert_eq!(content.codec(), RAW);
+    assert_eq!(
+        decode(&record),
+        Err(RecordError::Codec {
+            frame: 3,
+            codec: DAG_CBOR,
+            expected: RAW
         })
     );
 }
@@ -366,31 +396,28 @@ async fn it_refuses_a_frame_it_does_not_know() {
 #[dialog_common::test]
 async fn it_refuses_a_length_past_any_block_before_reading_it() {
     let mut record = MAGIC.to_vec();
-    record.push(CARRIED);
-    // MAX_BLOCK + 1, and a varint that runs past 64 bits.
-    let mut long = Vec::new();
-    carry(&mut long, &vec![0; MAX_BLOCK as usize + 1]);
-    record.extend(&long[1..5]);
+    DAG_CBOR.encode(&mut record);
+    (MAX_BLOCK + 1).encode(&mut record);
 
-    let mut decoder = Decoder::new();
     assert_eq!(
-        decoder.push(&record),
+        Decoder::new().push(&record),
         Err(RecordError::TooLarge {
             frame: 0,
             length: MAX_BLOCK + 1
         })
     );
+}
 
-    let mut overflowing = MAGIC.to_vec();
-    overflowing.push(CARRIED);
-    overflowing.extend([0xff; 10]);
-    overflowing.push(0x01);
+#[dialog_common::test]
+async fn it_refuses_an_integer_past_64_bits() {
+    let mut record = MAGIC.to_vec();
+    DAG_CBOR.encode(&mut record);
+    // The longest bijou64 integer, past `u64::MAX`.
+    record.extend([0xff; 9]);
+
     assert_eq!(
-        Decoder::new().push(&overflowing),
-        Err(RecordError::TooLarge {
-            frame: 0,
-            length: u64::MAX
-        })
+        Decoder::new().push(&record),
+        Err(RecordError::Integer { frame: 0 })
     );
 }
 
