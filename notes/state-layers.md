@@ -545,9 +545,12 @@ names, read as one composite and written by placement.
   only the layers above.
 - Each layer holds only its own link facts.
 - Links are facts held by the enclosing layer: `dialog.link/{from, to,
-  name, revision}` on `link:<base58(blake3(dagcbor{from, to}))>`
-  with `from` the encloser's address entity and `to` the enclosed
-  layer's identity, plus the
+  name, revision}` on `link:<base58(blake3(dagcbor{from, to, name}))>`
+  with `from` the encloser's address entity, `to` the enclosed
+  layer's identity, and `name` the scope name, so that one layer can
+  link another under two names, each a link of its own. The two links
+  of such a pair share one access: read-only under one name and
+  writable under the other is refused. Each link carries the
   target's address (`dialog.link/repository` and `dialog.link/branch`,
   `dialog.link/tree`, or `dialog.link/ephemeral`). `revision` is the
   target's head as the encloser last saw it: written at build and

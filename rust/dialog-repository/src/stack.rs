@@ -428,8 +428,9 @@ struct Link {
     to: usize,
     /// The scope name the link binds.
     name: Entity,
-    /// The link entity: `link:<blake3(dagcbor{from, to})>` over the
-    /// encloser's address entity and the enclosed layer's identity.
+    /// The link entity: `link:<blake3(dagcbor{from, to, name})>` over the
+    /// encloser's address entity, the enclosed layer's identity, and the
+    /// scope name, so that one layer can link another under two names.
     entity: Entity,
     /// Whether the stack only reads the enclosed layer through this
     /// link: it records the layer's head and advances it, but never
@@ -460,10 +461,11 @@ pub enum StackError {
         /// Its audience.
         to_audience: Audience,
     },
-    /// A layer links a layer it links already, under another name: a link
-    /// entity names the pair, so a pair holds one name.
-    #[error("Layer {from} links {to} under another name already")]
-    SecondName {
+    /// A layer links a layer under two names, read-only under one and
+    /// writable under the other: the stack writes a layer or only reads
+    /// it, whatever scope a write names.
+    #[error("Layer {from} links {to} under another name with another access")]
+    MixedAccess {
         /// The address entity of the linking layer.
         from: Box<Entity>,
         /// The address entity of the linked layer.
@@ -554,22 +556,24 @@ pub enum StackError {
     },
 }
 
-/// What a link entity hashes: the encloser's address entity and the
-/// enclosed layer's stack identity, in canonical dag-cbor like the
-/// descriptor.
+/// What a link entity hashes: the encloser's address entity, the
+/// enclosed layer's stack identity, and the scope name, in canonical
+/// dag-cbor like the descriptor.
 #[derive(Debug, Clone, Serialize)]
 struct LinkKey<'a> {
     from: &'a str,
     to: &'a str,
+    name: &'a str,
 }
 
-/// `link:<base58(blake3(dagcbor{from, to}))>`.
-fn link_entity(from: &Entity, to: &Entity) -> Entity {
+/// `link:<base58(blake3(dagcbor{from, to, name}))>`.
+fn link_entity(from: &Entity, to: &Entity, name: &Entity) -> Entity {
     let key = LinkKey {
         from: from.as_str(),
         to: to.as_str(),
+        name: name.as_str(),
     };
-    let bytes = serde_ipld_dagcbor::to_vec(&key).expect("two strings encode");
+    let bytes = serde_ipld_dagcbor::to_vec(&key).expect("three strings encode");
     format!("link:{}", Blake3Hash::hash(&bytes).as_bytes().to_base58())
         .parse()
         .expect("a base58 hash is an opaque URI path")
@@ -646,7 +650,8 @@ impl Topology {
 
     /// Link layer `from` to layer `to` beneath it under `name`, read-only
     /// or not. A link that already exists keeps its place, and takes the
-    /// access given.
+    /// access given. One layer can link another under two names, each a
+    /// link of its own, but with one access for both.
     fn link(
         &mut self,
         from: usize,
@@ -672,13 +677,19 @@ impl Topology {
                 to_audience,
             });
         }
-        if let Some(link) = self.links[from].iter_mut().find(|link| link.to == to) {
-            if link.name != name {
-                return Err(StackError::SecondName {
-                    from: Box::new(address),
-                    to: Box::new(target.address_entity()),
-                });
-            }
+        if self.links[from]
+            .iter()
+            .any(|link| link.to == to && link.name != name && link.read_only != read_only)
+        {
+            return Err(StackError::MixedAccess {
+                from: Box::new(address),
+                to: Box::new(target.address_entity()),
+            });
+        }
+        if let Some(link) = self.links[from]
+            .iter_mut()
+            .find(|link| link.to == to && link.name == name)
+        {
             if link.read_only == read_only {
                 return Ok(());
             }
@@ -762,7 +773,7 @@ impl Topology {
                 } else {
                     descriptor_links.push(entry);
                 }
-                link.entity = link_entity(&from, &self.ids[link.to]);
+                link.entity = link_entity(&from, &self.ids[link.to], &link.name);
             }
             descriptor_links.sort();
             read_only.sort();
@@ -3547,6 +3558,7 @@ mod tests {
         let link = link_entity(
             &Layer::Branch(local.clone()).address_entity(),
             &stack.identities()[0],
+            &name("shared"),
         );
         let shared_head = |branch: &Branch| Head::Tree(branch.revision()).bytes();
         assert_eq!(
@@ -3645,7 +3657,11 @@ mod tests {
         local.refresh(&operator).await?;
         let local_before = local.revision();
         let state_before = state.revision();
-        let link = link_entity(&state.entity().clone(), &stack.identities()[0]);
+        let link = link_entity(
+            &state.entity().clone(),
+            &stack.identities()[0],
+            &name("shared"),
+        );
 
         let doc: Entity = "doc:1".parse()?;
         stack
@@ -3695,8 +3711,8 @@ mod tests {
         local.refresh(&operator).await?;
 
         let local_address = Layer::Branch(local.clone()).address_entity();
-        let link = link_entity(&local_address, &stack.identities()[0]);
-        let own = link_entity(state.entity(), &stack.identities()[1]);
+        let link = link_entity(&local_address, &stack.identities()[0], &name("shared"));
+        let own = link_entity(state.entity(), &stack.identities()[1], &name("local"));
         let selector = |the: &str, of: &Entity| {
             ArtifactSelector::new()
                 .the(the.parse().expect("attribute"))
@@ -3789,7 +3805,11 @@ mod tests {
             values::<String>(&stack, &operator, "doc/title", &doc).await?,
             vec![Value::String("Notes".into())]
         );
-        let link = link_entity(&state.entity().clone(), &stack.identities()[0]);
+        let link = link_entity(
+            &state.entity().clone(),
+            &stack.identities()[0],
+            &name("shared"),
+        );
         let selector = ArtifactSelector::new()
             .the("dialog.link/revision".parse()?)
             .of(link);
@@ -3948,7 +3968,11 @@ mod tests {
             vec![Value::String("Notes".into())],
             "advance re-resolved the head and captured it"
         );
-        let link = link_entity(&state.entity().clone(), &stack.identities()[0]);
+        let link = link_entity(
+            &state.entity().clone(),
+            &stack.identities()[0],
+            &name("shared"),
+        );
         let selector = ArtifactSelector::new()
             .the("dialog.link/revision".parse()?)
             .of(link);
@@ -4563,22 +4587,129 @@ mod tests {
         Ok(())
     }
 
-    /// A layer links another under one name: a second name for the pair
-    /// is refused.
+    /// A layer links another under two names: each scope binds the
+    /// layer, a write placed on either lands in it once, a read guided by
+    /// placement finds both through it with no divergence, and a commit
+    /// that moves it advances both links to the one head.
     #[dialog_common::test]
-    async fn it_refuses_a_second_name_for_a_link() -> Result<()> {
+    async fn it_binds_one_layer_under_two_scopes() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &shared, name("space"))
+            .link(&top, &shared, name("persona"))
+            .perform(&operator)
+            .await?;
+        shared
+            .overlay()
+            .assert(Placement::new("persona/petname".parse()?, name("persona")))?;
+        shared
+            .overlay()
+            .assert(Placement::new("doc/title".parse()?, name("space")))?;
+        let bottom = Layer::Branch(shared.clone());
+        for scope in ["space", "persona"] {
+            let layers = stack.scope(&name(scope));
+            assert_eq!(layers.len(), 1, "{scope} binds one layer");
+            assert!(layers[0].same(&bottom), "{scope} binds the shared layer");
+        }
+
+        let doc: Entity = "doc:1".parse()?;
+        let before = shared.revision();
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of(doc.clone())
+                    .is("Notes".to_string()),
+            )
+            .assert(
+                dialog_query::the!("persona/petname")
+                    .of(doc.clone())
+                    .is("Ben".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert_ne!(shared.revision(), before, "the commit moved the layer");
+        assert_eq!(
+            committed(&shared, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Notes".into())],
+            "a write placed on one scope lands in the layer once"
+        );
+        assert_eq!(
+            committed(&shared, &operator, "persona/petname", &doc).await?,
+            vec![Value::String("Ben".into())],
+            "and a write placed on the other too"
+        );
+        assert_eq!(
+            values::<String>(&stack, &operator, "doc/title", &doc).await?,
+            vec![Value::String("Notes".into())]
+        );
+        assert_eq!(
+            values::<String>(&stack, &operator, "persona/petname", &doc).await?,
+            vec![Value::String("Ben".into())]
+        );
+        assert!(
+            stack.divergences().is_empty(),
+            "neither read diverges from its placement"
+        );
+
+        let head = Head::Tree(shared.revision()).bytes();
+        let links = top.scan(&ArtifactSelector::new().the("dialog.link/revision".parse()?));
+        assert_eq!(links.len(), 2, "the top holds a link for each scope");
+        for link in &links {
+            assert_eq!(
+                link.is,
+                Value::Bytes(head.clone()),
+                "each names the new head"
+            );
+        }
+        let space = link_entity(
+            &top.entity().clone(),
+            &stack.identities()[0],
+            &name("space"),
+        );
+        let persona = link_entity(
+            &top.entity().clone(),
+            &stack.identities()[0],
+            &name("persona"),
+        );
+        assert_ne!(space, persona, "the two links are two entities");
+
+        // The links read back as two: a new stack opened from the top
+        // binds both scopes.
+        let reopened = Stack::open(top.clone()).perform(&operator).await?;
+        assert_eq!(reopened.layers().len(), 2);
+        for scope in ["space", "persona"] {
+            assert_eq!(reopened.scope(&name(scope)).len(), 1, "{scope} binds again");
+        }
+        assert_eq!(
+            values::<String>(&reopened, &operator, "persona/petname", &doc).await?,
+            vec![Value::String("Ben".into())]
+        );
+        Ok(())
+    }
+
+    /// A layer links another under two names with one access: read-only
+    /// under one and writable under the other is refused.
+    #[dialog_common::test]
+    async fn it_refuses_two_accesses_for_one_layer() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let top = Ephemeral::create().perform(&operator).await;
         let refused = Stack::open(top.clone())
             .link(&top, &shared, name("shared"))
-            .link(&top, &shared, name("other"))
+            .link_read_only(&top, &shared, name("other"))
             .perform(&operator)
             .await;
         assert!(
-            matches!(refused, Err(StackError::SecondName { .. })),
-            "one pair holds one name: {refused:?}"
+            matches!(refused, Err(StackError::MixedAccess { .. })),
+            "one layer holds one access: {refused:?}"
         );
         Ok(())
     }
