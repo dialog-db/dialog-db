@@ -419,8 +419,8 @@ impl Response {
     /// A write refused because the cell is not at the version it named,
     /// carrying what the cell holds instead, when that is known: the
     /// state as the body, and its version as the `ETag`.
-    fn conflict(current: Option<memory::CellState>) -> Self {
-        let Some(state) = current else {
+    fn conflict(current: memory::Current) -> Self {
+        let Some(state) = current.state() else {
             return Self::status(412);
         };
         let version = state
@@ -956,12 +956,12 @@ where
             // it, whoever wrote it: a publish whose answer was lost, sent
             // again, finds its own write. Otherwise the writer is told
             // what the cell holds, to rebase onto.
-            Err(memory::MemoryError::VersionMismatch { current: None, .. }) => {
-                match self.held(subject, &space, &cell).await? {
+            Err(memory::MemoryError::VersionMismatch { current, .. }) => {
+                match self.holding(subject, &space, &cell, current).await? {
                     Some(edition) if Checksum::sha256(&edition.content) == bound.checksum => {
                         edition.version
                     }
-                    current => return Err(Failure::conflict(Some(current))),
+                    state => return Err(Failure::conflict(state.into())),
                 }
             }
             Err(error) => return Err(error.into()),
@@ -979,13 +979,33 @@ where
         match Provider::<memory::Retract>::execute(&self.provider, capability).await {
             Ok(()) => Ok(Response::status(204)),
             // A cell already empty is where the retract would leave it.
-            Err(memory::MemoryError::VersionMismatch { current: None, .. }) => {
-                match self.held(subject, &space, &cell).await? {
+            Err(memory::MemoryError::VersionMismatch { current, .. }) => {
+                match self.holding(subject, &space, &cell, current).await? {
                     None => Ok(Response::status(204)),
-                    current => Err(Failure::conflict(Some(current))),
+                    state => Err(Failure::conflict(state.into())),
                 }
             }
             Err(error) => Err(error.into()),
+        }
+    }
+
+    /// What the cell holds, as the store that refused a write said, or,
+    /// when it did not say, as read now on behalf of the write, whose
+    /// authority verified.
+    async fn holding(
+        &self,
+        subject: &Did,
+        space: &str,
+        cell: &str,
+        current: memory::Current,
+    ) -> Result<memory::CellState, Failure>
+    where
+        P: Store,
+    {
+        match current {
+            memory::Current::Holds(edition) => Ok(Some(edition)),
+            memory::Current::Empty => Ok(None),
+            memory::Current::Unknown => self.held(subject, space, cell).await,
         }
     }
 
@@ -1087,7 +1107,7 @@ impl Failure {
 
     /// A write refused for naming a version the cell is not at, with what
     /// the cell holds instead when that is known.
-    fn conflict(current: Option<memory::CellState>) -> Self {
+    fn conflict(current: memory::Current) -> Self {
         Self::Answered(Response::conflict(current))
     }
 }
