@@ -845,14 +845,6 @@ pub enum ResolveError {
     /// Failed to decode the resolved bytes.
     #[error("Decode error: {0}")]
     Decode(String),
-
-    /// What the remote cell holds does not prove who wrote it (see
-    /// [`MemoryError::Unproven`]).
-    #[error("The cell's content is unproven: {reason}")]
-    Unproven {
-        /// Why the record does not prove the content.
-        reason: String,
-    },
 }
 
 impl AuthorizationFailure for ResolveError {
@@ -873,7 +865,6 @@ impl From<MemoryError> for ResolveError {
             MemoryError::Storage(message) => Self::Storage(message),
             MemoryError::Rejected(error) => Self::Rejected(error),
             MemoryError::Authorization(error) => Self::Authorization(error),
-            MemoryError::Unproven { reason } => Self::Unproven { reason },
         }
     }
 }
@@ -987,12 +978,6 @@ impl From<MemoryError> for RetractError {
             MemoryError::Storage(message) => Self::Storage(message),
             MemoryError::Rejected(error) => Self::Rejected(error),
             MemoryError::Authorization(error) => Self::Authorization(error),
-            // A write is answered with a version, never with content to
-            // prove; a conflict's state that does not verify reads as
-            // unsaid.
-            MemoryError::Unproven { reason } => {
-                Self::Rejected(Rejection::Unclassified { detail: reason })
-            }
         }
     }
 }
@@ -1012,12 +997,6 @@ impl From<MemoryError> for PublishError {
             MemoryError::Storage(message) => Self::Storage(message),
             MemoryError::Rejected(error) => Self::Rejected(error),
             MemoryError::Authorization(error) => Self::Authorization(error),
-            // A write is answered with a version, never with content to
-            // prove; a conflict's state that does not verify reads as
-            // unsaid.
-            MemoryError::Unproven { reason } => {
-                Self::Rejected(Rejection::Unclassified { detail: reason })
-            }
         }
     }
 }

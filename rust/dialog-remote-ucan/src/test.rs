@@ -1564,19 +1564,7 @@ mod layer {
             .await
             .expect("the watch is accepted");
 
-        // The service hands on what the cell stores: the record of the
-        // publish that wrote it, which proves the content to whoever reads.
-        let stored = state.expect("the cell holds the publish").content;
-        let record = crate::record::Record::decode(&stored).expect("the cell holds a record");
-        let presented = crate::credential_container(&value).expect("the publish's container");
-        assert_eq!(record.container().tokens(), presented.tokens());
-        assert_eq!(record.content(), Some(content.as_slice()));
-        let resolver =
-            dialog_remote_ucan_s3::DefaultResolver::new(dialog_did_web::WebResolver::new());
-        record
-            .verify(subject.did(), "local", "head", &resolver)
-            .await
-            .expect("the record proves the publish");
+        assert_eq!(state.map(|edition| edition.content), Some(content));
         assert_eq!(
             subscription.invocation(),
             chain.invocation.to_cid().to_string()

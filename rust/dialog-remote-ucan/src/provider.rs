@@ -10,7 +10,7 @@
 //! performs it the way it always has.
 
 use base58::ToBase58;
-use dialog_capability::{Constraint, Did, Effect, ForkInvocation, Provider};
+use dialog_capability::{Constraint, Effect, ForkInvocation, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::Rejection;
 use dialog_effects::archive::prelude::PutExt;
@@ -19,14 +19,12 @@ use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, BlobSink, BlobWriter, Import, Read};
 use dialog_effects::memory::prelude::{PublishExt, RetractExt};
 use dialog_effects::memory::{
-    CellState, Edition, EditionSource, Editions, MemoryError, Publish, Resolve, Retract, Version,
-    Watch,
+    CellState, Edition, Editions, MemoryError, Publish, Resolve, Retract, Version, Watch,
 };
 use dialog_remote_s3::S3Error;
 use dialog_remote_ucan_s3::UcanAuthorization;
 use dialog_remote_ucan_s3::UcanSite as PermitSite;
 use dialog_ucan_core::Container;
-use dialog_ucan_core::promise::Promised;
 
 use crate::address::{Exchange, UcanAddress};
 use crate::direct;
@@ -113,20 +111,17 @@ impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Resolve>,
     ) -> Result<Option<Edition<Vec<u8>>>, MemoryError> {
-        let (subject, space, cell) = named(&invocation.authorization);
         if invocation.address.exchange() == Exchange::Permit {
-            let state = through_permits(self, invocation).await?;
-            return self.open(&subject, &space, &cell, state).await;
+            return through_permits(self, invocation).await;
         }
         let answer = exchange(self, &invocation.address, &invocation.authorization, None).await?;
         match answer {
             answer if answer.is_success() => {
                 let version = Version::from(answer.version()?);
-                let state = Some(Edition {
+                Ok(Some(Edition {
                     content: answer.bytes().await?,
                     version,
-                });
-                self.open(&subject, &space, &cell, state).await
+                }))
             }
             answer if answer.status == 404 => Ok(None),
             answer if answer.is_refusal() => Err(answer.refusal().await.into()),
@@ -159,7 +154,7 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
         match answer {
             answer if answer.is_success() => Ok(Version::from(answer.version()?)),
             answer if answer.status == 412 => {
-                let current = conflicting(self, &invocation.authorization, answer).await;
+                let current = conflicting(answer).await;
                 Err(MemoryError::VersionMismatch {
                     expected: invocation.capability.when().cloned(),
                     actual: current.clone().flatten().map(|edition| edition.version),
@@ -189,7 +184,7 @@ impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
         match answer {
             answer if answer.is_success() => Ok(()),
             answer if answer.status == 412 => {
-                let current = conflicting(self, &invocation.authorization, answer).await;
+                let current = conflicting(answer).await;
                 Err(MemoryError::VersionMismatch {
                     expected: Some(invocation.capability.when().clone()),
                     actual: current.clone().flatten().map(|edition| edition.version),
@@ -317,40 +312,7 @@ impl Provider<ForkInvocation<UcanSite, Watch>> for UcanSite {
         // Wait for the service to begin the watch, so a refusal is the
         // answer to the watch rather than the first thing it delivers.
         let watching = connection.watch(name, container)?.begun().await?;
-        let (subject, space, cell) = named(&invocation.authorization);
-        Ok(Box::new(Opened {
-            site: self.clone(),
-            subject,
-            space,
-            cell,
-            states: Box::new(watching),
-        }))
-    }
-}
-
-/// A watch whose states are each verified before they are handed on: a
-/// state whose record does not prove it is answered, in its place, as
-/// [`MemoryError::Unproven`].
-struct Opened {
-    site: UcanSite,
-    subject: Did,
-    space: String,
-    cell: String,
-    states: Editions,
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl EditionSource for Opened {
-    async fn next(&mut self) -> Result<Option<CellState>, MemoryError> {
-        let Some(state) = self.states.next().await? else {
-            return Ok(None);
-        };
-        let opened = self
-            .site
-            .open(&self.subject, &self.space, &self.cell, state)
-            .await?;
-        Ok(Some(opened))
+        Ok(Box::new(watching))
     }
 }
 
@@ -423,33 +385,14 @@ fn unanswered(error: S3Error) -> S3Error {
     }
 }
 
-/// What a conflict says the cell `authorization` names holds instead,
-/// when the service said and its record proves it: an older service
-/// answers a conflict with no body, and a state that does not verify is
-/// as good as none, so the writer reads the cell for itself.
-async fn conflicting(
-    site: &UcanSite,
-    authorization: &UcanAuthorization,
-    answer: direct::Answer,
-) -> Option<CellState> {
+/// What a conflict says the cell holds instead, when the service said: an
+/// older service answers a conflict with no body.
+async fn conflicting(answer: direct::Answer) -> Option<CellState> {
     let body = answer.bytes().await.ok()?;
     if body.is_empty() {
         return None;
     }
-    let state = serde_ipld_dagcbor::from_slice(&body).ok()?;
-    let (subject, space, cell) = named(authorization);
-    site.open(&subject, &space, &cell, state).await.ok()
-}
-
-/// The cell an invocation of a cell's effect names: its subject, and the
-/// space and cell its arguments give.
-fn named(authorization: &UcanAuthorization) -> (Did, String, String) {
-    let chain = authorization.invocation().chain();
-    let argument = |key: &str| match chain.arguments().get(key) {
-        Some(Promised::String(value)) => value.clone(),
-        _ => String::new(),
-    };
-    (chain.subject().clone(), argument("space"), argument("cell"))
+    serde_ipld_dagcbor::from_slice(&body).ok()
 }
 
 /// The socket of the space `subject` names: a service answers each space

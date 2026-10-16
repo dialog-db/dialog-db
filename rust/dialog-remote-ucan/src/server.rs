@@ -41,7 +41,6 @@ use dialog_varsig::AnySignature;
 use serde::{Deserialize, Serialize};
 
 use crate::direct::{OBJECT_MEDIA_TYPE, credential_container, is_credential};
-use crate::record::{self, Record};
 
 /// The media type of a refusal's body: the reason, as JSON, in the
 /// shape the client reads back.
@@ -495,16 +494,9 @@ impl From<AuthorizeError> for Refusal {
 #[derive(Debug)]
 pub struct Verified {
     chain: InvocationChain<AnySignature>,
-    container: Container,
 }
 
 impl Verified {
-    /// The container as it was presented: the invocation and delegations
-    /// in the bytes their signatures cover, which a cell's record carries.
-    pub fn container(&self) -> &Container {
-        &self.container
-    }
-
     /// The verified chain.
     pub fn chain(&self) -> &InvocationChain<AnySignature> {
         &self.chain
@@ -631,7 +623,6 @@ where
         container: Container,
         issuance: Issuance,
     ) -> Result<Verified, Refusal> {
-        let presented = container.clone();
         let chain =
             verify_invocation(container, self.resolver.as_ref(), &*self.revocations).await?;
         let at = self.clock.now();
@@ -651,10 +642,7 @@ where
         if !self.presented.record(&invocation, until, at).await {
             return Err(AuthorizeError::Replayed { invocation }.into());
         }
-        Ok(Verified {
-            chain,
-            container: presented,
-        })
+        Ok(Verified { chain })
     }
 
     /// Accept a watch: admit the invocation, which must say when it was
@@ -823,8 +811,7 @@ where
                 self.resolve(&subject, args).await
             }
             ["use", "put", "memory", "cell"] | ["memory", "publish"] => {
-                self.publish(&subject, args, verified.container(), payload)
-                    .await
+                self.publish(&subject, args, payload).await
             }
             ["use", "delete", "memory", "cell"] | ["memory", "retract"] => {
                 self.retract(&subject, args).await
@@ -936,14 +923,10 @@ where
         }
     }
 
-    /// Publish the content `payload` carries, storing the record of the
-    /// invocation `container` carries writing it, so that whoever reads
-    /// the cell can verify who wrote it and on whose authority.
     async fn publish(
         &self,
         subject: &Did,
         args: &Args,
-        container: &Container,
         payload: Payload,
     ) -> Result<Response, Failure>
     where
@@ -958,11 +941,6 @@ where
         if Checksum::sha256(&payload) != bound.checksum {
             return Err(Failure::checksum_mismatch());
         }
-        let record = record::encode(container, Some(&payload)).map_err(|error| {
-            Failure::Refused(Refusal(AuthorizeError::Malformed {
-                detail: error.to_string(),
-            }))
-        })?;
         let space = Space::of(&attenuated).space.clone();
         let cell = Cell::of(&attenuated).cell.clone();
         let capability = Subject::from(subject.clone())
@@ -970,7 +948,7 @@ where
             .memory()
             .attenuate(Space::of(&attenuated).clone())
             .attenuate(Cell::of(&attenuated).clone())
-            .invoke(memory::Publish::new(record, bound.when.clone()));
+            .invoke(memory::Publish::new(payload, bound.when.clone()));
         let version = match Provider::<memory::Publish>::execute(&self.provider, capability).await {
             Ok(version) => version,
             // The cell is not at the version the write named. One that
@@ -980,7 +958,9 @@ where
             // what the cell holds, to rebase onto.
             Err(memory::MemoryError::VersionMismatch { current: None, .. }) => {
                 match self.held(subject, &space, &cell).await? {
-                    Some(edition) if carries(&edition.content, &bound.checksum) => edition.version,
+                    Some(edition) if Checksum::sha256(&edition.content) == bound.checksum => {
+                        edition.version
+                    }
                     current => return Err(Failure::conflict(Some(current))),
                 }
             }
@@ -1026,19 +1006,6 @@ where
             .await
             .map_err(Failure::from)
     }
-}
-
-/// Whether what a cell stores carries the content `checksum` names: the
-/// content of its record, or, in a cell written before cells held records,
-/// the bytes themselves.
-fn carries(stored: &[u8], checksum: &Checksum) -> bool {
-    if !Record::is_record(stored) {
-        return Checksum::sha256(stored) == *checksum;
-    }
-    Record::decode(stored)
-        .ok()
-        .and_then(|record| record.content().map(Checksum::sha256))
-        .is_some_and(|carried| carried == *checksum)
 }
 
 /// A version as the `ETag` it travels as. A provider's versions are
@@ -1188,12 +1155,6 @@ impl From<memory::MemoryError> for Failure {
                 Self::Answered(Response::rejected(503, rejection))
             }
             memory::MemoryError::Storage(detail) => Self::storage(detail),
-            // A store the service keeps holds what it was given; one that
-            // reads back as unproven is the service's to answer for.
-            memory::MemoryError::Unproven { reason } => Self::Answered(Response::rejected(
-                500,
-                Rejection::Unclassified { detail: reason },
-            )),
         }
     }
 }
