@@ -30,6 +30,7 @@ mod direct;
 #[cfg(any(test, feature = "helpers"))]
 pub mod helpers;
 mod provider;
+pub mod record;
 pub mod server;
 mod site;
 pub mod socket;
