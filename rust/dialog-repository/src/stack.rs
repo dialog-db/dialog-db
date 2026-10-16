@@ -3381,6 +3381,7 @@ mod tests {
     use dialog_artifacts::{ArtifactSelector, Value};
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::{AttributeStatement, Relation};
+    use dialog_query::rule::DeductiveRuleDescriptor;
     use dialog_query::types::Scalar;
     use dialog_query::{AttributeQuery, Term};
     use dialog_search_tree::Manifest;
@@ -5674,6 +5675,335 @@ mod tests {
         let mut subscription = transaction.query().subscribe(query);
         let subscribed = subscription.poll(&operator).await?.expect("initial");
         assert_eq!(salaries(&subscribed.asserted)?, salaries(&selected)?);
+        Ok(())
+    }
+
+    /// The rules of a library in JSON, as a host holds them beside a
+    /// stack: `test.row/shared` gets a candidate for each pair a row is
+    /// in, and the candidate 3 for each row; `test.row/suffix` reads the
+    /// greatest candidate under the pick `max`, and adds one; and
+    /// `test.row/shown` holds each row that `unless` does not hide.
+    fn picked_rules() -> Result<Vec<dialog_query::DeductiveRule>> {
+        let rules = serde_json::json!([
+            {
+                "deduce": { "with": {
+                    "shared": { "the": "test.row/shared", "as": "natural:", "pick": "all:" }
+                }},
+                "when": [{
+                    "assert": { "with": {
+                        "row": { "the": "test.pair/row", "as": "entity:" },
+                        "length": { "the": "test.pair/length", "as": "natural:" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "pair" } },
+                        "row": { "?": { "name": "this" } },
+                        "length": { "?": { "name": "shared" } }
+                    }
+                }]
+            },
+            {
+                "deduce": { "with": {
+                    "shared": { "the": "test.row/shared", "as": "natural:", "pick": "all:" }
+                }},
+                "when": [
+                    {
+                        "assert": { "with": {
+                            "name": { "the": "test.row/name", "as": "text:" }
+                        }},
+                        "where": {
+                            "this": { "?": { "name": "this" } },
+                            "name": { "?": { "name": "name" } }
+                        }
+                    },
+                    { "assert": "==", "where": { "this": { "?": { "name": "shared" } }, "is": 3 } }
+                ]
+            },
+            {
+                "deduce": { "with": {
+                    "suffix": { "the": "test.row/suffix", "as": "natural:" }
+                }},
+                "when": [
+                    {
+                        "assert": { "with": {
+                            "shared": { "the": "test.row/shared", "as": "natural:", "pick": "max:" }
+                        }},
+                        "where": {
+                            "this": { "?": { "name": "this" } },
+                            "shared": { "?": { "name": "shared" } }
+                        }
+                    },
+                    {
+                        "assert": "math/sum",
+                        "where": {
+                            "of": { "?": { "name": "shared" } },
+                            "with": 1,
+                            "is": { "?": { "name": "suffix" } }
+                        }
+                    }
+                ]
+            },
+            {
+                "deduce": { "with": {
+                    "name": { "the": "test.row/shown", "as": "text:" }
+                }},
+                "when": [{
+                    "assert": { "with": {
+                        "name": { "the": "test.row/name", "as": "text:" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } }
+                    }
+                }],
+                "unless": [{
+                    "assert": { "with": {
+                        "hidden": { "the": "test.row/hidden", "as": "boolean:" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "hidden": true
+                    }
+                }]
+            }
+        ]);
+        let descriptors: Vec<DeductiveRuleDescriptor> = serde_json::from_value(rules)?;
+        Ok(descriptors
+            .into_iter()
+            .map(|descriptor| descriptor.compile())
+            .collect::<Result<_, _>>()?)
+    }
+
+    /// The query of one field of a row under `pick`.
+    fn picked(the: &str, kind: &str, pick: &str) -> Result<dialog_query::ConceptQuery> {
+        let predicate: dialog_query::ConceptDescriptor =
+            serde_json::from_value(serde_json::json!({ "with": {
+                "value": { "the": the, "as": kind, "pick": pick }
+            }}))?;
+        let mut terms = dialog_query::Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("value".into(), Term::var("value"));
+        Ok(dialog_query::ConceptQuery { predicate, terms })
+    }
+
+    /// The `(this, value)` of each conclusion, sorted.
+    fn pairs(rows: &[dialog_query::ConceptConclusion]) -> Vec<(Entity, Value)> {
+        let mut pairs: Vec<(Entity, Value)> = rows
+            .iter()
+            .map(|row| {
+                let value = row
+                    .source()
+                    .lookup(&Term::var("value"))
+                    .and_then(|binding| binding.content())
+                    .expect("each row has a value");
+                (row.entity().clone(), value)
+            })
+            .collect();
+        pairs.sort_by_key(|pair| format!("{pair:?}"));
+        pairs
+    }
+
+    /// Two rows, a pair of length 7 for the first, and the second hidden.
+    async fn picked_rows(stack: &Stack, operator: &impl StackSyncEnv) -> Result<(Entity, Entity)> {
+        let (first, second): (Entity, Entity) = ("row:1".parse()?, "row:2".parse()?);
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("test.row/name")
+                    .of(first.clone())
+                    .is("Garden".to_string()),
+            )
+            .assert(
+                dialog_query::the!("test.row/name")
+                    .of(second.clone())
+                    .is("Garden".to_string()),
+            )
+            .assert(
+                dialog_query::the!("test.row/hidden")
+                    .of(second.clone())
+                    .is(true),
+            )
+            .assert(
+                dialog_query::the!("test.pair/row")
+                    .of("pair:1".parse::<Entity>()?)
+                    .is(first.clone()),
+            )
+            .assert(
+                dialog_query::the!("test.pair/length")
+                    .of("pair:1".parse::<Entity>()?)
+                    .is(7u32),
+            )
+            .commit()
+            .publish()
+            .perform(operator)
+            .await?;
+        Ok((first, second))
+    }
+
+    /// A field that reads its candidates under a pick keeps the pick
+    /// through JSON, and the rules of a library in JSON, which the
+    /// overlay of a query brings, answer in that query: the greatest
+    /// candidate, a rule over it, and the rows that `unless` keeps.
+    #[dialog_common::test]
+    async fn it_answers_a_pick_and_an_unless_from_rules_in_json() -> Result<()> {
+        let query = picked("test.row/shared", "natural:", "max:")?;
+        let json = serde_json::to_value(&query.predicate)?;
+        assert_eq!(
+            json["with"]["value"]["pick"],
+            serde_json::json!("max:"),
+            "the pick is written"
+        );
+        let back: dialog_query::ConceptDescriptor = serde_json::from_value(json)?;
+        assert_eq!(back, query.predicate, "and read back");
+
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let stack = over_shared(&operator, &shared).await?;
+        let (first, second) = picked_rows(&stack, &operator).await?;
+        let select = |query: dialog_query::ConceptQuery| {
+            let mut layer = stack.query();
+            for rule in picked_rules().expect("the rules compile") {
+                layer = layer.with(rule);
+            }
+            layer.select(query).perform(&operator).try_vec()
+        };
+        assert_eq!(
+            pairs(&select(picked("test.row/shared", "natural:", "max:")?).await?),
+            vec![
+                (first.clone(), Value::UnsignedInt(7)),
+                (second.clone(), Value::UnsignedInt(3)),
+            ],
+            "the greatest candidate of each row"
+        );
+        assert_eq!(
+            pairs(&select(picked("test.row/suffix", "natural:", "last:")?).await?),
+            vec![
+                (first.clone(), Value::UnsignedInt(8)),
+                (second.clone(), Value::UnsignedInt(4)),
+            ],
+            "a rule reads the greatest candidate"
+        );
+        assert_eq!(
+            pairs(&select(picked("test.row/shown", "text:", "last:")?).await?),
+            vec![(first.clone(), Value::String("Garden".into()))],
+            "unless hides the second row"
+        );
+        assert!(
+            pairs(
+                &stack
+                    .query()
+                    .select(picked("test.row/suffix", "natural:", "last:")?)
+                    .perform(&operator)
+                    .try_vec()
+                    .await?
+            )
+            .is_empty(),
+            "no rule reaches a query that does not bring it"
+        );
+        Ok(())
+    }
+
+    /// An inductive rule of a dispatch reads the greatest of the
+    /// candidates that the dispatched rules of a library in JSON derive.
+    #[dialog_common::test]
+    async fn it_reads_a_pick_in_a_dispatch() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let stack = over_shared(&operator, &shared).await?;
+        let (first, _) = picked_rows(&stack, &operator).await?;
+        let record: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": { "with": {
+                "length": { "the": "test.picked/length", "as": "natural:" }
+            }},
+            "when": [
+                {
+                    "assert": { "with": {
+                        "row": { "the": "test.command/row", "as": "entity:" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "command" } },
+                        "row": { "?": { "name": "this" } }
+                    }
+                },
+                {
+                    "assert": { "with": {
+                        "shared": { "the": "test.row/shared", "as": "natural:", "pick": "max:" }
+                    }},
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "shared": { "?": { "name": "length" } }
+                    }
+                }
+            ]
+        }))?;
+        shared
+            .overlay()
+            .assert(crate::TransientAttribute::new("test.command/row".parse()?))?;
+        let mut transaction = stack.transaction().dispatch(record).dispatch(
+            dialog_query::the!("test.command/row")
+                .of("cmd:1".parse::<Entity>()?)
+                .is(first.clone()),
+        );
+        for rule in picked_rules()? {
+            transaction = transaction.dispatch(rule);
+        }
+        transaction.commit().publish().perform(&operator).await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "test.picked/length", &first).await?,
+            vec![Value::UnsignedInt(7)],
+            "the inductive rule read the greatest candidate"
+        );
+        Ok(())
+    }
+
+    /// A subscription over a field that reads derived candidates under
+    /// `max` sees a new answer once a commit adds a greater candidate.
+    #[dialog_common::test]
+    async fn it_subscribes_to_a_pick_over_rules_in_json() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let stack = over_shared(&operator, &shared).await?;
+        let (first, _) = picked_rows(&stack, &operator).await?;
+        let mut layer = stack.query();
+        for rule in picked_rules()? {
+            layer = layer.with(rule);
+        }
+        let mut subscription = layer.subscribe(picked("test.row/shared", "natural:", "max:")?);
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert!(
+            pairs(&initial.asserted).contains(&(first.clone(), Value::UnsignedInt(7))),
+            "the greatest candidate first"
+        );
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("test.pair/row")
+                    .of("pair:2".parse::<Entity>()?)
+                    .is(first.clone()),
+            )
+            .assert(
+                dialog_query::the!("test.pair/length")
+                    .of("pair:2".parse::<Entity>()?)
+                    .is(11u32),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let delta = subscription.poll(&operator).await?.expect("a new answer");
+        assert_eq!(
+            pairs(&delta.asserted),
+            vec![(first.clone(), Value::UnsignedInt(11))],
+            "the new greatest candidate"
+        );
+        assert_eq!(
+            pairs(&delta.retracted),
+            vec![(first, Value::UnsignedInt(7))],
+            "in place of the old one"
+        );
         Ok(())
     }
 
