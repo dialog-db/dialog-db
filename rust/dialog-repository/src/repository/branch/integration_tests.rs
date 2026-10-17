@@ -2370,6 +2370,7 @@ where
     ) -> Result<BlobWriter, BlobError> {
         Err(BlobError::Rejected(Rejection::Unavailable {
             reason: "rigged abort: this push dies at its first remote blob import".into(),
+            retry_after: None,
         }))
     }
 }
@@ -5896,6 +5897,93 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
     // Bob converges the ordinary way: pull, then push.
     bob_branch.pull().perform(&operator).await?;
     bob_branch.push().perform(&operator).await?;
+
+    Ok(())
+}
+
+/// A publish the remote took, whose local record another handle of the
+/// branch wrote first, does not say the remote holds that record.
+///
+/// The record is the edition the cache cell holds, not the remote's head:
+/// a push that took it for what the remote holds would decode the record
+/// as a revision and rebase onto it. So the refusal says nothing of what
+/// the cell holds, as before a store said, and the remote keeps what was
+/// published.
+#[dialog_common::test]
+async fn it_does_not_take_a_refused_record_for_the_remote_head(s3: S3Address) -> Result<()> {
+    use dialog_common::Blake3Hash;
+    use dialog_effects::memory::{Current, Version};
+
+    let (operator, profile) = test_session_with_peer().await;
+    let (repo, branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "record-conflict").await?;
+    branch
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
+        .perform(&operator)
+        .await?;
+    branch.push().perform(&operator).await?;
+
+    let origin = connect("origin", s3_site_address(&s3), repo.did(), &operator).await?;
+    let publishing = origin.branch("main").open().perform(&operator).await?;
+    publishing.fetch().perform(&operator).await?;
+    let other = origin.branch("main").open().perform(&operator).await?;
+    other.fetch().perform(&operator).await?;
+    let recorded = other
+        .cache()
+        .content()
+        .context("the push recorded where the remote stands")?;
+    other
+        .cache()
+        .publish(crate::RemoteEdition {
+            content: recorded.content,
+            version: Version::from(Blake3Hash::hash(b"recorded through another handle")),
+        })
+        .perform(&operator)
+        .await?;
+
+    branch
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice-again".parse()?,
+                is: Value::String("Alice again".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
+        .perform(&operator)
+        .await?;
+    let next = branch.revision().context("the branch has a revision")?;
+    let refused = publishing.publish(next.clone()).perform(&operator).await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(crate::PublishRemoteBranchError::Publish(
+                crate::PublishError::VersionMismatch {
+                    current: Current::Unknown,
+                    ..
+                }
+            ))
+        ),
+        "the refused record is not reported as the remote's head, got: {refused:?}"
+    );
+
+    let observed = origin.branch("main").open().perform(&operator).await?;
+    observed.fetch().perform(&operator).await?;
+    assert_eq!(
+        observed.revision().map(|revision| revision.tree),
+        Some(next.tree),
+        "the remote keeps what was published"
+    );
 
     Ok(())
 }

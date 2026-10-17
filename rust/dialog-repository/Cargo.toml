@@ -21,6 +21,7 @@ tracing = { workspace = true }
 dialog-artifacts = { workspace = true }
 dialog-capability = { workspace = true }
 dialog-common = { workspace = true }
+dialog-did-web = { workspace = true }
 dialog-identity = { workspace = true }
 dialog-query = { workspace = true }
 dialog-credentials = { workspace = true }
@@ -57,6 +58,7 @@ dialog-peer = { workspace = true, features = ["helpers"] }
 dialog-ucan-core = { workspace = true, features = ["helpers"] }
 dialog-remote-fs = { workspace = true }
 dialog-remote-s3 = { workspace = true, features = ["helpers"] }
+dialog-remote-ucan = { workspace = true, features = ["helpers"] }
 dialog-remote-ucan-s3 = { workspace = true, features = ["helpers"] }
 dialog-storage = { workspace = true, features = ["helpers"] }
 dialog-common = { workspace = true, features = ["helpers"] }

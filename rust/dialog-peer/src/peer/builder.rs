@@ -26,7 +26,9 @@ use parking_lot::Mutex;
 
 use super::secret::SiteSecrets;
 use super::upgrade::Step;
-use super::{Grant, Inner, Local, Mode, Peer, PeerSpace, Runtime, Session};
+use super::{
+    Discovery, Grant, Inner, Local, Mode, Peer, PeerSpace, Runtime, Session, default_discovery,
+};
 
 /// A peer built from the branch that holds its state: the same builder
 /// [`Peer::new`] starts, with this branch as its [space](PeerBuilder::space).
@@ -292,6 +294,7 @@ pub struct PeerBuilder<K = Unset, St = Unset, M = Local> {
     /// its own, with the default budget, when none are given.
     caches: Option<HeldCaches>,
     runtime: Runtime,
+    discovery: Arc<dyn Discovery>,
     issuer: Option<SignerCredential>,
     allowed: Vec<Allowance>,
     /// Certificates addressed to someone above this peer in its chain:
@@ -321,6 +324,7 @@ impl<M> PeerBuilder<Unset, Unset, M> {
             network: Network::default(),
             caches: None,
             runtime: Runtime::default(),
+            discovery: default_discovery(),
             issuer: None,
             allowed: Vec::new(),
             held: Vec::new(),
@@ -349,6 +353,7 @@ impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>, Session> {
             // caches its peer holds.
             caches: Some(peer.caches()),
             runtime: peer.runtime().clone(),
+            discovery: peer.discovery().clone(),
             issuer: Some(peer.credential().clone()),
             allowed: Vec::new(),
             // The peer's grants from the storage's system: links a
@@ -404,6 +409,15 @@ impl<K, St, M> PeerBuilder<K, St, M> {
         self
     }
 
+    /// What the peer learns where a DID's subject is reached with, in
+    /// place of resolving `did:key` locally and `did:web` and `did:plc`
+    /// over the network: a host that resolves DIDs its own way, or a test
+    /// that answers from memory.
+    pub fn discovery(mut self, discovery: impl Discovery + 'static) -> Self {
+        self.discovery = Arc::new(discovery);
+        self
+    }
+
     /// The space the peer keeps its records in: `branch`, where it finds
     /// delegations and retains them, records its spaces and contacts, and
     /// keeps its sealed secrets. Its repository is
@@ -453,6 +467,7 @@ impl<St> PeerBuilder<PeerKey, St, Local> {
             network: self.network,
             caches: self.caches,
             runtime: self.runtime,
+            discovery: self.discovery,
             issuer: self.issuer,
             allowed: self.allowed,
             held: self.held,
@@ -497,6 +512,7 @@ impl<St, M> PeerBuilder<Unset, St, M> {
             network: self.network,
             caches: self.caches,
             runtime: self.runtime,
+            discovery: self.discovery,
             issuer: self.issuer,
             allowed: self.allowed,
             held: self.held,
@@ -530,6 +546,7 @@ impl<K, M, S: Clone> With<Storage<S>> for PeerBuilder<K, Unset, M> {
             network: self.network,
             caches: self.caches,
             runtime: self.runtime,
+            discovery: self.discovery,
             issuer: self.issuer,
             allowed: self.allowed,
             held: self.held,
@@ -816,6 +833,7 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                 directory,
                 network: self.network,
                 runtime: self.runtime,
+                discovery: self.discovery,
                 state,
                 chains: Mutex::default(),
                 grants,

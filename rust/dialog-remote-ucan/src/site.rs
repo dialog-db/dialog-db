@@ -16,6 +16,7 @@ use dialog_effects::authority::{self, OperatorExt};
 use dialog_remote_ucan_s3::{Ucan, UcanAuthorization, UcanSite as PermitSite};
 
 use crate::address::UcanAddress;
+use crate::socket::Sockets;
 
 /// A UCAN site that proves and performs each operation in one request.
 ///
@@ -24,12 +25,28 @@ use crate::address::UcanAddress;
 #[derive(Debug, Clone, Default)]
 pub struct UcanSite {
     permits: PermitSite,
+    sockets: Sockets,
 }
 
 impl UcanSite {
     /// The permit-based site this one completes permits through.
     pub(crate) fn permits(&self) -> &PermitSite {
         &self.permits
+    }
+
+    /// The socket connections the site keeps, shared by its clones.
+    pub(crate) fn sockets(&self) -> &Sockets {
+        &self.sockets
+    }
+
+    /// A site whose socket connections are kept by `liveness`: how often
+    /// they are pinged, and when one is given up on (see
+    /// [`Liveness`](crate::socket::Liveness)).
+    pub fn with_liveness(liveness: crate::socket::Liveness) -> Self {
+        Self {
+            permits: PermitSite::default(),
+            sockets: Sockets::with_liveness(liveness),
+        }
     }
 }
 
