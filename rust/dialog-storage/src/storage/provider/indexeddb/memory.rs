@@ -18,7 +18,6 @@ use wasm_bindgen::{JsCast, JsValue};
 /// The single object store used for all memory operations.
 const MEMORY: &str = "memory";
 
-/// Format edition bytes for error messages.
 /// What a cell holds, as a write it refused reports it: `bytes` versioned
 /// as a resolve versions them, or empty.
 fn holding(bytes: Option<Vec<u8>>) -> Current {
@@ -34,6 +33,7 @@ fn holding(bytes: Option<Vec<u8>>) -> Current {
     }
 }
 
+/// Format edition bytes for error messages.
 fn format_edition(edition: Option<&[u8]>) -> Option<Version> {
     edition.map(Version::from)
 }

@@ -1,9 +1,9 @@
 //! Publish command for remote branches.
 
-use crate::{ConnectedBranch, PublishRemoteBranchError, RemoteSite, Revision};
+use crate::{ConnectedBranch, PublishError, PublishRemoteBranchError, RemoteSite, Revision};
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
-use dialog_effects::memory::Publish;
+use dialog_effects::memory::{Current, Publish};
 
 /// Command to publish a revision to the remote.
 ///
@@ -51,7 +51,23 @@ impl<'a> PublishRemoteBranch<'a> {
             .upstream()
             .edition()
             .ok_or(PublishRemoteBranchError::MissingEdition)?;
-        self.branch.cache().publish(edition).perform(env).await?;
+        // A record refused for one written first through another handle
+        // says what the record holds, not what the remote does: the
+        // remote took the revision. A caller rebasing onto what the remote
+        // holds must not take the record for its head, so the refusal
+        // says nothing of the cell.
+        self.branch
+            .cache()
+            .publish(edition)
+            .perform(env)
+            .await
+            .map_err(|error| match error {
+                PublishError::VersionMismatch { expected, .. } => PublishError::VersionMismatch {
+                    expected,
+                    current: Current::Unknown,
+                },
+                error => error,
+            })?;
 
         Ok(())
     }
