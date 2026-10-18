@@ -24,8 +24,10 @@
 //! plays each failure out: see `helpers::Fault`).
 //!
 //! - **It cannot be opened.** The cell's invocation goes as a request, and
-//!   the socket is not tried again for a while, so a service with no
-//!   socket, or one that is down, costs no connection attempt per call.
+//!   no socket at that service is tried again for a while, longer after
+//!   each failure in a row (30 s, doubling up to 15 minutes), so a service
+//!   with no socket, or one that is down, costs no connection attempt per
+//!   call or per space.
 //! - **It goes silent** (a laptop slept, a network changed, a NAT forgot
 //!   the mapping, a service wedged). Nothing reports this: the platform
 //!   learns only when something it sends fails, and a watch sends

@@ -39,8 +39,37 @@ use web::Link;
 
 /// How long a socket that could not be opened is not tried again: what
 /// would have gone over it goes as requests meanwhile, without paying for
-/// a connection attempt each time.
+/// a connection attempt each time. Each failure in a row doubles it, up to
+/// [`RETRY_LIMIT`].
 const RETRY: Duration = Duration::from_secs(30);
+
+/// The longest a service whose socket keeps failing is left untried: one
+/// that keeps no sockets at all is tried a few times an hour, not twice a
+/// minute for as long as it is used.
+const RETRY_LIMIT: Duration = Duration::from_secs(15 * 60);
+
+/// A service whose socket could not be opened: when it last failed, and
+/// how many times in a row.
+#[derive(Debug, Clone, Copy)]
+struct Unopened {
+    at: SystemTime,
+    times: u32,
+}
+
+impl Unopened {
+    /// How long after its last failure the service is tried again.
+    fn wait(&self) -> Duration {
+        let doublings = self.times.saturating_sub(1).min(16);
+        RETRY.saturating_mul(1 << doublings).min(RETRY_LIMIT)
+    }
+}
+
+/// The service a socket address reaches: the address without its query,
+/// which names the space. A service that cannot open the socket of one
+/// space cannot open another's, so its failures are kept per service.
+fn service(url: &str) -> &str {
+    url.split_once('?').map_or(url, |(service, _)| service)
+}
 
 /// How a site keeps its socket connections honest, and when it gives up
 /// on one.
@@ -85,8 +114,8 @@ pub struct Sockets {
     /// Socket addresses being opened: one open per address at a time, so
     /// invocations that race to a socket share the connection.
     opening: Arc<Mutex<HashMap<String, Arc<futures::lock::Mutex<()>>>>>,
-    /// Socket addresses that could not be opened, and when.
-    failed: Arc<Mutex<HashMap<String, SystemTime>>>,
+    /// Services whose socket could not be opened, by [`service`].
+    failed: Arc<Mutex<HashMap<String, Unopened>>>,
     liveness: Liveness,
 }
 
@@ -106,7 +135,8 @@ impl Sockets {
 
     /// The connection to `url`, opened when there is none or the one
     /// there closed. A socket that could not be opened is answered as
-    /// unavailable, without trying it again, until [`RETRY`] has passed.
+    /// unavailable, without trying it or any other space's socket at the
+    /// same service again, until [`Unopened::wait`] has passed.
     pub(crate) async fn connect(&self, url: &str) -> Result<Connection, MemoryError> {
         if let Some(connection) = self.open(url) {
             return Ok(connection);
@@ -127,11 +157,11 @@ impl Sockets {
             .failed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(url)
+            .get(service(url))
             .is_some_and(|failed| {
                 time::now()
-                    .duration_since(*failed)
-                    .is_ok_and(|since| since < RETRY)
+                    .duration_since(failed.at)
+                    .is_ok_and(|since| since < failed.wait())
             });
         if recently {
             return Err(unavailable("it could not be opened a moment ago"));
@@ -140,17 +170,23 @@ impl Sockets {
         let link = match Link::open(url, routes.clone()).await {
             Ok(link) => Arc::new(link),
             Err(error) => {
+                let at = time::now();
                 self.failed
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .insert(url.to_string(), time::now());
+                    .entry(service(url).to_string())
+                    .and_modify(|failed| {
+                        failed.at = at;
+                        failed.times = failed.times.saturating_add(1);
+                    })
+                    .or_insert(Unopened { at, times: 1 });
                 return Err(error);
             }
         };
         self.failed
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(url);
+            .remove(service(url));
         keep(Arc::downgrade(&link), routes.clone(), self.liveness);
         let connection = Connection {
             link,
@@ -653,7 +689,7 @@ pub(crate) fn unavailable(reason: impl std::fmt::Display) -> MemoryError {
 /// are covered natively only.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::Sockets;
+    use super::{RETRY, RETRY_LIMIT, Sockets, Unopened};
     use dialog_effects::Rejection;
     use dialog_effects::memory::MemoryError;
     use std::sync::Arc;
@@ -713,6 +749,62 @@ mod tests {
         );
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "it was not tried again");
         Ok(())
+    }
+
+    /// A service that cannot open one space's socket is not asked for
+    /// another space's at once: every space of a service without sockets
+    /// would otherwise pay a connection attempt each time it is held off.
+    ///
+    /// Native only, for the listener that counts attempts; the browser
+    /// connects through the same `Sockets`.
+    #[dialog_common::test]
+    async fn it_holds_off_every_space_at_a_service_whose_socket_failed() -> anyhow::Result<()> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let service = format!("ws://{}/ucan/", listener.local_addr()?);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counted = attempts.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+
+        let sockets = Sockets::default();
+        assert!(
+            sockets
+                .connect(&format!("{service}?sub=one"))
+                .await
+                .is_err()
+        );
+        let other = sockets.connect(&format!("{service}?sub=other")).await;
+        assert!(
+            matches!(
+                other,
+                Err(MemoryError::Rejected(Rejection::Unavailable { .. }))
+            ),
+            "{:?}",
+            other.err()
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "the other space's socket was not tried"
+        );
+        Ok(())
+    }
+
+    /// Each failure in a row doubles how long a service is left untried,
+    /// up to a limit, so one that keeps no sockets is asked rarely.
+    #[dialog_common::test]
+    fn it_waits_longer_after_each_failure_in_a_row() {
+        let at = dialog_common::time::now();
+        let wait = |times| Unopened { at, times }.wait();
+        assert_eq!(wait(1), RETRY);
+        assert_eq!(wait(2), RETRY * 2);
+        assert_eq!(wait(3), RETRY * 4);
+        assert_eq!(wait(10), RETRY_LIMIT);
+        assert_eq!(wait(u32::MAX), RETRY_LIMIT);
     }
 
     /// A service that answers a frame it cannot attribute to an invocation
