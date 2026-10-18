@@ -16,6 +16,8 @@ says how to cut a release.
 
 ### A query's own overlay is held as a line, so every rule set it assembles is cached
 
+[#609](https://github.com/dialog-db/dialog-db/pull/609)
+
 The facts a query folds in beside its lines, the injected `db:session` metadata and whatever `.with(..)` adds, were a `Changes` batch read as a store: filtered and sorted per selector, scanned for retracts and for rules on every read. A rule in that batch turned the assembled rule-set cache off for the whole query, and its bodies were decoded every time. The batch is now held as an `Ephemeral`, the store a branch's session overlay already uses. It is read by range, and its revision joins the key of every rule-set and read-settlement cache, so a query folding in the same facts as an earlier one is served what the earlier one assembled. Every overlay and staged rule is read through one function and hydrated once per content address. `Changes` stays the write batch and the wire form; nothing reads one as a source any more.
 
 What this changes for you:
