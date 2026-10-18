@@ -165,6 +165,27 @@ pub fn catalog() -> Vec<Spec> {
             prepare: |size| Box::pin(rule::install(size)),
         },
         Spec {
+            name: "rule-overlay",
+            size: 2000,
+            about: "two hundred single-entity reads of a concept a rule derives, each read carrying the rule in its own overlay",
+            volatile: false,
+            prepare: |size| Box::pin(rule::overlay(size)),
+        },
+        Spec {
+            name: "rule-session",
+            size: 2000,
+            about: "two hundred rounds of a session-overlay fact that is no rule, then a single-entity read of a concept a committed rule derives",
+            volatile: false,
+            prepare: |size| Box::pin(rule::session(size)),
+        },
+        Spec {
+            name: "rule-dispatch",
+            size: 500,
+            about: "one transaction asserting a fact per entity that a chain of three inductive rules relays: a round of induction per link",
+            volatile: false,
+            prepare: |size| Box::pin(commit::dispatch(size)),
+        },
+        Spec {
             name: "number-commit",
             size: 1000,
             about: "one transaction asserting a timestamp, a price, a count and a size per item: how numbers key",
