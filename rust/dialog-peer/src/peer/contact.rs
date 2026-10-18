@@ -433,6 +433,50 @@ mod tests {
         Ok(())
     }
 
+    /// Discovering again follows the document: an address recorded at the
+    /// same service that it no longer names (here a socket the service
+    /// stopped announcing) is taken back, and one at another service is
+    /// left as the host recorded it.
+    #[dialog_common::test]
+    async fn it_replaces_what_the_document_no_longer_names() -> anyhow::Result<()> {
+        let worker = discovering(
+            r#"[{"id": "did:web:tonk.network#ucan", "type": "UcanAccessService", "serviceEndpoint": "https://tonk.network/ucan/"}]"#,
+        )
+        .await?;
+        let stale = SiteAddress::from(
+            UcanAddress::new("https://tonk.network/ucan/").with_socket("wss://tonk.network/ucan/"),
+        );
+        let elsewhere = SiteAddress::from(UcanAddress::new("https://elsewhere.example/ucan/"));
+        for address in [stale, elsewhere.clone()] {
+            contact(did!("web:tonk.network"))
+                .add_address(address)
+                .name("tonk")
+                .perform(&worker)
+                .await?;
+        }
+
+        contact(did!("web:tonk.network"))
+            .discover()
+            .name("tonk")
+            .perform(&worker)
+            .await?;
+
+        let connection = connect(&worker).await?;
+        let mut addresses = connection
+            .addresses()
+            .iter()
+            .map(site_address)
+            .collect::<Result<Vec<_>, _>>()?;
+        addresses.sort_by_key(|site| format!("{site:?}"));
+        let mut expected = vec![
+            SiteAddress::from(UcanAddress::new("https://tonk.network/ucan/")),
+            elsewhere,
+        ];
+        expected.sort_by_key(|site| format!("{site:?}"));
+        assert_eq!(addresses, expected);
+        Ok(())
+    }
+
     /// A document that names no access service records nothing: the peer
     /// is not made a contact with nowhere to reach it.
     #[dialog_common::test]

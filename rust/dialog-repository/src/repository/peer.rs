@@ -191,10 +191,12 @@ impl DiscoverContact {
 
     /// Discover the peer's DID, record the access service its document
     /// names as the address it is reached at, with the name if one was
-    /// given, and answer the peer's entity.
+    /// given, and answer the peer's entity. Another address recorded at the
+    /// same endpoint is taken back, so discovering again follows the
+    /// document: a socket it stops naming is no longer dialed.
     pub async fn perform<Env>(self, env: &Env) -> Result<Entity, DiscoverContactError>
     where
-        Env: PeersEnv + Provider<Discover>,
+        Env: PeersEnv + Provider<Discover> + Provider<peer_fx::RemoveAddress>,
     {
         let peer = match &self.contact.by {
             By::Entity(entity) => entity.clone(),
@@ -224,12 +226,47 @@ impl DiscoverContact {
                 did: did.to_string(),
             }
         })?;
-        let add = contact(peer).add_address(address);
+        let discovered = SiteAddress::Ucan(address.clone());
+        let add = contact(peer).add_address(discovered.clone());
         let add = match self.name {
             Some(name) => add.name(name),
             None => add,
         };
-        Ok(add.perform(env).await?)
+        let peer = add.perform(env).await?;
+
+        // The document says where the peer is reached now. Another address
+        // recorded at the same endpoint is what was known of the service
+        // before (a socket it no longer announces, or none where it now
+        // announces one), so it is taken back: the peer is not tried where
+        // the document no longer says it is. Addresses at other services
+        // are the host's to keep.
+        let host = host(env).await.map_err(AddAddressError::from)?;
+        let connection = host
+            .clone()
+            .reader()
+            .peers()
+            .connect(peer.clone())
+            .perform(env)
+            .await
+            .map_err(AddAddressError::from)?;
+        for recorded in connection.addresses() {
+            let Ok(site) = site_address(recorded) else {
+                continue;
+            };
+            let SiteAddress::Ucan(ucan) = &site else {
+                continue;
+            };
+            if ucan.endpoint() == address.endpoint() && site != discovered {
+                host.clone()
+                    .writer()
+                    .peers()
+                    .remove_address(peer.clone(), recorded.clone())
+                    .perform(env)
+                    .await
+                    .map_err(AddAddressError::from)?;
+            }
+        }
+        Ok(peer)
     }
 }
 

@@ -65,6 +65,8 @@ What this changes for you:
 
 - `PeerBuilder::discovery` sets how a peer discovers; by default it reads `did:key` locally and `did:web` and `did:plc` over the network, and a peer's sessions discover as it does.
 - `UcanAddress::from_services` reads the endpoint from a `UcanAccessService` entry (`ACCESS_SERVICE`) and the socket from a `UcanAccessSocket` entry (`ACCESS_SOCKET`). A service that wants to be discovered adds both to its DID document.
+- Discovering a contact again follows its document: an address recorded at the same endpoint that the document no longer names, such as a socket the service stopped announcing, is taken back. Addresses at other services are kept. `DiscoverContact::perform` asks its environment for `Provider<RemoveAddress>` as well, which a `Peer` provides.
+- A loopback `did:web` (`localhost`, `*.localhost`, `127.x.x.x`) resolves over plain `http`, so a service on the same machine is discovered as a deployed one is. Every other host stays on `https`.
 - `dialog-peer` and `dialog-repository` now depend on `dialog-did-web`.
 
 Why: a peer's address was configured by hand beside its DID, so the two could disagree, and a service could not move or add a socket without every client being told. The DID document already answers who a peer is; it now answers where too.
