@@ -1,18 +1,10 @@
 use crate::artifacts::ordvalue::encode_value_owned;
-use crate::artifacts::query::Select;
 use crate::history::Edition;
 use crate::key::value_tail_bytes;
-use crate::selector::Constrained;
-use crate::{
-    Artifact, ArtifactSelector, ArtifactStream, Asset, Cause, DialogArtifactsError, Entity,
-    Instruction, Relation, Value,
-};
-use async_trait::async_trait;
-use dialog_capability::Provider;
+use crate::{Artifact, Asset, Cause, Entity, Instruction, Relation, Value};
 use dialog_search_tree::Manifest;
 use dialog_storage::Blake3Hash;
 use futures_util::Stream;
-use futures_util::stream;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
@@ -885,100 +877,6 @@ impl Statement for Changes {
     }
 }
 
-/// `Provider<Select>` for an in-memory [`Changes`] batch.
-///
-/// Treats `Changes` as a queryable source: `Assert` entries surface as
-/// [`Artifact`]s matching the [`ArtifactSelector`]'s
-/// `the` / `of` / `is` constraints (whichever are present), sorted by
-/// [`sort_key`] so the result interleaves cleanly with branch / layer
-/// scans in a `merge_grouped`-style union.
-///
-/// `Retract` entries are **deliberately not yielded**. A retract in a
-/// changes batch means "this fact should not appear" — a negative
-/// signal that doesn't fit `ArtifactStream`'s positive `Result<Artifact, _>`
-/// shape. Tombstone filtering against another source is a separate
-/// concern handled by the composition layer that owns the merge.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-impl<'a> Provider<Select<'a>> for Changes {
-    /// A batch on its own belongs to no tree, so it orders its rows as a new
-    /// tree would ([`Manifest::default`]). A caller merging the batch with a
-    /// tree's scan reads it with [`Changes::select`] under that tree's
-    /// manifest instead.
-    async fn execute(
-        &self,
-        input: ArtifactSelector<Constrained>,
-    ) -> Result<ArtifactStream<'a>, DialogArtifactsError> {
-        let matched = self.select(&input, &Manifest::default());
-        Ok(Box::pin(stream::iter(
-            matched.into_iter().map(|artifact| Ok(artifact.into())),
-        )))
-    }
-}
-
-impl Changes {
-    /// The asserted facts matching `input`, in [`sort_key`] order under
-    /// `manifest`: the order a scan of a tree written under `manifest` would
-    /// produce them, so the result merges with that tree's scan (see
-    /// [`SortKey`]). Retracts are not yielded, as in the `Provider<Select>`
-    /// impl.
-    pub fn select(
-        &self,
-        input: &ArtifactSelector<Constrained>,
-        manifest: &Manifest,
-    ) -> Vec<Artifact> {
-        let the = input.attribute();
-        let of = input.entity();
-        let is = input.value();
-
-        // Linear filter over the batch. A `Changes` overlay is small
-        // by construction — a few auto-injected metadata facts plus
-        // whatever the caller asserted via `.with(...)` — so scanning
-        // it per query is negligible and not worth indexing.
-        let mut matched: Vec<Artifact> = Vec::new();
-        for (entity, attrs) in &self.facts {
-            if let Some(of_target) = of
-                && entity != of_target
-            {
-                continue;
-            }
-            for (attribute, changes) in attrs {
-                if let Some(the_target) = the
-                    && attribute != the_target
-                {
-                    continue;
-                }
-                for change in changes {
-                    let value = match change {
-                        Change::Assert(v, _) => v,
-                        // Retracts don't surface from a Changes-as-source
-                        // view — see impl docs.
-                        Change::Retract(_) => continue,
-                    };
-                    if let Some(is_target) = is
-                        && value != is_target
-                    {
-                        continue;
-                    }
-                    matched.push(Artifact {
-                        the: attribute.clone(),
-                        of: entity.clone(),
-                        is: value.clone(),
-                        cause: None,
-                    });
-                }
-            }
-        }
-        // Sort by `sort_key` so this overlay's output is in the same
-        // order a scan of a tree written under `manifest` would produce for
-        // this selector — see `SortKey` docs. That's the precondition
-        // `merge_grouped` relies on when it unions this stream with that
-        // tree's scan.
-        matched.sort_by_cached_key(|artifact| sort_key(artifact, manifest));
-        matched
-    }
-}
-
 #[cfg(test)]
 mod tests {
     /// The instructions of a batch come in entity then attribute order,
@@ -1045,7 +943,6 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use futures_util::StreamExt as _;
 
     fn alice() -> Entity {
         "id:alice".parse().expect("valid entity")
@@ -1430,150 +1327,5 @@ mod tests {
         let instructions: Vec<_> = target.into_instructions();
         assert_eq!(instructions.len(), 1);
         assert!(matches!(instructions[0], Instruction::Retract(_)));
-    }
-
-    async fn artifacts(
-        changes: &Changes,
-        selector: ArtifactSelector<Constrained>,
-    ) -> Vec<Artifact> {
-        let stream = Provider::<Select<'_>>::execute(changes, selector)
-            .await
-            .expect("execute");
-        stream
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .map(|row| row.and_then(|view| view.to_owned()))
-            .collect::<Result<Vec<_>, _>>()
-            .expect("collect")
-    }
-
-    #[dialog_common::test]
-    async fn it_yields_asserts_as_artifacts() {
-        let mut changes = Changes::new();
-        changes.associate(
-            name_attr(),
-            alice(),
-            Value::String("Alice".into()),
-            crate::Pick::All,
-        );
-
-        let results = artifacts(&changes, ArtifactSelector::new().the(name_attr())).await;
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].of, alice());
-        assert_eq!(results[0].is, Value::String("Alice".into()));
-    }
-
-    #[dialog_common::test]
-    async fn it_yields_replaces_as_artifacts() {
-        let mut changes = Changes::new();
-        changes.associate(
-            name_attr(),
-            alice(),
-            Value::String("Alicia".into()),
-            crate::Pick::Last,
-        );
-
-        let results = artifacts(&changes, ArtifactSelector::new().of(alice())).await;
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].is, Value::String("Alicia".into()));
-    }
-
-    #[dialog_common::test]
-    async fn it_omits_retracts_from_the_selection() {
-        let mut changes = Changes::new();
-        changes.associate(
-            name_attr(),
-            alice(),
-            Value::String("Alice".into()),
-            crate::Pick::All,
-        );
-        changes.dissociate(name_attr(), bob(), Value::String("Bob".into()));
-
-        // Only the assert should surface. Retracts are deliberately
-        // dropped because there's no negative-fact channel in
-        // ArtifactStream.
-        let results = artifacts(&changes, ArtifactSelector::new().the(name_attr())).await;
-        let entities: Vec<&Entity> = results.iter().map(|a| &a.of).collect();
-        assert_eq!(entities, vec![&alice()]);
-    }
-
-    #[dialog_common::test]
-    async fn it_filters_by_the_of_and_is() {
-        let mut changes = Changes::new();
-        changes.associate(
-            name_attr(),
-            alice(),
-            Value::String("Alice".into()),
-            crate::Pick::All,
-        );
-        changes.associate(
-            name_attr(),
-            bob(),
-            Value::String("Bob".into()),
-            crate::Pick::All,
-        );
-        changes.associate(
-            role_attr(),
-            alice(),
-            Value::String("Engineer".into()),
-            crate::Pick::All,
-        );
-
-        // Filter by `the` only
-        let by_attr = artifacts(&changes, ArtifactSelector::new().the(name_attr())).await;
-        assert_eq!(by_attr.len(), 2);
-
-        // Filter by `the` + `of`
-        let by_attr_entity = artifacts(
-            &changes,
-            ArtifactSelector::new().the(name_attr()).of(alice()),
-        )
-        .await;
-        assert_eq!(by_attr_entity.len(), 1);
-        assert_eq!(by_attr_entity[0].of, alice());
-
-        // Filter by `is`
-        let by_value = artifacts(
-            &changes,
-            ArtifactSelector::new()
-                .the(name_attr())
-                .is(Value::String("Bob".into())),
-        )
-        .await;
-        assert_eq!(by_value.len(), 1);
-        assert_eq!(by_value[0].of, bob());
-    }
-
-    #[dialog_common::test]
-    async fn it_emits_artifacts_in_sort_key_order() {
-        // Insert in deliberately wrong order; expect output sorted by
-        // sort_key so cross-source merges interleave consistently.
-        let mut changes = Changes::new();
-        // Different attributes — sort by attribute key first.
-        changes.associate(
-            role_attr(),
-            alice(),
-            Value::String("Engineer".into()),
-            crate::Pick::All,
-        );
-        changes.associate(
-            name_attr(),
-            alice(),
-            Value::String("Alice".into()),
-            crate::Pick::All,
-        );
-
-        let results = artifacts(&changes, ArtifactSelector::new().of(alice())).await;
-        assert_eq!(results.len(), 2);
-        // Attributes ordered by their key bytes — verify by checking
-        // the output is monotonic under sort_key.
-        let keys: Vec<_> = results
-            .iter()
-            .map(|artifact| sort_key(artifact, &Manifest::default()))
-            .collect();
-        let mut sorted_keys = keys.clone();
-        sorted_keys.sort();
-        assert_eq!(keys, sorted_keys);
     }
 }

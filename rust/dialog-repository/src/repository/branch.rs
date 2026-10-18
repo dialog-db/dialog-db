@@ -324,7 +324,7 @@ impl Branch {
         &self,
         operator: &Capability<Operator>,
         derive: impl FnOnce() -> Changes,
-    ) -> Arc<Changes> {
+    ) -> Ephemeral {
         let profile = operator.profile();
         let did = operator.did();
         let revision = self.revision();
@@ -339,7 +339,7 @@ impl Branch {
         {
             return changes.clone();
         }
-        let changes = Arc::new(derive());
+        let changes = Ephemeral::holding(derive());
         *cache = Some((profile.clone(), did, revision, changes.clone()));
         changes
     }
@@ -351,7 +351,7 @@ type MetadataMemo = Arc<Mutex<Option<(Did, Option<Revision>, metadata::BranchMet
 
 /// A single-branch query layer's metadata memo: the profile, operator,
 /// and head it was derived under, and what was derived.
-type LayerMetadataMemo = Arc<Mutex<Option<(Did, Did, Option<Revision>, Arc<Changes>)>>>;
+type LayerMetadataMemo = Arc<Mutex<Option<(Did, Did, Option<Revision>, Ephemeral)>>>;
 
 /// A memoized commit identity: the (profile, issuer) inputs it was derived
 /// from, and the derived branch entity and origin. See

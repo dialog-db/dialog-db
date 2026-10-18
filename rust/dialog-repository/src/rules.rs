@@ -1,7 +1,7 @@
 //! Layered deductive-rule resolution.
 //!
-//! A query reads from a stack of layers — each branch in scope, plus
-//! the per-query [`Changes`] overlay. Just as facts are unioned across
+//! A query reads from a stack of layers — each branch in scope, its
+//! session overlay, and the per-query overlay. Just as facts are unioned across
 //! layers (see [`layer`](crate::layer)), *rules* are too: each layer
 //! reports the deductive rules it holds concluding a queried concept,
 //! and the union of those — plus the implicit per-descriptor rule built
@@ -27,20 +27,22 @@
 //!   discovery (the `derives` lookup) is cacheable by branch head —
 //!   the committed rule set for a concept only changes when the head
 //!   moves. Hydrated bodies are cached by content-addressed rule entity.
-//! - A **transient** layer reads the per-query overlay. Overlay rules
-//!   (`tx.assert(rule)` / `.with(rule)`, uncommitted — the head has NOT
-//!   moved) are read fresh every query and never head-cached. Keeping
-//!   the overlay in its own layer is what makes the "overlay rule masked
-//!   by a head-keyed cache" bug structurally impossible.
+//! - A **transient** layer reads an overlay: a line's session overlay,
+//!   the per-query overlay, or a transaction's staged writes. Overlay
+//!   rules (`tx.assert(rule)` / `.with(rule)`, uncommitted — the head
+//!   has NOT moved) are never head-cached: a rule set assembled over
+//!   them is keyed by each layer's revision (see [`LayerRoots`]), which
+//!   is what makes the "overlay rule masked by a head-keyed cache" bug
+//!   structurally impossible.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use dialog_artifacts::history::REVISION_ATTRIBUTE;
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, Changes, Entity, Relation, Statement, Update, Value,
-};
+use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Relation, Statement, Update, Value};
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
 use dialog_query::error::EvaluationError;
@@ -425,6 +427,10 @@ fn projection_rule(conclusion: ConceptDescriptor, formula: FormulaQuery) -> Dedu
 #[derive(Debug, Default)]
 pub struct RuleCache {
     inner: RwLock<RuleCacheInner>,
+    /// How many assembled rule sets were served, so a test can tell a
+    /// reuse from a rebuild.
+    #[cfg(test)]
+    reused: AtomicUsize,
 }
 
 /// The committed trigger footprint at a branch head: every `on:`
@@ -442,14 +448,14 @@ pub(crate) struct TriggerFootprint {
 /// The tree root of every layer a rule set was resolved from, in layer
 /// order: `None` for a layer with no tree yet.
 /// The layers a rule set was assembled over, each by what names its
-/// rules: a line by its root, a session overlay by its revision, and
-/// a staged store by its generation. A later read over the same
+/// rules: a line by its root, an overlay by its revision, and a staged
+/// store by its generation. A later read over the same
 /// layers finds the same rules.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LayerRoots {
     /// Each line's tree root.
     pub(crate) lines: Vec<Option<[u8; 32]>>,
-    /// Each line's session overlay revision.
+    /// Each line's session overlay revision, then the query overlay's.
     pub(crate) overlays: Vec<EphemeralRevision>,
     /// Each staged layer's generation.
     pub(crate) staged: Vec<u64>,
@@ -483,12 +489,10 @@ struct RuleCacheInner {
     /// Whether a concept carries the committed `dialog.concept/transient`
     /// marker, as of a branch head.
     transient: HashMap<Entity, (Revision, bool)>,
-    /// A concept's assembled rule set -- built-in, committed, and its
-    /// program analysis attached -- as of the tree root of every layer
-    /// it was resolved from. Assembling it is most of what planning a
-    /// warm query costs, and it changes only when a layer does. Only
-    /// sets resolved without overlay rules are kept, since those are
-    /// read fresh per query.
+    /// A concept's assembled rule set -- built-in, committed, overlay,
+    /// and its program analysis attached -- as of the [`LayerRoots`] it
+    /// was resolved from. Assembling it is most of what planning a warm
+    /// query costs, and it changes only when a layer does.
     ///
     /// Kept with the descriptor it was assembled for: the set carries
     /// that descriptor's implicit rule, which binds its field names, and
@@ -611,10 +615,18 @@ impl RuleCache {
         let inner = self.inner.read();
         match inner.bundles.get(&descriptor.this()) {
             Some(bundle) if bundle.roots == *roots && bundle.descriptor == *descriptor => {
+                #[cfg(test)]
+                self.reused.fetch_add(1, Ordering::Relaxed);
                 Some((bundle.rules.clone(), bundle.reads.clone()))
             }
             _ => None,
         }
+    }
+
+    /// How many assembled rule sets [`bundle`](Self::bundle) served.
+    #[cfg(test)]
+    pub(crate) fn reused(&self) -> usize {
+        self.reused.load(Ordering::Relaxed)
     }
 
     /// Record the rule set assembled for `descriptor` over layers at
@@ -769,54 +781,6 @@ pub(crate) fn assemble(
         concept_rules.install(rule);
     }
     concept_rules
-}
-
-/// Whether an overlay [`Changes`] batch installs any rule at all. Rule
-/// sets resolved from an overlay without rules can be cached with the
-/// committed layers alone.
-pub(crate) fn has_overlay_rules(changes: &Changes) -> bool {
-    let derives = derives_attr();
-    changes
-        .iter()
-        .any(|(_, attribute, _)| *attribute == derives)
-}
-
-/// Read rules from an overlay [`Changes`] batch deriving the attribute
-/// `on`: the `dialog.rule/derives` facts pointing at it, then their
-/// `dialog.rule/source` bodies. Fresh every query, like
-/// [`overlay_rules`].
-pub(crate) fn overlay_rules_deriving(changes: &Changes, on: &Entity) -> Vec<DeductiveRule> {
-    use dialog_artifacts::Change;
-
-    let derives = derives_attr();
-    let source = source_attr();
-
-    let mut rule_entities: Vec<Entity> = Vec::new();
-    for (entity, attribute, change) in changes.iter() {
-        if *attribute == derives
-            && let Change::Assert(Value::Entity(c), _) = change
-            && c == on
-            && !rule_entities.contains(entity)
-        {
-            rule_entities.push(entity.clone());
-        }
-    }
-
-    let mut out = Vec::new();
-    for rule_entity in rule_entities {
-        for (entity, attribute, change) in changes.iter() {
-            if *entity == rule_entity
-                && *attribute == source
-                && let Change::Assert(Value::Bytes(bytes), _) = change
-                && let Ok(rule) = hydrate(bytes)
-                && rule.stored_as(&rule_entity)
-            {
-                out.push(rule);
-                break;
-            }
-        }
-    }
-    out
 }
 
 /// The head of `rule` deriving the relation indexed by `on`, if it has

@@ -14,6 +14,19 @@ says how to cut a release.
 
 ## Unreleased
 
+### A query's own overlay is held as a line, so every rule set it assembles is cached
+
+The facts a query folds in beside its lines, the injected `db:session` metadata and whatever `.with(..)` adds, were a `Changes` batch read as a store: filtered and sorted per selector, scanned for retracts and for rules on every read. A rule in that batch turned the assembled rule-set cache off for the whole query, and its bodies were decoded every time. The batch is now held as an `Ephemeral`, the store a branch's session overlay already uses. It is read by range, and its revision joins the key of every rule-set and read-settlement cache, so a query folding in the same facts as an earlier one is served what the earlier one assembled. Every overlay and staged rule is read through one function and hydrated once per content address. `Changes` stays the write batch and the wire form; nothing reads one as a source any more.
+
+What this changes for you:
+
+- `QueryLayer::overlay` returns an `Ephemeral` instead of an `Arc<Changes>`.
+- `Changes::select` and `impl Provider<Select> for Changes` are removed from `dialog-artifacts`. To read facts held in memory beside a tree, hold them in an `Ephemeral` (`Ephemeral::apply` takes the batch) and read it with `Ephemeral::select`.
+- A query or subscription whose `.with(..)` carries a rule no longer rebuilds the rule set and re-decodes each rule body on every evaluation. Results are unchanged.
+- Asset changes in a `.with(..)` batch are dropped from the query's overlay, as they were before: a query reads facts only.
+
+Why: a query fell off the cache whenever its overlay held a rule. A performance report on Sapling, which hands rules to each query in its overlay, measured rule decoding and assembly at about 60% of instructions on that path. Reading the per-query batch as a separate kind of store is what let that path skip the cache, so the batch now goes through the store and the cache key every other overlay goes through.
+
 ### The storage rewrite carries blob-index keys over as they are
 
 [#605](https://github.com/dialog-db/dialog-db/pull/605), forward-ported from `release/0.3.x`

@@ -361,6 +361,24 @@ impl Ephemeral {
         Self::default()
     }
 
+    /// A line holding the facts of `changes` as one instant, with its
+    /// asset changes dropped: what a query reads beside its lines, which
+    /// is facts only. Lines built from equal batches carry equal
+    /// revisions, so a cache keyed by the revision serves both.
+    pub(crate) fn holding(mut changes: Changes) -> Self {
+        changes.take_assets();
+        let line = Self::new();
+        {
+            let mut state = line.state.write();
+            let mut delta = Delta::default();
+            for instruction in changes.into_instructions() {
+                state.apply(instruction, &mut delta);
+            }
+            state.mint(delta);
+        }
+        line
+    }
+
     /// Assert a statement: its asserts and replaces land in the store
     /// with the tree's semantics, its retracts remove or tombstone.
     /// Chainable; use [`apply`](Self::apply) to get the instant minted.
@@ -943,5 +961,43 @@ mod tests {
 
         assert_eq!(line.len(), 0, "nothing in the batch landed");
         assert_eq!(line.revision(), before, "no instant was minted");
+    }
+
+    /// A line holding a batch is named by what the batch holds: lines
+    /// built from equal batches carry equal revisions, so a cache keyed
+    /// by a query overlay's revision serves every query folding in the
+    /// same facts, and a different batch carries a different revision.
+    /// The batch's asset changes are dropped, since a read sees facts
+    /// only, and its retracts hide the facts beneath.
+    #[dialog_common::test]
+    fn it_names_a_held_batch_by_its_facts() {
+        let batch = |name: &str| {
+            let mut changes = Changes::new();
+            the!("person/name")
+                .of("id:a".parse().unwrap())
+                .is(name.to_string())
+                .assert(&mut changes);
+            claim("id:b", "person/name", "B").retract(&mut changes);
+            dialog_artifacts::Asset::from(b"not a fact".to_vec()).assert(&mut changes);
+            changes
+        };
+
+        let first = Ephemeral::holding(batch("A"));
+        let second = Ephemeral::holding(batch("A"));
+        assert_eq!(first.revision(), second.revision());
+        assert_ne!(first.revision(), Ephemeral::holding(batch("Z")).revision());
+
+        assert_eq!(
+            values(&first, "id:a", "person/name"),
+            vec![Value::String("A".into())]
+        );
+        assert_eq!(first.len(), 1, "the asset change is dropped");
+        assert!(
+            first.tombstones(&Manifest::default()).contains(&sort_key(
+                &fact("id:b", "person/name", "B"),
+                &Manifest::default()
+            )),
+            "the retract hides the fact beneath"
+        );
     }
 }
