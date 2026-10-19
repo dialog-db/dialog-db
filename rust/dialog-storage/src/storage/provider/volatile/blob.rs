@@ -11,19 +11,26 @@
 //! reader yields the (ranged) copy as a single chunk. A sink builds the
 //! outboard of the blob as it takes the bytes, as the filesystem sink does,
 //! and keeps it beside a blob of more than one group (see [`crate::bao`]).
+//! [`ImportRange`] keeps each group of a verified range in a partial blob, as
+//! it verifies, and the session holds the blob whole once it holds each
+//! group.
 
 use super::{Session, Volatile};
-use crate::bao::OutboardBuilder;
+use crate::bao::{self, Decoder, Groups, Item, OutboardBuilder};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Did, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _, BlobSizeExt as _};
+use dialog_effects::blob::prelude::{
+    BlobHeldExt as _, BlobImportExt as _, BlobImportRangeExt as _, BlobReadExt as _,
+    BlobSizeExt as _,
+};
 use dialog_effects::blob::{
-    BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Import, Read, Size, Write,
+    BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Held, Holding, Import, ImportRange,
+    Read, Size, Write,
 };
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 fn blob_key(digest: &Blake3Hash) -> String {
@@ -115,6 +122,120 @@ impl Volatile {
     }
 }
 
+/// A blob that a session holds in part: the groups that it holds, by their
+/// offsets, and the hashes that verified them, by their offsets in the
+/// outboard.
+#[derive(Debug, Default)]
+pub(super) struct Partial {
+    size: u64,
+    groups: BTreeMap<u64, Vec<u8>>,
+    pairs: BTreeMap<u64, [u8; bao::PAIR]>,
+    held: Groups,
+}
+
+impl Partial {
+    /// Which bytes of the blob the session holds.
+    fn holding(&self) -> Holding {
+        Holding {
+            size: self.size,
+            ranges: self.held.bytes(self.size),
+        }
+    }
+}
+
+/// A [`BlobSink`] of the Bao encoding of a range of a blob, which keeps each
+/// group that verifies in the partial blob of its session at once.
+struct MemoryRangeSink {
+    sessions: Arc<RwLock<HashMap<Did, Session>>>,
+    subject: Did,
+    digest: Blake3Hash,
+    size: u64,
+    tree: bao_tree::BaoTree,
+    decoder: Decoder,
+    failed: bool,
+}
+
+impl MemoryRangeSink {
+    /// Keeps `item`, and moves the blob to its place once the session holds
+    /// each group of it.
+    fn keep(&self, item: Item) {
+        let key = blob_key(&self.digest);
+        let mut sessions = self.sessions.write();
+        let session = sessions.entry(self.subject.clone()).or_default();
+        if session.blobs.contains_key(&key) {
+            return;
+        }
+        let partial = session
+            .partials
+            .entry(key.clone())
+            .or_insert_with(|| Partial {
+                size: self.size,
+                ..Partial::default()
+            });
+        match item {
+            Item::Parent { node, pair } => {
+                if let Some(offset) = bao::pair_offset(&self.tree, node) {
+                    partial.pairs.insert(offset, pair);
+                }
+            }
+            Item::Group { offset, bytes } => {
+                partial.groups.insert(offset, bytes);
+                partial.held.insert(offset / bao::GROUP);
+            }
+        }
+        if !partial.held.covers(bao::groups(self.size)) {
+            return;
+        }
+        let partial = session
+            .partials
+            .remove(&key)
+            .expect("the partial blob is there");
+        let blob: Vec<u8> = partial.groups.into_values().flatten().collect();
+        let outboard: Vec<u8> = partial.pairs.into_values().flatten().collect();
+        if !outboard.is_empty() {
+            session.outboards.insert(key.clone(), outboard);
+        }
+        session.blobs.insert(key, blob);
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl BlobSink for MemoryRangeSink {
+    async fn write_all(&mut self, bytes: &[u8]) -> Result<(), BlobError> {
+        let unverified = |reason: String| BlobError::Unverified {
+            digest: blob_key(&self.digest),
+            reason,
+        };
+        if self.failed {
+            return Err(unverified(
+                "an earlier part of the range did not verify".into(),
+            ));
+        }
+        self.decoder.push(bytes);
+        while let Some(item) = self.decoder.next_item() {
+            match item {
+                Ok(item) => self.keep(item),
+                Err(error) => {
+                    self.failed = true;
+                    return Err(unverified(error.to_string()));
+                }
+            }
+        }
+        if self.decoder.excess() > 0 {
+            self.failed = true;
+            return Err(unverified(
+                "the encoding runs past the end of its range".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn finish(self: Box<Self>) -> Result<Blake3Hash, BlobError> {
+        Ok(self.digest.clone())
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<Read> for Volatile {
@@ -122,26 +243,75 @@ impl Provider<Read> for Volatile {
         let subject: Did = effect.subject().into();
         let digest = effect.digest();
         let key = blob_key(digest);
+        let (offset, length) = effect
+            .range()
+            .map_or((0, None), |range| (range.offset, range.length));
 
         let sessions = self.sessions.read();
-        let bytes = sessions
-            .get(&subject)
-            .and_then(|session| session.blobs.get(&key))
+        let session = sessions.get(&subject);
+        if let Some(bytes) = session.and_then(|session| session.blobs.get(&key)) {
+            let start = (offset as usize).min(bytes.len());
+            let end = match length {
+                Some(length) => start.saturating_add(length as usize).min(bytes.len()),
+                None => bytes.len(),
+            };
+            return Ok(Box::new(MemoryBlobSource(Some(bytes[start..end].to_vec()))));
+        }
+        // A blob that the session holds in part reads to where the held part
+        // of the range ends.
+        let partial = session
+            .and_then(|session| session.partials.get(&key))
+            .filter(|partial| partial.holding().held_from(offset) > offset)
             .ok_or(BlobError::NotFound(key))?;
-
-        let ranged = match effect.range() {
-            None => bytes.clone(),
-            Some(range) => {
-                let start = (range.offset as usize).min(bytes.len());
-                let end = match range.length {
-                    Some(length) => start.saturating_add(length as usize).min(bytes.len()),
-                    None => bytes.len(),
-                };
-                bytes[start..end].to_vec()
-            }
-        };
-
+        let held = partial.holding().held_from(offset);
+        let end = length.map_or(held, |length| offset.saturating_add(length).min(held));
+        let mut ranged = Vec::new();
+        for (start, bytes) in partial.groups.range(offset / bao::GROUP * bao::GROUP..end) {
+            let from = offset.saturating_sub(*start) as usize;
+            let to = (end - start).min(bytes.len() as u64) as usize;
+            ranged.extend_from_slice(&bytes[from..to]);
+        }
         Ok(Box::new(MemoryBlobSource(Some(ranged))))
+    }
+}
+
+/// Which bytes of a blob the session holds.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Held> for Volatile {
+    async fn execute(&self, effect: Capability<Held>) -> Result<Option<Holding>, BlobError> {
+        let subject: Did = effect.subject().into();
+        let key = blob_key(effect.digest());
+        let sessions = self.sessions.read();
+        let Some(session) = sessions.get(&subject) else {
+            return Ok(None);
+        };
+        if let Some(bytes) = session.blobs.get(&key) {
+            let size = bytes.len() as u64;
+            return Ok(Some(Holding {
+                size,
+                ranges: vec![(0, size)],
+            }));
+        }
+        Ok(session.partials.get(&key).map(Partial::holding))
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<ImportRange> for Volatile {
+    async fn execute(&self, effect: Capability<ImportRange>) -> Result<BlobWriter, BlobError> {
+        let (size, range) = (effect.size(), effect.range());
+        let end = bao::group_range(size, range.offset, range.length).map_err(BlobError::Storage)?;
+        Ok(Box::new(MemoryRangeSink {
+            sessions: self.sessions.clone(),
+            subject: effect.subject().into(),
+            digest: effect.digest().clone(),
+            size,
+            tree: bao::tree(size),
+            decoder: Decoder::new(effect.digest(), size, range.offset, end),
+            failed: false,
+        }))
     }
 }
 
@@ -368,5 +538,46 @@ mod tests {
         assert_eq!(outboards.get(&blob_key(&long_hash)).map(Vec::len), Some(64));
         assert_eq!(outboards.get(&blob_key(&short_hash)), None);
         Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_keeps_the_groups_of_the_middle_of_a_blob_alone() {
+        let subject = unique_subject("blob-partial-middle");
+        crate::bao::conformance::it_keeps_the_groups_of_the_middle_alone(
+            &Volatile::new(),
+            &subject,
+        )
+        .await;
+    }
+
+    #[dialog_common::test]
+    async fn it_holds_a_blob_whole_once_it_keeps_each_group() {
+        let subject = unique_subject("blob-partial-whole");
+        let provider = Volatile::new();
+        crate::bao::conformance::it_holds_a_blob_whole_once_it_keeps_each_group(
+            &provider, &subject,
+        )
+        .await;
+        let sessions = provider.sessions.read();
+        let session = &sessions[subject.did()];
+        assert!(session.partials.is_empty());
+        assert_eq!(session.outboards.len(), 1);
+    }
+
+    #[dialog_common::test]
+    async fn it_refuses_a_group_that_does_not_verify() {
+        let subject = unique_subject("blob-partial-unverified");
+        crate::bao::conformance::it_refuses_a_group_that_does_not_verify(
+            &Volatile::new(),
+            &subject,
+        )
+        .await;
+    }
+
+    #[dialog_common::test]
+    async fn it_keeps_both_of_two_imports_of_one_blob_at_once() {
+        let subject = unique_subject("blob-partial-two");
+        crate::bao::conformance::it_keeps_both_of_two_imports_at_once(&Volatile::new(), &subject)
+            .await;
     }
 }

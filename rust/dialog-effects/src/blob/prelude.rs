@@ -17,7 +17,7 @@ use dialog_common::Blake3Hash;
 use crate::archive::Archive;
 use crate::{Method, method};
 
-use super::{Blob, ByteRange, Import, Read, Size, Write};
+use super::{Blob, ByteRange, Held, Import, ImportRange, Read, Size, Write};
 
 /// Scope the archive to its blob store.
 pub trait ArchiveBlobExt {
@@ -43,6 +43,8 @@ pub trait ReadBlobExt {
     fn read(self, digest: impl Into<Blake3Hash>) -> Capability<Read>;
     /// The size of a blob by hash, without reading its bytes.
     fn size(self, digest: impl Into<Blake3Hash>) -> Capability<Size>;
+    /// Which bytes of a blob the store holds, without reading them.
+    fn held(self, digest: impl Into<Blake3Hash>) -> Capability<Held>;
 }
 
 impl ReadBlobExt for Capability<Blob<method::Get>> {
@@ -52,6 +54,22 @@ impl ReadBlobExt for Capability<Blob<method::Get>> {
 
     fn size(self, digest: impl Into<Blake3Hash>) -> Capability<Size> {
         self.invoke(Size::new(digest))
+    }
+
+    fn held(self, digest: impl Into<Blake3Hash>) -> Capability<Held> {
+        self.invoke(Held::new(digest))
+    }
+}
+
+/// Field accessors on `Capability<Held>`.
+pub trait BlobHeldExt {
+    /// The blob digest from the capability chain.
+    fn digest(&self) -> &Blake3Hash;
+}
+
+impl BlobHeldExt for Capability<Held> {
+    fn digest(&self) -> &Blake3Hash {
+        &Held::of(self).digest
     }
 }
 
@@ -73,6 +91,13 @@ pub trait WriteBlobExt {
     fn write(self) -> Capability<Write>;
     /// Import a blob whose hash is already known.
     fn import(self, digest: impl Into<Blake3Hash>, size: u64) -> Capability<Import>;
+    /// Import a verified range of a blob whose hash and size are known.
+    fn import_range(
+        self,
+        digest: impl Into<Blake3Hash>,
+        size: u64,
+        range: ByteRange,
+    ) -> Capability<ImportRange>;
 }
 
 impl WriteBlobExt for Capability<Blob<method::Put>> {
@@ -82,6 +107,39 @@ impl WriteBlobExt for Capability<Blob<method::Put>> {
 
     fn import(self, digest: impl Into<Blake3Hash>, size: u64) -> Capability<Import> {
         self.invoke(Import::new(digest, size))
+    }
+
+    fn import_range(
+        self,
+        digest: impl Into<Blake3Hash>,
+        size: u64,
+        range: ByteRange,
+    ) -> Capability<ImportRange> {
+        self.invoke(ImportRange::new(digest, size, range))
+    }
+}
+
+/// Field accessors on `Capability<ImportRange>`.
+pub trait BlobImportRangeExt {
+    /// The blob digest from the capability chain.
+    fn digest(&self) -> &Blake3Hash;
+    /// The size of the blob from the capability chain.
+    fn size(&self) -> u64;
+    /// The range of the encoding from the capability chain.
+    fn range(&self) -> ByteRange;
+}
+
+impl BlobImportRangeExt for Capability<ImportRange> {
+    fn digest(&self) -> &Blake3Hash {
+        &ImportRange::of(self).digest
+    }
+
+    fn size(&self) -> u64 {
+        ImportRange::of(self).size
+    }
+
+    fn range(&self) -> ByteRange {
+        ImportRange::of(self).range
     }
 }
 

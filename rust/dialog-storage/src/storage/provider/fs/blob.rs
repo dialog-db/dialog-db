@@ -15,16 +15,30 @@
 //! pass, into a second temp file, and commits it before the blob, so a blob
 //! that the store holds always has its outboard. A sink dropped before its
 //! end removes what it staged.
+//!
+//! A blob that the store holds in part, from [`ImportRange`], is three files
+//! beside the blobs: `{base58(digest)}.partial`, the bytes of the groups that
+//! it holds at their offsets, with holes between; `.partial.outboard`, the
+//! hashes that verified them at their places in the outboard; and `.held`,
+//! the record of the groups that it holds (see [`Groups::encode`]). A group
+//! counts as held only once the record names it, and the record is written
+//! after the bytes. Once the record names each group, the store moves the
+//! outboard and the bytes to the places of a whole blob, and removes the
+//! record.
 
 use super::{FileReader, FileSystem, FileSystemError, FileSystemHandle, FileWriter};
-use crate::bao::OutboardBuilder;
+use crate::bao::{self, Decoder, Groups, Item, OutboardBuilder};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
-use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _, BlobSizeExt as _};
+use dialog_effects::blob::prelude::{
+    BlobHeldExt as _, BlobImportExt as _, BlobImportRangeExt as _, BlobReadExt as _,
+    BlobSizeExt as _,
+};
 use dialog_effects::blob::{
-    BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Import, Read, Size, Write,
+    BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Held, Holding, Import, ImportRange,
+    Read, Size, Write,
 };
 use futures_util::StreamExt;
 
@@ -34,6 +48,14 @@ const BLOB: &str = "blob";
 const STAGING: &str = "_staging";
 /// The extension of the outboard of a blob, beside it.
 const OUTBOARD: &str = "outboard";
+/// The extension of the bytes of a blob that the store holds in part.
+const PARTIAL: &str = "partial";
+/// The extension of the record of the groups of a partial blob.
+const HELD: &str = "held";
+/// The bytes of groups that a sink of a range keeps between two writes of the
+/// record of a partial blob: 1 MiB. A crash loses at most these, which a
+/// later read fetches again.
+const RECORD_EVERY: u64 = 1024 * 1024;
 
 impl FileSystem {
     /// The handle for this space's blob directory.
@@ -55,6 +77,17 @@ fn blob_key(digest: &Blake3Hash) -> String {
 /// The name of the outboard of the blob `digest`, in the blob directory.
 fn outboard_key(digest: &Blake3Hash) -> String {
     format!("{}.{OUTBOARD}", blob_key(digest))
+}
+
+/// The names of the bytes, the outboard, and the record of the blob
+/// `digest` that the store holds in part, in the blob directory.
+fn partial_keys(digest: &Blake3Hash) -> [String; 3] {
+    let key = blob_key(digest);
+    [
+        format!("{key}.{PARTIAL}"),
+        format!("{key}.{PARTIAL}.{OUTBOARD}"),
+        format!("{key}.{HELD}"),
+    ]
 }
 
 /// A [`BlobSource`] over a file's streaming reader.
@@ -182,21 +215,329 @@ impl BlobSink for FileBlobSink {
     }
 }
 
+/// A lock of each record of a partial blob in this process, by its path,
+/// beside the lock of the file system, which another process may hold.
+type Records = std::collections::HashMap<String, std::sync::Arc<futures_util::lock::Mutex<()>>>;
+static RECORDS: std::sync::LazyLock<std::sync::Mutex<Records>> =
+    std::sync::LazyLock::new(Default::default);
+
+impl FileSystem {
+    /// Which bytes of the blob `digest` the store holds.
+    async fn holding(&self, digest: &Blake3Hash) -> Result<Option<Holding>, BlobError> {
+        let blob_dir = self.blob()?;
+        if let Some(size) = blob_dir.resolve(&blob_key(digest))?.size().await? {
+            return Ok(Some(Holding {
+                size,
+                ranges: vec![(0, size)],
+            }));
+        }
+        let [_, _, held] = partial_keys(digest);
+        let Some(record) = blob_dir.resolve(&held)?.read_optional().await? else {
+            return Ok(None);
+        };
+        let (size, groups) = Groups::decode(&record)
+            .ok_or_else(|| BlobError::Storage(format!("the record {held} is not valid")))?;
+        Ok(Some(Holding {
+            size,
+            ranges: groups.bytes(size),
+        }))
+    }
+}
+
+/// Runs `then` with the record `record` of a partial blob to itself: in this
+/// process, and against another process that holds the store.
+async fn locked<T>(
+    record: &FileSystemHandle,
+    then: impl AsyncFnOnce() -> Result<T, BlobError>,
+) -> Result<T, BlobError> {
+    let local = {
+        let mut records = RECORDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        records.retain(|_, held| std::sync::Arc::strong_count(held) > 1);
+        std::sync::Arc::clone(records.entry(record.path().to_owned()).or_default())
+    };
+    let _local = local.lock().await;
+    let _shared = shared_lock(record).await?;
+    then().await
+}
+
+/// The lock of the file system of `record`, once no other process holds it.
+#[cfg(not(target_arch = "wasm32"))]
+async fn shared_lock(record: &FileSystemHandle) -> Result<super::LockGuard, BlobError> {
+    let mut waited = std::time::Duration::ZERO;
+    loop {
+        match super::lock(record).await {
+            Ok(guard) => return Ok(guard),
+            Err(FileSystemError::Lock(reason)) if waited < std::time::Duration::from_secs(10) => {
+                let _ = reason;
+                let pause = std::time::Duration::from_millis(5);
+                tokio::time::sleep(pause).await;
+                waited += pause;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// The lock of the file system of `record`: the web locks wait their turn.
+#[cfg(target_arch = "wasm32")]
+async fn shared_lock(record: &FileSystemHandle) -> Result<super::LockGuard, BlobError> {
+    Ok(super::lock(record).await?)
+}
+
+/// A [`BlobSink`] of the Bao encoding of a range of a blob: it keeps each
+/// group that verifies, and the hashes that verified it, in the partial blob,
+/// and records them at most [`RECORD_EVERY`] bytes apart, and at its end.
+struct RangeSink {
+    blob_dir: FileSystemHandle,
+    digest: Blake3Hash,
+    size: u64,
+    tree: bao_tree::BaoTree,
+    decoder: Decoder,
+    /// The groups that the sink kept and did not record yet.
+    kept: Groups,
+    /// The bytes of `kept`.
+    unrecorded: u64,
+    /// Whether the store held the blob whole at the start: the sink keeps
+    /// nothing more of it.
+    whole: bool,
+    /// Whether a part did not verify: the sink takes no more.
+    failed: bool,
+}
+
+impl FileSystem {
+    /// Open a sink of the range `range` of the blob `digest` of `size` bytes.
+    async fn open_range_sink(
+        &self,
+        digest: Blake3Hash,
+        size: u64,
+        range: dialog_effects::blob::ByteRange,
+    ) -> Result<RangeSink, BlobError> {
+        let end = bao::group_range(size, range.offset, range.length).map_err(BlobError::Storage)?;
+        let blob_dir = self.blob()?;
+        blob_dir.ensure_dir().await?;
+        let whole = blob_dir.resolve(&blob_key(&digest))?.exists().await;
+        Ok(RangeSink {
+            decoder: Decoder::new(&digest, size, range.offset, end),
+            tree: bao::tree(size),
+            blob_dir,
+            digest,
+            size,
+            kept: Groups::new(),
+            unrecorded: 0,
+            whole,
+            failed: false,
+        })
+    }
+}
+
+impl RangeSink {
+    /// Takes each item of the encoding that the decoder holds, and keeps it.
+    async fn keep(&mut self) -> Result<(), BlobError> {
+        let [data, outboard, _] = partial_keys(&self.digest);
+        while let Some(item) = self.decoder.next_item() {
+            match item {
+                Ok(Item::Parent { node, pair }) => {
+                    if let Some(offset) = bao::pair_offset(&self.tree, node) {
+                        self.blob_dir
+                            .resolve(&outboard)?
+                            .write_at(offset, &pair)
+                            .await?;
+                    }
+                }
+                Ok(Item::Group { offset, bytes }) => {
+                    self.blob_dir
+                        .resolve(&data)?
+                        .write_at(offset, &bytes)
+                        .await?;
+                    self.kept.insert(offset / bao::GROUP);
+                    self.unrecorded += bytes.len() as u64;
+                }
+                Err(unverified) => {
+                    self.failed = true;
+                    self.record().await?;
+                    return Err(BlobError::Unverified {
+                        digest: blob_key(&self.digest),
+                        reason: unverified.to_string(),
+                    });
+                }
+            }
+        }
+        if self.decoder.excess() > 0 {
+            self.failed = true;
+            self.record().await?;
+            return Err(BlobError::Unverified {
+                digest: blob_key(&self.digest),
+                reason: "the encoding runs past the end of its range".into(),
+            });
+        }
+        if self.unrecorded >= RECORD_EVERY {
+            self.record().await?;
+        }
+        Ok(())
+    }
+
+    /// Adds the groups that the sink kept to the record of the partial blob,
+    /// and moves the blob to its place once the record names each group.
+    async fn record(&mut self) -> Result<(), BlobError> {
+        let kept = std::mem::take(&mut self.kept);
+        self.unrecorded = 0;
+        let [data, outboard, held] = partial_keys(&self.digest);
+        let blob_dir = self.blob_dir.clone();
+        let (digest, size) = (self.digest.clone(), self.size);
+        let record = blob_dir.resolve(&held)?;
+        locked(&record, async || {
+            let dest = blob_dir.resolve(&blob_key(&digest))?;
+            let (data, outboard) = (blob_dir.resolve(&data)?, blob_dir.resolve(&outboard)?);
+            if dest.exists().await {
+                // Another sink completed the blob: what this one wrote since
+                // is a copy of bytes that the blob holds.
+                for leftover in [&data, &outboard, &record] {
+                    leftover.remove().await?;
+                }
+                return Ok(());
+            }
+            let mut groups = match record.read_optional().await? {
+                Some(bytes) => match Groups::decode(&bytes) {
+                    Some((held, groups)) if held == size => groups,
+                    _ => {
+                        return Err(BlobError::Storage(format!(
+                            "the record {} is not of a blob of {size} bytes",
+                            record.path()
+                        )));
+                    }
+                },
+                None => Groups::new(),
+            };
+            groups.extend(&kept);
+            if !groups.covers(bao::groups(size)) {
+                if !kept.is_empty() {
+                    record.write_atomic(&groups.encode(size)).await?;
+                }
+                return Ok(());
+            }
+            // The outboard first: a blob that the store holds has its
+            // outboard.
+            if outboard.exists().await {
+                outboard
+                    .rename(&blob_dir.resolve(&outboard_key(&digest))?)
+                    .await?;
+            }
+            if data.exists().await {
+                data.rename(&dest).await?;
+            } else {
+                dest.write(&[]).await?;
+            }
+            record.remove().await?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl BlobSink for RangeSink {
+    async fn write_all(&mut self, bytes: &[u8]) -> Result<(), BlobError> {
+        if self.failed {
+            return Err(BlobError::Unverified {
+                digest: blob_key(&self.digest),
+                reason: "an earlier part of the range did not verify".into(),
+            });
+        }
+        if self.whole {
+            return Ok(());
+        }
+        self.decoder.push(bytes);
+        self.keep().await
+    }
+
+    async fn finish(mut self: Box<Self>) -> Result<Blake3Hash, BlobError> {
+        if !self.whole && !self.kept.is_empty() {
+            self.record().await?;
+        }
+        Ok(self.digest.clone())
+    }
+}
+
+/// A [`BlobSource`] that gives nothing more after `left` bytes of a reader.
+struct Limited {
+    reader: FileReader,
+    left: u64,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl BlobSource for Limited {
+    async fn next(&mut self) -> Result<Option<Vec<u8>>, BlobError> {
+        if self.left == 0 {
+            return Ok(None);
+        }
+        match self.reader.next().await {
+            Some(Ok(mut chunk)) => {
+                chunk.truncate(usize::try_from(self.left).unwrap_or(usize::MAX));
+                self.left -= chunk.len() as u64;
+                Ok(Some(chunk))
+            }
+            Some(Err(e)) => Err(BlobError::Storage(e.to_string())),
+            None => Ok(None),
+        }
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<Read> for FileSystem {
     async fn execute(&self, effect: Capability<Read>) -> Result<BlobReader, BlobError> {
         let digest = effect.digest();
         let handle = self.blob()?.resolve(&blob_key(digest))?;
-        if !handle.exists().await {
-            return Err(BlobError::NotFound(blob_key(digest)));
-        }
         let (offset, length) = match effect.range() {
             Some(range) => (range.offset, range.length),
             None => (0, None),
         };
-        let reader = handle.reader_range(offset, length).await?;
-        Ok(Box::new(FileBlobSource(reader)))
+        if handle.exists().await {
+            let reader = handle.reader_range(offset, length).await?;
+            return Ok(Box::new(FileBlobSource(reader)));
+        }
+        // A blob that the store holds in part reads to where the held part of
+        // the range ends.
+        let held = match self.holding(digest).await? {
+            Some(holding) if holding.held_from(offset) > offset => holding.held_from(offset),
+            _ => return Err(BlobError::NotFound(blob_key(digest))),
+        };
+        let end = length.map_or(held, |length| offset.saturating_add(length).min(held));
+        let [data, _, _] = partial_keys(digest);
+        let reader = self
+            .blob()?
+            .resolve(&data)?
+            .reader_range(offset, Some(end - offset))
+            .await?;
+        Ok(Box::new(Limited {
+            reader,
+            left: end - offset,
+        }))
+    }
+}
+
+/// Which bytes of a blob the store holds: from the length of a whole blob,
+/// or from the record of a partial one.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Held> for FileSystem {
+    async fn execute(&self, effect: Capability<Held>) -> Result<Option<Holding>, BlobError> {
+        self.holding(effect.digest()).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<ImportRange> for FileSystem {
+    async fn execute(&self, effect: Capability<ImportRange>) -> Result<BlobWriter, BlobError> {
+        let sink = self
+            .open_range_sink(effect.digest().clone(), effect.size(), effect.range())
+            .await?;
+        Ok(Box::new(sink))
     }
 }
 
@@ -401,6 +742,33 @@ mod tests {
     }
 
     #[dialog_common::test]
+    async fn it_keeps_the_groups_of_the_middle_of_a_blob_alone() {
+        let fs = test_space("blob-partial-middle").await;
+        crate::bao::conformance::it_keeps_the_groups_of_the_middle_alone(&fs, &subject()).await;
+    }
+
+    #[dialog_common::test]
+    async fn it_holds_a_blob_whole_once_it_keeps_each_group() {
+        let fs = test_space("blob-partial-whole").await;
+        crate::bao::conformance::it_holds_a_blob_whole_once_it_keeps_each_group(&fs, &subject())
+            .await;
+        // The partial blob gave its place to the whole blob and its outboard.
+        let mut files = blob_files(&fs).await;
+        files.retain(|name| !name.ends_with(".lock"));
+        assert_eq!(files.len(), 2, "{files:?}");
+        assert!(
+            files.iter().any(|name| name.ends_with(".outboard")),
+            "{files:?}"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_refuses_a_group_that_does_not_verify() {
+        let fs = test_space("blob-partial-unverified").await;
+        crate::bao::conformance::it_refuses_a_group_that_does_not_verify(&fs, &subject()).await;
+    }
+
+    #[dialog_common::test]
     async fn it_reports_missing_blobs() {
         let fs = test_space("blob-missing").await;
         let result = subject()
@@ -456,5 +824,11 @@ mod tests {
             sink.finish().await,
             Err(BlobError::DigestMismatch { .. })
         ));
+    }
+
+    #[dialog_common::test]
+    async fn it_keeps_both_of_two_imports_of_one_blob_at_once() {
+        let fs = test_space("blob-partial-two").await;
+        crate::bao::conformance::it_keeps_both_of_two_imports_at_once(&fs, &subject()).await;
     }
 }

@@ -32,6 +32,16 @@ pub enum BlobError {
         actual: String,
     },
 
+    /// A part of a verified range of a blob does not verify against the
+    /// digest of the blob, so the store keeps nothing of it.
+    #[error("Blob {digest}: {reason}")]
+    Unverified {
+        /// The blob's content hash.
+        digest: String,
+        /// What did not verify.
+        reason: String,
+    },
+
     /// The bytes held under a digest are not the size they were named at.
     #[error("Blob {digest} was named at {expected} bytes, {held} are held")]
     SizeMismatch {

@@ -1159,6 +1159,13 @@ impl From<BlobError> for Failure {
                     "detail": format!("blob {digest} was named at {expected} bytes, {held} are held"),
                 }),
             )),
+            BlobError::Unverified { digest, reason } => Self::Answered(Response::json(
+                400,
+                &serde_json::json!({
+                    "kind": "Unverified",
+                    "detail": format!("blob {digest}: {reason}"),
+                }),
+            )),
             BlobError::Authorization(reason) => Self::Refused(Refusal(reason)),
             BlobError::Rejected(rejection) => Self::Answered(Response::rejected(503, rejection)),
             BlobError::Storage(detail) => Self::storage(detail),

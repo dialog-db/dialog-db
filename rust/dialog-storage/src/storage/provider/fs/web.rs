@@ -979,6 +979,65 @@ pub(super) async fn size(handle: &FileSystemHandle) -> Result<Option<u64>, FileS
     Ok(Some(file.size() as u64))
 }
 
+/// A read of a range, as one `Blob.slice` of the file.
+pub(super) async fn read_at(
+    handle: &FileSystemHandle,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>, FileSystemError> {
+    use futures_util::StreamExt as _;
+    let mut reader = open_reader(handle, offset, Some(len as u64)).await?;
+    let mut bytes = Vec::with_capacity(len);
+    while let Some(chunk) = reader.next().await {
+        bytes.extend(chunk?);
+    }
+    Ok(bytes)
+}
+
+/// A write at an offset, through a writable stream that keeps the data of
+/// the file: the browser stages the file and swaps it in on close, so each
+/// call costs a copy of the file. A sync access handle in a worker would write
+/// in place; this is the path that every browser and thread has.
+pub(super) async fn write_at(
+    handle: &FileSystemHandle,
+    offset: u64,
+    bytes: &[u8],
+) -> Result<(), FileSystemError> {
+    let Some((parent, name)) = handle.navigate_parent(true).await? else {
+        return Err(FileSystemError::Io(
+            "parent directory navigation failed".into(),
+        ));
+    };
+    let file_handle = get_file_handle(&parent, &name, true)
+        .await?
+        .ok_or_else(|| FileSystemError::Io(format!("could not create file '{name}'")))?;
+    let options = web_sys::FileSystemCreateWritableOptions::new();
+    options.set_keep_existing_data(true);
+    let writable: FileSystemWritableFileStream =
+        JsFuture::from(file_handle.create_writable_with_options(&options))
+            .await
+            .map_err(|e| js_io_error("creating writable stream", e))?
+            .dyn_into()
+            .map_err(|_| FileSystemError::Io("expected FileSystemWritableFileStream".into()))?;
+    let seek = writable
+        .seek_with_f64(offset as f64)
+        .map_err(|e| js_io_error("scheduling seek", e))?;
+    JsFuture::from(seek)
+        .await
+        .map_err(|e| js_io_error("seeking", e))?;
+    let chunk = Uint8Array::from(bytes);
+    let write = writable
+        .write_with_buffer_source(&chunk)
+        .map_err(|e| js_io_error("scheduling write", e))?;
+    JsFuture::from(write)
+        .await
+        .map_err(|e| js_io_error("writing at an offset", e))?;
+    JsFuture::from(writable.close())
+        .await
+        .map_err(|e| js_io_error("closing writable stream", e))?;
+    Ok(())
+}
+
 pub(super) async fn exists(handle: &FileSystemHandle) -> bool {
     let Ok(Some((parent, name))) = handle.navigate_parent(false).await else {
         // Either the parent directory is missing, or this is the root handle.

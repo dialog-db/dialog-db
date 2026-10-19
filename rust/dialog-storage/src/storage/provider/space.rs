@@ -131,7 +131,14 @@ pub struct Space<A, M, C, D, B> {
     /// an OPFS-backed `FileSystem` for streaming throughput. The generated
     /// impls are bound-conditional, so a provider without blob support still
     /// composes as long as nothing performs a blob effect on it.
-    #[provide(blob::Read, blob::Size, blob::Write, blob::Import)]
+    #[provide(
+        blob::Read,
+        blob::Size,
+        blob::Write,
+        blob::Import,
+        blob::Held,
+        blob::ImportRange
+    )]
     pub blob: B,
 }
 
