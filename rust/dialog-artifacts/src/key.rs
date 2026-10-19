@@ -171,6 +171,8 @@ fn encoded_len_lower_bound(value: &Value) -> usize {
 /// other two orderings through `FromKey` (each accessor re-splitting the key)
 /// costs ~ten key walks per instruction; this costs three plain
 /// serializations of the same parts.
+///
+/// Public for in-memory stores that key facts the way the tree does.
 pub fn artifact_index_keys(artifact: &crate::Artifact, manifest: &Manifest) -> (Key, Key, Key) {
     let encoded = EncodedValue::new(&artifact.is, manifest);
     artifact_index_keys_with(artifact, encoded.value_type, encoded.payload)
