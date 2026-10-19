@@ -69,12 +69,21 @@ impl Attenuation for Profile {
 pub struct Operator {
     /// The operator's DID (ephemeral session key).
     pub operator: Did,
+    /// The profile's UCAN delegation to the operator, DAG-CBOR encoded,
+    /// when the operator is a session the profile handed its whole
+    /// authority. Revision records carry it to prove the profile they
+    /// attribute (see `dialog_artifacts::history::RevisionRecord`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation: Option<Vec<u8>>,
 }
 
 impl Operator {
     /// Create a new operator.
     pub fn new(operator: Did) -> Self {
-        Self { operator }
+        Self {
+            operator,
+            delegation: None,
+        }
     }
 }
 
@@ -159,6 +168,10 @@ pub trait OperatorExt {
 
     /// The optional account DID from the authority chain.
     fn account(&self) -> &Option<Did>;
+
+    /// The profile's delegation to the operator, if the operator holds
+    /// one that hands it the profile's whole authority.
+    fn delegation(&self) -> Option<&[u8]>;
 }
 
 impl OperatorExt for Capability<Operator> {
@@ -172,5 +185,9 @@ impl OperatorExt for Capability<Operator> {
 
     fn account(&self) -> &Option<Did> {
         &Profile::of(self).account
+    }
+
+    fn delegation(&self) -> Option<&[u8]> {
+        Operator::of(self).delegation.as_deref()
     }
 }

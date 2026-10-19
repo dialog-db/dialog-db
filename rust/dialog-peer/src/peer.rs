@@ -80,6 +80,7 @@ pub use secret::{
 };
 pub use upgrade::{Step, StepBound, StepFuture, Upgraded};
 
+use dialog_ucan_core::subject::Subject as UcanSubject;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
@@ -176,6 +177,24 @@ pub(crate) struct WalkReach {
     pub(crate) resolve: ReachFn<Fork<RemoteSite, memory::Resolve>>,
     /// Remote envelope read for candidate admission.
     pub(crate) blob_read: ReachFn<Fork<RemoteSite, blob::Read>>,
+}
+
+/// The home's delegation of its whole authority (any subject, the root
+/// command) to `operator`, encoded, among `grants`: what makes the
+/// operator a session of the home, and what its revisions carry to prove
+/// whom they act for. `None` for a peer acting as itself, or a session
+/// holding only narrower grants.
+fn session_delegation(home: &Did, operator: &Did, grants: &[Grant]) -> Option<Vec<u8>> {
+    grants
+        .iter()
+        .map(|grant| &grant.certificate.0)
+        .find(|delegation| {
+            delegation.issuer() == home
+                && delegation.audience() == operator
+                && *delegation.subject() == UcanSubject::Any
+                && delegation.command().segments().is_empty()
+        })
+        .map(|delegation| delegation.encoded().to_vec())
 }
 
 /// A grant this peer holds: a delegation to its key, and who issued it.
@@ -511,11 +530,16 @@ impl<S: PeerSpace, M: Mode> Peer<S, M> {
     /// such a fetch resolves from what is already local, which bounds the
     /// recursion a fork-inside-a-proof would otherwise open.
     pub(crate) fn assemble(storage: Storage<S>, inner: Inner) -> Self {
-        let authority = Authority::new(
+        let mut authority = Authority::new(
             "peer",
             inner.home.clone(),
             inner.credential.signer().clone(),
         );
+        if let Some(delegation) =
+            session_delegation(&inner.home, &authority.operator_did(), &inner.grants)
+        {
+            authority = authority.with_delegation(delegation);
+        }
         let peer = Peer {
             authority,
             storage,

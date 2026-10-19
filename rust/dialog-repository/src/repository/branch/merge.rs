@@ -202,7 +202,8 @@ where
         authority.profile(),
         vec![theirs.version(), mine.version()],
         Vec::new(),
-    );
+    )
+    .delegated(authority.delegation().map(<[u8]>::to_vec));
     record.signature = Attest::new(record.payload()?).perform(env).await?;
     let manifest = merged.format_manifest(store.clone(), &delta).await?;
     merged

@@ -661,7 +661,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     authority.profile(),
                     vec![local.version(), upstream_revision.version()],
                     Vec::new(),
-                );
+                )
+                .delegated(authority.delegation().map(<[u8]>::to_vec));
                 record.signature = Attest::new(record.payload()?).perform(env).await?;
                 // The record's key carries its value through the tree's own
                 // inline-vs-spill threshold, so read it off the tree rather
@@ -826,7 +827,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     authority.profile(),
                     vec![local.version(), upstream_revision.version()],
                     Vec::new(),
-                );
+                )
+                .delegated(authority.delegation().map(<[u8]>::to_vec));
                 record.signature = Attest::new(record.payload()?).perform(env).await?;
                 // The record's key carries its value through the tree's own
                 // inline-vs-spill threshold, so read it off the tree rather
@@ -1023,7 +1025,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // record before it enters the tree, and the head once the
                 // merged root is final — same order as `Commit`.
                 let mut record =
-                    RevisionRecord::create(&revision, authority.profile(), parents, Vec::new());
+                    RevisionRecord::create(&revision, authority.profile(), parents, Vec::new())
+                        .delegated(authority.delegation().map(<[u8]>::to_vec));
                 record.signature = Attest::new(record.payload()?).perform(env).await?;
                 // The record's key carries its value through the tree's own
                 // inline-vs-spill threshold, so read it off the tree rather
