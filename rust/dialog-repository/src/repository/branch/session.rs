@@ -1195,18 +1195,23 @@ impl<'a> QueryEnv<'a> {
     }
 
     /// The rules a staged layer holds under `index` at `key`: two range
-    /// reads, as an overlay's are. The layer is per query, so it records
-    /// no demand; a body that does not hydrate is skipped.
+    /// reads, noted as an overlay's are. A body that does not hydrate is
+    /// skipped.
     fn staged_rules(
         &self,
         layer: &Staged,
         index: Index,
         key: &Entity,
+        manifest: &Manifest,
     ) -> Vec<(DeductiveRule, Installed)> {
-        let entities = rule_entities(layer.scan(&index.selector(key)));
+        let conclusions = index.selector(key);
+        self.read_rules(&conclusions, manifest);
+        let entities = rule_entities(layer.scan(&conclusions));
         let mut rules = Vec::with_capacity(entities.len());
         for rule_entity in entities {
-            if let Some(bytes) = source_bytes(layer.scan(&source_selector(&rule_entity)))
+            let sources = source_selector(&rule_entity);
+            self.read_rules(&sources, manifest);
+            if let Some(bytes) = source_bytes(layer.scan(&sources))
                 && let Ok(Some(rule)) = self.pending_body(rule_entity, &bytes)
             {
                 rules.push((rule, Installed::Pending));
@@ -1261,6 +1266,9 @@ impl<'a> QueryEnv<'a> {
             Index::Deriving => cache.derived(key, h),
         });
         if let Some(entities) = discovered {
+            // Served from the head's discovery, the read is still one the
+            // rule set assembled from it depends on.
+            self.read_rules(&index.selector(key), &self.format().await?.manifest);
             return Ok(entities);
         }
         // The moment any resolution scans cold, the whole
@@ -1634,7 +1642,7 @@ impl<'a> QueryEnv<'a> {
         }
         rules.extend(self.overlay_rules(&self.overlay, index, key, manifest)?);
         for layer in &self.layers {
-            rules.extend(self.staged_rules(layer, index, key));
+            rules.extend(self.staged_rules(layer, index, key, manifest));
         }
         Ok(rules)
     }
