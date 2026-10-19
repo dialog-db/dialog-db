@@ -26,11 +26,14 @@ use crate::FormulaQuery;
 use crate::Premise;
 use crate::Proposition;
 use crate::Term;
-use crate::error::InferenceError;
+use crate::error::{InferenceError, SchemeArgument};
+use crate::formula::cell::Cell;
 use crate::formula::number::Numeric;
 use crate::type_system::Primitive;
 use crate::type_system::Type as Kind;
+use crate::type_system::literal_form;
 use crate::type_system::unifier::{Context, Type as Inferred, VarId, lift};
+use crate::types::Any;
 use std::collections::HashMap;
 
 /// One narrowing step recorded during inference: `premise`
@@ -159,10 +162,17 @@ impl TypeEnv {
                     widened.push((var_name.to_string(), premise.to_string()));
                 }
                 let var = ctx.var_for_name(var_name);
-                if let Err(reason) = ctx.unify(&lift(&slot_kind), &Inferred::Variable(var)) {
-                    return Err(InferenceError::Conflict {
+                let inferred = Self::resolve(&ctx, var);
+                if ctx
+                    .unify(&lift(&slot_kind), &Inferred::Variable(var))
+                    .is_err()
+                {
+                    return Err(InferenceError::Variable {
                         variable: var_name.to_string(),
-                        reason: reason.to_string(),
+                        slot: slot_name.to_string(),
+                        premise: premise.to_string(),
+                        inferred: Box::new(inferred),
+                        expected: Box::new(slot_kind),
                     });
                 }
             }
@@ -253,9 +263,21 @@ impl TypeEnv {
     /// conflict.
     fn infer_formula(ctx: &mut Context, formula: &FormulaQuery) -> Result<(), InferenceError> {
         let params = formula.parameters();
+        let cells = formula.cells();
         let mut schemes: HashMap<String, Inferred> = HashMap::new();
 
-        for (slot_name, cell) in formula.cells().iter() {
+        // What each variable argument was before this formula touched
+        // it: once one argument narrows a scheme, resolving the
+        // others reports the scheme, not what they brought to it.
+        let mut before: HashMap<String, Kind> = HashMap::new();
+        for (slot_name, _) in cells.iter() {
+            if let Some(var_name) = params.get(slot_name).and_then(|param| param.name()) {
+                let var = ctx.var_for_name(var_name);
+                before.insert(var_name.to_string(), Self::resolve(ctx, var));
+            }
+        }
+
+        for (slot_name, cell) in cells.iter() {
             let Some(param) = params.get(slot_name) else {
                 continue;
             };
@@ -263,59 +285,157 @@ impl TypeEnv {
             let slot_ty = match cell.scheme_label() {
                 Some(label) => schemes
                     .entry(label.to_string())
-                    .or_insert_with(|| {
-                        let bound = cell
-                            .content_type()
-                            .as_ref()
-                            .map(|kind| kind.primitive_part())
-                            .unwrap_or(Primitive::ALL);
-                        Inferred::Variable(ctx.fresh(bound))
-                    })
+                    .or_insert_with(|| Inferred::Variable(ctx.fresh(Self::bound(cell))))
                     .clone(),
-                None => match cell.content_type() {
-                    Some(kind) => lift(kind),
-                    None => lift(&Kind::from(Primitive::ALL)),
-                },
+                None => lift(&Self::bound_kind(cell)),
             };
 
             let argument = match param.name() {
                 Some(var_name) => Inferred::Variable(ctx.var_for_name(var_name)),
-                None => match (param, cell.scheme_label()) {
-                    // A numeric constant in a *scheme* slot is a
-                    // polymorphic literal: it contributes the set of
-                    // types it instantiates to losslessly, so `1`
-                    // does not pin the scheme while `1.5` pins it to
-                    // Float. (At evaluation the literal adapts to the
-                    // row's instantiation; data never does.)
-                    (Term::Constant(value), Some(_)) => {
-                        match Numeric::try_from(value.clone()) {
-                            Ok(literal) => Inferred::Static(Kind::from(literal.admissible())),
-                            // Not numeric: its singleton kind applies
-                            // (and conflicts with a numeric bound).
-                            Err(_) => match param.kind() {
-                                Some(kind) => lift(&kind),
-                                None => continue,
-                            },
-                        }
-                    }
-                    // A constant in a concrete slot: its kind narrows
-                    // the slot.
-                    _ => match param.kind() {
-                        Some(kind) => lift(&kind),
-                        // A blank contributes nothing.
-                        None => continue,
-                    },
+                None => match Self::literal_kind(param, cell) {
+                    Some(kind) => Inferred::Static(kind),
+                    // A blank contributes nothing.
+                    None => continue,
                 },
             };
+            let current = match &argument {
+                Inferred::Variable(var) => Self::resolve(ctx, *var),
+                Inferred::Static(kind) => kind.clone(),
+            };
 
-            if let Err(reason) = ctx.unify(&slot_ty, &argument) {
-                return Err(InferenceError::Conflict {
-                    variable: param.name().unwrap_or(slot_name).to_string(),
-                    reason: reason.to_string(),
-                });
+            if ctx.unify(&slot_ty, &argument).is_err() {
+                return Err(Self::formula_conflict(
+                    formula, slot_name, cell, param, current, &before,
+                ));
             }
         }
         Ok(())
+    }
+
+    /// The primitive bound a formula cell places on its argument.
+    fn bound(cell: &Cell) -> Primitive {
+        cell.content_type()
+            .as_ref()
+            .map(|kind| kind.primitive_part())
+            .unwrap_or(Primitive::ALL)
+    }
+
+    /// The kind a formula cell takes: its declared kind for a
+    /// concrete cell, its bound for a scheme cell.
+    fn bound_kind(cell: &Cell) -> Kind {
+        match (cell.scheme_label(), cell.content_type()) {
+            (None, Some(kind)) => kind.clone(),
+            _ => Kind::from(Self::bound(cell)),
+        }
+    }
+
+    /// The kind a constant argument contributes to a formula cell;
+    /// `None` for a blank.
+    ///
+    /// A numeric constant in a *scheme* cell is a polymorphic
+    /// literal: it contributes the set of types it instantiates to
+    /// losslessly, so `1` does not pin the scheme while `1.5` pins
+    /// it to Float. (At evaluation the literal adapts to the row's
+    /// instantiation; data never does.) Any other constant
+    /// contributes its singleton kind.
+    fn literal_kind(param: &Term<Any>, cell: &Cell) -> Option<Kind> {
+        if let (Term::Constant(value), Some(_)) = (param, cell.scheme_label())
+            && let Ok(literal) = Numeric::try_from(value.clone())
+        {
+            return Some(Kind::from(literal.admissible()));
+        }
+        param.kind()
+    }
+
+    /// Explain why `param` could not unify with the cell `slot_name`
+    /// of `formula`. `current` is what the argument was just before
+    /// the failed unification.
+    ///
+    /// An argument that the cell's own bound already rules out is
+    /// reported alone. Otherwise the conflict is between arguments
+    /// sharing a scheme, and which of them trips it depends only on
+    /// the (unordered) cell iteration, so the whole scheme is reported: every argument
+    /// that narrows it, with what it brought.
+    fn formula_conflict(
+        formula: &FormulaQuery,
+        slot_name: &str,
+        cell: &Cell,
+        param: &Term<Any>,
+        current: Kind,
+        before: &HashMap<String, Kind>,
+    ) -> InferenceError {
+        let expected = Self::bound_kind(cell);
+        let rejected_by_cell = current.intersect(&expected).is_none();
+        if let (Some(label), false) = (cell.scheme_label(), rejected_by_cell) {
+            let params = formula.parameters();
+            let bound = Self::bound(cell);
+            let mut slots = Vec::new();
+            let mut arguments = Vec::new();
+            // Cells are unordered; list inputs before outputs, each by
+            // name, so the message is stable.
+            let mut members: Vec<(&str, &Cell)> = formula
+                .cells()
+                .iter()
+                .filter(|(_, member)| member.scheme_label() == Some(label))
+                .collect();
+            members.sort_by_key(|(name, member)| (!member.requirement().is_required(), *name));
+            for (name, member) in members {
+                slots.push(name.to_string());
+                let Some(argument) = params.get(name) else {
+                    continue;
+                };
+                let (term, admits) = match argument.name() {
+                    Some(var_name) => match before.get(var_name) {
+                        Some(kind) => (format!("?{var_name}"), kind.clone()),
+                        None => continue,
+                    },
+                    None => match Self::literal_kind(argument, member) {
+                        Some(kind) => (Self::literal(argument), kind),
+                        None => continue,
+                    },
+                };
+                // An argument admitting the whole bound (a fresh
+                // output variable, say) narrows nothing.
+                if bound.intersect(admits.primitive_part()) == Some(bound) {
+                    continue;
+                }
+                arguments.push(SchemeArgument {
+                    slot: name.to_string(),
+                    term,
+                    admits,
+                });
+            }
+            return InferenceError::Scheme {
+                formula: formula.name().to_string(),
+                slots,
+                arguments,
+            };
+        }
+        match param.name() {
+            Some(var_name) => InferenceError::Variable {
+                variable: var_name.to_string(),
+                slot: slot_name.to_string(),
+                premise: formula.name().to_string(),
+                inferred: Box::new(current),
+                expected: Box::new(expected),
+            },
+            None => InferenceError::Literal {
+                slot: slot_name.to_string(),
+                literal: Self::literal(param),
+                premise: formula.name().to_string(),
+                admits: Box::new(current),
+                expected: Box::new(expected),
+            },
+        }
+    }
+
+    /// Display form of a constant argument as an author would write
+    /// it, rather than `Term`'s debug-style rendering.
+    fn literal(param: &Term<Any>) -> String {
+        match param {
+            Term::Constant(value) => literal_form(value),
+            _ => param.to_string(),
+        }
     }
 
     /// Look up the inferred type for a variable by name.
@@ -635,6 +755,90 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    /// A scheme whose arguments have no type in common reports every
+    /// argument narrowing it, not whichever one cell iteration
+    /// happened to reach last: here the natural `?n` and the literal
+    /// `-1`, which has no unsigned form. Fresh `?count` narrows
+    /// nothing and is left out.
+    #[dialog_common::test]
+    fn it_reports_the_whole_scheme_when_arguments_share_no_type() -> anyhow::Result<()> {
+        let mut terms = Parameters::new();
+        terms.insert("of".to_string(), Term::var("n"));
+        terms.insert(
+            "with".to_string(),
+            Term::<Any>::Constant(Value::SignedInt(-1)),
+        );
+        terms.insert("is".to_string(), Term::var("count"));
+        let premises = vec![
+            AttributeQuery::new(
+                Term::from(the!("counter/count")),
+                Term::<Entity>::var("this"),
+                Term::<u32>::var("n").into(),
+                Term::var("cause"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            Premise::Assert(Proposition::Formula(Sum::apply(terms)?.into())),
+        ];
+
+        let error = TypeEnv::infer(&premises).unwrap_err();
+        assert!(
+            matches!(&error, InferenceError::Scheme { formula, .. } if formula == "math/sum"),
+            "expected a scheme conflict, got {error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            "math/sum needs `of`, `with` and `is` to share one type, but no type fits \
+             all of them: `of: ?n` is UnsignedInt, `with: -1` fits SignedInt|Float"
+        );
+        Ok(())
+    }
+
+    /// A variable used in slots of different kinds names the
+    /// variable, the slot that conflicts and both kinds.
+    #[dialog_common::test]
+    fn it_reports_both_kinds_of_a_conflicting_variable() {
+        let premises: Vec<Premise> = vec![
+            AttributeQuery::new(
+                Term::from(the!("thing/label")),
+                Term::<Entity>::var("this"),
+                Term::<String>::var("x").into(),
+                Term::var("cause1"),
+                Some(Cardinality::One),
+            )
+            .into(),
+            AttributeQuery::new(
+                Term::from(the!("thing/count")),
+                Term::<Entity>::var("this"),
+                Term::<u32>::var("x").into(),
+                Term::var("cause2"),
+                Some(Cardinality::One),
+            )
+            .into(),
+        ];
+
+        let error = TypeEnv::infer(&premises).unwrap_err();
+        match &error {
+            InferenceError::Variable {
+                variable,
+                inferred,
+                expected,
+                ..
+            } => {
+                assert_eq!(variable, "x");
+                assert_eq!(inferred.as_value_type(), Some(ValueType::String));
+                assert_eq!(expected.as_value_type(), Some(ValueType::UnsignedInt));
+            }
+            other => panic!("expected a variable conflict, got {other:?}"),
+        }
+        let message = error.to_string();
+        assert!(
+            message.starts_with("`?x` was inferred as String, but `"),
+            "got: {message}"
+        );
+        assert!(message.ends_with("takes UnsignedInt"), "got: {message}");
     }
 
     /// A typed slot kind flows into the variable's inferred type.

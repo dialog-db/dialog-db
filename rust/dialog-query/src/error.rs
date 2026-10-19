@@ -912,15 +912,98 @@ pub enum Infeasible {
 /// ([`TypeEnv::infer`](crate::rule::types::TypeEnv::infer)).
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum InferenceError {
-    /// A variable appears in slots whose declared kinds have no
-    /// common type: unification produced a contradiction.
-    #[error("variable {variable} has conflicting kinds across premises: {reason}")]
-    Conflict {
-        /// Name of the offending variable.
+    /// A variable is used in a slot whose kind shares nothing with
+    /// what earlier slots already inferred for it.
+    #[error("`?{variable}` was inferred as {inferred}, but `{slot}` in {premise} takes {expected}")]
+    Variable {
+        /// Name of the offending variable, without the `?`.
         variable: String,
-        /// Underlying unifier error message.
-        reason: String,
+        /// The slot it is used in.
+        slot: String,
+        /// Display form of the premise (or formula name) owning the
+        /// slot.
+        premise: String,
+        /// What the variable had been inferred as before this slot.
+        inferred: Box<Kind>,
+        /// What the slot takes.
+        expected: Box<Kind>,
     },
+    /// A constant argument has no form the slot takes. Formula
+    /// construction (`Cells::conform`) usually refuses such a
+    /// constant first; this is what inference reports if one gets
+    /// through.
+    #[error("`{slot}: {literal}` in {premise} is {admits}, but `{slot}` takes {expected}")]
+    Literal {
+        /// The slot the constant is given for.
+        slot: String,
+        /// Display form of the constant.
+        literal: String,
+        /// Display form of the premise (or formula name) owning the
+        /// slot.
+        premise: String,
+        /// The types the constant can be read as.
+        admits: Box<Kind>,
+        /// What the slot takes.
+        expected: Box<Kind>,
+    },
+    /// A formula's slots share one type (its scheme), but the
+    /// arguments given for them have no type in common.
+    #[error(
+        "{formula} needs {} to share one type, but no type fits all of them: {}",
+        list_slots(.slots),
+        list_arguments(.arguments)
+    )]
+    Scheme {
+        /// The formula's name, e.g. `math/sum`.
+        formula: String,
+        /// Every slot in the scheme: inputs, then outputs, each by
+        /// name.
+        slots: Vec<String>,
+        /// The arguments that constrain the scheme, each with the
+        /// types it admits on its own.
+        arguments: Vec<SchemeArgument>,
+    },
+}
+
+/// One argument narrowing a formula scheme, as reported by
+/// [`InferenceError::Scheme`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SchemeArgument {
+    /// The slot the argument is given for.
+    pub slot: String,
+    /// Display form of the argument: `?name` or a literal.
+    pub term: String,
+    /// The types the argument admits on its own.
+    pub admits: Kind,
+}
+
+impl fmt::Display for SchemeArgument {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let verb = if self.term.starts_with('?') {
+            "is"
+        } else {
+            "fits"
+        };
+        write!(f, "`{}: {}` {verb} {}", self.slot, self.term, self.admits)
+    }
+}
+
+/// "`a`", "`a` and `b`", "`a`, `b` and `c`".
+fn list_slots(slots: &[String]) -> String {
+    let quoted: Vec<String> = slots.iter().map(|slot| format!("`{slot}`")).collect();
+    match quoted.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        Some((last, _)) => last.clone(),
+        None => String::new(),
+    }
+}
+
+fn list_arguments(arguments: &[SchemeArgument]) -> String {
+    arguments
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Errors raised by rule analysis

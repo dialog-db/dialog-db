@@ -53,7 +53,7 @@ pub fn lift(ty: &StaticType) -> Type {
 pub enum UnifyError {
     /// Two types' primitive constraint sets have empty
     /// intersection: no shape can satisfy both.
-    #[error("constraint conflict between {left:?} and {right:?}")]
+    #[error("constraint conflict between {left} and {right}")]
     ConstraintConflict {
         /// The narrower side.
         left: Primitive,

@@ -866,7 +866,7 @@ impl Display for Refinement {
                     }
                     let relation = if bound.inclusive { inclusive } else { strict };
                     match decode_value(interval.value_type, &bound.encoded) {
-                        Some((value, [])) => write!(f, "{relation} {value:?}")?,
+                        Some((value, [])) => write!(f, "{relation} {}", literal_form(&value))?,
                         _ => write!(f, "{relation} <{} bytes>", bound.encoded.len())?,
                     }
                     *separate = true;
@@ -877,6 +877,22 @@ impl Display for Refinement {
             side(&interval.upper, "<", "<=", &mut separate)?;
         }
         Ok(())
+    }
+}
+
+/// A value as an author would write it in notation (`-1`,
+/// `"text"`, an entity's URI), rather than its debug form
+/// (`SignedInt(-1)`). For error messages and `Display` impls.
+pub(crate) fn literal_form(value: &Value) -> String {
+    match value {
+        Value::String(text) => format!("{text:?}"),
+        Value::UnsignedInt(number) => number.to_string(),
+        Value::SignedInt(number) => number.to_string(),
+        Value::Float(number) => number.to_string(),
+        Value::Boolean(flag) => flag.to_string(),
+        Value::Entity(entity) => entity.to_string(),
+        Value::Symbol(relation) => relation.to_string(),
+        other => format!("{other:?}"),
     }
 }
 
@@ -1192,6 +1208,22 @@ mod tests {
     }
     fn o(vt: ValueType) -> Type {
         Type::from(vt).optional()
+    }
+
+    /// An interval bound displays as written in notation (`> 0`), not
+    /// as the debug form of its value (`> UnsignedInt(0)`): it shows up
+    /// in inference errors next to the kind it refines.
+    #[dialog_common::test]
+    fn it_displays_interval_bounds_as_literals() {
+        let positive = Type::from(ValueType::UnsignedInt)
+            .with_interval(&Value::UnsignedInt(0), false, true)
+            .expect("unsigned admits an interval");
+        assert_eq!(positive.to_string(), "UnsignedInt[> 0]");
+
+        let below = Type::from(ValueType::SignedInt)
+            .with_interval(&Value::SignedInt(-3), true, false)
+            .expect("signed admits an interval");
+        assert_eq!(below.to_string(), "SignedInt[<= -3]");
     }
 
     /// Interval refinements meet by intersection and join by convex hull

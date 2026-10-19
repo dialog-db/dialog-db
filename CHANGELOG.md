@@ -14,6 +14,24 @@ says how to cut a release.
 
 ## Unreleased
 
+### Type inference errors say which argument conflicts, and with what
+
+A rule whose premises give a variable or a formula argument no common type used to fail with a message like `variable with has conflicting kinds across premises: constraint conflict between Primitive { bits: 4 } and Primitive { bits: 24 }`. That message had three problems. It printed type sets as raw bitfields. It reported a constant argument under its slot's name, as if `with` were a variable. And for a formula whose slots share one type (`math/sum`'s `of`, `with` and `is`), it blamed whichever argument cell iteration reached last, and that order is a `HashMap`'s, so it differed from run to run. Inference now reports each kind of conflict on its own terms, with types in their readable form:
+
+```text
+math/sum needs `of`, `with` and `is` to share one type, but no type fits all of them: `of: ?n` is UnsignedInt[> 0], `with: -1` fits SignedInt|Float
+`?x` was inferred as String, but `the` in … takes UnsignedInt
+```
+
+What this changes for you:
+
+- `InferenceError::Conflict { variable, reason }` is gone. In its place: `InferenceError::Variable` (a variable whose inferred kind shares nothing with a slot), `InferenceError::Literal` (a constant with no form its slot takes) and `InferenceError::Scheme` (formula arguments sharing a scheme with no common type, listing each narrowing argument as a `SchemeArgument`). The kinds they carry are `Box<Type>`.
+- `UnifyError::ConstraintConflict` displays its sets as `UnsignedInt` and `SignedInt|Float` instead of `Primitive { bits: … }`.
+- An interval refinement displays its bound as a literal (`UnsignedInt[> 0]`) instead of a debug value (`UnsignedInt[> UnsignedInt(0)]`).
+- `TypeError::TypeInference` and `AnalysisError::Inference` still carry a `reason` string; only its text changes. Which rules compile is unchanged.
+
+Why: in tonk, subtracting with `math/sum` and `with: -1` from a natural-number field failed with the old message, and nothing in it pointed at the `-1` (which has no unsigned form) or at `math/difference`.
+
 ### The storage rewrite carries blob-index keys over as they are
 
 [#605](https://github.com/dialog-db/dialog-db/pull/605), forward-ported from `release/0.3.x`
