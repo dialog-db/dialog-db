@@ -453,6 +453,17 @@ pub mod revision {
         pub Entity,
     );
 
+    /// `dialog.revision/attested` — the DID (as entity) of the principal
+    /// the revision's record proves responsible for it: the profile the
+    /// issuer acted for when the record's delegation binds it, the
+    /// issuer itself otherwise.
+    #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[domain("dialog.revision")]
+    pub struct Attested(
+        /// The attested principal's entity (its DID).
+        pub Entity,
+    );
+
     /// `dialog.revision/edition` — the revision's causal depth
     /// (a Lamport timestamp), derived from its parents.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1014,6 +1025,24 @@ pub struct Revision {
     pub authority: revision::Authority,
     /// The revision's causal depth.
     pub edition: revision::Edition,
+}
+
+/// Who a revision is provably attributed to, projected from its signed
+/// record.
+///
+/// [`Revision::authority`] reports the profile a record *claims* its
+/// issuer acted for; this reports only what the record proves. When the
+/// record carries the profile's delegation of its whole authority to the
+/// issuer, `attested` is that profile; otherwise it is the issuer, whose
+/// signature is the only proof the record holds. A record whose
+/// delegation does not bind the profile it names projects nothing here
+/// or in [`Revision`].
+#[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RevisionAttestation {
+    /// The revision entity.
+    pub this: Entity,
+    /// The principal the revision is provably attributed to.
+    pub attested: revision::Attested,
 }
 
 /// One edge of the revision DAG: `this` revision was minted on top of

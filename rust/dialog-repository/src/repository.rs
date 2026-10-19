@@ -1560,6 +1560,44 @@ mod tests {
         }
 
         #[dialog_common::test]
+        async fn it_attests_the_profile_a_session_acts_for() -> anyhow::Result<()> {
+            // A session holding its profile's whole authority signs its
+            // revisions with that delegation, so the record proves the
+            // profile rather than only the session key.
+            use crate::schema;
+            use crate::schema::DidExt as _;
+
+            let (operator, profile) = test_session_with_peer().await;
+            let repo = test_repo(&operator, &profile).await;
+            let branch = repo.branch("main").open().perform(&operator).await?;
+
+            branch
+                .transaction()
+                .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            let branch = repo.branch("main").load().perform(&operator).await?;
+            let head = branch.revision().expect("a revision");
+
+            let rows: Vec<schema::RevisionAttestation> = branch
+                .query()
+                .select(Query::<schema::RevisionAttestation> {
+                    this: head.entity().into(),
+                    attested: Term::var("attested"),
+                })
+                .perform(&operator)
+                .try_vec()
+                .await?;
+            assert_eq!(rows.len(), 1, "the revision is attested exactly once");
+            assert_ne!(operator.did(), profile.did());
+            assert_eq!(rows[0].attested.0, profile.did().this());
+
+            Ok(())
+        }
+
+        #[dialog_common::test]
         async fn it_projects_the_revision_dag_edge() -> anyhow::Result<()> {
             // schema::RevisionParent derives the DAG edge from the same
             // signed record: one row per parent, none for genesis.

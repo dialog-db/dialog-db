@@ -49,7 +49,10 @@ pub use key::{KeyPart as KeyPartFormula, SeparatorPart as SeparatorPartFormula};
 pub use logic::{And, Not, Or};
 pub use math::{Difference, Modulo, Product, Quotient, Sum};
 pub use position::{Position as PositionFormula, PositionParts as PositionPartsFormula};
-pub use revision::{Revision as RevisionFormula, RevisionParent as RevisionParentFormula};
+pub use revision::{
+    Revision as RevisionFormula, RevisionAttestation as RevisionAttestationFormula,
+    RevisionParent as RevisionParentFormula,
+};
 pub use string::{Concatenate, Length, Like, Lowercase, Uppercase};
 
 use crate::Parameters;
