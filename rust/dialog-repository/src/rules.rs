@@ -60,6 +60,7 @@ use parking_lot::RwLock;
 
 use crate::repository::EphemeralRevision;
 use crate::{Revision, schema};
+use dialog_common::Blake3Hash;
 
 // The `dialog.rule/*` vocabulary and the Statement lowerings that
 // install/uninstall a rule by plain assertion/retraction live with the
@@ -472,10 +473,12 @@ struct RuleCacheInner {
     /// (rule entity, attribute concept entity). Both halves are
     /// content-addressed, so an entry is never stale.
     heads: HashMap<(Entity, Entity), DeductiveRule>,
-    /// Hydrated rule bodies, keyed by content-addressed rule entity.
-    /// Never stale (the key is a content hash), so this survives head
-    /// changes and is shared across concepts.
-    bodies: HashMap<Entity, DeductiveRule>,
+    /// Hydrated rule bodies, keyed by the rule entity and the hash of the
+    /// bytes they were decoded from. A body is looked up only with bytes
+    /// the reader read itself, so the cache decodes and never answers
+    /// whether a rule exists, and forged bytes under a known entity miss
+    /// it and fail their content-address check as they would cold.
+    bodies: HashMap<(Entity, Blake3Hash), DeductiveRule>,
     /// The committed trigger footprint, as of a branch head.
     footprint: Option<(Revision, TriggerFootprint)>,
     /// Committed inductive-rule entities watching an `on:` entity, as
@@ -484,8 +487,8 @@ struct RuleCacheInner {
     /// Committed deductive-rule entities whose bodies read an `on:`
     /// entity, as of a branch head.
     reads: HashMap<Entity, (Revision, Vec<Entity>)>,
-    /// Hydrated inductive bodies, content-addressed — never stale.
-    inductive: HashMap<Entity, InductiveRule>,
+    /// Hydrated inductive bodies, keyed like `bodies`.
+    inductive: HashMap<(Entity, Blake3Hash), InductiveRule>,
     /// Whether a concept carries the committed `dialog.concept/transient`
     /// marker, as of a branch head.
     transient: HashMap<Entity, (Revision, bool)>,
@@ -679,14 +682,22 @@ impl RuleCache {
         self.inner.write().selecting.insert(key, selecting);
     }
 
-    /// A cached hydrated body by rule entity, if present.
-    pub(crate) fn body(&self, rule: &Entity) -> Option<DeductiveRule> {
-        self.inner.read().bodies.get(rule).cloned()
+    /// The body `rule` decoded to from `bytes`, if decoded before.
+    pub(crate) fn body(&self, rule: &Entity, bytes: &[u8]) -> Option<DeductiveRule> {
+        self.inner
+            .read()
+            .bodies
+            .get(&(rule.clone(), Blake3Hash::hash(bytes)))
+            .cloned()
     }
 
-    /// Cache a hydrated body under its content-addressed entity.
-    pub(crate) fn record_body(&self, rule: Entity, body: DeductiveRule) {
-        self.inner.write().bodies.insert(rule, body);
+    /// Cache the body `rule` decoded to from `bytes`, once it was checked
+    /// to be stored under its content address.
+    pub(crate) fn record_body(&self, rule: Entity, bytes: &[u8], body: DeductiveRule) {
+        self.inner
+            .write()
+            .bodies
+            .insert((rule, Blake3Hash::hash(bytes)), body);
     }
 
     /// The committed trigger footprint if scanned at `head`; `None` if
@@ -733,15 +744,23 @@ impl RuleCache {
         self.inner.write().reads.insert(on, (head, entities));
     }
 
-    /// A cached hydrated inductive body by rule entity, if present.
-    pub(crate) fn inductive(&self, rule: &Entity) -> Option<InductiveRule> {
-        self.inner.read().inductive.get(rule).cloned()
+    /// The inductive body `rule` decoded to from `bytes`, if decoded
+    /// before.
+    pub(crate) fn inductive(&self, rule: &Entity, bytes: &[u8]) -> Option<InductiveRule> {
+        self.inner
+            .read()
+            .inductive
+            .get(&(rule.clone(), Blake3Hash::hash(bytes)))
+            .cloned()
     }
 
-    /// Cache a hydrated inductive body under its content-addressed
-    /// entity.
-    pub(crate) fn record_inductive(&self, rule: Entity, body: InductiveRule) {
-        self.inner.write().inductive.insert(rule, body);
+    /// Cache the inductive body `rule` decoded to from `bytes`, once it
+    /// was checked to be stored under its content address.
+    pub(crate) fn record_inductive(&self, rule: Entity, bytes: &[u8], body: InductiveRule) {
+        self.inner
+            .write()
+            .inductive
+            .insert((rule, Blake3Hash::hash(bytes)), body);
     }
 
     /// The cached committed transience verdict for `concept` if

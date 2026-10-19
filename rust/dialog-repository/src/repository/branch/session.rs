@@ -1215,11 +1215,11 @@ impl<'a> QueryEnv<'a> {
         rules
     }
 
-    /// The rule stored under `rule_entity` as `bytes`, from the first
-    /// line's body cache when an earlier read hydrated it: the entity is
-    /// a content address, so a body cached under it is the body. A body
-    /// under an entity it does not hash to is forged, corrupt, or stored
-    /// by an earlier release, and is inert, as at commit.
+    /// The rule stored under `rule_entity` as `bytes`, the bytes this
+    /// read found, from the first line's body cache when the same bytes
+    /// were decoded before. A body under an entity it does not hash to is
+    /// forged, corrupt, or stored by an earlier release (which
+    /// `Branch::upgrade_rules` re-installs), and is inert, as at commit.
     fn pending_body(
         &self,
         rule_entity: Entity,
@@ -1229,7 +1229,10 @@ impl<'a> QueryEnv<'a> {
             .sources
             .first()
             .map(|source| source.as_ref().rule_cache());
-        if let Some(body) = cache.as_ref().and_then(|cache| cache.body(&rule_entity)) {
+        if let Some(body) = cache
+            .as_ref()
+            .and_then(|cache| cache.body(&rule_entity, bytes))
+        {
             return Ok(Some(body));
         }
         let rule = hydrate(bytes)?;
@@ -1237,7 +1240,7 @@ impl<'a> QueryEnv<'a> {
             return Ok(None);
         }
         if let Some(cache) = cache {
-            cache.record_body(rule_entity, rule.clone());
+            cache.record_body(rule_entity, bytes, rule.clone());
         }
         Ok(Some(rule))
     }
@@ -1303,38 +1306,26 @@ impl<'a> QueryEnv<'a> {
         index: Index,
         key: &Entity,
     ) -> Result<Vec<(DeductiveRule, Installed)>, EvaluationError> {
-        let cache = source.as_ref().rule_cache();
         let rule_entities = self.durable_rule_entities(source, index, key).await?;
 
-        // Hydration: reuse cached bodies (content-addressed, never
-        // stale) and fetch + compile the rest from each rule's
-        // `dialog.rule/source` — concurrently, because the fetches are
-        // independent point selects and a head move with N installed
-        // rules must not pay N sequential round trips (blocks already
-        // in flight join through the env's `Hydrate` flight).
-        let cache = &cache;
+        // Each rule's `dialog.rule/source` is read from this line, which
+        // is what says the rule is there; only decoding those bytes is
+        // cached. Concurrently, because the reads are independent point
+        // selects and a head move with N installed rules must not pay N
+        // sequential round trips (blocks already in flight join through
+        // the env's `Hydrate` flight).
         let rules = try_join_all(rule_entities.into_iter().map(
             |(rule_entity, installed)| async move {
-                if let Some(body) = cache.body(&rule_entity) {
-                    return Ok::<_, EvaluationError>(Some((body, installed)));
-                }
                 let source_claims = self
                     .select_tree(source, source_selector(&rule_entity))
                     .await
                     .map_err(|e| EvaluationError::Store(format!("rule source lookup: {e:?}")))?;
                 let Some(bytes) = source_bytes(source_claims) else {
-                    return Ok(None);
+                    return Ok::<_, EvaluationError>(None);
                 };
-                let body = hydrate(&bytes)?;
-                // A body under an entity it does not hash to is forged,
-                // corrupt, or stored by an earlier release
-                // (`Branch::upgrade_rules` re-installs those): inert, as at
-                // commit.
-                if !body.stored_as(&rule_entity) {
-                    return Ok(None);
-                }
-                cache.record_body(rule_entity, body.clone());
-                Ok(Some((body, installed)))
+                Ok(self
+                    .pending_body(rule_entity, &bytes)?
+                    .map(|body| (body, installed)))
             },
         ))
         .await?;
@@ -1587,7 +1578,7 @@ impl<'a> QueryEnv<'a> {
             if !seen.insert(entity.clone()) {
                 continue;
             }
-            let cached = cache.as_ref().and_then(|cache| cache.body(&entity));
+            let cached = cache.as_ref().and_then(|cache| cache.body(&entity, &bytes));
             let rule = match cached {
                 Some(rule) => rule,
                 // Inductive rules share the attribute and do not decode.
@@ -2050,6 +2041,7 @@ mod rule_tests {
     use super::*;
     use crate::Branch;
     use crate::helpers::{Counting, connect, test_repo};
+    use dialog_artifacts::Update as _;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::concept::descriptor::{ConceptConclusion, ConceptDescriptor};
     use dialog_query::concept::query::ConceptQuery;
@@ -2937,6 +2929,78 @@ mod rule_tests {
         assert!(
             branch.rule_cache().reused() > reused,
             "the second query must be served the rule set the first assembled"
+        );
+        Ok(())
+    }
+
+    /// A rule whose source bytes are forged (another rule's, stored under
+    /// its entity) is inert even after the genuine body under that entity
+    /// was decoded: the body cache decodes bytes a read found, and never
+    /// stands in for them.
+    #[dialog_common::test]
+    async fn it_keeps_forged_bytes_inert_after_the_genuine_body_is_cached() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let alice: Entity = "id:alice".parse()?;
+        repo.branch("main")
+            .open()
+            .perform(&operator)
+            .await?
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let mut genuine = Changes::new();
+        employee_from_person().assert(&mut genuine);
+        // The bytes of another rule: they decode, but not to a rule stored
+        // under this entity.
+        let other = Value::Bytes(rule_with_person_attr("org/person-alias").encode());
+        let mut forged = Changes::new();
+        for (of, the, change) in genuine.iter() {
+            let dialog_artifacts::Change::Assert(value, pick) = change else {
+                continue;
+            };
+            let value = if *the == source_attr() {
+                other.clone()
+            } else {
+                value.clone()
+            };
+            forged.associate(the.clone(), of.clone(), value, pick.clone());
+        }
+
+        let employees = |overlay: Changes| {
+            let branch = &branch;
+            let operator = &operator;
+            async move {
+                let mut terms = Parameters::new();
+                terms.insert("this".into(), Term::var("this"));
+                terms.insert("name".into(), Term::var("name"));
+                let rows: Vec<ConceptConclusion> = branch
+                    .query()
+                    .with(overlay)
+                    .select(ConceptQuery {
+                        predicate: employee_descriptor(),
+                        terms,
+                    })
+                    .perform(operator)
+                    .try_vec()
+                    .await?;
+                anyhow::Ok(rows.iter().map(|c| c.entity().clone()).collect::<Vec<_>>())
+            }
+        };
+
+        assert_eq!(employees(genuine).await?, vec![alice]);
+        assert!(
+            employees(forged).await?.is_empty(),
+            "forged bytes under a cached entity must stay inert"
         );
         Ok(())
     }
