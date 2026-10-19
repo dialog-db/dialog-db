@@ -470,16 +470,31 @@ pub(super) async fn open_writer(handle: &FileSystemHandle) -> Result<FileWriter,
     let file = fs::File::create(&tmp)
         .await
         .map_err(|e| FileSystemError::Io(e.to_string()))?;
-    Ok(FileWriter { file, tmp, target })
+    Ok(FileWriter {
+        file,
+        tmp,
+        target,
+        settled: false,
+    })
 }
 
 /// A streaming, atomically-committed file writer. Bytes go to a temp file;
 /// [`finish`](Self::finish) flushes and renames it into place. Dropping without
-/// `finish` leaves the temp file (cleaned up best-effort).
+/// `finish` removes the temp file, so a write that does not end keeps nothing.
 pub struct FileWriter {
     file: fs::File,
     tmp: PathBuf,
     target: PathBuf,
+    /// Whether the temp file is gone: moved into place, or removed.
+    settled: bool,
+}
+
+impl Drop for FileWriter {
+    fn drop(&mut self) {
+        if !self.settled {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+    }
 }
 
 impl FileWriter {
@@ -520,17 +535,22 @@ impl FileWriter {
             .await
             .map_err(|e| FileSystemError::Io(e.to_string()))?;
         match fs::rename(&self.tmp, dest).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.settled = true;
+                Ok(())
+            }
             Err(e) => {
                 let _ = fs::remove_file(&self.tmp).await;
+                self.settled = true;
                 Err(FileSystemError::Io(e.to_string()))
             }
         }
     }
 
     /// Discard the staged content without committing it.
-    pub async fn discard(self) -> Result<(), FileSystemError> {
+    pub async fn discard(mut self) -> Result<(), FileSystemError> {
         let _ = fs::remove_file(&self.tmp).await;
+        self.settled = true;
         Ok(())
     }
 }

@@ -8,12 +8,14 @@
 //! [`BlobError::DigestMismatch`] and nothing is stored); [`Read`] serves the
 //! whole blob or a byte range. "Streaming" degrades to buffering — the store
 //! is a `HashMap`, so a sink accumulates bytes and commits on finish, and a
-//! reader yields the (ranged) copy as a single chunk.
+//! reader yields the (ranged) copy as a single chunk. A sink builds the
+//! outboard of the blob as it takes the bytes, as the filesystem sink does,
+//! and keeps it beside a blob of more than one group (see [`crate::bao`]).
 
 use super::{Session, Volatile};
+use crate::bao::OutboardBuilder;
 use async_trait::async_trait;
 use base58::ToBase58;
-use blake3::Hasher;
 use dialog_capability::{Capability, Did, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _, BlobSizeExt as _};
@@ -47,7 +49,9 @@ struct MemoryBlobSink {
     sessions: Arc<RwLock<HashMap<Did, Session>>>,
     subject: Did,
     buffer: Vec<u8>,
-    hasher: Hasher,
+    /// The hash and the outboard of the bytes so far.
+    builder: OutboardBuilder,
+    outboard: Vec<u8>,
     /// `Some` for an import (the declared digest, verified at finish); `None`
     /// for an ingest (the hash is discovered).
     expected: Option<Blake3Hash>,
@@ -57,7 +61,8 @@ struct MemoryBlobSink {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl BlobSink for MemoryBlobSink {
     async fn write_all(&mut self, bytes: &[u8]) -> Result<(), BlobError> {
-        self.hasher.update(bytes);
+        let pairs = self.builder.update(bytes);
+        self.outboard.extend(pairs);
         self.buffer.extend_from_slice(bytes);
         Ok(())
     }
@@ -67,11 +72,13 @@ impl BlobSink for MemoryBlobSink {
             sessions,
             subject,
             buffer,
-            hasher,
+            builder,
+            mut outboard,
             expected,
         } = *self;
 
-        let hash = Blake3Hash::from(*hasher.finalize().as_bytes());
+        let (hash, pairs) = builder.finish();
+        outboard.extend(pairs);
 
         if let Some(expected) = expected
             && hash != expected
@@ -84,13 +91,12 @@ impl BlobSink for MemoryBlobSink {
 
         // Content addressing is idempotent: an existing blob has identical
         // bytes, so keep the first copy.
-        sessions
-            .write()
-            .entry(subject)
-            .or_default()
-            .blobs
-            .entry(blob_key(&hash))
-            .or_insert(buffer);
+        let mut sessions = sessions.write();
+        let session = sessions.entry(subject).or_default();
+        if !outboard.is_empty() {
+            session.outboards.entry(blob_key(&hash)).or_insert(outboard);
+        }
+        session.blobs.entry(blob_key(&hash)).or_insert(buffer);
 
         Ok(hash)
     }
@@ -102,7 +108,8 @@ impl Volatile {
             sessions: self.sessions.clone(),
             subject,
             buffer: Vec::new(),
-            hasher: Hasher::new(),
+            builder: OutboardBuilder::new(),
+            outboard: Vec::new(),
             expected,
         }
     }
@@ -328,6 +335,38 @@ mod tests {
             .perform(&provider)
             .await;
         assert!(matches!(missing, Err(BlobError::NotFound(_))));
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_keeps_an_outboard_for_a_blob_of_more_than_one_group() -> anyhow::Result<()> {
+        let provider = Volatile::new();
+        let subject = unique_subject("blob-outboard");
+        let write = async |payload: &[u8]| -> anyhow::Result<Blake3Hash> {
+            let mut sink = subject
+                .clone()
+                .writer()
+                .archive()
+                .blob()
+                .write()
+                .perform(&provider)
+                .await?;
+            sink.write_all(payload).await?;
+            Ok(sink.finish().await?)
+        };
+        let long: Vec<u8> = (0..16 * 1024 + 1).map(|i| (i % 251) as u8).collect();
+        let short = vec![1u8; 16 * 1024];
+
+        let (long_hash, short_hash) = (write(&long).await?, write(&short).await?);
+
+        let sessions = provider.sessions.read();
+        let outboards = &sessions[subject.did()].outboards;
+        assert_eq!(
+            outboards.get(&blob_key(&long_hash)),
+            Some(&crate::bao::outboard(&long).1)
+        );
+        assert_eq!(outboards.get(&blob_key(&long_hash)).map(Vec::len), Some(64));
+        assert_eq!(outboards.get(&blob_key(&short_hash)), None);
         Ok(())
     }
 }
