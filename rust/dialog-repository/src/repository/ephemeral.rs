@@ -776,6 +776,62 @@ mod tests {
         assert_eq!(line.revision().sequence, 3);
     }
 
+    /// A read naming an attribute is answered from the count of facts
+    /// held per attribute when the store holds none of it, so the count
+    /// must follow every write: a replace under a choosing pick (the
+    /// session write), a retract of the attribute's last fact and its
+    /// re-assert, a tombstone over a fact held only beneath, and the
+    /// lift of everything by `clear`.
+    #[dialog_common::test]
+    fn it_reads_an_attribute_through_every_write_to_it() {
+        let names = |line: &Ephemeral| -> Vec<Value> {
+            line.scan(&ArtifactSelector::new().the("person/name".parse().unwrap()))
+                .into_iter()
+                .map(|fact| fact.is)
+                .collect()
+        };
+        let roles = |line: &Ephemeral| {
+            line.scan(&ArtifactSelector::new().the("person/role".parse().unwrap()))
+        };
+        let line = Ephemeral::new();
+        line.assert(claim("id:a", "person/name", "A")).unwrap();
+        assert_eq!(names(&line), vec![Value::String("A".into())]);
+
+        let mut replace = Changes::new();
+        replace.associate(
+            "person/name".parse().unwrap(),
+            "id:a".parse().unwrap(),
+            Value::String("B".into()),
+            dialog_artifacts::Pick::Last,
+        );
+        line.apply(replace).unwrap();
+        assert_eq!(
+            names(&line),
+            vec![Value::String("B".into())],
+            "a replace removes the value it succeeds and holds its own"
+        );
+
+        line.retract(claim("id:a", "person/name", "B")).unwrap();
+        assert!(names(&line).is_empty(), "the attribute's last fact is gone");
+        line.assert(claim("id:a", "person/name", "C")).unwrap();
+        assert_eq!(
+            names(&line),
+            vec![Value::String("C".into())],
+            "a re-assert after the last retract is read"
+        );
+
+        line.retract(claim("id:b", "person/role", "Engineer"))
+            .unwrap();
+        assert!(roles(&line).is_empty(), "a tombstone holds no fact");
+        assert_eq!(names(&line), vec![Value::String("C".into())]);
+
+        line.clear();
+        assert!(names(&line).is_empty() && roles(&line).is_empty());
+        line.assert(claim("id:b", "person/role", "Engineer"))
+            .unwrap();
+        assert_eq!(roles(&line).len(), 1, "an assert after the lift is read");
+    }
+
     #[dialog_common::test]
     fn it_exports_held_facts_and_tombstones_for_another_line() {
         let source = Ephemeral::new();
