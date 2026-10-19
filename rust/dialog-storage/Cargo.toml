@@ -38,6 +38,7 @@ signature = { workspace = true }
 anyhow = { workspace = true, optional = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+bao-tree = { workspace = true }
 base58 = { workspace = true }
 blake3 = { workspace = true }
 futures-util = { workspace = true }

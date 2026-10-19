@@ -7,6 +7,7 @@
 
 extern crate self as dialog_storage;
 
+pub mod bao;
 pub mod capability;
 pub mod emulator;
 pub use emulator::*;
