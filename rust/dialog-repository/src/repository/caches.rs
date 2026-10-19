@@ -47,7 +47,7 @@ use dialog_query::formula::FormulaCache;
 use dialog_search_tree::{Cache, NODE_CACHE_BUDGET, NodeCache, Scope};
 use dialog_varsig::Did;
 
-use super::branch::{Writer, Writers};
+use super::branch::{LayerMetadataMemo, Writer, Writers};
 use super::source::Caches;
 use crate::BranchReference;
 use crate::rules::{RuleCache, SharedRuleCache};
@@ -72,8 +72,9 @@ struct Repository {
     /// tree they rewrite. The rewrite's blocks land in this repository's
     /// archive, so an entry answers only for it.
     rewrites: Cache<Blake3Hash, Blake3Hash>,
-    /// By branch name: its rule cache and its live spine.
-    branches: Mutex<HashMap<String, (SharedRuleCache, SpineSlot)>>,
+    /// By branch name: its rule cache, its live spine, and the metadata
+    /// its queries fold in.
+    branches: Mutex<HashMap<String, (SharedRuleCache, SpineSlot, LayerMetadataMemo)>>,
 }
 
 impl Repository {
@@ -243,12 +244,18 @@ impl HeldCaches {
             .entry(branch.of().to_string())
             .or_insert_with(|| Arc::new(Repository::new()))
             .clone();
-        let (rules, spine) = repository
+        let (rules, spine, metadata) = repository
             .branches
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .entry(branch.name().to_string())
-            .or_insert_with(|| (Arc::new(RuleCache::new()), SpineSlot::new()))
+            .or_insert_with(|| {
+                (
+                    Arc::new(RuleCache::new()),
+                    SpineSlot::new(),
+                    LayerMetadataMemo::default(),
+                )
+            })
             .clone();
         Caches {
             nodes: self.nodes.scoped(scope(branch.of())),
@@ -260,6 +267,7 @@ impl HeldCaches {
             records: repository.records.clone(),
             rewrites: repository.rewrites.clone(),
             spine,
+            metadata,
         }
     }
 }

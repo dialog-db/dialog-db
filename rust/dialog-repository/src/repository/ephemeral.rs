@@ -37,16 +37,18 @@
 //! [`selector_range`]: dialog_artifacts::tree::selector_range
 //! [`Branch::overlay`]: crate::Branch::overlay
 
+use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, AttributeKey, Cause, Changes, DialogArtifactsError, Entity,
-    EntityKey, Instruction, Key, KeyViewConstruct, Pick, SortKey, Standing, Statement, Update,
-    ValueKey, sort_key,
+    Artifact, ArtifactSelector, Cause, Changes, DialogArtifactsError, Entity, EntityKey,
+    Instruction, Key, KeyViewConstruct, Pick, Relation, SortKey, Standing, Statement, Update,
+    artifact_index_keys, sort_key,
 };
 use dialog_common::Blake3Hash;
 use dialog_search_tree::Manifest;
@@ -123,11 +125,8 @@ impl Default for State {
 
 /// The three index keys of a fact under `manifest`.
 fn index_keys(fact: &Artifact, manifest: &Manifest) -> [Key; 3] {
-    [
-        EntityKey::from_artifact(fact, manifest).into_key(),
-        AttributeKey::from_artifact(fact, manifest).into_key(),
-        ValueKey::from_artifact(fact, manifest).into_key(),
-    ]
+    let (entity, attribute, value) = artifact_index_keys(fact, manifest);
+    [entity, attribute, value]
 }
 
 /// Facts held under the tree's three index keys, in one ordered map.
@@ -137,6 +136,11 @@ fn index_keys(fact: &Artifact, manifest: &Manifest) -> [Key; 3] {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Facts {
     map: BTreeMap<Key, Artifact>,
+    /// How many held facts each attribute has. A read names an
+    /// attribute far more often than not, and most stores (a query's
+    /// metadata, a session overlay) hold none of the ones it names, so
+    /// the read is answered from here without building its range.
+    attributes: HashMap<Relation, usize>,
     /// The key format facts are keyed under. Fixed to the default
     /// manifest, the same one every tree carries today and the one
     /// [`Demand`](crate::Demand) ranges are built under.
@@ -161,6 +165,7 @@ impl Facts {
         if self.map.contains_key(&entity) {
             return false;
         }
+        *self.attributes.entry(fact.the.clone()).or_default() += 1;
         self.map.insert(entity, fact.clone());
         self.map.insert(attribute, fact.clone());
         self.map.insert(value, fact);
@@ -175,18 +180,39 @@ impl Facts {
         for key in index_keys(fact, &self.manifest) {
             self.map.remove(&key);
         }
+        if let Entry::Occupied(mut held) = self.attributes.entry(fact.the.clone()) {
+            *held.get_mut() -= 1;
+            if *held.get() == 0 {
+                held.remove();
+            }
+        }
         true
     }
 
     /// Every held fact at an `(entity, attribute)` cell.
-    pub(crate) fn cell(&self, of: &Entity, the: &dialog_artifacts::Relation) -> Vec<Artifact> {
+    pub(crate) fn cell(&self, of: &Entity, the: &Relation) -> Vec<Artifact> {
         self.scan(&ArtifactSelector::new().of(of.clone()).the(the.clone()))
     }
 
     /// The facts a selector matches, in the store's own key order.
     pub(crate) fn scan(&self, selector: &ArtifactSelector<Constrained>) -> Vec<Artifact> {
+        self.scan_within(&Window::new(selector))
+    }
+
+    /// The facts a window's selector matches, in the store's own key
+    /// order. A store with no fact of the selector's attribute answers
+    /// without building the range.
+    fn scan_within(&self, window: &Window<'_>) -> Vec<Artifact> {
+        if self.map.is_empty() {
+            return Vec::new();
+        }
+        if let Some(the) = window.selector.attribute()
+            && !self.attributes.contains_key(the)
+        {
+            return Vec::new();
+        }
         self.map
-            .range(selector_range(selector, &self.manifest))
+            .range(window.range(&self.manifest))
             .map(|(_, fact)| fact.clone())
             .collect()
     }
@@ -201,9 +227,15 @@ impl Facts {
         selector: &ArtifactSelector<Constrained>,
         manifest: &Manifest,
     ) -> Vec<Artifact> {
-        let mut rows = self.scan(selector);
-        if *manifest != self.manifest {
-            let range = selector_range(selector, manifest);
+        self.select_within(&Window::new(selector), manifest)
+    }
+
+    /// [`select`](Self::select) over a window shared with the other
+    /// stores one read meets, so the range is built once per read.
+    pub(crate) fn select_within(&self, window: &Window<'_>, manifest: &Manifest) -> Vec<Artifact> {
+        let mut rows = self.scan_within(window);
+        if !rows.is_empty() && *manifest != self.manifest {
+            let range = selector_range(window.selector, manifest);
             rows.sort_by_cached_key(|fact| {
                 index_keys(fact, manifest)
                     .into_iter()
@@ -230,6 +262,40 @@ impl Facts {
     pub(crate) fn len(&self) -> usize {
         // Every fact sits under exactly three keys.
         self.map.len() / 3
+    }
+}
+
+/// A selector with the key range it covers in an in-memory store, built
+/// on first use. One read meets several stores (each line's session
+/// overlay, the query's own, the staged writes) that all key facts under
+/// the same format, and most of them are empty or miss; sharing one
+/// window builds the range at most once per read instead of once per
+/// store.
+pub(crate) struct Window<'s> {
+    selector: &'s ArtifactSelector<Constrained>,
+    range: OnceCell<(Manifest, RangeInclusive<Key>)>,
+}
+
+impl<'s> Window<'s> {
+    pub(crate) fn new(selector: &'s ArtifactSelector<Constrained>) -> Self {
+        Self {
+            selector,
+            range: OnceCell::new(),
+        }
+    }
+
+    /// The selector's range under `manifest`. Every store keys under the
+    /// default format today, so the first range built serves the rest;
+    /// a store under another format gets its own.
+    fn range(&self, manifest: &Manifest) -> RangeInclusive<Key> {
+        let (keyed, range) = self
+            .range
+            .get_or_init(|| (manifest.clone(), selector_range(self.selector, manifest)));
+        if keyed == manifest {
+            range.clone()
+        } else {
+            selector_range(self.selector, manifest)
+        }
     }
 }
 
@@ -377,6 +443,35 @@ impl Ephemeral {
             state.mint(delta);
         }
         line
+    }
+
+    /// A new line holding this one's facts and tombstones with the
+    /// facts of `changes` applied over them as one instant, its asset
+    /// changes dropped. This line is left as it was. Copying the held
+    /// facts costs less than re-keying them, so a line that adds a few
+    /// facts to a larger one that is shared starts from a copy of it.
+    /// The new line's revision chains from this one's, so lines built
+    /// from the same line and equal batches carry equal revisions.
+    pub(crate) fn extending(&self, mut changes: Changes) -> Self {
+        changes.take_assets();
+        let base = self.state.read();
+        let mut state = State {
+            facts: base.facts.clone(),
+            tombstones: base.tombstones.clone(),
+            shadowed: base.shadowed.clone(),
+            sequence: base.sequence,
+            hash: base.hash.clone(),
+            log: VecDeque::new(),
+        };
+        drop(base);
+        let mut delta = Delta::default();
+        for instruction in changes.into_instructions() {
+            state.apply(instruction, &mut delta);
+        }
+        state.mint(delta);
+        Self {
+            state: Arc::new(RwLock::new(state)),
+        }
     }
 
     /// Assert a statement: its asserts and replaces land in the store
@@ -575,6 +670,12 @@ impl Ephemeral {
         manifest: &Manifest,
     ) -> Vec<Artifact> {
         self.state.read().facts.select(selector, manifest)
+    }
+
+    /// [`select`](Self::select) over a window shared with the other
+    /// stores one read meets.
+    pub(crate) fn select_within(&self, window: &Window<'_>, manifest: &Manifest) -> Vec<Artifact> {
+        self.state.read().facts.select_within(window, manifest)
     }
 }
 

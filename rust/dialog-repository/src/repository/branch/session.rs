@@ -38,6 +38,7 @@ use crate::REGISTRY;
 use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped};
 use crate::repository::archive::networked::Reads;
 use crate::repository::branch::select::line_manifest;
+use crate::repository::ephemeral::Window;
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
 use crate::repository::{CellSettlement, ReadObservation};
@@ -164,7 +165,9 @@ impl<'a> QueryLayer<'a> {
     /// `operator` (from [`Identify`]) supplies the profile + operator
     /// DIDs the schema entities are derived from.
     pub fn metadata(&self, operator: &Capability<Operator>) -> Changes {
-        self.derive_metadata(operator)
+        let (mut changes, heads) = self.derive_metadata(operator);
+        changes.merge(heads);
+        changes
     }
 
     /// [`metadata`](Self::metadata) held as a line, shared with every
@@ -175,18 +178,41 @@ impl<'a> QueryLayer<'a> {
         // branch keeps it: deriving it hashes and base58-renders entities
         // and re-parses both DIDs each time.
         if let [SourceRef::Branch(branch)] = self.sources.as_slice() {
-            return branch.layer_metadata(operator, || self.derive_metadata(operator));
+            return branch.layer_metadata(
+                operator,
+                || self.derive_metadata(operator),
+                || self.derive_heads(operator),
+            );
         }
-        Ephemeral::holding(self.derive_metadata(operator))
+        let (mut changes, heads) = self.derive_metadata(operator);
+        changes.merge(heads);
+        Ephemeral::holding(changes)
     }
 
-    /// Derive what [`metadata`](Self::metadata) folds in.
-    fn derive_metadata(&self, operator: &Capability<Operator>) -> Changes {
+    /// The revision facts of [`derive_metadata`](Self::derive_metadata)
+    /// alone: what a new head adds to the facts that stay put.
+    fn derive_heads(&self, operator: &Capability<Operator>) -> Changes {
+        let mut heads = Changes::new();
+        for source in &self.sources {
+            if let SourceRef::Branch(branch) = source
+                && let Some(revision) = branch.metadata(operator).revision
+            {
+                revision.assert(&mut heads);
+            }
+        }
+        heads
+    }
+
+    /// Derive what [`metadata`](Self::metadata) folds in, as the facts
+    /// that stay put while the lines' heads move and the revision facts
+    /// that move with them.
+    fn derive_metadata(&self, operator: &Capability<Operator>) -> (Changes, Changes) {
         let mut changes = Changes::new();
+        let mut heads = Changes::new();
 
         let mut branch_entities = Vec::with_capacity(self.sources.len());
         for source in &self.sources {
-            if let Some(entity) = source.metadata(operator, &mut changes) {
+            if let Some(entity) = source.metadata(operator, &mut changes, &mut heads) {
                 branch_entities.push(entity);
             }
         }
@@ -224,7 +250,7 @@ impl<'a> QueryLayer<'a> {
             .assert(&mut changes);
         }
 
-        changes
+        (changes, heads)
     }
 
     /// The full per-query overlay: this layer's own
@@ -846,9 +872,15 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // every committed row of every line it is read beside. Found
         // only for a read that meets an overlay row, since it reads
         // every line's revision.
+        // One window for every in-memory store this read meets, so the
+        // key range is built once, and not at all when they are empty.
+        let window = Window::new(&input);
         let mut session = None;
         for (source, line) in self.sources.iter().zip(&format.lines) {
-            let rows = source.as_ref().overlay().select(&input, &line.manifest);
+            let rows = source
+                .as_ref()
+                .overlay()
+                .select_within(&window, &line.manifest);
             if rows.is_empty() {
                 continue;
             }
@@ -880,7 +912,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // every one of those probes. Push the overlay's materialized
         // result only when it has rows, so the single-source common case
         // flows through `merge_grouped`'s passthrough arm.
-        let overlay = self.overlay.select(&input, &manifest);
+        let overlay = self.overlay.select_within(&window, &manifest);
         if !overlay.is_empty() {
             changes.push(Box::pin(stream::iter(
                 overlay.into_iter().map(|fact| Ok(fact.into())),
@@ -894,7 +926,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // the transaction: a read over the transaction elects as a read
         // after the commit will.
         for (index, layer) in self.layers().iter().enumerate() {
-            let rows = layer.select(&input, &manifest);
+            let rows = layer.select_within(&window, &manifest);
             if rows.is_empty() {
                 continue;
             }

@@ -26,6 +26,7 @@ What this changes for you:
 - `Changes::select` and `impl Provider<Select> for Changes` are removed from `dialog-artifacts`. To read facts held in memory beside a tree, hold them in an `Ephemeral` (`Ephemeral::apply` takes the batch) and read it with `Ephemeral::select`.
 - A query or subscription whose `.with(..)` carries a rule no longer rebuilds the rule set and re-decodes each rule body on every evaluation. Results are unchanged.
 - Asset changes in a `.with(..)` batch are dropped from the query's overlay, as they were before: a query reads facts only.
+- `EntityKey::from_artifact`, `AttributeKey::from_artifact` and `ValueKey::from_artifact` build the key from its parts in one pass instead of parsing and re-encoding it once per field. The bytes are unchanged. `dialog_artifacts::artifact_index_keys`, which builds all three at once, is now public.
 
 Why: a query fell off the cache whenever its overlay held a rule. A performance report on Sapling, which hands rules to each query in its overlay, measured rule decoding and assembly at about 60% of instructions on that path. Reading the per-query batch as a separate kind of store is what let that path skip the cache, so the batch now goes through the store and the cache key every other overlay goes through.
 

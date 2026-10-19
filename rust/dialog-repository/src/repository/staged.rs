@@ -37,7 +37,7 @@ use dialog_artifacts::{
 };
 use dialog_search_tree::Manifest;
 
-use super::ephemeral::{EphemeralRevision, Facts};
+use super::ephemeral::{EphemeralRevision, Facts, Window};
 use crate::Revision;
 use crate::repository::branch::ReadSettlement;
 use crate::rules::conclusion_attr;
@@ -317,15 +317,12 @@ impl Staged {
         self.0.facts.scan(selector)
     }
 
-    /// The held facts a selector matches, in the order a scan of a tree
-    /// written under `manifest` would produce them: what a query merges
-    /// with that tree's rows.
-    pub(crate) fn select(
-        &self,
-        selector: &ArtifactSelector<Constrained>,
-        manifest: &Manifest,
-    ) -> Vec<Artifact> {
-        self.0.facts.select(selector, manifest)
+    /// The held facts a window's selector matches, in the order a scan
+    /// of a tree written under `manifest` would produce them: what a
+    /// query merges with that tree's rows. The window is shared with the
+    /// other stores one read meets.
+    pub(crate) fn select_within(&self, window: &Window<'_>, manifest: &Manifest) -> Vec<Artifact> {
+        self.0.facts.select_within(window, manifest)
     }
 
     /// Sort keys of every fact this store hides beneath it, keyed under
