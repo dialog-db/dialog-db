@@ -3240,6 +3240,92 @@ mod rule_tests {
         Ok(())
     }
 
+    /// A subscription to a concept whose field is read under a ranked
+    /// type, derived by rules, resolves it under two spellings: its own
+    /// fields and its relation's attribute concept (field `is`). The two
+    /// share an identity; each keeps its own rule set, so a re-poll after
+    /// a commit of plain facts is served both instead of assembling them
+    /// again.
+    #[dialog_common::test]
+    async fn it_keeps_a_rule_set_per_spelling_of_a_concept() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let cases = ["case:active", "case:invited"];
+        let rule = |case: &str, flag: &str| -> anyhow::Result<DeductiveRule> {
+            let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+                "deduce": { "with": { "status": { "the": "account/status", "as": cases } } },
+                "when": [
+                    {
+                        "assert": { "with": { "flag": { "the": flag, "as": "text:" } } },
+                        "where": { "this": { "?": { "name": "this" } }, "flag": { "?": { "name": "flag" } } }
+                    },
+                    { "assert": "==", "where": { "this": { "?": { "name": "status" } }, "is": case } }
+                ]
+            }))?;
+            Ok(descriptor.compile()?)
+        };
+        let account: Entity = "id:account".parse()?;
+        repo.branch("main")
+            .open()
+            .perform(&operator)
+            .await?
+            .transaction()
+            .assert(rule("case:active", "account/active")?)
+            .assert(rule("case:invited", "account/invited")?)
+            .assert(
+                the!("account/invited")
+                    .of(account.clone())
+                    .is("yes".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let status: ConceptDescriptor = serde_json::from_value(serde_json::json!({
+            "with": { "status": { "the": "account/status", "as": cases } }
+        }))?;
+        let query = || {
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("this"));
+            terms.insert("status".into(), Term::var("status"));
+            ConceptQuery {
+                predicate: status.clone(),
+                terms,
+            }
+        };
+
+        let mut subscription = branch.subscribe(query());
+        let first = subscription.poll(&operator).await?;
+        assert!(first.is_some_and(|delta| delta.asserted.len() == 1));
+        assert_eq!(
+            branch.rule_cache().spellings(&status.this()),
+            2,
+            "the concept's own spelling and its attribute concept's each keep a set"
+        );
+        let mut promote = dialog_artifacts::Changes::new();
+        promote.associate(
+            "account/active".parse()?,
+            account.clone(),
+            Value::String("yes".into()),
+            dialog_artifacts::Pick::Last,
+        );
+        branch
+            .transaction()
+            .assert(promote)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let reused = branch.rule_cache().reused();
+        subscription.poll(&operator).await?;
+        assert!(
+            branch.rule_cache().reused() >= reused + 2,
+            "the re-poll is served both spellings' sets"
+        );
+        Ok(())
+    }
+
     /// A transaction whose writes install no rule reads through the rule
     /// set a query of its branch assembled.
     #[dialog_common::test]

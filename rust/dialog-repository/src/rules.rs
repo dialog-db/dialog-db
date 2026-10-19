@@ -520,8 +520,11 @@ struct RuleCacheInner {
     ///
     /// Kept with the descriptor it was assembled for: the set carries
     /// that descriptor's implicit rule, which binds its field names, and
-    /// descriptors differing only in field names share an identity.
-    bundles: HashMap<Entity, Bundle>,
+    /// descriptors differing only in field names share an identity. One
+    /// set per spelling, at most [`SPELLINGS`] per concept, so queries
+    /// spelling one concept differently (a view's fields and a rule
+    /// premise's) do not evict each other's.
+    bundles: HashMap<Entity, Vec<Bundle>>,
     /// Every rule the program analysis sets aside over layers holding
     /// these rule facts, with the rule-discovery reads finding them.
     quarantined: Option<(RuleKey, Vec<Quarantine>, RuleDemand)>,
@@ -537,6 +540,9 @@ struct RuleCacheInner {
     /// rule binds.
     selecting: HashMap<SelectingKey, Selecting>,
 }
+
+/// How many spellings of one concept keep an assembled rule set each.
+const SPELLINGS: usize = 4;
 
 /// A rule set assembled for one descriptor, as of the rule facts of the
 /// layers it was resolved from.
@@ -706,14 +712,20 @@ impl RuleCache {
         key: &RuleKey,
     ) -> Option<(ConceptRules, RuleDemand)> {
         let inner = self.inner.read();
-        match inner.bundles.get(&descriptor.this()) {
-            Some(bundle) if bundle.key == *key && bundle.descriptor == *descriptor => {
-                #[cfg(test)]
-                self.reused.fetch_add(1, Ordering::Relaxed);
-                Some((bundle.rules.clone(), bundle.demand.clone()))
-            }
-            _ => None,
-        }
+        let bundle = inner
+            .bundles
+            .get(&descriptor.this())?
+            .iter()
+            .find(|bundle| bundle.descriptor == *descriptor && bundle.key == *key)?;
+        #[cfg(test)]
+        self.reused.fetch_add(1, Ordering::Relaxed);
+        Some((bundle.rules.clone(), bundle.demand.clone()))
+    }
+
+    /// How many spellings of `concept` hold an assembled rule set.
+    #[cfg(test)]
+    pub(crate) fn spellings(&self, concept: &Entity) -> usize {
+        self.inner.read().bundles.get(concept).map_or(0, Vec::len)
     }
 
     /// How many assembled rule sets [`bundle`](Self::bundle) served.
@@ -724,7 +736,9 @@ impl RuleCache {
 
     /// Record the rule set assembled for `descriptor` over layers holding
     /// the rule facts `key` names, with the rule-discovery reads
-    /// assembling it made, replacing one recorded for its concept before.
+    /// assembling it made, replacing one recorded for that spelling
+    /// before, and the oldest spelling of its concept past
+    /// [`SPELLINGS`].
     pub(crate) fn record_bundle(
         &self,
         descriptor: ConceptDescriptor,
@@ -732,15 +746,18 @@ impl RuleCache {
         rules: ConceptRules,
         reads: Vec<RuleRead>,
     ) {
-        self.inner.write().bundles.insert(
-            descriptor.this(),
-            Bundle {
-                key,
-                descriptor,
-                rules,
-                demand: RuleDemand::new(reads),
-            },
-        );
+        let mut inner = self.inner.write();
+        let spellings = inner.bundles.entry(descriptor.this()).or_default();
+        spellings.retain(|bundle| bundle.descriptor != descriptor);
+        if spellings.len() == SPELLINGS {
+            spellings.remove(0);
+        }
+        spellings.push(Bundle {
+            key,
+            descriptor,
+            rules,
+            demand: RuleDemand::new(reads),
+        });
     }
 
     /// The selecting rules built for `descriptor` reading `derived`
