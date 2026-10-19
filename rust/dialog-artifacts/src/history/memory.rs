@@ -36,6 +36,7 @@ impl MemoryHistory {
             skips: Vec::new(),
             // A test double stores records as-is and never verifies them,
             // so the signature stays empty.
+            delegation: None,
             signature: Vec::new(),
         };
         self.records.insert(revision.version(), record);

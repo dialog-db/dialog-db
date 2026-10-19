@@ -1,4 +1,6 @@
 use dialog_capability::Did;
+use dialog_ucan_core::{Delegation, subject::Subject};
+use dialog_varsig::algorithm::eddsa::Ed25519Signature;
 use serde::{Deserialize, Serialize};
 
 use crate::Revision;
@@ -47,11 +49,9 @@ pub struct RevisionRecord {
     /// DID of the operator (session key) that minted the revision — the
     /// key whose signature binds this record
     pub issuer: String,
-    /// DID of the profile (long-lived key) the issuer *claims* authorized
-    /// it. Attribution metadata vouched for by the issuer's signature, not
-    /// an authorization proof: binding it cryptographically needs
-    /// delegation proofs plus a time-anchoring story (see
-    /// `notes/version-control.md`).
+    /// DID of the profile (long-lived key) the issuer acted for. On its
+    /// own this is only the issuer's claim; [`delegation`](Self::delegation)
+    /// is what proves it (see [`RevisionRecord::attested`]).
     pub authority: String,
     /// Parent revision versions — the revision DAG edge. Empty for
     /// genesis; two entries for a merge.
@@ -63,6 +63,20 @@ pub struct RevisionRecord {
     /// [`carry_skips`](super::carry_skips)). Empty for genesis and merge
     /// revisions.
     pub skips: Vec<Version>,
+    /// The authority's UCAN delegation to the issuer, DAG-CBOR encoded:
+    /// the proof that the issuer is a session of the profile the record
+    /// names. It binds only when it hands the issuer the profile's whole
+    /// authority (any subject, the root command), so a narrower grant
+    /// the profile gave someone else cannot be used to sign as it.
+    ///
+    /// Attribution, not authorization: its time bounds are not checked,
+    /// because a profile that delegated to the issuer stays the one it
+    /// acted for after the delegation lapses, while whether the write was
+    /// allowed is decided by whoever accepted it. Absent from records
+    /// minted without one, and then skipped in the encoding, so those
+    /// records keep the bytes they were signed over.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
+    pub delegation: Option<Vec<u8>>,
     /// The issuer's Ed25519 signature over [`RevisionRecord::payload`] —
     /// this record encoded with an empty signature field. The key is the
     /// one the issuer DID names (`did:key`).
@@ -135,6 +149,9 @@ impl RevisionRecord {
     /// version derived from the record's own contents must be that slot
     /// (a valid record cannot be replayed at another revision entity), and
     /// the signature must verify under the key the issuer DID names.
+    ///
+    /// A record whose [`delegation`](Self::delegation) does not bind its
+    /// authority is refused as well: it claims a proof it does not have.
     pub fn verify(&self, version: &Version) -> Result<(), DialogArtifactsError> {
         let derived = self.version();
         if derived != *version {
@@ -143,7 +160,61 @@ impl RevisionRecord {
             )));
         }
         verify_issuer_signature(&self.issuer, &self.payload()?, &self.signature)?;
+        self.attested()?;
         Ok(())
+    }
+
+    /// The principal this record proves responsible for its revision:
+    /// the [`authority`](Self::authority) when the issuer is that
+    /// principal or its [`delegation`](Self::delegation) binds it, and
+    /// otherwise the issuer alone, whose signature is the only proof the
+    /// record then holds.
+    ///
+    /// Checks the delegation, not the record's own signature; see
+    /// [`verify`](Self::verify) for both.
+    pub fn attested(&self) -> Result<&str, DialogArtifactsError> {
+        if self.authority == self.issuer {
+            return Ok(&self.authority);
+        }
+        match &self.delegation {
+            Some(delegation) => {
+                self.verify_delegation(delegation)?;
+                Ok(&self.authority)
+            }
+            None => Ok(&self.issuer),
+        }
+    }
+
+    /// Check that `delegation` is the authority's grant of its whole
+    /// authority to the issuer, signed by the authority.
+    fn verify_delegation(&self, delegation: &[u8]) -> Result<(), DialogArtifactsError> {
+        let refused = |reason: &str| {
+            DialogArtifactsError::InvalidSignature(format!(
+                "Revision record delegation does not bind {}: {reason}",
+                self.authority
+            ))
+        };
+        let delegation: Delegation<Ed25519Signature> =
+            serde_ipld_dagcbor::from_slice(delegation)
+                .map_err(|error| refused(&format!("not an Ed25519 delegation ({error})")))?;
+        if delegation.issuer().to_string() != self.authority {
+            return Err(refused("issued by another principal"));
+        }
+        if delegation.audience().to_string() != self.issuer {
+            return Err(refused("issued to another principal"));
+        }
+        if *delegation.subject() != Subject::Any || !delegation.command().segments().is_empty() {
+            return Err(refused("narrower than the authority's whole authority"));
+        }
+        let payload = delegation
+            .signed_payload()
+            .map_err(|error| refused(&format!("unencodable ({error})")))?;
+        verify_issuer_signature(
+            &self.authority,
+            &payload,
+            &delegation.signature().to_bytes(),
+        )
+        .map_err(|error| refused(&format!("{error}")))
     }
 
     /// The fact carrying this record: an [`Artifact`] on the revision
@@ -215,8 +286,17 @@ impl RevisionRecord {
             authority: authority.to_string(),
             parents,
             skips,
+            delegation: None,
             signature: Vec::new(),
         }
+    }
+
+    /// This record carrying `delegation`, the authority's delegation to
+    /// the issuer (see [`delegation`](Self::delegation)). Set it before
+    /// signing: the signature covers it.
+    pub fn delegated(mut self, delegation: Option<Vec<u8>>) -> Self {
+        self.delegation = delegation;
+        self
     }
 }
 

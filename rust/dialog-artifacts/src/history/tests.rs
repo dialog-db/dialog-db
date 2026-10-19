@@ -1939,6 +1939,7 @@ async fn it_verifies_signed_revision_records() -> Result<()> {
         authority: did_key.clone(),
         parents: vec![parent],
         skips: vec![parent],
+        delegation: None,
         signature: Vec::new(),
     };
     record.signature = key.sign(&record.payload()?).to_bytes().to_vec();
@@ -1982,6 +1983,125 @@ async fn it_verifies_signed_revision_records() -> Result<()> {
     Ok(())
 }
 
+/// A record names the profile its issuer acted for, and carries the
+/// profile's delegation to the issuer to prove it. The proof binds only
+/// when the profile handed the issuer its whole authority: any subject,
+/// the root command. Without a proof the record attests only its
+/// issuer, and a proof that does not bind makes the record a forgery.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_attests_the_profile_a_session_delegation_binds() -> Result<()> {
+    use dialog_credentials::{Ed25519Signer, Signer};
+    use dialog_ucan_core::DelegationBuilder;
+    use dialog_ucan_core::subject::Subject;
+    use dialog_varsig::Principal as _;
+    use ed25519_dalek::Signer as _;
+
+    async fn signer(seed: u8) -> Signer {
+        Signer::from(Ed25519Signer::import(&[seed; 32]).await.expect("a key"))
+    }
+
+    async fn delegate(
+        issuer: &Signer,
+        audience: &Signer,
+        subject: Subject,
+        command: Vec<String>,
+    ) -> Vec<u8> {
+        DelegationBuilder::new()
+            .issuer(issuer.clone())
+            .audience(&audience.did())
+            .subject(subject)
+            .command(command)
+            .try_build()
+            .await
+            .expect("a delegation")
+            .encoded()
+            .to_vec()
+    }
+
+    let profile = signer(1).await;
+    let operator = signer(2).await;
+    let stranger = signer(3).await;
+    let operator_key = signing_key(2);
+
+    let sign = |mut record: RevisionRecord| -> Result<RevisionRecord> {
+        record.signature = operator_key.sign(&record.payload()?).to_bytes().to_vec();
+        Ok(record)
+    };
+    let unsigned = RevisionRecord {
+        format: super::REVISION_RECORD_FORMAT,
+        branch: Entity::new()?,
+        issuer: operator.did().to_string(),
+        authority: profile.did().to_string(),
+        parents: Vec::new(),
+        skips: Vec::new(),
+        delegation: None,
+        signature: Vec::new(),
+    };
+
+    // A session delegation binds the profile.
+    let session = delegate(&profile, &operator, Subject::Any, Vec::new()).await;
+    let bound = sign(RevisionRecord {
+        delegation: Some(session.clone()),
+        ..unsigned.clone()
+    })?;
+    bound.verify(&bound.version())?;
+    assert_eq!(bound.attested()?, profile.did().to_string());
+
+    // Without a delegation the claim stands unproven: only the issuer is
+    // attested.
+    let claimed = sign(unsigned.clone())?;
+    claimed.verify(&claimed.version())?;
+    assert_eq!(claimed.attested()?, operator.did().to_string());
+
+    // An issuer acting as itself needs no delegation.
+    let own = RevisionRecord {
+        authority: operator.did().to_string(),
+        ..unsigned.clone()
+    };
+    let own = sign(own)?;
+    assert_eq!(own.attested()?, operator.did().to_string());
+
+    // Each way a delegation can fail to bind makes the record a forgery.
+    let refused = [
+        // Issued by someone other than the named profile.
+        delegate(&stranger, &operator, Subject::Any, Vec::new()).await,
+        // Issued to someone other than the issuer.
+        delegate(&profile, &stranger, Subject::Any, Vec::new()).await,
+        // Narrower than the profile's whole authority.
+        delegate(&profile, &operator, Subject::Any, vec!["archive".into()]).await,
+        delegate(
+            &profile,
+            &operator,
+            Subject::Specific(stranger.did()),
+            Vec::new(),
+        )
+        .await,
+        // Not a delegation at all.
+        b"not a delegation".to_vec(),
+    ];
+    for delegation in refused {
+        let forged = sign(RevisionRecord {
+            delegation: Some(delegation),
+            ..unsigned.clone()
+        })?;
+        assert!(forged.verify(&forged.version()).is_err());
+        assert!(forged.attested().is_err());
+    }
+
+    // A tampered delegation no longer carries the profile's signature.
+    let mut tampered = session;
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0x01;
+    let forged = sign(RevisionRecord {
+        delegation: Some(tampered),
+        ..unsigned.clone()
+    })?;
+    assert!(forged.verify(&forged.version()).is_err());
+
+    Ok(())
+}
+
 /// The durable history reader refuses records that don't vouch for
 /// themselves: an unsigned (or badly signed) record planted in the tree at
 /// a revision entity errors out of `revision_record`, while a properly
@@ -2008,6 +2128,7 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
         authority: "did:web:example.com".to_string(),
         parents: Vec::new(),
         skips: Vec::new(),
+        delegation: None,
         signature: Vec::new(),
     };
     let forged = RevisionRecord {
@@ -2078,6 +2199,7 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
         authority: did_key,
         parents: Vec::new(),
         skips: Vec::new(),
+        delegation: None,
         signature: Vec::new(),
     };
     record.signature = key.sign(&record.payload()?).to_bytes().to_vec();

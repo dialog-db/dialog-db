@@ -142,8 +142,24 @@ impl<S: Signature> Delegation<S> {
         })
     }
 
-    const fn signature(&self) -> &S {
+    /// The issuer's signature over [`signed_payload`](Self::signed_payload).
+    #[must_use]
+    pub const fn signature(&self) -> &S {
         &self.envelope.0
+    }
+
+    /// The bytes the issuer signed: the envelope payload in the encoding
+    /// its varsig header names.
+    ///
+    /// For a verifier that already holds the issuer's key and has to
+    /// check the signature synchronously, outside the async
+    /// [`Verifier`] path [`verify_with`](Self::verify_with) takes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CodecError`] if the payload cannot be encoded.
+    pub fn signed_payload(&self) -> Result<Vec<u8>, CodecError> {
+        self.envelope().encode()
     }
 
     const fn envelope(&self) -> &EnvelopePayload<S, DelegationPayload> {
