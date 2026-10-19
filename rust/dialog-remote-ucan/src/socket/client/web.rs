@@ -59,9 +59,14 @@ impl Link {
         let on_close = {
             let opened = opened.clone();
             let routes = routes.clone();
-            Closure::<dyn FnMut(CloseEvent)>::new(move |_| {
+            Closure::<dyn FnMut(CloseEvent)>::new(move |event: CloseEvent| {
                 settle(&opened, Err("the socket closed".into()));
-                routes.close();
+                routes.close(&format!(
+                    "it was closed with code {}{}{}",
+                    event.code(),
+                    if event.reason().is_empty() { "" } else { ": " },
+                    event.reason(),
+                ));
             })
         };
         let on_message = {
@@ -118,23 +123,23 @@ impl Link {
             .map_err(|error| unavailable(format!("{error:?}")))
     }
 
-    /// Close the socket, and end every wait on it.
+    /// Close the socket, for `reason`, and end every wait on it.
     ///
     /// The handlers are detached first: the socket outlives this link in
     /// the browser, and its events (the close this causes among them) must
     /// not reach closures that are gone.
-    pub(crate) fn close(&self) {
+    pub(crate) fn close(&self, reason: &str) {
         self.socket.set_onopen(None);
         self.socket.set_onerror(None);
         self.socket.set_onclose(None);
         self.socket.set_onmessage(None);
         let _ = self.socket.close();
-        self.routes.close();
+        self.routes.close(reason);
     }
 }
 
 impl Drop for Link {
     fn drop(&mut self) {
-        self.close();
+        self.close("the connection was released");
     }
 }

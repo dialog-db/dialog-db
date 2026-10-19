@@ -47,17 +47,34 @@ impl Link {
         });
         let reading = routes.clone();
         let reader = tokio::spawn(async move {
-            while let Some(Ok(message)) = source.next().await {
-                // Anything the service sends, a pong among them, says the
-                // connection is alive.
-                reading.heard();
-                if let Message::Binary(bytes) = message
-                    && let Ok(reply) = Reply::decode(&bytes)
-                {
-                    reading.route(reply);
+            let reason = loop {
+                match source.next().await {
+                    Some(Ok(Message::Close(frame))) => {
+                        break match frame {
+                            Some(frame) => format!(
+                                "it was closed with code {}{}{}",
+                                u16::from(frame.code),
+                                if frame.reason.is_empty() { "" } else { ": " },
+                                frame.reason
+                            ),
+                            None => "it was closed".to_string(),
+                        };
+                    }
+                    Some(Ok(message)) => {
+                        // Anything the service sends, a pong among them,
+                        // says the connection is alive.
+                        reading.heard();
+                        if let Message::Binary(bytes) = message
+                            && let Ok(reply) = Reply::decode(&bytes)
+                        {
+                            reading.route(reply);
+                        }
+                    }
+                    Some(Err(error)) => break format!("it failed: {error}"),
+                    None => break "it ended".to_string(),
                 }
-            }
-            reading.close();
+            };
+            reading.close(&reason);
         });
         routes.heard();
         Ok(Self {
@@ -80,18 +97,18 @@ impl Link {
             .map_err(unavailable)
     }
 
-    /// Close the socket, and end every wait on it.
-    pub(crate) fn close(&self) {
+    /// Close the socket, for `reason`, and end every wait on it.
+    pub(crate) fn close(&self, reason: &str) {
         // Ending the queue has the writing task close the socket; the
         // reading task holds the other half of it open until it stops.
         self.outgoing.close_channel();
         self.reader.abort();
-        self.routes.close();
+        self.routes.close(reason);
     }
 }
 
 impl Drop for Link {
     fn drop(&mut self) {
-        self.close();
+        self.close("the connection was released");
     }
 }

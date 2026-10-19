@@ -166,7 +166,7 @@ impl Sockets {
         if recently {
             return Err(unavailable("it could not be opened a moment ago"));
         }
-        let routes = Routes::default();
+        let routes = Routes::new(url);
         let link = match Link::open(url, routes.clone()).await {
             Ok(link) => Arc::new(link),
             Err(error) => {
@@ -187,6 +187,7 @@ impl Sockets {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(service(url));
+        tracing::info!(url, "socket opened");
         keep(Arc::downgrade(&link), routes.clone(), self.liveness);
         let connection = Connection {
             link,
@@ -234,7 +235,10 @@ fn keep(link: Weak<Link>, routes: Routes, liveness: Liveness) {
                 return;
             }
             if routes.silence() >= liveness.deadline {
-                link.close();
+                link.close(&format!(
+                    "nothing was heard from the service for {}s",
+                    liveness.deadline.as_secs()
+                ));
                 return;
             }
             if routes.is_busy() {
@@ -242,12 +246,15 @@ fn keep(link: Weak<Link>, routes: Routes, liveness: Liveness) {
             } else {
                 idle += liveness.heartbeat;
                 if idle >= liveness.idle {
-                    link.close();
+                    link.close(&format!(
+                        "nothing waited on it for {}s",
+                        liveness.idle.as_secs()
+                    ));
                     return;
                 }
             }
-            if link.ping().is_err() {
-                link.close();
+            if let Err(error) = link.ping() {
+                link.close(&format!("a ping could not be sent: {error}"));
                 return;
             }
         }
@@ -325,6 +332,8 @@ impl Wait {
 /// every later state names.
 #[derive(Debug, Clone)]
 pub(crate) struct Routes {
+    /// The socket's URL, which every report of it names.
+    url: Arc<str>,
     waits: Arc<Mutex<Waits>>,
     frames: Arc<std::sync::atomic::AtomicU64>,
     closed: Arc<std::sync::atomic::AtomicBool>,
@@ -332,9 +341,11 @@ pub(crate) struct Routes {
     heard: Arc<Mutex<Instant>>,
 }
 
-impl Default for Routes {
-    fn default() -> Self {
+impl Routes {
+    /// The routes of the socket at `url`, before it opens.
+    pub(crate) fn new(url: &str) -> Self {
         Self {
+            url: url.into(),
             waits: Arc::default(),
             frames: Arc::default(),
             closed: Arc::default(),
@@ -443,7 +454,17 @@ impl Routes {
                     wait.update(|slot| slot.state = Some(state));
                 }
             }
-            Reply::Ended { ref invocation, .. } => {
+            Reply::Ended {
+                ref invocation,
+                status,
+                ..
+            } => {
+                tracing::info!(
+                    url = %self.url,
+                    invocation,
+                    status,
+                    "the service ended a watch"
+                );
                 if let Some(wait) = waits.watches.remove(invocation) {
                     wait.update(|slot| slot.last = Some(reply));
                 }
@@ -451,9 +472,19 @@ impl Routes {
         }
     }
 
-    /// The connection closed: every wait ends.
-    pub(crate) fn close(&self) {
-        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+    /// The connection closed, for `reason`: every wait ends. Only the first
+    /// reason is reported, as the one that closed it.
+    pub(crate) fn close(&self, reason: &str) {
+        if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let watches = self
+            .waits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .watches
+            .len();
+        tracing::info!(url = %self.url, reason, watches, "socket closed");
         let mut waits = self.waits.lock().unwrap_or_else(PoisonError::into_inner);
         for (_, (_, wait)) in waits.answers.drain() {
             wait.update(|slot| slot.closed = true);
