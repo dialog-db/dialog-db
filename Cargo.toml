@@ -69,6 +69,9 @@ axum = "0.8"
 aes-gcm = "0.10"
 base58 = "0.2"
 base64 = "0.22"
+# The Bao tree of a blob, over groups of 16 KiB: its outboard, and the
+# verified ranges of a blob. See `dialog_storage::bao`.
+bao-tree = { version = "0.16.1", default-features = false }
 blake3 = "1"
 brotli = "8"
 bytes = "1"

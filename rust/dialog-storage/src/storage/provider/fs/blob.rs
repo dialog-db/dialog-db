@@ -2,17 +2,24 @@
 //!
 //! Layout: `{space_root}/blob/{base58(digest)}` — whole, hash-addressable
 //! binary objects, parallel to the block archive at `{space_root}/archive/...`.
+//! Beside each blob over one group of 16 KiB is its outboard,
+//! `{space_root}/blob/{base58(digest)}.outboard`: the hashes of the Bao tree
+//! of the blob, which prove any range of it against the digest alone (see
+//! [`crate::bao`]).
 //!
 //! Bytes stream rather than buffer: [`Read`] hands back a [`BlobSource`] over
 //! the file (optionally ranged), and [`Write`]/[`Import`] hand back a
 //! [`BlobSink`] that stages into a temp file, hashes as it goes, and commits
 //! atomically — to the discovered hash for an ingest, or the declared (and
-//! verified) digest for an import.
+//! verified) digest for an import. The sink builds the outboard in the same
+//! pass, into a second temp file, and commits it before the blob, so a blob
+//! that the store holds always has its outboard. A sink dropped before its
+//! end removes what it staged.
 
 use super::{FileReader, FileSystem, FileSystemError, FileSystemHandle, FileWriter};
+use crate::bao::OutboardBuilder;
 use async_trait::async_trait;
 use base58::ToBase58;
-use blake3::Hasher;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _, BlobSizeExt as _};
@@ -25,6 +32,8 @@ const BLOB: &str = "blob";
 /// Base name for the staging handle. Only its uniquely-suffixed temp file is
 /// ever created; the content commits straight to the hash path.
 const STAGING: &str = "_staging";
+/// The extension of the outboard of a blob, beside it.
+const OUTBOARD: &str = "outboard";
 
 impl FileSystem {
     /// The handle for this space's blob directory.
@@ -43,6 +52,11 @@ fn blob_key(digest: &Blake3Hash) -> String {
     digest.as_bytes().to_base58()
 }
 
+/// The name of the outboard of the blob `digest`, in the blob directory.
+fn outboard_key(digest: &Blake3Hash) -> String {
+    format!("{}.{OUTBOARD}", blob_key(digest))
+}
+
 /// A [`BlobSource`] over a file's streaming reader.
 struct FileBlobSource(FileReader);
 
@@ -59,11 +73,15 @@ impl BlobSource for FileBlobSource {
 }
 
 /// A [`BlobSink`] that stages bytes into a temp file while hashing, then
-/// commits to the content-addressed path on [`finish`](BlobSink::finish).
+/// commits to the content-addressed path on [`finish`](BlobSink::finish). It
+/// stages the outboard of the blob beside it, from its first parent on.
 struct FileBlobSink {
     writer: FileWriter,
     blob_dir: FileSystemHandle,
-    hasher: Hasher,
+    /// The hash and the outboard of the bytes so far.
+    builder: OutboardBuilder,
+    /// The staged outboard, once the blob has more than one group.
+    outboard: Option<FileWriter>,
     /// `Some` for an import (the declared digest, verified at finish); `None`
     /// for an ingest (the hash is discovered).
     expected: Option<Blake3Hash>,
@@ -81,9 +99,27 @@ impl FileSystem {
         Ok(FileBlobSink {
             writer,
             blob_dir,
-            hasher: Hasher::new(),
+            builder: OutboardBuilder::new(),
+            outboard: None,
             expected,
         })
+    }
+}
+
+impl FileBlobSink {
+    /// Appends `pairs`, the next bytes of the outboard, to its staged file.
+    async fn stage_outboard(&mut self, pairs: &[u8]) -> Result<(), BlobError> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let outboard = match &mut self.outboard {
+            Some(outboard) => outboard,
+            None => self
+                .outboard
+                .insert(self.blob_dir.resolve(STAGING)?.writer().await?),
+        };
+        outboard.write_all(pairs).await?;
+        Ok(())
     }
 }
 
@@ -91,27 +127,33 @@ impl FileSystem {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl BlobSink for FileBlobSink {
     async fn write_all(&mut self, bytes: &[u8]) -> Result<(), BlobError> {
-        self.hasher.update(bytes);
+        let pairs = self.builder.update(bytes);
+        self.stage_outboard(&pairs).await?;
         self.writer
             .write_all(bytes)
             .await
             .map_err(|e| BlobError::Storage(e.to_string()))
     }
 
-    async fn finish(self: Box<Self>) -> Result<Blake3Hash, BlobError> {
+    async fn finish(mut self: Box<Self>) -> Result<Blake3Hash, BlobError> {
+        let builder = std::mem::take(&mut self.builder);
+        let (hash, pairs) = builder.finish();
+        self.stage_outboard(&pairs).await?;
         let FileBlobSink {
             writer,
             blob_dir,
-            hasher,
+            outboard,
             expected,
+            ..
         } = *self;
-
-        let hash = Blake3Hash::from(*hasher.finalize().as_bytes());
 
         if let Some(expected) = expected
             && hash != expected
         {
             let _ = writer.discard().await;
+            if let Some(outboard) = outboard {
+                let _ = outboard.discard().await;
+            }
             return Err(BlobError::DigestMismatch {
                 expected: expected.as_bytes().to_base58(),
                 actual: hash.as_bytes().to_base58(),
@@ -119,6 +161,16 @@ impl BlobSink for FileBlobSink {
         }
 
         let dest = blob_dir.resolve(&blob_key(&hash))?;
+        // The outboard first: a blob that the store holds has its outboard.
+        // A blob that a store held before it kept outboards gets one here.
+        if let Some(outboard) = outboard {
+            let place = blob_dir.resolve(&outboard_key(&hash))?;
+            if place.exists().await {
+                let _ = outboard.discard().await;
+            } else {
+                outboard.finish_to(&place).await?;
+            }
+        }
         // Content addressing is idempotent: an existing blob has identical
         // bytes, so drop the staged copy rather than rewrite.
         if dest.exists().await {
@@ -250,6 +302,102 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(drain(reader).await, payload[10..19]);
+    }
+
+    /// Writes `payload` as a blob through an ingest sink, in pieces of 8 KiB.
+    async fn ingest(fs: &FileSystem, payload: &[u8]) -> Blake3Hash {
+        let mut sink = subject()
+            .writer()
+            .archive()
+            .blob()
+            .write()
+            .perform(fs)
+            .await
+            .unwrap();
+        for chunk in payload.chunks(8192) {
+            sink.write_all(chunk).await.unwrap();
+        }
+        sink.finish().await.unwrap()
+    }
+
+    /// The names of the files in the blob directory of `fs`.
+    async fn blob_files(fs: &FileSystem) -> Vec<String> {
+        let mut files = fs.blob().unwrap().list().await.unwrap();
+        files.sort();
+        files
+    }
+
+    #[dialog_common::test]
+    async fn it_keeps_an_outboard_for_a_blob_of_more_than_one_group() {
+        let fs = test_space("blob-outboard").await;
+        let payload: Vec<u8> = (0..16 * 1024 + 1).map(|i| (i % 251) as u8).collect();
+
+        let hash = ingest(&fs, &payload).await;
+
+        let outboard = fs
+            .blob()
+            .unwrap()
+            .resolve(&outboard_key(&hash))
+            .unwrap()
+            .read()
+            .await
+            .unwrap();
+        assert_eq!(outboard.len(), 64);
+        assert_eq!(outboard, crate::bao::outboard(&payload).1);
+        assert_eq!(
+            blob_files(&fs).await,
+            [blob_key(&hash), outboard_key(&hash)]
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_keeps_no_outboard_for_a_blob_of_one_group() {
+        let fs = test_space("blob-one-group").await;
+        let payload = vec![7u8; 16 * 1024];
+
+        let hash = ingest(&fs, &payload).await;
+
+        assert_eq!(blob_files(&fs).await, [blob_key(&hash)]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[dialog_common::test]
+    async fn it_keeps_nothing_of_a_write_that_does_not_end() {
+        let fs = test_space("blob-dropped").await;
+        let mut sink = subject()
+            .writer()
+            .archive()
+            .blob()
+            .write()
+            .perform(&fs)
+            .await
+            .unwrap();
+        sink.write_all(&vec![3u8; 100 * 1024]).await.unwrap();
+
+        drop(sink);
+
+        assert_eq!(blob_files(&fs).await, Vec::<String>::new());
+    }
+
+    #[dialog_common::test]
+    async fn it_keeps_no_outboard_of_an_import_that_does_not_verify() {
+        let fs = test_space("blob-forged-outboard").await;
+        let payload = vec![5u8; 100 * 1024];
+        let mut sink = subject()
+            .writer()
+            .archive()
+            .blob()
+            .import(Blake3Hash::from([0u8; 32]), payload.len() as u64)
+            .perform(&fs)
+            .await
+            .unwrap();
+        sink.write_all(&payload).await.unwrap();
+
+        assert!(matches!(
+            sink.finish().await,
+            Err(BlobError::DigestMismatch { .. })
+        ));
+        assert_eq!(blob_files(&fs).await, Vec::<String>::new());
     }
 
     #[dialog_common::test]
