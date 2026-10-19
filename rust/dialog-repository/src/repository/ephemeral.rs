@@ -41,7 +41,7 @@ use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::RangeInclusive;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
@@ -53,6 +53,8 @@ use dialog_artifacts::{
 use dialog_common::Blake3Hash;
 use dialog_search_tree::Manifest;
 use parking_lot::RwLock;
+
+use crate::rules::is_rule_attribute;
 
 /// How many instants the ring retains. A subscription pinned further
 /// back than this recomputes from the fold instead of maintaining.
@@ -108,6 +110,9 @@ struct State {
     /// The most recent instants, oldest first, at most
     /// [`LOG_CAPACITY`].
     log: VecDeque<Instant>,
+    /// The hash of the rule facts held and hidden ([`Facts::rules`]),
+    /// once read; reset by an instant that changes one.
+    rules: OnceLock<Option<Blake3Hash>>,
 }
 
 impl Default for State {
@@ -119,6 +124,7 @@ impl Default for State {
             sequence: 0,
             hash: Blake3Hash::from([0u8; 32]),
             log: VecDeque::new(),
+            rules: OnceLock::new(),
         }
     }
 }
@@ -243,6 +249,42 @@ impl Facts {
             });
         }
         rows
+    }
+
+    /// A hash of the rule facts held here ([`is_rule_attribute`]) and of
+    /// those among `hidden`, the facts the store hides beneath it: what
+    /// names every rule set assembled over the store (see
+    /// [`RuleKey`](crate::rules::RuleKey)). Equal for stores holding and
+    /// hiding the same rule facts, however they came to, and `None` for a
+    /// store with none, which names no rule set.
+    pub(crate) fn rules<'h>(
+        &self,
+        hidden: impl Iterator<Item = &'h Artifact>,
+    ) -> Option<Blake3Hash> {
+        let row = |polarity: u8, fact: &Artifact| {
+            let (the, of, tail) = sort_key(fact, &self.manifest);
+            let mut row = vec![polarity];
+            for part in [&the, &of, &tail] {
+                row.extend((part.len() as u64).to_be_bytes());
+                row.extend(part);
+            }
+            row.extend(fact.cause.as_ref().map_or([0; 32], |cause| cause.0));
+            row
+        };
+        let mut rows: Vec<Vec<u8>> = Vec::new();
+        for the in self.attributes.keys().filter(|the| is_rule_attribute(the)) {
+            for fact in self.scan(&ArtifactSelector::new().the(the.clone())) {
+                rows.push(row(b'+', &fact));
+            }
+        }
+        for fact in hidden.filter(|fact| is_rule_attribute(&fact.the)) {
+            rows.push(row(b'-', fact));
+        }
+        if rows.is_empty() {
+            return None;
+        }
+        rows.sort();
+        Some(Blake3Hash::hash_iter(rows.iter().map(Vec::as_slice)))
     }
 
     /// Every held fact once, in entity order.
@@ -388,6 +430,14 @@ impl State {
         if delta.is_empty() {
             return None;
         }
+        if delta
+            .asserted
+            .iter()
+            .chain(&delta.retracted)
+            .any(|fact| is_rule_attribute(&fact.the))
+        {
+            self.rules = OnceLock::new();
+        }
         self.sequence += 1;
         let mut chunks: Vec<Vec<u8>> =
             Vec::with_capacity(2 + delta.asserted.len() + delta.retracted.len());
@@ -462,6 +512,7 @@ impl Ephemeral {
             sequence: base.sequence,
             hash: base.hash.clone(),
             log: VecDeque::new(),
+            rules: base.rules.clone(),
         };
         drop(base);
         let mut delta = Delta::default();
@@ -586,6 +637,17 @@ impl Ephemeral {
         }
         state.mint(delta);
         self
+    }
+
+    /// The hash of the rule facts this line holds and hides, or `None`
+    /// when it has none (see [`Facts::rules`]). Kept until an instant
+    /// changes a rule fact, so a line of plain facts answers at once.
+    pub(crate) fn rules(&self) -> Option<Blake3Hash> {
+        let state = self.state.read();
+        state
+            .rules
+            .get_or_init(|| state.facts.rules(state.shadowed.values()))
+            .clone()
     }
 
     /// The line's identity now.
@@ -1156,5 +1218,41 @@ mod tests {
             )),
             "the retract hides the fact beneath"
         );
+    }
+
+    /// A line's rules hash names the rule facts it holds and hides: none
+    /// for a line of plain facts, unchanged by a plain write, moved by a
+    /// rule write or a tombstone over one, and equal for lines holding
+    /// the same rule facts however they came to.
+    #[dialog_common::test]
+    fn it_names_its_rule_facts() {
+        let line = Ephemeral::new();
+        line.assert(claim("id:a", "person/name", "A")).unwrap();
+        assert_eq!(line.rules(), None, "plain facts name no rule set");
+
+        let rule = || claim("id:rule", "dialog.rule/conclusion", "id:concept");
+        line.assert(rule()).unwrap();
+        let named = line.rules();
+        assert!(named.is_some());
+        line.assert(claim("id:b", "person/name", "B")).unwrap();
+        assert_eq!(line.rules(), named, "a plain write leaves it");
+
+        let other = Ephemeral::new();
+        let extra = || claim("id:extra", "dialog.rule/conclusion", "id:other");
+        other.assert(extra()).unwrap();
+        other.assert(claim("id:c", "person/name", "C")).unwrap();
+        other.assert(rule()).unwrap();
+        other.retract(extra()).unwrap();
+        assert_eq!(
+            other.rules(),
+            named,
+            "the same rule facts reached by other writes, the same name"
+        );
+
+        line.retract(rule()).unwrap();
+        assert_eq!(line.rules(), None, "the rule fact is gone");
+        line.retract(claim("id:other", "dialog.concept/transient", "x"))
+            .unwrap();
+        assert!(line.rules().is_some(), "a tombstone over a rule fact names");
     }
 }

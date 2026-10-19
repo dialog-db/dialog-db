@@ -27,20 +27,20 @@
 
 use core::fmt;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, AssetChange, Change, Changes, Entity, Instruction, Pick, Relation,
     SortKey, Statement, Update, Value, sort_key,
 };
+use dialog_common::Blake3Hash;
 use dialog_search_tree::Manifest;
 
 use super::ephemeral::{EphemeralRevision, Facts, Window};
 use crate::Revision;
 use crate::repository::branch::ReadSettlement;
-use crate::rules::conclusion_attr;
+use crate::rules::{conclusion_attr, is_rule_attribute};
 
 mod electing;
 
@@ -77,15 +77,10 @@ struct State {
     /// write to a shared store detaches its own copy, which keeps
     /// settling where the shared one stopped, the log being append-only.
     cells: Arc<parking_lot::Mutex<Option<SettlementMemo>>>,
-    /// Which writes this store holds, as a number no other store's
-    /// writes share: minted afresh by every write, so two stores with
-    /// the same number hold the same writes. Zero for a store nothing
-    /// was written to.
-    generation: u64,
+    /// The hash of the rule facts held and retracted ([`Facts::rules`]),
+    /// once read; reset by a write of one.
+    rules: OnceLock<Option<Blake3Hash>>,
 }
-
-/// The generations minted so far, across every staged store.
-static GENERATIONS: AtomicU64 = AtomicU64::new(1);
 
 /// A settlement of a store's writes under one observation of the lines.
 #[derive(Clone)]
@@ -173,7 +168,9 @@ impl State {
             let memo = self.cells.lock().clone();
             self.cells = Arc::new(parking_lot::Mutex::new(memo));
         }
-        self.generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
+        if is_rule_attribute(the) {
+            self.rules = OnceLock::new();
+        }
         let fact = |value: &Value| Artifact {
             the: the.clone(),
             of: of.clone(),
@@ -267,10 +264,15 @@ impl Staged {
         Arc::make_mut(&mut self.0).apply_change(the, of, change);
     }
 
-    /// The number naming the writes this store holds: equal between
-    /// stores holding the same writes, different otherwise.
-    pub(crate) fn generation(&self) -> u64 {
-        self.0.generation
+    /// The hash of the rule facts this store holds and retracts, or
+    /// `None` when it has none (see [`Facts::rules`]). Kept until a
+    /// write of a rule fact, so a transaction staging plain facts
+    /// answers at once.
+    pub(crate) fn rules(&self) -> Option<Blake3Hash> {
+        self.0
+            .rules
+            .get_or_init(|| self.0.facts.rules(self.0.retracted.values()))
+            .clone()
     }
 
     /// Every write in the order the transaction made it.
@@ -579,10 +581,9 @@ mod tests {
         let a: Entity = "id:a".parse().expect("entity");
         let write = Change::Assert(Value::String("A".into()), Pick::Last);
         staged.apply_change(&the, &a, &write);
-        let written = staged.generation();
         staged.apply_change(&the, &a, &write);
         assert_eq!(staged.writes_of(&the, &a), vec![write.clone()]);
-        assert_eq!(staged.generation(), written, "the repeat is no write");
+        assert_eq!(staged.log().len(), 1, "the repeat is no write");
         assert_eq!(
             exported(&staged),
             vec![("id:a person/name".into(), write.clone())]
@@ -603,34 +604,33 @@ mod tests {
         );
     }
 
-    /// A store's generation names its writes: a clone shares it, a
-    /// write mints a new one, and no two stores written separately
-    /// share one.
+    /// A store's rules hash names the rule facts it holds and retracts:
+    /// none for a store of plain facts, unchanged by a plain write, moved
+    /// by a rule write, and equal for stores that staged the same rule
+    /// facts.
     #[dialog_common::test]
-    fn it_mints_a_generation_per_write() {
+    fn it_names_its_rule_facts() {
         let mut staged = Staged::default();
-        assert_eq!(staged.generation(), 0);
         apply(
             &mut staged,
             Instruction::Assert(fact("id:a", "person/name", "A"), Pick::All),
         );
-        let written = staged.generation();
-        assert_ne!(written, 0);
-        let clone = staged.clone();
-        assert_eq!(clone.generation(), written);
+        assert_eq!(staged.rules(), None, "plain facts name no rule set");
+        let rule = fact("id:rule", "dialog.rule/conclusion", "id:concept");
+        apply(&mut staged, Instruction::Assert(rule.clone(), Pick::All));
+        let named = staged.rules();
+        assert!(named.is_some());
         apply(
             &mut staged,
-            Instruction::Assert(fact("id:a", "person/name", "B"), Pick::All),
+            Instruction::Assert(fact("id:b", "person/name", "B"), Pick::All),
         );
-        assert_ne!(staged.generation(), written);
-        assert_eq!(clone.generation(), written);
+        assert_eq!(staged.rules(), named, "a plain write leaves it");
         let mut other = Staged::default();
-        apply(
-            &mut other,
-            Instruction::Assert(fact("id:a", "person/name", "A"), Pick::All),
-        );
-        assert_ne!(other.generation(), written);
-        assert_ne!(other.generation(), staged.generation());
+        apply(&mut other, Instruction::Assert(rule.clone(), Pick::All));
+        assert_eq!(other.rules(), named, "same rule facts, same name");
+        apply(&mut staged, Instruction::Retract(rule));
+        assert_ne!(staged.rules(), named, "a rule write moves it");
+        assert_ne!(staged.rules(), None, "a retracted rule fact still names");
     }
 
     #[dialog_common::test]

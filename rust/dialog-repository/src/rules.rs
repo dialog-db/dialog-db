@@ -31,9 +31,9 @@
 //!   the per-query overlay, or a transaction's staged writes. Overlay
 //!   rules (`tx.assert(rule)` / `.with(rule)`, uncommitted — the head
 //!   has NOT moved) are never head-cached: a rule set assembled over
-//!   them is keyed by each layer's revision (see [`LayerRoots`]), which
-//!   is what makes the "overlay rule masked by a head-keyed cache" bug
-//!   structurally impossible.
+//!   them is keyed by the rule facts each layer holds (see [`RuleKey`]),
+//!   which is what makes the "overlay rule masked by a head-keyed cache"
+//!   bug structurally impossible.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 #[cfg(test)]
@@ -58,7 +58,6 @@ use dialog_query::{
 use dialog_search_tree::Manifest;
 use parking_lot::RwLock;
 
-use crate::repository::EphemeralRevision;
 use crate::{Revision, schema};
 use dialog_common::Blake3Hash;
 
@@ -70,6 +69,16 @@ pub(crate) use dialog_query::rule::statement::{
     conclusion_attr, derives_attr, head_entities, on_attr, quarantined_attr, reads_attr,
     source_attr,
 };
+
+/// Whether facts of `the` are rule facts: every `dialog.rule/*` attribute
+/// and the `dialog.concept/transient` marker. Rule resolution reads
+/// nothing else, so a layer's rule facts name every rule set assembled
+/// over it (see [`RuleKey`]), and a write of no rule fact leaves them as
+/// they were.
+pub(crate) fn is_rule_attribute(the: &Relation) -> bool {
+    let name = the.as_str();
+    name.starts_with("dialog.rule/") || name == "dialog.concept/transient"
+}
 
 /// The `dialog.concept/transient` marker attribute. A concept carrying it
 /// is a *command*: facts of it dispatched into a transaction (and heads
@@ -446,20 +455,28 @@ pub(crate) struct TriggerFootprint {
     pub(crate) reads: BTreeSet<Entity>,
 }
 
-/// The tree root of every layer a rule set was resolved from, in layer
-/// order: `None` for a layer with no tree yet.
-/// The layers a rule set was assembled over, each by what names its
-/// rules: a line by its root, an overlay by its revision, and a staged
-/// store by its generation. A later read over the same
-/// layers finds the same rules.
+/// A tree root, or `None` for a line with no tree yet.
+type Root = Option<[u8; 32]>;
+
+/// The rule facts of the layers a rule set was assembled over: what the
+/// set is a function of, so a later read whose layers hold the same rule
+/// facts is served it.
+///
+/// A line is named by its rules root: the root of the newest tree whose
+/// commit changed a rule fact, carried across the commits since (see
+/// [`RuleCache::rules_root`]). An overlay or staged layer is named by
+/// the hash of the rule facts it holds and hides, and is left out when
+/// it holds none, so a query with a session overlay of plain facts, or a
+/// transaction that staged none, shares the branch query's entries.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LayerRoots {
-    /// Each line's tree root.
-    pub(crate) lines: Vec<Option<[u8; 32]>>,
-    /// Each line's session overlay revision, then the query overlay's.
-    pub(crate) overlays: Vec<EphemeralRevision>,
-    /// Each staged layer's generation.
-    pub(crate) staged: Vec<u64>,
+pub(crate) struct RuleKey {
+    /// Each line's rules root.
+    pub(crate) lines: Vec<Root>,
+    /// Each overlay (the lines' session overlays, then the query's own)
+    /// that holds rule facts, by its position and their hash.
+    pub(crate) overlays: Vec<(usize, Blake3Hash)>,
+    /// Each staged layer that holds rule facts, likewise.
+    pub(crate) staged: Vec<(usize, Blake3Hash)>,
 }
 
 #[derive(Debug, Default)]
@@ -493,7 +510,7 @@ struct RuleCacheInner {
     /// marker, as of a branch head.
     transient: HashMap<Entity, (Revision, bool)>,
     /// A concept's assembled rule set -- built-in, committed, overlay,
-    /// and its program analysis attached -- as of the [`LayerRoots`] it
+    /// and its program analysis attached -- as of the [`RuleKey`] it
     /// was resolved from. Assembling it is most of what planning a warm
     /// query costs, and it changes only when a layer does.
     ///
@@ -501,9 +518,14 @@ struct RuleCacheInner {
     /// that descriptor's implicit rule, which binds its field names, and
     /// descriptors differing only in field names share an identity.
     bundles: HashMap<Entity, Bundle>,
-    /// Every rule the program analysis sets aside over the layers at
-    /// these roots, with the rule-discovery reads finding them.
-    quarantined: Option<(LayerRoots, Vec<Quarantine>, Vec<RuleRead>)>,
+    /// Every rule the program analysis sets aside over layers holding
+    /// these rule facts, with the rule-discovery reads finding them.
+    quarantined: Option<(RuleKey, Vec<Quarantine>, Vec<RuleRead>)>,
+    /// A tree root and the rules root it carries: the root of the newest
+    /// tree before it whose commit changed a rule fact. Recorded by a
+    /// commit that changes none, as the head it minted; any other head
+    /// is its own rules root.
+    rules_root: Option<(Root, Root)>,
     /// A selecting concept's rule and covering rule, keyed by the
     /// concept, the attributes it reads as derived and the one source
     /// rule deriving them (if one). Pure functions of their key, so
@@ -512,11 +534,11 @@ struct RuleCacheInner {
     selecting: HashMap<SelectingKey, Selecting>,
 }
 
-/// A rule set assembled for one descriptor, as of the roots of the
+/// A rule set assembled for one descriptor, as of the rule facts of the
 /// layers it was resolved from.
 #[derive(Debug, Clone)]
 struct Bundle {
-    roots: LayerRoots,
+    key: RuleKey,
     descriptor: ConceptDescriptor,
     rules: ConceptRules,
     /// The rule-discovery reads assembling it made, replayed as rule
@@ -583,41 +605,60 @@ impl RuleCache {
         self.inner.write().heads.insert((rule, attribute), head);
     }
 
-    /// Every rule set aside over layers at `roots`, if recorded at
-    /// exactly those roots, with the reads that found them.
-    pub(crate) fn quarantined(
-        &self,
-        roots: &LayerRoots,
-    ) -> Option<(Vec<Quarantine>, Vec<RuleRead>)> {
+    /// The rules root of the tree at `root`: the root a commit that
+    /// changed no rule fact carried to it, or `root` itself. A head moved
+    /// any other way (a pull, a merge, a commit before this cache) is
+    /// its own rules root, so its rule sets are assembled once again,
+    /// never served stale.
+    pub(crate) fn rules_root(&self, root: Root) -> Root {
+        match &self.inner.read().rules_root {
+            Some((head, rules)) if *head == root => *rules,
+            _ => root,
+        }
+    }
+
+    /// Note that the commit from the tree at `previous` to the tree at
+    /// `root` changed no rule fact, so `root` carries the rules root of
+    /// `previous`.
+    pub(crate) fn carry_rules_root(&self, previous: Root, root: Root) {
+        let rules = self.rules_root(previous);
+        self.inner.write().rules_root = Some((root, rules));
+    }
+
+    /// Every rule set aside over layers holding the rule facts `key`
+    /// names, if recorded for exactly those, with the reads that found
+    /// them.
+    pub(crate) fn quarantined(&self, key: &RuleKey) -> Option<(Vec<Quarantine>, Vec<RuleRead>)> {
         match &self.inner.read().quarantined {
-            Some((at, quarantined, reads)) if at == roots => {
+            Some((at, quarantined, reads)) if at == key => {
                 Some((quarantined.clone(), reads.clone()))
             }
             _ => None,
         }
     }
 
-    /// Record every rule set aside over layers at `roots`.
+    /// Record every rule set aside over layers holding the rule facts
+    /// `key` names.
     pub(crate) fn record_quarantined(
         &self,
-        roots: LayerRoots,
+        key: RuleKey,
         quarantined: Vec<Quarantine>,
         reads: Vec<RuleRead>,
     ) {
-        self.inner.write().quarantined = Some((roots, quarantined, reads));
+        self.inner.write().quarantined = Some((key, quarantined, reads));
     }
 
-    /// The rule set assembled for `descriptor` over layers at `roots`,
-    /// if one was recorded for exactly that descriptor at exactly those
-    /// roots.
+    /// The rule set assembled for `descriptor` over layers holding the
+    /// rule facts `key` names, if one was recorded for exactly that
+    /// descriptor and those rule facts.
     pub(crate) fn bundle(
         &self,
         descriptor: &ConceptDescriptor,
-        roots: &LayerRoots,
+        key: &RuleKey,
     ) -> Option<(ConceptRules, Vec<RuleRead>)> {
         let inner = self.inner.read();
         match inner.bundles.get(&descriptor.this()) {
-            Some(bundle) if bundle.roots == *roots && bundle.descriptor == *descriptor => {
+            Some(bundle) if bundle.key == *key && bundle.descriptor == *descriptor => {
                 #[cfg(test)]
                 self.reused.fetch_add(1, Ordering::Relaxed);
                 Some((bundle.rules.clone(), bundle.reads.clone()))
@@ -632,20 +673,20 @@ impl RuleCache {
         self.reused.load(Ordering::Relaxed)
     }
 
-    /// Record the rule set assembled for `descriptor` over layers at
-    /// `roots`, with the rule-discovery reads assembling it made,
-    /// replacing one recorded for its concept before.
+    /// Record the rule set assembled for `descriptor` over layers holding
+    /// the rule facts `key` names, with the rule-discovery reads
+    /// assembling it made, replacing one recorded for its concept before.
     pub(crate) fn record_bundle(
         &self,
         descriptor: ConceptDescriptor,
-        roots: LayerRoots,
+        key: RuleKey,
         rules: ConceptRules,
         reads: Vec<RuleRead>,
     ) {
         self.inner.write().bundles.insert(
             descriptor.this(),
             Bundle {
-                roots,
+                key,
                 descriptor,
                 rules,
                 reads,

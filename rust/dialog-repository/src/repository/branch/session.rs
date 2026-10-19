@@ -12,7 +12,7 @@ use dialog_artifacts::{
 };
 use dialog_artifacts::{LoadBlob, Relation as ArtifactsRelation, Standing, Value};
 use dialog_capability::{Capability, Fork, Provider};
-use dialog_common::{Buffer, ConditionalSync, Held, Holds};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSync, Held, Holds};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::{Identify, Operator, OperatorExt as _};
 use dialog_effects::memory::Resolve;
@@ -42,8 +42,10 @@ use crate::repository::ephemeral::Window;
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
 use crate::repository::{CellSettlement, ReadObservation};
+#[cfg(test)]
+use crate::rules::is_rule_attribute;
 use crate::rules::{
-    LayerRoots, RuleRead, Selecting, assemble, builtin, builtin_derives, builtin_deriving,
+    RuleKey, RuleRead, Selecting, assemble, builtin, builtin_derives, builtin_deriving,
     conclusion_attr, derives_attr, derives_keys, derives_selector, head_onto, hydrate,
     quarantined_attr, rule_entities, source_attr, source_bytes, source_selector,
 };
@@ -664,7 +666,17 @@ impl<'a> QueryEnv<'a> {
     /// Note a rule-discovery read: recorded as rule demand when
     /// recording is on, and kept so a rule set assembled from it can
     /// replay it for a later subscription.
+    ///
+    /// Every rule read names a rule attribute: a rule set is keyed by the
+    /// rule facts of its layers ([`RuleKey`]), so a read of any other
+    /// attribute would let a write the key does not see change the set.
+    /// Test builds check it.
     fn read_rules(&self, selector: &ArtifactSelector<Constrained>, manifest: &Manifest) {
+        #[cfg(test)]
+        assert!(
+            selector.attribute().is_some_and(is_rule_attribute),
+            "a rule read outside the rule attributes: {selector:?}"
+        );
         if let Some(demand) = &self.demand {
             demand.record_rules(selector, manifest);
         }
@@ -1360,22 +1372,26 @@ impl Provider<SelectRules> for QueryEnv<'_> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let concept = input.this();
 
-        // An assembled rule set depends only on the layers it was resolved
-        // from, so while none has moved the last one assembled stands:
-        // every layer is named in `roots`, a line by its root and every
-        // overlay and staged layer by its revision, so no layer can hold a
-        // rule the key does not see. A query recording what it reads
-        // reuses the set as well, and records the rule reads that
-        // assembled it as its own.
-        let roots = self.layer_roots();
+        // An assembled rule set depends only on the rule facts of the
+        // layers it was resolved from, so while none of those has changed
+        // the last one assembled stands: `key` names every layer's rule
+        // facts, a line by its rules root and every overlay and staged
+        // layer by their hash, so no layer can hold a rule the key does
+        // not see, and a write of plain facts leaves it. A query recording
+        // what it reads reuses the set as well, and records the rule
+        // reads that assembled it as its own.
+        let key = self.rule_key();
         let cache = self
             .sources
             .first()
             .map(|source| source.as_ref().rule_cache());
-        if let Some((bundle, reads)) = cache
-            .as_ref()
-            .and_then(|cache| cache.bundle(&input, &roots))
-        {
+        if let Some((bundle, reads)) = cache.as_ref().and_then(|cache| cache.bundle(&input, &key)) {
+            #[cfg(test)]
+            assert_eq!(
+                rule_spellings(&bundle),
+                rule_spellings(&self.isolated().assemble_bundle(&input).await?),
+                "a cached rule set must be the one its layers assemble"
+            );
             if let Some(demand) = &self.demand {
                 for (selector, manifest) in &reads {
                     demand.record_rules(selector, manifest);
@@ -1388,7 +1404,27 @@ impl Provider<SelectRules> for QueryEnv<'_> {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .len();
+        let bundle = self.assemble_bundle(&input).await?;
+        if let Some(cache) = cache {
+            cache.record_bundle(
+                input.clone(),
+                key,
+                bundle.clone(),
+                self.reads_since(first_read),
+            );
+        }
+        Ok(self.continuing(&concept, bundle))
+    }
+}
 
+impl QueryEnv<'_> {
+    /// The rule set of `input` assembled from the layers: resolved, its
+    /// closure analyzed, the rules the analysis sets aside left out, and
+    /// the analysis attached when the concept is recursive.
+    async fn assemble_bundle(
+        &self,
+        input: &ConceptDescriptor,
+    ) -> Result<ConceptRules, EvaluationError> {
         // Plan cache rides a line (peers share content-addressed plans;
         // any line's cache is correct). The overlay-only query has no
         // line, so it falls back to a private cache.
@@ -1397,28 +1433,56 @@ impl Provider<SelectRules> for QueryEnv<'_> {
             .first()
             .map(|source| source.as_ref().plan_cache())
             .unwrap_or_default();
-
-        let bundle = self.resolve_bundle(&input, plan_cache).await?;
-        let analysis = self.program_analysis(&input, &bundle).await?;
-        analysis.check(&input)?;
+        let bundle = self.resolve_bundle(input, plan_cache).await?;
+        let analysis = self.program_analysis(input, &bundle).await?;
+        analysis.check(input)?;
         let bundle = bundle.without(analysis.quarantined());
-        let bundle = if analysis.is_recursive(&ProgramAnalysis::node(&input)) {
+        Ok(if analysis.is_recursive(&ProgramAnalysis::node(input)) {
             bundle.with_recursion(analysis)
         } else {
             bundle
-        };
-        if let Some(cache) = cache {
-            let reads = self
-                .reads
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .get(first_read..)
-                .map(<[_]>::to_vec)
-                .unwrap_or_default();
-            cache.record_bundle(input.clone(), roots, bundle.clone(), reads);
-        }
-        Ok(self.continuing(&concept, bundle))
+        })
     }
+
+    /// Every rule-discovery read noted since `first`: what an entry
+    /// assembled since then was read from.
+    fn reads_since(&self, first: usize) -> Vec<RuleRead> {
+        self.reads
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(first..)
+            .map(<[_]>::to_vec)
+            .unwrap_or_default()
+    }
+
+    /// This environment with nothing recording its reads: what a test
+    /// assembles afresh, to compare with what a cache served, without
+    /// that work joining the demand or the reads of what is served.
+    #[cfg(test)]
+    fn isolated(&self) -> Self {
+        let mut isolated = self.clone();
+        isolated.demand = None;
+        isolated.reads = Arc::default();
+        isolated
+    }
+}
+
+/// The rules of `bundle` by identity, in an order that does not depend
+/// on how they were installed: what two assemblies of one rule set agree
+/// on. A rule is named by its content address, the hash of its canonical
+/// spelling, so fresh local names do not tell two assemblies apart; a
+/// rule without one (an implicit rule) by the concept it concludes.
+#[cfg(test)]
+fn rule_spellings(bundle: &ConceptRules) -> Vec<String> {
+    let mut spellings: Vec<String> = bundle
+        .rules()
+        .map(|rule| match rule.try_this() {
+            Some(entity) => entity.to_string(),
+            None => format!("implicit {}", rule.conclusion().this()),
+        })
+        .collect();
+    spellings.sort();
+    spellings
 }
 
 /// The entity of the attribute concept of `field`'s relation read
@@ -1436,16 +1500,31 @@ fn relation_concept(field: &ConceptFieldDescriptor) -> Entity {
 static QUARANTINED: LazyLock<ArtifactsRelation> = LazyLock::new(quarantined_attr);
 
 impl<'a> QueryEnv<'a> {
-    /// The roots of the layers this query reads rules from.
-    fn layer_roots(&self) -> LayerRoots {
-        LayerRoots {
+    /// The rule facts of the layers this query reads rules from.
+    fn rule_key(&self) -> RuleKey {
+        let held = |(index, rules): (usize, Option<Blake3Hash>)| Some((index, rules?));
+        RuleKey {
             lines: self
                 .sources
                 .iter()
-                .map(|source| source.as_ref().root())
+                .map(|source| {
+                    let source = source.as_ref();
+                    source.rule_cache().rules_root(source.root())
+                })
                 .collect(),
-            overlays: self.overlays().map(Ephemeral::revision).collect(),
-            staged: self.layers.iter().map(Staged::generation).collect(),
+            overlays: self
+                .overlays()
+                .map(Ephemeral::rules)
+                .enumerate()
+                .filter_map(held)
+                .collect(),
+            staged: self
+                .layers
+                .iter()
+                .map(Staged::rules)
+                .enumerate()
+                .filter_map(held)
+                .collect(),
         }
     }
 
@@ -1481,18 +1560,23 @@ impl<'a> QueryEnv<'a> {
     }
 
     /// Every rule the program analysis sets aside, over every deductive
-    /// rule the layers hold, sorted by rule and concept. Kept per layer
-    /// roots like an assembled rule set, and recorded as rule demand, so
+    /// rule the layers hold, sorted by rule and concept. Kept per rule
+    /// key like an assembled rule set, and recorded as rule demand, so
     /// a subscription re-evaluates when a rule is installed or retracted.
     async fn quarantined(&self) -> Result<Vec<Quarantine>, EvaluationError> {
-        let roots = self.layer_roots();
+        let key = self.rule_key();
         let cache = self
             .sources
             .first()
             .map(|source| source.as_ref().rule_cache());
-        if let Some((quarantined, reads)) =
-            cache.as_ref().and_then(|cache| cache.quarantined(&roots))
+        if let Some((quarantined, reads)) = cache.as_ref().and_then(|cache| cache.quarantined(&key))
         {
+            #[cfg(test)]
+            assert_eq!(
+                quarantined,
+                self.isolated().assemble_quarantined().await?,
+                "the rules a cache sets aside must be the ones its layers set aside"
+            );
             if let Some(demand) = &self.demand {
                 for (selector, manifest) in &reads {
                     demand.record_rules(selector, manifest);
@@ -1505,7 +1589,16 @@ impl<'a> QueryEnv<'a> {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .len();
+        let quarantined = self.assemble_quarantined().await?;
+        if let Some(cache) = cache {
+            cache.record_quarantined(key, quarantined.clone(), self.reads_since(first_read));
+        }
+        Ok(quarantined)
+    }
 
+    /// Every rule the program analysis sets aside, assembled from the
+    /// layers.
+    async fn assemble_quarantined(&self) -> Result<Vec<Quarantine>, EvaluationError> {
         // Each attribute some rule concludes roots an analysis; a cycle
         // lies in the closure of every attribute on it, so the union
         // covers every cycle once.
@@ -1532,17 +1625,6 @@ impl<'a> QueryEnv<'a> {
             }
         }
         quarantined.sort_by(|a, b| (&a.rule, &a.concept).cmp(&(&b.rule, &b.concept)));
-
-        if let Some(cache) = cache {
-            let reads = self
-                .reads
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .get(first_read..)
-                .map(<[_]>::to_vec)
-                .unwrap_or_default();
-            cache.record_quarantined(roots, quarantined.clone(), reads);
-        }
         Ok(quarantined)
     }
 
@@ -2047,14 +2129,17 @@ mod rule_tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::Branch;
     use crate::helpers::{Counting, connect, test_repo};
+    use crate::{Branch, Repository, Transaction};
     use dialog_artifacts::Update as _;
+    use dialog_credentials::Credential;
     use dialog_peer::helpers::test_session_with_peer;
+    use dialog_peer::{Peer, Session};
     use dialog_query::concept::descriptor::{ConceptConclusion, ConceptDescriptor};
     use dialog_query::concept::query::ConceptQuery;
     use dialog_query::rule::DeductiveRuleDescriptor;
     use dialog_query::{DeductiveRule, Parameters, Term, the};
+    use dialog_storage::provider::storage::VolatileSpace;
 
     /// Conclusion concept `employee` (one `name` field). Derived — no
     /// `employee` fact is ever written; rows come only from rules.
@@ -2114,6 +2199,47 @@ mod rule_tests {
         let rows: Vec<ConceptConclusion> = branch
             .query()
             .select(query)
+            .perform(operator)
+            .try_vec()
+            .await?;
+        Ok(rows.iter().map(|c| c.entity().clone()).collect())
+    }
+
+    /// Query `employee` through a transaction's view.
+    async fn transaction_employees(
+        tx: &Transaction<&Branch>,
+        operator: &Peer<VolatileSpace, Session>,
+    ) -> anyhow::Result<Vec<Entity>> {
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("name".into(), Term::var("name"));
+        let rows: Vec<ConceptConclusion> = tx
+            .query()
+            .select(ConceptQuery {
+                predicate: employee_descriptor(),
+                terms,
+            })
+            .perform(operator)
+            .try_vec()
+            .await?;
+        Ok(rows.iter().map(|c| c.entity().clone()).collect())
+    }
+
+    /// Query `staff` (one `name` field over `org/staff-name`) and return
+    /// the derived entities.
+    async fn staff(
+        branch: &Branch,
+        operator: &Peer<VolatileSpace, Session>,
+    ) -> anyhow::Result<Vec<Entity>> {
+        let mut terms = Parameters::new();
+        terms.insert("this".into(), Term::var("this"));
+        terms.insert("name".into(), Term::var("name"));
+        let predicate: ConceptDescriptor = serde_json::from_value(serde_json::json!({
+            "with": { "name": { "the": "org/staff-name", "as": "text:" } }
+        }))?;
+        let rows: Vec<ConceptConclusion> = branch
+            .query()
+            .select(ConceptQuery { predicate, terms })
             .perform(operator)
             .try_vec()
             .await?;
@@ -2938,6 +3064,266 @@ mod rule_tests {
             branch.rule_cache().reused() > reused,
             "the second query must be served the rule set the first assembled"
         );
+        Ok(())
+    }
+
+    /// A branch holding `alice` as a person and the committed rule
+    /// deriving employees from persons.
+    async fn branch_with_employee_rule(
+        operator: &Peer<VolatileSpace, Session>,
+        repo: &Repository<Credential>,
+    ) -> anyhow::Result<(Branch, Entity)> {
+        let alice: Entity = "id:alice".parse()?;
+        repo.branch("main")
+            .open()
+            .perform(operator)
+            .await?
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(employee_from_person())
+            .commit()
+            .publish()
+            .perform(operator)
+            .await?;
+        Ok((repo.branch("main").open().perform(operator).await?, alice))
+    }
+
+    /// A session-overlay write that installs no rule leaves every rule
+    /// set standing: the next query is served the set the last one
+    /// assembled instead of rebuilding it.
+    #[dialog_common::test]
+    async fn it_reuses_the_rule_set_across_an_overlay_write_without_rules() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, alice) = branch_with_employee_rule(&operator, &repo).await?;
+
+        assert!(query_employees(&branch, &operator).await?.contains(&alice));
+        let reused = branch.rule_cache().reused();
+
+        branch.overlay().assert(
+            the!("org/person-role")
+                .of(alice.clone())
+                .is("Engineer".to_string()),
+        )?;
+        assert!(query_employees(&branch, &operator).await?.contains(&alice));
+        assert!(
+            branch.rule_cache().reused() > reused,
+            "an overlay write without a rule must not rebuild the rule set"
+        );
+        Ok(())
+    }
+
+    /// A commit that installs no rule leaves every rule set standing,
+    /// though it moves the head and the tree root.
+    #[dialog_common::test]
+    async fn it_reuses_the_rule_set_across_a_commit_without_rules() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, alice) = branch_with_employee_rule(&operator, &repo).await?;
+
+        assert!(query_employees(&branch, &operator).await?.contains(&alice));
+        let reused = branch.rule_cache().reused();
+
+        let bob: Entity = "id:bob".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(bob.clone())
+                    .is("Bob".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let employees = query_employees(&branch, &operator).await?;
+        assert!(employees.contains(&alice) && employees.contains(&bob));
+        assert!(
+            branch.rule_cache().reused() > reused,
+            "a commit without a rule must not rebuild the rule set"
+        );
+        Ok(())
+    }
+
+    /// A commit that installs a rule after commits that installed none
+    /// moves the rules root they carried: the next query sees the new
+    /// rule, though the rule set before it was served across those
+    /// commits.
+    #[dialog_common::test]
+    async fn it_sees_a_rule_committed_after_commits_without_rules() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, alice) = branch_with_employee_rule(&operator, &repo).await?;
+        assert_eq!(
+            query_employees(&branch, &operator).await?,
+            vec![alice.clone()]
+        );
+
+        let carol: Entity = "id:carol".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/contractor-name")
+                    .of(carol.clone())
+                    .is("Carol".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let reused = branch.rule_cache().reused();
+        assert_eq!(
+            query_employees(&branch, &operator).await?,
+            vec![alice.clone()]
+        );
+        assert!(
+            branch.rule_cache().reused() > reused,
+            "the commit without a rule carried the rules root"
+        );
+
+        branch
+            .transaction()
+            .assert(rule_with_person_attr("org/contractor-name"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let employees = query_employees(&branch, &operator).await?;
+        assert!(
+            employees.contains(&alice) && employees.contains(&carol),
+            "the committed rule is seen: {employees:?}"
+        );
+        Ok(())
+    }
+
+    /// A rule installed by a commit that does not classify its batch (a
+    /// raw commit, as a pull or a merge lands one) is seen, though the
+    /// commit before it carried the rules root: the carried root names
+    /// the head it was carried to, and any other head is its own rules
+    /// root.
+    #[dialog_common::test]
+    async fn it_sees_a_rule_a_head_move_it_did_not_classify_installed() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, alice) = branch_with_employee_rule(&operator, &repo).await?;
+        let carol: Entity = "id:carol".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/contractor-name")
+                    .of(carol.clone())
+                    .is("Carol".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            query_employees(&branch, &operator).await?,
+            vec![alice.clone()]
+        );
+
+        let mut changes = dialog_artifacts::Changes::new();
+        rule_with_person_attr("org/contractor-name").assert(&mut changes);
+        branch
+            .commit(stream::iter(changes.into_instructions()))
+            .perform(&operator)
+            .await?;
+        let employees = query_employees(&branch, &operator).await?;
+        assert!(
+            employees.contains(&alice) && employees.contains(&carol),
+            "the rule the raw commit installed is seen: {employees:?}"
+        );
+        Ok(())
+    }
+
+    /// A transaction whose writes install no rule reads through the rule
+    /// set a query of its branch assembled.
+    #[dialog_common::test]
+    async fn it_reuses_the_branch_rule_set_in_a_transaction_without_rules() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let (branch, alice) = branch_with_employee_rule(&operator, &repo).await?;
+
+        assert!(query_employees(&branch, &operator).await?.contains(&alice));
+        let reused = branch.rule_cache().reused();
+
+        let bob: Entity = "id:bob".parse()?;
+        let tx = branch.transaction().assert(
+            the!("org/person-name")
+                .of(bob.clone())
+                .is("Bob".to_string()),
+        );
+        let employees = transaction_employees(&tx, &operator).await?;
+        assert!(employees.contains(&alice) && employees.contains(&bob));
+        assert!(
+            branch.rule_cache().reused() > reused,
+            "a transaction without a rule must not rebuild the rule set"
+        );
+        Ok(())
+    }
+
+    /// A rule arriving in the session overlay for a concept in another
+    /// concept's closure is seen by the next query of the other, though
+    /// that query's rule set was assembled before the rule arrived.
+    #[dialog_common::test]
+    async fn it_sees_an_overlay_rule_in_the_closure_of_a_cached_rule_set() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let alice: Entity = "id:alice".parse()?;
+        repo.branch("main")
+            .open()
+            .perform(&operator)
+            .await?
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .assert(projection("org/employee-name", "org/staff-name", "name"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        assert!(staff(&branch, &operator).await?.is_empty());
+        branch.overlay().assert(employee_from_person())?;
+        assert_eq!(staff(&branch, &operator).await?, vec![alice]);
+        Ok(())
+    }
+
+    /// A rule a transaction stages is read by the transaction's query,
+    /// though a query of its branch assembled the rule set without it.
+    #[dialog_common::test]
+    async fn it_sees_a_staged_rule_after_a_cached_rule_set() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let alice: Entity = "id:alice".parse()?;
+        repo.branch("main")
+            .open()
+            .perform(&operator)
+            .await?
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        assert!(query_employees(&branch, &operator).await?.is_empty());
+        let tx = branch.transaction().assert(employee_from_person());
+        assert_eq!(transaction_employees(&tx, &operator).await?, vec![alice]);
         Ok(())
     }
 
