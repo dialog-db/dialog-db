@@ -1385,7 +1385,9 @@ impl Provider<SelectRules> for QueryEnv<'_> {
             .sources
             .first()
             .map(|source| source.as_ref().rule_cache());
-        if let Some((bundle, reads)) = cache.as_ref().and_then(|cache| cache.bundle(&input, &key)) {
+        if let Some((bundle, demanded)) =
+            cache.as_ref().and_then(|cache| cache.bundle(&input, &key))
+        {
             #[cfg(test)]
             assert_eq!(
                 rule_spellings(&bundle),
@@ -1393,9 +1395,7 @@ impl Provider<SelectRules> for QueryEnv<'_> {
                 "a cached rule set must be the one its layers assemble"
             );
             if let Some(demand) = &self.demand {
-                for (selector, manifest) in &reads {
-                    demand.record_rules(selector, manifest);
-                }
+                demanded.record(demand);
             }
             return Ok(self.continuing(&concept, bundle));
         }
@@ -1569,7 +1569,8 @@ impl<'a> QueryEnv<'a> {
             .sources
             .first()
             .map(|source| source.as_ref().rule_cache());
-        if let Some((quarantined, reads)) = cache.as_ref().and_then(|cache| cache.quarantined(&key))
+        if let Some((quarantined, demanded)) =
+            cache.as_ref().and_then(|cache| cache.quarantined(&key))
         {
             #[cfg(test)]
             assert_eq!(
@@ -1578,9 +1579,7 @@ impl<'a> QueryEnv<'a> {
                 "the rules a cache sets aside must be the ones its layers set aside"
             );
             if let Some(demand) = &self.demand {
-                for (selector, manifest) in &reads {
-                    demand.record_rules(selector, manifest);
-                }
+                demanded.record(demand);
             }
             return Ok(quarantined);
         }

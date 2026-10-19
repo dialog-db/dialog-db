@@ -36,13 +36,17 @@
 //!   bug structurally impossible.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ops::RangeInclusive;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use dialog_artifacts::history::REVISION_ATTRIBUTE;
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Relation, Statement, Update, Value};
+use dialog_artifacts::tree::selector_range;
+use dialog_artifacts::{
+    Artifact, ArtifactSelector, Entity, Key, Relation, Statement, Update, Value,
+};
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
 use dialog_query::error::EvaluationError;
@@ -520,7 +524,7 @@ struct RuleCacheInner {
     bundles: HashMap<Entity, Bundle>,
     /// Every rule the program analysis sets aside over layers holding
     /// these rule facts, with the rule-discovery reads finding them.
-    quarantined: Option<(RuleKey, Vec<Quarantine>, Vec<RuleRead>)>,
+    quarantined: Option<(RuleKey, Vec<Quarantine>, RuleDemand)>,
     /// A tree root and the rules root it carries: the root of the newest
     /// tree before it whose commit changed a rule fact. Recorded by a
     /// commit that changes none, as the head it minted; any other head
@@ -541,14 +545,59 @@ struct Bundle {
     key: RuleKey,
     descriptor: ConceptDescriptor,
     rules: ConceptRules,
-    /// The rule-discovery reads assembling it made, replayed as rule
-    /// demand for a subscription that reuses it.
-    reads: Vec<RuleRead>,
+    /// What the rule-discovery reads assembling it demanded, recorded
+    /// as rule demand for a subscription that reuses it.
+    demand: RuleDemand,
 }
 
 /// One rule-discovery read: the selector and the manifest it was keyed
 /// under.
 pub(crate) type RuleRead = (ArtifactSelector<Constrained>, Manifest);
+
+/// The key ranges an entry's rule-discovery reads demanded, by the format
+/// they were keyed under, each read's range built once when the entry is
+/// recorded and merged with the ranges it overlaps. A subscription served
+/// the entry records these as they are: an entry serves many queries, and
+/// building a range per read for each was most of what serving it cost.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RuleDemand(Arc<[(Manifest, Vec<RangeInclusive<Key>>)]>);
+
+impl RuleDemand {
+    /// The ranges `reads` demand.
+    pub(crate) fn new(reads: Vec<RuleRead>) -> Self {
+        let mut keyed: Vec<(Manifest, Vec<RangeInclusive<Key>>)> = Vec::new();
+        for (selector, manifest) in reads {
+            let range = selector_range(&selector, &manifest);
+            match keyed.iter_mut().find(|(keyed, _)| *keyed == manifest) {
+                Some((_, ranges)) => ranges.push(range),
+                None => keyed.push((manifest, vec![range])),
+            }
+        }
+        for (_, ranges) in &mut keyed {
+            ranges.sort_by(|a, b| a.start().cmp(b.start()));
+            let mut merged: Vec<RangeInclusive<Key>> = Vec::with_capacity(ranges.len());
+            for range in ranges.drain(..) {
+                match merged.last_mut() {
+                    Some(last) if range.start() <= last.end() => {
+                        if range.end() > last.end() {
+                            *last = last.start().clone()..=range.end().clone();
+                        }
+                    }
+                    _ => merged.push(range),
+                }
+            }
+            *ranges = merged;
+        }
+        Self(keyed.into())
+    }
+
+    /// Record these ranges as `demand`'s rule demand.
+    pub(crate) fn record(&self, demand: &crate::Demand) {
+        for (manifest, ranges) in self.0.iter() {
+            demand.record_rule_ranges(manifest, ranges);
+        }
+    }
+}
 
 /// What a selecting rule is a function of: the concept, the attribute
 /// concepts it reads as derived (sorted) and the sole source rule
@@ -626,12 +675,12 @@ impl RuleCache {
     }
 
     /// Every rule set aside over layers holding the rule facts `key`
-    /// names, if recorded for exactly those, with the reads that found
-    /// them.
-    pub(crate) fn quarantined(&self, key: &RuleKey) -> Option<(Vec<Quarantine>, Vec<RuleRead>)> {
+    /// names, if recorded for exactly those, with what the reads that
+    /// found them demanded.
+    pub(crate) fn quarantined(&self, key: &RuleKey) -> Option<(Vec<Quarantine>, RuleDemand)> {
         match &self.inner.read().quarantined {
-            Some((at, quarantined, reads)) if at == key => {
-                Some((quarantined.clone(), reads.clone()))
+            Some((at, quarantined, demand)) if at == key => {
+                Some((quarantined.clone(), demand.clone()))
             }
             _ => None,
         }
@@ -645,7 +694,7 @@ impl RuleCache {
         quarantined: Vec<Quarantine>,
         reads: Vec<RuleRead>,
     ) {
-        self.inner.write().quarantined = Some((key, quarantined, reads));
+        self.inner.write().quarantined = Some((key, quarantined, RuleDemand::new(reads)));
     }
 
     /// The rule set assembled for `descriptor` over layers holding the
@@ -655,13 +704,13 @@ impl RuleCache {
         &self,
         descriptor: &ConceptDescriptor,
         key: &RuleKey,
-    ) -> Option<(ConceptRules, Vec<RuleRead>)> {
+    ) -> Option<(ConceptRules, RuleDemand)> {
         let inner = self.inner.read();
         match inner.bundles.get(&descriptor.this()) {
             Some(bundle) if bundle.key == *key && bundle.descriptor == *descriptor => {
                 #[cfg(test)]
                 self.reused.fetch_add(1, Ordering::Relaxed);
-                Some((bundle.rules.clone(), bundle.reads.clone()))
+                Some((bundle.rules.clone(), bundle.demand.clone()))
             }
             _ => None,
         }
@@ -689,7 +738,7 @@ impl RuleCache {
                 key,
                 descriptor,
                 rules,
-                reads,
+                demand: RuleDemand::new(reads),
             },
         );
     }
