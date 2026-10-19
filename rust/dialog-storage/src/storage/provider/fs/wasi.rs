@@ -78,6 +78,22 @@ pub(super) async fn size(_handle: &FileSystemHandle) -> Result<Option<u64>, File
     Err(unsupported())
 }
 
+pub(super) async fn read_at(
+    _handle: &FileSystemHandle,
+    _offset: u64,
+    _len: usize,
+) -> Result<Vec<u8>, FileSystemError> {
+    Err(unsupported())
+}
+
+pub(super) async fn write_at(
+    _handle: &FileSystemHandle,
+    _offset: u64,
+    _bytes: &[u8],
+) -> Result<(), FileSystemError> {
+    Err(unsupported())
+}
+
 pub(super) async fn exists(_handle: &FileSystemHandle) -> bool {
     false
 }

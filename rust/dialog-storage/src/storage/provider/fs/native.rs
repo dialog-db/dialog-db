@@ -405,6 +405,51 @@ pub(super) async fn size(handle: &FileSystemHandle) -> Result<Option<u64>, FileS
     }
 }
 
+pub(super) async fn read_at(
+    handle: &FileSystemHandle,
+    offset: u64,
+    len: usize,
+) -> Result<Vec<u8>, FileSystemError> {
+    let path: PathBuf = handle.try_into()?;
+    let io = |e: io::Error| FileSystemError::Io(e.to_string());
+    let mut file = match fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(FileSystemError::NotFound(path.display().to_string()));
+        }
+        Err(e) => return Err(io(e)),
+    };
+    file.seek(SeekFrom::Start(offset)).await.map_err(io)?;
+    let mut bytes = Vec::with_capacity(len);
+    file.take(len as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(io)?;
+    Ok(bytes)
+}
+
+pub(super) async fn write_at(
+    handle: &FileSystemHandle,
+    offset: u64,
+    bytes: &[u8],
+) -> Result<(), FileSystemError> {
+    let path: PathBuf = handle.try_into()?;
+    let io = |e: io::Error| FileSystemError::Io(e.to_string());
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).await.map_err(io)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .await
+        .map_err(io)?;
+    file.seek(SeekFrom::Start(offset)).await.map_err(io)?;
+    file.write_all(bytes).await.map_err(io)?;
+    file.flush().await.map_err(io)
+}
+
 pub(super) async fn exists(handle: &FileSystemHandle) -> bool {
     let Ok(path) = PathBuf::try_from(handle) else {
         return false;

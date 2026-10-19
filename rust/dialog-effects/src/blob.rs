@@ -12,16 +12,30 @@
 //! Subject
 //!   └── Archive (/archive)
 //!         └── Blob (/archive/blob)
-//!               ├── Write                          → BlobWriter  (ingest; finish → hash)
-//!               ├── Import { digest, size, chunks } → BlobWriter
-//!               ├── Read { digest, range }          → BlobReader
-//!               └── Size { digest }                 → Option<u64>
+//!               ├── Write                             → BlobWriter  (ingest; finish → hash)
+//!               ├── Import { digest, size, chunks }    → BlobWriter
+//!               ├── ImportRange { digest, size, range } → BlobWriter  (verified groups)
+//!               ├── Read { digest, range }             → BlobReader
+//!               ├── Size { digest }                    → Option<u64>
+//!               └── Held { digest }                    → Option<Holding>
 //! ```
 //!
 //! Bytes never travel inside an effect: the signed capability carries only
 //! hash-addressed metadata (`digest`, `range`, `size`, per-part `chunks`), and
 //! a blob effect's *output* is a streaming transfer handle that the caller
 //! reads from ([`BlobReader`]) or writes into ([`BlobWriter`]).
+//!
+//! # Partial blobs
+//!
+//! The hash of a blob is the root of its Bao tree, a tree of BLAKE3 hashes
+//! over groups of 16 KiB of the blob. A range of the blob that comes with the
+//! hashes on the path from the root to each of its groups can be verified
+//! alone, group by group. So a store can hold a blob in part: some of its
+//! groups, and the hashes that verified them. [`ImportRange`] keeps each
+//! group of such a range that verifies, and [`Held`] says which groups a store
+//! holds. A store answers [`Size`] only for a blob that it holds whole, and a
+//! [`Read`] of a blob that it holds in part ends where the held part of the
+//! range ends.
 
 use crate::archive::Archive;
 use crate::method;
@@ -169,6 +183,103 @@ impl Policy for Size {
 
 impl Effect for Size {
     type Output = Result<Option<u64>, BlobError>;
+}
+
+/// Which bytes of a blob a store holds: the groups of a blob that it holds in
+/// part, or all of a blob that it holds whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Holding {
+    /// The size of the blob.
+    pub size: u64,
+    /// The ranges of bytes that the store holds, in order, each from the
+    /// start of a group to the end of a group or of the blob, with no two
+    /// that touch.
+    pub ranges: Vec<(u64, u64)>,
+}
+
+impl Holding {
+    /// Whether the store holds each byte of the blob.
+    pub fn is_complete(&self) -> bool {
+        self.ranges.as_slice() == [(0, self.size)] || self.size == 0
+    }
+
+    /// Where the held part of the range from `offset` ends: `offset` itself
+    /// when the store does not hold the byte at `offset`.
+    pub fn held_from(&self, offset: u64) -> u64 {
+        self.ranges
+            .iter()
+            .find(|(start, end)| *start <= offset && offset < *end)
+            .map_or(offset, |(_, end)| *end)
+    }
+}
+
+/// Which bytes of the blob `digest` the store holds, without reading them:
+/// `None` when it holds none of them.
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
+pub struct Held {
+    /// The blob's content hash.
+    #[serde(with = "dialog_common::as_bytes")]
+    pub digest: Blake3Hash,
+}
+
+impl Held {
+    /// The held bytes of the blob `digest`.
+    pub fn new(digest: impl Into<Blake3Hash>) -> Self {
+        Self {
+            digest: digest.into(),
+        }
+    }
+}
+
+impl Policy for Held {
+    type Of = Blob<method::Get>;
+}
+
+impl Effect for Held {
+    type Output = Result<Option<Holding>, BlobError>;
+}
+
+/// Import a verified range of a blob whose hash and size are **already
+/// known**, into the blob store, as a part of the blob.
+///
+/// The sink takes the Bao encoding of the groups of `range`, in the order of
+/// the encoding: each group, after the hashes of the tree that verify it
+/// against `digest`, with groups of 16 KiB, as `bao-tree` encodes a range.
+/// The store keeps each group that verifies, and the hashes that verified it,
+/// as it arrives. A group that does not verify fails the write, and the store
+/// keeps nothing of it; the groups before it stay.
+/// [`finish`](BlobSink::finish) records what the store keeps, and gives the
+/// digest. Once the store holds each group of the blob, it holds the blob
+/// whole.
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
+pub struct ImportRange {
+    /// The blob's content hash: the root of its Bao tree.
+    #[serde(with = "dialog_common::as_bytes")]
+    pub digest: Blake3Hash,
+    /// The size of the blob, which shapes its tree.
+    pub size: u64,
+    /// The range of the encoding, from the start of a group to the end of a
+    /// group or of the blob.
+    pub range: ByteRange,
+}
+
+impl ImportRange {
+    /// Import the groups of `range` of the blob `digest` of `size` bytes.
+    pub fn new(digest: impl Into<Blake3Hash>, size: u64, range: ByteRange) -> Self {
+        Self {
+            digest: digest.into(),
+            size,
+            range,
+        }
+    }
+}
+
+impl Policy for ImportRange {
+    type Of = Blob<method::Put>;
+}
+
+impl Effect for ImportRange {
+    type Output = Result<BlobWriter, BlobError>;
 }
 
 /// Ingest a blob whose hash is **discovered** during the write. Carries no
