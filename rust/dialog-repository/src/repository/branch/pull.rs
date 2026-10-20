@@ -1211,7 +1211,7 @@ async fn rival_merges(
         )
         .revision_record(&version)
         .await?;
-        if !record.is_some_and(|record| record.parents.len() > 1) {
+        if record.is_none_or(|record| record.parents.len() <= 1) {
             return Ok(false);
         }
     }
