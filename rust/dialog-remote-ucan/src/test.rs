@@ -20,7 +20,7 @@ use dialog_effects::archive::prelude::*;
 use dialog_effects::blob::BlobError;
 use dialog_effects::blob::prelude::*;
 use dialog_effects::memory::prelude::CellScope;
-use dialog_effects::memory::{MemoryError, Version};
+use dialog_effects::memory::{Current, Edition, MemoryError, Publish, Resolve, Version, Watch};
 use dialog_ucan::Scope;
 use dialog_ucan_core::{Container, Tag};
 use dialog_varsig::Principal as _;
@@ -453,11 +453,631 @@ async fn it_labels_the_request_with_the_command_and_the_subject() {
     );
 }
 
+/// A watch over the service's socket answers what the cell holds when it
+/// begins, then each change: here, a publish made over HTTP.
+#[dialog_common::test]
+async fn it_watches_a_cell_over_the_socket(service: UcanServiceAddress) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let cell = CellScope::new(subject, "local", "head");
+    let watch = cell.watch();
+    let authorization = issued(&signer, &watch).await;
+    let address = UcanAddress::new(&service.endpoint).with_socket(&service.socket);
+    let mut editions = Provider::<ForkInvocation<UcanSite, Watch>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(watch, address, authorization),
+    )
+    .await?;
+    assert_eq!(editions.next().await?, Some(None), "the cell begins empty");
+
+    let version = perform(&service, &signer, cell.publish(b"first".to_vec(), None)).await?;
+    assert_eq!(
+        editions.next().await?,
+        Some(Some(Edition {
+            content: b"first".to_vec(),
+            version: version.clone(),
+        })),
+        "the publish reaches the watch"
+    );
+
+    perform(
+        &service,
+        &signer,
+        cell.publish(b"second".to_vec(), Some(version)),
+    )
+    .await?;
+    let next = editions.next().await?;
+    assert_eq!(
+        next.and_then(|state| state).map(|edition| edition.content),
+        Some(b"second".to_vec()),
+        "and so does the next"
+    );
+    Ok(())
+}
+
+/// A watch nobody reads holds where its cell stands, not every state the
+/// cell passed through. `Branch::replicate` pauses while its stream is not
+/// read, which a host does on purpose (a hidden tab), and the watch's
+/// replies queue meanwhile: queued without bound, a busy cell grows the
+/// queue by a state per change for as long as the pause lasts.
+/// `EditionSource` lets a watch skip states for exactly this.
+#[dialog_common::test]
+async fn it_holds_only_the_newest_state_for_a_watch_nobody_reads(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    use std::time::Duration;
+
+    let (signer, subject) = owner().await;
+    let cell = CellScope::new(subject, "local", "head");
+    let watch = cell.watch();
+    let authorization = issued(&signer, &watch).await;
+    let address = UcanAddress::new(&service.endpoint).with_socket(&service.socket);
+    let mut editions = Provider::<ForkInvocation<UcanSite, Watch>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(watch, address, authorization),
+    )
+    .await?;
+    assert_eq!(editions.next().await?, Some(None), "the cell begins empty");
+
+    // Fewer changes than the loopback service's own buffer, so it delivers
+    // every one of them.
+    let changes = 50;
+    let mut version = None;
+    for change in 0..changes {
+        let content = change.to_string().into_bytes();
+        version = Some(perform(&service, &signer, cell.publish(content, version)).await?);
+    }
+    // Long enough for the service to have delivered every change.
+    dialog_common::time::sleep(Duration::from_millis(500)).await;
+
+    let newest = (changes - 1).to_string().into_bytes();
+    let mut reads = 0;
+    loop {
+        reads += 1;
+        let state = editions.next().await?;
+        if state.flatten().map(|edition| edition.content) == Some(newest.clone()) {
+            break;
+        }
+    }
+    assert!(
+        reads <= 2,
+        "a watch read after {changes} changes should reach the newest state at once; it took {reads} reads"
+    );
+    Ok(())
+}
+
+/// Where the address names a socket, a cell's invocations go over it: the
+/// endpoint here answers nothing, so a publish and a resolve that succeed
+/// went over the socket.
+#[dialog_common::test]
+async fn it_reads_and_writes_a_cell_over_the_socket(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let cell = CellScope::new(subject, "local", "head");
+    let address = UcanAddress::new("http://127.0.0.1:1/").with_socket(&service.socket);
+
+    let publish = cell.publish(b"framed".to_vec(), None);
+    let authorization = issued(&signer, &publish).await;
+    let version = Provider::<ForkInvocation<UcanSite, Publish>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(publish, address.clone(), authorization),
+    )
+    .await?;
+
+    let resolve = cell.resolve();
+    let authorization = issued(&signer, &resolve).await;
+    let resolved = Provider::<ForkInvocation<UcanSite, Resolve>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(resolve, address, authorization),
+    )
+    .await?;
+    assert_eq!(
+        resolved,
+        Some(Edition {
+            content: b"framed".to_vec(),
+            version,
+        })
+    );
+    Ok(())
+}
+
+/// A socket that cannot be reached is passed over: the cell's invocation
+/// goes to the endpoint as a request.
+#[dialog_common::test]
+async fn it_passes_over_a_socket_it_cannot_reach(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let cell = CellScope::new(subject, "local", "head");
+    let address = UcanAddress::new(&service.endpoint).with_socket("ws://127.0.0.1:1/");
+    let publish = cell.publish(b"requested".to_vec(), None);
+    let authorization = issued(&signer, &publish).await;
+    Provider::<ForkInvocation<UcanSite, Publish>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(publish, address, authorization),
+    )
+    .await?;
+    Ok(())
+}
+
+/// A liveness short enough for a test to outlast its deadline.
+fn quick() -> crate::socket::Liveness {
+    crate::socket::Liveness {
+        heartbeat: std::time::Duration::from_millis(100),
+        deadline: std::time::Duration::from_millis(400),
+        answer: std::time::Duration::from_secs(5),
+        idle: std::time::Duration::from_secs(5),
+    }
+}
+
+/// A quiet connection to a service that answers its pings is kept: a
+/// watch over it still delivers a change made long after the deadline a
+/// connection that heard nothing would be given up by. The heartbeat must
+/// tell a cell that does not change from a connection that is gone.
+#[dialog_common::test]
+async fn it_keeps_a_quiet_connection_whose_service_answers_pings(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let cell = CellScope::new(subject, "local", "head");
+    let watch = cell.watch();
+    let authorization = issued(&signer, &watch).await;
+    let address = UcanAddress::new(&service.endpoint).with_socket(&service.socket);
+    let site = UcanSite::with_liveness(quick());
+    let mut editions = Provider::<ForkInvocation<UcanSite, Watch>>::execute(
+        &site,
+        ForkInvocation::new(watch, address, authorization),
+    )
+    .await?;
+    assert_eq!(editions.next().await?, Some(None), "the cell begins empty");
+
+    // Several deadlines pass with nothing to deliver.
+    dialog_common::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    let version = perform(&service, &signer, cell.publish(b"late".to_vec(), None)).await?;
+    assert_eq!(
+        editions.next().await?,
+        Some(Some(Edition {
+            content: b"late".to_vec(),
+            version,
+        })),
+        "the watch outlived the quiet"
+    );
+    Ok(())
+}
+
+/// A watch whose connection goes silent ends once the connection is given
+/// up on, rather than waiting for ever on a connection that is gone, so
+/// whoever watches can begin it again.
+#[dialog_common::test(
+    fault = crate::helpers::Fault::Freeze {
+        after: std::time::Duration::from_millis(200),
+        times: 1,
+    }
+)]
+async fn it_ends_a_watch_once_its_connection_went_silent(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let watch = CellScope::new(subject, "local", "head").watch();
+    let authorization = issued(&signer, &watch).await;
+    let address = UcanAddress::new(&service.endpoint).with_socket(&service.socket);
+    let site = UcanSite::with_liveness(quick());
+    let mut editions = Provider::<ForkInvocation<UcanSite, Watch>>::execute(
+        &site,
+        ForkInvocation::new(watch, address, authorization),
+    )
+    .await?;
+    assert_eq!(editions.next().await?, Some(None), "the watch began");
+
+    let ended = editions.next().await;
+    assert!(
+        matches!(ended, Ok(None) | Err(_)),
+        "the watch ends once its connection is given up on; got {ended:?}"
+    );
+    Ok(())
+}
+
+/// A resolve sent over a connection that went silent is answered as
+/// unavailable once the connection is given up on: a read may be tried
+/// again, and nothing was changed.
+#[dialog_common::test(
+    fault = crate::helpers::Fault::Freeze {
+        after: std::time::Duration::ZERO,
+        times: 1,
+    }
+)]
+async fn it_answers_a_read_over_a_silent_connection_as_unavailable(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let resolve = CellScope::new(subject, "local", "head").resolve();
+    let authorization = issued(&signer, &resolve).await;
+    let address = UcanAddress::new(&service.endpoint).with_socket(&service.socket);
+    let resolved = Provider::<ForkInvocation<UcanSite, Resolve>>::execute(
+        &UcanSite::with_liveness(quick()),
+        ForkInvocation::new(resolve, address, authorization),
+    )
+    .await;
+    assert!(
+        matches!(
+            resolved,
+            Err(MemoryError::Rejected(
+                dialog_effects::Rejection::Unavailable { .. }
+            ))
+        ),
+        "{resolved:?}"
+    );
+    Ok(())
+}
+
+/// A publish the service carried out, but whose answer was lost with its
+/// connection, is answered as unavailable: the caller may send it again,
+/// with an invocation of its own, and the publish sent again finds its own
+/// write and is answered as done, at the version it left.
+#[dialog_common::test(fault = crate::helpers::Fault::LosePublish { times: 1 })]
+async fn it_answers_a_lost_publish_as_retryable_and_the_retry_finds_it(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let cell = CellScope::new(subject, "local", "head");
+    let address = UcanAddress::new(&service.endpoint).with_socket(&service.socket);
+    let published = perform_at(
+        address.clone(),
+        &signer,
+        cell.publish(b"landed".to_vec(), None),
+    )
+    .await;
+    assert!(
+        matches!(
+            published,
+            Err(MemoryError::Rejected(
+                dialog_effects::Rejection::Unavailable { .. }
+            ))
+        ),
+        "{published:?}"
+    );
+
+    let landed = perform(&service, &signer, cell.resolve())
+        .await?
+        .expect("the publish landed");
+    assert_eq!(landed.content, b"landed".to_vec());
+    let again = perform_at(address, &signer, cell.publish(b"landed".to_vec(), None)).await?;
+    assert_eq!(
+        again, landed.version,
+        "the retry is done, at the same version"
+    );
+    Ok(())
+}
+
+/// `capability`, invoked by `signer` at `address`.
+async fn perform_at<Fx>(
+    address: UcanAddress,
+    signer: &Ed25519Signer,
+    capability: Capability<Fx>,
+) -> Fx::Output
+where
+    Fx: Effect + Clone,
+    Capability<Fx>: Ability,
+    UcanSite: Provider<ForkInvocation<UcanSite, Fx>>,
+{
+    let authorization = issued(signer, &capability).await;
+    UcanSite::default()
+        .execute(ForkInvocation::new(capability, address, authorization))
+        .await
+}
+
+/// The service's endpoint, and the same endpoint with its socket: what a
+/// cell's invocations are carried over either way.
+fn transports(service: &UcanServiceAddress) -> [(&'static str, UcanAddress); 2] {
+    [
+        ("a request", UcanAddress::new(&service.endpoint)),
+        (
+            "the socket",
+            UcanAddress::new(&service.endpoint).with_socket(&service.socket),
+        ),
+    ]
+}
+
+/// A publish of what the cell already holds, at a version the cell is no
+/// longer at, is done: the cell is where the writer wanted it, so it is
+/// answered with the version the cell is at, and nothing is written.
+#[dialog_common::test]
+async fn it_publishes_what_a_cell_holds_as_done(service: UcanServiceAddress) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    for (carried, address) in transports(&service) {
+        let cell = CellScope::new(subject.clone(), "local", carried);
+        let first = perform_at(
+            address.clone(),
+            &signer,
+            cell.publish(b"head".to_vec(), None),
+        )
+        .await?;
+        let again = perform_at(address, &signer, cell.publish(b"head".to_vec(), None)).await?;
+        assert_eq!(again, first, "over {carried}, the same head is done");
+        let held = perform(&service, &signer, cell.resolve()).await?;
+        assert_eq!(
+            held,
+            Some(Edition {
+                content: b"head".to_vec(),
+                version: first
+            }),
+            "over {carried}, nothing was written"
+        );
+    }
+    Ok(())
+}
+
+/// A publish at a version the cell is no longer at, of content other than
+/// what it holds, is refused as a conflict that says what the cell holds:
+/// the writer rebases onto it without a read of its own. The cell keeps
+/// what it held.
+#[dialog_common::test]
+async fn it_answers_a_conflict_with_what_the_cell_holds(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    for (carried, address) in transports(&service) {
+        let cell = CellScope::new(subject.clone(), "local", carried);
+        let version = perform_at(
+            address.clone(),
+            &signer,
+            cell.publish(b"theirs".to_vec(), None),
+        )
+        .await?;
+        let conflict = perform_at(address, &signer, cell.publish(b"ours".to_vec(), None)).await;
+        let Err(MemoryError::VersionMismatch { current, .. }) = conflict else {
+            panic!("over {carried}, expected a conflict, got {conflict:?}");
+        };
+        let held = Edition {
+            content: b"theirs".to_vec(),
+            version: version.clone(),
+        };
+        assert_eq!(current, Current::Holds(held.clone()), "over {carried}");
+        assert_eq!(
+            perform(&service, &signer, cell.resolve()).await?,
+            Some(held),
+            "over {carried}, the conflict wrote nothing"
+        );
+    }
+    Ok(())
+}
+
+/// A retract of a cell already empty is done: it is where the retract
+/// would leave it.
+#[dialog_common::test]
+async fn it_retracts_an_empty_cell_as_done(service: UcanServiceAddress) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    for (carried, address) in transports(&service) {
+        let cell = CellScope::new(subject.clone(), "local", carried);
+        let version = perform_at(
+            address.clone(),
+            &signer,
+            cell.publish(b"gone".to_vec(), None),
+        )
+        .await?;
+        perform_at(address.clone(), &signer, cell.retract(version.clone())).await?;
+        perform_at(address, &signer, cell.retract(version)).await?;
+        assert_eq!(
+            perform(&service, &signer, cell.resolve()).await?,
+            None,
+            "over {carried}"
+        );
+    }
+    Ok(())
+}
+
+/// A write without authority over the cell is refused for its authority,
+/// and learns nothing of what the cell holds: what a conflict says is
+/// told only to a writer whose invocation verified. Nothing is written.
+#[dialog_common::test]
+async fn it_tells_a_writer_without_authority_nothing_of_the_cell(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let (outsider, _) = owner().await;
+    for (carried, address) in transports(&service) {
+        let cell = CellScope::new(subject.clone(), "local", carried);
+        let version = perform_at(
+            address.clone(),
+            &signer,
+            cell.publish(b"held".to_vec(), None),
+        )
+        .await?;
+        let refused = perform_at(address, &outsider, cell.publish(b"theirs".to_vec(), None)).await;
+        assert!(
+            matches!(refused, Err(MemoryError::Authorization(_))),
+            "over {carried}, the write is refused for its authority: {refused:?}"
+        );
+        assert_eq!(
+            perform(&service, &signer, cell.resolve()).await?,
+            Some(Edition {
+                content: b"held".to_vec(),
+                version
+            }),
+            "over {carried}, nothing was written"
+        );
+    }
+    Ok(())
+}
+
+/// A watch the service refuses is refused when it is begun, not as the
+/// first thing it delivers, so whoever begins it can tell a watch that
+/// runs from one that never will. Here the watch does not say when it was
+/// issued, which a watch over a socket must.
+#[dialog_common::test]
+async fn it_refuses_a_watch_when_it_is_begun(service: UcanServiceAddress) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let watch = CellScope::new(subject, "local", "head").watch();
+    let minted = issued(&signer, &watch).await;
+    let undated = undated(&signer, &watch, &minted).await;
+    let address = UcanAddress::new(&service.endpoint).with_socket(&service.socket);
+    let begun = Provider::<ForkInvocation<UcanSite, Watch>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(watch, address, undated),
+    )
+    .await;
+    assert!(
+        matches!(
+            begun,
+            Err(MemoryError::Authorization(AuthorizeError::Stale {
+                issued_at: None,
+                ..
+            }))
+        ),
+        "{:?}",
+        begun.err()
+    );
+    Ok(())
+}
+
+/// The authorization `minted` carries, minted again by `signer` on its
+/// own authority without saying when it was issued.
+async fn undated<Fx>(
+    signer: &Ed25519Signer,
+    capability: &Capability<Fx>,
+    minted: &UcanAuthorization,
+) -> UcanAuthorization
+where
+    Fx: Effect + Clone,
+    Capability<Fx>: Ability,
+{
+    use dialog_ucan_core::{InvocationBuilder, InvocationChain};
+    let command = capability
+        .ability()
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(String::from)
+        .collect();
+    let invocation = InvocationBuilder::new()
+        .issuer(Signer::from(signer.clone()))
+        .audience(signer)
+        .subject(signer)
+        .command(command)
+        .arguments(minted.invocation().chain().arguments().clone())
+        .proofs(Vec::new())
+        .try_build()
+        .await
+        .expect("the invocation mints");
+    let chain = InvocationChain::new(invocation, Default::default());
+    UcanAuthorization::from(dialog_ucan::UcanInvocation {
+        chain: Box::new(chain),
+        subject: signer.did(),
+        ability: capability.ability(),
+    })
+}
+
+/// A service that names no socket cannot follow a cell: the watch is
+/// refused as unsupported, so the cell is resolved again instead.
+#[dialog_common::test]
+async fn it_refuses_a_watch_where_the_service_names_no_socket(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let watch = CellScope::new(subject, "local", "head").watch();
+    let authorization = issued(&signer, &watch).await;
+    let watched = Provider::<ForkInvocation<UcanSite, Watch>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(watch, UcanAddress::new(&service.endpoint), authorization),
+    )
+    .await;
+    assert!(
+        matches!(
+            watched,
+            Err(MemoryError::Rejected(
+                dialog_effects::Rejection::Unsupported { .. }
+            ))
+        ),
+        "{:?}",
+        watched.err()
+    );
+    Ok(())
+}
+
+/// A resolve whose socket closes after the frame was sent is answered as
+/// unavailable, as a resolve whose request failed on the wire is: a read
+/// that may have reached the service changes nothing there, so it may be
+/// tried at the peer's next address. Answered as unclassified, the
+/// connection's failover (`Resend` for `memory::Resolve`, which resends
+/// on `Rejection::Unavailable`) never tries the next address.
+///
+/// Native only, for the service it stands up; the browser's link answers
+/// a socket that closes in flight the same way, through the same
+/// `exchange`, which
+/// `it_answers_a_read_over_a_silent_connection_as_unavailable` pins on
+/// both targets.
+#[cfg(not(target_arch = "wasm32"))]
+// The handshake callback's error type is tungstenite's, not ours.
+#[allow(clippy::result_large_err)]
+#[dialog_common::test]
+async fn it_answers_a_resolve_lost_on_the_socket_as_unavailable() -> anyhow::Result<()> {
+    use futures_util::StreamExt as _;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+    use tokio_tungstenite::tungstenite::http::HeaderValue;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let socket = format!("ws://{}/", listener.local_addr()?);
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let speaks = |_: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
+            response.headers_mut().insert(
+                "Sec-WebSocket-Protocol",
+                HeaderValue::from_static(crate::socket::SUBPROTOCOL),
+            );
+            Ok(response)
+        };
+        let Ok(mut socket) = tokio_tungstenite::accept_hdr_async(stream, speaks).await else {
+            return;
+        };
+        // Take the frame, then go away without answering it.
+        while let Some(Ok(message)) = socket.next().await {
+            if let Message::Binary(_) = message {
+                break;
+            }
+        }
+    });
+
+    let (signer, subject) = owner().await;
+    let resolve = CellScope::new(subject, "local", "head").resolve();
+    let authorization = issued(&signer, &resolve).await;
+    let address = UcanAddress::new("http://127.0.0.1:1/").with_socket(&socket);
+    let resolved = Provider::<ForkInvocation<UcanSite, Resolve>>::execute(
+        &UcanSite::default(),
+        ForkInvocation::new(resolve, address, authorization),
+    )
+    .await;
+    assert!(
+        matches!(
+            resolved,
+            Err(MemoryError::Rejected(
+                dialog_effects::Rejection::Unavailable { .. }
+            ))
+        ),
+        "a read lost in flight may be tried elsewhere; got {resolved:?}"
+    );
+    Ok(())
+}
+
 /// The layer itself, driven directly: what it does with a request that
 /// carries no invocation, a credential it cannot read, an operation it
 /// does not perform, and a body that is not what the invocation bound.
 mod layer {
     use super::*;
+    use crate::socket::{Change, Reply, Request as Frame, Session};
+    use crate::{FRESHNESS, Issuance};
+    use dialog_effects::memory::Edition;
+    use dialog_ucan_core::promise::Promised;
+    use dialog_ucan_core::subject::Subject as DelegatedSubject;
+    use dialog_ucan_core::time::timestamp::{Duration, Timestamp, UNIX_EPOCH};
+    use dialog_ucan_core::{
+        DelegationBuilder, InvocationBuilder, InvocationChain, RevocationChecker, RevocationMatch,
+        RevocationSelector,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     async fn credential_for<Fx>(signer: &Ed25519Signer, capability: &Capability<Fx>) -> String
     where
@@ -519,15 +1139,18 @@ mod layer {
             .put(Buffer::from(content.clone()));
         let authorization = issued(&signer, &put).await;
         let container = Container::from(authorization.invocation().chain());
-        let access = Access::new(MemoryStore::default());
+        // One invocation, read in each form by a service of its own: a
+        // service that saw it once would refuse it as presented again.
+        let store = MemoryStore::default();
         for tag in [Tag::Base64Url, Tag::Base64UrlGzip] {
+            let access = Access::new(store.clone());
             let text = String::from_utf8(container.clone().encode(tag).unwrap()).unwrap();
             let value = format!("UCAN {text}");
             let request = Request::new(Some(&value)).payload(content.clone());
             let (status, _) = performed(access.handle(request).await).await;
             assert_eq!(status, 200, "{tag:?}");
         }
-        assert_eq!(access.provider().blocks(), 1);
+        assert_eq!(store.blocks(), 1);
     }
 
     #[dialog_common::test]
@@ -682,5 +1305,689 @@ mod layer {
         async fn next(&mut self) -> Result<Option<Vec<u8>>, BlobError> {
             Ok(self.pieces.pop_front())
         }
+    }
+
+    /// The credential for `capability`, minted by `signer` on its own
+    /// authority, saying it was issued at `issued_at` (Unix seconds), or not
+    /// saying when.
+    async fn issued_at<Fx>(
+        signer: &Ed25519Signer,
+        capability: &Capability<Fx>,
+        issued_at: Option<u64>,
+    ) -> String
+    where
+        Fx: Effect + Clone,
+        Capability<Fx>: Ability,
+    {
+        let minted = issued(signer, capability).await;
+        let arguments = minted.invocation().chain().arguments().clone();
+        let command = capability
+            .ability()
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(String::from)
+            .collect();
+        let builder = InvocationBuilder::new()
+            .issuer(Signer::from(signer.clone()))
+            .audience(signer)
+            .subject(signer)
+            .command(command)
+            .arguments(arguments)
+            .proofs(Vec::new());
+        let builder = match issued_at {
+            Some(at) => builder
+                .issued_at(Timestamp::new(UNIX_EPOCH + Duration::from_secs(at)).expect("in range")),
+            None => builder,
+        };
+        let invocation = builder.try_build().await.expect("the invocation mints");
+        let chain = InvocationChain::new(invocation, Default::default());
+        credential(Container::from(&chain)).expect("encodes")
+    }
+
+    fn refused(answer: Answer) -> AuthorizeError {
+        match answer {
+            Answer::Refused(refusal) => {
+                assert_eq!(refusal.status(), 401, "a fresh invocation would do");
+                refusal.reason().clone()
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// Every invocation the client mints says when it was issued.
+    #[dialog_common::test]
+    async fn it_mints_invocations_that_say_when_they_were_issued() {
+        let (signer, subject) = owner().await;
+        let resolve = CellScope::new(subject, "local", "head").resolve();
+        let minted = issued(&signer, &resolve).await;
+        let issued = minted
+            .invocation()
+            .chain()
+            .invocation
+            .issued_at()
+            .map(|at| at.to_unix());
+        let at = now_s();
+        assert!(
+            issued.is_some_and(|issued| issued + 5 >= at && issued <= at),
+            "issued at {issued:?}, checked at {at}"
+        );
+    }
+
+    /// An invocation presented a second time is refused, whatever it
+    /// would do, and does not do it again.
+    #[dialog_common::test]
+    async fn it_refuses_an_invocation_presented_twice() {
+        let (signer, subject) = owner().await;
+        let content = b"first".to_vec();
+        let publish =
+            CellScope::new(subject.clone(), "local", "head").publish(content.clone(), None);
+        let access = Access::new(MemoryStore::default());
+        let value = credential_for(&signer, &publish).await;
+
+        let request = Request::new(Some(&value)).payload(content.clone());
+        let (status, _) = performed(access.handle(request).await).await;
+        assert_eq!(status, 200);
+        let version = access
+            .provider()
+            .cell(&subject, "local", "head")
+            .map(|edition| edition.version);
+
+        let request = Request::new(Some(&value)).payload(content);
+        let reason = refused(access.handle(request).await);
+        assert!(
+            matches!(reason, AuthorizeError::Replayed { .. }),
+            "{reason:?}"
+        );
+        assert_eq!(
+            access
+                .provider()
+                .cell(&subject, "local", "head")
+                .map(|edition| edition.version),
+            version,
+            "the replay wrote nothing"
+        );
+    }
+
+    /// An invocation issued longer ago than the freshness window is
+    /// refused as stale, and what it would write is not written.
+    #[dialog_common::test]
+    async fn it_refuses_an_invocation_issued_too_long_ago() {
+        let (signer, subject) = owner().await;
+        let content = b"late".to_vec();
+        let publish =
+            CellScope::new(subject.clone(), "local", "head").publish(content.clone(), None);
+        let access = Access::new(MemoryStore::default());
+        let long_ago = now_s() - FRESHNESS.as_secs() - 60;
+        let value = issued_at(&signer, &publish, Some(long_ago)).await;
+
+        let request = Request::new(Some(&value)).payload(content);
+        let reason = refused(access.handle(request).await);
+        assert!(
+            matches!(
+                reason,
+                AuthorizeError::Stale {
+                    issued_at: Some(_),
+                    ..
+                }
+            ),
+            "{reason:?}"
+        );
+        assert!(
+            access.provider().cell(&subject, "local", "head").is_none(),
+            "the stale invocation wrote nothing"
+        );
+    }
+
+    /// An invocation that does not say when it was issued is served where
+    /// saying is optional, as over HTTP, and refused where it is required.
+    #[dialog_common::test]
+    async fn it_requires_an_issue_time_only_where_asked() {
+        let (signer, subject) = owner().await;
+        let resolve = CellScope::new(subject, "local", "head").resolve();
+        let access = Access::new(MemoryStore::default());
+
+        let value = issued_at(&signer, &resolve, None).await;
+        let (status, _) = performed(access.handle(Request::new(Some(&value))).await).await;
+        assert_eq!(status, 404, "served: the cell is empty");
+
+        let value = issued_at(&signer, &resolve, None).await;
+        let container = crate::direct::credential_container(&value).expect("reads");
+        let refused = access.admit(container, Issuance::Required).await;
+        assert!(
+            matches!(
+                refused.as_ref().map_err(|refusal| refusal.reason()),
+                Err(AuthorizeError::Stale {
+                    issued_at: None,
+                    ..
+                })
+            ),
+            "{:?}",
+            refused.err()
+        );
+    }
+
+    /// Answers a revocation of `delegation` (its content identifier), by
+    /// `principal`, once `revoked` is set.
+    #[derive(Clone)]
+    struct Revocable {
+        delegation: String,
+        principal: dialog_capability::Did,
+        revoked: Arc<AtomicBool>,
+    }
+
+    impl RevocationChecker for Revocable {
+        type Error = std::convert::Infallible;
+
+        async fn query(
+            &self,
+            selector: RevocationSelector<'_>,
+        ) -> Result<Option<RevocationMatch>, Self::Error> {
+            let revoked = self.revoked.load(Ordering::SeqCst)
+                && selector.delegation.to_string() == self.delegation
+                && selector.by.contains(&self.principal);
+            Ok(revoked.then(|| RevocationMatch {
+                revocation: selector.delegation,
+                principal: self.principal.clone(),
+                // The checker knows the delegation is revoked but keeps no
+                // signed document of it.
+                proof: None,
+            }))
+        }
+    }
+
+    /// A watch of the cell `head` in `local`, made by an operator the
+    /// subject delegated reading its cells to: the delegation's content
+    /// identifier, the subject, and the watch.
+    async fn delegated_watch() -> (String, Ed25519Signer, Container) {
+        let subject = Ed25519Signer::generate().await.expect("a subject");
+        let operator = Ed25519Signer::generate().await.expect("an operator");
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&operator.did())
+            .subject(DelegatedSubject::Specific(subject.did()))
+            .command(["use", "get", "memory", "cell"].map(String::from).to_vec())
+            .try_build()
+            .await
+            .expect("the delegation mints");
+        let cid = delegation.to_cid();
+        let mut arguments = std::collections::BTreeMap::new();
+        arguments.insert("space".to_string(), Promised::String("local".into()));
+        arguments.insert("cell".to_string(), Promised::String("head".into()));
+        let invocation = InvocationBuilder::new()
+            .issuer(operator)
+            .audience(&subject.did())
+            .subject(&subject.did())
+            .command(
+                ["use", "get", "memory", "cell", "watch"]
+                    .map(String::from)
+                    .to_vec(),
+            )
+            .arguments(arguments)
+            .proofs(vec![cid])
+            .issued_at(Timestamp::now())
+            .try_build()
+            .await
+            .expect("the watch mints");
+        let mut delegations = std::collections::HashMap::new();
+        delegations.insert(cid, Arc::new(delegation));
+        let chain = InvocationChain::new(invocation, delegations);
+        (cid.to_string(), subject, Container::from(&chain))
+    }
+
+    /// A watch is accepted with what the cell holds when it begins, and is
+    /// named by its invocation.
+    #[dialog_common::test]
+    async fn it_subscribes_a_watch_with_what_the_cell_holds() {
+        let (signer, subject) = owner().await;
+        let content = b"held".to_vec();
+        let publish =
+            CellScope::new(subject.clone(), "local", "head").publish(content.clone(), None);
+        let access = Access::new(MemoryStore::default());
+        let value = credential_for(&signer, &publish).await;
+        let (status, _) = performed(
+            access
+                .handle(Request::new(Some(&value)).payload(content.clone()))
+                .await,
+        )
+        .await;
+        assert_eq!(status, 200);
+
+        let watch = CellScope::new(subject.clone(), "local", "head").watch();
+        let minted = issued(&signer, &watch).await;
+        let chain = minted.invocation().chain();
+        let (subscription, state) = access
+            .subscribe(Container::from(chain))
+            .await
+            .expect("the watch is accepted");
+
+        assert_eq!(state.map(|edition| edition.content), Some(content));
+        assert_eq!(
+            subscription.invocation(),
+            chain.invocation.to_cid().to_string()
+        );
+        assert!(subscription.follows(subject.did(), "local", "head"));
+        assert!(!subscription.follows(subject.did(), "local", "tail"));
+    }
+
+    /// A watch is authority that lasts, so one that does not say when it
+    /// was issued is refused as stale, where a request would be served.
+    #[dialog_common::test]
+    async fn it_refuses_a_watch_that_does_not_say_when_it_was_issued() {
+        let (signer, subject) = owner().await;
+        let watch = CellScope::new(subject, "local", "head").watch();
+        let access = Access::new(MemoryStore::default());
+        let value = issued_at(&signer, &watch, None).await;
+        let container = crate::direct::credential_container(&value).expect("reads");
+
+        match access.subscribe(container).await {
+            Err(Answer::Refused(refusal)) => assert!(
+                matches!(
+                    refusal.reason(),
+                    AuthorizeError::Stale {
+                        issued_at: None,
+                        ..
+                    }
+                ),
+                "{:?}",
+                refusal.reason()
+            ),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// An invocation that is not a watch is not taken for one.
+    #[dialog_common::test]
+    async fn it_subscribes_nothing_but_a_watch() {
+        let (signer, subject) = owner().await;
+        let resolve = CellScope::new(subject, "local", "head").resolve();
+        let access = Access::new(MemoryStore::default());
+        let minted = issued(&signer, &resolve).await;
+        let answer = access
+            .subscribe(Container::from(minted.invocation().chain()))
+            .await;
+        assert!(matches!(answer, Err(Answer::Unsupported)), "{answer:?}");
+    }
+
+    /// A watch whose delegation is revoked after it began keeps being
+    /// delivered to until its authority is checked again, which happens
+    /// once the recheck interval has passed since it last held, and is
+    /// then refused as revoked.
+    #[dialog_common::test]
+    async fn it_refuses_a_running_watch_once_its_delegation_is_revoked() {
+        let (delegation, subject, watch) = delegated_watch().await;
+        let revoked = Arc::new(AtomicBool::new(false));
+        let access = Access::new(MemoryStore::default()).with_revocations(Revocable {
+            delegation,
+            principal: subject.did(),
+            revoked: revoked.clone(),
+        });
+        let (mut subscription, state) = access.subscribe(watch).await.expect("accepted");
+        assert_eq!(state, None, "nothing is published yet");
+        let began = subscription.checked();
+        let interval = std::time::Duration::from_secs(60);
+
+        revoked.store(true, Ordering::SeqCst);
+        access
+            .recheck(&mut subscription, interval, began + 30)
+            .await
+            .expect("within the interval the authority is not checked again");
+
+        let refused = access
+            .recheck(&mut subscription, interval, began + 60)
+            .await
+            .expect_err("past the interval the revocation is found");
+        assert!(
+            matches!(refused.reason(), AuthorizeError::Revoked { .. }),
+            "{:?}",
+            refused.reason()
+        );
+        assert_eq!(
+            subscription.checked(),
+            began,
+            "a refused check holds nothing"
+        );
+    }
+
+    /// A watch whose authority still holds is found to, and when.
+    #[dialog_common::test]
+    async fn it_keeps_a_running_watch_whose_authority_holds() {
+        let (_, _, watch) = delegated_watch().await;
+        let access = Access::new(MemoryStore::default());
+        let (mut subscription, _) = access.subscribe(watch).await.expect("accepted");
+        let at = subscription.checked() + 120;
+        access
+            .recheck(&mut subscription, std::time::Duration::from_secs(60), at)
+            .await
+            .expect("the authority holds");
+        assert_eq!(subscription.checked(), at);
+    }
+
+    /// A subscription is data a service can store between messages and
+    /// read back whole.
+    #[dialog_common::test]
+    async fn it_stores_a_subscription_and_reads_it_back() {
+        let (_, _, watch) = delegated_watch().await;
+        let access = Access::new(MemoryStore::default());
+        let (subscription, _) = access.subscribe(watch).await.expect("accepted");
+        let bytes = serde_ipld_dagcbor::to_vec(&subscription).expect("encodes");
+        let read: crate::Subscription = serde_ipld_dagcbor::from_slice(&bytes).expect("decodes");
+        assert_eq!(read, subscription);
+    }
+
+    fn invoke(container: &Container, payload: Option<Vec<u8>>) -> Vec<u8> {
+        Frame::Invoke {
+            id: Some(1),
+            container: container.to_bytes().expect("encodes"),
+            payload,
+        }
+        .encode()
+    }
+
+    /// A frame whose invocation cannot be read is still answered as the
+    /// frame it is: the answer names the frame, so it reaches whoever sent
+    /// it rather than every invocation that awaits an answer.
+    #[dialog_common::test]
+    async fn it_answers_an_unreadable_invocation_under_its_frame() {
+        let access = Access::new(MemoryStore::default());
+        let mut session = Session::new();
+        let frame = Frame::Invoke {
+            id: Some(42),
+            container: b"not a container".to_vec(),
+            payload: None,
+        }
+        .encode();
+
+        let reply = session.receive(&access, &frame).await;
+        let Some(Reply::Answer {
+            id,
+            invocation,
+            status,
+            body,
+            ..
+        }) = reply
+        else {
+            panic!("expected an answer, got {reply:?}");
+        };
+        assert_eq!(id, Some(42), "the answer names the frame");
+        assert_eq!(invocation, None, "no invocation could be read");
+        assert_eq!(status, 400);
+        let reason: AuthorizeError = serde_json::from_slice(&body).expect("a reason");
+        assert!(
+            matches!(reason, AuthorizeError::Malformed { .. }),
+            "{reason:?}"
+        );
+    }
+
+    /// Over a socket a watch is answered with what its cell holds, each
+    /// change to the cell is delivered to it, and once it is cancelled
+    /// nothing more is.
+    #[dialog_common::test]
+    async fn it_answers_a_watch_frame_and_delivers_changes_until_cancelled() {
+        let (signer, subject) = owner().await;
+        let access = Access::new(MemoryStore::default());
+        let mut session = Session::new();
+
+        let watch = CellScope::new(subject.clone(), "local", "head").watch();
+        let minted = issued(&signer, &watch).await;
+        let container = Container::from(minted.invocation().chain());
+        let invocation = minted.invocation().chain().invocation.to_cid().to_string();
+        let reply = session.receive(&access, &invoke(&container, None)).await;
+        assert_eq!(
+            reply,
+            Some(Reply::State {
+                invocation: invocation.clone(),
+                state: None
+            })
+        );
+
+        let state = Some(Edition {
+            content: b"next".to_vec(),
+            version: Version::from(b"v1".as_slice()),
+        });
+        let change = Change {
+            subject: subject.did(),
+            space: "local",
+            cell: "head",
+            state: &state,
+        };
+        let delivered = session
+            .deliver(&access, change, Duration::from_secs(60), now_s())
+            .await;
+        assert_eq!(
+            delivered,
+            vec![Reply::State {
+                invocation: invocation.clone(),
+                state: state.clone()
+            }]
+        );
+        let elsewhere = Change {
+            cell: "tail",
+            ..change
+        };
+        assert!(
+            session
+                .deliver(&access, elsewhere, Duration::from_secs(60), now_s())
+                .await
+                .is_empty(),
+            "a change to another cell reaches no watch"
+        );
+
+        let cancel = Frame::Cancel { invocation }.encode();
+        assert_eq!(session.receive(&access, &cancel).await, None);
+        assert!(
+            session
+                .deliver(&access, change, Duration::from_secs(60), now_s())
+                .await
+                .is_empty(),
+            "a cancelled watch is delivered nothing"
+        );
+    }
+
+    /// A frame's invocation must say when it was issued, where a request's
+    /// need not, and one that does not is refused and does nothing.
+    #[dialog_common::test]
+    async fn it_refuses_a_frame_that_does_not_say_when_it_was_issued() {
+        let (signer, subject) = owner().await;
+        let content = b"undated".to_vec();
+        let publish =
+            CellScope::new(subject.clone(), "local", "head").publish(content.clone(), None);
+        let access = Access::new(MemoryStore::default());
+        let mut session = Session::new();
+        let value = issued_at(&signer, &publish, None).await;
+        let container = crate::direct::credential_container(&value).expect("reads");
+
+        let reply = session
+            .receive(&access, &invoke(&container, Some(content)))
+            .await;
+        let Some(Reply::Answer { status, body, .. }) = reply else {
+            panic!("expected an answer, got {reply:?}");
+        };
+        assert_eq!(status, 401);
+        let reason: AuthorizeError = serde_json::from_slice(&body).expect("a reason");
+        assert!(
+            matches!(
+                reason,
+                AuthorizeError::Stale {
+                    issued_at: None,
+                    ..
+                }
+            ),
+            "{reason:?}"
+        );
+        assert!(
+            access.provider().cell(&subject, "local", "head").is_none(),
+            "the refused frame wrote nothing"
+        );
+    }
+
+    /// A watch whose delegation was revoked is ended, with the reason,
+    /// once its authority is checked again, and is then dropped.
+    #[dialog_common::test]
+    async fn it_ends_a_watch_whose_authority_no_longer_holds() {
+        let (delegation, subject, watch) = delegated_watch().await;
+        let revoked = Arc::new(AtomicBool::new(false));
+        let access = Access::new(MemoryStore::default()).with_revocations(Revocable {
+            delegation,
+            principal: subject.did(),
+            revoked: revoked.clone(),
+        });
+        let mut session = Session::new();
+        let reply = session.receive(&access, &invoke(&watch, None)).await;
+        let Some(Reply::State { invocation, .. }) = reply else {
+            panic!("expected the watch accepted, got {reply:?}");
+        };
+
+        revoked.store(true, Ordering::SeqCst);
+        let state = None;
+        let did = subject.did();
+        let change = Change {
+            subject: &did,
+            space: "local",
+            cell: "head",
+            state: &state,
+        };
+        let delivered = session
+            .deliver(&access, change, Duration::ZERO, now_s())
+            .await;
+        let [
+            Reply::Ended {
+                invocation: ended,
+                status,
+                body,
+            },
+        ] = delivered.as_slice()
+        else {
+            panic!("expected the watch ended, got {delivered:?}");
+        };
+        assert_eq!(ended, &invocation);
+        assert_eq!(*status, 403);
+        let reason: AuthorizeError = serde_json::from_slice(body).expect("a reason");
+        assert!(
+            matches!(reason, AuthorizeError::Revoked { .. }),
+            "{reason:?}"
+        );
+        assert_eq!(session.watches().count(), 0, "the ended watch is dropped");
+    }
+
+    /// Answers no revocation, yielding once inside each query and counting
+    /// the queries in flight, so queries made together overlap and the
+    /// most ever in flight says whether they were.
+    #[derive(Clone, Default)]
+    struct Overlapping {
+        in_flight: Arc<AtomicUsize>,
+        most: Arc<AtomicUsize>,
+    }
+
+    impl RevocationChecker for Overlapping {
+        type Error = std::convert::Infallible;
+
+        async fn query(
+            &self,
+            _: RevocationSelector<'_>,
+        ) -> Result<Option<RevocationMatch>, Self::Error> {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            YieldOnce(false).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+
+    /// Pending once, then ready: lets whatever else is being polled run.
+    struct YieldOnce(bool);
+
+    impl std::future::Future for YieldOnce {
+        type Output = ();
+
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            if self.0 {
+                return std::task::Poll::Ready(());
+            }
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+
+    /// Watches of one cell, each made by an operator the subject delegated
+    /// reading its cells to.
+    async fn watches_of_one_cell(count: usize) -> (Ed25519Signer, Vec<Container>) {
+        let subject = Ed25519Signer::generate().await.expect("a subject");
+        let operator = Ed25519Signer::generate().await.expect("an operator");
+        let delegation = DelegationBuilder::new()
+            .issuer(subject.clone())
+            .audience(&operator.did())
+            .subject(DelegatedSubject::Specific(subject.did()))
+            .command(["use", "get", "memory", "cell"].map(String::from).to_vec())
+            .try_build()
+            .await
+            .expect("the delegation mints");
+        let cid = delegation.to_cid();
+        let delegation = Arc::new(delegation);
+        let mut watches = Vec::new();
+        for _ in 0..count {
+            let mut arguments = std::collections::BTreeMap::new();
+            arguments.insert("space".to_string(), Promised::String("local".into()));
+            arguments.insert("cell".to_string(), Promised::String("head".into()));
+            let invocation = InvocationBuilder::new()
+                .issuer(operator.clone())
+                .audience(&subject.did())
+                .subject(&subject.did())
+                .command(
+                    ["use", "get", "memory", "cell", "watch"]
+                        .map(String::from)
+                        .to_vec(),
+                )
+                .arguments(arguments)
+                .proofs(vec![cid])
+                .issued_at(Timestamp::now())
+                .try_build()
+                .await
+                .expect("the watch mints");
+            let mut delegations = std::collections::HashMap::new();
+            delegations.insert(cid, delegation.clone());
+            watches.push(Container::from(&InvocationChain::new(
+                invocation,
+                delegations,
+            )));
+        }
+        (subject, watches)
+    }
+
+    /// The watches a change reaches have their authority checked together,
+    /// not one after another, so a change to a cell many follow is not
+    /// held up by checking each in turn.
+    #[dialog_common::test]
+    async fn it_checks_the_watches_a_change_reaches_together() {
+        let (subject, watches) = watches_of_one_cell(2).await;
+        let revocations = Overlapping::default();
+        let access = Access::new(MemoryStore::default()).with_revocations(revocations.clone());
+        let mut session = Session::new();
+        for watch in &watches {
+            let reply = session.receive(&access, &invoke(watch, None)).await;
+            assert!(matches!(reply, Some(Reply::State { .. })), "{reply:?}");
+        }
+        revocations.most.store(0, Ordering::SeqCst);
+
+        let state = None;
+        let did = subject.did();
+        let change = Change {
+            subject: &did,
+            space: "local",
+            cell: "head",
+            state: &state,
+        };
+        let delivered = session
+            .deliver(&access, change, Duration::ZERO, now_s())
+            .await;
+        assert_eq!(delivered.len(), 2, "both watches are delivered to");
+        assert_eq!(
+            revocations.most.load(Ordering::SeqCst),
+            2,
+            "the two checks were in flight together"
+        );
     }
 }

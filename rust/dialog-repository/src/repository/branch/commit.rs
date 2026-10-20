@@ -21,7 +21,7 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, Operator, OperatorExt};
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Read as BlobRead;
-use dialog_effects::memory::{Publish, Resolve};
+use dialog_effects::memory::{Current, Publish, Resolve};
 use futures_util::{Stream, StreamExt as _, stream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -334,7 +334,7 @@ where
                 if actual != base_version {
                     return Err(PublishError::VersionMismatch {
                         expected: base_version,
-                        actual,
+                        current: Current::Unknown,
                     }
                     .into());
                 }

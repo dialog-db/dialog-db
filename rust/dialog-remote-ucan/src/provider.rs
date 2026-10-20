@@ -3,24 +3,33 @@
 //!
 //! An address names the exchange to speak. The direct exchange runs
 //! [`direct::invoke`] and reads the answer the way the object route's
-//! client would have: the statuses, the `ETag`, the body. The permit
+//! client would have: the statuses, the `ETag`, the body. A cell's
+//! invocation goes over the service's socket instead when the address
+//! names one, answered with the same status, version and body. The permit
 //! exchange hands the fork to the permit-based site, which redeems and
 //! performs it the way it always has.
 
 use base58::ToBase58;
 use dialog_capability::{Constraint, Effect, ForkInvocation, Provider};
 use dialog_common::Blake3Hash;
+use dialog_effects::Rejection;
 use dialog_effects::archive::prelude::PutExt;
 use dialog_effects::archive::{ArchiveError, Get, Put};
 use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
 use dialog_effects::blob::{BlobError, BlobReader, BlobSink, BlobWriter, Import, Read};
 use dialog_effects::memory::prelude::{PublishExt, RetractExt};
-use dialog_effects::memory::{Edition, MemoryError, Publish, Resolve, Retract, Version};
+use dialog_effects::memory::{
+    CellState, Current, Edition, Editions, MemoryError, Publish, Resolve, Retract, Version, Watch,
+};
+use dialog_remote_s3::S3Error;
+use dialog_remote_ucan_s3::UcanAuthorization;
 use dialog_remote_ucan_s3::UcanSite as PermitSite;
+use dialog_ucan_core::Container;
 
-use crate::address::Exchange;
+use crate::address::{Exchange, UcanAddress};
 use crate::direct;
 use crate::site::UcanSite;
+use crate::socket::{Failed, Reply};
 
 /// Hand a fork to the permit-based site, which redeems and performs it
 /// the way it always has.
@@ -105,7 +114,7 @@ impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
-        let answer = direct::invoke(&invocation.address, &invocation.authorization, None).await?;
+        let answer = exchange(self, &invocation.address, &invocation.authorization, None).await?;
         match answer {
             answer if answer.is_success() => {
                 let version = Version::from(answer.version()?);
@@ -135,7 +144,8 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
             return through_permits(self, invocation).await;
         }
         let payload = invocation.capability.content().to_vec();
-        let answer = direct::invoke(
+        let answer = exchange(
+            self,
             &invocation.address,
             &invocation.authorization,
             Some(payload),
@@ -145,7 +155,7 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
             answer if answer.is_success() => Ok(Version::from(answer.version()?)),
             answer if answer.status == 412 => Err(MemoryError::VersionMismatch {
                 expected: invocation.capability.when().cloned(),
-                actual: None,
+                current: conflicting(answer).await,
             }),
             answer if answer.is_refusal() => Err(answer.refusal().await.into()),
             answer => Err(MemoryError::Storage(format!(
@@ -166,12 +176,12 @@ impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
-        let answer = direct::invoke(&invocation.address, &invocation.authorization, None).await?;
+        let answer = exchange(self, &invocation.address, &invocation.authorization, None).await?;
         match answer {
             answer if answer.is_success() => Ok(()),
             answer if answer.status == 412 => Err(MemoryError::VersionMismatch {
                 expected: Some(invocation.capability.when().clone()),
-                actual: None,
+                current: conflicting(answer).await,
             }),
             answer if answer.is_refusal() => Err(answer.refusal().await.into()),
             answer => Err(MemoryError::Storage(format!(
@@ -265,4 +275,124 @@ impl BlobSink for Upload {
             ))),
         }
     }
+}
+
+/// A watch rides the service's socket, the one connection to it shared by
+/// every watch of a cell in the same space: a service that names no
+/// socket cannot follow a cell, and a watch there is refused, so the cell
+/// is read by resolving it again.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<ForkInvocation<UcanSite, Watch>> for UcanSite {
+    async fn execute(
+        &self,
+        invocation: ForkInvocation<UcanSite, Watch>,
+    ) -> Result<Editions, MemoryError> {
+        let Some(socket) = invocation.address.socket() else {
+            return Err(Rejection::Unsupported {
+                reason: "the access service names no socket".into(),
+            }
+            .into());
+        };
+        let url = per_space(socket, invocation.capability.subject().as_ref());
+        let chain = invocation.authorization.invocation().chain();
+        let container = Container::from(chain)
+            .to_bytes()
+            .map_err(|error| MemoryError::Storage(error.to_string()))?;
+        let name = chain.invocation.to_cid().to_string();
+        let connection = self.sockets().connect(&url).await?;
+        // Wait for the service to begin the watch, so a refusal is the
+        // answer to the watch rather than the first thing it delivers.
+        let watching = connection.watch(name, container)?.begun().await?;
+        Ok(Box::new(watching))
+    }
+}
+
+/// Carry a cell's invocation to the service: over its socket when the
+/// address names one, as a request otherwise.
+///
+/// A socket that cannot be reached, or that could not take the frame, is
+/// passed over for a request: the invocation never left. One sent and not
+/// answered, over the socket or as a request, is not sent again, since the
+/// service would refuse the same invocation as presented before. It is
+/// answered as unavailable, so whoever asked may try it again, at this
+/// address or the next, with an invocation of its own. That is safe for a
+/// write too: a service answers a write that would leave the cell as it
+/// already is as done, and one that conflicts with what the cell holds
+/// with that state, so a write that landed before its answer was lost
+/// finds itself.
+async fn exchange(
+    site: &UcanSite,
+    address: &UcanAddress,
+    authorization: &UcanAuthorization,
+    payload: Option<Vec<u8>>,
+) -> Result<direct::Answer, S3Error> {
+    let Some(socket) = address.socket() else {
+        return direct::invoke(address, authorization, payload)
+            .await
+            .map_err(unanswered);
+    };
+    let chain = authorization.invocation().chain();
+    let Ok(connection) = site
+        .sockets()
+        .connect(&per_space(socket, chain.subject().as_str()))
+        .await
+    else {
+        return direct::invoke(address, authorization, payload)
+            .await
+            .map_err(unanswered);
+    };
+    let container = Container::from(chain)
+        .to_bytes()
+        .map_err(|error| S3Error::Serialization(error.to_string()))?;
+    let name = chain.invocation.to_cid().to_string();
+    match connection.invoke(name, container, payload.clone()).await {
+        Ok(Reply::Answer {
+            status,
+            version,
+            body,
+            ..
+        }) => Ok(direct::Answer::framed(status, version, body)),
+        Ok(other) => Err(S3Error::Rejected(Rejection::Unclassified {
+            detail: format!("the service answered an invocation with {other:?}"),
+        })),
+        Err(Failed::NotSent) => direct::invoke(address, authorization, payload)
+            .await
+            .map_err(unanswered),
+        Err(Failed::Lost(error)) => Err(S3Error::Rejected(Rejection::unavailable(format!(
+            "the invocation was sent and not answered: {error}"
+        )))),
+    }
+}
+
+/// A request that failed once it was sent is answered as unavailable, to
+/// be tried again with an invocation of its own (see [`exchange`]); one
+/// that failed otherwise is answered as it failed.
+fn unanswered(error: S3Error) -> S3Error {
+    match error {
+        S3Error::Transport(detail) => S3Error::Rejected(Rejection::unavailable(format!(
+            "the request was sent and not answered: {detail}"
+        ))),
+        error => error,
+    }
+}
+
+/// What a conflict says the cell holds instead: unknown when the service
+/// did not say, as an older service, which answers a conflict with no
+/// body, does not.
+async fn conflicting(answer: direct::Answer) -> Current {
+    let Ok(body) = answer.bytes().await else {
+        return Current::Unknown;
+    };
+    if body.is_empty() {
+        return Current::Unknown;
+    }
+    serde_ipld_dagcbor::from_slice::<CellState>(&body).map_or(Current::Unknown, Current::from)
+}
+
+/// The socket of the space `subject` names: a service answers each space
+/// on a connection of its own.
+fn per_space(socket: &str, subject: &str) -> String {
+    let separator = if socket.contains('?') { '&' } else { '?' };
+    format!("{socket}{separator}sub={subject}")
 }
