@@ -294,6 +294,22 @@ fn compile_rule_as<T: Compile>(
                         field,
                     }
                 }
+                AnalysisError::HeadField {
+                    field,
+                    declared,
+                    variable,
+                    inferred,
+                    reason,
+                    bound_by,
+                } => TypeError::HeadField {
+                    rule: Box::new(rule.into()),
+                    field,
+                    declared,
+                    variable,
+                    inferred,
+                    reason,
+                    bound_by,
+                },
                 // Entry-scoped reduce errors pass through unchanged.
                 AnalysisError::Reduce(error) => *error,
             });
