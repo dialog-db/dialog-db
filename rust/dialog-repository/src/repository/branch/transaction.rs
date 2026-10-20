@@ -19,7 +19,7 @@ use crate::Commit;
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::source::SourceRef;
-use crate::rules::{SharedRuleCache, TriggerFootprint, on_attr, reads_attr};
+use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
 use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot, Staged};
 use dialog_artifacts::{Changes, Statement};
 use dialog_capability::{Fork, Provider};
@@ -273,6 +273,7 @@ impl TransactionCommit<&Snapshot> {
 
         let previous = snapshot.revision();
         let touches_rules = touches_rules(&changes);
+        let touches_rule_facts = touches_rule_facts(&changes);
         let machinery =
             store_assets(SourceRef::Snapshot(snapshot), changes.take_assets(), env).await?;
 
@@ -292,6 +293,11 @@ impl TransactionCommit<&Snapshot> {
                 &revision,
             );
         }
+        if !touches_rule_facts {
+            SourceRef::Snapshot(snapshot)
+                .rule_cache()
+                .carry_rules_root(Some(*previous.tree.hash()), Some(*revision.tree.hash()));
+        }
         Ok(revision)
     }
 }
@@ -304,6 +310,18 @@ pub(crate) fn touches_rules(changes: &Changes) -> bool {
     changes
         .iter()
         .any(|(_, attribute, _)| *attribute == on || *attribute == reads)
+}
+
+/// Whether a settled change batch writes a rule fact
+/// ([`is_rule_attribute`]): when it does not, the tree it commits holds
+/// the rule facts of the tree it was committed onto, which carries its
+/// rules root to the new head (see [`RuleCache::rules_root`]).
+///
+/// [`RuleCache::rules_root`]: crate::RuleCache
+pub(crate) fn touches_rule_facts(changes: &Changes) -> bool {
+    changes
+        .iter()
+        .any(|(_, attribute, _)| is_rule_attribute(attribute))
 }
 
 /// Carry the trigger footprint cached at `previous` forward to

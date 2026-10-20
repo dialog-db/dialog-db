@@ -30,6 +30,51 @@ What this changes for you:
 
 Why: numbers are one band, and the band is read through a type at every boundary, not only at the scan. A rule that compiles must not fail at run time over the type a number happened to be stored as.
 
+### Repositories opened through one environment decode and plan the same rules once
+
+[#611](https://github.com/dialog-db/dialog-db/pull/611)
+
+The rule cache and the plan cache were held per branch and per repository. What rule resolution decodes and builds from content (rule bodies, keyed by entity and the bytes the reader read; inductive bodies; a rule's head re-spelled onto an attribute; selecting rules) and query plans are now held once per environment and shared by every repository opened through it. Each of those maps is bounded. Assembled rule sets, the rules set aside, rule discovery and the trigger footprint stay per branch.
+
+What this changes for you:
+
+- A peer with many spaces holding the same rules decodes each rule body and plans each rule once, not once per space.
+- `HeldCaches::release` keeps the shared rule content and plans, since nothing in them belongs to the released repository; `HeldCaches::clear` drops them.
+
+Why: those entries are pure functions of content and answer nothing about which rules a repository holds, so sharing them is sound. An assembled rule set is keyed by its lines' rules roots and kept one per spelling of a concept: shared across repositories, the sets of every repository querying the same concept would evict each other on every query. Sharing assembled sets between repositories whose rules are equal would need the key to name a line by its rule content rather than its root, and is left until a workload shows it is needed.
+
+### An assembled rule set stands until a rule fact of its layers changes
+
+[#610](https://github.com/dialog-db/dialog-db/pull/610)
+
+A rule set, and the analysis of which rules are set aside, was kept per exact layer state: each line's tree root, each overlay's revision, each staged layer's generation. Any write moved one of those, so a session-overlay fact, a staged fact or a commit of plain facts rebuilt every rule set on the next query, and a transaction's query never shared the set its branch had assembled. Rule resolution reads only `dialog.rule/*` and `dialog.concept/transient`, so an entry is now keyed by those facts alone. A line is named by its rules root: a commit whose batch writes no rule fact carries the rules root of the head it built on to the head it mints, and any head moved another way (a pull, a merge, a raw commit) is its own rules root. An overlay or a staged layer is named by a hash of the rule facts it holds and hides, and is left out of the key when it holds none. Lookup is an exact match; nothing is replayed.
+
+What this changes for you:
+
+- A query or subscription after a session-overlay write, a transaction write or a commit that writes no rule fact reuses the assembled rule set instead of rebuilding it. Results are unchanged. On the `rule_cache` bench (a chain of 10 committed rules over 50 people, native, arm64), such a query takes 0.40 ms after an overlay write (1.78 ms on 0.4.0-rc.2), 0.46 ms after a commit (1.99 ms) and 0.39 ms in a transaction (1.91 ms); with nothing written in between it takes 0.39 ms on either.
+- The first query after a commit that installs or retracts a rule, or after a pull or merge, assembles its rule sets once, as before. That includes rules a transaction staged and then committed: the staged layer and the committed line name the same rule facts differently, so the `rule-dispatch` perf scenario assembles 6 sets, as on 0.4.0-rc.2, not the 3 an earlier draft of this change reached by replaying reads.
+- Each spelling of a concept (the same relation under different field names) keeps its own assembled rule set, at most four per concept; before, queries alternating between two spellings evicted each other's. The `subscribe-repoll` perf scenario assembles 9 rule sets instead of 18.
+- A decoded rule body is cached by its entity and the hash of the bytes it was decoded from, and is used only after the reader's own read returned those bytes. A rule whose stored bytes do not hash to its entity stays inert even when the genuine body under that entity was decoded earlier; before, a cached body stood in for whatever bytes a layer held.
+- A subscription now records, as rule demand, the rule reads the branch's head cache answered. Before, a rule set assembled from cached discovery did not demand that range, and a rule installed into it did not re-run the subscription.
+
+Why: tonk writes session facts through the overlay and commits as commands run, and every such write took it off the rule cache. A rule set is a function of the rule facts of its layers, so that is what the cache is keyed by.
+
+### A query's own overlay is held as a line, so every rule set it assembles is cached
+
+[#609](https://github.com/dialog-db/dialog-db/pull/609)
+
+The facts a query folds in beside its lines, the injected `db:session` metadata and whatever `.with(..)` adds, were a `Changes` batch read as a store: filtered and sorted per selector, scanned for retracts and for rules on every read. A rule in that batch turned the assembled rule-set cache off for the whole query, and its bodies were decoded every time. The batch is now held as an `Ephemeral`, the store a branch's session overlay already uses. It is read by range, and its revision joins the key of every rule-set and read-settlement cache, so a query folding in the same facts as an earlier one is served what the earlier one assembled. Every overlay and staged rule is read through one function and hydrated once per content address. `Changes` stays the write batch and the wire form; nothing reads one as a source any more.
+
+What this changes for you:
+
+- `QueryLayer::overlay` returns an `Ephemeral` instead of an `Arc<Changes>`.
+- `Changes::select` and `impl Provider<Select> for Changes` are removed from `dialog-artifacts`. To read facts held in memory beside a tree, hold them in an `Ephemeral` (`Ephemeral::apply` takes the batch) and read it with `Ephemeral::select`.
+- A query or subscription whose `.with(..)` carries a rule no longer rebuilds the rule set and re-decodes each rule body on every evaluation. Results are unchanged.
+- Asset changes in a `.with(..)` batch are dropped from the query's overlay, as they were before: a query reads facts only.
+- `EntityKey::from_artifact`, `AttributeKey::from_artifact` and `ValueKey::from_artifact` build the key from its parts in one pass instead of parsing and re-encoding it once per field. The bytes are unchanged. `dialog_artifacts::artifact_index_keys`, which builds all three at once, is now public.
+
+Why: a query fell off the cache whenever its overlay held a rule. A performance report on Sapling, which hands rules to each query in its overlay, measured rule decoding and assembly at about 60% of instructions on that path. Reading the per-query batch as a separate kind of store is what let that path skip the cache, so the batch now goes through the store and the cache key every other overlay goes through.
+
 ### The storage rewrite carries blob-index keys over as they are
 
 [#605](https://github.com/dialog-db/dialog-db/pull/605), forward-ported from `release/0.3.x`
