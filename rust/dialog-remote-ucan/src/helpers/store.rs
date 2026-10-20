@@ -168,6 +168,11 @@ impl BlobSource for Chunks {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<blob::Read> for MemoryStore {
     async fn execute(&self, capability: Capability<blob::Read>) -> Result<BlobReader, BlobError> {
+        if capability.encoding().is_some() {
+            return Err(BlobError::Storage(
+                "this store serves no verified range of a blob".into(),
+            ));
+        }
         let digest = capability.digest().clone();
         let key = (capability.subject().to_string(), digest.clone());
         let bytes = self
