@@ -19,6 +19,7 @@ use std::collections::BTreeSet;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
+use super::commit::session_delegation;
 use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::history::{Context, RevisionRecord};
 use dialog_artifacts::merge;
@@ -197,18 +198,24 @@ where
     // The tree is the head's for now; it is replaced once the merged
     // root is final, below.
     let mut revision = theirs.merge(mine, theirs.tree.clone(), branch_entity, authority.did());
+    let delegation = session_delegation(&authority);
     let mut record = RevisionRecord::create(
         &revision,
         authority.profile(),
         vec![theirs.version(), mine.version()],
         Vec::new(),
-    )
-    .delegated(authority.delegation().map(<[u8]>::to_vec));
+    );
     record.signature = Attest::new(record.payload()?).perform(env).await?;
     let manifest = merged.format_manifest(store.clone(), &delta).await?;
-    merged
-        .record(&store, &mut delta, record.entries(&manifest)?)
-        .await?;
+    let mut entries = record.entries(&manifest)?;
+    // The session's delegation goes in with the record the first time
+    // this tree holds it.
+    if let Some(delegation) = &delegation
+        && !delegation.is_in(&merged, &store, &delta).await?
+    {
+        entries = entries.and(delegation.entries(&manifest)?);
+    }
+    merged.record(&store, &mut delta, entries).await?;
     revision.tree = TreeReference::from(*merged.root().as_bytes());
     merged_context.record(revision.version());
     revision.context = Some(merged_context.clone());

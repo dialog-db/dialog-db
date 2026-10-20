@@ -898,7 +898,7 @@ impl<S: PeerSpace, M: Mode> IntoFuture for PeerBuilder<PeerKey, Storage<S>, M> {
 /// and two grants that say the same thing are the same grant. Deriving
 /// it makes a session minted twice hold the same delegation (the
 /// signature is deterministic too, wherever Ed25519 signing is), so the
-/// delegation its revision records carry does not change what an
+/// delegation its revision records refer to does not change what an
 /// otherwise identical history writes.
 fn grant_nonce(
     issuer: &Did,
@@ -984,7 +984,7 @@ mod tests {
     /// A session opened twice for the same context and scope holds the
     /// same delegation, nonce included: the grant is derived from what it
     /// says, so it is the one its peer's earlier sessions held, and the
-    /// records its commits carry it in are the same too.
+    /// records its commits refer to it from are the same too.
     #[dialog_common::test]
     async fn it_mints_the_same_session_grant_every_time() -> Result<()> {
         let peer = test_peer().await;

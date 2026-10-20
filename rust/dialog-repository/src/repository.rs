@@ -1561,9 +1561,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_attests_the_profile_a_session_acts_for() -> anyhow::Result<()> {
-            // A session holding its profile's whole authority signs its
-            // revisions with that delegation, so the record proves the
-            // profile rather than only the session key.
+            // A session holding its profile's whole authority refers its
+            // revisions to that delegation, stored once in the tree, so
+            // each record proves the profile as well as the session key.
             use crate::schema;
             use crate::schema::DidExt as _;
 
@@ -1571,28 +1571,41 @@ mod tests {
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
 
-            branch
-                .transaction()
-                .assert(the!("user/name").of(Entity::new()?).is("Alice".to_string()))
-                .commit()
-                .publish()
-                .perform(&operator)
-                .await?;
+            let mut heads = Vec::new();
+            for name in ["Alice", "Bob"] {
+                branch
+                    .transaction()
+                    .assert(the!("user/name").of(Entity::new()?).is(name.to_string()))
+                    .commit()
+                    .publish()
+                    .perform(&operator)
+                    .await?;
+                let branch = repo.branch("main").load().perform(&operator).await?;
+                heads.push(branch.revision().expect("a revision"));
+            }
             let branch = repo.branch("main").load().perform(&operator).await?;
-            let head = branch.revision().expect("a revision");
 
-            let rows: Vec<schema::RevisionAttestation> = branch
-                .query()
-                .select(Query::<schema::RevisionAttestation> {
-                    this: head.entity().into(),
-                    attested: Term::var("attested"),
-                })
-                .perform(&operator)
-                .try_vec()
-                .await?;
-            assert_eq!(rows.len(), 1, "the revision is attested exactly once");
             assert_ne!(operator.did(), profile.did());
-            assert_eq!(rows[0].attested.0, profile.did().this());
+            let mut expected = vec![operator.did().this(), profile.did().this()];
+            expected.sort();
+            for head in heads {
+                let rows: Vec<schema::RevisionAttestation> = branch
+                    .query()
+                    .select(Query::<schema::RevisionAttestation> {
+                        this: head.entity().into(),
+                        attested: Term::var("attested"),
+                    })
+                    .perform(&operator)
+                    .try_vec()
+                    .await?;
+                let mut attested: Vec<_> = rows.into_iter().map(|row| row.attested.0).collect();
+                attested.sort();
+                attested.dedup();
+                assert_eq!(
+                    attested, expected,
+                    "each revision proves its session key and its profile"
+                );
+            }
 
             Ok(())
         }

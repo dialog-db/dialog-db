@@ -1,3 +1,4 @@
+use super::commit::session_delegation;
 use dialog_artifacts::history::RevisionRecord;
 use std::collections::BTreeSet;
 use std::mem;
@@ -656,21 +657,27 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     branch_entity.clone(),
                     authority.did(),
                 );
+                let delegation = session_delegation(&authority);
                 let mut record = RevisionRecord::create(
                     &revision,
                     authority.profile(),
                     vec![local.version(), upstream_revision.version()],
                     Vec::new(),
-                )
-                .delegated(authority.delegation().map(<[u8]>::to_vec));
+                );
                 record.signature = Attest::new(record.payload()?).perform(env).await?;
                 // The record's key carries its value through the tree's own
                 // inline-vs-spill threshold, so read it off the tree rather
                 // than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
-                merged
-                    .record(&store, &mut delta, record.entries(&manifest)?)
-                    .await?;
+                let mut entries = record.entries(&manifest)?;
+                // The session's delegation goes in with the record the first time
+                // this tree holds it.
+                if let Some(delegation) = &delegation
+                    && !delegation.is_in(&merged, &store, &delta).await?
+                {
+                    entries = entries.and(delegation.entries(&manifest)?);
+                }
+                merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 let mut context = local_context.clone();
                 context.merge(theirs);
@@ -822,21 +829,27 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     branch_entity.clone(),
                     authority.did(),
                 );
+                let delegation = session_delegation(&authority);
                 let mut record = RevisionRecord::create(
                     &revision,
                     authority.profile(),
                     vec![local.version(), upstream_revision.version()],
                     Vec::new(),
-                )
-                .delegated(authority.delegation().map(<[u8]>::to_vec));
+                );
                 record.signature = Attest::new(record.payload()?).perform(env).await?;
                 // The record's key carries its value through the tree's own
                 // inline-vs-spill threshold, so read it off the tree rather
                 // than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
-                merged
-                    .record(&store, &mut delta, record.entries(&manifest)?)
-                    .await?;
+                let mut entries = record.entries(&manifest)?;
+                // The session's delegation goes in with the record the first time
+                // this tree holds it.
+                if let Some(delegation) = &delegation
+                    && !delegation.is_in(&merged, &store, &delta).await?
+                {
+                    entries = entries.and(delegation.entries(&manifest)?);
+                }
+                merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 let mut context = local_context.clone();
                 context.merge(theirs);
@@ -1024,17 +1037,23 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // parent (see `dialog_artifacts::history::skip`). Sign the
                 // record before it enters the tree, and the head once the
                 // merged root is final — same order as `Commit`.
+                let delegation = session_delegation(&authority);
                 let mut record =
-                    RevisionRecord::create(&revision, authority.profile(), parents, Vec::new())
-                        .delegated(authority.delegation().map(<[u8]>::to_vec));
+                    RevisionRecord::create(&revision, authority.profile(), parents, Vec::new());
                 record.signature = Attest::new(record.payload()?).perform(env).await?;
                 // The record's key carries its value through the tree's own
                 // inline-vs-spill threshold, so read it off the tree rather
                 // than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
-                merged
-                    .record(&store, &mut delta, record.entries(&manifest)?)
-                    .await?;
+                let mut entries = record.entries(&manifest)?;
+                // The session's delegation goes in with the record the first time
+                // this tree holds it.
+                if let Some(delegation) = &delegation
+                    && !delegation.is_in(&merged, &store, &delta).await?
+                {
+                    entries = entries.and(delegation.entries(&manifest)?);
+                }
+                merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 // The minted head publishes its watermark: the merged
                 // context plus its own version, signed with the rest of

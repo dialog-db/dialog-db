@@ -540,10 +540,10 @@ impl BufferedBatch {
     where
         S: ArchiveReader + Clone,
     {
-        let RecordEntries { entries, spill } = entries.into();
+        let RecordEntries { entries, spills } = entries.into();
         // A spilled record value is staged with the batch's other spills,
         // as the instruction path stages a spilling fact's.
-        if let Some((_, bytes)) = spill {
+        for (_, bytes) in spills {
             self.staged.stage_blob(Buffer::from(bytes));
         }
         let storage = DeltaOverlay::new(&self.staged, store);

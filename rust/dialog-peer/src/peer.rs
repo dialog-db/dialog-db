@@ -181,8 +181,8 @@ pub(crate) struct WalkReach {
 
 /// The home's delegation of its whole authority (any subject, the root
 /// command) to `operator`, encoded, among `grants`: what makes the
-/// operator a session of the home, and what its revisions carry to prove
-/// whom they act for. `None` for a peer acting as itself, or a session
+/// operator a session of the home, and what its revisions refer to to
+/// prove whom they act for. `None` for a peer acting as itself, or a session
 /// holding only narrower grants.
 fn session_delegation(home: &Did, operator: &Did, grants: &[Grant]) -> Option<Vec<u8>> {
     grants

@@ -2,21 +2,23 @@ use super::merge::merge_with_winner;
 use super::transaction::induction_ignores;
 use crate::repository::archive::persist;
 use crate::repository::source::SourceRef;
+use crate::schema::DidExt as _;
 use crate::{
     Branch, CommitError, Index, NetworkedIndex, PublishError, RemoteSite, RepositoryMemoryExt as _,
     Revision, Snapshot, TreeReference, origin_of,
 };
 use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::history::{
-    Context, Edition, Origin, RevisionRecord, TreeHistory, Version, context_of, extend_skips,
+    Context, DelegationRecord, Edition, Origin, RevisionRecord, TreeHistory, Version, context_of,
+    extend_skips,
 };
 use dialog_artifacts::tree::{Stamp, WriteScope};
 use dialog_artifacts::{Datum, DialogArtifactsError, Entity, Instruction, Key, NUMBER_BAND, State};
-use dialog_capability::{Did, Fork, Provider};
+use dialog_capability::{Capability, Did, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::archive::{Get, Import, Put};
-use dialog_effects::authority::{Attest, Identify, OperatorExt};
+use dialog_effects::authority::{Attest, Identify, Operator, OperatorExt};
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::{Publish, Resolve};
@@ -827,8 +829,7 @@ where
         // (`TreeHistory::revision_record`) refuse records that don't verify
         // against the slot they were found at.
         let mut record =
-            RevisionRecord::create(&revision, &profile, parent.into_iter().collect(), skips)
-                .delegated(authority.delegation().map(<[u8]>::to_vec));
+            RevisionRecord::create(&revision, &profile, parent.into_iter().collect(), skips);
         record.signature = Attest::new(record.payload()?).perform(env).await?;
         debug_assert_eq!(record.version(), version);
         // The record's key carries its value through the tree's own
@@ -837,7 +838,15 @@ where
         // The entries are appended to the batch's still open buffered tree:
         // they ride the same buffered write as the data, so the record costs
         // a buffer append instead of a second canonical spine-to-leaf edit.
-        let entries = record.entries(batch.manifest())?;
+        let mut entries = record.entries(batch.manifest())?;
+        // The session's delegation, which proves the profile the record
+        // names, rides with the record the first time this branch's tree
+        // holds it; later commits by the same session find it there.
+        if let Some(delegation) = session_delegation(&authority)
+            && !delegation.is_in(&tree, &store, &delta).await?
+        {
+            entries = entries.and(delegation.entries(batch.manifest())?);
+        }
         // The caller's machinery entries (blob-index tombstones) ride the same
         // batch as the revision record, so one seal covers data, record,
         // and entries together.
@@ -878,6 +887,18 @@ where
             context,
         })))
     }
+}
+
+/// The delegation by which the session `authority` acts for its profile,
+/// as the fact recorded on the session key: what proves the profile its
+/// revision records name. `None` for an operator acting as itself or
+/// holding no session delegation.
+pub(super) fn session_delegation(authority: &Capability<Operator>) -> Option<DelegationRecord> {
+    let delegation = authority.delegation()?;
+    Some(DelegationRecord::new(
+        authority.did().this(),
+        delegation.to_vec(),
+    ))
 }
 
 #[cfg(test)]

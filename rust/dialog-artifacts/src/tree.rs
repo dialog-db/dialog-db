@@ -861,8 +861,10 @@ impl ArtifactTreeExt for ArtifactTree {
     where
         S: ArchiveReader + Clone,
     {
-        let RecordEntries { entries, spill } = entries;
-        stage_spilled_value(delta, spill);
+        let RecordEntries { entries, spills } = entries;
+        for spill in spills {
+            stage_spilled_value(delta, Some(spill));
+        }
         let transient = {
             // Read through the delta: this tree's latest nodes may only
             // exist there (persisted by an earlier batch, not yet flushed).

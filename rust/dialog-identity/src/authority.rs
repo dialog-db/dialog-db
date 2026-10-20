@@ -57,9 +57,9 @@ impl Authority {
         }
     }
 
-    /// Set the profile's delegation to the operator: the proof, carried
-    /// by the revisions this authority mints, that the operator acts for
-    /// the profile.
+    /// Set the profile's delegation to the operator: the proof, referred
+    /// to by the revisions this authority mints, that the operator acts
+    /// for the profile.
     pub fn with_delegation(mut self, delegation: Vec<u8>) -> Self {
         self.delegation = Some(delegation);
         self

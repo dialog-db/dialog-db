@@ -453,12 +453,13 @@ pub mod revision {
         pub Entity,
     );
 
-    /// `dialog.revision/attested` — the DID (as entity) of the principal
-    /// the revision's record proves responsible for it: the profile the
-    /// issuer acted for when the record's delegation binds it, the
-    /// issuer itself otherwise.
+    /// `dialog.revision/attested` — the DID (as entity) of a principal
+    /// the revision's record proves responsible for it: always its
+    /// issuer, and the profile the issuer acted for when the record's
+    /// delegation binds it. Cardinality-many.
     #[derive(Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
     #[domain("dialog.revision")]
+    #[pick(all)]
     pub struct Attested(
         /// The attested principal's entity (its DID).
         pub Entity,
@@ -1028,20 +1029,18 @@ pub struct Revision {
 }
 
 /// Who a revision is provably attributed to, projected from its signed
-/// record.
+/// record: one row per principal the record proves.
 ///
 /// [`Revision::authority`] reports the profile a record *claims* its
-/// issuer acted for; this reports only what the record proves. When the
-/// record carries the profile's delegation of its whole authority to the
-/// issuer, `attested` is that profile; otherwise it is the issuer, whose
-/// signature is the only proof the record holds. A record whose
-/// delegation does not bind the profile it names projects nothing here
-/// or in [`Revision`].
+/// issuer acted for; this reports only what the record proves. Its
+/// issuer is always attested, by the record's signature. The profile is
+/// attested too when the record refers to a delegation, stored once in
+/// the tree, that hands the issuer the profile's whole authority.
 #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RevisionAttestation {
     /// The revision entity.
     pub this: Entity,
-    /// The principal the revision is provably attributed to.
+    /// A principal the revision is provably attributed to.
     pub attested: revision::Attested,
 }
 

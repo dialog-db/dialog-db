@@ -50,8 +50,10 @@ pub struct RevisionRecord {
     /// key whose signature binds this record
     pub issuer: String,
     /// DID of the profile (long-lived key) the issuer acted for. On its
-    /// own this is only the issuer's claim; [`delegation`](Self::delegation)
-    /// is what proves it (see [`RevisionRecord::attested`]).
+    /// own this is only the issuer's claim; the profile's delegation to
+    /// the issuer, stored beside the record as a
+    /// [`DelegationRecord`](super::DelegationRecord), is
+    /// what proves it (see [`RevisionRecord::attests`]).
     pub authority: String,
     /// Parent revision versions — the revision DAG edge. Empty for
     /// genesis; two entries for a merge.
@@ -63,20 +65,6 @@ pub struct RevisionRecord {
     /// [`carry_skips`](super::carry_skips)). Empty for genesis and merge
     /// revisions.
     pub skips: Vec<Version>,
-    /// The authority's UCAN delegation to the issuer, DAG-CBOR encoded:
-    /// the proof that the issuer is a session of the profile the record
-    /// names. It binds only when it hands the issuer the profile's whole
-    /// authority (any subject, the root command), so a narrower grant
-    /// the profile gave someone else cannot be used to sign as it.
-    ///
-    /// Attribution, not authorization: its time bounds are not checked,
-    /// because a profile that delegated to the issuer stays the one it
-    /// acted for after the delegation lapses, while whether the write was
-    /// allowed is decided by whoever accepted it. Absent from records
-    /// minted without one, and then skipped in the encoding, so those
-    /// records keep the bytes they were signed over.
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
-    pub delegation: Option<Vec<u8>>,
     /// The issuer's Ed25519 signature over [`RevisionRecord::payload`] —
     /// this record encoded with an empty signature field. The key is the
     /// one the issuer DID names (`did:key`).
@@ -149,9 +137,6 @@ impl RevisionRecord {
     /// version derived from the record's own contents must be that slot
     /// (a valid record cannot be replayed at another revision entity), and
     /// the signature must verify under the key the issuer DID names.
-    ///
-    /// A record whose [`delegation`](Self::delegation) does not bind its
-    /// authority is refused as well: it claims a proof it does not have.
     pub fn verify(&self, version: &Version) -> Result<(), DialogArtifactsError> {
         let derived = self.version();
         if derived != *version {
@@ -160,34 +145,21 @@ impl RevisionRecord {
             )));
         }
         verify_issuer_signature(&self.issuer, &self.payload()?, &self.signature)?;
-        self.attested()?;
         Ok(())
     }
 
-    /// The principal this record proves responsible for its revision:
-    /// the [`authority`](Self::authority) when the issuer is that
-    /// principal or its [`delegation`](Self::delegation) binds it, and
-    /// otherwise the issuer alone, whose signature is the only proof the
-    /// record then holds.
+    /// Check that `delegation` binds the record's
+    /// [`authority`](Self::authority): issued by the authority, to the
+    /// issuer, for any subject and the root command, and signed by the
+    /// authority. When it does, the record proves the authority
+    /// responsible for its revision; its issuer it proves by its own
+    /// signature (see [`verify`](Self::verify)).
     ///
-    /// Checks the delegation, not the record's own signature; see
-    /// [`verify`](Self::verify) for both.
-    pub fn attested(&self) -> Result<&str, DialogArtifactsError> {
-        if self.authority == self.issuer {
-            return Ok(&self.authority);
-        }
-        match &self.delegation {
-            Some(delegation) => {
-                self.verify_delegation(delegation)?;
-                Ok(&self.authority)
-            }
-            None => Ok(&self.issuer),
-        }
-    }
-
-    /// Check that `delegation` is the authority's grant of its whole
-    /// authority to the issuer, signed by the authority.
-    fn verify_delegation(&self, delegation: &[u8]) -> Result<(), DialogArtifactsError> {
+    /// Attribution, not authorization: the delegation's time bounds are
+    /// not checked, because a profile that delegated to the issuer stays
+    /// the one it acted for after the delegation lapses, while whether
+    /// the write was allowed is decided by whoever accepted it.
+    pub fn attests(&self, delegation: &[u8]) -> Result<(), DialogArtifactsError> {
         let refused = |reason: &str| {
             DialogArtifactsError::InvalidSignature(format!(
                 "Revision record delegation does not bind {}: {reason}",
@@ -260,7 +232,7 @@ impl RevisionRecord {
 
         Ok(RecordEntries {
             entries: vec![(entity_key, added.clone()), (attribute_key, added)],
-            spill: encoded.spill,
+            spills: encoded.spill.into_iter().collect(),
         })
     }
 
@@ -286,17 +258,8 @@ impl RevisionRecord {
             authority: authority.to_string(),
             parents,
             skips,
-            delegation: None,
             signature: Vec::new(),
         }
-    }
-
-    /// This record carrying `delegation`, the authority's delegation to
-    /// the issuer (see [`delegation`](Self::delegation)). Set it before
-    /// signing: the signature covers it.
-    pub fn delegated(mut self, delegation: Option<Vec<u8>>) -> Self {
-        self.delegation = delegation;
-        self
     }
 }
 
@@ -311,16 +274,26 @@ impl RevisionRecord {
 pub struct RecordEntries {
     /// The tree entries.
     pub entries: Vec<(Key, State<Datum>)>,
-    /// A spilled value's block: the reference its keys carry and the raw
-    /// value bytes stored under it. `None` when every value stays inline.
-    pub spill: Option<(dialog_storage::Blake3Hash, Vec<u8>)>,
+    /// The blocks of spilled values: the reference each one's keys carry
+    /// and the raw value bytes stored under it. Empty when every value
+    /// stays inline.
+    pub spills: Vec<(dialog_storage::Blake3Hash, Vec<u8>)>,
+}
+
+impl RecordEntries {
+    /// These entries followed by `other`'s, to be written together.
+    pub fn and(mut self, other: RecordEntries) -> Self {
+        self.entries.extend(other.entries);
+        self.spills.extend(other.spills);
+        self
+    }
 }
 
 impl From<Vec<(Key, State<Datum>)>> for RecordEntries {
     fn from(entries: Vec<(Key, State<Datum>)>) -> Self {
         Self {
             entries,
-            spill: None,
+            spills: Vec::new(),
         }
     }
 }
