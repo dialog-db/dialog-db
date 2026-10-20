@@ -1060,7 +1060,9 @@ fn bind_seed(
             scope.add(name.as_ref());
             true
         }
-        Some(Term::Constant(expected)) => *expected == value,
+        // A constant agrees with the number its type reads the row as,
+        // as a scan for that constant admits the row.
+        Some(Term::Constant(expected)) => value.reads_as(expected),
         Some(Term::Variable { name: None, .. }) | None => true,
     }
 }
@@ -1335,6 +1337,161 @@ mod tests {
                 .await?
                 .is_empty(),
             "the dispatched command must never reach the branch"
+        );
+        Ok(())
+    }
+
+    /// The increment rule over a counter declared `integer:`: the band
+    /// stores a non-negative count as a natural whatever type wrote it,
+    /// so the body's integer view must read the stored natural.
+    fn integer_increment_rule() -> InductiveRule {
+        serde_json::from_value(json!({
+            "description": "Increment an integer counter on an increment command",
+            "assert!": {
+                "with": {
+                    "count": { "the": "counter/count", "as": "integer:" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "counter": { "the": "cmd.increment/counter", "as": "entity:" }
+                        }
+                    },
+                    "where": {
+                        "counter": { "?": { "name": "this" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": {
+                            "count": { "the": "counter/count", "as": "integer:" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "count": { "?": { "name": "prev" } }
+                    }
+                },
+                {
+                    "assert": "math/sum",
+                    "where": {
+                        "of": { "?": { "name": "prev" } },
+                        "with": 1,
+                        "is": { "?": { "name": "count" } }
+                    }
+                }
+            ]
+        }))
+        .expect("integer increment rule compiles")
+    }
+
+    /// A count asserted as a natural in the same commit as the increment
+    /// seeds the rule's `integer:` premise. The seed is read through the
+    /// variable's view, as a scan reads it: the natural 40 is the integer
+    /// 40, and the commit increments it rather than failing. The staged
+    /// 40 is not yet a claim the head can succeed, so 41 lands beside it.
+    #[dialog_common::test]
+    async fn it_seeds_an_integer_premise_from_a_natural_fact() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let counter: Entity = "ctr:1".parse()?;
+        branch
+            .transaction()
+            .assert(integer_increment_rule())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(40u128),
+            )
+            .dispatch(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command)
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        assert_eq!(
+            values(&branch, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(40), Value::UnsignedInt(41)],
+            "the seeded natural must read as the integer and be incremented"
+        );
+        Ok(())
+    }
+
+    /// The two-replica route: a count written by another replica's rule
+    /// arrives by pull (a raw commit here), so the next local commit
+    /// replays it through the watermark lag as a seed row. It reads back
+    /// as a natural, and must seed the `integer:` premise like a scan
+    /// would, so the increment after a merge commits.
+    #[dialog_common::test]
+    async fn it_increments_an_integer_counter_after_a_pulled_count() -> Result<()> {
+        use dialog_artifacts::{Artifact, Instruction};
+        use futures_util::stream;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let counter: Entity = "ctr:1".parse()?;
+        branch
+            .transaction()
+            .assert(integer_increment_rule())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // The other replica's count lands without local induction.
+        branch
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "counter/count".parse()?,
+                    of: counter.clone(),
+                    is: Value::SignedInt(1),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command)
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        assert_eq!(
+            values(&branch, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)],
+            "the increment after a pull must read the pulled count through the integer view"
         );
         Ok(())
     }

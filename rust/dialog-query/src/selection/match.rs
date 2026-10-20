@@ -513,22 +513,25 @@ impl Match {
         value: Value,
     ) -> Result<(), EvaluationError> {
         let key = name.as_ref();
-        // Contract check: a typed variable only accepts values
-        // inhabiting its kind. Scans filter mismatched facts
-        // before reaching here, so a failure at this point is
-        // a contract violation (e.g. an untyped construction
-        // path feeding a value the rule's types exclude), not
-        // a data-dependent non-match.
-        if let Some(kind) = kind
-            && !kind.admits(&value)
-        {
-            return Err(EvaluationError::KindMismatch {
-                variable: key.to_string(),
-                kind: kind.to_string(),
-                value: format!("{value:?}"),
-                value_type: format!("{:?}", value.data_type()),
-            });
-        }
+        // A typed variable reads the value through its kind, as a scan
+        // reads a stored fact (`Type::view`): a natural 40 binds an
+        // integer variable as the integer 40, whatever path brought it
+        // here (a scan, a formula result, a commit's seed row). Only a
+        // value the kind does not read at all (a string into a number,
+        // a negative into a natural) is a mismatch, and callers that
+        // filter rows treat it as a non-match.
+        let value = match kind {
+            Some(kind) => {
+                kind.view(value.clone())
+                    .ok_or_else(|| EvaluationError::KindMismatch {
+                        variable: key.to_string(),
+                        kind: kind.to_string(),
+                        value: format!("{value:?}"),
+                        value_type: format!("{:?}", value.data_type()),
+                    })?
+            }
+            None => value,
+        };
         if let Some(existing) = self.find(key) {
             match existing {
                 // Two numbers agree when either reads as the other through
@@ -678,6 +681,37 @@ mod tests {
 
         row.bind(&typed, Value::String("Alice".into()))
             .expect("a String value inhabits the kind");
+    }
+
+    /// A typed number variable binds a number of another type as its
+    /// view reads it, the way a scan reads a stored fact: the natural 40
+    /// is the integer 40 to an integer variable, and the integer 3 is
+    /// the natural 3 to a natural one. A number the view does not read
+    /// (a negative into a natural) is a mismatch.
+    #[dialog_common::test]
+    fn bind_reads_a_number_through_the_terms_kind() {
+        let mut row = Match::new();
+        let integer: Term<Any> = Term::<i128>::var("n").into();
+        row.bind(&integer, Value::UnsignedInt(40))
+            .expect("an integer variable reads a natural");
+        assert_eq!(row.find("n"), Some(&Binding::Present(Value::SignedInt(40))));
+
+        let mut row = Match::new();
+        let natural: Term<Any> = Term::<u128>::var("n").into();
+        row.bind(&natural, Value::SignedInt(3))
+            .expect("a natural variable reads a non-negative integer");
+        assert_eq!(
+            row.find("n"),
+            Some(&Binding::Present(Value::UnsignedInt(3)))
+        );
+
+        let mut row = Match::new();
+        let err = row.bind(&natural, Value::SignedInt(-3));
+        assert!(
+            matches!(err, Err(EvaluationError::KindMismatch { .. })),
+            "a natural variable does not read -3, got {err:?}"
+        );
+        assert_eq!(row.find("n"), None, "a refused value leaves nothing bound");
     }
 
     #[dialog_common::test]

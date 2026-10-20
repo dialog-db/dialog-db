@@ -14,6 +14,22 @@ says how to cut a release.
 
 ## Unreleased
 
+### A number binds a typed rule variable as the variable's type reads it
+
+Fixes [#615](https://github.com/dialog-db/dialog-db/issues/615)
+
+Since 0.3.0 a non-negative number reads back from storage as a natural, whatever type wrote it, and a field declared `integer` reads it as the integer it is. A scan already did. A value bound into a typed variable by any other route (a commit's induction seeding a rule from a new fact, a formula result, a merge of two rows) was instead held to the variable's exact type, and a natural meeting an `integer` variable failed the whole commit with `Commit-time induction failed: seeded rule body: ... Variable ?n of kind SignedInt cannot bind UnsignedInt(40)`. Binding now reads the value through the variable's type, as a scan does: the natural 40 binds an `integer` variable as the integer 40, and only a value the type does not read at all (a string into a number, a negative into a natural) is a mismatch, which the callers that filter rows treat as a non-match.
+
+The route that showed it needed two replicas. A commit's induction replays every fact that reached the branch since it last induced, so the first commit after a pull seeds its rules with the pulled facts, among them a count the other replica's rule wrote, which reads back as a natural. A replica's own writes advance that watermark, so alone it only ever read the count by scan and never hit the check.
+
+What this changes for you:
+
+- An inductive rule over a field declared `integer` (or `float`) no longer fails the commit when the fact seeding it holds a natural, which is what every non-negative number is once stored. The first increment after a pull commits and syncs instead of being lost.
+- A constant premise field agrees with a seeded fact its type reads as the constant (`count: 40` matches the stored natural 40), as a scan for that constant does.
+- `Match::bind` on a typed variable stores the value as the variable's type reads it (`SignedInt(40)` for an `i128` variable given `UnsignedInt(40)`), not the value as given.
+
+Why: numbers are one band, and the band is read through a type at every boundary, not only at the scan. A rule that compiles must not fail at run time over the type a number happened to be stored as.
+
 ### The storage rewrite carries blob-index keys over as they are
 
 [#605](https://github.com/dialog-db/dialog-db/pull/605), forward-ported from `release/0.3.x`
