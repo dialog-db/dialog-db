@@ -190,6 +190,34 @@ pub enum TypeError {
         variable: String,
     },
 
+    /// A head field's declared type does not read every value the
+    /// body can bind to the field's variable: an integer that may be
+    /// negative into a natural field, a float that may have a
+    /// fraction into an integer field, or a value of a type the field
+    /// never holds. Narrow the variable in the body (a comparison such
+    /// as `?n >= 0`, a rounding formula) or widen the field's type.
+    #[error(
+        "Rule {rule}: head field \"{field}\" is {declared}, but ?{variable} is {inferred}: {reason}{}",
+        bound_by.as_ref().map(|premise| format!(" (bound by {premise})")).unwrap_or_default()
+    )]
+    HeadField {
+        /// The offending rule.
+        rule: Box<Rule>,
+        /// The head field.
+        field: String,
+        /// The field's declared type.
+        declared: Box<Kind>,
+        /// The body variable the field is bound from.
+        variable: String,
+        /// The variable's body-inferred type.
+        inferred: Box<Kind>,
+        /// Why the field does not read it, and how to fix it.
+        reason: String,
+        /// The premise that gave the variable the shape the field
+        /// does not read, when inference recorded one.
+        bound_by: Option<String>,
+    },
+
     /// A `Coalesce` constraint in this rule violates its type
     /// contract: its source must be set-widened (`Optional<α>`)
     /// and its `fallback` and `is` must each unify with `α`.
@@ -972,6 +1000,31 @@ pub enum AnalysisError {
     ReducedFieldCollision {
         /// The doubly defined field.
         field: String,
+    },
+    /// A head field's declared type does not read every value the
+    /// body can bind to the field's variable: an integer that may be
+    /// negative into a natural field, a float that may have a
+    /// fraction into an integer field, or a value of a type the field
+    /// never holds. The body narrows the variable (a comparison such
+    /// as `?n >= 0`, a rounding formula) or the field widens.
+    #[error(
+        "head field {field} is {declared}, but ?{variable} is {inferred}: {reason}{}",
+        bound_by.as_ref().map(|premise| format!(" (bound by {premise})")).unwrap_or_default()
+    )]
+    HeadField {
+        /// The head field.
+        field: String,
+        /// The field's declared type.
+        declared: Box<Kind>,
+        /// The body variable the field is bound from.
+        variable: String,
+        /// The variable's body-inferred type.
+        inferred: Box<Kind>,
+        /// Why the field does not read it, and how to fix it.
+        reason: String,
+        /// The premise that gave the variable the shape the field
+        /// does not read, when inference recorded one.
+        bound_by: Option<String>,
     },
     /// A reduce entry failed its type check: the carried
     /// [`TypeError`] is one of the entry-scoped variants

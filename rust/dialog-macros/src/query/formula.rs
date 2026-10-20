@@ -99,6 +99,27 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
         None
     };
+    // A field typed `N::Signed`, for a scheme parameter `N`, is the
+    // scheme's *signed image*: its cell is bounded by the signed
+    // numeric types and labeled with the parameter, flagged signed, so
+    // inference types it as the scheme's instantiation read as a
+    // number that may be negative, without sharing the scheme's type
+    // variable.
+    let signed_image_of = |ty: &syn::Type| -> Option<syn::Ident> {
+        if let syn::Type::Path(tp) = ty
+            && tp.qself.is_none()
+            && tp.path.segments.len() == 2
+            && tp.path.segments[1].ident == "Signed"
+            && tp.path.segments[0].arguments.is_none()
+            && tp.path.segments[1].arguments.is_none()
+        {
+            let ident = &tp.path.segments[0].ident;
+            if scheme_params.contains(ident) {
+                return Some(ident.clone());
+            }
+        }
+        None
+    };
 
     // `#[formula(cached)]` asks the engine to keep this formula's outputs:
     // the same inputs are computed once for as long as the environment's
@@ -240,8 +261,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
             // A scheme field's cell carries the bound of its type
             // parameter and the parameter name as the scheme label;
             // a concrete field's cell carries its singleton kind.
-            let (data_type, scheme) = match scheme_param_of(ty) {
-                Some(param) => {
+            let (data_type, scheme) = match (scheme_param_of(ty), signed_image_of(ty)) {
+                (Some(param), _) => {
                     let label =
                         syn::LitStr::new(&param.to_string(), proc_macro2::Span::call_site());
                     (
@@ -253,7 +274,19 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         Some(quote! { .scheme(#label) }),
                     )
                 }
-                None => (type_to_value_data_type(ty), None),
+                (None, Some(param)) => {
+                    let label =
+                        syn::LitStr::new(&param.to_string(), proc_macro2::Span::call_site());
+                    (
+                        quote! {
+                            Some(dialog_query::type_system::Type::from(
+                                dialog_query::type_system::Primitive::SIGNED_NUMERIC,
+                            ))
+                        },
+                        Some(quote! { .signed_of(#label) }),
+                    )
+                }
+                (None, None) => (type_to_value_data_type(ty), None),
             };
 
             if *is_output {

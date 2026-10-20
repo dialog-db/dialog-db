@@ -201,18 +201,37 @@ impl Context {
                     return Ok(Type::Variable(x));
                 }
                 // If either side has already been resolved to a
-                // static, unify that resolved static against the
-                // other variable instead.
+                // static, narrow the other variable to that static,
+                // then link the two: they stay one variable, so a
+                // static a later premise contributes to either one
+                // reaches the other. A scheme variable a polymorphic
+                // literal resolves to the whole numeric set would
+                // otherwise split its cells into separate variables,
+                // and a field typing one of them would never type the
+                // rest.
                 let xs = self.substitution.get(&x).cloned();
                 let ys = self.substitution.get(&y).cloned();
-                match (xs, ys) {
+                let resolved = match (xs, ys) {
                     (Some(Type::Static(sx)), _) => {
-                        return self.unify(&Type::Static(sx), &Type::Variable(y));
+                        Some(self.unify(&Type::Static(sx), &Type::Variable(y))?)
                     }
                     (_, Some(Type::Static(sy))) => {
-                        return self.unify(&Type::Variable(x), &Type::Static(sy));
+                        Some(self.unify(&Type::Variable(x), &Type::Static(sy))?)
                     }
-                    _ => {}
+                    _ => None,
+                };
+                if let Some(resolved) = resolved {
+                    let merged = self.constraint(x).intersect(self.constraint(y)).ok_or(
+                        UnifyError::ConstraintConflict {
+                            left: self.constraint(x),
+                            right: self.constraint(y),
+                        },
+                    )?;
+                    self.constraints.insert(x, merged);
+                    self.constraints.insert(y, merged);
+                    self.substitution.insert(x, resolved.clone());
+                    self.substitution.insert(y, Type::Variable(x));
+                    return Ok(resolved);
                 }
                 let cx = self.constraint(x);
                 let cy = self.constraint(y);
@@ -333,6 +352,41 @@ mod tests {
                 "the variable's constraint participates in the returned meet"
             ),
             other => panic!("expected static, got {other:?}"),
+        }
+    }
+
+    /// Two variables unified after one of them resolved to a static
+    /// stay one variable: a static a later unification brings to
+    /// either reaches the other. A scheme variable a polymorphic
+    /// literal resolves to the whole numeric set must not split its
+    /// cells into variables a field's type then reaches one at a time.
+    #[dialog_common::test]
+    fn unify_links_variables_past_a_static_resolution() {
+        let mut ctx = Context::new();
+        let scheme = ctx.fresh(Primitive::NUMERIC);
+        let operand = ctx.fresh(Primitive::ANY);
+        let result = ctx.fresh(Primitive::ANY);
+        ctx.unify(
+            &Type::Variable(scheme),
+            &Type::Static(StaticType::from(Primitive::NUMERIC)),
+        )
+        .expect("the literal resolves the scheme to the numbers");
+        ctx.unify(&Type::Variable(scheme), &Type::Variable(operand))
+            .expect("the operand joins the scheme");
+        ctx.unify(&Type::Variable(scheme), &Type::Variable(result))
+            .expect("the result joins the scheme");
+        ctx.unify(
+            &Type::Static(StaticType::from(ValueType::SignedInt)),
+            &Type::Variable(operand),
+        )
+        .expect("a field types the operand");
+        match ctx.resolve(&Type::Variable(result)) {
+            Type::Static(s) => assert_eq!(
+                s.primitive_part(),
+                Primitive::singleton(ValueType::SignedInt),
+                "the result is typed with the operand it shares a scheme with"
+            ),
+            other => panic!("expected the result resolved, got {other:?}"),
         }
     }
 
