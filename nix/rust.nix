@@ -131,6 +131,36 @@ let
     }
   );
 
+  # The crates a Wasm component links, built for WASI. No test runs on a
+  # WASI target, so this is what keeps them building there: a change that
+  # takes every `wasm32` build to be a browser breaks it.
+  wasiCrates = builtins.concatStringsSep " " (
+    map (crate: "-p ${crate}") [
+      "dialog-common"
+      "dialog-ucan-core"
+      "dialog-credentials"
+      "dialog-capability"
+      "dialog-storage"
+      "dialog-remote-ucan"
+      "dialog-repository"
+      "dialog-query"
+      "dialog-peer"
+    ]
+  );
+
+  wasiAttributes = commonAttributes // {
+    CARGO_BUILD_TARGET = "wasm32-wasip2";
+  };
+
+  wasiArtifacts = craneLib.buildDepsOnly (
+    wasiAttributes
+    // {
+      pname = "dialog-db-workspace-wasi-deps";
+      cargoExtraArgs = "--locked ${wasiCrates}";
+      cargoCheckExtraArgs = "";
+    }
+  );
+
   # Generic crate builder using crane
   buildCrate =
     attributes:
@@ -249,6 +279,16 @@ let
         # The doctests run in the check phase, which the shared attributes
         # turn off.
         doCheck = true;
+      }
+    );
+
+    wasi = craneLib.mkCargoDerivation (
+      wasiAttributes
+      // {
+        pname = "dialog-db-wasi-check";
+        cargoArtifacts = wasiArtifacts;
+        buildPhaseCargoCommand = "cargo check --release --locked ${wasiCrates}";
+        doInstallCargoArtifacts = false;
       }
     );
 
