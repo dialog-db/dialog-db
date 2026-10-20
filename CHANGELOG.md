@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A number binds a typed rule variable as the variable's type reads it
 
-Fixes [#615](https://github.com/dialog-db/dialog-db/issues/615)
+[#616](https://github.com/dialog-db/dialog-db/pull/616), fixes [#615](https://github.com/dialog-db/dialog-db/issues/615)
 
 Since 0.3.0 a non-negative number reads back from storage as a natural, whatever type wrote it, and a field declared `integer` reads it as the integer it is. A scan already did. A value bound into a typed variable by any other route (a commit's induction seeding a rule from a new fact, a formula result, a merge of two rows) was instead held to the variable's exact type, and a natural meeting an `integer` variable failed the whole commit with `Commit-time induction failed: seeded rule body: ... Variable ?n of kind SignedInt cannot bind UnsignedInt(40)`. Binding now reads the value through the variable's type, as a scan does: the natural 40 binds an `integer` variable as the integer 40, and only a value the type does not read at all (a string into a number, a negative into a natural) is a mismatch, which the callers that filter rows treat as a non-match.
 
