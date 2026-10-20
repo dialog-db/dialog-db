@@ -17,7 +17,7 @@ use dialog_common::Blake3Hash;
 use crate::archive::Archive;
 use crate::{Method, method};
 
-use super::{Blob, ByteRange, Held, Import, ImportRange, Read, Size, Usage, Write};
+use super::{Blob, ByteRange, Held, Import, ImportRange, Proof, Read, Size, Usage, Write};
 
 /// Scope the archive to its blob store.
 pub trait ArchiveBlobExt {
@@ -45,6 +45,9 @@ pub trait ReadBlobExt {
     fn size(self, digest: impl Into<Blake3Hash>) -> Capability<Size>;
     /// Which bytes of a blob the store holds, without reading them.
     fn held(self, digest: impl Into<Blake3Hash>) -> Capability<Held>;
+    /// The proof of a range of a blob, from its outboard.
+    fn proof(self, digest: impl Into<Blake3Hash>, size: u64, range: ByteRange)
+    -> Capability<Proof>;
     /// The bytes that the blob store keeps.
     fn usage(self) -> Capability<Usage>;
 }
@@ -62,6 +65,15 @@ impl ReadBlobExt for Capability<Blob<method::Get>> {
         self.invoke(Held::new(digest))
     }
 
+    fn proof(
+        self,
+        digest: impl Into<Blake3Hash>,
+        size: u64,
+        range: ByteRange,
+    ) -> Capability<Proof> {
+        self.invoke(Proof::new(digest, size, range))
+    }
+
     fn usage(self) -> Capability<Usage> {
         self.invoke(Usage::new())
     }
@@ -76,6 +88,30 @@ pub trait BlobHeldExt {
 impl BlobHeldExt for Capability<Held> {
     fn digest(&self) -> &Blake3Hash {
         &Held::of(self).digest
+    }
+}
+
+/// Field accessors on `Capability<Proof>`.
+pub trait BlobProofExt {
+    /// The blob digest from the capability chain.
+    fn digest(&self) -> &Blake3Hash;
+    /// The size of the blob from the capability chain.
+    fn size(&self) -> u64;
+    /// The range from the capability chain.
+    fn range(&self) -> ByteRange;
+}
+
+impl BlobProofExt for Capability<Proof> {
+    fn digest(&self) -> &Blake3Hash {
+        &Proof::of(self).digest
+    }
+
+    fn size(&self) -> u64 {
+        Proof::of(self).size
+    }
+
+    fn range(&self) -> ByteRange {
+        Proof::of(self).range
     }
 }
 

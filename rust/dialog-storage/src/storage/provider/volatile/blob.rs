@@ -22,12 +22,12 @@ use base58::ToBase58;
 use dialog_capability::{Capability, Did, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::blob::prelude::{
-    BlobHeldExt as _, BlobImportExt as _, BlobImportRangeExt as _, BlobReadExt as _,
-    BlobSizeExt as _,
+    BlobHeldExt as _, BlobImportExt as _, BlobImportRangeExt as _, BlobProofExt as _,
+    BlobReadExt as _, BlobSizeExt as _,
 };
 use dialog_effects::blob::{
     BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Encoding, Held, Holding, Import,
-    ImportRange, Read, Size, Usage, Write,
+    ImportRange, Proof, Read, Size, Usage, Write,
 };
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
@@ -431,6 +431,62 @@ impl Provider<Held> for Volatile {
     }
 }
 
+/// The proof of a range of a blob, from the pairs of its outboard, or of the
+/// hashes that verified the groups of a partial blob that holds the first
+/// and the last group of the range.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Proof> for Volatile {
+    async fn execute(
+        &self,
+        effect: Capability<Proof>,
+    ) -> Result<Option<Vec<Blake3Hash>>, BlobError> {
+        let subject: Did = effect.subject().into();
+        let (digest, size, range) = (effect.digest(), effect.size(), effect.range());
+        let end = range
+            .length
+            .map_or(size, |length| range.offset.saturating_add(length).min(size));
+        if range.offset >= end {
+            return Err(BlobError::Storage(format!(
+                "a proof covers at least one byte of the blob, of {size} bytes"
+            )));
+        }
+        let proof = bao::Proof::new(size, range.offset, end);
+        let key = blob_key(digest);
+        let sessions = self.sessions.read();
+        let Some(session) = sessions.get(&subject) else {
+            return Ok(None);
+        };
+        let hashes = if let Some(bytes) = session.blobs.get(&key) {
+            if bytes.len() as u64 != size {
+                return Ok(None);
+            }
+            let outboard = session.outboards.get(&key);
+            proof.hashes(digest, |offset| {
+                outboard
+                    .and_then(|outboard| outboard.get(offset as usize..offset as usize + bao::PAIR))
+                    .and_then(|pair| pair.try_into().ok())
+            })
+        } else {
+            let Some(partial) = session.partials.get(&key) else {
+                return Ok(None);
+            };
+            let holding = partial.holding();
+            if partial.size != size || !proof.groups().all(|group| holding.held_from(group) > group)
+            {
+                return Ok(None);
+            }
+            proof.hashes(digest, |offset| partial.pairs.get(&offset).copied())
+        };
+        hashes
+            .map(|hashes| hashes.map(|hashes| hashes.into_iter().map(Blake3Hash::from).collect()))
+            .map_err(|unverified| BlobError::Unverified {
+                digest: key,
+                reason: format!("the store holds a part that went bad: {unverified}"),
+            })
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<ImportRange> for Volatile {
@@ -731,6 +787,26 @@ mod tests {
     async fn it_holds_the_part_of_the_size_whose_group_verified_last() {
         let subject = unique_subject("blob-partial-size");
         crate::bao::conformance::it_holds_the_part_of_the_size_whose_group_verified_last(
+            &Volatile::new(),
+            &subject,
+        )
+        .await;
+    }
+
+    #[dialog_common::test]
+    async fn it_proves_a_range_of_a_blob_that_it_holds_whole() {
+        let subject = unique_subject("blob-proof-whole");
+        crate::bao::conformance::it_proves_a_range_of_a_blob_that_it_holds_whole(
+            &Volatile::new(),
+            &subject,
+        )
+        .await;
+    }
+
+    #[dialog_common::test]
+    async fn it_proves_a_range_of_a_blob_that_it_holds_in_part() {
+        let subject = unique_subject("blob-proof-partial");
+        crate::bao::conformance::it_proves_a_range_of_a_blob_that_it_holds_in_part(
             &Volatile::new(),
             &subject,
         )
