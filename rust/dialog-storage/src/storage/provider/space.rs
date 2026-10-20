@@ -137,6 +137,7 @@ pub struct Space<A, M, C, D, B> {
         blob::Write,
         blob::Import,
         blob::Held,
+        blob::Proof,
         blob::ImportRange,
         blob::Usage
     )]

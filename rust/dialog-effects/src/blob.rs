@@ -18,6 +18,7 @@
 //!               ├── Read { digest, range }             → BlobReader
 //!               ├── Size { digest }                    → Option<u64>
 //!               ├── Held { digest }                    → Option<Holding>
+//!               ├── Proof { digest, size, range }      → Option<Vec<Blake3Hash>>
 //!               └── Usage                               → u64 (bytes kept)
 //! ```
 //!
@@ -36,7 +37,9 @@
 //! group of such a range that verifies, and [`Held`] says which groups a store
 //! holds. A store answers [`Size`] only for a blob that it holds whole, and a
 //! [`Read`] of a blob that it holds in part ends where the held part of the
-//! range ends.
+//! range ends. [`Proof`] gives the hashes that tie a range to the digest,
+//! from those that the store keeps, so a reader can make sure of the range
+//! itself.
 
 use crate::archive::Archive;
 use crate::method;
@@ -271,6 +274,47 @@ impl Policy for Held {
 
 impl Effect for Held {
     type Output = Result<Option<Holding>, BlobError>;
+}
+
+/// The proof of a range of the blob `digest` of `size` bytes: the hashes of
+/// the subtrees of its Bao tree that lie beside the range, from left to
+/// right, with groups of 16 KiB. A reader that hashes the groups of the
+/// range, and the tree above them, reaches the digest with these hashes.
+///
+/// The store reads the proof from the outboard of the blob, or from the
+/// hashes that verified the groups of a partial blob, and reads no byte of
+/// the blob. It answers `None` when it does not hold the blob at `size`, or
+/// holds it in part without the first or the last group of the range. A
+/// range from the first byte to the last has the empty proof.
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
+pub struct Proof {
+    /// The blob's content hash: the root of its Bao tree.
+    #[serde(with = "dialog_common::as_bytes")]
+    pub digest: Blake3Hash,
+    /// The size of the blob, which shapes its tree.
+    pub size: u64,
+    /// The range, of at least one byte. The proof covers each group that
+    /// holds a byte of it.
+    pub range: ByteRange,
+}
+
+impl Proof {
+    /// The proof of `range` of the blob `digest` of `size` bytes.
+    pub fn new(digest: impl Into<Blake3Hash>, size: u64, range: ByteRange) -> Self {
+        Self {
+            digest: digest.into(),
+            size,
+            range,
+        }
+    }
+}
+
+impl Policy for Proof {
+    type Of = Blob<method::Get>;
+}
+
+impl Effect for Proof {
+    type Output = Result<Option<Vec<Blake3Hash>>, BlobError>;
 }
 
 /// Import a verified range of a blob whose hash and size are **already

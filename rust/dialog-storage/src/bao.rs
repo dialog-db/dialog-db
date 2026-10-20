@@ -448,6 +448,151 @@ pub fn groups_of(size: u64, start: u64, end: u64) -> (u64, u64) {
     (first, last.max(first))
 }
 
+/// One parent on the path from the root of a tree to a group: where the
+/// outboard keeps its pair, and the child that the path goes on to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Step {
+    node: TreeNode,
+    /// The offset of its pair in the post-order outboard.
+    offset: u64,
+    is_root: bool,
+    /// Whether the path goes on to the left child, and not the right.
+    left: bool,
+}
+
+/// The parents on the path from the root of the tree of a blob of `size`
+/// bytes to the group at the byte `group`, from the root down.
+fn path(size: u64, group: u64) -> Vec<Step> {
+    let tree = tree(size);
+    let Some(items) = items(size, group, group.saturating_add(1).min(size)) else {
+        return Vec::new();
+    };
+    items
+        .filter_map(|chunk| match chunk {
+            BaoChunk::Parent {
+                node,
+                is_root,
+                left,
+                ..
+            } => pair_offset(&tree, node).map(|offset| Step {
+                node,
+                offset,
+                is_root,
+                left,
+            }),
+            BaoChunk::Leaf { .. } => None,
+        })
+        .collect()
+}
+
+/// The proof of a range of a blob: the hashes of the subtrees of its tree
+/// that lie beside the range, from left to right, 32 bytes each. A reader
+/// that holds the groups of the range hashes them, and the tree above them,
+/// and reaches the hash of the blob with these hashes.
+///
+/// The subtrees beside a range are the siblings of the path from the root to
+/// its first group, to the left of that path, and of the path to its last
+/// group, to the right. So the proof reads only the pairs on those two paths,
+/// at most two hashes for each level of the tree. A range that starts the
+/// blob has nothing to its left, and one that ends the blob nothing to its
+/// right: the proof then reads no pair of that path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Proof {
+    /// The first group of the range, and the path to it, if the range does
+    /// not start the blob.
+    first: Option<(u64, Vec<Step>)>,
+    /// The last group of the range, and the path to it, if the range does
+    /// not end the blob.
+    last: Option<(u64, Vec<Step>)>,
+}
+
+impl Proof {
+    /// The proof of the groups from `start` to `end` of a blob of `size`
+    /// bytes: from the group that holds `start` to the group that holds the
+    /// byte before `end`. A range with no byte has the proof of its group.
+    pub fn new(size: u64, start: u64, end: u64) -> Self {
+        let end = end.min(size).max(start.saturating_add(1).min(size));
+        let (first, last) = groups_of(size, start, end);
+        let last_group = last.saturating_sub(1) / GROUP * GROUP;
+        Self {
+            first: (first > 0).then(|| (first, path(size, first))),
+            last: (last < size).then(|| (last_group, path(size, last_group))),
+        }
+    }
+
+    /// The groups whose paths the proof reads, by their offsets: a store
+    /// that holds a blob in part holds the pairs of each.
+    pub fn groups(&self) -> impl Iterator<Item = u64> + '_ {
+        self.first
+            .iter()
+            .chain(self.last.iter())
+            .map(|(group, _)| *group)
+    }
+
+    /// The offsets in the post-order outboard of the pairs that the proof
+    /// reads, each once.
+    pub fn pairs(&self) -> Vec<u64> {
+        let mut offsets: Vec<u64> = self
+            .first
+            .iter()
+            .chain(self.last.iter())
+            .flat_map(|(_, path)| path.iter().map(|step| step.offset))
+            .collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        offsets
+    }
+
+    /// The hashes of the proof against the blob `hash`, from the pair that
+    /// `pair` gives for each offset of [`Proof::pairs`]: none if it gives
+    /// none for one. Each pair must verify against the hash of its parent,
+    /// from the root down.
+    pub fn hashes(
+        &self,
+        hash: &Blake3Hash,
+        pair: impl Fn(u64) -> Option<[u8; PAIR]>,
+    ) -> Result<Option<Vec<[u8; 32]>>, Unverified> {
+        // The hashes beside one path, on the side `left` or the right, from
+        // the root down.
+        let beside = |path: &[Step], left: bool| {
+            let mut expected = blake3::Hash::from(*hash.as_bytes());
+            let mut hashes = Vec::new();
+            for step in path {
+                let Some(pair) = pair(step.offset) else {
+                    return Ok(None);
+                };
+                let (l, r) = split(&pair);
+                if parent_hash(&l, &r, step.is_root) != expected {
+                    return Err(Unverified::Parent(step.node));
+                }
+                match (step.left, left) {
+                    (false, true) => hashes.push(*l.as_bytes()),
+                    (true, false) => hashes.push(*r.as_bytes()),
+                    _ => {}
+                }
+                expected = if step.left { l } else { r };
+            }
+            Ok(Some(hashes))
+        };
+        let mut hashes = Vec::new();
+        if let Some((_, path)) = &self.first {
+            let Some(left) = beside(path, true)? else {
+                return Ok(None);
+            };
+            hashes.extend(left);
+        }
+        if let Some((_, path)) = &self.last {
+            let Some(right) = beside(path, false)? else {
+                return Ok(None);
+            };
+            // The deeper a subtree to the right, the nearer it is to the
+            // range: the proof gives them from left to right.
+            hashes.extend(right.into_iter().rev());
+        }
+        Ok(Some(hashes))
+    }
+}
+
 /// Encodes a verified range of a blob, item by item, in the order of
 /// `bao-tree`: [`Encoder::need`] says which bytes of the outboard or of the
 /// blob the store reads next, and [`Encoder::take`] takes them and gives
@@ -658,6 +803,7 @@ pub fn outboard(bytes: &[u8]) -> (Blake3Hash, Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
+    use super::conformance::root_of;
     use super::*;
     use bao_tree::io::outboard::PostOrderMemOutboard;
 
@@ -908,6 +1054,110 @@ mod tests {
             assert_eq!(built.len() as u64, outboard_size(size as u64), "{size}");
         }
     }
+
+    /// The proof of the range from `start` to `end` of `bytes`, from its
+    /// outboard.
+    fn proof_of(bytes: &[u8], start: u64, end: u64) -> Vec<[u8; 32]> {
+        let (hash, outboard) = outboard(bytes);
+        Proof::new(bytes.len() as u64, start, end)
+            .hashes(&hash, |offset| {
+                outboard
+                    .get(offset as usize..offset as usize + PAIR)
+                    .map(|pair| pair.try_into().expect("a pair"))
+            })
+            .expect("the outboard verifies")
+            .expect("the outboard holds each pair")
+    }
+
+    #[dialog_common::test]
+    fn it_proves_a_range_against_the_hash_alone() {
+        for &size in SIZES.iter().filter(|&&size| size > 0) {
+            let bytes = blob(size);
+            let hash = blake3::hash(&bytes);
+            let size = size as u64;
+            let ranges = [
+                (0, 1),
+                (0, size),
+                (size - 1, size),
+                (size / 2, size / 2 + 1),
+                (GROUP - 1, GROUP + 1),
+                (GROUP, size),
+                (size / 3, 2 * size / 3 + 1),
+            ];
+            for (start, end) in ranges {
+                let (start, end) = (start.min(size - 1), end.min(size));
+                let proof = proof_of(&bytes, start, end);
+                assert_eq!(
+                    root_of(&bytes, start, end, &proof),
+                    Some(*hash.as_bytes()),
+                    "the proof of {start}..{end} of {size}"
+                );
+                let levels = u64::from(64 - groups(size).saturating_sub(1).leading_zeros());
+                assert!(
+                    proof.len() as u64 <= 2 * levels,
+                    "{} hashes for {levels} levels",
+                    proof.len()
+                );
+            }
+        }
+    }
+
+    #[dialog_common::test]
+    fn it_needs_no_pair_for_a_range_of_the_whole_blob() {
+        for &size in SIZES {
+            let size = size as u64;
+            let proof = Proof::new(size, 0, size);
+            assert_eq!(proof.pairs(), Vec::<u64>::new(), "{size}");
+            assert_eq!(proof.groups().count(), 0, "{size}");
+        }
+    }
+
+    #[dialog_common::test]
+    fn it_reads_only_the_paths_of_the_first_and_the_last_group() {
+        let size = 3 * 1024 * 1024;
+        let proof = Proof::new(size, GROUP * 10 + 5, GROUP * 100);
+        assert_eq!(proof.groups().collect::<Vec<_>>(), [GROUP * 10, GROUP * 99]);
+        // A tree of 192 groups has eight levels of parents.
+        assert!(proof.pairs().len() <= 16, "{:?}", proof.pairs());
+        let to_the_end = Proof::new(size, GROUP * 10, size);
+        assert_eq!(to_the_end.groups().collect::<Vec<_>>(), [GROUP * 10]);
+        let from_the_start = Proof::new(size, 0, GROUP * 3);
+        assert_eq!(from_the_start.groups().collect::<Vec<_>>(), [GROUP * 2]);
+    }
+
+    #[dialog_common::test]
+    fn it_reaches_another_root_with_a_changed_hash_or_group() {
+        let bytes = blob(1024 * 1024 + 123);
+        let hash = *blake3::hash(&bytes).as_bytes();
+        let (start, end) = (GROUP * 3, GROUP * 9);
+        let mut proof = proof_of(&bytes, start, end);
+        proof[1][7] ^= 1;
+        assert_ne!(root_of(&bytes, start, end, &proof), Some(hash));
+        let proof = proof_of(&bytes, start, end);
+        let mut changed = bytes.clone();
+        changed[GROUP as usize * 5] ^= 1;
+        assert_ne!(root_of(&changed, start, end, &proof), Some(hash));
+    }
+
+    #[dialog_common::test]
+    fn it_fails_a_pair_of_the_proof_that_does_not_verify() {
+        let bytes = blob(1024 * 1024 + 123);
+        let (hash, mut outboard) = outboard(&bytes);
+        let size = bytes.len() as u64;
+        let proof = Proof::new(size, GROUP * 3, GROUP * 9);
+        let changed = proof.pairs()[0] as usize;
+        outboard[changed] ^= 1;
+        let pair = |offset: u64| {
+            outboard
+                .get(offset as usize..offset as usize + PAIR)
+                .map(|pair| pair.try_into().expect("a pair"))
+        };
+        assert!(matches!(
+            proof.hashes(&hash, pair),
+            Err(Unverified::Parent(_))
+        ));
+        assert_eq!(proof.hashes(&hash, |_| None), Ok(None));
+    }
 }
 
 /// What each store of partial blobs must do, as tests that each provider
@@ -917,8 +1167,59 @@ pub(crate) mod conformance {
     use super::*;
     use bao_tree::io::outboard::PostOrderMemOutboard;
     use dialog_capability::{Provider, Subject};
-    use dialog_effects::blob::{BlobError, BlobReader, ByteRange, Held, ImportRange, Read, Size};
+    use dialog_effects::blob::{
+        BlobError, BlobReader, ByteRange, Held, ImportRange, Proof, Read, Size,
+    };
     use dialog_effects::prelude::*;
+
+    /// The root that a reader reaches from the groups from `start` to `end`
+    /// of `bytes` and the hashes of `proof`, with its own code: it hashes
+    /// each group of the range, and the tree of BLAKE3 above them, and takes
+    /// the hash of each subtree beside the range from the proof, from left
+    /// to right. None if the proof has too few hashes, or too many.
+    pub fn root_of(bytes: &[u8], start: u64, end: u64, proof: &[[u8; 32]]) -> Option<[u8; 32]> {
+        /// The hash of the subtree of `chunks` chunks of 1 KiB at the chunk
+        /// `at`.
+        fn subtree(
+            bytes: &[u8],
+            (at, chunks): (u64, u64),
+            is_root: bool,
+            range: (u64, u64),
+            proof: &mut std::slice::Iter<'_, [u8; 32]>,
+        ) -> Option<[u8; 32]> {
+            let size = bytes.len() as u64;
+            let (from, to) = (at * 1024, ((at + chunks) * 1024).min(size));
+            if to <= range.0 || from >= range.1 {
+                return proof.next().copied();
+            }
+            if chunks <= 16 {
+                let group = &bytes[from as usize..to as usize];
+                if is_root {
+                    return Some(*blake3::hash(group).as_bytes());
+                }
+                let mut hasher = blake3::Hasher::new();
+                hasher.set_input_offset(from);
+                hasher.update(group);
+                return Some(hasher.finalize_non_root());
+            }
+            // BLAKE3 puts the largest power of two of the chunks, less than
+            // all of them, on the left.
+            let left = 1u64 << (63 - (chunks - 1).leading_zeros());
+            let l = subtree(bytes, (at, left), false, range, proof)?;
+            let r = subtree(bytes, (at + left, chunks - left), false, range, proof)?;
+            Some(if is_root {
+                *merge_subtrees_root(&l, &r, Mode::Hash).as_bytes()
+            } else {
+                merge_subtrees_non_root(&l, &r, Mode::Hash)
+            })
+        }
+        let size = bytes.len() as u64;
+        let range = groups_of(size, start, end);
+        let mut hashes = proof.iter();
+        let chunks = size.div_ceil(1024).max(1);
+        let root = subtree(bytes, (0, chunks), true, range, &mut hashes)?;
+        hashes.next().is_none().then_some(root)
+    }
 
     /// A blob of `size` bytes whose groups differ.
     pub fn blob(size: usize) -> Vec<u8> {
@@ -1357,6 +1658,115 @@ pub(crate) mod conformance {
             matches!(imported, Err(BlobError::Unverified { .. })),
             "{imported:?}"
         );
+    }
+
+    /// The proof of `range` of the blob `bytes` that `store` gives, as a
+    /// blob of `size` bytes.
+    async fn proof<P>(
+        store: &P,
+        subject: &Subject,
+        bytes: &[u8],
+        size: u64,
+        (start, end): (u64, u64),
+    ) -> Result<Option<Vec<[u8; 32]>>, BlobError>
+    where
+        P: Provider<Proof> + dialog_common::ConditionalSync,
+    {
+        let digest = Blake3Hash::from(*blake3::hash(bytes).as_bytes());
+        let range = ByteRange {
+            offset: start,
+            length: Some(end - start),
+        };
+        let hashes = subject
+            .clone()
+            .reader()
+            .archive()
+            .blob()
+            .proof(digest, size, range)
+            .perform(store)
+            .await?;
+        Ok(hashes.map(|hashes| hashes.iter().map(|hash| *hash.as_bytes()).collect()))
+    }
+
+    /// A store that holds a blob whole proves each range of it from its
+    /// outboard, and proves no range at another size.
+    pub async fn it_proves_a_range_of_a_blob_that_it_holds_whole<P>(store: &P, subject: &Subject)
+    where
+        P: Provider<ImportRange> + Provider<Proof> + dialog_common::ConditionalSync,
+    {
+        let bytes = blob(10 * GROUP as usize + 99);
+        let size = bytes.len() as u64;
+        let hash = *blake3::hash(&bytes).as_bytes();
+        import(store, subject, &bytes, 0, size, &encoding(&bytes, 0, size))
+            .await
+            .unwrap();
+
+        for range in [
+            (0, 1),
+            (0, size),
+            (GROUP * 3 + 5, GROUP * 7),
+            (GROUP * 9, size),
+            (size - 1, size),
+        ] {
+            let hashes = proof(store, subject, &bytes, size, range)
+                .await
+                .unwrap()
+                .expect("a proof of a whole blob");
+            assert_eq!(
+                root_of(&bytes, range.0, range.1, &hashes),
+                Some(hash),
+                "{range:?}"
+            );
+        }
+        let other = proof(store, subject, &bytes, size + 1, (0, GROUP)).await;
+        assert!(matches!(other, Ok(None)), "{other:?}");
+        let empty = proof(store, subject, &bytes, size, (GROUP, GROUP)).await;
+        assert!(empty.is_err(), "{empty:?}");
+    }
+
+    /// A store that holds a blob in part proves a range whose first and last
+    /// groups it holds, from the hashes that verified them, and proves no
+    /// other range.
+    pub async fn it_proves_a_range_of_a_blob_that_it_holds_in_part<P>(store: &P, subject: &Subject)
+    where
+        P: Provider<ImportRange> + Provider<Proof> + dialog_common::ConditionalSync,
+    {
+        let bytes = blob(10 * GROUP as usize + 99);
+        let size = bytes.len() as u64;
+        let hash = *blake3::hash(&bytes).as_bytes();
+        for (start, end) in [(GROUP * 2, GROUP * 3), (GROUP * 6, GROUP * 7)] {
+            import(
+                store,
+                subject,
+                &bytes,
+                start,
+                end,
+                &encoding(&bytes, start, end),
+            )
+            .await
+            .unwrap();
+        }
+
+        for range in [(GROUP * 2 + 7, GROUP * 7), (GROUP * 6, GROUP * 6 + 1)] {
+            let hashes = proof(store, subject, &bytes, size, range)
+                .await
+                .unwrap()
+                .expect("a proof of the held groups");
+            assert_eq!(
+                root_of(&bytes, range.0, range.1, &hashes),
+                Some(hash),
+                "{range:?}"
+            );
+        }
+        for range in [(GROUP, GROUP * 3), (GROUP * 2, GROUP * 8), (0, size)] {
+            let hashes = proof(store, subject, &bytes, size, range).await;
+            let expected = if range == (0, size) {
+                Some(Vec::new())
+            } else {
+                None
+            };
+            assert_eq!(hashes.unwrap(), expected, "{range:?}");
+        }
     }
 
     /// The usage of a store counts each whole blob and its outboard, and the
