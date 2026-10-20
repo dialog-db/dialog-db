@@ -155,6 +155,8 @@ pub trait BlobReadExt {
     fn digest(&self) -> &Blake3Hash;
     /// The byte range from the capability chain.
     fn range(&self) -> Option<ByteRange>;
+    /// The form of the answer from the capability chain.
+    fn encoding(&self) -> Option<super::Encoding>;
 }
 
 impl BlobReadExt for Capability<Read> {
@@ -164,6 +166,10 @@ impl BlobReadExt for Capability<Read> {
 
     fn range(&self) -> Option<ByteRange> {
         Read::of(self).range
+    }
+
+    fn encoding(&self) -> Option<super::Encoding> {
+        Read::of(self).encoding
     }
 }
 

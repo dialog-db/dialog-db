@@ -120,6 +120,24 @@ pub type BlobReader = Box<dyn BlobSource>;
 /// A streaming writer returned by [`Write`] / [`Import`].
 pub type BlobWriter = Box<dyn BlobSink>;
 
+/// The form in which a [`Read`] gives the bytes of a blob, as its invocation
+/// names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Encoding {
+    /// A verified range: the Bao encoding of the groups of 16 KiB of the
+    /// range, with the hashes that verify each against the digest alone.
+    ///
+    /// The answer is the size of the blob, as 8 bytes, little endian; then
+    /// the end of the part of the range that it covers, as 8 bytes, little
+    /// endian; then the encoding of the groups from the group that holds the
+    /// start of the range to that end, in pre order, as `bao-tree` encodes
+    /// them. A store that holds the blob in part covers the held part from
+    /// the start of the range, and the end tells the reader so before the
+    /// first group. A store that holds none of the start covers nothing.
+    Bao,
+}
+
 /// Read a blob, optionally a byte range, by hash.
 #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Read {
@@ -128,6 +146,10 @@ pub struct Read {
     pub digest: Blake3Hash,
     /// The byte range to read, or the whole blob when `None`.
     pub range: Option<ByteRange>,
+    /// The form of the answer: the raw bytes when `None`, or a verified
+    /// range. See [`Encoding`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<Encoding>,
 }
 
 impl Read {
@@ -136,6 +158,7 @@ impl Read {
         Self {
             digest: digest.into(),
             range: None,
+            encoding: None,
         }
     }
 
@@ -144,6 +167,16 @@ impl Read {
         Self {
             digest: digest.into(),
             range: Some(ByteRange { offset, length }),
+            encoding: None,
+        }
+    }
+
+    /// Read a byte range of the blob `digest` as a verified range: see
+    /// [`Encoding::Bao`].
+    pub fn verified(digest: impl Into<Blake3Hash>, offset: u64, length: Option<u64>) -> Self {
+        Self {
+            encoding: Some(Encoding::Bao),
+            ..Self::range(digest, offset, length)
         }
     }
 }
