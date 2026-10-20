@@ -378,6 +378,13 @@ impl FileSystemHandle {
         backend::write_at(self, offset, bytes).await
     }
 
+    /// Make sure that the bytes of the file at this location are on the
+    /// disk, as a power loss leaves them. A file that is missing has nothing
+    /// to make sure of.
+    pub async fn sync(&self) -> Result<(), FileSystemError> {
+        backend::sync(self).await
+    }
+
     /// Open a streaming writer that commits atomically on
     /// [`finish`](FileWriter::finish), so large content is never buffered whole.
     pub async fn writer(&self) -> Result<FileWriter, FileSystemError> {

@@ -303,6 +303,21 @@ impl Provider<ImportRange> for Volatile {
     async fn execute(&self, effect: Capability<ImportRange>) -> Result<BlobWriter, BlobError> {
         let (size, range) = (effect.size(), effect.range());
         let end = bao::group_range(size, range.offset, range.length).map_err(BlobError::Storage)?;
+        let subject: Did = effect.subject().into();
+        // A part of the blob at another size is of another tree, whose pairs
+        // sit at other places: the import is refused before it keeps any.
+        let other = self
+            .sessions
+            .read()
+            .get(&subject)
+            .and_then(|session| session.partials.get(&blob_key(effect.digest())))
+            .is_some_and(|partial| partial.size != size);
+        if other {
+            return Err(BlobError::Storage(format!(
+                "the store holds a part of the blob {} of another size than {size} bytes",
+                blob_key(effect.digest())
+            )));
+        }
         Ok(Box::new(MemoryRangeSink {
             sessions: self.sessions.clone(),
             subject: effect.subject().into(),
@@ -579,5 +594,22 @@ mod tests {
         let subject = unique_subject("blob-partial-two");
         crate::bao::conformance::it_keeps_both_of_two_imports_at_once(&Volatile::new(), &subject)
             .await;
+    }
+
+    #[dialog_common::test]
+    async fn it_refuses_an_import_at_another_size() {
+        let subject = unique_subject("blob-partial-size");
+        crate::bao::conformance::it_refuses_an_import_at_another_size(&Volatile::new(), &subject)
+            .await;
+    }
+
+    #[dialog_common::test]
+    async fn it_verifies_a_range_of_a_blob_that_it_holds_whole() {
+        let subject = unique_subject("blob-partial-verify-whole");
+        crate::bao::conformance::it_verifies_a_range_of_a_blob_that_it_holds_whole(
+            &Volatile::new(),
+            &subject,
+        )
+        .await;
     }
 }

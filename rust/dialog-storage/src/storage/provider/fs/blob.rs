@@ -269,8 +269,7 @@ async fn shared_lock(record: &FileSystemHandle) -> Result<super::LockGuard, Blob
     loop {
         match super::lock(record).await {
             Ok(guard) => return Ok(guard),
-            Err(FileSystemError::Lock(reason)) if waited < std::time::Duration::from_secs(10) => {
-                let _ = reason;
+            Err(FileSystemError::Lock(_)) if waited < std::time::Duration::from_secs(10) => {
                 let pause = std::time::Duration::from_millis(5);
                 tokio::time::sleep(pause).await;
                 waited += pause;
@@ -299,8 +298,8 @@ struct RangeSink {
     kept: Groups,
     /// The bytes of `kept`.
     unrecorded: u64,
-    /// Whether the store held the blob whole at the start: the sink keeps
-    /// nothing more of it.
+    /// Whether the store held the blob whole at the start: the sink still
+    /// verifies each part, and keeps nothing more of it.
     whole: bool,
     /// Whether a part did not verify: the sink takes no more.
     failed: bool,
@@ -318,6 +317,19 @@ impl FileSystem {
         let blob_dir = self.blob()?;
         blob_dir.ensure_dir().await?;
         let whole = blob_dir.resolve(&blob_key(&digest))?.exists().await;
+        // A record of the blob at another size names groups of another
+        // tree: the pairs of this import would land at other places of the
+        // outboard. The import is refused before it writes anything.
+        let [_, _, held] = partial_keys(&digest);
+        if !whole
+            && let Some(record) = blob_dir.resolve(&held)?.read_optional().await?
+            && Groups::decode(&record).is_none_or(|(held, _)| held != size)
+        {
+            return Err(BlobError::Storage(format!(
+                "the store holds a part of the blob {} of another size than {size} bytes",
+                blob_key(&digest)
+            )));
+        }
         Ok(RangeSink {
             decoder: Decoder::new(&digest, size, range.offset, end),
             tree: bao::tree(size),
@@ -333,11 +345,13 @@ impl FileSystem {
 }
 
 impl RangeSink {
-    /// Takes each item of the encoding that the decoder holds, and keeps it.
+    /// Takes each item of the encoding that the decoder holds, and keeps it,
+    /// unless the store holds the blob whole.
     async fn keep(&mut self) -> Result<(), BlobError> {
         let [data, outboard, _] = partial_keys(&self.digest);
         while let Some(item) = self.decoder.next_item() {
             match item {
+                Ok(_) if self.whole => {}
                 Ok(Item::Parent { node, pair }) => {
                     if let Some(offset) = bao::pair_offset(&self.tree, node) {
                         self.blob_dir
@@ -379,7 +393,9 @@ impl RangeSink {
     }
 
     /// Adds the groups that the sink kept to the record of the partial blob,
-    /// and moves the blob to its place once the record names each group.
+    /// and moves the blob to its place once the record names each group. The
+    /// bytes and the hashes reach the disk before the record names them, so a
+    /// record never names a group whose bytes a power loss left out.
     async fn record(&mut self) -> Result<(), BlobError> {
         let kept = std::mem::take(&mut self.kept);
         self.unrecorded = 0;
@@ -398,6 +414,8 @@ impl RangeSink {
                 }
                 return Ok(());
             }
+            data.sync().await?;
+            outboard.sync().await?;
             let mut groups = match record.read_optional().await? {
                 Some(bytes) => match Groups::decode(&bytes) {
                     Some((held, groups)) if held == size => groups,
@@ -418,11 +436,15 @@ impl RangeSink {
                 return Ok(());
             }
             // The outboard first: a blob that the store holds has its
-            // outboard.
-            if outboard.exists().await {
-                outboard
-                    .rename(&blob_dir.resolve(&outboard_key(&digest))?)
-                    .await?;
+            // outboard. An outboard that is there already is whole, as one
+            // that a crash left between the two moves is: the partial one,
+            // which can hold the pairs of one range alone, does not replace
+            // it.
+            let whole_outboard = blob_dir.resolve(&outboard_key(&digest))?;
+            if whole_outboard.exists().await {
+                outboard.remove().await?;
+            } else if outboard.exists().await {
+                outboard.rename(&whole_outboard).await?;
             }
             if data.exists().await {
                 data.rename(&dest).await?;
@@ -445,9 +467,6 @@ impl BlobSink for RangeSink {
                 digest: blob_key(&self.digest),
                 reason: "an earlier part of the range did not verify".into(),
             });
-        }
-        if self.whole {
-            return Ok(());
         }
         self.decoder.push(bytes);
         self.keep().await
@@ -508,11 +527,21 @@ impl Provider<Read> for FileSystem {
         };
         let end = length.map_or(held, |length| offset.saturating_add(length).min(held));
         let [data, _, _] = partial_keys(digest);
-        let reader = self
+        let reader = match self
             .blob()?
             .resolve(&data)?
             .reader_range(offset, Some(end - offset))
-            .await?;
+            .await
+        {
+            Ok(reader) => reader,
+            // A sink completed the blob after the record was read: the bytes
+            // moved to the place of a whole blob.
+            Err(_) if handle.exists().await => {
+                let reader = handle.reader_range(offset, length).await?;
+                return Ok(Box::new(FileBlobSource(reader)));
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(Box::new(Limited {
             reader,
             left: end - offset,
@@ -830,5 +859,80 @@ mod tests {
     async fn it_keeps_both_of_two_imports_of_one_blob_at_once() {
         let fs = test_space("blob-partial-two").await;
         crate::bao::conformance::it_keeps_both_of_two_imports_at_once(&fs, &subject()).await;
+    }
+
+    #[dialog_common::test]
+    async fn it_refuses_an_import_at_another_size() {
+        let fs = test_space("blob-partial-size").await;
+        crate::bao::conformance::it_refuses_an_import_at_another_size(&fs, &subject()).await;
+    }
+
+    #[dialog_common::test]
+    async fn it_verifies_a_range_of_a_blob_that_it_holds_whole() {
+        let fs = test_space("blob-partial-verify-whole").await;
+        crate::bao::conformance::it_verifies_a_range_of_a_blob_that_it_holds_whole(&fs, &subject())
+            .await;
+    }
+
+    /// A crash between the two moves of a completion leaves the whole
+    /// outboard in place and the record of the partial blob: the outboard of
+    /// a later import, which holds the pairs of its range alone, does not
+    /// replace it.
+    #[dialog_common::test]
+    async fn it_keeps_a_whole_outboard_that_a_crash_left_beside_a_partial_blob() {
+        use crate::bao::conformance::{blob, encoding, import};
+        let fs = test_space("blob-partial-crash").await;
+        let bytes = blob(8 * crate::bao::GROUP as usize);
+        let size = bytes.len() as u64;
+        let digest = Blake3Hash::from(*blake3::hash(&bytes).as_bytes());
+        let half = 4 * crate::bao::GROUP;
+        import(&fs, &subject(), &bytes, 0, half, &encoding(&bytes, 0, half))
+            .await
+            .unwrap();
+        // The crash: the whole outboard moved to its place, and the partial
+        // outboard with it.
+        let blob_dir = fs.blob().unwrap();
+        let outboard = crate::bao::outboard(&bytes).1;
+        let [_, partial_outboard, _] = partial_keys(&digest);
+        blob_dir
+            .resolve(&partial_outboard)
+            .unwrap()
+            .remove()
+            .await
+            .unwrap();
+        blob_dir
+            .resolve(&outboard_key(&digest))
+            .unwrap()
+            .write(&outboard)
+            .await
+            .unwrap();
+
+        import(
+            &fs,
+            &subject(),
+            &bytes,
+            half,
+            size,
+            &encoding(&bytes, half, size),
+        )
+        .await
+        .unwrap();
+
+        let kept = blob_dir
+            .resolve(&outboard_key(&digest))
+            .unwrap()
+            .read()
+            .await
+            .unwrap();
+        assert_eq!(kept, outboard);
+        assert_eq!(
+            blob_dir
+                .resolve(&blob_key(&digest))
+                .unwrap()
+                .read()
+                .await
+                .unwrap(),
+            bytes
+        );
     }
 }

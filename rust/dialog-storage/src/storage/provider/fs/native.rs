@@ -450,6 +450,18 @@ pub(super) async fn write_at(
     file.flush().await.map_err(io)
 }
 
+pub(super) async fn sync(handle: &FileSystemHandle) -> Result<(), FileSystemError> {
+    let path: PathBuf = handle.try_into()?;
+    match fs::File::open(&path).await {
+        Ok(file) => file
+            .sync_data()
+            .await
+            .map_err(|e| FileSystemError::Io(e.to_string())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(FileSystemError::Io(e.to_string())),
+    }
+}
+
 pub(super) async fn exists(handle: &FileSystemHandle) -> bool {
     let Ok(path) = PathBuf::try_from(handle) else {
         return false;
