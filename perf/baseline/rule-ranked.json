@@ -10,19 +10,19 @@
     "rows": 1000
   },
   "counters": {
-    "archive.get": 11,
-    "archive.get.bytes": 439328,
+    "archive.get": 0,
+    "archive.get.bytes": 0,
     "archive.put": 0,
     "archive.put.bytes": 0,
     "span.apply_batch_reusing": 0,
     "span.buffer_records": 0,
     "span.commit": 0,
-    "span.hydrate_rule": 4,
+    "span.hydrate_rule": 0,
     "span.resolve_bundle": 9,
     "span.resolve_rules": 9,
     "span.seal_batch": 0,
     "span.settle": 0,
     "span.write_instructions": 0
   },
-  "instructions": 69832272
+  "instructions": 58476474
 }
