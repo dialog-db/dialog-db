@@ -37,20 +37,24 @@
 //! [`selector_range`]: dialog_artifacts::tree::selector_range
 //! [`Branch::overlay`]: crate::Branch::overlay
 
+use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::ops::RangeInclusive;
+use std::sync::{Arc, OnceLock};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, AttributeKey, Cause, Changes, DialogArtifactsError, Entity,
-    EntityKey, Instruction, Key, KeyViewConstruct, Pick, SortKey, Standing, Statement, Update,
-    ValueKey, sort_key,
+    Artifact, ArtifactSelector, Cause, Changes, DialogArtifactsError, Entity, EntityKey,
+    Instruction, Key, KeyViewConstruct, Pick, Relation, SortKey, Standing, Statement, Update,
+    artifact_index_keys, sort_key,
 };
 use dialog_common::Blake3Hash;
 use dialog_search_tree::Manifest;
 use parking_lot::RwLock;
+
+use crate::rules::is_rule_attribute;
 
 /// How many instants the ring retains. A subscription pinned further
 /// back than this recomputes from the fold instead of maintaining.
@@ -106,6 +110,9 @@ struct State {
     /// The most recent instants, oldest first, at most
     /// [`LOG_CAPACITY`].
     log: VecDeque<Instant>,
+    /// The hash of the rule facts held and hidden ([`Facts::rules`]),
+    /// once read; reset by an instant that changes one.
+    rules: OnceLock<Option<Blake3Hash>>,
 }
 
 impl Default for State {
@@ -117,17 +124,15 @@ impl Default for State {
             sequence: 0,
             hash: Blake3Hash::from([0u8; 32]),
             log: VecDeque::new(),
+            rules: OnceLock::new(),
         }
     }
 }
 
 /// The three index keys of a fact under `manifest`.
 fn index_keys(fact: &Artifact, manifest: &Manifest) -> [Key; 3] {
-    [
-        EntityKey::from_artifact(fact, manifest).into_key(),
-        AttributeKey::from_artifact(fact, manifest).into_key(),
-        ValueKey::from_artifact(fact, manifest).into_key(),
-    ]
+    let (entity, attribute, value) = artifact_index_keys(fact, manifest);
+    [entity, attribute, value]
 }
 
 /// Facts held under the tree's three index keys, in one ordered map.
@@ -137,6 +142,11 @@ fn index_keys(fact: &Artifact, manifest: &Manifest) -> [Key; 3] {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Facts {
     map: BTreeMap<Key, Artifact>,
+    /// How many held facts each attribute has. A read names an
+    /// attribute far more often than not, and most stores (a query's
+    /// metadata, a session overlay) hold none of the ones it names, so
+    /// the read is answered from here without building its range.
+    attributes: HashMap<Relation, usize>,
     /// The key format facts are keyed under. Fixed to the default
     /// manifest, the same one every tree carries today and the one
     /// [`Demand`](crate::Demand) ranges are built under.
@@ -161,6 +171,7 @@ impl Facts {
         if self.map.contains_key(&entity) {
             return false;
         }
+        *self.attributes.entry(fact.the.clone()).or_default() += 1;
         self.map.insert(entity, fact.clone());
         self.map.insert(attribute, fact.clone());
         self.map.insert(value, fact);
@@ -175,18 +186,39 @@ impl Facts {
         for key in index_keys(fact, &self.manifest) {
             self.map.remove(&key);
         }
+        if let Entry::Occupied(mut held) = self.attributes.entry(fact.the.clone()) {
+            *held.get_mut() -= 1;
+            if *held.get() == 0 {
+                held.remove();
+            }
+        }
         true
     }
 
     /// Every held fact at an `(entity, attribute)` cell.
-    pub(crate) fn cell(&self, of: &Entity, the: &dialog_artifacts::Relation) -> Vec<Artifact> {
+    pub(crate) fn cell(&self, of: &Entity, the: &Relation) -> Vec<Artifact> {
         self.scan(&ArtifactSelector::new().of(of.clone()).the(the.clone()))
     }
 
     /// The facts a selector matches, in the store's own key order.
     pub(crate) fn scan(&self, selector: &ArtifactSelector<Constrained>) -> Vec<Artifact> {
+        self.scan_within(&Window::new(selector))
+    }
+
+    /// The facts a window's selector matches, in the store's own key
+    /// order. A store with no fact of the selector's attribute answers
+    /// without building the range.
+    fn scan_within(&self, window: &Window<'_>) -> Vec<Artifact> {
+        if self.map.is_empty() {
+            return Vec::new();
+        }
+        if let Some(the) = window.selector.attribute()
+            && !self.attributes.contains_key(the)
+        {
+            return Vec::new();
+        }
         self.map
-            .range(selector_range(selector, &self.manifest))
+            .range(window.range(&self.manifest))
             .map(|(_, fact)| fact.clone())
             .collect()
     }
@@ -201,9 +233,15 @@ impl Facts {
         selector: &ArtifactSelector<Constrained>,
         manifest: &Manifest,
     ) -> Vec<Artifact> {
-        let mut rows = self.scan(selector);
-        if *manifest != self.manifest {
-            let range = selector_range(selector, manifest);
+        self.select_within(&Window::new(selector), manifest)
+    }
+
+    /// [`select`](Self::select) over a window shared with the other
+    /// stores one read meets, so the range is built once per read.
+    pub(crate) fn select_within(&self, window: &Window<'_>, manifest: &Manifest) -> Vec<Artifact> {
+        let mut rows = self.scan_within(window);
+        if !rows.is_empty() && *manifest != self.manifest {
+            let range = selector_range(window.selector, manifest);
             rows.sort_by_cached_key(|fact| {
                 index_keys(fact, manifest)
                     .into_iter()
@@ -211,6 +249,42 @@ impl Facts {
             });
         }
         rows
+    }
+
+    /// A hash of the rule facts held here ([`is_rule_attribute`]) and of
+    /// those among `hidden`, the facts the store hides beneath it: what
+    /// names every rule set assembled over the store (see
+    /// [`RuleKey`](crate::rules::RuleKey)). Equal for stores holding and
+    /// hiding the same rule facts, however they came to, and `None` for a
+    /// store with none, which names no rule set.
+    pub(crate) fn rules<'h>(
+        &self,
+        hidden: impl Iterator<Item = &'h Artifact>,
+    ) -> Option<Blake3Hash> {
+        let row = |polarity: u8, fact: &Artifact| {
+            let (the, of, tail) = sort_key(fact, &self.manifest);
+            let mut row = vec![polarity];
+            for part in [&the, &of, &tail] {
+                row.extend((part.len() as u64).to_be_bytes());
+                row.extend(part);
+            }
+            row.extend(fact.cause.as_ref().map_or([0; 32], |cause| cause.0));
+            row
+        };
+        let mut rows: Vec<Vec<u8>> = Vec::new();
+        for the in self.attributes.keys().filter(|the| is_rule_attribute(the)) {
+            for fact in self.scan(&ArtifactSelector::new().the(the.clone())) {
+                rows.push(row(b'+', &fact));
+            }
+        }
+        for fact in hidden.filter(|fact| is_rule_attribute(&fact.the)) {
+            rows.push(row(b'-', fact));
+        }
+        if rows.is_empty() {
+            return None;
+        }
+        rows.sort();
+        Some(Blake3Hash::hash_iter(rows.iter().map(Vec::as_slice)))
     }
 
     /// Every held fact once, in entity order.
@@ -230,6 +304,40 @@ impl Facts {
     pub(crate) fn len(&self) -> usize {
         // Every fact sits under exactly three keys.
         self.map.len() / 3
+    }
+}
+
+/// A selector with the key range it covers in an in-memory store, built
+/// on first use. One read meets several stores (each line's session
+/// overlay, the query's own, the staged writes) that all key facts under
+/// the same format, and most of them are empty or miss; sharing one
+/// window builds the range at most once per read instead of once per
+/// store.
+pub(crate) struct Window<'s> {
+    selector: &'s ArtifactSelector<Constrained>,
+    range: OnceCell<(Manifest, RangeInclusive<Key>)>,
+}
+
+impl<'s> Window<'s> {
+    pub(crate) fn new(selector: &'s ArtifactSelector<Constrained>) -> Self {
+        Self {
+            selector,
+            range: OnceCell::new(),
+        }
+    }
+
+    /// The selector's range under `manifest`. Every store keys under the
+    /// default format today, so the first range built serves the rest;
+    /// a store under another format gets its own.
+    fn range(&self, manifest: &Manifest) -> RangeInclusive<Key> {
+        let (keyed, range) = self
+            .range
+            .get_or_init(|| (manifest.clone(), selector_range(self.selector, manifest)));
+        if keyed == manifest {
+            range.clone()
+        } else {
+            selector_range(self.selector, manifest)
+        }
     }
 }
 
@@ -322,6 +430,14 @@ impl State {
         if delta.is_empty() {
             return None;
         }
+        if delta
+            .asserted
+            .iter()
+            .chain(&delta.retracted)
+            .any(|fact| is_rule_attribute(&fact.the))
+        {
+            self.rules = OnceLock::new();
+        }
         self.sequence += 1;
         let mut chunks: Vec<Vec<u8>> =
             Vec::with_capacity(2 + delta.asserted.len() + delta.retracted.len());
@@ -359,6 +475,54 @@ impl Ephemeral {
     /// An empty line.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A line holding the facts of `changes` as one instant, with its
+    /// asset changes dropped: what a query reads beside its lines, which
+    /// is facts only. Lines built from equal batches carry equal
+    /// revisions, so a cache keyed by the revision serves both.
+    pub(crate) fn holding(mut changes: Changes) -> Self {
+        changes.take_assets();
+        let line = Self::new();
+        {
+            let mut state = line.state.write();
+            let mut delta = Delta::default();
+            for instruction in changes.into_instructions() {
+                state.apply(instruction, &mut delta);
+            }
+            state.mint(delta);
+        }
+        line
+    }
+
+    /// A new line holding this one's facts and tombstones with the
+    /// facts of `changes` applied over them as one instant, its asset
+    /// changes dropped. This line is left as it was. Copying the held
+    /// facts costs less than re-keying them, so a line that adds a few
+    /// facts to a larger one that is shared starts from a copy of it.
+    /// The new line's revision chains from this one's, so lines built
+    /// from the same line and equal batches carry equal revisions.
+    pub(crate) fn extending(&self, mut changes: Changes) -> Self {
+        changes.take_assets();
+        let base = self.state.read();
+        let mut state = State {
+            facts: base.facts.clone(),
+            tombstones: base.tombstones.clone(),
+            shadowed: base.shadowed.clone(),
+            sequence: base.sequence,
+            hash: base.hash.clone(),
+            log: VecDeque::new(),
+            rules: base.rules.clone(),
+        };
+        drop(base);
+        let mut delta = Delta::default();
+        for instruction in changes.into_instructions() {
+            state.apply(instruction, &mut delta);
+        }
+        state.mint(delta);
+        Self {
+            state: Arc::new(RwLock::new(state)),
+        }
     }
 
     /// Assert a statement: its asserts and replaces land in the store
@@ -475,6 +639,17 @@ impl Ephemeral {
         self
     }
 
+    /// The hash of the rule facts this line holds and hides, or `None`
+    /// when it has none (see [`Facts::rules`]). Kept until an instant
+    /// changes a rule fact, so a line of plain facts answers at once.
+    pub(crate) fn rules(&self) -> Option<Blake3Hash> {
+        let state = self.state.read();
+        state
+            .rules
+            .get_or_init(|| state.facts.rules(state.shadowed.values()))
+            .clone()
+    }
+
     /// The line's identity now.
     pub fn revision(&self) -> EphemeralRevision {
         let state = self.state.read();
@@ -557,6 +732,12 @@ impl Ephemeral {
         manifest: &Manifest,
     ) -> Vec<Artifact> {
         self.state.read().facts.select(selector, manifest)
+    }
+
+    /// [`select`](Self::select) over a window shared with the other
+    /// stores one read meets.
+    pub(crate) fn select_within(&self, window: &Window<'_>, manifest: &Manifest) -> Vec<Artifact> {
+        self.state.read().facts.select_within(window, manifest)
     }
 }
 
@@ -655,6 +836,62 @@ mod tests {
         assert_eq!(after.len(), 2);
         assert!(after.contains(&Value::String("C".into())));
         assert_eq!(line.revision().sequence, 3);
+    }
+
+    /// A read naming an attribute is answered from the count of facts
+    /// held per attribute when the store holds none of it, so the count
+    /// must follow every write: a replace under a choosing pick (the
+    /// session write), a retract of the attribute's last fact and its
+    /// re-assert, a tombstone over a fact held only beneath, and the
+    /// lift of everything by `clear`.
+    #[dialog_common::test]
+    fn it_reads_an_attribute_through_every_write_to_it() {
+        let names = |line: &Ephemeral| -> Vec<Value> {
+            line.scan(&ArtifactSelector::new().the("person/name".parse().unwrap()))
+                .into_iter()
+                .map(|fact| fact.is)
+                .collect()
+        };
+        let roles = |line: &Ephemeral| {
+            line.scan(&ArtifactSelector::new().the("person/role".parse().unwrap()))
+        };
+        let line = Ephemeral::new();
+        line.assert(claim("id:a", "person/name", "A")).unwrap();
+        assert_eq!(names(&line), vec![Value::String("A".into())]);
+
+        let mut replace = Changes::new();
+        replace.associate(
+            "person/name".parse().unwrap(),
+            "id:a".parse().unwrap(),
+            Value::String("B".into()),
+            dialog_artifacts::Pick::Last,
+        );
+        line.apply(replace).unwrap();
+        assert_eq!(
+            names(&line),
+            vec![Value::String("B".into())],
+            "a replace removes the value it succeeds and holds its own"
+        );
+
+        line.retract(claim("id:a", "person/name", "B")).unwrap();
+        assert!(names(&line).is_empty(), "the attribute's last fact is gone");
+        line.assert(claim("id:a", "person/name", "C")).unwrap();
+        assert_eq!(
+            names(&line),
+            vec![Value::String("C".into())],
+            "a re-assert after the last retract is read"
+        );
+
+        line.retract(claim("id:b", "person/role", "Engineer"))
+            .unwrap();
+        assert!(roles(&line).is_empty(), "a tombstone holds no fact");
+        assert_eq!(names(&line), vec![Value::String("C".into())]);
+
+        line.clear();
+        assert!(names(&line).is_empty() && roles(&line).is_empty());
+        line.assert(claim("id:b", "person/role", "Engineer"))
+            .unwrap();
+        assert_eq!(roles(&line).len(), 1, "an assert after the lift is read");
     }
 
     #[dialog_common::test]
@@ -943,5 +1180,79 @@ mod tests {
 
         assert_eq!(line.len(), 0, "nothing in the batch landed");
         assert_eq!(line.revision(), before, "no instant was minted");
+    }
+
+    /// A line holding a batch is named by what the batch holds: lines
+    /// built from equal batches carry equal revisions, so a cache keyed
+    /// by a query overlay's revision serves every query folding in the
+    /// same facts, and a different batch carries a different revision.
+    /// The batch's asset changes are dropped, since a read sees facts
+    /// only, and its retracts hide the facts beneath.
+    #[dialog_common::test]
+    fn it_names_a_held_batch_by_its_facts() {
+        let batch = |name: &str| {
+            let mut changes = Changes::new();
+            the!("person/name")
+                .of("id:a".parse().unwrap())
+                .is(name.to_string())
+                .assert(&mut changes);
+            claim("id:b", "person/name", "B").retract(&mut changes);
+            dialog_artifacts::Asset::from(b"not a fact".to_vec()).assert(&mut changes);
+            changes
+        };
+
+        let first = Ephemeral::holding(batch("A"));
+        let second = Ephemeral::holding(batch("A"));
+        assert_eq!(first.revision(), second.revision());
+        assert_ne!(first.revision(), Ephemeral::holding(batch("Z")).revision());
+
+        assert_eq!(
+            values(&first, "id:a", "person/name"),
+            vec![Value::String("A".into())]
+        );
+        assert_eq!(first.len(), 1, "the asset change is dropped");
+        assert!(
+            first.tombstones(&Manifest::default()).contains(&sort_key(
+                &fact("id:b", "person/name", "B"),
+                &Manifest::default()
+            )),
+            "the retract hides the fact beneath"
+        );
+    }
+
+    /// A line's rules hash names the rule facts it holds and hides: none
+    /// for a line of plain facts, unchanged by a plain write, moved by a
+    /// rule write or a tombstone over one, and equal for lines holding
+    /// the same rule facts however they came to.
+    #[dialog_common::test]
+    fn it_names_its_rule_facts() {
+        let line = Ephemeral::new();
+        line.assert(claim("id:a", "person/name", "A")).unwrap();
+        assert_eq!(line.rules(), None, "plain facts name no rule set");
+
+        let rule = || claim("id:rule", "dialog.rule/conclusion", "id:concept");
+        line.assert(rule()).unwrap();
+        let named = line.rules();
+        assert!(named.is_some());
+        line.assert(claim("id:b", "person/name", "B")).unwrap();
+        assert_eq!(line.rules(), named, "a plain write leaves it");
+
+        let other = Ephemeral::new();
+        let extra = || claim("id:extra", "dialog.rule/conclusion", "id:other");
+        other.assert(extra()).unwrap();
+        other.assert(claim("id:c", "person/name", "C")).unwrap();
+        other.assert(rule()).unwrap();
+        other.retract(extra()).unwrap();
+        assert_eq!(
+            other.rules(),
+            named,
+            "the same rule facts reached by other writes, the same name"
+        );
+
+        line.retract(rule()).unwrap();
+        assert_eq!(line.rules(), None, "the rule fact is gone");
+        line.retract(claim("id:other", "dialog.concept/transient", "x"))
+            .unwrap();
+        assert!(line.rules().is_some(), "a tombstone over a rule fact names");
     }
 }

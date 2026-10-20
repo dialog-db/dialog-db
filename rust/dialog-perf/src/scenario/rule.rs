@@ -1,6 +1,7 @@
 //! Reads answered by rules: a derived concept scanned and probed, a
-//! recursive closure, a ranked field several rules state cases for, and
-//! the first read after installing many rules.
+//! recursive closure, a ranked field several rules state cases for, the
+//! first read after installing many rules, reads carrying their rule in
+//! their own overlay, and reads after session writes that change no rule.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -9,9 +10,12 @@ use anyhow::Result;
 use dialog_artifacts::{Artifact, Entity, Pick, Value};
 use dialog_query::{ConceptDescriptor, DeductiveRule};
 
-use super::read::{probe, read};
+use dialog_query::query::Output as _;
+use dialog_query::{ConceptConclusion, the};
+
+use super::read::{PROBES, probe, read};
 use super::{Outcome, Prepared, seed_stuff};
-use crate::env::{Env, assert_all, concept, entity, fact, rule, text, var};
+use crate::env::{Env, assert_all, concept, entity, fact, query, rule, text, var};
 
 /// `member`, derived from `stuff`: title from the name, level from the role.
 fn member() -> ConceptDescriptor {
@@ -313,4 +317,89 @@ pub async fn install(size: usize) -> Result<Box<dyn Prepared>> {
     seed_stuff(&env, 100, Pick::Last).await?;
     env.reopen().await?;
     Ok(Box::new(Install { env, size }))
+}
+
+struct Overlay {
+    env: Env,
+    size: usize,
+}
+
+impl Prepared for Overlay {
+    fn env(&self) -> &Env {
+        &self.env
+    }
+
+    fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
+        Box::pin(async move {
+            let step = (self.size / PROBES).max(1);
+            let mut rows = 0u64;
+            for probe in 0..PROBES {
+                let this = entity("stuff", (probe * step) % self.size);
+                let found: Vec<ConceptConclusion> = self
+                    .env
+                    .branch
+                    .query()
+                    .with(member_rule())
+                    .select(query(&member(), &["title", "level"], Some(&this)))
+                    .perform(&self.env.operator)
+                    .try_vec()
+                    .await?;
+                rows += found.len() as u64;
+            }
+            Ok(Outcome::from([("rows".into(), rows)]))
+        })
+    }
+}
+
+/// `rule-overlay`: `size` stuff entities and no rule committed, then two
+/// hundred single-entity reads of a member, each carrying the member rule
+/// in its own overlay, the way an application hands its rules to every
+/// query.
+pub async fn overlay(size: usize) -> Result<Box<dyn Prepared>> {
+    let mut env = Env::open().await?;
+    seed_stuff(&env, size, Pick::Last).await?;
+    env.reopen().await?;
+    Ok(Box::new(Overlay { env, size }))
+}
+
+struct Session {
+    env: Env,
+    size: usize,
+}
+
+impl Prepared for Session {
+    fn env(&self) -> &Env {
+        &self.env
+    }
+
+    fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
+        Box::pin(async move {
+            let step = (self.size / PROBES).max(1);
+            let presence: Entity = "id:presence".parse()?;
+            let mut rows = 0u64;
+            for probe in 0..PROBES {
+                let seen = the!("session/seen")
+                    .of(presence.clone())
+                    .is(format!("probe-{probe}"));
+                self.env.branch.overlay().assert(seen)?;
+                let this = entity("stuff", (probe * step) % self.size);
+                rows += read(&self.env, &member(), &["title", "level"], Some(&this))
+                    .await?
+                    .len() as u64;
+            }
+            Ok(Outcome::from([("rows".into(), rows)]))
+        })
+    }
+}
+
+/// `rule-session`: the member rule and `size` stuff entities, then two
+/// hundred rounds of a session-overlay fact that is no rule followed by a
+/// single-entity read of a member, the way a reactive application writes
+/// presence between reads.
+pub async fn session(size: usize) -> Result<Box<dyn Prepared>> {
+    let mut env = Env::open().await?;
+    env.install(&[member_rule()]).await?;
+    seed_stuff(&env, size, Pick::Last).await?;
+    env.reopen().await?;
+    Ok(Box::new(Session { env, size }))
 }

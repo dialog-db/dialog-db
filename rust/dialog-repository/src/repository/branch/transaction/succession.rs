@@ -37,7 +37,7 @@ use crate::repository::branch::session::{Erased, QueryEnv};
 use crate::repository::source::Source;
 use crate::repository::staged::squash;
 use crate::rules::derives_attr;
-use crate::{CommitError, Staged};
+use crate::{CommitError, Ephemeral, Staged};
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Cause, Change, Changes, Entity, Pick,
@@ -58,7 +58,6 @@ use dialog_query::{
 use futures_util::TryStreamExt;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
-use std::sync::Arc;
 
 /// Settle a transaction's writes for its commit against `sources`,
 /// read with `overlay`. A write under a choosing pick succeeds the
@@ -73,7 +72,7 @@ use std::sync::Arc;
 #[tracing::instrument(skip_all, name = "settle")]
 pub(crate) async fn settle(
     sources: Vec<Source>,
-    overlay: Arc<Changes>,
+    overlay: Ephemeral,
     staged: &Staged,
     env: &Erased,
 ) -> Result<Changes, CommitError> {
@@ -177,7 +176,7 @@ impl ReadSettlement {
     pub(crate) async fn advance(
         &mut self,
         sources: &[Source],
-        overlay: &Arc<Changes>,
+        overlay: &Ephemeral,
         layer: &Staged,
         env: &Erased,
     ) -> Result<(), CommitError> {
