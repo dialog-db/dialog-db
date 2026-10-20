@@ -32,10 +32,15 @@ mod native;
 #[cfg(not(target_arch = "wasm32"))]
 use native::Link;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod web;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use web::Link;
+
+#[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
+mod wasi;
+#[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
+use wasi::Link;
 
 /// How long a socket that could not be opened is not tried again: what
 /// would have gone over it goes as requests meanwhile, without paying for
@@ -261,8 +266,11 @@ fn keep(link: Weak<Link>, routes: Routes, liveness: Liveness) {
     };
     #[cfg(not(target_arch = "wasm32"))]
     tokio::spawn(keeper);
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_futures::spawn_local(keeper);
+    // A WASI build opens no link, so there is none to keep.
+    #[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
+    drop(keeper);
 }
 
 /// What a wait receives: each state of a watched cell, coalesced to the

@@ -43,6 +43,9 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 [target.'cfg(all(target_arch = "wasm32", not(target_os = "unknown")))'.dependencies]
 getrandom_04 = { workspace = true }
 
+[target.'cfg(all(target_arch = "wasm32", target_os = "wasi", target_env = "p3"))'.dependencies]
+wasip3 = { workspace = true }
+
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { workspace = true, features = ["js"] }
 js-sys = { workspace = true }
