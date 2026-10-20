@@ -176,7 +176,11 @@ fn selects_head(selector: &ArtifactSelector<Constrained>, metadata: &BTreeSet<En
 type Ranges = BTreeMap<Key, Key>;
 
 fn record_range(ranges: &Mutex<Ranges>, range: RangeInclusive<Key>) {
-    let mut ranges = ranges.lock().expect("demand lock");
+    merge_range(&mut ranges.lock().expect("demand lock"), range);
+}
+
+/// Add `range` to `ranges`, merged with every range it overlaps.
+fn merge_range(ranges: &mut Ranges, range: RangeInclusive<Key>) {
     let (mut start, mut end) = range.into_inner();
     // The range starting at or before the new one may reach into it.
     if let Some((existing_start, existing_end)) = ranges.range(..=start.clone()).next_back()
@@ -258,6 +262,20 @@ impl Demand {
     ) {
         self.keyed_under(manifest);
         record_range(&self.rules, selector_range(selector, manifest));
+    }
+
+    /// Record rule-discovery ranges already built under `manifest`: what
+    /// a rule set served from a cache demanded when it was assembled.
+    pub(crate) fn record_rule_ranges(
+        &self,
+        manifest: &dialog_search_tree::Manifest,
+        ranges: &[RangeInclusive<Key>],
+    ) {
+        self.keyed_under(manifest);
+        let mut rules = self.rules.lock().expect("demand lock");
+        for range in ranges {
+            merge_range(&mut rules, range.clone());
+        }
     }
 
     /// Note the format a range is recorded under. One evaluation reads
