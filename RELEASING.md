@@ -22,7 +22,7 @@ and anything else bumps the patch (see the top of
 3. Once it merges, tag the merge commit and push the tag:
 
    ```sh
-   git tag -a v<version> -m v<version> <merge commit>
+   git tag -s v<version> -m v<version> <merge commit>
    git push origin v<version>
    ```
 
