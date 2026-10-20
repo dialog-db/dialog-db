@@ -33,12 +33,12 @@ use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::blob::prelude::{
-    BlobHeldExt as _, BlobImportExt as _, BlobImportRangeExt as _, BlobReadExt as _,
-    BlobSizeExt as _,
+    BlobHeldExt as _, BlobImportExt as _, BlobImportRangeExt as _, BlobProofExt as _,
+    BlobReadExt as _, BlobSizeExt as _,
 };
 use dialog_effects::blob::{
     BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Encoding, Held, Holding, Import,
-    ImportRange, Read, Size, Usage, Write,
+    ImportRange, Proof, Read, Size, Usage, Write,
 };
 use futures_util::StreamExt;
 
@@ -813,6 +813,96 @@ impl Provider<Held> for FileSystem {
     }
 }
 
+/// The proof of a range of a blob, from the pairs of its outboard on the
+/// paths to the first and the last group of the range: of the outboard of a
+/// whole blob, which the store builds first for a blob that it wrote before
+/// it kept outboards, or of the outboard of a partial blob that holds both
+/// groups. A pair of the outboard of a whole blob that does not verify
+/// removes the outboard, which the next read builds again.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Proof> for FileSystem {
+    async fn execute(
+        &self,
+        effect: Capability<Proof>,
+    ) -> Result<Option<Vec<Blake3Hash>>, BlobError> {
+        let (digest, size, range) = (effect.digest(), effect.size(), effect.range());
+        let end = range
+            .length
+            .map_or(size, |length| range.offset.saturating_add(length).min(size));
+        if range.offset >= end {
+            return Err(BlobError::Storage(format!(
+                "a proof covers at least one byte of the blob, of {size} bytes"
+            )));
+        }
+        let proof = bao::Proof::new(size, range.offset, end);
+        let blob_dir = self.blob()?;
+        let whole = blob_dir.resolve(&blob_key(digest))?;
+        // A sink can complete the blob while the proof reads its partial
+        // outboard: the proof then reads the outboard of the whole blob.
+        for _ in 0..2 {
+            let (outboard, whole_blob) = match whole.size().await? {
+                Some(held) if held != size => return Ok(None),
+                Some(_) => {
+                    let outboard = blob_dir.resolve(&outboard_key(digest))?;
+                    if size > bao::GROUP && !outboard.exists().await {
+                        rebuild_outboard(digest, &whole, &blob_dir, &outboard).await?;
+                    }
+                    (outboard, true)
+                }
+                None => {
+                    let holding = match self.holding(digest).await? {
+                        Some(holding) if holding.size == size => holding,
+                        _ => return Ok(None),
+                    };
+                    if !proof.groups().all(|group| holding.held_from(group) > group) {
+                        return Ok(None);
+                    }
+                    let [_, outboard, _] = partial_keys(digest);
+                    (blob_dir.resolve(&outboard)?, false)
+                }
+            };
+            let mut pairs = std::collections::HashMap::new();
+            let mut moved = false;
+            for offset in proof.pairs() {
+                match outboard.read_at(offset, bao::PAIR).await {
+                    Ok(pair) => {
+                        pairs.insert(offset, pair);
+                    }
+                    Err(_) if !whole_blob && whole.exists().await => {
+                        moved = true;
+                        break;
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            if moved {
+                continue;
+            }
+            let pair = |offset| {
+                pairs
+                    .get(&offset)
+                    .and_then(|pair| <[u8; bao::PAIR]>::try_from(pair.as_slice()).ok())
+            };
+            return match proof.hashes(digest, pair) {
+                Ok(hashes) => {
+                    Ok(hashes.map(|hashes| hashes.into_iter().map(Blake3Hash::from).collect()))
+                }
+                Err(unverified) => {
+                    if whole_blob {
+                        let _ = outboard.remove().await;
+                    }
+                    Err(BlobError::Unverified {
+                        digest: blob_key(digest),
+                        reason: format!("the store holds a part that went bad: {unverified}"),
+                    })
+                }
+            };
+        }
+        Ok(None)
+    }
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<ImportRange> for FileSystem {
@@ -1136,6 +1226,20 @@ mod tests {
     }
 
     #[dialog_common::test]
+    async fn it_proves_a_range_of_a_blob_that_it_holds_whole() {
+        let fs = test_space("blob-proof-whole").await;
+        crate::bao::conformance::it_proves_a_range_of_a_blob_that_it_holds_whole(&fs, &subject())
+            .await;
+    }
+
+    #[dialog_common::test]
+    async fn it_proves_a_range_of_a_blob_that_it_holds_in_part() {
+        let fs = test_space("blob-proof-partial").await;
+        crate::bao::conformance::it_proves_a_range_of_a_blob_that_it_holds_in_part(&fs, &subject())
+            .await;
+    }
+
+    #[dialog_common::test]
     async fn it_verifies_a_range_of_a_blob_that_it_holds_whole() {
         let fs = test_space("blob-partial-verify-whole").await;
         crate::bao::conformance::it_verifies_a_range_of_a_blob_that_it_holds_whole(&fs, &subject())
@@ -1311,6 +1415,51 @@ mod tests {
         assert_eq!(
             outboard.read().await.unwrap(),
             crate::bao::outboard(&payload).1
+        );
+    }
+
+    /// A proof of a whole blob whose outboard holds a pair on its path that
+    /// does not verify fails once, and removes the outboard. The next proof
+    /// builds it again from the bytes.
+    #[dialog_common::test]
+    async fn it_builds_again_an_outboard_whose_pair_fails_a_proof() {
+        use dialog_effects::blob::ByteRange;
+        let fs = test_space("blob-proof-pair").await;
+        let group = crate::bao::GROUP;
+        let payload = crate::bao::conformance::blob(10 * group as usize);
+        let size = payload.len() as u64;
+        let digest = ingest(&fs, &payload).await;
+        let outboard = fs.blob().unwrap().resolve(&outboard_key(&digest)).unwrap();
+        // The pair of the root comes last in post order.
+        let root = crate::bao::outboard_size(size) - crate::bao::PAIR as u64;
+        outboard
+            .write_at(root, &[7; crate::bao::PAIR])
+            .await
+            .unwrap();
+        let range = ByteRange {
+            offset: 3 * group,
+            length: Some(4 * group),
+        };
+        let prove = || {
+            subject()
+                .reader()
+                .archive()
+                .blob()
+                .proof(digest.clone(), size, range)
+                .perform(&fs)
+        };
+
+        let failed = prove().await;
+        let again = prove().await.unwrap().expect("a proof of the whole blob");
+
+        assert!(
+            matches!(failed, Err(BlobError::Unverified { .. })),
+            "{failed:?}"
+        );
+        let again: Vec<[u8; 32]> = again.iter().map(|hash| *hash.as_bytes()).collect();
+        assert_eq!(
+            crate::bao::conformance::root_of(&payload, 3 * group, 7 * group, &again),
+            Some(*digest.as_bytes())
         );
     }
 
