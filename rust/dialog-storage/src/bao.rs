@@ -485,6 +485,36 @@ fn path(size: u64, group: u64) -> Vec<Step> {
         .collect()
 }
 
+/// The parents that the encoding of a range sends just before the group at
+/// the byte `group` of a blob of `size` bytes, when an earlier group of the
+/// range came before it: the parents on the path to the group below the
+/// last parent from which the path goes on to the right. The parents above
+/// came before the earlier group. The encoding of a range that starts at the
+/// group sends each parent on the path. So a reader that joins the encodings
+/// of two ranges that touch, into the encoding of both, keeps only these
+/// parents of the second before its first group.
+pub fn parents_before(size: u64, group: u64) -> usize {
+    path(size, group)
+        .iter()
+        .rev()
+        .take_while(|step| step.left)
+        .count()
+}
+
+/// The length of the encoding of the groups from `start` to `end` of a blob
+/// of `size` bytes, after its header: [`PAIR`] bytes for each parent, and the
+/// bytes of each group.
+pub fn encoded_size(size: u64, start: u64, end: u64) -> u64 {
+    items(size, start, end).map_or(0, |items| {
+        items
+            .map(|chunk| match chunk {
+                BaoChunk::Parent { .. } => PAIR as u64,
+                BaoChunk::Leaf { size, .. } => size as u64,
+            })
+            .sum()
+    })
+}
+
 /// The proof of a range of a blob: the hashes of the subtrees of its tree
 /// that lie beside the range, from left to right, 32 bytes each. A reader
 /// that holds the groups of the range hashes them, and the tree above them,
@@ -1099,6 +1129,51 @@ mod tests {
                     proof.len()
                 );
             }
+        }
+    }
+
+    #[dialog_common::test]
+    fn it_measures_the_encoding_of_a_range() {
+        for &size in SIZES {
+            let bytes = blob(size);
+            let size = size as u64;
+            for (start, end) in [
+                (0, size),
+                (size / 3, size),
+                (0, size / 2),
+                (size / 4, size / 2),
+            ] {
+                let (first, last) = groups_of(size, start, end);
+                let encoded = conformance::encoding(&bytes, first, last);
+                assert_eq!(
+                    encoded_size(size, first, last),
+                    encoded.len() as u64,
+                    "{start}..{end} of {size}"
+                );
+            }
+        }
+    }
+
+    /// The encoding of a range is the encoding of its first part, and then
+    /// the encoding of the rest without the parents that came before.
+    #[dialog_common::test]
+    fn it_joins_the_encodings_of_two_ranges_that_touch() {
+        let bytes = blob(3 * 1024 * 1024 + 123);
+        let size = bytes.len() as u64;
+        for at in [
+            GROUP,
+            GROUP * 2,
+            GROUP * 64,
+            GROUP * 65,
+            GROUP * 128,
+            GROUP * 191,
+        ] {
+            let whole = conformance::encoding(&bytes, 0, size);
+            let mut joined = conformance::encoding(&bytes, 0, at);
+            let rest = conformance::encoding(&bytes, at, size);
+            let dropped = path(size, at).len() - parents_before(size, at);
+            joined.extend_from_slice(&rest[dropped * PAIR..]);
+            assert_eq!(joined, whole, "{at}");
         }
     }
 
