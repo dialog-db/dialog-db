@@ -10,7 +10,9 @@ use super::{FileSystem, FileSystemError, FileSystemHandle};
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::memory::prelude::{ListExt, PublishExt, ResolveExt, RetractExt};
-use dialog_effects::memory::{Edition, List, MemoryError, Publish, Resolve, Retract, Version};
+use dialog_effects::memory::{
+    Current, Edition, List, MemoryError, Publish, Resolve, Retract, Version,
+};
 
 const MEMORY: &str = "memory";
 
@@ -36,6 +38,21 @@ impl From<FileSystemError> for MemoryError {
 }
 
 /// Format edition bytes for error messages.
+/// What a cell holds, as a write it refused reports it: `bytes` versioned
+/// as a resolve versions them, or empty.
+fn holding(bytes: Option<Vec<u8>>) -> Current {
+    match bytes {
+        Some(bytes) => {
+            let version = Version::from(content_hash(&bytes).as_slice());
+            Current::Holds(Edition {
+                content: bytes,
+                version,
+            })
+        }
+        None => Current::Empty,
+    }
+}
+
 fn format_edition(edition: Option<&[u8]>) -> Option<Version> {
     edition.map(Version::from)
 }
@@ -98,10 +115,8 @@ impl Provider<Publish> for FileSystem {
         let _guard = cell_handle.lock().await?;
 
         // Read current value to check CAS condition
-        let current_edition: Option<[u8; 32]> = cell_handle
-            .read_optional()
-            .await?
-            .map(|bytes| content_hash(&bytes));
+        let held = cell_handle.read_optional().await?;
+        let current_edition: Option<[u8; 32]> = held.as_deref().map(content_hash);
 
         // Compute new edition
         let new_edition = content_hash(&content);
@@ -114,10 +129,10 @@ impl Provider<Publish> for FileSystem {
         // Check CAS condition
         match (expected_edition.as_deref(), &current_edition) {
             // Creating new: require cell doesn't exist
-            (None, Some(current)) => {
+            (None, Some(_)) => {
                 return Err(MemoryError::VersionMismatch {
                     expected: None,
-                    actual: format_edition(Some(current.as_slice())),
+                    current: holding(held),
                 });
             }
             // Updating existing: require edition matches
@@ -125,7 +140,7 @@ impl Provider<Publish> for FileSystem {
                 if expected != current.as_slice() {
                     return Err(MemoryError::VersionMismatch {
                         expected: format_edition(Some(expected)),
-                        actual: format_edition(Some(current.as_slice())),
+                        current: holding(held),
                     });
                 }
             }
@@ -133,7 +148,7 @@ impl Provider<Publish> for FileSystem {
             (Some(expected), None) => {
                 return Err(MemoryError::VersionMismatch {
                     expected: format_edition(Some(expected)),
-                    actual: None,
+                    current: Current::Empty,
                 });
             }
             // Creating new when cell doesn't exist: valid
@@ -180,7 +195,7 @@ impl Provider<Retract> for FileSystem {
         if expected_edition != current_edition.as_slice() {
             return Err(MemoryError::VersionMismatch {
                 expected: format_edition(Some(&expected_edition)),
-                actual: format_edition(Some(current_edition.as_slice())),
+                current: holding(Some(current_bytes)),
             });
         }
 
@@ -349,6 +364,7 @@ mod tests {
         // Try to update with wrong edition
         let wrong_edition = Version::from(Blake3Hash::hash(b"wrong"));
         let result = did
+            .clone()
             .writer()
             .memory()
             .space("local")
@@ -357,7 +373,50 @@ mod tests {
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
+        let held = did
+            .reader()
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
+            .perform(&provider)
+            .await?
+            .expect("the cell holds initial");
+        assert!(
+            matches!(&result, Err(MemoryError::VersionMismatch { current: Current::Holds(edition), .. }) if *edition == held),
+            "the refusal says what the cell holds: {result:?}"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_says_a_cell_is_empty_when_an_update_finds_none() -> anyhow::Result<()> {
+        let location = StorageLocation::new(
+            Directory::Temp,
+            unique_name("fs-it_says_a_cell_is_empty_when_an_update_finds_none"),
+        );
+        let provider = FileSystem::open(&location).await?;
+        let did = unique_did().await;
+        let result = did
+            .writer()
+            .memory()
+            .space("local")
+            .cell("missing")
+            .publish(b"updated", Some(Version::from(Blake3Hash::hash(b"gone"))))
+            .perform(&provider)
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(MemoryError::VersionMismatch {
+                    current: Current::Empty,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
 
         Ok(())
     }
@@ -383,6 +442,7 @@ mod tests {
 
         // Try to create again (when = None means expect empty)
         let result = did
+            .clone()
             .writer()
             .memory()
             .space("local")
@@ -391,7 +451,19 @@ mod tests {
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
+        let held = did
+            .reader()
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
+            .perform(&provider)
+            .await?
+            .expect("the cell holds initial");
+        assert!(
+            matches!(&result, Err(MemoryError::VersionMismatch { current: Current::Holds(edition), .. }) if *edition == held),
+            "the refusal says what the cell holds: {result:?}"
+        );
 
         Ok(())
     }
@@ -461,6 +533,7 @@ mod tests {
         // Try to retract with wrong edition
         let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = did
+            .clone()
             .user()
             .delete()
             .memory()
@@ -470,7 +543,19 @@ mod tests {
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
+        let held = did
+            .reader()
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
+            .perform(&provider)
+            .await?
+            .expect("the cell holds content");
+        assert!(
+            matches!(&result, Err(MemoryError::VersionMismatch { current: Current::Holds(edition), .. }) if *edition == held),
+            "the refusal says what the cell holds: {result:?}"
+        );
 
         Ok(())
     }

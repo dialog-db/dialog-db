@@ -43,7 +43,7 @@ use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Size as BlobSize;
-use dialog_effects::memory::{Publish, Resolve, Version as MemoryVersion};
+use dialog_effects::memory::{Current, Publish, Resolve, Version as MemoryVersion};
 use dialog_query::query::Application;
 use dialog_search_tree::Cache;
 
@@ -285,7 +285,7 @@ impl BatchPublish {
             if actual != base_version {
                 return Err(PublishError::VersionMismatch {
                     expected: base_version,
-                    actual,
+                    current: Current::Unknown,
                 }
                 .into());
             }

@@ -8,9 +8,26 @@ use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::memory::prelude::{ListExt, PublishExt, ResolveExt, RetractExt};
-use dialog_effects::memory::{Edition, List, MemoryError, Publish, Resolve, Retract, Version};
+use dialog_effects::memory::{
+    Current, Edition, List, MemoryError, Publish, Resolve, Retract, Version,
+};
 
 /// Format edition bytes for error messages.
+/// What a cell holds, as a write it refused reports it: `bytes` versioned
+/// as a resolve versions them, or empty.
+fn holding(bytes: Option<Vec<u8>>) -> Current {
+    match bytes {
+        Some(bytes) => {
+            let version = Version::from(Blake3Hash::hash(&bytes).as_bytes());
+            Current::Holds(Edition {
+                content: bytes,
+                version,
+            })
+        }
+        None => Current::Empty,
+    }
+}
+
 fn format_edition(edition: Option<&[u8]>) -> Option<Version> {
     edition.map(Version::from)
 }
@@ -57,10 +74,8 @@ impl Provider<Publish> for Volatile {
         let session = sessions.entry(subject).or_default();
 
         // Get current value and edition
-        let current_edition = session
-            .memory
-            .get(&key)
-            .map(|bytes| Blake3Hash::hash(bytes));
+        let held = session.memory.get(&key).cloned();
+        let current_edition = held.as_deref().map(Blake3Hash::hash);
 
         // Compute new edition
         let new_edition = Blake3Hash::hash(&content);
@@ -73,10 +88,10 @@ impl Provider<Publish> for Volatile {
         // Check CAS condition
         match (expected_edition.as_deref(), &current_edition) {
             // Creating new: require cell doesn't exist
-            (None, Some(current)) => {
+            (None, Some(_)) => {
                 return Err(MemoryError::VersionMismatch {
                     expected: None,
-                    actual: format_edition(Some(current.as_bytes())),
+                    current: holding(held),
                 });
             }
             // Updating existing: require edition matches
@@ -84,7 +99,7 @@ impl Provider<Publish> for Volatile {
                 if expected != current.as_bytes() {
                     return Err(MemoryError::VersionMismatch {
                         expected: format_edition(Some(expected)),
-                        actual: format_edition(Some(current.as_bytes())),
+                        current: holding(held),
                     });
                 }
             }
@@ -92,7 +107,7 @@ impl Provider<Publish> for Volatile {
             (Some(expected), None) => {
                 return Err(MemoryError::VersionMismatch {
                     expected: format_edition(Some(expected)),
-                    actual: None,
+                    current: Current::Empty,
                 });
             }
             // Creating new when cell doesn't exist: valid
@@ -131,7 +146,7 @@ impl Provider<Retract> for Volatile {
         if expected_edition != current_edition.as_bytes() {
             return Err(MemoryError::VersionMismatch {
                 expected: format_edition(Some(&expected_edition)),
-                actual: format_edition(Some(current_edition.as_bytes())),
+                current: holding(Some(current_bytes.clone())),
             });
         }
 
@@ -295,6 +310,7 @@ mod tests {
         // Try to update with wrong edition
         let wrong_edition = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
+            .clone()
             .writer()
             .memory()
             .space("local")
@@ -303,7 +319,46 @@ mod tests {
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
+        let held = subject
+            .reader()
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
+            .perform(&provider)
+            .await?
+            .expect("the cell holds initial");
+        assert!(
+            matches!(&result, Err(MemoryError::VersionMismatch { current: Current::Holds(edition), .. }) if *edition == held),
+            "the refusal says what the cell holds: {result:?}"
+        );
+
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_says_a_cell_is_empty_when_an_update_finds_none() -> anyhow::Result<()> {
+        let provider = Volatile::new();
+        let subject = unique_subject("memory-update-missing");
+        let result = subject
+            .writer()
+            .memory()
+            .space("local")
+            .cell("missing")
+            .publish(b"updated", Some(Version::from(Blake3Hash::hash(b"gone"))))
+            .perform(&provider)
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(MemoryError::VersionMismatch {
+                    current: Current::Empty,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
 
         Ok(())
     }
@@ -326,6 +381,7 @@ mod tests {
 
         // Try to create again (when = None means expect empty)
         let result = subject
+            .clone()
             .writer()
             .memory()
             .space("local")
@@ -334,7 +390,19 @@ mod tests {
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
+        let held = subject
+            .reader()
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
+            .perform(&provider)
+            .await?
+            .expect("the cell holds initial");
+        assert!(
+            matches!(&result, Err(MemoryError::VersionMismatch { current: Current::Holds(edition), .. }) if *edition == held),
+            "the refusal says what the cell holds: {result:?}"
+        );
 
         Ok(())
     }
@@ -401,6 +469,7 @@ mod tests {
         // Try to retract with wrong edition
         let wrong_version = Version::from(Blake3Hash::hash(b"wrong"));
         let result = subject
+            .clone()
             .user()
             .delete()
             .memory()
@@ -410,7 +479,19 @@ mod tests {
             .perform(&provider)
             .await;
 
-        assert!(matches!(result, Err(MemoryError::VersionMismatch { .. })));
+        let held = subject
+            .reader()
+            .memory()
+            .space("local")
+            .cell("test")
+            .resolve()
+            .perform(&provider)
+            .await?
+            .expect("the cell holds content");
+        assert!(
+            matches!(&result, Err(MemoryError::VersionMismatch { current: Current::Holds(edition), .. }) if *edition == held),
+            "the refusal says what the cell holds: {result:?}"
+        );
 
         Ok(())
     }

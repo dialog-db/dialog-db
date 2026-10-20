@@ -319,6 +319,11 @@ impl Authorization<Ucan> for UcanAuthorization {
             .command(command)
             .arguments(args)
             .proofs(proofs)
+            // When it was issued, so a service can refuse it presented
+            // again later: a captured invocation is not authority forever.
+            // By the clock of the subject's service, where it was found
+            // to differ from this one.
+            .issued_at(crate::clock::issued_at(&subject_did))
             .try_build()
             .await
             .map_err(|e| AuthorizeError::Malformed {

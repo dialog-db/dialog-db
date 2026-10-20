@@ -395,6 +395,7 @@ mod tests {
     async fn it_reads_back_a_rejection() {
         let sent = Rejection::Unavailable {
             reason: "registry is down".into(),
+            retry_after: None,
         };
         let body = serde_json::to_vec(&sent).expect("serializes");
 

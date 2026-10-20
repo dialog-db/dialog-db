@@ -1,5 +1,5 @@
 use crate::{Publish, PublishError, Resolve, ResolveError, RetainPublish, RetainResolve, Retract};
-use dialog_capability::Did;
+use dialog_capability::{Capability, Did};
 use dialog_common::ConditionalSync;
 use dialog_common::time::{self, Duration, SystemTime};
 use dialog_effects::memory::prelude::CellScope;
@@ -317,6 +317,21 @@ where
             effect: self.capability.clone().resolve(),
             cache: self.cache.clone(),
         }
+    }
+
+    /// The capability to follow this cell as it changes: what it holds
+    /// when the watch begins, then each state it takes.
+    ///
+    /// Perform it where the cell is held, `.fork(&address)` for a remote
+    /// one, and read each state's content with [`decode`](Self::decode).
+    pub fn watch(&self) -> Capability<memory::Watch> {
+        self.capability.watch()
+    }
+
+    /// Read `bytes`, a state of this cell as a watch delivers it, as the
+    /// cell's content.
+    pub async fn decode(&self, bytes: &[u8]) -> Result<T, ResolveError> {
+        self.cache.decode(bytes).await
     }
 }
 

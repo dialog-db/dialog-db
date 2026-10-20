@@ -14,6 +14,112 @@ says how to cut a release.
 
 ## Unreleased
 
+### A write is safe to send again, and a refused one says what to do next
+
+[#564](https://github.com/dialog-db/dialog-db/pull/564)
+
+A refused request now tells its caller what to do next: try again (and when), rebase onto what the cell holds and write again, or get authority and try again. The access service's writes are made safe to send again to get there. A write that would leave the cell as it already is succeeds, so a publish whose answer was lost, sent again, finds its own write instead of a conflict. A write that does conflict says what the cell holds, so the writer rebases without a read of its own. The cell's state is told only after the write's authority verified; a write without authority is refused for that, and learns nothing of the cell.
+
+What this changes for you:
+
+- `MemoryError::VersionMismatch`, `PublishError::VersionMismatch`, `RetractError::VersionMismatch` and `ResolveError::VersionMismatch` say what the cell holds instead as `current: Current`: `Current::Holds(edition)`, `Current::Empty`, or `Current::Unknown` when whoever refused the write did not say, as S3 does not. Their `actual: Option<Version>` is gone; `Current::version()` reads the version where the cell holds one. Code that builds the variant names `current`; a match with `..` is unaffected. The volatile, filesystem, IndexedDB and loopback stores answer `Holds` or `Empty`, which they used to report as a bare `actual` version.
+- A remote branch's `publish` that the remote took, but whose local record was written first through another handle, is refused as `PublishRemoteBranchError::Publish(VersionMismatch)` with `Current::Unknown`: what the local record holds is not the remote's head, and `push` would otherwise rebase onto it.
+- The access service answers a publish of the content the cell already holds as done, with the version the cell is at, and a retract of an empty cell as done, whatever version either named.
+- It answers any other conflict with `412`, the cell's state as a DAG-CBOR `CellState` in the body (`CELL_STATE_MEDIA_TYPE`) and its version as the `ETag`. Over the socket the `Answer` carries the same. The client decodes it into `current`; an older service's bare `412` decodes as `Current::Unknown`.
+- `push` onto a remote that answers with its head reports `PushError::NonFastForward` naming that head and records it, verified, so `pull().assuming_upstream()` rebases onto it without asking the remote again.
+- `Rejection::Unavailable` has a `retry_after: Option<u64>` (seconds), left out of the encoding when unsaid, so an older peer reads and writes it as before; `Rejection::unavailable(reason)` builds one without it and `Rejection::retry_after()` reads it. The service sends it as `Retry-After` too (`Response::retry_after`).
+- An invocation sent and not answered is `Rejection::Unavailable`, a write included, where a write was `Rejection::Unclassified` before.
+
+Why: an error is useful when the caller can act on it. A bare conflict made every writer read the cell before it could rebase, a lost answer left it unable to tell a write that landed from one that did not, and a retryable refusal gave no hint of when.
+
+### A socket that fails is noticed, and every way it fails has an answer a caller can act on
+
+[#564](https://github.com/dialog-db/dialog-db/pull/564)
+
+A space's resolves, publishes and watches share one long-lived socket, and a connection that went quiet (a laptop that slept, a changed network, a NAT that forgot the mapping) was never closed: the platform reports nothing until something it sends fails, and a watch sends nothing. Every invocation for the space then waited for ever, and replication went on counting the upstream as watched while it no longer followed it. The client now keeps each connection honest, says what became of a frame it sent, and recovers from each way a connection fails: silent, cut, lost in flight, refused, behind, or judged by a clock that differs. The socket module's documentation lists each case and what the client does.
+
+What this changes for you:
+
+- The client pings each connection with a text `ping` every `Liveness::heartbeat` (15 seconds by default) and closes one it heard nothing from for `Liveness::deadline` (45 seconds). A service answers `ping` with `pong`, as text, without reading it as a frame; a hibernating Durable Object answers it through `setWebSocketAutoResponse` with the pair `PING`, `PONG`. A service that does not answer has its connections closed every deadline.
+- An invocation waits for its answer, and a watch for its first state, no longer than `Liveness::answer` (30 seconds). A connection nothing waits on is closed after `Liveness::idle` (a minute). Invocations that race to open a socket share one connection. `UcanSite::with_liveness` and `Sockets::with_liveness` set these.
+- A socket that cannot be opened holds off every space's socket at the same service, not only its own, for 30 seconds, doubling with each failure in a row up to 15 minutes and starting over once one opens. A service without sockets, such as a deployment whose upgrade answers 404, is tried a few times an hour, not once per space every 30 seconds.
+- A frame that never left goes as a request instead, whatever it does. An invocation sent and not answered, over the socket or as a request, is `Rejection::Unavailable`, so a peer's next address is tried with a fresh invocation. That is safe for a write too (see the entry on writes that are safe to send again).
+- A push whose publish landed but whose answer was lost no longer leaves every later push refused as `PushError::NonFastForward`: a remote already at the head being pushed is taken as the push having landed, and the sync point is recorded.
+- A watch's states are coalesced to the newest while it is not read, instead of queued per change; the last state before it ends is never dropped.
+- A watch the service refuses is an error of the `Watch` effect, not the first item of its `EditionSource`.
+- `branch.replicate()` begins an ended watch, or one it could not begin, again on its own, after a wait that doubles each time in a row from a second up to a minute and starts over once a watch delivers. Host ticks do not jump the wait.
+- An effect at a peer refused as `AuthorizeError::Stale` is sent once more, stamped by the clock the refusal said the service read. `dialog_ucan::clock` keeps the difference per subject, for the process.
+- `Access::with_clock` sets the clock a service judges by (the system's by default), and `Access::now` reads it; hand it to `Access::recheck` and `Session::deliver`. `Presented::record` is told the time by it, as a third argument.
+- `dialog_common::time::sleep` waits on native and in a browser or worker alike, and `dialog_common::time::Instant` is a clock that only moves forward.
+- Test helpers: `UcanSettings::fault` has the loopback service's socket fail on cue (`Fault::Cut`, `Fault::Freeze`, `Fault::LosePublish`), and `UcanSettings::clock_offset` sets its clock ahead or behind.
+
+Why: a socket is worth having only if a caller can rely on it as it relies on a request: an answer or an error it can act on, in bounded time. Each of these was a way it gave neither.
+
+### A peer is reached where its DID document says
+
+[#564](https://github.com/dialog-db/dialog-db/pull/564)
+
+A peer is named by its DID, and where it is reached is what its DID document says. `contact(did).discover()` reads the services the document names and records the access service among them as the peer's address. `Discover` asks for a DID's services beside `Resolve`: a `did:key` names none, and a `did:web` or `did:plc` document is fetched as resolving it is. A document naming a DID other than the one asked for is refused, so a host serving a DID's URL cannot point it at services the DID never named.
+
+What this changes for you:
+
+- `PeerBuilder::discovery` sets how a peer discovers; by default it reads `did:key` locally and `did:web` and `did:plc` over the network, and a peer's sessions discover as it does.
+- `UcanAddress::from_services` reads the endpoint from a `UcanAccessService` entry (`ACCESS_SERVICE`) and the socket from a `UcanAccessSocket` entry (`ACCESS_SOCKET`). A service that wants to be discovered adds both to its DID document.
+- Discovering a contact again follows its document: an address recorded at the same endpoint that the document no longer names, such as a socket the service stopped announcing, is taken back. Addresses at other services are kept. `DiscoverContact::perform` asks its environment for `Provider<RemoveAddress>` as well, which a `Peer` provides.
+- A loopback `did:web` (`localhost`, `*.localhost`, `127.x.x.x`) resolves over plain `http`, so a service on the same machine is discovered as a deployed one is. Every other host stays on `https`.
+- `dialog-peer` and `dialog-repository` now depend on `dialog-did-web`.
+
+Why: a peer's address was configured by hand beside its DID, so the two could disagree, and a service could not move or add a socket without every client being told. The DID document already answers who a peer is; it now answers where too.
+
+### Invocations say when they were issued, and a service refuses one that is stale or presented again
+
+[#564](https://github.com/dialog-db/dialog-db/pull/564)
+
+The client stamps every invocation with `iat`. `Access::admit` refuses one issued longer ago than its freshness window (`FRESHNESS`, 30 seconds by default) and one presented before, remembering the invocations it accepted while they are fresh through a `Presented` record. Over a socket an invocation must say when it was issued; over HTTP one that does not is still served, so a client that predates the stamp keeps working.
+
+What this changes for you:
+
+- New refusals: `AuthorizeError::Stale { issued_at, at }`, which carries the service's time, and `AuthorizeError::Replayed { invocation }`. Both answer 401. An exhaustive match on `AuthorizeError` needs the arms.
+- The record of accepted invocations (`RecentInvocations` by default) is per `Access`, so per process. An embedder that builds a service per request, or runs several processes, shares one record across them with `Access::with_presented`, or a replay can reach another instance; `Access::with_freshness` sets the window.
+- A test that presents one invocation twice to one `Access` now gets `Replayed`.
+- A client whose clock is more than the window off from the service's has its first invocation for a subject refused as `Stale`; the refusal says what the service's clock read, and the effect is sent once more stamped by it (see the entry on the socket's failures).
+
+Why: an invocation carried no time of its own and the service never asked how old one was, so a captured invocation held for as long as its delegations did.
+
+### A cell can be watched, and a cell's invocations go over the access service's socket
+
+[#564](https://github.com/dialog-db/dialog-db/pull/564)
+
+`memory::Watch` follows a cell: what it holds when the watch begins, then each state it takes, through an `EditionSource` that may skip intermediate states but never the last one. Its command is `/use/get/memory/cell/watch`, so any grant to read the cell covers it. A UCAN address can name a `socket`: one connection per space, shared by every watch of a cell in that space, which also carries the cell's resolves, publishes and retracts; blocks and blobs stay requests. Every frame on it is an invocation verified on its own, and the service checks a running watch's authority again, as of the time it delivers to it, once it was last found to hold more than an interval before (`Access::recheck`). `Session` is the service's side of one connection and holds no connection or clock, so a loopback server and a service that hibernates between messages serve it alike.
+
+What this changes for you:
+
+- `UcanAddress` has a public `socket` field (`with_socket`, `socket`), so a struct literal of it needs the field; `UcanServiceAddress` (test helper) has one too.
+- A site that cannot follow a cell answers a watch with the new `Rejection::Unsupported`, as S3, the filesystem remote and a UCAN address with no socket do; the caller resolves the cell again instead. An exhaustive match on `Rejection` needs the arm.
+- `Access::subscribe` accepts a watch and answers a `Subscription`, plain data a service can store, which names the cell it follows (`subject`, `space`, `cell`).
+- A frame the client sends names itself (`Request::Invoke { id, .. }`) and the service's answer echoes it, so the answer to an invocation the service could not read reaches whoever sent it. An answer that names neither a frame nor an invocation fails every invocation awaiting an answer on that connection.
+- Dropping a site closes its sockets, so the service ends their sessions.
+- `dialog-remote-ucan` now depends on tokio and tokio-tungstenite natively and on web-sys's `WebSocket` on wasm.
+
+Why: a host learned that a remote branch moved only by resolving its head again and again, each time a verified invocation the service pays for. A watch tells it when the head moves.
+
+### A branch keeps itself in step with its upstreams, and a head delivered late is not recorded over a newer one
+
+[#564](https://github.com/dialog-db/dialog-db/pull/564)
+
+`Branch::replicate()` keeps a branch in step with its upstreams for as long as its stream is read: an upstream that can be watched is followed and each head it delivers is pulled with no round trip of its own, and one that cannot be watched, a local one, or one whose watch ended is pulled from on the ticks the host passes to `every`, which also begin an ended watch again and push the branch's own commits. A bare replicate pulls and pushes; `pull()` or `push()` does one. `ConnectedBranch::watch` follows a remote branch's head, and `ConnectedBranch::observe` records a delivered head only when it is ahead of the one recorded, read from the local record at that moment, since more than one handle records heads of one remote branch.
+
+What this changes for you:
+
+- `Revision::precedence` orders two heads of one branch (`Precedence::{Same, Before, After, Concurrent}`) by their signed contexts, falling back to editions for heads without one.
+- `ConnectedBranch::observe` answers `Observation::{Advanced, Stale, Diverged}`; a diverged head is not recorded, and `replicate` asks the remote where it stands instead.
+- `Pull::assuming_upstream` merges the head recorded for a remote upstream without asking the remote.
+- `replicate` answers `Replicated::Pulled`, `Replicated::Pushed`, and `Replicated::Unwatched(target)` when a watch ends. An ended watch is begun again on its own after a wait that doubles each time in a row, up to a minute; without `every`, an upstream that cannot be watched at all is pulled from only as the replication begins.
+- A watched head that cannot be recorded is answered as an error, and the remote is then asked where it stands, so the head is still pulled.
+- `Cell::watch` and `Cell::decode` give any cell a watch.
+
+Why: a delivered head can arrive after a newer one was fetched or delivered. Recorded as it came, it would move the sync point back and make the next push fail or upload what the remote holds.
+
 ### A rule's head refuses a number its field may not hold, a difference may be negative, and floats round to integers
 
 [#617](https://github.com/dialog-db/dialog-db/pull/617), after [#615](https://github.com/dialog-db/dialog-db/issues/615) and [#616](https://github.com/dialog-db/dialog-db/pull/616); the design is in `notes/formula-schemes.md`, "Addendum: the number band"
@@ -460,6 +566,11 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- `UcanAddress` encodes an optional `socket`, left out when absent, so an address without one keeps its bytes. An older replica reads an address that names a socket and drops the socket, reaching the peer over requests.
+- Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
+- The socket carries text `ping` and `pong` messages beside its frames. A service's socket must answer `ping` with `pong`, or a client closes the connection every `Liveness::deadline`; no released service has a socket, so none predates this.
+- A conflict's `412` now has a body, and `Rejection::Unavailable` may carry `retry_after`. An older client ignores both; this client reads an older service's bare `412` as a conflict that does not say what the cell holds.
+- Nothing stored is rewritten.
 - Nothing new is stored by the rewrite fix: a blob-index entry keeps the
   key and value it had, so the tree reads as the older release wrote it
   apart from the numbers the rewrite moves. A branch whose migration
@@ -478,7 +589,6 @@ thread multiplies whatever it holds by the size of the thread pool.
   refusal and retracts nothing. An older peer reading this release's
   answer ignores the field and retracts the named certificate on the
   service's word, as it did before.
-
 
 ## 0.3.0 (2026-10-13)
 

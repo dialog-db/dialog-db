@@ -23,8 +23,8 @@ pub use peer::{
     Vault, VaultReference,
 };
 pub use peer::{
-    Allowance, BranchPeerExt, Local, Mode, OpenFuture, Peer, PeerBuilder, PeerError, PeerKey,
-    PeerSpace, Runtime, Session, Step, StepBound, StepFuture, Unset, Upgraded, With,
+    Allowance, BranchPeerExt, Discovery, Local, Mode, OpenFuture, Peer, PeerBuilder, PeerError,
+    PeerKey, PeerSpace, Runtime, Session, Step, StepBound, StepFuture, Unset, Upgraded, With,
 };
 
 /// Test helpers: unique names, peers over volatile storage, sample data.

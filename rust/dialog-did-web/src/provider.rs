@@ -9,7 +9,8 @@
 use dialog_capability::Provider;
 use dialog_credentials::Verifier;
 
-use crate::document::DidDocument;
+use crate::discover::Discover;
+use crate::document::{DidDocument, Service};
 use crate::error::ResolveError;
 use crate::fetch::{Fetch, ReqwestFetch};
 use crate::resolve::Resolve;
@@ -31,6 +32,18 @@ impl Provider<Resolve> for DidKeyProvider {
             .map_err(|_| ResolveError::UnsupportedKey(input.did.as_str().into()))?;
         // A did:key names exactly one key: a single-member set over the same DID.
         Ok(MultiVerifier::single(input.did, verifier))
+    }
+}
+
+/// A `did:key` has no document, so it names no services.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<Discover> for DidKeyProvider {
+    async fn execute(&self, input: Discover) -> Result<Vec<Service>, ResolveError> {
+        if input.did.method() != "key" {
+            return Err(ResolveError::UnsupportedMethod(input.did.method().into()));
+        }
+        Ok(Vec::new())
     }
 }
 
@@ -84,6 +97,21 @@ impl<F: Fetch> Provider<Resolve> for DidWebProvider<F> {
         let document: DidDocument = serde_json::from_slice(&body)
             .map_err(|e| ResolveError::MalformedDocument(e.to_string()))?;
         document.verifier(&subject, fragment)
+    }
+}
+
+/// The services a `did:web` document names, fetched as resolving it does.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<F: Fetch> Provider<Discover> for DidWebProvider<F> {
+    async fn execute(&self, input: Discover) -> Result<Vec<Service>, ResolveError> {
+        if input.did.method() != "web" {
+            return Err(ResolveError::UnsupportedMethod(input.did.method().into()));
+        }
+        let body = self.fetch.get(&did_web_url(input.did.as_str())?).await?;
+        let document: DidDocument = serde_json::from_slice(&body)
+            .map_err(|e| ResolveError::MalformedDocument(e.to_string()))?;
+        document.services(&input.did)
     }
 }
 
@@ -157,6 +185,21 @@ impl<F: Fetch> Provider<Resolve> for DidPlcProvider<F> {
     }
 }
 
+/// The services a `did:plc` document names, fetched as resolving it does.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<F: Fetch> Provider<Discover> for DidPlcProvider<F> {
+    async fn execute(&self, input: Discover) -> Result<Vec<Service>, ResolveError> {
+        if input.did.method() != "plc" {
+            return Err(ResolveError::UnsupportedMethod(input.did.method().into()));
+        }
+        let body = self.fetch.get(&did_plc_url(input.did.as_str())?).await?;
+        let document: DidDocument = serde_json::from_slice(&body)
+            .map_err(|e| ResolveError::MalformedDocument(e.to_string()))?;
+        document.services(&input.did)
+    }
+}
+
 /// Routes a resolution to a sub-provider by the DID's method.
 ///
 /// The varsig `CompositeResolver` composes by signature type, not DID method,
@@ -197,6 +240,24 @@ where
     P: Provider<Resolve> + dialog_common::ConditionalSync,
 {
     async fn execute(&self, input: Resolve) -> Result<MultiVerifier, ResolveError> {
+        match input.did.method() {
+            "key" => self.key.execute(input).await,
+            "web" => self.web.execute(input).await,
+            "plc" => self.plc.execute(input).await,
+            other => Err(ResolveError::UnsupportedMethod(other.into())),
+        }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<K, W, P> Provider<Discover> for MethodResolver<K, W, P>
+where
+    K: Provider<Discover> + dialog_common::ConditionalSync,
+    W: Provider<Discover> + dialog_common::ConditionalSync,
+    P: Provider<Discover> + dialog_common::ConditionalSync,
+{
+    async fn execute(&self, input: Discover) -> Result<Vec<Service>, ResolveError> {
         match input.did.method() {
             "key" => self.key.execute(input).await,
             "web" => self.web.execute(input).await,
