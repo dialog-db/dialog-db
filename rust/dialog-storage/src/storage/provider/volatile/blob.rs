@@ -16,7 +16,7 @@
 //! group.
 
 use super::{Session, Volatile};
-use crate::bao::{self, Decoder, Groups, Item, OutboardBuilder};
+use crate::bao::{self, Decoder, Encoder, Groups, Item, Need, OutboardBuilder};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Did, Provider};
@@ -26,8 +26,8 @@ use dialog_effects::blob::prelude::{
     BlobSizeExt as _,
 };
 use dialog_effects::blob::{
-    BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Held, Holding, Import, ImportRange,
-    Read, Size, Usage, Write,
+    BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Encoding, Held, Holding, Import,
+    ImportRange, Read, Size, Usage, Write,
 };
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
@@ -172,6 +172,11 @@ impl MemoryRangeSink {
                 size: self.size,
                 ..Partial::default()
             });
+        // A sink of another size that opened before the first group came
+        // keeps nothing: its pairs sit at other places.
+        if partial.size != self.size {
+            return;
+        }
         match item {
             Item::Parent { node, pair } => {
                 if let Some(offset) = bao::pair_offset(&self.tree, node) {
@@ -249,6 +254,9 @@ impl Provider<Read> for Volatile {
 
         let sessions = self.sessions.read();
         let session = sessions.get(&subject);
+        if effect.encoding() == Some(Encoding::Bao) {
+            return verified(session, digest, offset, length);
+        }
         if let Some(bytes) = session.and_then(|session| session.blobs.get(&key)) {
             let start = (offset as usize).min(bytes.len());
             let end = match length {
@@ -297,6 +305,71 @@ impl Provider<Usage> for Volatile {
             .sum();
         Ok((lengths(&session.blobs) + lengths(&session.outboards) + partials) as u64)
     }
+}
+
+/// A verified range of the blob `digest` that `session` holds, from
+/// `offset`, for `length` bytes or to its end, encoded whole: the session
+/// holds the blob in memory already. See [`Encoding::Bao`].
+fn verified(
+    session: Option<&Session>,
+    digest: &Blake3Hash,
+    offset: u64,
+    length: Option<u64>,
+) -> Result<BlobReader, BlobError> {
+    let key = blob_key(digest);
+    let whole = session.and_then(|session| session.blobs.get(&key));
+    let partial = session.and_then(|session| session.partials.get(&key));
+    let size = match (whole, partial) {
+        (Some(bytes), _) => bytes.len() as u64,
+        (None, Some(partial)) if !partial.held.is_empty() => partial.size,
+        _ => return Err(BlobError::NotFound(key)),
+    };
+    let end = length.map_or(size, |length| offset.saturating_add(length).min(size));
+    let (first, last) = if end > offset {
+        bao::groups_of(size, offset, end)
+    } else {
+        let first = bao::groups_of(size, offset, offset).0;
+        (first, first)
+    };
+    let held = match (whole, partial) {
+        (Some(_), _) => size,
+        (None, Some(partial)) => partial.holding().held_from(first),
+        (None, None) => first,
+    };
+    let covered = last.min(held).max(first);
+    let outboard = session.and_then(|session| session.outboards.get(&key));
+    let mut encoder = Encoder::new(digest, size, first, covered);
+    let mut encoded = bao::header(size, covered).to_vec();
+    while let Some(need) = encoder.need() {
+        let bytes: Vec<u8> = match (need, whole, partial) {
+            (Need::Pair { offset }, Some(_), _) => outboard
+                .and_then(|outboard| outboard.get(offset as usize..offset as usize + bao::PAIR))
+                .map(<[u8]>::to_vec)
+                .unwrap_or_default(),
+            (Need::Pair { offset }, None, Some(partial)) => partial
+                .pairs
+                .get(&offset)
+                .map(|pair| pair.to_vec())
+                .unwrap_or_default(),
+            (Need::Group { offset, length }, Some(bytes), _) => bytes
+                .get(offset as usize..offset as usize + length)
+                .map(<[u8]>::to_vec)
+                .unwrap_or_default(),
+            (Need::Group { offset, .. }, None, Some(partial)) => {
+                partial.groups.get(&offset).cloned().unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        encoded.extend(
+            encoder
+                .take(&bytes)
+                .map_err(|unverified| BlobError::Unverified {
+                    digest: key.clone(),
+                    reason: format!("the store holds a part that went bad: {unverified}"),
+                })?,
+        );
+    }
+    Ok(Box::new(MemoryBlobSource(Some(encoded))))
 }
 
 /// Which bytes of a blob the session holds.
@@ -641,6 +714,23 @@ mod tests {
     async fn it_counts_the_bytes_that_it_keeps() {
         let subject = unique_subject("blob-usage");
         crate::bao::conformance::it_counts_the_bytes_that_it_keeps(&Volatile::new(), &subject)
+            .await;
+    }
+
+    #[dialog_common::test]
+    async fn it_answers_a_verified_range_of_a_whole_blob() {
+        let subject = unique_subject("blob-verified-whole");
+        crate::bao::conformance::it_answers_a_verified_range_of_a_whole_blob(
+            &Volatile::new(),
+            &subject,
+        )
+        .await;
+    }
+
+    #[dialog_common::test]
+    async fn it_answers_the_held_start_of_a_range() {
+        let subject = unique_subject("blob-verified-partial");
+        crate::bao::conformance::it_answers_the_held_start_of_a_range(&Volatile::new(), &subject)
             .await;
     }
 }

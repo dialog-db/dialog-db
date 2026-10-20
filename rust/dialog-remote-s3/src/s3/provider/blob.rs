@@ -64,6 +64,12 @@ impl Provider<ForkInvocation<S3, Import>> for S3 {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<S3Invocation<Read>> for S3 {
     async fn execute(&self, input: S3Invocation<Read>) -> Result<BlobReader, BlobError> {
+        // An object of S3 has no outboard to verify a range with.
+        if input.capability.encoding().is_some() {
+            return Err(BlobError::Storage(
+                "an S3 bucket serves no verified range of a blob".into(),
+            ));
+        }
         let mut permit = input.permit;
         if let Some(range) = input.capability.range() {
             let value = match range.length {

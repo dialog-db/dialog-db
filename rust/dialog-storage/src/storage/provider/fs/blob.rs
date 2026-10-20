@@ -27,7 +27,7 @@
 //! record.
 
 use super::{FileReader, FileSystem, FileSystemError, FileSystemHandle, FileWriter};
-use crate::bao::{self, Decoder, Groups, Item, OutboardBuilder};
+use crate::bao::{self, Decoder, Encoder, Groups, Item, Need, OutboardBuilder};
 use async_trait::async_trait;
 use base58::ToBase58;
 use dialog_capability::{Capability, Provider};
@@ -37,8 +37,8 @@ use dialog_effects::blob::prelude::{
     BlobSizeExt as _,
 };
 use dialog_effects::blob::{
-    BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Held, Holding, Import, ImportRange,
-    Read, Size, Usage, Write,
+    BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Encoding, Held, Holding, Import,
+    ImportRange, Read, Size, Usage, Write,
 };
 use futures_util::StreamExt;
 
@@ -237,6 +237,10 @@ impl FileSystem {
         };
         let (size, groups) = Groups::decode(&record)
             .ok_or_else(|| BlobError::Storage(format!("the record {held} is not valid")))?;
+        // A sink that opened writes the record of no group yet.
+        if groups.is_empty() {
+            return Ok(None);
+        }
         Ok(Some(Holding {
             size,
             ranges: groups.bytes(size),
@@ -319,16 +323,23 @@ impl FileSystem {
         let whole = blob_dir.resolve(&blob_key(&digest))?.exists().await;
         // A record of the blob at another size names groups of another
         // tree: the pairs of this import would land at other places of the
-        // outboard. The import is refused before it writes anything.
+        // outboard. The first sink writes its size into the record as it
+        // opens, under the lock of the record, so a sink of another size is
+        // refused before it writes anything.
         let [_, _, held] = partial_keys(&digest);
-        if !whole
-            && let Some(record) = blob_dir.resolve(&held)?.read_optional().await?
-            && Groups::decode(&record).is_none_or(|(held, _)| held != size)
-        {
-            return Err(BlobError::Storage(format!(
-                "the store holds a part of the blob {} of another size than {size} bytes",
-                blob_key(&digest)
-            )));
+        if !whole {
+            let record = blob_dir.resolve(&held)?;
+            locked(&record, async || match record.read_optional().await? {
+                Some(bytes) if Groups::decode(&bytes).is_some_and(|(held, _)| held == size) => {
+                    Ok(())
+                }
+                Some(_) => Err(BlobError::Storage(format!(
+                    "the store holds a part of the blob {} of another size than {size} bytes",
+                    blob_key(&digest)
+                ))),
+                None => Ok(record.write_atomic(&Groups::new().encode(size)).await?),
+            })
+            .await?;
         }
         Ok(RangeSink {
             decoder: Decoder::new(&digest, size, range.offset, end),
@@ -505,6 +516,140 @@ impl BlobSource for Limited {
     }
 }
 
+/// The most bytes of the encoding of a verified range that one call of
+/// [`VerifiedSource::next`] gives.
+const VERIFIED_CHUNK: usize = 1024 * 1024;
+
+/// A [`BlobSource`] of a verified range: its header, and then the encoding of
+/// its groups, which the store reads a group and a pair at a time. A part
+/// that does not verify, as a group that went bad on the disk, ends the
+/// source with an error after the parts before it.
+struct VerifiedSource {
+    header: Option<[u8; bao::HEADER]>,
+    encoder: Encoder,
+    digest: Blake3Hash,
+    data: FileSystemHandle,
+    outboard: FileSystemHandle,
+    /// Why the next call fails, after a call that gave the parts before it.
+    failure: Option<BlobError>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl BlobSource for VerifiedSource {
+    async fn next(&mut self) -> Result<Option<Vec<u8>>, BlobError> {
+        if let Some(header) = self.header.take() {
+            return Ok(Some(header.to_vec()));
+        }
+        if let Some(failure) = self.failure.take() {
+            return Err(failure);
+        }
+        let mut encoded = Vec::new();
+        while let Some(need) = self.encoder.need() {
+            let bytes = match need {
+                Need::Pair { offset } => self.outboard.read_at(offset, bao::PAIR).await?,
+                Need::Group { offset, length } => self.data.read_at(offset, length).await?,
+            };
+            match self.encoder.take(&bytes) {
+                Ok(item) => encoded.extend(item),
+                Err(unverified) => {
+                    let failure = BlobError::Unverified {
+                        digest: blob_key(&self.digest),
+                        reason: format!("the store holds a part that went bad: {unverified}"),
+                    };
+                    if encoded.is_empty() {
+                        return Err(failure);
+                    }
+                    self.failure = Some(failure);
+                    break;
+                }
+            }
+            if encoded.len() >= VERIFIED_CHUNK {
+                break;
+            }
+        }
+        Ok((!encoded.is_empty()).then_some(encoded))
+    }
+}
+
+impl FileSystem {
+    /// A verified range of the blob `digest`, from `offset`, for `length`
+    /// bytes or to its end: of a whole blob, or of the held part of a partial
+    /// one from the start of the range. See [`Encoding::Bao`].
+    async fn verified(
+        &self,
+        digest: &Blake3Hash,
+        offset: u64,
+        length: Option<u64>,
+    ) -> Result<BlobReader, BlobError> {
+        let blob_dir = self.blob()?;
+        let whole = blob_dir.resolve(&blob_key(digest))?;
+        let (size, data, outboard, held_from): (u64, _, _, Box<dyn Fn(u64) -> u64 + Send + Sync>) =
+            if let Some(size) = whole.size().await? {
+                let outboard = blob_dir.resolve(&outboard_key(digest))?;
+                if size > bao::GROUP && !outboard.exists().await {
+                    rebuild_outboard(digest, &whole, &blob_dir, &outboard).await?;
+                }
+                (size, whole, outboard, Box::new(move |_| size))
+            } else if let Some(holding) = self.holding(digest).await? {
+                let [data, outboard, _] = partial_keys(digest);
+                let size = holding.size;
+                (
+                    size,
+                    blob_dir.resolve(&data)?,
+                    blob_dir.resolve(&outboard)?,
+                    Box::new(move |from| holding.held_from(from)),
+                )
+            } else {
+                return Err(BlobError::NotFound(blob_key(digest)));
+            };
+        let end = length.map_or(size, |length| offset.saturating_add(length).min(size));
+        let (first, last) = if end > offset {
+            bao::groups_of(size, offset, end)
+        } else {
+            let first = bao::groups_of(size, offset, offset).0;
+            (first, first)
+        };
+        let covered = last.min(held_from(first)).max(first);
+        Ok(Box::new(VerifiedSource {
+            header: Some(bao::header(size, covered)),
+            encoder: Encoder::new(digest, size, first, covered),
+            digest: digest.clone(),
+            data,
+            outboard,
+            failure: None,
+        }))
+    }
+}
+
+/// Builds the outboard of the whole blob `whole`, which a store wrote before
+/// it kept outboards, and keeps it at `place`, if its bytes hash to `digest`.
+async fn rebuild_outboard(
+    digest: &Blake3Hash,
+    whole: &FileSystemHandle,
+    blob_dir: &FileSystemHandle,
+    place: &FileSystemHandle,
+) -> Result<(), BlobError> {
+    let mut builder = OutboardBuilder::new();
+    let mut staged = blob_dir.resolve(STAGING)?.writer().await?;
+    let mut reader = whole.reader().await?;
+    while let Some(chunk) = reader.next().await {
+        let pairs = builder.update(&chunk?);
+        staged.write_all(&pairs).await?;
+    }
+    let (hash, pairs) = builder.finish();
+    staged.write_all(&pairs).await?;
+    if &hash != digest {
+        let _ = staged.discard().await;
+        return Err(BlobError::DigestMismatch {
+            expected: blob_key(digest),
+            actual: blob_key(&hash),
+        });
+    }
+    staged.finish_to(place).await?;
+    Ok(())
+}
+
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl Provider<Read> for FileSystem {
@@ -515,6 +660,9 @@ impl Provider<Read> for FileSystem {
             Some(range) => (range.offset, range.length),
             None => (0, None),
         };
+        if effect.encoding() == Some(Encoding::Bao) {
+            return self.verified(digest, offset, length).await;
+        }
         if handle.exists().await {
             let reader = handle.reader_range(offset, length).await?;
             return Ok(Box::new(FileBlobSource(reader)));
@@ -979,5 +1127,84 @@ mod tests {
     async fn it_counts_the_bytes_that_it_keeps() {
         let fs = test_space("blob-usage").await;
         crate::bao::conformance::it_counts_the_bytes_that_it_keeps(&fs, &subject()).await;
+    }
+
+    #[dialog_common::test]
+    async fn it_answers_a_verified_range_of_a_whole_blob() {
+        let fs = test_space("blob-verified-whole").await;
+        crate::bao::conformance::it_answers_a_verified_range_of_a_whole_blob(&fs, &subject()).await;
+    }
+
+    #[dialog_common::test]
+    async fn it_answers_the_held_start_of_a_range() {
+        let fs = test_space("blob-verified-partial").await;
+        crate::bao::conformance::it_answers_the_held_start_of_a_range(&fs, &subject()).await;
+    }
+
+    /// A group that went bad on the disk ends a verified range before it:
+    /// the store sends the groups before it, and then an error, and never a
+    /// group that does not verify.
+    #[dialog_common::test]
+    async fn it_ends_a_verified_range_before_a_group_that_went_bad() {
+        let fs = test_space("blob-verified-bad").await;
+        let payload: Vec<u8> = (0..10 * crate::bao::GROUP as usize)
+            .map(|i| (i % 249) as u8)
+            .collect();
+        let digest = ingest(&fs, &payload).await;
+        let file = fs.blob().unwrap().resolve(&blob_key(&digest)).unwrap();
+        file.write_at(4 * crate::bao::GROUP + 9, &[payload[4 * 16384 + 9] ^ 1])
+            .await
+            .unwrap();
+        let mut reader = subject()
+            .reader()
+            .archive()
+            .blob()
+            .invoke(Read::verified(digest.clone(), 0, None))
+            .perform(&fs)
+            .await
+            .unwrap();
+
+        let mut bytes = Vec::new();
+        let ended = loop {
+            match reader.next().await {
+                Ok(Some(chunk)) => bytes.extend(chunk),
+                Ok(None) => break None,
+                Err(error) => break Some(error),
+            }
+        };
+
+        assert!(
+            matches!(ended, Some(BlobError::Unverified { .. })),
+            "{ended:?}"
+        );
+        let mut decoder =
+            crate::bao::Decoder::new(&digest, payload.len() as u64, 0, payload.len() as u64);
+        decoder.push(&bytes[crate::bao::HEADER..]);
+        let mut groups = 0;
+        while let Some(item) = decoder.next_item() {
+            if let crate::bao::Item::Group { .. } = item.unwrap() {
+                groups += 1;
+            }
+        }
+        assert_eq!(groups, 4, "the groups before the bad one");
+    }
+
+    /// A blob that a store wrote before it kept outboards gets one at its
+    /// first verified read.
+    #[dialog_common::test]
+    async fn it_builds_the_outboard_of_an_older_blob_at_its_first_verified_read() {
+        let fs = test_space("blob-verified-older").await;
+        let payload = crate::bao::conformance::blob(3 * crate::bao::GROUP as usize);
+        let digest = ingest(&fs, &payload).await;
+        let outboard = fs.blob().unwrap().resolve(&outboard_key(&digest)).unwrap();
+        outboard.remove().await.unwrap();
+
+        let read = crate::bao::conformance::verified(&fs, &subject(), &digest, 0, None).await;
+
+        assert!(read.is_ok(), "{:?}", read.err());
+        assert_eq!(
+            outboard.read().await.unwrap(),
+            crate::bao::outboard(&payload).1
+        );
     }
 }

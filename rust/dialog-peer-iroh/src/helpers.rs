@@ -128,7 +128,16 @@ impl BlobSink for CollectBlob {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<blob::Read> for Volatile {
     async fn execute(&self, input: Capability<blob::Read>) -> Result<BlobReader, BlobError> {
-        let blob::Read { digest, range } = &input.constraint;
+        let blob::Read {
+            digest,
+            range,
+            encoding,
+        } = &input.constraint;
+        if encoding.is_some() {
+            return Err(BlobError::Storage(
+                "this store serves no verified range of a blob".into(),
+            ));
+        }
         let bytes = self
             .blob(digest)
             .ok_or_else(|| BlobError::NotFound(format!("{digest:?}")))?;
