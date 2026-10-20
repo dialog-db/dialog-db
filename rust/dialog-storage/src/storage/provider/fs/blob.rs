@@ -38,7 +38,7 @@ use dialog_effects::blob::prelude::{
 };
 use dialog_effects::blob::{
     BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Held, Holding, Import, ImportRange,
-    Read, Size, Write,
+    Read, Size, Usage, Write,
 };
 use futures_util::StreamExt;
 
@@ -549,6 +549,45 @@ impl Provider<Read> for FileSystem {
     }
 }
 
+/// The bytes that the blob store keeps: the length of each whole blob and
+/// outboard, and of each partial blob the bytes of the groups that its record
+/// names, with its outboard. A staged write, a lock, and a temporary file
+/// keep nothing yet. The store reads the record of each partial blob, and no
+/// blob.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Usage> for FileSystem {
+    async fn execute(&self, _effect: Capability<Usage>) -> Result<u64, BlobError> {
+        let blob_dir = self.blob()?;
+        let mut kept = 0u64;
+        for name in blob_dir.list().await? {
+            if name.starts_with(STAGING) || name.ends_with(".lock") || name.ends_with(".tmp") {
+                continue;
+            }
+            let file = blob_dir.resolve(&name)?;
+            if let Some(key) = name.strip_suffix(&format!(".{PARTIAL}")) {
+                // The bytes of a partial blob have holes: what it keeps is
+                // the groups that its record names.
+                let record = blob_dir.resolve(&format!("{key}.{HELD}"))?;
+                if let Some((size, groups)) = record
+                    .read_optional()
+                    .await?
+                    .and_then(|record| Groups::decode(&record))
+                {
+                    kept += groups
+                        .bytes(size)
+                        .iter()
+                        .map(|(start, end)| end - start)
+                        .sum::<u64>();
+                }
+                continue;
+            }
+            kept += file.size().await?.unwrap_or(0);
+        }
+        Ok(kept)
+    }
+}
+
 /// Which bytes of a blob the store holds: from the length of a whole blob,
 /// or from the record of a partial one.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
@@ -934,5 +973,11 @@ mod tests {
                 .unwrap(),
             bytes
         );
+    }
+
+    #[dialog_common::test]
+    async fn it_counts_the_bytes_that_it_keeps() {
+        let fs = test_space("blob-usage").await;
+        crate::bao::conformance::it_counts_the_bytes_that_it_keeps(&fs, &subject()).await;
     }
 }

@@ -27,7 +27,7 @@ use dialog_effects::blob::prelude::{
 };
 use dialog_effects::blob::{
     BlobError, BlobReader, BlobSink, BlobSource, BlobWriter, Held, Holding, Import, ImportRange,
-    Read, Size, Write,
+    Read, Size, Usage, Write,
 };
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
@@ -272,6 +272,30 @@ impl Provider<Read> for Volatile {
             ranged.extend_from_slice(&bytes[from..to]);
         }
         Ok(Box::new(MemoryBlobSource(Some(ranged))))
+    }
+}
+
+/// The bytes that the session keeps: each blob and outboard, and the groups
+/// and the pairs of each partial blob.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl Provider<Usage> for Volatile {
+    async fn execute(&self, effect: Capability<Usage>) -> Result<u64, BlobError> {
+        let subject: Did = effect.subject().into();
+        let sessions = self.sessions.read();
+        let Some(session) = sessions.get(&subject) else {
+            return Ok(0);
+        };
+        let lengths = |map: &HashMap<String, Vec<u8>>| map.values().map(Vec::len).sum::<usize>();
+        let partials: usize = session
+            .partials
+            .values()
+            .map(|partial| {
+                partial.groups.values().map(Vec::len).sum::<usize>()
+                    + partial.pairs.len() * bao::PAIR
+            })
+            .sum();
+        Ok((lengths(&session.blobs) + lengths(&session.outboards) + partials) as u64)
     }
 }
 
@@ -611,5 +635,12 @@ mod tests {
             &subject,
         )
         .await;
+    }
+
+    #[dialog_common::test]
+    async fn it_counts_the_bytes_that_it_keeps() {
+        let subject = unique_subject("blob-usage");
+        crate::bao::conformance::it_counts_the_bytes_that_it_keeps(&Volatile::new(), &subject)
+            .await;
     }
 }
