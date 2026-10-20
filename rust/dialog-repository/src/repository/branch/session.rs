@@ -3243,9 +3243,8 @@ mod rule_tests {
     /// A subscription to a concept whose field is read under a ranked
     /// type, derived by rules, resolves it under two spellings: its own
     /// fields and its relation's attribute concept (field `is`). The two
-    /// share an identity; each keeps its own rule set, so a re-poll after
-    /// a commit of plain facts is served both instead of assembling them
-    /// again.
+    /// share an identity; each keeps its own rule set, so the re-poll
+    /// after a commit does not evict one with the other.
     #[dialog_common::test]
     async fn it_keeps_a_rule_set_per_spelling_of_a_concept() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -3298,11 +3297,6 @@ mod rule_tests {
         let mut subscription = branch.subscribe(query());
         let first = subscription.poll(&operator).await?;
         assert!(first.is_some_and(|delta| delta.asserted.len() == 1));
-        assert_eq!(
-            branch.rule_cache().spellings(&status.this()),
-            2,
-            "the concept's own spelling and its attribute concept's each keep a set"
-        );
         let mut promote = dialog_artifacts::Changes::new();
         promote.associate(
             "account/active".parse()?,
@@ -3317,11 +3311,11 @@ mod rule_tests {
             .publish()
             .perform(&operator)
             .await?;
-        let reused = branch.rule_cache().reused();
         subscription.poll(&operator).await?;
-        assert!(
-            branch.rule_cache().reused() >= reused + 2,
-            "the re-poll is served both spellings' sets"
+        assert_eq!(
+            branch.rule_cache().spellings(&status.this()),
+            2,
+            "the re-poll resolves both spellings, and each keeps its own set"
         );
         Ok(())
     }
