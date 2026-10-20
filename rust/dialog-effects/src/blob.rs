@@ -283,9 +283,12 @@ impl Effect for Held {
 ///
 /// The store reads the proof from the outboard of the blob, or from the
 /// hashes that verified the groups of a partial blob, and reads no byte of
-/// the blob. It answers `None` when it does not hold the blob at `size`, or
-/// holds it in part without the first or the last group of the range. A
-/// range from the first byte to the last has the empty proof.
+/// the blob. The proof reads the pairs on the path to the first group of the
+/// range, unless the range starts the blob, and on the path to its last
+/// group, unless the range ends the blob. The store answers `None` when it
+/// does not hold the blob at `size`, or holds it in part without a group
+/// whose path the proof reads. A range from the first byte to the last has
+/// the empty proof.
 #[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
 pub struct Proof {
     /// The blob's content hash: the root of its Bao tree.
