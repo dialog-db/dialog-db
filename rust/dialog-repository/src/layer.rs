@@ -2,8 +2,8 @@
 //!
 //! Everything here works on `Stream<Item = Result<ArtifactView, _>>` —
 //! [`ArtifactStream`]s — and is agnostic to where the streams came
-//! from (a branch's tree scan, a [`Changes`] overlay, anything else
-//! that implements `Provider<Select>`). Rows travel as borrowed-access
+//! from (a branch's tree scan, an [`Ephemeral`](crate::Ephemeral)
+//! overlay, anything else that implements `Provider<Select>`). Rows travel as borrowed-access
 //! [`ArtifactView`]s; nothing in this layer materializes an owned
 //! `Artifact`, and merge order comes from each row's
 //! [`sort_key`](ArtifactView::sort_key) — derived straight from a scanned
@@ -19,10 +19,9 @@
 //!   single physical tree" order via [`sort_key`](dialog_artifacts::sort_key)
 //!   and dedupes identical `(the, of, is, cause)` artifacts within
 //!   each `(the, of)` run.
-//! - [`tombstones_from`] lifts retract instructions out of a
-//!   [`Changes`] overlay, and [`Hidden`] + [`filter_hidden`] apply them,
-//!   with a transaction's staged retracts, to a source stream as a
-//!   filter — the mechanism that lets a
+//! - [`Hidden`] + [`filter_hidden`] apply the tombstones an overlay
+//!   holds, with a transaction's staged retracts, to a source stream as
+//!   a filter — the mechanism that lets a
 //!   [`Transaction::retract`](crate::repository::branch::Transaction::retract)
 //!   suppress facts in the underlying branch view.
 
@@ -30,9 +29,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Cause, Changes, SortKey, sort_key,
-};
+use dialog_artifacts::{ArtifactSelector, ArtifactStream, ArtifactView, Cause, SortKey, sort_key};
 use dialog_search_tree::Manifest;
 use futures_util::{StreamExt, stream};
 
@@ -44,7 +41,7 @@ use futures_util::{StreamExt, stream};
 /// Each input is assumed sorted by [`sort_key`] under `manifest` — true
 /// of scans of trees written under `manifest` by construction (the
 /// prolly tree stores entries in that order), and of in-memory overlays
-/// read with that manifest ([`Changes::select`], `Ephemeral::select`),
+/// read with that manifest (`Ephemeral::select`, `Staged::select`),
 /// which sort their materialized rows by it. Implemented as a streaming k-way
 /// merge over per-stream head slots, each holding the front row and its
 /// sort key.
@@ -202,28 +199,6 @@ impl MergeKeys {
     }
 }
 
-/// Extract a tombstone set from a [`Changes`] overlay — one
-/// [`SortKey`] per retracted artifact.
-///
-/// Asserts and Replaces are ignored; only Retracts contribute. Used
-/// at query time to filter matching source facts out of branch
-/// streams before they reach the merge.
-pub(crate) fn tombstones_from(changes: &Changes, manifest: &Manifest) -> HashSet<SortKey> {
-    let mut tombstones = HashSet::new();
-    for (entity, attribute, change) in changes.iter() {
-        if let dialog_artifacts::Change::Retract(value) = change {
-            let artifact = Artifact {
-                the: attribute.clone(),
-                of: entity.clone(),
-                is: value.clone(),
-                cause: None,
-            };
-            tombstones.insert(sort_key(&artifact, manifest));
-        }
-    }
-    tombstones
-}
-
 /// What a query's upper layers hide in the streams beneath them: exact
 /// facts, by sort key. Holds each layer's set as shared, rather than
 /// one merged copy, so building it never copies a set.
@@ -312,9 +287,12 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::Ephemeral;
     use dialog_artifacts::ArchiveDelta;
     use dialog_artifacts::tree::ArtifactTree;
-    use dialog_artifacts::{DialogArtifactsError, Entity, Instruction, Update as _, Value};
+    use dialog_artifacts::{
+        Artifact, Changes, DialogArtifactsError, Entity, Instruction, Update as _, Value,
+    };
     use dialog_search_tree::{MemoryBlocks, NodeCache};
 
     fn artifact(of: &str, the: &str, is: &str) -> Artifact {
@@ -382,7 +360,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_extracts_tombstones_from_retracts_only() -> anyhow::Result<()> {
+    fn it_holds_tombstones_for_retracts_only() -> anyhow::Result<()> {
         let mut changes = Changes::new();
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
@@ -398,7 +376,7 @@ mod tests {
             Value::String("Bob".into()),
         );
 
-        let tombstones = tombstones_from(&changes, &Manifest::default());
+        let tombstones = Ephemeral::holding(changes).tombstones(&Manifest::default());
         assert_eq!(tombstones.len(), 1, "only the retract contributes");
         // The lone tombstone matches the retracted artifact.
         let retracted = artifact("id:bob", "test/name", "Bob");
@@ -505,7 +483,7 @@ mod tests {
                     .clone()
                     .scan(spilling_store.clone(), spill_cache(), selector()),
             ),
-            Hidden::default().facts(Arc::new(tombstones_from(&changes, &small))),
+            Hidden::default().facts(Ephemeral::holding(changes).tombstones(&small)),
             small,
         );
         assert!(

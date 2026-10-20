@@ -37,7 +37,7 @@ use dialog_artifacts::{
 };
 use dialog_search_tree::Manifest;
 
-use super::ephemeral::{EphemeralRevision, Facts};
+use super::ephemeral::{EphemeralRevision, Facts, Window};
 use crate::Revision;
 use crate::repository::branch::ReadSettlement;
 use crate::rules::conclusion_attr;
@@ -122,23 +122,20 @@ pub(crate) struct CellSettlement {
 }
 
 /// What a read settlement observed: the lines it settled against and
-/// the metadata it read with. A later read with the same observation
+/// the overlays it read with. A later read with the same observation
 /// settles to the same writes.
 #[derive(Clone, Debug)]
 pub(crate) struct ReadObservation {
     /// Each line's head.
     pub(crate) heads: Vec<Option<Revision>>,
-    /// Each line's session overlay.
+    /// Each line's session overlay, then the query's own overlay (the
+    /// metadata and facts the read folded in).
     pub(crate) overlays: Vec<EphemeralRevision>,
-    /// The metadata the read folded in.
-    pub(crate) metadata: Arc<Changes>,
 }
 
 impl ReadObservation {
     fn matches(&self, other: &ReadObservation) -> bool {
-        self.heads == other.heads
-            && self.overlays == other.overlays
-            && (Arc::ptr_eq(&self.metadata, &other.metadata) || *self.metadata == *other.metadata)
+        self.heads == other.heads && self.overlays == other.overlays
     }
 }
 
@@ -320,15 +317,12 @@ impl Staged {
         self.0.facts.scan(selector)
     }
 
-    /// The held facts a selector matches, in the order a scan of a tree
-    /// written under `manifest` would produce them: what a query merges
-    /// with that tree's rows.
-    pub(crate) fn select(
-        &self,
-        selector: &ArtifactSelector<Constrained>,
-        manifest: &Manifest,
-    ) -> Vec<Artifact> {
-        self.0.facts.select(selector, manifest)
+    /// The held facts a window's selector matches, in the order a scan
+    /// of a tree written under `manifest` would produce them: what a
+    /// query merges with that tree's rows. The window is shared with the
+    /// other stores one read meets.
+    pub(crate) fn select_within(&self, window: &Window<'_>, manifest: &Manifest) -> Vec<Artifact> {
+        self.0.facts.select_within(window, manifest)
     }
 
     /// Sort keys of every fact this store hides beneath it, keyed under
@@ -539,8 +533,7 @@ mod tests {
         let overlay = super::super::ephemeral::Ephemeral::new();
         let observed = ReadObservation {
             heads: vec![None],
-            overlays: vec![overlay.revision()],
-            metadata: Arc::new(Changes::new()),
+            overlays: vec![overlay.revision(), overlay.revision()],
         };
         assert!(staged.take_settlement(&observed).is_none());
         let settlement = ReadSettlement::new(Edition::GENESIS);
@@ -548,11 +541,15 @@ mod tests {
 
         // Another observation of the lines misses it.
         let elsewhere = ReadObservation {
-            metadata: Arc::new({
-                let mut changes = Changes::new();
-                changes.associate(the.clone(), a.clone(), Value::String("x".into()), Pick::All);
-                changes
-            }),
+            overlays: vec![
+                overlay.revision(),
+                super::super::ephemeral::Ephemeral::holding({
+                    let mut changes = Changes::new();
+                    changes.associate(the.clone(), a.clone(), Value::String("x".into()), Pick::All);
+                    changes
+                })
+                .revision(),
+            ],
             ..observed.clone()
         };
         assert!(staged.take_settlement(&elsewhere).is_none());
