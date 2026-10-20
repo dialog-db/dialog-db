@@ -665,6 +665,52 @@ mod tests {
     }
 
     #[dialog_common::test]
+    fn it_decodes_a_blob_of_each_size_whole() {
+        for &size in SIZES {
+            let bytes = blob(size);
+            let size = size as u64;
+            let encoded = encoding(&bytes, 0, size);
+            let groups: Vec<u8> = decode(&bytes, 0, size, &encoded, 777)
+                .into_iter()
+                .filter_map(|item| match item.unwrap() {
+                    Item::Group { bytes, .. } => Some(bytes),
+                    Item::Parent { .. } => None,
+                })
+                .flatten()
+                .collect();
+            assert_eq!(groups, bytes, "{size}");
+        }
+    }
+
+    #[dialog_common::test]
+    fn it_fails_a_forged_pair_of_hashes() {
+        for size in [2 * GROUP as usize, 5 * GROUP as usize + 3] {
+            let bytes = blob(size);
+            let mut encoded = encoding(&bytes, 0, size as u64);
+            // The encoding of a whole blob starts with the pair of the root.
+            encoded[5] ^= 1;
+
+            let items = decode(&bytes, 0, size as u64, &encoded, 4096);
+
+            assert!(
+                matches!(items.as_slice(), [Err(Unverified::Parent(_))]),
+                "{size}: {items:?}"
+            );
+        }
+    }
+
+    #[dialog_common::test]
+    fn it_fails_a_changed_blob_of_one_group() {
+        let bytes = blob(GROUP as usize);
+        let mut encoded = encoding(&bytes, 0, GROUP);
+        encoded[100] ^= 1;
+
+        let items = decode(&bytes, 0, GROUP, &encoded, 4096);
+
+        assert_eq!(items, [Err(Unverified::Group(0))]);
+    }
+
+    #[dialog_common::test]
     fn it_keeps_the_pair_of_each_parent_where_the_outboard_keeps_it() {
         let bytes = blob(500 * 1024 + 3);
         let outboard = PostOrderMemOutboard::create(&bytes, BLOCK_SIZE);
@@ -969,5 +1015,81 @@ pub(crate) mod conformance {
             .unwrap()
             .unwrap();
         assert_eq!(held.ranges, [first, second]);
+    }
+
+    /// An import of a blob at another size than the part that the store
+    /// holds is refused at once, and the part stays as it was.
+    pub async fn it_refuses_an_import_at_another_size<P>(store: &P, subject: &Subject)
+    where
+        P: Provider<ImportRange> + Provider<Held> + dialog_common::ConditionalSync,
+    {
+        let bytes = blob(6 * GROUP as usize);
+        let digest = Blake3Hash::from(*blake3::hash(&bytes).as_bytes());
+        import(
+            store,
+            subject,
+            &bytes,
+            0,
+            2 * GROUP,
+            &encoding(&bytes, 0, 2 * GROUP),
+        )
+        .await
+        .unwrap();
+
+        let range = ByteRange {
+            offset: 0,
+            length: Some(2 * GROUP),
+        };
+        let refused = subject
+            .clone()
+            .writer()
+            .archive()
+            .blob()
+            .import_range(digest.clone(), bytes.len() as u64 + 1, range)
+            .perform(store)
+            .await;
+
+        assert!(
+            matches!(refused, Err(BlobError::Storage(_))),
+            "{:?}",
+            refused.err()
+        );
+        let held = subject
+            .clone()
+            .reader()
+            .archive()
+            .blob()
+            .held(digest)
+            .perform(store)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (held.size, held.ranges),
+            (bytes.len() as u64, vec![(0, 2 * GROUP)])
+        );
+    }
+
+    /// A store that holds a blob whole still verifies an import of a range
+    /// of it: a part that does not verify fails the write.
+    pub async fn it_verifies_a_range_of_a_blob_that_it_holds_whole<P>(store: &P, subject: &Subject)
+    where
+        P: Provider<ImportRange> + dialog_common::ConditionalSync,
+    {
+        let bytes = blob(3 * GROUP as usize);
+        let size = bytes.len() as u64;
+        import(store, subject, &bytes, 0, size, &encoding(&bytes, 0, size))
+            .await
+            .unwrap();
+        let mut encoded = encoding(&bytes, 0, size);
+        let last = encoded.len() - 1;
+        encoded[last] ^= 1;
+
+        let imported = import(store, subject, &bytes, 0, size, &encoded).await;
+
+        assert!(
+            matches!(imported, Err(BlobError::Unverified { .. })),
+            "{imported:?}"
+        );
     }
 }
