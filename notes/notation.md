@@ -1090,7 +1090,7 @@ A pure computation, similar to formulas in a spreadsheet. Given bound input fiel
 }
 ```
 
-**Difference**: Subtracts the second value from the first (saturating at 0).
+**Difference**: Subtracts the second value from the first. The difference is a number that may be negative: a natural minus a natural is an integer (`3 - 5` is `-2`). A head field declared `natural:` does not take it until a comparison in the body (`>= 0` on the result) proves it a natural.
 
 ```json
 { 
@@ -1146,6 +1146,18 @@ A pure computation, similar to formulas in a spreadsheet. Given bound input fiel
 }
 ```
 
+**Floor**, **Round**, **Truncate**: Take a number of any type to an integer, the way from a float to an `integer:` field. `math/floor` is the greatest integer not above the number (`2.7` to `2`, `-2.3` to `-3`), `math/round` the nearest integer with halves away from zero (`2.5` to `3`, `-2.5` to `-3`), `math/truncate` the number with its fraction dropped (`2.7` to `2`, `-2.7` to `-2`). An integer is its own floor, rounding and truncation. A float with no finite value yields no result.
+
+```json
+{ 
+  "assert": "math/floor", 
+  "where": { 
+    "of": { "?": { "name": "price" } }, 
+    "is": { "?": { "name": "whole" } } 
+  } 
+}
+```
+
 <details>
 <summary>MathFormula</summary>
 <pre>
@@ -1162,11 +1174,11 @@ A pure computation, similar to formulas in a spreadsheet. Given bound input fiel
   },
   "math/difference": {
     "type": "object",
-    "description": "Subtracts second from first (saturating at 0): is = of - subtract.",
+    "description": "Subtracts second from first: is = of - subtract. The difference may be negative: a natural minus a natural is an integer.",
     "properties": {
       "of":       { "$ref": "#/$defs/Term", "description": "Minuend." },
       "subtract": { "$ref": "#/$defs/Term", "description": "Subtrahend." },
-      "is":       { "$ref": "#/$defs/Term", "description": "Derived: difference (saturating)." }
+      "is":       { "$ref": "#/$defs/Term", "description": "Derived: difference, an integer for integer operands and a float for float operands." }
     },
     "required": ["of", "subtract", "is"]
   },
@@ -1199,6 +1211,33 @@ A pure computation, similar to formulas in a spreadsheet. Given bound input fiel
       "is": { "$ref": "#/$defs/Term", "description": "Derived: remainder (empty if by = 0)." }
     },
     "required": ["of", "by", "is"]
+  },
+  "math/floor": {
+    "type": "object",
+    "description": "The greatest integer not above a number: floor(2.7) = 2, floor(-2.3) = -3. No result for a float with no finite value.",
+    "properties": {
+      "of": { "$ref": "#/$defs/Term", "description": "The number." },
+      "is": { "$ref": "#/$defs/Term", "description": "Derived: its floor, an integer." }
+    },
+    "required": ["of", "is"]
+  },
+  "math/round": {
+    "type": "object",
+    "description": "The integer nearest a number, halves away from zero: round(2.5) = 3, round(-2.5) = -3. No result for a float with no finite value.",
+    "properties": {
+      "of": { "$ref": "#/$defs/Term", "description": "The number." },
+      "is": { "$ref": "#/$defs/Term", "description": "Derived: the nearest integer." }
+    },
+    "required": ["of", "is"]
+  },
+  "math/truncate": {
+    "type": "object",
+    "description": "A number with its fraction dropped, toward zero: truncate(2.7) = 2, truncate(-2.7) = -2. No result for a float with no finite value.",
+    "properties": {
+      "of": { "$ref": "#/$defs/Term", "description": "The number." },
+      "is": { "$ref": "#/$defs/Term", "description": "Derived: the number truncated, an integer." }
+    },
+    "required": ["of", "is"]
   }
 }
 </pre>

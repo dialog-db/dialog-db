@@ -27,6 +27,7 @@
 //! [`DeductiveRule::apply`](crate::DeductiveRule), which binds
 //! concrete values into the head.
 
+use crate::artifact::Type as ValueType;
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::constraint::Constraint;
 use crate::error::{AnalysisError, TypeError};
@@ -319,6 +320,47 @@ pub fn analyze(
     analyze_with(conclusion, premises, kind, Vec::new())
 }
 
+/// Why a numeric head field of type `declared` does not read every
+/// number of `inferred`, with the shape it does not read: `None` when
+/// it reads them all. A number is read through the band: a natural
+/// reads as an integer and as a float, an integer as a float; an
+/// integer does not read as a natural (it may be negative) and a
+/// float not as an integer (it may have a fraction). Only a variable
+/// the body types as a number is held to the band; one it leaves
+/// open, or types outside the numbers, is not judged here.
+fn head_mismatch(field: &str, declared: &Kind, inferred: &Kind) -> Option<(ValueType, String)> {
+    let present = inferred.clone().required().primitive_part();
+    let target = declared.clone().required().primitive_part();
+    let numbers = Primitive::NUMERIC;
+    if present.intersect(numbers) != Some(present) || target.intersect(numbers).is_none() {
+        return None;
+    }
+    for shape in present.iter() {
+        if target.contains(shape) {
+            continue;
+        }
+        let reads = match shape {
+            ValueType::UnsignedInt => {
+                target.contains(ValueType::SignedInt) || target.contains(ValueType::Float)
+            }
+            ValueType::SignedInt => target.contains(ValueType::Float),
+            _ => false,
+        };
+        if reads {
+            continue;
+        }
+        let reason = match shape {
+            ValueType::SignedInt => format!(
+                "it may be negative; narrow it with a comparison such as `?{field} >= 0`, or declare the field integer"
+            ),
+            ValueType::Float => "it may have a fraction; round it with math/floor, math/round or math/truncate, or declare the field float".to_string(),
+            _ => "no number of one type is of the other".to_string(),
+        };
+        return Some((shape, reason));
+    }
+    None
+}
+
 /// [`analyze`] with a `reduce` clause: `(field, spec)` pairs in
 /// head-field order, empty for a plain rule.
 ///
@@ -346,9 +388,23 @@ pub fn analyze_with(
     kind: RuleKind,
     reduce: Vec<(String, ReduceSpec)>,
 ) -> Result<AnalyzedRule, AnalysisError> {
-    let mut types = TypeEnv::infer(&premises).map_err(|err| AnalysisError::Inference {
-        reason: err.to_string(),
-    })?;
+    let head: Vec<(String, Kind)> = conclusion
+        .with()
+        .iter()
+        .filter_map(|(field, descriptor)| {
+            let declared = Kind::from(descriptor.content_type()?);
+            let declared = if descriptor.is_optional() {
+                declared.optional()
+            } else {
+                declared
+            };
+            Some((field.to_string(), declared))
+        })
+        .collect();
+    let mut types =
+        TypeEnv::infer_for(&premises, &head).map_err(|err| AnalysisError::Inference {
+            reason: err.to_string(),
+        })?;
 
     let mut entries = Vec::with_capacity(reduce.len());
     for (field, spec) in reduce {
@@ -411,6 +467,42 @@ pub fn analyze_with(
             },
         );
         entries.push(entry);
+    }
+    // Every head field reads what the body binds to its variable: a
+    // number through the band (a natural is an integer and a float; an
+    // integer that may be negative is not a natural, a float that may
+    // have a fraction is not an integer), anything else as its own
+    // type. A failing field names the premise that gave the variable
+    // the shape it does not read.
+    for (field, descriptor) in conclusion.with().iter() {
+        let Some(declared) = descriptor.content_type().map(Kind::from) else {
+            continue;
+        };
+        let Some(inferred) = types.get(field) else {
+            continue;
+        };
+        if let Some((offending, reason)) = head_mismatch(field, &declared, inferred) {
+            let bound_by = types
+                .narrowings()
+                .iter()
+                .find(|step| {
+                    step.variable == *field
+                        && step.to.primitive_part().contains(offending)
+                        && !step
+                            .from
+                            .as_ref()
+                            .is_some_and(|from| from.primitive_part().contains(offending))
+                })
+                .map(|step| step.premise.clone());
+            return Err(AnalysisError::HeadField {
+                field: field.to_string(),
+                declared: Box::new(declared),
+                variable: field.to_string(),
+                inferred: Box::new(inferred.clone()),
+                reason,
+                bound_by,
+            });
+        }
     }
     let types = Arc::new(types);
 
@@ -488,6 +580,9 @@ pub fn analyze_with(
         canonical: None,
     })
 }
+
+#[cfg(test)]
+mod band;
 
 #[cfg(test)]
 mod tests {
