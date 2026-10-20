@@ -47,7 +47,7 @@ pub use attribute::AttributeParts as AttributePartsFormula;
 pub use conversions::{ParseFloat, ParseSignedInteger, ParseUnsignedInteger, ToString};
 pub use key::{KeyPart as KeyPartFormula, SeparatorPart as SeparatorPartFormula};
 pub use logic::{And, Not, Or};
-pub use math::{Difference, Modulo, Product, Quotient, Sum};
+pub use math::{Difference, Floor, Modulo, Product, Quotient, Round, Sum, Truncate};
 pub use position::{Position as PositionFormula, PositionParts as PositionPartsFormula};
 pub use revision::{Revision as RevisionFormula, RevisionParent as RevisionParentFormula};
 pub use string::{Concatenate, Length, Like, Lowercase, Uppercase};

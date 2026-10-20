@@ -38,6 +38,13 @@ impl<N: Number> Sum<N> {
 
 /// Difference formula: `is = of - subtract`, generic over the
 /// numeric types (see [`Sum`] for the scheme semantics).
+///
+/// The difference is the operands' type read as a number that may be
+/// negative ([`Number::Signed`]): a natural minus a natural is an
+/// integer (`3 - 5` is `-2`, not a non-match), an integer minus an
+/// integer an integer, a float minus a float a float. A head field
+/// declared natural does not take it as it is; a comparison such as
+/// `is >= 0` in the body narrows it back to a natural.
 #[derive(Debug, Clone, Formula)]
 pub struct Difference<N: Number = Numeric> {
     /// Number to subtract from
@@ -46,19 +53,88 @@ pub struct Difference<N: Number = Numeric> {
     pub subtract: N,
     /// Difference
     #[output(cost = 2)]
-    pub is: N,
+    pub is: N::Signed,
 }
 
 impl<N: Number> Difference<N> {
     /// Compute `of - subtract`. No rows when the operation has no
-    /// value of the shared type (including unsigned underflow).
+    /// value of the signed type (overflow, mixed float and integer).
     pub fn compute(input: DifferenceInput<N>) -> Vec<Self> {
-        match input.of.clone().subtract(input.subtract.clone()) {
+        match input.of.clone().subtract_signed(input.subtract.clone()) {
             Some(is) => vec![Difference {
                 of: input.of,
                 subtract: input.subtract,
                 is,
             }],
+            None => vec![],
+        }
+    }
+}
+
+/// Floor formula: `is` is the greatest integer not above `of`. The
+/// way from a float to an integer field: `floor(2.7)` is `2`,
+/// `floor(-2.3)` is `-3`, and an integer is its own floor. No rows for
+/// a float with no finite value or one past the integer's range.
+#[derive(Debug, Clone, Formula)]
+pub struct Floor<N: Number = Numeric> {
+    /// Number to take the floor of
+    pub of: N,
+    /// The greatest integer not above `of`
+    #[output(cost = 1)]
+    pub is: i128,
+}
+
+impl<N: Number> Floor<N> {
+    /// Compute the floor of `of`.
+    pub fn compute(input: FloorInput<N>) -> Vec<Self> {
+        match input.of.clone().floor() {
+            Some(is) => vec![Floor { of: input.of, is }],
+            None => vec![],
+        }
+    }
+}
+
+/// Round formula: `is` is the integer nearest `of`, half away from
+/// zero: `round(2.5)` is `3`, `round(-2.5)` is `-3`, and an integer
+/// is its own rounding. No rows for a float with no finite value or
+/// one past the integer's range.
+#[derive(Debug, Clone, Formula)]
+pub struct Round<N: Number = Numeric> {
+    /// Number to round
+    pub of: N,
+    /// The integer nearest `of`, half away from zero
+    #[output(cost = 1)]
+    pub is: i128,
+}
+
+impl<N: Number> Round<N> {
+    /// Compute the rounding of `of`.
+    pub fn compute(input: RoundInput<N>) -> Vec<Self> {
+        match input.of.clone().round() {
+            Some(is) => vec![Round { of: input.of, is }],
+            None => vec![],
+        }
+    }
+}
+
+/// Truncate formula: `is` is `of` with its fraction dropped, toward
+/// zero: `truncate(2.7)` is `2`, `truncate(-2.7)` is `-2`, and an
+/// integer is its own truncation. No rows for a float with no finite
+/// value or one past the integer's range.
+#[derive(Debug, Clone, Formula)]
+pub struct Truncate<N: Number = Numeric> {
+    /// Number to truncate
+    pub of: N,
+    /// `of` with its fraction dropped, toward zero
+    #[output(cost = 1)]
+    pub is: i128,
+}
+
+impl<N: Number> Truncate<N> {
+    /// Compute the truncation of `of`.
+    pub fn compute(input: TruncateInput<N>) -> Vec<Self> {
+        match input.of.clone().truncate() {
+            Some(is) => vec![Truncate { of: input.of, is }],
             None => vec![],
         }
     }
@@ -347,10 +423,11 @@ mod tests {
         Ok(())
     }
 
-    /// Unsigned underflow has no value of the shared type: the row
-    /// is a non-match, never a saturated (fabricated) zero.
+    /// A natural minus a larger natural is the negative integer it
+    /// is: the difference of two numbers is a number that may be
+    /// negative, never a non-match and never a saturated zero.
     #[dialog_common::test]
-    fn it_filters_difference_underflow() -> anyhow::Result<()> {
+    fn it_computes_a_negative_difference_of_naturals() -> anyhow::Result<()> {
         let mut terms = Parameters::new();
         terms.insert("of".to_string(), Term::var("x"));
         terms.insert("subtract".to_string(), Term::var("y"));
@@ -361,11 +438,68 @@ mod tests {
         input.bind(&Term::var("y"), 10u32.into()).unwrap();
 
         let app: FormulaQuery = Difference::apply(terms)?.into();
-        let results = app
-            .compute(input)
-            .expect("underflow is a non-match, not an error");
+        let results = app.compute(input).expect("the difference computes");
 
-        assert_eq!(results.len(), 0, "no value of the type is the result");
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0]
+                .lookup(&Term::var("result"))
+                .ok()
+                .and_then(|b| b.content().ok()),
+            Some(Value::SignedInt(-7)),
+            "3 - 10 is the integer -7"
+        );
+        Ok(())
+    }
+
+    /// The rounding formulas take a number of any type to the integer:
+    /// a float through its floor, nearest or truncation, an integer to
+    /// itself. A float with no finite value yields no row.
+    #[dialog_common::test]
+    fn it_rounds_floats_to_integers() -> anyhow::Result<()> {
+        fn compute<F: Formula>(of: Value) -> anyhow::Result<Option<Value>>
+        where
+            FormulaQuery: From<<F as Predicate>::Application>,
+        {
+            let mut terms = Parameters::new();
+            terms.insert("of".to_string(), Term::var("x"));
+            terms.insert("is".to_string(), Term::var("result"));
+            let mut input = Match::new();
+            input.bind(&Term::var("x"), of).unwrap();
+            let app: FormulaQuery = F::apply(terms)?.into();
+            let results = app.compute(input)?;
+            Ok(results.first().and_then(|row| {
+                row.lookup(&Term::var("result"))
+                    .ok()
+                    .and_then(|b| b.content().ok())
+            }))
+        }
+        type Rounding = fn(Value) -> anyhow::Result<Option<Value>>;
+        let cases: [(&str, Rounding, f64, i128); 6] = [
+            ("floor", compute::<Floor>, 2.7, 2),
+            ("floor", compute::<Floor>, -2.3, -3),
+            ("round", compute::<Round>, 2.5, 3),
+            ("round", compute::<Round>, -2.5, -3),
+            ("truncate", compute::<Truncate>, 2.7, 2),
+            ("truncate", compute::<Truncate>, -2.7, -2),
+        ];
+        for (name, compute, of, expected) in cases {
+            assert_eq!(
+                compute(Value::Float(of))?,
+                Some(Value::SignedInt(expected)),
+                "math/{name} of {of}"
+            );
+        }
+        assert_eq!(
+            compute::<Floor>(Value::UnsignedInt(4))?,
+            Some(Value::SignedInt(4)),
+            "an integer is its own floor"
+        );
+        assert_eq!(
+            compute::<Round>(Value::Float(f64::NAN))?,
+            None,
+            "a float with no finite value has no integer"
+        );
         Ok(())
     }
 
