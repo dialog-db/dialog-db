@@ -374,6 +374,7 @@ impl ReadBlob<'_> {
             .invoke(BlobRead {
                 digest: hash.clone(),
                 range,
+                encoding: None,
             })
             .perform(env)
             .await;
@@ -448,6 +449,7 @@ impl ReadBlob<'_> {
             .invoke(BlobRead {
                 digest: hash.clone(),
                 range,
+                encoding: None,
             })
             .perform(env)
             .await

@@ -198,6 +198,13 @@ pub fn group_range(size: u64, offset: u64, length: Option<u64>) -> Result<u64, S
     Ok(end)
 }
 
+/// The items of the encoding of the groups from `start` to `end` of a blob
+/// of `size`, in pre order, or none for a range with no group.
+fn items(size: u64, start: u64, end: u64) -> Option<ResponseIter> {
+    let ranges = chunk_ranges(size, start, end);
+    (start < end && !ranges.is_empty()).then(|| ResponseIter::new(tree(size), ranges))
+}
+
 /// The byte offset in the post-order outboard of a blob of `tree` of the
 /// pair of hashes of `node`, if the outboard keeps one.
 pub fn pair_offset(tree: &BaoTree, node: TreeNode) -> Option<u64> {
@@ -265,7 +272,9 @@ pub enum Unverified {
 /// its bytes are all there and it verifies. An item that does not verify ends
 /// the decoder: it gives nothing after it.
 pub struct Decoder {
-    iter: ResponseIter,
+    /// The items of the range to come after `next`: none for an empty
+    /// range, which `bao-tree` iterates over no tree.
+    iter: Option<ResponseIter>,
     /// The item that the decoder waits for the bytes of.
     next: Option<BaoChunk>,
     /// The hashes that the items to come must verify against, the next on
@@ -283,8 +292,8 @@ impl Decoder {
     /// `size` bytes: from the group that holds `start` to the group that holds
     /// the byte before `end`.
     pub fn new(hash: &Blake3Hash, size: u64, start: u64, end: u64) -> Self {
-        let mut iter = ResponseIter::new(tree(size), chunk_ranges(size, start, end));
-        let next = iter.next();
+        let mut iter = items(size, start, end);
+        let next = iter.as_mut().and_then(Iterator::next);
         Self {
             iter,
             next,
@@ -377,7 +386,7 @@ impl Decoder {
             }
         };
         self.taken += wanted;
-        self.next = self.iter.next();
+        self.next = self.iter.as_mut().and_then(Iterator::next);
         Some(Ok(item))
     }
 }
@@ -387,6 +396,134 @@ fn split(pair: &[u8; PAIR]) -> (blake3::Hash, blake3::Hash) {
     let (left, right) = pair.split_at(32);
     let hash = |half: &[u8]| blake3::Hash::from(<[u8; 32]>::try_from(half).expect("32 bytes"));
     (hash(left), hash(right))
+}
+
+/// What an [`Encoder`] needs next from its store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Need {
+    /// The [`PAIR`] bytes of the outboard at `offset`.
+    Pair {
+        /// The offset in the outboard.
+        offset: u64,
+    },
+    /// `length` bytes of the blob at `offset`: one group.
+    Group {
+        /// The offset in the blob.
+        offset: u64,
+        /// The bytes of the group.
+        length: usize,
+    },
+}
+
+/// The bytes of the header of a verified range: the size of the blob, and
+/// the end of the part of the range that the answer covers.
+pub const HEADER: usize = 16;
+
+/// The header of a verified range of a blob of `size` bytes that covers the
+/// range up to `covered`.
+pub fn header(size: u64, covered: u64) -> [u8; HEADER] {
+    let mut header = [0; HEADER];
+    header[..8].copy_from_slice(&size.to_le_bytes());
+    header[8..].copy_from_slice(&covered.to_le_bytes());
+    header
+}
+
+/// The size and the end of the covered part of the header `bytes`.
+pub fn read_header(bytes: &[u8; HEADER]) -> (u64, u64) {
+    let (size, covered) = bytes.split_at(8);
+    let number = |bytes: &[u8]| u64::from_le_bytes(bytes.try_into().expect("8 bytes"));
+    (number(size), number(covered))
+}
+
+/// The groups from the group that holds `start` to `end`, as a verified
+/// range covers them: from the start of that group, to the end of the group
+/// that holds the byte before `end`, or to the end of the blob of `size`.
+pub fn groups_of(size: u64, start: u64, end: u64) -> (u64, u64) {
+    let first = (start / GROUP * GROUP).min(size);
+    let last = end
+        .min(size)
+        .div_ceil(GROUP)
+        .saturating_mul(GROUP)
+        .min(size);
+    (first, last.max(first))
+}
+
+/// Encodes a verified range of a blob, item by item, in the order of
+/// `bao-tree`: [`Encoder::need`] says which bytes of the outboard or of the
+/// blob the store reads next, and [`Encoder::take`] takes them and gives
+/// their encoding. The encoder verifies each item as it encodes it, so a
+/// store whose bytes or hashes went bad ends the range before the bad item,
+/// and sends nothing that would not verify.
+pub struct Encoder {
+    tree: BaoTree,
+    iter: Option<ResponseIter>,
+    next: Option<BaoChunk>,
+    check: Decoder,
+}
+
+impl Encoder {
+    /// An encoder of the groups from `start` to `end` of the blob `hash` of
+    /// `size` bytes: each a group boundary, or `end` the end of the blob.
+    pub fn new(hash: &Blake3Hash, size: u64, start: u64, end: u64) -> Self {
+        let tree = tree(size);
+        let mut iter = items(size, start, end);
+        let next = iter.as_mut().and_then(Iterator::next);
+        Self {
+            tree,
+            iter,
+            next,
+            check: Decoder::new(hash, size, start, end),
+        }
+    }
+
+    /// What the encoder needs next, or none once it encoded the range.
+    pub fn need(&self) -> Option<Need> {
+        match self.next? {
+            BaoChunk::Parent { node, .. } => {
+                pair_offset(&self.tree, node).map(|offset| Need::Pair { offset })
+            }
+            BaoChunk::Leaf {
+                start_chunk, size, ..
+            } => Some(Need::Group {
+                offset: start_chunk.to_bytes(),
+                length: size,
+            }),
+        }
+    }
+
+    /// Takes `bytes`, the bytes that [`Encoder::need`] named, and gives their
+    /// encoding, or why they do not verify. Bytes of another length than the
+    /// item, as a store that holds less than it named gives, do not verify.
+    pub fn take(&mut self, bytes: &[u8]) -> Result<Vec<u8>, Unverified> {
+        let unverified = match self.next {
+            Some(BaoChunk::Parent { node, .. }) => Unverified::Parent(node),
+            Some(BaoChunk::Leaf { start_chunk, .. }) => Unverified::Group(start_chunk.to_bytes()),
+            None => Unverified::Group(self.tree.size()),
+        };
+        let wanted = match self.next {
+            Some(chunk) => chunk.size(),
+            None => 0,
+        };
+        if bytes.len() != wanted {
+            self.next = None;
+            return Err(unverified);
+        }
+        self.check.push(bytes);
+        match self.check.next_item() {
+            Some(Ok(_)) => {
+                self.next = self.iter.as_mut().and_then(Iterator::next);
+                Ok(bytes.to_vec())
+            }
+            Some(Err(error)) => {
+                self.next = None;
+                Err(error)
+            }
+            None => {
+                self.next = None;
+                Err(unverified)
+            }
+        }
+    }
 }
 
 /// The groups of a blob that a store holds, as ranges of the numbers of
@@ -1151,5 +1288,124 @@ pub(crate) mod conformance {
             kept >= 2 * GROUP && kept <= 2 * GROUP + 64 + outboard_size(part.len() as u64),
             "{kept}"
         );
+    }
+
+    /// The header and the rest of a verified read of `range` of the blob
+    /// `digest` from `store`.
+    pub async fn verified<P>(
+        store: &P,
+        subject: &Subject,
+        digest: &Blake3Hash,
+        offset: u64,
+        length: Option<u64>,
+    ) -> Result<((u64, u64), Vec<u8>), BlobError>
+    where
+        P: Provider<Read> + dialog_common::ConditionalSync,
+    {
+        let mut reader = subject
+            .clone()
+            .reader()
+            .archive()
+            .blob()
+            .invoke(Read::verified(digest.clone(), offset, length))
+            .perform(store)
+            .await?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = reader.next().await? {
+            bytes.extend(chunk);
+        }
+        let header: [u8; HEADER] = bytes[..HEADER].try_into().expect("a header");
+        Ok((read_header(&header), bytes.split_off(HEADER)))
+    }
+
+    /// A store that holds a blob whole answers a verified range of it, which
+    /// the decoder of `bao-tree` verifies group by group.
+    pub async fn it_answers_a_verified_range_of_a_whole_blob<P>(store: &P, subject: &Subject)
+    where
+        P: Provider<Read> + Provider<dialog_effects::blob::Write> + dialog_common::ConditionalSync,
+    {
+        let bytes = blob(20 * GROUP as usize + 77);
+        let size = bytes.len() as u64;
+        let mut sink = subject
+            .clone()
+            .writer()
+            .archive()
+            .blob()
+            .write()
+            .perform(store)
+            .await
+            .unwrap();
+        sink.write_all(&bytes).await.unwrap();
+        let digest = sink.finish().await.unwrap();
+
+        for (offset, length) in [
+            (0, None),
+            (5 * GROUP + 3, Some(2 * GROUP)),
+            (size - 10, Some(10)),
+        ] {
+            let ((held_size, covered), encoded) = verified(store, subject, &digest, offset, length)
+                .await
+                .unwrap();
+            let end = length.map_or(size, |length| offset + length);
+            let (first, last) = groups_of(size, offset, end);
+            assert_eq!((held_size, covered), (size, last), "{offset}");
+            let ranges = chunk_ranges(size, first, last);
+            let hash = blake3::Hash::from(*digest.as_bytes());
+            let decoded: Vec<u8> = bao_tree::io::sync::DecodeResponseIter::new(
+                hash,
+                tree(size),
+                std::io::Cursor::new(encoded),
+                &ranges,
+            )
+            .filter_map(|item| match item.expect("each item verifies") {
+                bao_tree::io::BaoContentItem::Leaf(leaf) => Some(leaf.data.to_vec()),
+                bao_tree::io::BaoContentItem::Parent(_) => None,
+            })
+            .flatten()
+            .collect();
+            assert_eq!(decoded, bytes[first as usize..last as usize], "{offset}");
+        }
+    }
+
+    /// A store that holds the first part of a range answers its groups, and
+    /// a covered end short of the range. A store that holds none of the start
+    /// of a range answers at once that it covers nothing.
+    pub async fn it_answers_the_held_start_of_a_range<P>(store: &P, subject: &Subject)
+    where
+        P: Provider<Read> + Provider<ImportRange> + dialog_common::ConditionalSync,
+    {
+        let bytes = blob(12 * GROUP as usize);
+        let size = bytes.len() as u64;
+        let digest = Blake3Hash::from(*blake3::hash(&bytes).as_bytes());
+        import(
+            store,
+            subject,
+            &bytes,
+            2 * GROUP,
+            6 * GROUP,
+            &encoding(&bytes, 2 * GROUP, 6 * GROUP),
+        )
+        .await
+        .unwrap();
+
+        let ((_, short), encoded) = verified(store, subject, &digest, 3 * GROUP + 5, None)
+            .await
+            .unwrap();
+        let ((_, none), nothing) = verified(store, subject, &digest, 7 * GROUP, Some(GROUP))
+            .await
+            .unwrap();
+
+        assert_eq!(short, 6 * GROUP, "the answer covers the held part alone");
+        let mut decoder = Decoder::new(&digest, size, 3 * GROUP, short);
+        decoder.push(&encoded);
+        let mut groups = Vec::new();
+        while let Some(item) = decoder.next_item() {
+            if let Item::Group { bytes, .. } = item.unwrap() {
+                groups.extend(bytes);
+            }
+        }
+        assert!(decoder.is_done());
+        assert_eq!(groups, bytes[3 * GROUP as usize..6 * GROUP as usize]);
+        assert_eq!((none, nothing.len()), (7 * GROUP, 0));
     }
 }
