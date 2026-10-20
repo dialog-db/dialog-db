@@ -17,11 +17,20 @@
 //!   through its own [`Scope`], so it is answered only with nodes it holds
 //!   itself: a node another repository holds is kept once, but is not a hit
 //!   until this repository's own archive has produced it.
-//! - **Everything addressed by content or version, per repository:**
-//!   spilled values, plans, causal verdicts, contexts, revision records.
-//!   Every branch of a repository shares them.
-//! - **What is tagged by a head, per branch:** the rule cache and the live
-//!   spine.
+//! - **Rule content and plans, for the whole environment:** decoded rule
+//!   bodies (keyed by entity and the bytes a reader read), heads re-spelled
+//!   onto attributes, selecting rules and query plans are pure functions
+//!   of content, and none answers which rules a repository holds, so two
+//!   repositories with the same rules decode and plan them once.
+//! - **Everything else addressed by content or version, per repository:**
+//!   spilled values, causal verdicts, contexts, revision records. Every
+//!   branch of a repository shares them.
+//! - **What is tagged by a line's rules or head, per branch:** assembled
+//!   rule sets, the rules set aside, rule discovery and the trigger
+//!   footprint, the live spine. An assembled set is keyed by its lines'
+//!   rules roots, one set per spelling of a concept, so held for the
+//!   environment the sets of repositories querying the same concept would
+//!   evict each other on every query.
 //! - **The outputs of cached formulas, for the whole environment:** a
 //!   formula is a pure function of its inputs, so what it computed for one
 //!   repository holds for any (see [`FormulaCache`]).
@@ -47,10 +56,10 @@ use dialog_query::formula::FormulaCache;
 use dialog_search_tree::{Cache, NODE_CACHE_BUDGET, NodeCache, Scope};
 use dialog_varsig::Did;
 
-use super::branch::{Writer, Writers};
+use super::branch::{LayerMetadataMemo, Writer, Writers};
 use super::source::Caches;
 use crate::BranchReference;
-use crate::rules::{RuleCache, SharedRuleCache};
+use crate::rules::{RuleCache, RuleContent, SharedRuleCache};
 
 /// The key an environment holds its caches under.
 const HELD: &str = "dialog.caches";
@@ -64,7 +73,6 @@ fn scope(repository: &Did) -> Scope {
 /// itself.
 struct Repository {
     spills: SpillCache,
-    plans: PlanCache,
     causality: CausalityCache,
     contexts: ContextCache,
     records: Cache<Version, RevisionRecord>,
@@ -72,15 +80,15 @@ struct Repository {
     /// tree they rewrite. The rewrite's blocks land in this repository's
     /// archive, so an entry answers only for it.
     rewrites: Cache<Blake3Hash, Blake3Hash>,
-    /// By branch name: its rule cache and its live spine.
-    branches: Mutex<HashMap<String, (SharedRuleCache, SpineSlot)>>,
+    /// By branch name: its rule cache, its live spine, and the metadata
+    /// its queries fold in.
+    branches: Mutex<HashMap<String, (SharedRuleCache, SpineSlot, LayerMetadataMemo)>>,
 }
 
 impl Repository {
     fn new() -> Self {
         Self {
             spills: spill_cache(),
-            plans: PlanCache::default(),
             causality: CausalityCache::new(),
             contexts: ContextCache::new(),
             records: Cache::new(),
@@ -88,6 +96,15 @@ impl Repository {
             branches: Mutex::default(),
         }
     }
+}
+
+/// What every repository opened through an environment shares: rule
+/// content and query plans, pure functions of content that answer
+/// nothing about what a repository holds.
+#[derive(Clone, Default)]
+struct Shared {
+    content: Arc<RuleContent>,
+    plans: PlanCache,
 }
 
 /// The caches an environment holds for the repositories opened through it.
@@ -113,6 +130,8 @@ pub struct HeldCaches {
     nodes: ArtifactNodeCache,
     /// The outputs of formulas marked `#[formula(cached)]`.
     formulas: FormulaCache,
+    /// The rule content and plans every repository shares.
+    shared: Arc<Mutex<Shared>>,
     /// By repository DID.
     repositories: Arc<Mutex<HashMap<String, Arc<Repository>>>>,
     /// The writers of the branches open through any environment holding
@@ -155,6 +174,7 @@ impl HeldCaches {
         Self {
             nodes: NodeCache::with_budget(bytes),
             formulas,
+            shared: Arc::default(),
             repositories: Arc::default(),
             writers: Arc::default(),
         }
@@ -206,7 +226,10 @@ impl HeldCaches {
     }
 
     /// Let go of everything held for `repository`: its nodes that no other
-    /// repository holds, and every cache of its branches.
+    /// repository holds, and every cache of its own and of its branches.
+    /// The rule content and plans every repository shares stay, since
+    /// nothing in them is the repository's; [`clear`](Self::clear) lets
+    /// them go.
     ///
     /// A branch of it that is still open keeps working: it reads its nodes
     /// again, and keeps the other caches it was opened with. The next open
@@ -225,6 +248,10 @@ impl HeldCaches {
     /// Let go of everything, for every repository. The writers of open
     /// branches are not caches and stay.
     pub fn clear(&self) {
+        *self
+            .shared
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Shared::default();
         self.lock().clear();
         self.nodes.clear();
         self.formulas.clear();
@@ -238,28 +265,40 @@ impl HeldCaches {
 
     /// The caches every open of `branch` reads and commits through.
     pub(crate) fn branch(&self, branch: &BranchReference) -> Caches {
+        let shared = self
+            .shared
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
         let repository = self
             .lock()
             .entry(branch.of().to_string())
             .or_insert_with(|| Arc::new(Repository::new()))
             .clone();
-        let (rules, spine) = repository
+        let (rules, spine, metadata) = repository
             .branches
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .entry(branch.name().to_string())
-            .or_insert_with(|| (Arc::new(RuleCache::new()), SpineSlot::new()))
+            .or_insert_with(|| {
+                (
+                    Arc::new(RuleCache::sharing(shared.content.clone())),
+                    SpineSlot::new(),
+                    LayerMetadataMemo::default(),
+                )
+            })
             .clone();
         Caches {
             nodes: self.nodes.scoped(scope(branch.of())),
             spills: repository.spills.clone(),
             rules,
-            plans: repository.plans.clone(),
+            plans: shared.plans,
             causality: repository.causality.clone(),
             contexts: repository.contexts.clone(),
             records: repository.records.clone(),
             rewrites: repository.rewrites.clone(),
             spine,
+            metadata,
         }
     }
 }
