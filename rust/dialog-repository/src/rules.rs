@@ -31,18 +31,22 @@
 //!   the per-query overlay, or a transaction's staged writes. Overlay
 //!   rules (`tx.assert(rule)` / `.with(rule)`, uncommitted — the head
 //!   has NOT moved) are never head-cached: a rule set assembled over
-//!   them is keyed by each layer's revision (see [`LayerRoots`]), which
-//!   is what makes the "overlay rule masked by a head-keyed cache" bug
-//!   structurally impossible.
+//!   them is keyed by the rule facts each layer holds (see [`RuleKey`]),
+//!   which is what makes the "overlay rule masked by a head-keyed cache"
+//!   bug structurally impossible.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ops::RangeInclusive;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use dialog_artifacts::history::REVISION_ATTRIBUTE;
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Relation, Statement, Update, Value};
+use dialog_artifacts::tree::selector_range;
+use dialog_artifacts::{
+    Artifact, ArtifactSelector, Entity, Key, Relation, Statement, Update, Value,
+};
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
 use dialog_query::error::EvaluationError;
@@ -58,8 +62,8 @@ use dialog_query::{
 use dialog_search_tree::Manifest;
 use parking_lot::RwLock;
 
-use crate::repository::EphemeralRevision;
 use crate::{Revision, schema};
+use dialog_common::Blake3Hash;
 
 // The `dialog.rule/*` vocabulary and the Statement lowerings that
 // install/uninstall a rule by plain assertion/retraction live with the
@@ -69,6 +73,16 @@ pub(crate) use dialog_query::rule::statement::{
     conclusion_attr, derives_attr, head_entities, on_attr, quarantined_attr, reads_attr,
     source_attr,
 };
+
+/// Whether facts of `the` are rule facts: every `dialog.rule/*` attribute
+/// and the `dialog.concept/transient` marker. Rule resolution reads
+/// nothing else, so a layer's rule facts name every rule set assembled
+/// over it (see [`RuleKey`]), and a write of no rule fact leaves them as
+/// they were.
+pub(crate) fn is_rule_attribute(the: &Relation) -> bool {
+    let name = the.as_str();
+    name.starts_with("dialog.rule/") || name == "dialog.concept/transient"
+}
 
 /// The `dialog.concept/transient` marker attribute. A concept carrying it
 /// is a *command*: facts of it dispatched into a transaction (and heads
@@ -445,20 +459,28 @@ pub(crate) struct TriggerFootprint {
     pub(crate) reads: BTreeSet<Entity>,
 }
 
-/// The tree root of every layer a rule set was resolved from, in layer
-/// order: `None` for a layer with no tree yet.
-/// The layers a rule set was assembled over, each by what names its
-/// rules: a line by its root, an overlay by its revision, and a staged
-/// store by its generation. A later read over the same
-/// layers finds the same rules.
+/// A tree root, or `None` for a line with no tree yet.
+type Root = Option<[u8; 32]>;
+
+/// The rule facts of the layers a rule set was assembled over: what the
+/// set is a function of, so a later read whose layers hold the same rule
+/// facts is served it.
+///
+/// A line is named by its rules root: the root of the newest tree whose
+/// commit changed a rule fact, carried across the commits since (see
+/// [`RuleCache::rules_root`]). An overlay or staged layer is named by
+/// the hash of the rule facts it holds and hides, and is left out when
+/// it holds none, so a query with a session overlay of plain facts, or a
+/// transaction that staged none, shares the branch query's entries.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LayerRoots {
-    /// Each line's tree root.
-    pub(crate) lines: Vec<Option<[u8; 32]>>,
-    /// Each line's session overlay revision, then the query overlay's.
-    pub(crate) overlays: Vec<EphemeralRevision>,
-    /// Each staged layer's generation.
-    pub(crate) staged: Vec<u64>,
+pub(crate) struct RuleKey {
+    /// Each line's rules root.
+    pub(crate) lines: Vec<Root>,
+    /// Each overlay (the lines' session overlays, then the query's own)
+    /// that holds rule facts, by its position and their hash.
+    pub(crate) overlays: Vec<(usize, Blake3Hash)>,
+    /// Each staged layer that holds rule facts, likewise.
+    pub(crate) staged: Vec<(usize, Blake3Hash)>,
 }
 
 #[derive(Debug, Default)]
@@ -472,10 +494,12 @@ struct RuleCacheInner {
     /// (rule entity, attribute concept entity). Both halves are
     /// content-addressed, so an entry is never stale.
     heads: HashMap<(Entity, Entity), DeductiveRule>,
-    /// Hydrated rule bodies, keyed by content-addressed rule entity.
-    /// Never stale (the key is a content hash), so this survives head
-    /// changes and is shared across concepts.
-    bodies: HashMap<Entity, DeductiveRule>,
+    /// Hydrated rule bodies, keyed by the rule entity and the hash of the
+    /// bytes they were decoded from. A body is looked up only with bytes
+    /// the reader read itself, so the cache decodes and never answers
+    /// whether a rule exists, and forged bytes under a known entity miss
+    /// it and fail their content-address check as they would cold.
+    bodies: HashMap<(Entity, Blake3Hash), DeductiveRule>,
     /// The committed trigger footprint, as of a branch head.
     footprint: Option<(Revision, TriggerFootprint)>,
     /// Committed inductive-rule entities watching an `on:` entity, as
@@ -484,23 +508,31 @@ struct RuleCacheInner {
     /// Committed deductive-rule entities whose bodies read an `on:`
     /// entity, as of a branch head.
     reads: HashMap<Entity, (Revision, Vec<Entity>)>,
-    /// Hydrated inductive bodies, content-addressed — never stale.
-    inductive: HashMap<Entity, InductiveRule>,
+    /// Hydrated inductive bodies, keyed like `bodies`.
+    inductive: HashMap<(Entity, Blake3Hash), InductiveRule>,
     /// Whether a concept carries the committed `dialog.concept/transient`
     /// marker, as of a branch head.
     transient: HashMap<Entity, (Revision, bool)>,
     /// A concept's assembled rule set -- built-in, committed, overlay,
-    /// and its program analysis attached -- as of the [`LayerRoots`] it
+    /// and its program analysis attached -- as of the [`RuleKey`] it
     /// was resolved from. Assembling it is most of what planning a warm
     /// query costs, and it changes only when a layer does.
     ///
     /// Kept with the descriptor it was assembled for: the set carries
     /// that descriptor's implicit rule, which binds its field names, and
-    /// descriptors differing only in field names share an identity.
-    bundles: HashMap<Entity, Bundle>,
-    /// Every rule the program analysis sets aside over the layers at
-    /// these roots, with the rule-discovery reads finding them.
-    quarantined: Option<(LayerRoots, Vec<Quarantine>, Vec<RuleRead>)>,
+    /// descriptors differing only in field names share an identity. One
+    /// set per spelling, at most [`SPELLINGS`] per concept, so queries
+    /// spelling one concept differently (a view's fields and a rule
+    /// premise's) do not evict each other's.
+    bundles: HashMap<Entity, Vec<Bundle>>,
+    /// Every rule the program analysis sets aside over layers holding
+    /// these rule facts, with the rule-discovery reads finding them.
+    quarantined: Option<(RuleKey, Vec<Quarantine>, RuleDemand)>,
+    /// A tree root and the rules root it carries: the root of the newest
+    /// tree before it whose commit changed a rule fact. Recorded by a
+    /// commit that changes none, as the head it minted; any other head
+    /// is its own rules root.
+    rules_root: Option<(Root, Root)>,
     /// A selecting concept's rule and covering rule, keyed by the
     /// concept, the attributes it reads as derived and the one source
     /// rule deriving them (if one). Pure functions of their key, so
@@ -509,21 +541,69 @@ struct RuleCacheInner {
     selecting: HashMap<SelectingKey, Selecting>,
 }
 
-/// A rule set assembled for one descriptor, as of the roots of the
+/// How many spellings of one concept keep an assembled rule set each.
+const SPELLINGS: usize = 4;
+
+/// A rule set assembled for one descriptor, as of the rule facts of the
 /// layers it was resolved from.
 #[derive(Debug, Clone)]
 struct Bundle {
-    roots: LayerRoots,
+    key: RuleKey,
     descriptor: ConceptDescriptor,
     rules: ConceptRules,
-    /// The rule-discovery reads assembling it made, replayed as rule
-    /// demand for a subscription that reuses it.
-    reads: Vec<RuleRead>,
+    /// What the rule-discovery reads assembling it demanded, recorded
+    /// as rule demand for a subscription that reuses it.
+    demand: RuleDemand,
 }
 
 /// One rule-discovery read: the selector and the manifest it was keyed
 /// under.
 pub(crate) type RuleRead = (ArtifactSelector<Constrained>, Manifest);
+
+/// The key ranges an entry's rule-discovery reads demanded, by the format
+/// they were keyed under, each read's range built once when the entry is
+/// recorded and merged with the ranges it overlaps. A subscription served
+/// the entry records these as they are: an entry serves many queries, and
+/// building a range per read for each was most of what serving it cost.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RuleDemand(Arc<[(Manifest, Vec<RangeInclusive<Key>>)]>);
+
+impl RuleDemand {
+    /// The ranges `reads` demand.
+    pub(crate) fn new(reads: Vec<RuleRead>) -> Self {
+        let mut keyed: Vec<(Manifest, Vec<RangeInclusive<Key>>)> = Vec::new();
+        for (selector, manifest) in reads {
+            let range = selector_range(&selector, &manifest);
+            match keyed.iter_mut().find(|(keyed, _)| *keyed == manifest) {
+                Some((_, ranges)) => ranges.push(range),
+                None => keyed.push((manifest, vec![range])),
+            }
+        }
+        for (_, ranges) in &mut keyed {
+            ranges.sort_by(|a, b| a.start().cmp(b.start()));
+            let mut merged: Vec<RangeInclusive<Key>> = Vec::with_capacity(ranges.len());
+            for range in ranges.drain(..) {
+                match merged.last_mut() {
+                    Some(last) if range.start() <= last.end() => {
+                        if range.end() > last.end() {
+                            *last = last.start().clone()..=range.end().clone();
+                        }
+                    }
+                    _ => merged.push(range),
+                }
+            }
+            *ranges = merged;
+        }
+        Self(keyed.into())
+    }
+
+    /// Record these ranges as `demand`'s rule demand.
+    pub(crate) fn record(&self, demand: &crate::Demand) {
+        for (manifest, ranges) in self.0.iter() {
+            demand.record_rule_ranges(manifest, ranges);
+        }
+    }
+}
 
 /// What a selecting rule is a function of: the concept, the attribute
 /// concepts it reads as derived (sorted) and the sole source rule
@@ -580,47 +660,72 @@ impl RuleCache {
         self.inner.write().heads.insert((rule, attribute), head);
     }
 
-    /// Every rule set aside over layers at `roots`, if recorded at
-    /// exactly those roots, with the reads that found them.
-    pub(crate) fn quarantined(
-        &self,
-        roots: &LayerRoots,
-    ) -> Option<(Vec<Quarantine>, Vec<RuleRead>)> {
+    /// The rules root of the tree at `root`: the root a commit that
+    /// changed no rule fact carried to it, or `root` itself. A head moved
+    /// any other way (a pull, a merge, a commit before this cache) is
+    /// its own rules root, so its rule sets are assembled once again,
+    /// never served stale.
+    pub(crate) fn rules_root(&self, root: Root) -> Root {
+        match &self.inner.read().rules_root {
+            Some((head, rules)) if *head == root => *rules,
+            _ => root,
+        }
+    }
+
+    /// Note that the commit from the tree at `previous` to the tree at
+    /// `root` changed no rule fact, so `root` carries the rules root of
+    /// `previous`.
+    pub(crate) fn carry_rules_root(&self, previous: Root, root: Root) {
+        let rules = self.rules_root(previous);
+        self.inner.write().rules_root = Some((root, rules));
+    }
+
+    /// Every rule set aside over layers holding the rule facts `key`
+    /// names, if recorded for exactly those, with what the reads that
+    /// found them demanded.
+    pub(crate) fn quarantined(&self, key: &RuleKey) -> Option<(Vec<Quarantine>, RuleDemand)> {
         match &self.inner.read().quarantined {
-            Some((at, quarantined, reads)) if at == roots => {
-                Some((quarantined.clone(), reads.clone()))
+            Some((at, quarantined, demand)) if at == key => {
+                Some((quarantined.clone(), demand.clone()))
             }
             _ => None,
         }
     }
 
-    /// Record every rule set aside over layers at `roots`.
+    /// Record every rule set aside over layers holding the rule facts
+    /// `key` names.
     pub(crate) fn record_quarantined(
         &self,
-        roots: LayerRoots,
+        key: RuleKey,
         quarantined: Vec<Quarantine>,
         reads: Vec<RuleRead>,
     ) {
-        self.inner.write().quarantined = Some((roots, quarantined, reads));
+        self.inner.write().quarantined = Some((key, quarantined, RuleDemand::new(reads)));
     }
 
-    /// The rule set assembled for `descriptor` over layers at `roots`,
-    /// if one was recorded for exactly that descriptor at exactly those
-    /// roots.
+    /// The rule set assembled for `descriptor` over layers holding the
+    /// rule facts `key` names, if one was recorded for exactly that
+    /// descriptor and those rule facts.
     pub(crate) fn bundle(
         &self,
         descriptor: &ConceptDescriptor,
-        roots: &LayerRoots,
-    ) -> Option<(ConceptRules, Vec<RuleRead>)> {
+        key: &RuleKey,
+    ) -> Option<(ConceptRules, RuleDemand)> {
         let inner = self.inner.read();
-        match inner.bundles.get(&descriptor.this()) {
-            Some(bundle) if bundle.roots == *roots && bundle.descriptor == *descriptor => {
-                #[cfg(test)]
-                self.reused.fetch_add(1, Ordering::Relaxed);
-                Some((bundle.rules.clone(), bundle.reads.clone()))
-            }
-            _ => None,
-        }
+        let bundle = inner
+            .bundles
+            .get(&descriptor.this())?
+            .iter()
+            .find(|bundle| bundle.descriptor == *descriptor && bundle.key == *key)?;
+        #[cfg(test)]
+        self.reused.fetch_add(1, Ordering::Relaxed);
+        Some((bundle.rules.clone(), bundle.demand.clone()))
+    }
+
+    /// How many spellings of `concept` hold an assembled rule set.
+    #[cfg(test)]
+    pub(crate) fn spellings(&self, concept: &Entity) -> usize {
+        self.inner.read().bundles.get(concept).map_or(0, Vec::len)
     }
 
     /// How many assembled rule sets [`bundle`](Self::bundle) served.
@@ -629,25 +734,30 @@ impl RuleCache {
         self.reused.load(Ordering::Relaxed)
     }
 
-    /// Record the rule set assembled for `descriptor` over layers at
-    /// `roots`, with the rule-discovery reads assembling it made,
-    /// replacing one recorded for its concept before.
+    /// Record the rule set assembled for `descriptor` over layers holding
+    /// the rule facts `key` names, with the rule-discovery reads
+    /// assembling it made, replacing one recorded for that spelling
+    /// before, and the oldest spelling of its concept past
+    /// [`SPELLINGS`].
     pub(crate) fn record_bundle(
         &self,
         descriptor: ConceptDescriptor,
-        roots: LayerRoots,
+        key: RuleKey,
         rules: ConceptRules,
         reads: Vec<RuleRead>,
     ) {
-        self.inner.write().bundles.insert(
-            descriptor.this(),
-            Bundle {
-                roots,
-                descriptor,
-                rules,
-                reads,
-            },
-        );
+        let mut inner = self.inner.write();
+        let spellings = inner.bundles.entry(descriptor.this()).or_default();
+        spellings.retain(|bundle| bundle.descriptor != descriptor);
+        if spellings.len() == SPELLINGS {
+            spellings.remove(0);
+        }
+        spellings.push(Bundle {
+            key,
+            descriptor,
+            rules,
+            demand: RuleDemand::new(reads),
+        });
     }
 
     /// The selecting rules built for `descriptor` reading `derived`
@@ -679,14 +789,22 @@ impl RuleCache {
         self.inner.write().selecting.insert(key, selecting);
     }
 
-    /// A cached hydrated body by rule entity, if present.
-    pub(crate) fn body(&self, rule: &Entity) -> Option<DeductiveRule> {
-        self.inner.read().bodies.get(rule).cloned()
+    /// The body `rule` decoded to from `bytes`, if decoded before.
+    pub(crate) fn body(&self, rule: &Entity, bytes: &[u8]) -> Option<DeductiveRule> {
+        self.inner
+            .read()
+            .bodies
+            .get(&(rule.clone(), Blake3Hash::hash(bytes)))
+            .cloned()
     }
 
-    /// Cache a hydrated body under its content-addressed entity.
-    pub(crate) fn record_body(&self, rule: Entity, body: DeductiveRule) {
-        self.inner.write().bodies.insert(rule, body);
+    /// Cache the body `rule` decoded to from `bytes`, once it was checked
+    /// to be stored under its content address.
+    pub(crate) fn record_body(&self, rule: Entity, bytes: &[u8], body: DeductiveRule) {
+        self.inner
+            .write()
+            .bodies
+            .insert((rule, Blake3Hash::hash(bytes)), body);
     }
 
     /// The committed trigger footprint if scanned at `head`; `None` if
@@ -733,15 +851,23 @@ impl RuleCache {
         self.inner.write().reads.insert(on, (head, entities));
     }
 
-    /// A cached hydrated inductive body by rule entity, if present.
-    pub(crate) fn inductive(&self, rule: &Entity) -> Option<InductiveRule> {
-        self.inner.read().inductive.get(rule).cloned()
+    /// The inductive body `rule` decoded to from `bytes`, if decoded
+    /// before.
+    pub(crate) fn inductive(&self, rule: &Entity, bytes: &[u8]) -> Option<InductiveRule> {
+        self.inner
+            .read()
+            .inductive
+            .get(&(rule.clone(), Blake3Hash::hash(bytes)))
+            .cloned()
     }
 
-    /// Cache a hydrated inductive body under its content-addressed
-    /// entity.
-    pub(crate) fn record_inductive(&self, rule: Entity, body: InductiveRule) {
-        self.inner.write().inductive.insert(rule, body);
+    /// Cache the inductive body `rule` decoded to from `bytes`, once it
+    /// was checked to be stored under its content address.
+    pub(crate) fn record_inductive(&self, rule: Entity, bytes: &[u8], body: InductiveRule) {
+        self.inner
+            .write()
+            .inductive
+            .insert((rule, Blake3Hash::hash(bytes)), body);
     }
 
     /// The cached committed transience verdict for `concept` if

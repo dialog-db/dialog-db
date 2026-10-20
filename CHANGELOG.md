@@ -14,6 +14,22 @@ says how to cut a release.
 
 ## Unreleased
 
+### An assembled rule set stands until a rule fact of its layers changes
+
+[#610](https://github.com/dialog-db/dialog-db/pull/610)
+
+A rule set, and the analysis of which rules are set aside, was kept per exact layer state: each line's tree root, each overlay's revision, each staged layer's generation. Any write moved one of those, so a session-overlay fact, a staged fact or a commit of plain facts rebuilt every rule set on the next query, and a transaction's query never shared the set its branch had assembled. Rule resolution reads only `dialog.rule/*` and `dialog.concept/transient`, so an entry is now keyed by those facts alone. A line is named by its rules root: a commit whose batch writes no rule fact carries the rules root of the head it built on to the head it mints, and any head moved another way (a pull, a merge, a raw commit) is its own rules root. An overlay or a staged layer is named by a hash of the rule facts it holds and hides, and is left out of the key when it holds none. Lookup is an exact match; nothing is replayed.
+
+What this changes for you:
+
+- A query or subscription after a session-overlay write, a transaction write or a commit that writes no rule fact reuses the assembled rule set instead of rebuilding it. Results are unchanged. On the `rule_cache` bench (a chain of 10 committed rules over 50 people, native, arm64), such a query takes 0.40 ms after an overlay write (1.78 ms on 0.4.0-rc.2), 0.46 ms after a commit (1.99 ms) and 0.39 ms in a transaction (1.91 ms); with nothing written in between it takes 0.39 ms on either.
+- The first query after a commit that installs or retracts a rule, or after a pull or merge, assembles its rule sets once, as before. That includes rules a transaction staged and then committed: the staged layer and the committed line name the same rule facts differently, so the `rule-dispatch` perf scenario assembles 6 sets, as on 0.4.0-rc.2, not the 3 an earlier draft of this change reached by replaying reads.
+- Each spelling of a concept (the same relation under different field names) keeps its own assembled rule set, at most four per concept; before, queries alternating between two spellings evicted each other's. The `subscribe-repoll` perf scenario assembles 9 rule sets instead of 18.
+- A decoded rule body is cached by its entity and the hash of the bytes it was decoded from, and is used only after the reader's own read returned those bytes. A rule whose stored bytes do not hash to its entity stays inert even when the genuine body under that entity was decoded earlier; before, a cached body stood in for whatever bytes a layer held.
+- A subscription now records, as rule demand, the rule reads the branch's head cache answered. Before, a rule set assembled from cached discovery did not demand that range, and a rule installed into it did not re-run the subscription.
+
+Why: tonk writes session facts through the overlay and commits as commands run, and every such write took it off the rule cache. A rule set is a function of the rule facts of its layers, so that is what the cache is keyed by.
+
 ### A query's own overlay is held as a line, so every rule set it assembles is cached
 
 [#609](https://github.com/dialog-db/dialog-db/pull/609)

@@ -21,7 +21,7 @@
 
 use super::induce::induce;
 use super::succession;
-use super::{Transaction, TransactionCommit, carry_footprint, touches_rules};
+use super::{Transaction, TransactionCommit, carry_footprint, touches_rule_facts, touches_rules};
 use crate::Ephemeral;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
@@ -683,6 +683,7 @@ where
     .await?;
     let induced = induce(source, &mut changes, transients, env).await?;
     let touches = touches_rules(&changes);
+    let touches_rule_facts = touches_rule_facts(&changes);
     let previous = base.clone();
     let machinery = store_assets(source, changes.take_assets(), env).await?;
     let outcome = Mint {
@@ -699,10 +700,16 @@ where
     }
     .perform(env, line)
     .await?;
-    if let Outcome::Minted(minted) = &outcome
-        && !touches
-    {
-        carry_footprint(&source.rule_cache(), previous.as_ref(), &minted.revision);
+    if let Outcome::Minted(minted) = &outcome {
+        if !touches {
+            carry_footprint(&source.rule_cache(), previous.as_ref(), &minted.revision);
+        }
+        if !touches_rule_facts {
+            source.rule_cache().carry_rules_root(
+                previous.as_ref().map(|revision| *revision.tree.hash()),
+                Some(*minted.revision.tree.hash()),
+            );
+        }
     }
     Ok((outcome, induced))
 }
