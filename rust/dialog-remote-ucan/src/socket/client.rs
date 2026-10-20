@@ -13,6 +13,13 @@
 //! change from a connection that is gone, so a connection the keeper has
 //! not heard from is closed, and everything waiting on it is told.
 
+// Off the browser on wasm no link opens (see `wasi::Link`), so what routes
+// a link's replies is never called there.
+#![cfg_attr(
+    all(target_arch = "wasm32", not(target_os = "unknown")),
+    allow(dead_code)
+)]
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -32,10 +39,15 @@ mod native;
 #[cfg(not(target_arch = "wasm32"))]
 use native::Link;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod web;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use web::Link;
+
+#[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
+mod wasi;
+#[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
+use wasi::Link;
 
 /// How long a socket that could not be opened is not tried again: what
 /// would have gone over it goes as requests meanwhile, without paying for
@@ -261,8 +273,12 @@ fn keep(link: Weak<Link>, routes: Routes, liveness: Liveness) {
     };
     #[cfg(not(target_arch = "wasm32"))]
     tokio::spawn(keeper);
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_futures::spawn_local(keeper);
+    // Off the browser no link ever opens (see `wasi::Link`), so there is
+    // nothing to keep.
+    #[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
+    drop(keeper);
 }
 
 /// What a wait receives: each state of a watched cell, coalesced to the
