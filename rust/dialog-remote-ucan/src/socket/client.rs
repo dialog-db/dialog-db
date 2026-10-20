@@ -301,6 +301,7 @@ enum Received {
 struct Wait(Arc<Mutex<Slot>>);
 
 impl Wait {
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "unknown"))))]
     fn update(&self, change: impl FnOnce(&mut Slot)) {
         let mut slot = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         change(&mut slot);
@@ -341,6 +342,7 @@ impl Wait {
 #[derive(Debug, Clone)]
 pub(crate) struct Routes {
     /// The socket's URL, which every report of it names.
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "unknown"))))]
     url: Arc<str>,
     waits: Arc<Mutex<Waits>>,
     frames: Arc<std::sync::atomic::AtomicU64>,
@@ -352,7 +354,11 @@ pub(crate) struct Routes {
 impl Routes {
     /// The routes of the socket at `url`, before it opens.
     pub(crate) fn new(url: &str) -> Self {
+        // A build with no socket names no URL in a report.
+        #[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
+        let _ = url;
         Self {
+            #[cfg(not(all(target_arch = "wasm32", not(target_os = "unknown"))))]
             url: url.into(),
             waits: Arc::default(),
             frames: Arc::default(),
@@ -395,6 +401,7 @@ impl Routes {
         waits.watches.remove(invocation);
     }
 
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "unknown"))))]
     /// Something was heard from the service: the connection is alive.
     pub(crate) fn heard(&self) {
         *self.heard.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
@@ -414,6 +421,7 @@ impl Routes {
         !waits.answers.is_empty() || !waits.watches.is_empty()
     }
 
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "unknown"))))]
     /// Hand `reply` to whoever waits on it. An answer, or the end of a
     /// watch, is the last reply its wait gets; a watch's first state moves
     /// it from awaiting its answer to following its cell.
@@ -480,6 +488,7 @@ impl Routes {
         }
     }
 
+    #[cfg(not(all(target_arch = "wasm32", not(target_os = "unknown"))))]
     /// The connection closed, for `reason`: every wait ends. Only the first
     /// reason is reported, as the one that closed it.
     pub(crate) fn close(&self, reason: &str) {

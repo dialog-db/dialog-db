@@ -15,6 +15,8 @@ use ed25519_dalek::SigningKey;
 
 use super::{ENTITY_LENGTH, IdentityError};
 use dialog_common::Blake3Hash;
+#[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
+use dialog_common::random;
 
 /// A [`Uri`] is a helper type that helps validate and reliably convert between
 /// plain string URIs (which typically represent an [`Entity`]) and their other
@@ -66,7 +68,7 @@ impl Uri {
         #[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
         let signing_key = {
             let mut seed = [0u8; 32];
-            dialog_common::random::fill(&mut seed)
+            random::fill(&mut seed)
                 .map_err(|error| IdentityError::InvalidEntity(format!("{error}")))?;
             SigningKey::from_bytes(&seed)
         };
