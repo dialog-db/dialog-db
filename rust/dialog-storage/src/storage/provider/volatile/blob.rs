@@ -430,8 +430,8 @@ impl Provider<Held> for Volatile {
 }
 
 /// The proof of a range of a blob, from the pairs of its outboard, or of the
-/// hashes that verified the groups of a partial blob that holds the first
-/// and the last group of the range.
+/// hashes that verified the groups of a partial blob that holds each group
+/// whose path the proof reads.
 #[dialog_capability::provider]
 impl Provider<Proof> for Volatile {
     async fn execute(
