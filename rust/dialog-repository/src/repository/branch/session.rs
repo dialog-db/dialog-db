@@ -1,6 +1,7 @@
 use dialog_effects::blob::Read as BlobRead;
 use std::cell::Cell;
 use std::collections::HashSet;
+use std::iter::once;
 
 use dialog_artifacts::history::Edition;
 use dialog_artifacts::selector::Constrained;
@@ -34,22 +35,22 @@ use tokio::sync::OnceCell;
 
 use crate::CommitError;
 use crate::REGISTRY;
-use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped, tombstones_from};
+use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped};
 use crate::repository::archive::networked::Reads;
 use crate::repository::branch::select::line_manifest;
+use crate::repository::ephemeral::Window;
 use crate::repository::fetch::Driven;
 use crate::repository::source::{Source, SourceRef};
 use crate::repository::{CellSettlement, ReadObservation};
 use crate::rules::{
     LayerRoots, RuleRead, Selecting, assemble, builtin, builtin_derives, builtin_deriving,
-    conclusion_attr, derives_attr, derives_keys, derives_selector, has_overlay_rules, head_onto,
-    hydrate, overlay_rules_deriving, quarantined_attr, rule_entities, source_attr, source_bytes,
-    source_selector,
+    conclusion_attr, derives_attr, derives_keys, derives_selector, head_onto, hydrate,
+    quarantined_attr, rule_entities, source_attr, source_bytes, source_selector,
 };
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
 };
-use crate::{Branch, Hydrate, NetworkedIndex, RemoteSite, Snapshot, Staged};
+use crate::{Branch, Ephemeral, Hydrate, NetworkedIndex, RemoteSite, Snapshot, Staged};
 
 /// A composable query over one or more lines (branches, snapshots)
 /// plus an in-memory overlay.
@@ -164,29 +165,54 @@ impl<'a> QueryLayer<'a> {
     /// `operator` (from [`Identify`]) supplies the profile + operator
     /// DIDs the schema entities are derived from.
     pub fn metadata(&self, operator: &Capability<Operator>) -> Changes {
-        Changes::clone(&self.shared_metadata(operator))
+        let (mut changes, heads) = self.derive_metadata(operator);
+        changes.merge(heads);
+        changes
     }
 
-    /// [`metadata`](Self::metadata), shared with every other query over
-    /// the same branch, profile, operator and head.
-    fn shared_metadata(&self, operator: &Capability<Operator>) -> Arc<Changes> {
+    /// [`metadata`](Self::metadata) held as a line, shared with every
+    /// other query over the same branch, profile, operator and head.
+    fn shared_metadata(&self, operator: &Capability<Operator>) -> Ephemeral {
         // Every query folds this in, and for a layer over one branch it
         // depends only on the profile, the operator and the head, so the
         // branch keeps it: deriving it hashes and base58-renders entities
         // and re-parses both DIDs each time.
         if let [SourceRef::Branch(branch)] = self.sources.as_slice() {
-            return branch.layer_metadata(operator, || self.derive_metadata(operator));
+            return branch.layer_metadata(
+                operator,
+                || self.derive_metadata(operator),
+                || self.derive_heads(operator),
+            );
         }
-        Arc::new(self.derive_metadata(operator))
+        let (mut changes, heads) = self.derive_metadata(operator);
+        changes.merge(heads);
+        Ephemeral::holding(changes)
     }
 
-    /// Derive what [`metadata`](Self::metadata) folds in.
-    fn derive_metadata(&self, operator: &Capability<Operator>) -> Changes {
+    /// The revision facts of [`derive_metadata`](Self::derive_metadata)
+    /// alone: what a new head adds to the facts that stay put.
+    fn derive_heads(&self, operator: &Capability<Operator>) -> Changes {
+        let mut heads = Changes::new();
+        for source in &self.sources {
+            if let SourceRef::Branch(branch) = source
+                && let Some(revision) = branch.metadata(operator).revision
+            {
+                revision.assert(&mut heads);
+            }
+        }
+        heads
+    }
+
+    /// Derive what [`metadata`](Self::metadata) folds in, as the facts
+    /// that stay put while the lines' heads move and the revision facts
+    /// that move with them.
+    fn derive_metadata(&self, operator: &Capability<Operator>) -> (Changes, Changes) {
         let mut changes = Changes::new();
+        let mut heads = Changes::new();
 
         let mut branch_entities = Vec::with_capacity(self.sources.len());
         for source in &self.sources {
-            if let Some(entity) = source.metadata(operator, &mut changes) {
+            if let Some(entity) = source.metadata(operator, &mut changes, &mut heads) {
                 branch_entities.push(entity);
             }
         }
@@ -224,7 +250,7 @@ impl<'a> QueryLayer<'a> {
             .assert(&mut changes);
         }
 
-        changes
+        (changes, heads)
     }
 
     /// The full per-query overlay: this layer's own
@@ -232,17 +258,21 @@ impl<'a> QueryLayer<'a> {
     /// folded in. This is exactly what `.select(..).perform(..)`
     /// queries against alongside the branch streams.
     ///
-    /// A layer that adds no changes of its own queries the metadata
-    /// alone, which is then the branch's shared copy rather than a new
-    /// one rebuilt fact by fact for every query.
-    pub fn overlay(&self, operator: &Capability<Operator>) -> Arc<Changes> {
+    /// Held as a line, like a branch's session overlay, so it is read
+    /// by range and named by its revision: every cache keyed by the
+    /// layers a query reads keys by it too, and a query whose overlay
+    /// holds the same facts as an earlier one's is served what the
+    /// earlier one assembled. A layer that adds no changes of its own
+    /// queries the metadata alone, which is then the branch's shared
+    /// line rather than a new one built for every query.
+    pub fn overlay(&self, operator: &Capability<Operator>) -> Ephemeral {
         let metadata = self.shared_metadata(operator);
         if self.changes.is_empty() {
             return metadata;
         }
         let mut overlay = self.changes.clone();
-        Changes::clone(&metadata).assert(&mut overlay);
-        Arc::new(overlay)
+        metadata.export().assert(&mut overlay);
+        Ephemeral::holding(overlay)
     }
 
     /// Stage a query application. Call `.perform(&operator)` to execute.
@@ -406,10 +436,10 @@ pub(crate) struct QueryEnv<'a> {
     /// erased lifetimes in `QueryEnv<'0>: Provider<Select<'1>>` hit
     /// rustc's #100013 limitation; a named lifetime does not).
     sources: Vec<Source>,
-    /// All overlay facts — caller-asserted + auto-injected metadata —
-    /// merged into one batch. Queried via [`Changes::select`] under the
-    /// lines' format.
-    changes: Arc<Changes>,
+    /// The query's own overlay: caller-asserted facts and the
+    /// auto-injected metadata, held as a line (see
+    /// [`QueryLayer::overlay`]) and read under the lines' format.
+    overlay: Ephemeral,
     /// A transaction's writes and dispatched transients, each held so a
     /// selector is a range read (see [`Staged`]) and shared, never
     /// copied, per query.
@@ -506,18 +536,13 @@ impl<'a> QueryEnv<'a> {
     /// paths all construct through here so there is exactly one query
     /// env — a transaction query is just a single-line `QueryEnv`.
     /// Deductive-rule resolution is built in (a durable layer per line,
-    /// its session overlay, and the per-query changes as a transient
+    /// its session overlay, and the per-query overlay as a transient
     /// layer), so the paths can never diverge on it.
-    pub(crate) fn new(
-        sources: Vec<Source>,
-        changes: impl Into<Arc<Changes>>,
-        env: &'a Erased,
-    ) -> Self {
-        let changes = changes.into();
+    pub(crate) fn new(sources: Vec<Source>, overlay: Ephemeral, env: &'a Erased) -> Self {
         let fetches = sources.iter().any(|source| source.as_ref().fetches());
         Self {
             sources,
-            changes,
+            overlay,
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
             demand: None,
@@ -537,7 +562,8 @@ impl<'a> QueryEnv<'a> {
     }
 
     /// What a read settlement observes of this environment: the lines'
-    /// heads, their session overlays and the metadata read with.
+    /// heads, then the revision of every overlay read with them (see
+    /// [`overlays`](Self::overlays)).
     pub(crate) fn observation(&self) -> ReadObservation {
         ReadObservation {
             heads: self
@@ -545,13 +571,19 @@ impl<'a> QueryEnv<'a> {
                 .iter()
                 .map(|source| source.as_ref().revision())
                 .collect(),
-            overlays: self
-                .sources
-                .iter()
-                .map(|source| source.as_ref().overlay().revision())
-                .collect(),
-            metadata: self.changes.clone(),
+            overlays: self.overlays().map(Ephemeral::revision).collect(),
         }
+    }
+
+    /// Every overlay this environment reads: each line's session overlay,
+    /// then the query's own. What names a read's layers names each of
+    /// them by its revision, so none can be read without keying the
+    /// caches built from it.
+    fn overlays(&self) -> impl Iterator<Item = &Ephemeral> {
+        self.sources
+            .iter()
+            .map(|source| source.as_ref().overlay())
+            .chain(once(&self.overlay))
     }
 
     /// The layers' choosing writes a read of `input` meets, each cell
@@ -582,7 +614,7 @@ impl<'a> QueryEnv<'a> {
                 .unwrap_or_else(|| super::transaction::ReadSettlement::new(self.pending_edition()));
             // A settlement that failed partway is not kept: the next
             // read starts it again.
-            Box::pin(settlement.advance(&self.sources, &self.changes, layer, self.env))
+            Box::pin(settlement.advance(&self.sources, &self.overlay, layer, self.env))
                 .await
                 .map_err(failed)?;
             let settlements: Vec<CellSettlement> = cells
@@ -669,17 +701,12 @@ impl QueryEnv<'_> {
                 } else {
                     MergeKeys::Fields
                 };
-                let shared = Arc::new(tombstones_from(&self.changes, &manifest));
                 let lines = self
                     .sources
                     .iter()
                     .zip(lines)
                     .map(|(source, line)| {
-                        let changes = if line == manifest {
-                            shared.clone()
-                        } else {
-                            Arc::new(tombstones_from(&self.changes, &line))
-                        };
+                        let changes = self.overlay.tombstones(&line);
                         // Every set is shared, never merged, so this costs
                         // nothing per query however much the layers or the
                         // session hold.
@@ -711,7 +738,7 @@ impl Clone for QueryEnv<'_> {
     fn clone(&self) -> Self {
         Self {
             sources: self.sources.clone(),
-            changes: self.changes.clone(),
+            overlay: self.overlay.clone(),
             layers: self.layers.clone(),
             format: self.format.clone(),
             demand: self.demand.clone(),
@@ -845,9 +872,15 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // every committed row of every line it is read beside. Found
         // only for a read that meets an overlay row, since it reads
         // every line's revision.
+        // One window for every in-memory store this read meets, so the
+        // key range is built once, and not at all when they are empty.
+        let window = Window::new(&input);
         let mut session = None;
         for (source, line) in self.sources.iter().zip(&format.lines) {
-            let rows = source.as_ref().overlay().select(&input, &line.manifest);
+            let rows = source
+                .as_ref()
+                .overlay()
+                .select_within(&window, &line.manifest);
             if rows.is_empty() {
                 continue;
             }
@@ -879,7 +912,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // every one of those probes. Push the overlay's materialized
         // result only when it has rows, so the single-source common case
         // flows through `merge_grouped`'s passthrough arm.
-        let overlay = self.changes.select(&input, &manifest);
+        let overlay = self.overlay.select_within(&window, &manifest);
         if !overlay.is_empty() {
             changes.push(Box::pin(stream::iter(
                 overlay.into_iter().map(|fact| Ok(fact.into())),
@@ -893,7 +926,7 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // the transaction: a read over the transaction elects as a read
         // after the commit will.
         for (index, layer) in self.layers().iter().enumerate() {
-            let rows = layer.select(&input, &manifest);
+            let rows = layer.select_within(&window, &manifest);
             if rows.is_empty() {
                 continue;
             }
@@ -1074,24 +1107,6 @@ impl Index {
     }
 }
 
-/// The rules a staged layer holds under `index` at `key`: two range
-/// reads, as a session's are. The layer is per query, so it is read
-/// fresh and records no demand; a body that does not hydrate is
-/// skipped, as an overlay's is.
-fn staged_rules(layer: &Staged, index: Index, key: &Entity) -> Vec<(DeductiveRule, Installed)> {
-    let entities = rule_entities(layer.scan(&index.selector(key)));
-    let mut rules = Vec::with_capacity(entities.len());
-    for rule_entity in entities {
-        if let Some(bytes) = source_bytes(layer.scan(&source_selector(&rule_entity)))
-            && let Ok(rule) = hydrate(&bytes)
-            && rule.stored_as(&rule_entity)
-        {
-            rules.push((rule, Installed::Pending));
-        }
-    }
-    rules
-}
-
 impl<'a> QueryEnv<'a> {
     /// Read a `dialog.rule/*` selector against a single line's committed
     /// tree only (NOT the overlay) and collect the matching artifacts.
@@ -1150,19 +1165,18 @@ impl<'a> QueryEnv<'a> {
         Ok(artifacts)
     }
 
-    /// The rules under `index` at `key` held in `source`'s session
-    /// overlay: session-asserted `dialog.rule/*` facts, read fresh (the
-    /// overlay is in memory and never head-cached). Recorded as rule
-    /// demand, so a subscription re-evaluates when a session rule for
+    /// The rules under `index` at `key` held in `overlay`: a line's
+    /// session overlay or the query's own. Two range reads each, and a
+    /// body is hydrated once per content address. Recorded as rule
+    /// demand, so a subscription re-evaluates when an overlay rule for
     /// the concept or attribute arrives or goes.
-    fn session_rules(
+    fn overlay_rules(
         &self,
-        source: &Source,
+        overlay: &Ephemeral,
         index: Index,
         key: &Entity,
         manifest: &Manifest,
     ) -> Result<Vec<(DeductiveRule, Installed)>, EvaluationError> {
-        let overlay = source.as_ref().overlay();
         let conclusions = index.selector(key);
         self.read_rules(&conclusions, manifest);
         let entities = rule_entities(overlay.scan(&conclusions));
@@ -1173,15 +1187,59 @@ impl<'a> QueryEnv<'a> {
             let Some(bytes) = source_bytes(overlay.scan(&sources)) else {
                 continue;
             };
-            // A body under an entity it does not hash to is forged,
-            // corrupt, or stored by an earlier release: inert, as at
-            // commit.
-            let rule = hydrate(&bytes)?;
-            if rule.stored_as(&rule_entity) {
+            if let Some(rule) = self.pending_body(rule_entity, &bytes)? {
                 rules.push((rule, Installed::Pending));
             }
         }
         Ok(rules)
+    }
+
+    /// The rules a staged layer holds under `index` at `key`: two range
+    /// reads, as an overlay's are. The layer is per query, so it records
+    /// no demand; a body that does not hydrate is skipped.
+    fn staged_rules(
+        &self,
+        layer: &Staged,
+        index: Index,
+        key: &Entity,
+    ) -> Vec<(DeductiveRule, Installed)> {
+        let entities = rule_entities(layer.scan(&index.selector(key)));
+        let mut rules = Vec::with_capacity(entities.len());
+        for rule_entity in entities {
+            if let Some(bytes) = source_bytes(layer.scan(&source_selector(&rule_entity)))
+                && let Ok(Some(rule)) = self.pending_body(rule_entity, &bytes)
+            {
+                rules.push((rule, Installed::Pending));
+            }
+        }
+        rules
+    }
+
+    /// The rule stored under `rule_entity` as `bytes`, from the first
+    /// line's body cache when an earlier read hydrated it: the entity is
+    /// a content address, so a body cached under it is the body. A body
+    /// under an entity it does not hash to is forged, corrupt, or stored
+    /// by an earlier release, and is inert, as at commit.
+    fn pending_body(
+        &self,
+        rule_entity: Entity,
+        bytes: &[u8],
+    ) -> Result<Option<DeductiveRule>, EvaluationError> {
+        let cache = self
+            .sources
+            .first()
+            .map(|source| source.as_ref().rule_cache());
+        if let Some(body) = cache.as_ref().and_then(|cache| cache.body(&rule_entity)) {
+            return Ok(Some(body));
+        }
+        let rule = hydrate(bytes)?;
+        if !rule.stored_as(&rule_entity) {
+            return Ok(None);
+        }
+        if let Some(cache) = cache {
+            cache.record_body(rule_entity, rule.clone());
+        }
+        Ok(Some(rule))
     }
 
     /// The committed rule entities under `index` at `key` on `source`,
@@ -1303,18 +1361,18 @@ impl Provider<SelectRules> for QueryEnv<'_> {
     async fn execute(&self, input: ConceptDescriptor) -> Result<ConceptRules, EvaluationError> {
         let concept = input.this();
 
-        // An assembled rule set depends only on the committed layers it was
-        // resolved from, so while none has moved the last one assembled
-        // stands. Not when rules are read fresh: from the query's overlay,
-        // or from a line's session overlay, which moves without moving its
-        // root. A query recording what it reads reuses the set as well,
-        // and records the rule reads that assembled it as its own.
+        // An assembled rule set depends only on the layers it was resolved
+        // from, so while none has moved the last one assembled stands:
+        // every layer is named in `roots`, a line by its root and every
+        // overlay and staged layer by its revision, so no layer can hold a
+        // rule the key does not see. A query recording what it reads
+        // reuses the set as well, and records the rule reads that
+        // assembled it as its own.
         let roots = self.layer_roots();
         let cache = self
             .sources
             .first()
-            .map(|source| source.as_ref().rule_cache())
-            .filter(|_| !has_overlay_rules(&self.changes));
+            .map(|source| source.as_ref().rule_cache());
         if let Some((bundle, reads)) = cache
             .as_ref()
             .and_then(|cache| cache.bundle(&input, &roots))
@@ -1387,11 +1445,7 @@ impl<'a> QueryEnv<'a> {
                 .iter()
                 .map(|source| source.as_ref().root())
                 .collect(),
-            overlays: self
-                .sources
-                .iter()
-                .map(|source| source.as_ref().overlay().revision())
-                .collect(),
+            overlays: self.overlays().map(Ephemeral::revision).collect(),
             staged: self.layers.iter().map(Staged::generation).collect(),
         }
     }
@@ -1436,8 +1490,7 @@ impl<'a> QueryEnv<'a> {
         let cache = self
             .sources
             .first()
-            .map(|source| source.as_ref().rule_cache())
-            .filter(|_| !has_overlay_rules(&self.changes));
+            .map(|source| source.as_ref().rule_cache());
         if let Some((quarantined, reads)) =
             cache.as_ref().and_then(|cache| cache.quarantined(&roots))
         {
@@ -1522,13 +1575,7 @@ impl<'a> QueryEnv<'a> {
         for layer in &self.layers {
             take(layer.scan(&selector));
         }
-        for (entity, changed, change) in self.changes.iter() {
-            if *changed == attribute
-                && let dialog_artifacts::Change::Assert(Value::Bytes(bytes), _) = change
-            {
-                bodies.push((entity.clone(), bytes.clone()));
-            }
-        }
+        take(self.overlay.scan(&selector));
 
         let cache = self
             .sources
@@ -1592,15 +1639,11 @@ impl<'a> QueryEnv<'a> {
         let manifest = &self.format().await?.manifest;
         for source in &self.sources {
             rules.extend(self.durable_rules(source, index, key).await?);
-            rules.extend(self.session_rules(source, index, key, manifest)?);
+            rules.extend(self.overlay_rules(source.as_ref().overlay(), index, key, manifest)?);
         }
-        rules.extend(match index {
-            Index::Deriving => overlay_rules_deriving(&self.changes, key)
-                .into_iter()
-                .map(|rule| (rule, Installed::Pending)),
-        });
+        rules.extend(self.overlay_rules(&self.overlay, index, key, manifest)?);
         for layer in &self.layers {
-            rules.extend(staged_rules(layer, index, key));
+            rules.extend(self.staged_rules(layer, index, key));
         }
         Ok(rules)
     }
@@ -1662,7 +1705,8 @@ impl<'a> QueryEnv<'a> {
                 return Ok(true);
             }
         }
-        if !overlay_rules_deriving(&self.changes, &on).is_empty() {
+        self.read_rules(&selector, manifest);
+        if !self.overlay.scan(&selector).is_empty() {
             return Ok(true);
         }
         Ok(self
@@ -2840,6 +2884,59 @@ mod rule_tests {
         assert!(
             query_employees(&branch, &operator).await?.is_empty(),
             "overlay rule must not persist into a later plain query"
+        );
+        Ok(())
+    }
+
+    /// A query carrying a rule of its own is served the rule set an
+    /// earlier query with the same rule assembled, as a query over
+    /// committed rules is: what the query holds is named by its
+    /// revision, so nothing has to be read fresh.
+    #[dialog_common::test]
+    async fn it_reuses_the_rule_set_of_a_query_with_the_same_rule() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice: Entity = "id:alice".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/person-name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let employees = || async {
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("this"));
+            terms.insert("name".into(), Term::var("name"));
+            branch
+                .query()
+                .with(employee_from_person())
+                .select(ConceptQuery {
+                    predicate: employee_descriptor(),
+                    terms,
+                })
+                .perform(&operator)
+                .try_vec()
+                .await
+        };
+
+        let first: Vec<ConceptConclusion> = employees().await?;
+        assert!(first.iter().any(|c| *c.entity() == alice));
+        let reused = branch.rule_cache().reused();
+
+        let second: Vec<ConceptConclusion> = employees().await?;
+        assert!(second.iter().any(|c| *c.entity() == alice));
+        assert!(
+            branch.rule_cache().reused() > reused,
+            "the second query must be served the rule set the first assembled"
         );
         Ok(())
     }

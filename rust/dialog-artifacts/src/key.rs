@@ -171,10 +171,9 @@ fn encoded_len_lower_bound(value: &Value) -> usize {
 /// other two orderings through `FromKey` (each accessor re-splitting the key)
 /// costs ~ten key walks per instruction; this costs three plain
 /// serializations of the same parts.
-pub(crate) fn artifact_index_keys(
-    artifact: &crate::Artifact,
-    manifest: &Manifest,
-) -> (Key, Key, Key) {
+///
+/// Public for in-memory stores that key facts the way the tree does.
+pub fn artifact_index_keys(artifact: &crate::Artifact, manifest: &Manifest) -> (Key, Key, Key) {
     let encoded = EncodedValue::new(&artifact.is, manifest);
     artifact_index_keys_with(artifact, encoded.value_type, encoded.payload)
 }
@@ -202,6 +201,22 @@ pub(crate) fn artifact_index_keys_with(
     parts.tag = VALUE_KEY_TAG;
     let vae = Key::from(varkey::build_key(&parts));
     (eav, aev, vae)
+}
+
+/// One index key of `artifact`, in the ordering `tag` names, built from its
+/// parts in one serialization (see [`artifact_index_keys`]): what the chained
+/// `set_*` rebuilds produce, without parsing and re-encoding the key once per
+/// field.
+pub(crate) fn fact_key(tag: u8, artifact: &crate::Artifact, manifest: &Manifest) -> Key {
+    let encoded = EncodedValue::new(&artifact.is, manifest);
+    Key::from(varkey::build_key(&varkey::KeyParts {
+        tag,
+        entity: artifact.of.as_str().as_bytes().to_vec(),
+        attribute: artifact.the.as_str().as_bytes().to_vec(),
+        value_type: encoded.value_type,
+        value: encoded.payload,
+        version: None,
+    }))
 }
 
 /// Re-projects an existing index key of any ordering into all three
@@ -633,6 +648,68 @@ mod tests {
             is: value,
             cause: None,
         }
+    }
+
+    /// A fact's keys built from their parts in one serialization are the
+    /// bytes the chained `set_*` rebuilds produce, in all three orderings,
+    /// for every value type and for values on both sides of the spill
+    /// boundary, under the default format and a narrow one.
+    #[dialog_common::test]
+    async fn it_builds_fact_keys_as_the_chained_setters_do() -> anyhow::Result<()> {
+        use super::{
+            AttributeKeyPart, EntityKeyPart, KeyType, KeyViewConstruct, artifact_index_keys,
+        };
+
+        fn chained<K: KeyViewConstruct + KeyType>(fact: &Artifact, manifest: &Manifest) -> Vec<u8> {
+            K::default()
+                .set_entity(EntityKeyPart::from(&fact.of))
+                .set_attribute(AttributeKeyPart::from(&fact.the))
+                .set_value(
+                    fact.is.data_type().band(manifest.value_encoding),
+                    value_payload(&fact.is, manifest),
+                )
+                .bytes()
+                .to_vec()
+        }
+
+        let narrow = Manifest {
+            inline_n: 16,
+            spill_prefix: 4,
+            ..Manifest::default()
+        };
+        let mut values = vec![
+            Value::Bytes(vec![0x00, 0xFF, 0x7F, 0x00]),
+            Value::Entity(Entity::from_str("did:key:z6MkOther")?),
+            Value::Boolean(true),
+            Value::UnsignedInt(u128::MAX),
+            Value::SignedInt(-1),
+            Value::Float(1783112056217.0),
+            Value::Record(vec![1, 2, 3]),
+            Value::Symbol(Relation::from_str("open/status")?),
+        ];
+        for length in [0, 1, 15, 16, 17, 63, 64, 65, 300] {
+            values.push(Value::String("x".repeat(length)));
+            values.push(Value::Bytes(vec![0; length]));
+        }
+        for manifest in [Manifest::default(), narrow] {
+            for value in &values {
+                let fact = fact(value.clone());
+                let entity = EntityKey::from_artifact(&fact, &manifest);
+                let attribute = AttributeKey::from_artifact(&fact, &manifest);
+                let value_key = ValueKey::from_artifact(&fact, &manifest);
+                assert_eq!(entity.bytes(), chained::<EntityKey<_>>(&fact, &manifest));
+                assert_eq!(
+                    attribute.bytes(),
+                    chained::<AttributeKey<_>>(&fact, &manifest)
+                );
+                assert_eq!(value_key.bytes(), chained::<ValueKey<_>>(&fact, &manifest));
+                let (eav, aev, vae) = artifact_index_keys(&fact, &manifest);
+                assert_eq!(eav.as_ref(), entity.bytes());
+                assert_eq!(aev.as_ref(), attribute.bytes());
+                assert_eq!(vae.as_ref(), value_key.bytes());
+            }
+        }
+        Ok(())
     }
 
     /// Every value type's key splits into exactly its schema's component
