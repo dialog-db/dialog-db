@@ -17,7 +17,8 @@
 //!               ├── ImportRange { digest, size, range } → BlobWriter  (verified groups)
 //!               ├── Read { digest, range }             → BlobReader
 //!               ├── Size { digest }                    → Option<u64>
-//!               └── Held { digest }                    → Option<Holding>
+//!               ├── Held { digest }                    → Option<Holding>
+//!               └── Usage                               → u64 (bytes kept)
 //! ```
 //!
 //! Bytes never travel inside an effect: the signed capability carries only
@@ -280,6 +281,35 @@ impl Policy for ImportRange {
 
 impl Effect for ImportRange {
     type Output = Result<BlobWriter, BlobError>;
+}
+
+/// The bytes that the blob store of the subject keeps now: each whole blob
+/// and its outboard, and of each partial blob the groups that it holds and
+/// the hashes that verified them. A write that has not ended keeps nothing
+/// yet. A store counts what it realized, so a blob that a store knows only
+/// by its hash costs nothing, and a quota can be a share of the disk.
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
+pub struct Usage;
+
+impl Usage {
+    /// The bytes that the blob store keeps.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for Usage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Policy for Usage {
+    type Of = Blob<method::Get>;
+}
+
+impl Effect for Usage {
+    type Output = Result<u64, BlobError>;
 }
 
 /// Ingest a blob whose hash is **discovered** during the write. Carries no
