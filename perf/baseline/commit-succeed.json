@@ -6,8 +6,8 @@
     "facts": 500
   },
   "counters": {
-    "archive.get": 14,
-    "archive.get.bytes": 496604,
+    "archive.get": 0,
+    "archive.get.bytes": 0,
     "archive.put": 18,
     "archive.put.bytes": 721344,
     "span.apply_batch_reusing": 1,
@@ -19,6 +19,6 @@
     "span.settle": 1,
     "span.write_instructions": 1
   },
-  "instructions": 1700477724,
+  "instructions": 1583996845,
   "volatile": true
 }

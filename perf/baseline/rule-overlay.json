@@ -19,5 +19,6 @@
     "span.seal_batch": 0,
     "span.settle": 0,
     "span.write_instructions": 0
-  }
+  },
+  "instructions": 252129795
 }
