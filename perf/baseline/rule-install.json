@@ -7,20 +7,20 @@
     "rules": 100
   },
   "counters": {
-    "archive.get": 11,
-    "archive.get.bytes": 364240,
-    "archive.put": 12,
-    "archive.put.bytes": 437164,
+    "archive.get": 0,
+    "archive.get.bytes": 0,
+    "archive.put": 13,
+    "archive.put.bytes": 432900,
     "span.apply_batch_reusing": 1,
     "span.buffer_records": 2,
     "span.commit": 1,
-    "span.hydrate_rule": 101,
+    "span.hydrate_rule": 100,
     "span.resolve_bundle": 3,
     "span.resolve_rules": 3,
     "span.seal_batch": 1,
     "span.settle": 1,
     "span.write_instructions": 1
   },
-  "instructions": 227420143,
+  "instructions": 186806403,
   "volatile": true
 }
