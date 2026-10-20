@@ -1092,4 +1092,64 @@ pub(crate) mod conformance {
             "{imported:?}"
         );
     }
+
+    /// The usage of a store counts each whole blob and its outboard, and the
+    /// groups that a partial blob holds, and not the holes between them.
+    pub async fn it_counts_the_bytes_that_it_keeps<P>(store: &P, subject: &Subject)
+    where
+        P: Provider<ImportRange>
+            + Provider<dialog_effects::blob::Usage>
+            + Provider<dialog_effects::blob::Write>
+            + dialog_common::ConditionalSync,
+    {
+        let usage = async || {
+            subject
+                .clone()
+                .reader()
+                .archive()
+                .blob()
+                .usage()
+                .perform(store)
+                .await
+                .unwrap()
+        };
+        assert_eq!(usage().await, 0);
+        let whole = blob(5 * GROUP as usize + 1);
+        let mut sink = subject
+            .clone()
+            .writer()
+            .archive()
+            .blob()
+            .write()
+            .perform(store)
+            .await
+            .unwrap();
+        sink.write_all(&whole).await.unwrap();
+        sink.finish().await.unwrap();
+        let after_whole = usage().await;
+        let part = blob(100 * GROUP as usize);
+        import(
+            store,
+            subject,
+            &part,
+            40 * GROUP,
+            42 * GROUP,
+            &encoding(&part, 40 * GROUP, 42 * GROUP),
+        )
+        .await
+        .unwrap();
+        let after_part = usage().await;
+
+        assert_eq!(
+            after_whole,
+            whole.len() as u64 + outboard_size(whole.len() as u64)
+        );
+        // Two groups, at most the pairs of the whole outboard of the partial
+        // blob, and its record: far less than its size.
+        let kept = after_part - after_whole;
+        assert!(
+            kept >= 2 * GROUP && kept <= 2 * GROUP + 64 + outboard_size(part.len() as u64),
+            "{kept}"
+        );
+    }
 }
