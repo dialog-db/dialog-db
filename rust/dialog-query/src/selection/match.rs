@@ -520,7 +520,13 @@ impl Match {
         // value the kind does not read at all (a string into a number,
         // a negative into a natural) is a mismatch, and callers that
         // filter rows treat it as a non-match.
+        //
+        // A value that already inhabits a primitive kind is what its
+        // view reads, so it binds as it is: that is every row a scan
+        // yields, and the clone the view's failure message needs is
+        // paid only by a value the kind has to read through the band.
         let value = match kind {
+            Some(kind) if matches!(kind, Kind::Primitive(_)) && kind.admits(&value) => value,
             Some(kind) => {
                 kind.view(value.clone())
                     .ok_or_else(|| EvaluationError::KindMismatch {
