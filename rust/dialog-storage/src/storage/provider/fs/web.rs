@@ -1038,6 +1038,13 @@ pub(super) async fn write_at(
     Ok(())
 }
 
+/// The close of each writable stream already gave its bytes to the browser,
+/// which keeps them as it keeps the rest of the origin: there is nothing more
+/// to make sure of.
+pub(super) async fn sync(_handle: &FileSystemHandle) -> Result<(), FileSystemError> {
+    Ok(())
+}
+
 pub(super) async fn exists(handle: &FileSystemHandle) -> bool {
     let Ok(Some((parent, name))) = handle.navigate_parent(false).await else {
         // Either the parent directory is missing, or this is the root handle.
