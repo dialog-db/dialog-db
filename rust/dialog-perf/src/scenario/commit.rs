@@ -1,11 +1,13 @@
 //! The write path: bulk and per-row commits, writes that succeed
-//! standing claims, and writes to a relation a rule derives.
+//! standing claims, writes to a relation a rule derives, and writes that
+//! dispatch a chain of inductive rules.
 
 use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::Pick;
+use dialog_artifacts::{Pick, Value};
+use dialog_query::InductiveRule;
 
 use super::{Outcome, Prepared, seed_stuff};
 use crate::env::{Env, assert_all, entity, fact, rule, text, var};
@@ -141,4 +143,68 @@ pub async fn derived(size: usize) -> Result<Box<dyn Prepared>> {
     seed_stuff(&env, size, Pick::Last).await?;
     env.reopen().await?;
     Ok(Box::new(Derived { env, size }))
+}
+
+/// How many inductive rules the `rule-dispatch` chain relays through.
+const RELAYS: usize = 3;
+
+/// An inductive rule asserting `dispatch/a{to}` wherever
+/// `dispatch/a{to - 1}` holds, with the same target.
+fn relay(to: usize) -> Result<InductiveRule> {
+    Ok(serde_json::from_value(serde_json::json!({
+        "assert!": {
+            "with": { "target": { "the": format!("dispatch/a{to}"), "as": "entity:" } }
+        },
+        "when": [{
+            "assert": {
+                "with": { "target": { "the": format!("dispatch/a{}", to - 1), "as": "entity:" } }
+            },
+            "where": { "this": var("this"), "target": var("target") }
+        }]
+    }))?)
+}
+
+struct Dispatch {
+    env: Env,
+    size: usize,
+}
+
+impl Prepared for Dispatch {
+    fn env(&self) -> &Env {
+        &self.env
+    }
+
+    fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
+        Box::pin(async move {
+            let facts = (0..self.size).map(|index| {
+                fact(
+                    &entity("stuff", index),
+                    "dispatch/a0",
+                    Value::Entity(entity("target", index)),
+                )
+            });
+            self.env.commit(assert_all(facts, Pick::All)).await?;
+            Ok(Outcome::from([(
+                "facts".into(),
+                ((RELAYS + 1) * self.size) as u64,
+            )]))
+        })
+    }
+}
+
+/// `rule-dispatch`: a chain of inductive rules relaying `dispatch/a0`
+/// through `dispatch/a3`, then one transaction asserting `dispatch/a0` for
+/// `size` entities: the commit dispatches a round of induction per link.
+pub async fn dispatch(size: usize) -> Result<Box<dyn Prepared>> {
+    let env = Env::open().await?;
+    let mut transaction = env.branch.transaction();
+    for to in 1..=RELAYS {
+        transaction = transaction.assert(relay(to)?);
+    }
+    transaction
+        .commit()
+        .publish()
+        .perform(&env.operator)
+        .await?;
+    Ok(Box::new(Dispatch { env, size }))
 }

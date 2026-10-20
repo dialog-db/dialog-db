@@ -317,14 +317,20 @@ impl Writer {
 
 impl Branch {
     /// The metadata a query layer over this branch alone folds in, as
-    /// `derive` computes it, reused while the profile, operator, and head
+    /// `derive` computes it (`heads` computing its revision facts alone), reused while the profile, operator, and head
     /// are those it was derived under. Shared rather than copied: every
     /// query over the branch reads the same facts.
+    ///
+    /// Only the revision facts move with the head, so the rest is kept
+    /// as a line of its own while the profile and operator stay, and a
+    /// new head copies it and adds its revision rather than keying every
+    /// fact again.
     pub(crate) fn layer_metadata(
         &self,
         operator: &Capability<Operator>,
-        derive: impl FnOnce() -> Changes,
-    ) -> Arc<Changes> {
+        derive: impl FnOnce() -> (Changes, Changes),
+        heads: impl FnOnce() -> Changes,
+    ) -> Ephemeral {
         let profile = operator.profile();
         let did = operator.did();
         let revision = self.revision();
@@ -332,16 +338,31 @@ impl Branch {
             .layer_metadata_cache
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if let Some((cached_profile, cached_operator, cached_revision, changes)) = cache.as_ref()
-            && cached_profile == profile
-            && *cached_operator == did
-            && *cached_revision == revision
-        {
-            return changes.clone();
-        }
-        let changes = Arc::new(derive());
-        *cache = Some((profile.clone(), did, revision, changes.clone()));
-        changes
+        let fixed = match cache.as_ref() {
+            Some(memo) if memo.profile == *profile && memo.operator == did => {
+                if memo.revision == revision {
+                    return memo.metadata.clone();
+                }
+                Some(memo.fixed.clone())
+            }
+            _ => None,
+        };
+        let (fixed, heads) = match fixed {
+            Some(fixed) => (fixed, heads()),
+            None => {
+                let (changes, heads) = derive();
+                (Ephemeral::holding(changes), heads)
+            }
+        };
+        let metadata = fixed.extending(heads);
+        *cache = Some(LayerMetadata {
+            profile: profile.clone(),
+            operator: did,
+            revision,
+            fixed,
+            metadata: metadata.clone(),
+        });
+        metadata
     }
 }
 
@@ -349,9 +370,20 @@ impl Branch {
 /// and what was derived.
 type MetadataMemo = Arc<Mutex<Option<(Did, Option<Revision>, metadata::BranchMetadata)>>>;
 
-/// A single-branch query layer's metadata memo: the profile, operator,
-/// and head it was derived under, and what was derived.
-type LayerMetadataMemo = Arc<Mutex<Option<(Did, Did, Option<Revision>, Arc<Changes>)>>>;
+/// A single-branch query layer's metadata memo.
+pub(crate) type LayerMetadataMemo = Arc<Mutex<Option<LayerMetadata>>>;
+
+/// What [`Branch::layer_metadata`] keeps: the profile, operator, and
+/// head the metadata was derived under, the part of it that does not
+/// move with the head, and the whole.
+#[derive(Debug)]
+pub(crate) struct LayerMetadata {
+    profile: Did,
+    operator: Did,
+    revision: Option<Revision>,
+    fixed: Ephemeral,
+    metadata: Ephemeral,
+}
 
 /// A memoized commit identity: the (profile, issuer) inputs it was derived
 /// from, and the derived branch entity and origin. See
@@ -601,6 +633,7 @@ impl Branch {
             records: self.record_cache.clone(),
             rewrites: self.rewrite_cache.clone(),
             spine: self.spine.clone(),
+            metadata: self.layer_metadata_cache.clone(),
         }
     }
 

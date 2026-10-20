@@ -595,20 +595,23 @@ impl<'a> Dispatch<'a> {
             + 'static,
     {
         let cache = self.source.rule_cache();
-        if let Some(body) = cache.body(entity) {
-            return Ok(Some(body));
-        }
         let bytes = match overlay.sources.get(entity) {
             Some(bytes) => Some(bytes.clone()),
             None => self.source_bytes(entity, env).await?,
         };
-        Ok(bytes
-            .and_then(|bytes| hydrate(&bytes).ok())
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        if let Some(body) = cache.body(entity, &bytes) {
+            return Ok(Some(body));
+        }
+        Ok(hydrate(&bytes)
+            .ok()
             // Content-address check: forged bytes stored under a
             // mismatching entity are inert.
             .filter(|body| body.stored_as(entity))
             .inspect(|body| {
-                cache.record_body(entity.clone(), body.clone());
+                cache.record_body(entity.clone(), &bytes, body.clone());
             }))
     }
 
@@ -635,9 +638,6 @@ impl<'a> Dispatch<'a> {
             + 'static,
     {
         let cache = self.source.rule_cache();
-        if let Some(rule) = cache.inductive(entity) {
-            return Ok(Some(rule));
-        }
         let bytes = match overlay.sources.get(entity) {
             Some(bytes) => Some(bytes.clone()),
             None => self.source_bytes(entity, env).await?,
@@ -645,6 +645,9 @@ impl<'a> Dispatch<'a> {
         let Some(bytes) = bytes else {
             return Ok(None);
         };
+        if let Some(rule) = cache.inductive(entity, &bytes) {
+            return Ok(Some(rule));
+        }
         // Undecodable bytes, or bytes whose content address is not the
         // entity they were stored under, are forged or corrupt entries
         // in the carved-out namespace — inert, like any dangling index
@@ -656,7 +659,7 @@ impl<'a> Dispatch<'a> {
         if !rule.stored_as(entity) {
             return Ok(None);
         }
-        cache.record_inductive(entity.clone(), rule.clone());
+        cache.record_inductive(entity.clone(), &bytes, rule.clone());
         Ok(Some(rule))
     }
 
