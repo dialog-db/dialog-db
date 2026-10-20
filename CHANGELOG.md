@@ -14,6 +14,19 @@ says how to cut a release.
 
 ## Unreleased
 
+### Repositories opened through one environment decode and plan the same rules once
+
+[#611](https://github.com/dialog-db/dialog-db/pull/611)
+
+The rule cache and the plan cache were held per branch and per repository. What rule resolution decodes and builds from content (rule bodies, keyed by entity and the bytes the reader read; inductive bodies; a rule's head re-spelled onto an attribute; selecting rules) and query plans are now held once per environment and shared by every repository opened through it. Each of those maps is bounded. Assembled rule sets, the rules set aside, rule discovery and the trigger footprint stay per branch.
+
+What this changes for you:
+
+- A peer with many spaces holding the same rules decodes each rule body and plans each rule once, not once per space.
+- `HeldCaches::release` keeps the shared rule content and plans, since nothing in them belongs to the released repository; `HeldCaches::clear` drops them.
+
+Why: those entries are pure functions of content and answer nothing about which rules a repository holds, so sharing them is sound. An assembled rule set is keyed by its lines' rules roots and kept one per spelling of a concept: shared across repositories, the sets of every repository querying the same concept would evict each other on every query. Sharing assembled sets between repositories whose rules are equal would need the key to name a line by its rule content rather than its root, and is left until a workload shows it is needed.
+
 ### An assembled rule set stands until a rule fact of its layers changes
 
 [#610](https://github.com/dialog-db/dialog-db/pull/610)
