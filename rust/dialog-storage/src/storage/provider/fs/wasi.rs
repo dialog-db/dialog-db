@@ -94,6 +94,10 @@ pub(super) async fn write_at(
     Err(unsupported())
 }
 
+pub(super) async fn sync(_handle: &FileSystemHandle) -> Result<(), FileSystemError> {
+    Err(unsupported())
+}
+
 pub(super) async fn exists(_handle: &FileSystemHandle) -> bool {
     false
 }
