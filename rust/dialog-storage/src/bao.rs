@@ -1305,6 +1305,13 @@ pub(crate) mod conformance {
         .await
         .unwrap();
         let wrong = holding(store, subject, &digest).await;
+        // A sink at the size of the blob whose first group does not verify
+        // claims nothing, so it says that the group does not verify.
+        let mut forged = start.clone();
+        let group = forged.len() - 2 * GROUP as usize;
+        forged[group] ^= 1;
+        let refused = import(store, subject, &bytes, 0, 2 * GROUP, &forged).await;
+        let kept = holding(store, subject, &digest).await;
         import(
             store,
             subject,
@@ -1318,6 +1325,11 @@ pub(crate) mod conformance {
 
         assert_eq!(first, Some((size, vec![(0, 2 * GROUP)])));
         assert_eq!(wrong, Some((size + 1, vec![(0, 2 * GROUP)])));
+        assert!(
+            matches!(refused, Err(BlobError::Unverified { .. })),
+            "{refused:?}"
+        );
+        assert_eq!(kept, wrong, "a sink that claimed nothing removes nothing");
         assert_eq!(
             holding(store, subject, &digest).await,
             Some((size, vec![(2 * GROUP, 4 * GROUP)]))

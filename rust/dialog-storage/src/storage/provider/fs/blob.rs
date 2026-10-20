@@ -364,7 +364,10 @@ impl RangeSink {
                 Ok(item) => self.put(item).await?,
                 Err(unverified) => {
                     self.failed = true;
-                    self.record().await?;
+                    // A sink that claimed no record kept nothing to record.
+                    if self.claimed {
+                        self.record().await?;
+                    }
                     return Err(BlobError::Unverified {
                         digest: blob_key(&self.digest),
                         reason: unverified.to_string(),
@@ -374,7 +377,9 @@ impl RangeSink {
         }
         if self.decoder.excess() > 0 {
             self.failed = true;
-            self.record().await?;
+            if self.claimed {
+                self.record().await?;
+            }
             return Err(BlobError::Unverified {
                 digest: blob_key(&self.digest),
                 reason: "the encoding runs past the end of its range".into(),
@@ -574,6 +579,11 @@ struct VerifiedSource {
     digest: Blake3Hash,
     data: FileSystemHandle,
     outboard: FileSystemHandle,
+    /// Whether the blob is whole: a pair of its outboard that does not verify
+    /// then removes the outboard, which the next read builds again from the
+    /// bytes. A sink of another size that lost its claim can leave such a
+    /// pair in a partial outboard that later became whole.
+    whole: bool,
     /// Why the next call fails, after a call that gave the parts before it.
     failure: Option<BlobError>,
 }
@@ -597,6 +607,9 @@ impl BlobSource for VerifiedSource {
             match self.encoder.take(&bytes) {
                 Ok(item) => encoded.extend(item),
                 Err(unverified) => {
+                    if self.whole && matches!(unverified, bao::Unverified::Parent(_)) {
+                        let _ = self.outboard.remove().await;
+                    }
                     let failure = BlobError::Unverified {
                         digest: blob_key(&self.digest),
                         reason: format!("the store holds a part that went bad: {unverified}"),
@@ -628,8 +641,10 @@ impl FileSystem {
     ) -> Result<BlobReader, BlobError> {
         let blob_dir = self.blob()?;
         let whole = blob_dir.resolve(&blob_key(digest))?;
+        let whole_size = whole.size().await?;
+        let whole_blob = whole_size.is_some();
         let (size, data, outboard, held_from): (u64, _, _, Box<dyn Fn(u64) -> u64 + Send + Sync>) =
-            if let Some(size) = whole.size().await? {
+            if let Some(size) = whole_size {
                 let outboard = blob_dir.resolve(&outboard_key(digest))?;
                 if size > bao::GROUP && !outboard.exists().await {
                     rebuild_outboard(digest, &whole, &blob_dir, &outboard).await?;
@@ -659,6 +674,7 @@ impl FileSystem {
             header: Some(bao::header(size, covered)),
             encoder: Encoder::new(digest, size, first, covered),
             digest: digest.clone(),
+            whole: whole_blob,
             data,
             outboard,
             failure: None,
@@ -1252,6 +1268,50 @@ mod tests {
             }
         }
         assert_eq!(groups, 4, "the groups before the bad one");
+    }
+
+    /// A whole blob whose outboard holds a pair that does not verify, as a
+    /// sink of another size that lost its claim can leave, ends its verified
+    /// range at that pair once, and removes the outboard. The next read
+    /// builds it again from the bytes, and answers the whole range.
+    #[dialog_common::test]
+    async fn it_builds_again_an_outboard_whose_pair_does_not_verify() {
+        let fs = test_space("blob-verified-pair").await;
+        let payload = crate::bao::conformance::blob(10 * crate::bao::GROUP as usize);
+        let digest = ingest(&fs, &payload).await;
+        let outboard = fs.blob().unwrap().resolve(&outboard_key(&digest)).unwrap();
+        outboard.write_at(0, &[7; crate::bao::PAIR]).await.unwrap();
+        let mut reader = subject()
+            .reader()
+            .archive()
+            .blob()
+            .invoke(Read::verified(digest.clone(), 0, None))
+            .perform(&fs)
+            .await
+            .unwrap();
+
+        let ended = loop {
+            match reader.next().await {
+                Ok(Some(_)) => {}
+                Ok(None) => break None,
+                Err(error) => break Some(error),
+            }
+        };
+        let again = crate::bao::conformance::verified(&fs, &subject(), &digest, 0, None).await;
+
+        assert!(
+            matches!(ended, Some(BlobError::Unverified { .. })),
+            "{ended:?}"
+        );
+        let ((size, covered), _) = again.unwrap();
+        assert_eq!(
+            (size, covered),
+            (payload.len() as u64, payload.len() as u64)
+        );
+        assert_eq!(
+            outboard.read().await.unwrap(),
+            crate::bao::outboard(&payload).1
+        );
     }
 
     /// A blob that a store wrote before it kept outboards gets one at its
