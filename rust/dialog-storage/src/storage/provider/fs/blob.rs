@@ -814,9 +814,10 @@ impl Provider<Held> for FileSystem {
 /// The proof of a range of a blob, from the pairs of its outboard on the
 /// paths to the first and the last group of the range: of the outboard of a
 /// whole blob, which the store builds first for a blob that it wrote before
-/// it kept outboards, or of the outboard of a partial blob that holds both
-/// groups. A pair of the outboard of a whole blob that does not verify
-/// removes the outboard, which the next read builds again.
+/// it kept outboards, or of the outboard of a partial blob that holds each
+/// group whose path the proof reads. A pair of the outboard of a whole blob
+/// that does not verify removes the outboard, which the next read builds
+/// again.
 #[dialog_capability::provider]
 impl Provider<Proof> for FileSystem {
     async fn execute(
