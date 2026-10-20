@@ -1,10 +1,13 @@
-//! DID to HTTPS URL derivation.
+//! DID to URL derivation.
 //!
 //! `did:web`, per the did:web method spec:
 //! - `did:web:example.com` becomes `https://example.com/.well-known/did.json`.
 //! - `did:web:example.com:path:to` becomes `https://example.com/path/to/did.json`.
 //! - a percent-encoded colon in the host segment (`did:web:host%3A3000`) decodes
 //!   to a port (`host:3000`).
+//! - a loopback host (`localhost`, `*.localhost`, `127.x.x.x`) is fetched over
+//!   plain `http`: a service on this machine cannot hold a certificate a
+//!   client trusts, and a request to it never leaves the machine.
 //!
 //! `did:plc`, resolved against the PLC directory:
 //! - `did:plc:xxxx` becomes `https://plc.directory/did:plc:xxxx`.
@@ -141,13 +144,30 @@ pub fn did_web_url(did: &str) -> Result<String, ResolveError> {
         }
     }
 
-    let url = if path_segments.is_empty() {
-        format!("https://{host}/.well-known/did.json")
+    let scheme = if is_loopback(host.split_once(':').map_or(&*host, |(name, _)| name)) {
+        "http"
     } else {
-        format!("https://{host}/{}/did.json", path_segments.join("/"))
+        "https"
+    };
+    let url = if path_segments.is_empty() {
+        format!("{scheme}://{host}/.well-known/did.json")
+    } else {
+        format!("{scheme}://{host}/{}/did.json", path_segments.join("/"))
     };
 
     Ok(url)
+}
+
+/// Whether `name`, a validated `did:web` host without its port, names this
+/// machine: `localhost` and its subdomains, which resolve to loopback, and
+/// an IPv4 address in `127.0.0.0/8`.
+fn is_loopback(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == "localhost"
+        || name.ends_with(".localhost")
+        || name
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 /// The `plc.directory` origin every `did:plc` resolves against.
@@ -243,6 +263,37 @@ mod tests {
         }
     }
 
+    /// A service on this machine is fetched over `http`, whatever its port:
+    /// it holds no certificate a client trusts. Any other host stays on
+    /// `https`, a name that merely contains `localhost` included.
+    #[dialog_common::test]
+    fn fetches_a_loopback_host_over_http() {
+        for (did, url) in [
+            (
+                "did:web:localhost%3A8090",
+                "http://localhost:8090/.well-known/did.json",
+            ),
+            (
+                "did:web:127.0.0.1%3A8090",
+                "http://127.0.0.1:8090/.well-known/did.json",
+            ),
+            (
+                "did:web:tonk.localhost:path",
+                "http://tonk.localhost/path/did.json",
+            ),
+            (
+                "did:web:localhost.example.com",
+                "https://localhost.example.com/.well-known/did.json",
+            ),
+            (
+                "did:web:128.0.0.1",
+                "https://128.0.0.1/.well-known/did.json",
+            ),
+        ] {
+            assert_eq!(did_web_url(did).unwrap(), url, "{did}");
+        }
+    }
+
     /// A second colon in the decoded host is not a second port.
     #[dialog_common::test]
     fn rejects_multiple_colons_in_host() {
@@ -309,8 +360,8 @@ mod tests {
     #[dialog_common::test]
     fn host_with_port() {
         assert_eq!(
-            did_web_url("did:web:localhost%3A3000").unwrap(),
-            "https://localhost:3000/.well-known/did.json"
+            did_web_url("did:web:example.com%3A3000").unwrap(),
+            "https://example.com:3000/.well-known/did.json"
         );
     }
 

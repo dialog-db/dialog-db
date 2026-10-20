@@ -785,6 +785,33 @@ pub enum AuthorizeError {
         at: u64,
     },
 
+    /// The invocation was issued too long before it was presented, or
+    /// does not say when it was issued where that is required.
+    ///
+    /// Like [`Expired`](Self::Expired), nothing about the authority is in
+    /// question: an invocation is good once, when it is made, so a fresh
+    /// one is expected to succeed. Refusing a stale one is what stops a
+    /// captured invocation being presented again later.
+    #[error("Invocation issued at {issued_at:?} is too old to accept at {at}")]
+    Stale {
+        /// Unix timestamp the invocation says it was issued at, if it
+        /// says.
+        issued_at: Option<u64>,
+        /// Unix timestamp the check was made at.
+        at: u64,
+    },
+
+    /// The invocation was presented before.
+    ///
+    /// An invocation carries a nonce, so one made again is never the
+    /// same: this one was copied. A fresh invocation is expected to
+    /// succeed.
+    #[error("Invocation {invocation} was presented before")]
+    Replayed {
+        /// The invocation's content identifier.
+        invocation: String,
+    },
+
     /// Authority in the chain has been withdrawn.
     ///
     /// Terminal in a way [`Expired`](Self::Expired) is not: re-obtaining a

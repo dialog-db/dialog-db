@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-artifacts"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -1092,7 +1092,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-baseline"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1117,7 +1117,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-capability"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "async-trait",
  "base58",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-common"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1156,6 +1156,7 @@ dependencies = [
  "dialog-macros",
  "futures-util",
  "getrandom 0.2.16",
+ "js-sys",
  "parking_lot",
  "rand 0.8.5",
  "rkyv",
@@ -1176,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-credentials"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -1204,7 +1205,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-csv"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1222,7 +1223,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-diagnose"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1245,7 +1246,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-did-web"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1272,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-effects"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "async-trait",
  "base58",
@@ -1282,13 +1283,14 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_ipld_dagcbor",
+ "serde_json",
  "thiserror 2.0.18",
  "wasm-bindgen-test",
 ]
 
 [[package]]
 name = "dialog-encoding"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "base58",
@@ -1305,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-identity"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "async-trait",
  "dialog-capability",
@@ -1326,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-macros"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "blake3",
  "convert_case",
@@ -1337,7 +1339,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-network"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "async-trait",
  "dialog-capability",
@@ -1352,7 +1354,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-number"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "dialog-common",
  "ryu",
@@ -1362,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-peer"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1372,6 +1374,7 @@ dependencies = [
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
+ "dialog-did-web",
  "dialog-effects",
  "dialog-identity",
  "dialog-network",
@@ -1409,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-perf"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1433,7 +1436,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-query"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1473,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-remote-fs"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1499,7 +1502,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-remote-s3"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1540,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-remote-ucan"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1556,24 +1559,30 @@ dependencies = [
  "dialog-ucan",
  "dialog-ucan-core",
  "dialog-varsig",
+ "futures",
  "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "js-sys",
  "reqwest",
  "serde",
+ "serde_bytes",
  "serde_ipld_dagcbor",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
+ "web-sys",
 ]
 
 [[package]]
 name = "dialog-remote-ucan-s3"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-signature",
@@ -1613,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-repository"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1624,6 +1633,7 @@ dependencies = [
  "dialog-capability",
  "dialog-common",
  "dialog-credentials",
+ "dialog-did-web",
  "dialog-effects",
  "dialog-identity",
  "dialog-network",
@@ -1662,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-search-tree"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1697,7 +1707,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-soak"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1721,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-storage"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1769,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-ucan"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "async-trait",
  "base58",
@@ -1793,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-ucan-core"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "arbitrary",
  "base64",
@@ -1833,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "dialog-varsig"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "dialog-common",
  "ed25519-dalek",
@@ -2927,7 +2937,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "merkle-reference"
-version = "0.4.0-rc.2"
+version = "0.4.0-rc.3"
 dependencies = [
  "blake3",
  "dialog-common",
@@ -4682,8 +4692,12 @@ checksum = "7a9daff607c6d2bf6c16fd681ccb7eecc83e4e2cdc1ca067ffaadfca5de7f084"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -4834,6 +4848,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.2",
+ "rustls",
+ "rustls-pki-types",
  "sha1 0.10.7",
  "thiserror 2.0.18",
  "utf-8",

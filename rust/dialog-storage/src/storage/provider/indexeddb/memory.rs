@@ -9,12 +9,29 @@ use async_trait::async_trait;
 use dialog_capability::{Capability, Provider};
 use dialog_common::Blake3Hash;
 use dialog_effects::memory::prelude::{ListExt, PublishExt, ResolveExt, RetractExt};
-use dialog_effects::memory::{Edition, List, MemoryError, Publish, Resolve, Retract, Version};
+use dialog_effects::memory::{
+    Current, Edition, List, MemoryError, Publish, Resolve, Retract, Version,
+};
 use js_sys::Uint8Array;
 use wasm_bindgen::{JsCast, JsValue};
 
 /// The single object store used for all memory operations.
 const MEMORY: &str = "memory";
+
+/// What a cell holds, as a write it refused reports it: `bytes` versioned
+/// as a resolve versions them, or empty.
+fn holding(bytes: Option<Vec<u8>>) -> Current {
+    match bytes {
+        Some(bytes) => {
+            let version = Version::from(Blake3Hash::hash(&bytes).as_bytes());
+            Current::Holds(Edition {
+                content: bytes,
+                version,
+            })
+        }
+        None => Current::Empty,
+    }
+}
 
 /// Format edition bytes for error messages.
 fn format_edition(edition: Option<&[u8]>) -> Option<Version> {
@@ -82,16 +99,19 @@ impl Provider<Publish> for IndexedDb {
                 // Read current value to check CAS condition
                 let current = object_store.get(key.clone()).await.map_err(storage_error)?;
 
-                let current_edition = if let Some(value) = &current {
-                    let bytes = value
-                        .clone()
-                        .dyn_into::<Uint8Array>()
-                        .map_err(|_| MemoryError::Storage("Value is not Uint8Array".to_string()))?
-                        .to_vec();
-                    Some(Blake3Hash::hash(&bytes))
-                } else {
-                    None
+                let held = match &current {
+                    Some(value) => Some(
+                        value
+                            .clone()
+                            .dyn_into::<Uint8Array>()
+                            .map_err(|_| {
+                                MemoryError::Storage("Value is not Uint8Array".to_string())
+                            })?
+                            .to_vec(),
+                    ),
+                    None => None,
                 };
+                let current_edition = held.as_deref().map(Blake3Hash::hash);
 
                 // Compute new edition
                 let new_edition = Blake3Hash::hash(&content);
@@ -107,9 +127,7 @@ impl Provider<Publish> for IndexedDb {
                     (None, Some(_)) => {
                         return Err(MemoryError::VersionMismatch {
                             expected: None,
-                            actual: format_edition(
-                                current_edition.as_ref().map(|h| h.as_bytes().as_slice()),
-                            ),
+                            current: holding(held),
                         });
                     }
                     // Updating existing: require edition matches
@@ -117,7 +135,7 @@ impl Provider<Publish> for IndexedDb {
                         if expected != current.as_bytes() {
                             return Err(MemoryError::VersionMismatch {
                                 expected: format_edition(Some(expected)),
-                                actual: format_edition(Some(current.as_bytes())),
+                                current: holding(held),
                             });
                         }
                     }
@@ -125,7 +143,7 @@ impl Provider<Publish> for IndexedDb {
                     (Some(expected), None) => {
                         return Err(MemoryError::VersionMismatch {
                             expected: format_edition(Some(expected)),
-                            actual: None,
+                            current: Current::Empty,
                         });
                     }
                     // Creating new when cell doesn't exist: valid
@@ -172,7 +190,7 @@ impl Provider<Retract> for IndexedDb {
                 if expected_edition != current_edition.as_bytes() {
                     return Err(MemoryError::VersionMismatch {
                         expected: format_edition(Some(&expected_edition)),
-                        actual: format_edition(Some(current_edition.as_bytes())),
+                        current: holding(Some(bytes)),
                     });
                 }
 

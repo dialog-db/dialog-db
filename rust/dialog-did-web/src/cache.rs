@@ -31,6 +31,8 @@ use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use web_time::Instant;
 
+use crate::discover::Discover;
+use crate::document::Service;
 use crate::error::ResolveError;
 use crate::resolve::Resolve;
 use crate::verifier::MultiVerifier;
@@ -178,5 +180,20 @@ where
         let result = self.inner.execute(input).await;
         self.store(key, &result);
         result
+    }
+}
+
+/// Discovery is not cached: it is asked for when a contact is learned or
+/// its addresses stop answering, rarely enough that the fetch is the right
+/// answer, and the cache's bound is sized for the verifiers every
+/// verification asks for.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<P> Provider<Discover> for CachingResolver<P>
+where
+    P: Provider<Discover> + ConditionalSync,
+{
+    async fn execute(&self, input: Discover) -> Result<Vec<Service>, ResolveError> {
+        self.inner.execute(input).await
     }
 }

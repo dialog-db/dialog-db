@@ -103,6 +103,12 @@ impl<S: Signature> Invocation<S> {
         self.payload().expiration
     }
 
+    /// Getter for the `issued_at` field.
+    #[must_use]
+    pub const fn issued_at(&self) -> Option<Timestamp> {
+        self.payload().issued_at
+    }
+
     /// Getter for the `meta` field. Returns an empty map when meta is absent.
     #[must_use]
     pub fn meta(&self) -> &BTreeMap<String, Ipld> {
