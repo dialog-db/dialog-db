@@ -14,6 +14,29 @@ says how to cut a release.
 
 ## Unreleased
 
+### A rule's head refuses a number its field may not hold, a difference may be negative, and floats round to integers
+
+[#617](https://github.com/dialog-db/dialog-db/pull/617), after [#615](https://github.com/dialog-db/dialog-db/issues/615) and [#616](https://github.com/dialog-db/dialog-db/pull/616); the design is in `notes/formula-schemes.md`, "Addendum: the number band"
+
+A compiled rule is meant not to fail or go quiet at run time over the type a number happened to take. Three things made that false for numbers since they became one band. `math/difference` shared one type across its operands and result, so a natural minus a larger natural was a non-match and a decrement over a natural counter could not be written with a `-1` literal at all. A head field's declared type was never checked against what the body binds to it, so a rule could write a negative into a `natural:` field, where no natural reader sees it. And a comparison proved nothing to the type system, so no guard could make a difference a natural again. This change fixes all three and adds the rounding formulas a float needs to reach an integer field.
+
+What this changes for you:
+
+- `math/difference` yields an integer for integer operands, naturals included (`3 - 5` is `-2`), and a float for float operands. A rule whose natural head took the difference directly no longer compiles (see the next point); the difference used to be a non-match on underflow.
+- Compiling a rule whose head field cannot hold every number the body binds to it fails with `TypeError::HeadField`: an integer that may be negative into a `natural:` field, a float that may have a fraction into an `integer:` field. The error names the field, the variable, both types, why the field does not read it, what to do (`?n >= 0`, `math/floor`, or widening the field) and the premise that gave the variable that shape. A natural into an `integer:` or `float:` field, and an integer into a `float:` field, compile as before.
+- A comparison that proves a value non-negative (`>= 0`, `> -1`) makes an integer variable a natural, so a decrement guarded by `>= 0` on its result compiles against a natural head and leaves no row for the negative case instead of writing it.
+- A numeric head field narrows a body variable the body left open: a count read through a field with no declared type and stepped by `1` is a natural when the head is, and the scan feeding it reads naturals.
+- `math/floor`, `math/round` (halves away from zero) and `math/truncate` take any number to an integer; a float with no finite value yields no row.
+- Rust: `Difference<N>::is` is `N::Signed`; the `Number` trait has `Signed`, `subtract_signed`, `floor`, `round` and `truncate`; `Cell::signed_of` and `Cell::is_signed`, `Primitive::SIGNED_NUMERIC`, `Primitive::without`, `Type::proves_non_negative` and `Type::normalized` are new; `TypeEnv::infer_for` infers a body against its head's field types.
+- Two values of different integer storage variants (a stored natural and a negative integer) now compute together in `math/sum` and the other arithmetic formulas instead of being a non-match.
+- Type inference keeps two variables one variable after a static resolves one of them. Before, a polymorphic literal such as `1` resolving a formula's scheme to the whole numeric set split the formula's cells into separate variables, and a field's type reached only the cell it was written on.
+
+Why: numbers are one band and a rule compiles against types; what the body can bind has to be checked against what the head holds at compile time, with the error saying what to do, rather than refused or dropped at run time.
+
+#### Compatibility and migration
+
+- Nothing a replica stores or syncs is rewritten. A stored rule that no longer compiles under the head check (one that wrote a possibly negative integer into a `natural:` field, or a float into an `integer:` field) is held inert by `Branch::commit`, as any rule that fails to hydrate is: it stops firing and does not fail commits. Re-evaluate such a rule with a guard or a rounding formula, or widen the field, to have it fire again.
+
 ### A number binds a typed rule variable as the variable's type reads it
 
 [#616](https://github.com/dialog-db/dialog-db/pull/616), fixes [#615](https://github.com/dialog-db/dialog-db/issues/615)

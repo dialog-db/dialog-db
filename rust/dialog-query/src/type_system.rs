@@ -123,6 +123,14 @@ impl Primitive {
             | Self::bit_for(ValueType::Float),
     };
 
+    /// The numeric primitives a result that may be negative or have a
+    /// fraction can take: `SignedInt`, `Float`. The bound of a formula
+    /// output declared signed (`math/difference`'s `is`): a natural
+    /// minus a natural is an integer.
+    pub const SIGNED_NUMERIC: Self = Self {
+        bits: Self::bit_for(ValueType::SignedInt) | Self::bit_for(ValueType::Float),
+    };
+
     /// String-like primitives: `String`, `Symbol`.
     pub const STRING_LIKE: Self = Self {
         bits: Self::bit_for(ValueType::String) | Self::bit_for(ValueType::Symbol),
@@ -211,6 +219,13 @@ impl Primitive {
             None
         } else {
             Some(merged)
+        }
+    }
+
+    /// This set without the members of `other`. May be empty.
+    pub fn without(self, other: Self) -> Self {
+        Self {
+            bits: self.bits & !other.bits,
         }
     }
 
@@ -1089,6 +1104,54 @@ impl Type {
         }
     }
 
+    /// Whether this type's interval proves every number it admits is
+    /// not negative: a lower bound of `>= b` with `b > -1`, or `> b`
+    /// with `b >= -1`. Integers above such a bound are naturals.
+    pub fn proves_non_negative(&self) -> bool {
+        let Some(interval) = self.refinement().and_then(|r| r.interval.as_deref()) else {
+            return false;
+        };
+        let Some(lower) = &interval.lower else {
+            return false;
+        };
+        let Some((bound, _)) = decode_value(interval.value_type, &lower.encoded) else {
+            return false;
+        };
+        match bound {
+            Value::UnsignedInt(_) => true,
+            Value::SignedInt(bound) => {
+                if lower.inclusive {
+                    bound > -1
+                } else {
+                    bound >= -1
+                }
+            }
+            Value::Float(bound) => {
+                if lower.inclusive {
+                    bound > -1.0
+                } else {
+                    bound >= -1.0
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// This type as the number band reads it: an integer the type's
+    /// interval proves non-negative (`?n >= 0`) is a natural, since
+    /// every non-negative number reads as one. A float stays a float,
+    /// a type without such a bound is returned as it is.
+    pub fn normalized(self) -> Type {
+        let membership = self.primitive_part();
+        if !membership.contains(ValueType::SignedInt) || !self.proves_non_negative() {
+            return self;
+        }
+        let narrowed = membership
+            .without(Primitive::singleton(ValueType::SignedInt))
+            .union(Primitive::singleton(ValueType::UnsignedInt));
+        self.with_primitive_part(narrowed)
+    }
+
     /// Rebuild this type around a replacement primitive part,
     /// preserving its refinement structure. The unifier uses this
     /// so a resolution that narrows membership does not silently
@@ -1192,6 +1255,76 @@ mod tests {
     }
     fn o(vt: ValueType) -> Type {
         Type::from(vt).optional()
+    }
+
+    /// The band reads an integer a lower bound proves non-negative as
+    /// a natural: `>= 0`, `> -1` and `>= -0.5` prove it, `>= -1`,
+    /// `> -2` and an upper bound do not. A float keeps its type under
+    /// every bound, and a natural is one already.
+    #[dialog_common::test]
+    fn it_reads_a_non_negative_integer_as_a_natural() {
+        let integer = Type::from(ValueType::SignedInt);
+        let natural = Type::from(ValueType::UnsignedInt);
+        let proving: [(Value, bool); 4] = [
+            (Value::UnsignedInt(0), true),
+            (Value::SignedInt(0), true),
+            (Value::SignedInt(-1), false),
+            (Value::Float(-0.5), true),
+        ];
+        for (bound, inclusive) in proving {
+            let bounded = integer
+                .clone()
+                .with_interval(&bound, inclusive, true)
+                .expect("an integer admits an interval");
+            assert!(
+                bounded.proves_non_negative(),
+                "{bounded} proves non-negative"
+            );
+            let narrowed = bounded.clone().normalized();
+            assert_eq!(
+                narrowed.primitive_part(),
+                natural.primitive_part(),
+                "{bounded} reads as a natural"
+            );
+            assert_eq!(
+                narrowed.refinement(),
+                bounded.refinement(),
+                "the bound is kept"
+            );
+        }
+        let leaving: [(Value, bool, bool); 3] = [
+            (Value::SignedInt(-1), true, true),
+            (Value::SignedInt(-2), false, true),
+            (Value::SignedInt(10), true, false),
+        ];
+        for (bound, inclusive, lower) in leaving {
+            let bounded = integer
+                .clone()
+                .with_interval(&bound, inclusive, lower)
+                .expect("an integer admits an interval");
+            assert!(
+                !bounded.proves_non_negative(),
+                "{bounded} admits a negative"
+            );
+            assert_eq!(
+                bounded.clone().normalized(),
+                bounded,
+                "{bounded} stays an integer"
+            );
+        }
+        let float = Type::from(ValueType::Float)
+            .with_interval(&Value::UnsignedInt(0), true, true)
+            .expect("a float admits an interval");
+        assert_eq!(float.clone().normalized(), float, "a float stays a float");
+        let open = Type::from(Primitive::NUMERIC)
+            .with_interval(&Value::UnsignedInt(0), true, true)
+            .expect("a number admits an interval");
+        assert_eq!(
+            open.normalized().primitive_part(),
+            Primitive::singleton(ValueType::UnsignedInt)
+                .union(Primitive::singleton(ValueType::Float)),
+            "an open number above zero is a natural or a float"
+        );
     }
 
     /// Interval refinements meet by intersection and join by convex hull

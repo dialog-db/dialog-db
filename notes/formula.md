@@ -62,7 +62,7 @@ If cost is omitted, it defaults to 1.
 While `#[derive(Formula)]` can define new formula types, they must be registered in the `define_formulas!` macro in `dialog_query::formula::query` to be usable in the query engine. The current set of built-in formulas:
 
 **Math** (`dialog_query::formula::math`):
-- `Sum` ("math/sum"), `Difference` ("math/difference"), `Product` ("math/product"), `Quotient` ("math/quotient"), `Modulo` ("math/modulo")
+- `Sum` ("math/sum"), `Difference` ("math/difference"), `Product` ("math/product"), `Quotient` ("math/quotient"), `Modulo` ("math/modulo"), `Floor` ("math/floor"), `Round` ("math/round"), `Truncate` ("math/truncate")
 
 **Strings** (`dialog_query::formula::string`):
 - `Concatenate` ("text/concatenate"), `Length` ("text/length"), `Uppercase` ("text/upper-case"), `Lowercase` ("text/lower-case"), `Like` ("text/like")

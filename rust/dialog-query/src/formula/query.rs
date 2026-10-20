@@ -7,7 +7,7 @@ use crate::formula::cache::FormulaCache;
 use crate::formula::cell::Cells;
 use crate::formula::conversions::{self, ParseFloat, ParseSignedInteger, ParseUnsignedInteger};
 use crate::formula::logic::{And, Not, Or};
-use crate::formula::math::{Difference, Modulo, Product, Quotient, Sum};
+use crate::formula::math::{Difference, Floor, Modulo, Product, Quotient, Round, Sum, Truncate};
 use crate::formula::number::Numeric;
 use crate::formula::string::{Concatenate, Length, Like, Lowercase, Uppercase};
 use crate::selection::{Match, Selection};
@@ -114,6 +114,9 @@ define_formulas! {
     "math/product"            => Product(Product, super::math::ProductQuery),
     "math/quotient"           => Quotient(Quotient, super::math::QuotientQuery),
     "math/modulo"             => Modulo(Modulo, super::math::ModuloQuery),
+    "math/floor"              => Floor(Floor, super::math::FloorQuery),
+    "math/round"              => Round(Round, super::math::RoundQuery),
+    "math/truncate"           => Truncate(Truncate, super::math::TruncateQuery),
     "text/concatenate"        => Concatenate(Concatenate, super::string::ConcatenateQuery),
     "text/length"             => Length(Length, super::string::LengthQuery),
     "text/upper-case"         => Uppercase(Uppercase, super::string::UppercaseQuery),

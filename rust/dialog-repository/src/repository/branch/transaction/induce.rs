@@ -1435,6 +1435,103 @@ mod tests {
         Ok(())
     }
 
+    /// A guarded decrement over a natural counter: `count - 1` is an
+    /// integer, which the natural head takes only once `>= 0` proves it
+    /// a natural. At one the decrement commits zero; at zero the
+    /// difference is `-1`, the guard leaves no row, and the commit
+    /// changes nothing rather than failing or writing a negative.
+    #[dialog_common::test]
+    async fn it_decrements_a_natural_counter_down_to_zero() -> Result<()> {
+        let rule: InductiveRule = serde_json::from_value(json!({
+            "description": "Decrement a counter on a decrement command, never below zero",
+            "assert!": {
+                "with": {
+                    "count": { "the": "counter/count", "as": "natural:" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "counter": { "the": "cmd.decrement/counter", "as": "entity:" }
+                        }
+                    },
+                    "where": {
+                        "counter": { "?": { "name": "this" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": {
+                            "count": { "the": "counter/count", "as": "natural:" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "count": { "?": { "name": "prev" } }
+                    }
+                },
+                {
+                    "assert": "math/difference",
+                    "where": {
+                        "of": { "?": { "name": "prev" } },
+                        "subtract": 1,
+                        "is": { "?": { "name": "count" } }
+                    }
+                },
+                {
+                    "assert": ">=",
+                    "where": {
+                        "of": { "?": { "name": "count" } },
+                        "with": 0
+                    }
+                }
+            ]
+        }))
+        .expect("the guarded decrement compiles");
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let counter: Entity = "ctr:1".parse()?;
+        branch
+            .transaction()
+            .assert(rule)
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        for (command, expected) in [("cmd:1", 0u128), ("cmd:2", 0u128)] {
+            let command: Entity = command.parse()?;
+            branch
+                .transaction()
+                .dispatch(
+                    dialog_query::the!("cmd.decrement/counter")
+                        .of(command)
+                        .is(counter.clone()),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            branch.refresh(&operator).await?;
+            assert_eq!(
+                values(&branch, &operator, "counter/count", &counter).await?,
+                vec![Value::UnsignedInt(expected)],
+                "the counter never goes below zero"
+            );
+        }
+        Ok(())
+    }
+
     /// The two-replica route: a count written by another replica's rule
     /// arrives by pull (a raw commit here), so the next local commit
     /// replays it through the watermark lag as a seed row. It reads back
