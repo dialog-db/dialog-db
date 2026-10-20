@@ -6,8 +6,8 @@
     "commits": 100
   },
   "counters": {
-    "archive.get": 8,
-    "archive.get.bytes": 259608,
+    "archive.get": 0,
+    "archive.get.bytes": 0,
     "archive.put": 112,
     "archive.put.bytes": 3687208,
     "span.apply_batch_reusing": 100,
@@ -19,5 +19,5 @@
     "span.settle": 100,
     "span.write_instructions": 100
   },
-  "instructions": 241327923
+  "instructions": 213812645
 }

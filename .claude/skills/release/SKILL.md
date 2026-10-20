@@ -24,7 +24,7 @@ order of operations around them.
 3. **Open the release pull request** titled `chore(release): <version>`,
    and wait for it to merge. Do not merge it yourself unless asked.
 4. **Tag the merge commit** and push the tag:
-   `git tag -a v<version> -m v<version> <merge commit> && git push origin v<version>`.
+   `git tag -s v<version> -m v<version> <merge commit> && git push origin v<version>`.
    The `Release` workflow checks the tag and publishes the GitHub release;
    confirm it went green.
 5. **Repoint dependents.** In tonk's `Cargo.toml`, every dialog crate takes
