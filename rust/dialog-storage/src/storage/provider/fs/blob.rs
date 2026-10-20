@@ -305,6 +305,12 @@ struct RangeSink {
     /// Whether the store held the blob whole at the start: the sink still
     /// verifies each part, and keeps nothing more of it.
     whole: bool,
+    /// Whether the record names the size of this sink. See
+    /// [`RangeSink::claim`].
+    claimed: bool,
+    /// The items that verified before the first group, which the sink keeps
+    /// once it claims the record: the pairs of one path of the tree.
+    pending: Vec<Item>,
     /// Whether a part did not verify: the sink takes no more.
     failed: bool,
 }
@@ -321,26 +327,6 @@ impl FileSystem {
         let blob_dir = self.blob()?;
         blob_dir.ensure_dir().await?;
         let whole = blob_dir.resolve(&blob_key(&digest))?.exists().await;
-        // A record of the blob at another size names groups of another
-        // tree: the pairs of this import would land at other places of the
-        // outboard. The first sink writes its size into the record as it
-        // opens, under the lock of the record, so a sink of another size is
-        // refused before it writes anything.
-        let [_, _, held] = partial_keys(&digest);
-        if !whole {
-            let record = blob_dir.resolve(&held)?;
-            locked(&record, async || match record.read_optional().await? {
-                Some(bytes) if Groups::decode(&bytes).is_some_and(|(held, _)| held == size) => {
-                    Ok(())
-                }
-                Some(_) => Err(BlobError::Storage(format!(
-                    "the store holds a part of the blob {} of another size than {size} bytes",
-                    blob_key(&digest)
-                ))),
-                None => Ok(record.write_atomic(&Groups::new().encode(size)).await?),
-            })
-            .await?;
-        }
         Ok(RangeSink {
             decoder: Decoder::new(&digest, size, range.offset, end),
             tree: bao::tree(size),
@@ -350,6 +336,8 @@ impl FileSystem {
             kept: Groups::new(),
             unrecorded: 0,
             whole,
+            claimed: false,
+            pending: Vec::new(),
             failed: false,
         })
     }
@@ -357,28 +345,23 @@ impl FileSystem {
 
 impl RangeSink {
     /// Takes each item of the encoding that the decoder holds, and keeps it,
-    /// unless the store holds the blob whole.
+    /// unless the store holds the blob whole. The items before the first
+    /// group wait until the sink claims the record.
     async fn keep(&mut self) -> Result<(), BlobError> {
-        let [data, outboard, _] = partial_keys(&self.digest);
         while let Some(item) = self.decoder.next_item() {
             match item {
                 Ok(_) if self.whole => {}
-                Ok(Item::Parent { node, pair }) => {
-                    if let Some(offset) = bao::pair_offset(&self.tree, node) {
-                        self.blob_dir
-                            .resolve(&outboard)?
-                            .write_at(offset, &pair)
-                            .await?;
+                Ok(item) if !self.claimed => {
+                    let group = matches!(item, Item::Group { .. });
+                    self.pending.push(item);
+                    if group {
+                        self.claim().await?;
+                        for item in std::mem::take(&mut self.pending) {
+                            self.put(item).await?;
+                        }
                     }
                 }
-                Ok(Item::Group { offset, bytes }) => {
-                    self.blob_dir
-                        .resolve(&data)?
-                        .write_at(offset, &bytes)
-                        .await?;
-                    self.kept.insert(offset / bao::GROUP);
-                    self.unrecorded += bytes.len() as u64;
-                }
+                Ok(item) => self.put(item).await?,
                 Err(unverified) => {
                     self.failed = true;
                     self.record().await?;
@@ -400,6 +383,66 @@ impl RangeSink {
         if self.unrecorded >= RECORD_EVERY {
             self.record().await?;
         }
+        Ok(())
+    }
+
+    /// Writes `item`, a pair of the outboard or a group of the blob, into the
+    /// partial blob.
+    async fn put(&mut self, item: Item) -> Result<(), BlobError> {
+        let [data, outboard, _] = partial_keys(&self.digest);
+        match item {
+            Item::Parent { node, pair } => {
+                if let Some(offset) = bao::pair_offset(&self.tree, node) {
+                    self.blob_dir
+                        .resolve(&outboard)?
+                        .write_at(offset, &pair)
+                        .await?;
+                }
+            }
+            Item::Group { offset, bytes } => {
+                self.blob_dir
+                    .resolve(&data)?
+                    .write_at(offset, &bytes)
+                    .await?;
+                self.kept.insert(offset / bao::GROUP);
+                self.unrecorded += bytes.len() as u64;
+            }
+        }
+        Ok(())
+    }
+
+    /// Makes the record of the partial blob name the size of this sink,
+    /// once its first group verified, before the sink writes a pair or a
+    /// group. The tree depends on the size, so a part of another size has
+    /// its pairs at other places of the outboard. Bao proves a size only
+    /// with the last group, so a group of the start verifies at more than
+    /// one size, and a part of the blob does not prove its size. So the size
+    /// whose group verified last wins: the part of another size goes, and a
+    /// sink of that size that still writes fails at its next record. The
+    /// pairs that it writes until then can sit at places of the new tree.
+    /// The encoder of a verified range checks each pair before it sends it,
+    /// so such an answer ends short there, and sends no wrong pair. A sink
+    /// whose size no group proved writes nothing, and binds no size.
+    async fn claim(&mut self) -> Result<(), BlobError> {
+        let [data, outboard, held] = partial_keys(&self.digest);
+        let blob_dir = self.blob_dir.clone();
+        let size = self.size;
+        let record = blob_dir.resolve(&held)?;
+        locked(&record, async || {
+            let ours = record
+                .read_optional()
+                .await?
+                .and_then(|bytes| Groups::decode(&bytes))
+                .is_some_and(|(held, _)| held == size);
+            if !ours {
+                blob_dir.resolve(&data)?.remove().await?;
+                blob_dir.resolve(&outboard)?.remove().await?;
+                record.write_atomic(&Groups::new().encode(size)).await?;
+            }
+            Ok::<_, BlobError>(())
+        })
+        .await?;
+        self.claimed = true;
         Ok(())
     }
 
@@ -432,8 +475,9 @@ impl RangeSink {
                     Some((held, groups)) if held == size => groups,
                     _ => {
                         return Err(BlobError::Storage(format!(
-                            "the record {} is not of a blob of {size} bytes",
-                            record.path()
+                            "an import of the blob {} at another size than {size} bytes took \
+                             the place of this one",
+                            blob_key(&digest)
                         )));
                     }
                 },
@@ -709,13 +753,19 @@ impl Provider<Usage> for FileSystem {
         let blob_dir = self.blob()?;
         let mut kept = 0u64;
         for name in blob_dir.list().await? {
-            if name.starts_with(STAGING) || name.ends_with(".lock") || name.ends_with(".tmp") {
+            // The outboard of a partial blob is sparse: what it keeps is the
+            // pairs that verify the groups of the record.
+            if name.starts_with(STAGING)
+                || name.ends_with(".lock")
+                || name.ends_with(".tmp")
+                || name.ends_with(&format!(".{PARTIAL}.{OUTBOARD}"))
+            {
                 continue;
             }
             let file = blob_dir.resolve(&name)?;
             if let Some(key) = name.strip_suffix(&format!(".{PARTIAL}")) {
                 // The bytes of a partial blob have holes: what it keeps is
-                // the groups that its record names.
+                // the groups that its record names, and their pairs.
                 let record = blob_dir.resolve(&format!("{key}.{HELD}"))?;
                 if let Some((size, groups)) = record
                     .read_optional()
@@ -726,7 +776,8 @@ impl Provider<Usage> for FileSystem {
                         .bytes(size)
                         .iter()
                         .map(|(start, end)| end - start)
-                        .sum::<u64>();
+                        .sum::<u64>()
+                        + groups.pairs(size);
                 }
                 continue;
             }
@@ -1049,9 +1100,23 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_refuses_an_import_at_another_size() {
+    async fn it_imports_a_blob_after_a_sink_of_another_size_kept_nothing() {
+        let fs = test_space("blob-partial-nothing").await;
+        crate::bao::conformance::it_imports_a_blob_after_a_sink_of_another_size_kept_nothing(
+            &fs,
+            &subject(),
+        )
+        .await;
+    }
+
+    #[dialog_common::test]
+    async fn it_holds_the_part_of_the_size_whose_group_verified_last() {
         let fs = test_space("blob-partial-size").await;
-        crate::bao::conformance::it_refuses_an_import_at_another_size(&fs, &subject()).await;
+        crate::bao::conformance::it_holds_the_part_of_the_size_whose_group_verified_last(
+            &fs,
+            &subject(),
+        )
+        .await;
     }
 
     #[dialog_common::test]

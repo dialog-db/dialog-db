@@ -152,19 +152,45 @@ struct MemoryRangeSink {
     size: u64,
     tree: bao_tree::BaoTree,
     decoder: Decoder,
+    /// Whether the partial blob is of the size of this sink: see the claim
+    /// of the file system store.
+    claimed: bool,
+    /// The items that verified before the first group.
+    pending: Vec<Item>,
     failed: bool,
 }
 
 impl MemoryRangeSink {
     /// Keeps `item`, and moves the blob to its place once the session holds
-    /// each group of it.
-    fn keep(&self, item: Item) {
+    /// each group of it. The items before the first group wait for it. Then
+    /// the sink claims the partial blob, as the file system store claims its
+    /// record: a part of another size goes, since a group of the start
+    /// verifies at more than one size.
+    fn keep(&mut self, item: Item) -> Result<(), BlobError> {
         let key = blob_key(&self.digest);
         let mut sessions = self.sessions.write();
         let session = sessions.entry(self.subject.clone()).or_default();
         if session.blobs.contains_key(&key) {
-            return;
+            return Ok(());
         }
+        let items = if self.claimed {
+            vec![item]
+        } else {
+            let group = matches!(item, Item::Group { .. });
+            self.pending.push(item);
+            if !group {
+                return Ok(());
+            }
+            if session
+                .partials
+                .get(&key)
+                .is_some_and(|partial| partial.size != self.size)
+            {
+                session.partials.remove(&key);
+            }
+            self.claimed = true;
+            std::mem::take(&mut self.pending)
+        };
         let partial = session
             .partials
             .entry(key.clone())
@@ -172,24 +198,28 @@ impl MemoryRangeSink {
                 size: self.size,
                 ..Partial::default()
             });
-        // A sink of another size that opened before the first group came
-        // keeps nothing: its pairs sit at other places.
         if partial.size != self.size {
-            return;
+            return Err(BlobError::Storage(format!(
+                "an import of the blob {key} at another size than {} bytes took the place of \
+                 this one",
+                self.size
+            )));
         }
-        match item {
-            Item::Parent { node, pair } => {
-                if let Some(offset) = bao::pair_offset(&self.tree, node) {
-                    partial.pairs.insert(offset, pair);
+        for item in items {
+            match item {
+                Item::Parent { node, pair } => {
+                    if let Some(offset) = bao::pair_offset(&self.tree, node) {
+                        partial.pairs.insert(offset, pair);
+                    }
                 }
-            }
-            Item::Group { offset, bytes } => {
-                partial.groups.insert(offset, bytes);
-                partial.held.insert(offset / bao::GROUP);
+                Item::Group { offset, bytes } => {
+                    partial.groups.insert(offset, bytes);
+                    partial.held.insert(offset / bao::GROUP);
+                }
             }
         }
         if !partial.held.covers(bao::groups(self.size)) {
-            return;
+            return Ok(());
         }
         let partial = session
             .partials
@@ -201,6 +231,7 @@ impl MemoryRangeSink {
             session.outboards.insert(key.clone(), outboard);
         }
         session.blobs.insert(key, blob);
+        Ok(())
     }
 }
 
@@ -208,8 +239,9 @@ impl MemoryRangeSink {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl BlobSink for MemoryRangeSink {
     async fn write_all(&mut self, bytes: &[u8]) -> Result<(), BlobError> {
+        let digest = blob_key(&self.digest);
         let unverified = |reason: String| BlobError::Unverified {
-            digest: blob_key(&self.digest),
+            digest: digest.clone(),
             reason,
         };
         if self.failed {
@@ -220,7 +252,12 @@ impl BlobSink for MemoryRangeSink {
         self.decoder.push(bytes);
         while let Some(item) = self.decoder.next_item() {
             match item {
-                Ok(item) => self.keep(item),
+                Ok(item) => {
+                    if let Err(error) = self.keep(item) {
+                        self.failed = true;
+                        return Err(error);
+                    }
+                }
                 Err(error) => {
                     self.failed = true;
                     return Err(unverified(error.to_string()));
@@ -400,21 +437,6 @@ impl Provider<ImportRange> for Volatile {
     async fn execute(&self, effect: Capability<ImportRange>) -> Result<BlobWriter, BlobError> {
         let (size, range) = (effect.size(), effect.range());
         let end = bao::group_range(size, range.offset, range.length).map_err(BlobError::Storage)?;
-        let subject: Did = effect.subject().into();
-        // A part of the blob at another size is of another tree, whose pairs
-        // sit at other places: the import is refused before it keeps any.
-        let other = self
-            .sessions
-            .read()
-            .get(&subject)
-            .and_then(|session| session.partials.get(&blob_key(effect.digest())))
-            .is_some_and(|partial| partial.size != size);
-        if other {
-            return Err(BlobError::Storage(format!(
-                "the store holds a part of the blob {} of another size than {size} bytes",
-                blob_key(effect.digest())
-            )));
-        }
         Ok(Box::new(MemoryRangeSink {
             sessions: self.sessions.clone(),
             subject: effect.subject().into(),
@@ -422,6 +444,8 @@ impl Provider<ImportRange> for Volatile {
             size,
             tree: bao::tree(size),
             decoder: Decoder::new(effect.digest(), size, range.offset, end),
+            claimed: false,
+            pending: Vec::new(),
             failed: false,
         }))
     }
@@ -694,10 +718,23 @@ mod tests {
     }
 
     #[dialog_common::test]
-    async fn it_refuses_an_import_at_another_size() {
+    async fn it_imports_a_blob_after_a_sink_of_another_size_kept_nothing() {
+        let subject = unique_subject("blob-partial-nothing");
+        crate::bao::conformance::it_imports_a_blob_after_a_sink_of_another_size_kept_nothing(
+            &Volatile::new(),
+            &subject,
+        )
+        .await;
+    }
+
+    #[dialog_common::test]
+    async fn it_holds_the_part_of_the_size_whose_group_verified_last() {
         let subject = unique_subject("blob-partial-size");
-        crate::bao::conformance::it_refuses_an_import_at_another_size(&Volatile::new(), &subject)
-            .await;
+        crate::bao::conformance::it_holds_the_part_of_the_size_whose_group_verified_last(
+            &Volatile::new(),
+            &subject,
+        )
+        .await;
     }
 
     #[dialog_common::test]

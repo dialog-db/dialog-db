@@ -588,6 +588,23 @@ impl Groups {
         self.0 = kept;
     }
 
+    /// The bytes of the pairs of hashes that verify these groups of a blob
+    /// of `size` bytes: of each parent on the path from the root to one of
+    /// them, once. A partial blob keeps these in its outboard.
+    pub fn pairs(&self, size: u64) -> u64 {
+        let mut ranges = ChunkRanges::empty();
+        for (start, end) in self.bytes(size) {
+            ranges |= chunk_ranges(size, start, end);
+        }
+        if ranges.is_empty() {
+            return 0;
+        }
+        let parents = ResponseIter::new(tree(size), ranges)
+            .filter(|chunk| matches!(chunk, BaoChunk::Parent { .. }))
+            .count();
+        parents as u64 * PAIR as u64
+    }
+
     /// The ranges of bytes of these groups, of a blob of `size` bytes.
     pub fn bytes(&self, size: u64) -> Vec<(u64, u64)> {
         self.0
@@ -942,6 +959,33 @@ pub(crate) mod conformance {
         P: Provider<ImportRange> + dialog_common::ConditionalSync,
     {
         let digest = Blake3Hash::from(*blake3::hash(bytes).as_bytes());
+        import_at(
+            store,
+            subject,
+            digest,
+            bytes.len() as u64,
+            start,
+            end,
+            encoded,
+        )
+        .await
+    }
+
+    /// Imports `encoded`, the encoding of the groups from `start` to `end`
+    /// of the blob `digest`, as a blob of `size` bytes, into `store`, in
+    /// pieces of 5000 bytes, and gives what the sink said.
+    pub async fn import_at<P>(
+        store: &P,
+        subject: &Subject,
+        digest: Blake3Hash,
+        size: u64,
+        start: u64,
+        end: u64,
+        encoded: &[u8],
+    ) -> Result<(), BlobError>
+    where
+        P: Provider<ImportRange> + dialog_common::ConditionalSync,
+    {
         let range = ByteRange {
             offset: start,
             length: Some(end - start),
@@ -951,7 +995,7 @@ pub(crate) mod conformance {
             .writer()
             .archive()
             .blob()
-            .import_range(digest, bytes.len() as u64, range)
+            .import_range(digest, size, range)
             .perform(store)
             .await?;
         let mut written = Ok(());
@@ -1154,56 +1198,129 @@ pub(crate) mod conformance {
         assert_eq!(held.ranges, [first, second]);
     }
 
-    /// An import of a blob at another size than the part that the store
-    /// holds is refused at once, and the part stays as it was.
-    pub async fn it_refuses_an_import_at_another_size<P>(store: &P, subject: &Subject)
+    /// The size and the ranges of the part of `digest` that `store` holds.
+    async fn holding<P>(
+        store: &P,
+        subject: &Subject,
+        digest: &Blake3Hash,
+    ) -> Option<(u64, Vec<(u64, u64)>)>
     where
-        P: Provider<ImportRange> + Provider<Held> + dialog_common::ConditionalSync,
+        P: Provider<Held> + dialog_common::ConditionalSync,
     {
-        let bytes = blob(6 * GROUP as usize);
-        let digest = Blake3Hash::from(*blake3::hash(&bytes).as_bytes());
-        import(
-            store,
-            subject,
-            &bytes,
-            0,
-            2 * GROUP,
-            &encoding(&bytes, 0, 2 * GROUP),
-        )
-        .await
-        .unwrap();
-
-        let range = ByteRange {
-            offset: 0,
-            length: Some(2 * GROUP),
-        };
-        let refused = subject
-            .clone()
-            .writer()
-            .archive()
-            .blob()
-            .import_range(digest.clone(), bytes.len() as u64 + 1, range)
-            .perform(store)
-            .await;
-
-        assert!(
-            matches!(refused, Err(BlobError::Storage(_))),
-            "{:?}",
-            refused.err()
-        );
-        let held = subject
+        subject
             .clone()
             .reader()
             .archive()
             .blob()
-            .held(digest)
+            .held(digest.clone())
             .perform(store)
             .await
             .unwrap()
+            .map(|held| (held.size, held.ranges))
+    }
+
+    /// A sink at a size whose tree has another depth, whose first group does
+    /// not verify, and a sink of another size that ends with nothing, bind no
+    /// size: an import at the size of the blob then keeps its groups.
+    pub async fn it_imports_a_blob_after_a_sink_of_another_size_kept_nothing<P>(
+        store: &P,
+        subject: &Subject,
+    ) where
+        P: Provider<ImportRange> + Provider<Held> + dialog_common::ConditionalSync,
+    {
+        let bytes = blob(6 * GROUP as usize);
+        let size = bytes.len() as u64;
+        let digest = Blake3Hash::from(*blake3::hash(&bytes).as_bytes());
+        let encoded = encoding(&bytes, 0, 2 * GROUP);
+        let range = ByteRange {
+            offset: 0,
+            length: Some(2 * GROUP),
+        };
+        let unused = subject
+            .clone()
+            .writer()
+            .archive()
+            .blob()
+            .import_range(digest.clone(), size + 7, range)
+            .perform(store)
+            .await
             .unwrap();
+        unused.finish().await.unwrap();
+
+        let refused = import_at(
+            store,
+            subject,
+            digest.clone(),
+            size / 2,
+            0,
+            2 * GROUP,
+            &encoded,
+        )
+        .await;
+        let none = holding(store, subject, &digest).await;
+        import(store, subject, &bytes, 0, 2 * GROUP, &encoded)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(refused, Err(BlobError::Unverified { .. })),
+            "{refused:?}"
+        );
+        assert_eq!(none, None, "a sink that kept nothing binds no size");
         assert_eq!(
-            (held.size, held.ranges),
-            (bytes.len() as u64, vec![(0, 2 * GROUP)])
+            holding(store, subject, &digest).await,
+            Some((size, vec![(0, 2 * GROUP)]))
+        );
+    }
+
+    /// Bao proves a size only with the last group, so the groups of the
+    /// start of a blob verify at two sizes whose trees have one shape. The
+    /// store holds the part of the size whose group verified last, so a
+    /// wrong size of an asset never stops the fetch of the blob at its
+    /// size for good.
+    pub async fn it_holds_the_part_of_the_size_whose_group_verified_last<P>(
+        store: &P,
+        subject: &Subject,
+    ) where
+        P: Provider<ImportRange> + Provider<Held> + dialog_common::ConditionalSync,
+    {
+        let bytes = blob(6 * GROUP as usize - 100);
+        let size = bytes.len() as u64;
+        let digest = Blake3Hash::from(*blake3::hash(&bytes).as_bytes());
+        let start = encoding(&bytes, 0, 2 * GROUP);
+
+        import(store, subject, &bytes, 0, 2 * GROUP, &start)
+            .await
+            .unwrap();
+        let first = holding(store, subject, &digest).await;
+        import_at(
+            store,
+            subject,
+            digest.clone(),
+            size + 1,
+            0,
+            2 * GROUP,
+            &start,
+        )
+        .await
+        .unwrap();
+        let wrong = holding(store, subject, &digest).await;
+        import(
+            store,
+            subject,
+            &bytes,
+            2 * GROUP,
+            4 * GROUP,
+            &encoding(&bytes, 2 * GROUP, 4 * GROUP),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first, Some((size, vec![(0, 2 * GROUP)])));
+        assert_eq!(wrong, Some((size + 1, vec![(0, 2 * GROUP)])));
+        assert_eq!(
+            holding(store, subject, &digest).await,
+            Some((size, vec![(2 * GROUP, 4 * GROUP)]))
         );
     }
 
@@ -1281,13 +1398,18 @@ pub(crate) mod conformance {
             after_whole,
             whole.len() as u64 + outboard_size(whole.len() as u64)
         );
-        // Two groups, at most the pairs of the whole outboard of the partial
-        // blob, and its record: far less than its size.
+        // Two groups, the pairs on their paths from the root, and at most a
+        // record: not the whole outboard of the partial blob.
+        let mut held = Groups::new();
+        held.insert(40);
+        held.insert(41);
+        let pairs = held.pairs(part.len() as u64);
         let kept = after_part - after_whole;
         assert!(
-            kept >= 2 * GROUP && kept <= 2 * GROUP + 64 + outboard_size(part.len() as u64),
+            kept >= 2 * GROUP + pairs && kept <= 2 * GROUP + pairs + 64,
             "{kept}"
         );
+        assert!(pairs <= 8 * PAIR as u64, "{pairs}");
     }
 
     /// The header and the rest of a verified read of `range` of the blob
