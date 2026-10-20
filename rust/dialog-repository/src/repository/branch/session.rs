@@ -3320,6 +3320,46 @@ mod rule_tests {
         Ok(())
     }
 
+    /// Two repositories opened through one environment share what rule
+    /// resolution decodes (a body decoded for one is not decoded again for
+    /// the other), but each assembles its own rule set, keyed by its own
+    /// lines' rules. The plan cache is shared the same way, through the
+    /// same environment-wide handle, but goes unobserved here: a
+    /// `PlanCache` offers no way to inspect its entries, and one added
+    /// for a test alone would widen `dialog-query`'s API.
+    #[dialog_common::test]
+    async fn it_shares_decoded_rules_between_repositories_but_not_rule_sets() -> anyhow::Result<()>
+    {
+        let (operator, profile) = test_session_with_peer().await;
+        let ours = test_repo(&operator, &profile).await;
+        let theirs = test_repo(&operator, &profile).await;
+        let (our_branch, alice) = branch_with_employee_rule(&operator, &ours).await?;
+        let (their_branch, _) = branch_with_employee_rule(&operator, &theirs).await?;
+        assert_eq!(
+            query_employees(&our_branch, &operator).await?,
+            vec![alice.clone()]
+        );
+
+        let rule = employee_from_person();
+        let entity = rule.try_this().expect("a compiled rule has an identity");
+        assert!(
+            their_branch
+                .rule_cache()
+                .body(&entity, &rule.encode())
+                .is_some(),
+            "the body our query decoded is theirs to reuse"
+        );
+        let concept = employee_descriptor().this();
+        assert_eq!(their_branch.rule_cache().spellings(&concept), 0);
+        assert_eq!(
+            query_employees(&their_branch, &operator).await?,
+            vec![alice]
+        );
+        assert_eq!(their_branch.rule_cache().spellings(&concept), 1);
+        assert_eq!(our_branch.rule_cache().spellings(&concept), 1);
+        Ok(())
+    }
+
     /// A transaction whose writes install no rule reads through the rule
     /// set a query of its branch assembled.
     #[dialog_common::test]

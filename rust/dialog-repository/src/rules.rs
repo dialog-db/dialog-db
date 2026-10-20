@@ -59,7 +59,7 @@ use dialog_query::{
     AttributeQuery, Cardinality, ConceptQuery, DeductiveRule, Descriptor, FormulaQuery,
     InductiveRule, Parameters, Premise, Proposition, Term, the,
 };
-use dialog_search_tree::Manifest;
+use dialog_search_tree::{Cache, Manifest};
 use parking_lot::RwLock;
 
 use crate::{Revision, schema};
@@ -441,6 +441,9 @@ fn projection_rule(conclusion: ConceptDescriptor, formula: FormulaQuery) -> Dedu
 #[derive(Debug, Default)]
 pub struct RuleCache {
     inner: RwLock<RuleCacheInner>,
+    /// What this cache shares with every other branch's in the
+    /// environment.
+    content: Arc<RuleContent>,
     /// How many assembled rule sets were served, so a test can tell a
     /// reuse from a rebuild.
     #[cfg(test)]
@@ -490,16 +493,6 @@ struct RuleCacheInner {
     /// attribute's `on:` entity and tagged with the head it was scanned
     /// at, so a head advance (commit/pull) re-scans it.
     derived: HashMap<Entity, (Revision, Vec<(Entity, Installed)>)>,
-    /// A rule's head re-spelled onto an attribute concept, keyed by
-    /// (rule entity, attribute concept entity). Both halves are
-    /// content-addressed, so an entry is never stale.
-    heads: HashMap<(Entity, Entity), DeductiveRule>,
-    /// Hydrated rule bodies, keyed by the rule entity and the hash of the
-    /// bytes they were decoded from. A body is looked up only with bytes
-    /// the reader read itself, so the cache decodes and never answers
-    /// whether a rule exists, and forged bytes under a known entity miss
-    /// it and fail their content-address check as they would cold.
-    bodies: HashMap<(Entity, Blake3Hash), DeductiveRule>,
     /// The committed trigger footprint, as of a branch head.
     footprint: Option<(Revision, TriggerFootprint)>,
     /// Committed inductive-rule entities watching an `on:` entity, as
@@ -508,8 +501,6 @@ struct RuleCacheInner {
     /// Committed deductive-rule entities whose bodies read an `on:`
     /// entity, as of a branch head.
     reads: HashMap<Entity, (Revision, Vec<Entity>)>,
-    /// Hydrated inductive bodies, keyed like `bodies`.
-    inductive: HashMap<(Entity, Blake3Hash), InductiveRule>,
     /// Whether a concept carries the committed `dialog.concept/transient`
     /// marker, as of a branch head.
     transient: HashMap<Entity, (Revision, bool)>,
@@ -533,12 +524,32 @@ struct RuleCacheInner {
     /// commit that changes none, as the head it minted; any other head
     /// is its own rules root.
     rules_root: Option<(Root, Root)>,
+}
+
+/// What rule resolution decodes and builds that is a pure function of
+/// content: shared by every branch's [`RuleCache`] in an environment
+/// (see [`HeldCaches`](crate::HeldCaches)), since no entry answers which
+/// rules a line holds. Each map is bounded.
+#[derive(Debug, Default)]
+pub(crate) struct RuleContent {
+    /// A rule's head re-spelled onto an attribute concept, keyed by
+    /// (rule entity, attribute concept entity). Both halves are
+    /// content-addressed, so an entry is never stale.
+    heads: Cache<(Entity, Entity), DeductiveRule>,
+    /// Hydrated rule bodies, keyed by the rule entity and the hash of the
+    /// bytes they were decoded from. A body is looked up only with bytes
+    /// the reader read itself, so the cache decodes and never answers
+    /// whether a rule exists, and forged bytes under a known entity miss
+    /// it and fail their content-address check as they would cold.
+    bodies: Cache<(Entity, Blake3Hash), DeductiveRule>,
+    /// Hydrated inductive bodies, keyed like `bodies`.
+    inductive: Cache<(Entity, Blake3Hash), InductiveRule>,
     /// A selecting concept's rule and covering rule, keyed by the
     /// concept, the attributes it reads as derived and the one source
     /// rule deriving them (if one). Pure functions of their key, so
     /// never stale; kept with the descriptor, whose field names the
     /// rule binds.
-    selecting: HashMap<SelectingKey, Selecting>,
+    selecting: Cache<SelectingKey, Selecting>,
 }
 
 /// How many spellings of one concept keep an assembled rule set each.
@@ -625,6 +636,15 @@ impl RuleCache {
         Self::default()
     }
 
+    /// A fresh cache for one branch, sharing `content` with the other
+    /// branches of its environment.
+    pub(crate) fn sharing(content: Arc<RuleContent>) -> Self {
+        Self {
+            content,
+            ..Self::default()
+        }
+    }
+
     /// Cached committed rule entities deriving the attribute `on`, each
     /// with when it was installed, if scanned at `head`; `None` if
     /// absent or stale.
@@ -648,16 +668,14 @@ impl RuleCache {
 
     /// The head of `rule` deriving the relation indexed by `attribute`, if recorded.
     pub(crate) fn head(&self, rule: &Entity, attribute: &Entity) -> Option<DeductiveRule> {
-        self.inner
-            .read()
+        self.content
             .heads
-            .get(&(rule.clone(), attribute.clone()))
-            .cloned()
+            .get_cached(&(rule.clone(), attribute.clone()))
     }
 
     /// Record the head of `rule` re-spelled onto `attribute`.
     pub(crate) fn record_head(&self, rule: Entity, attribute: Entity, head: DeductiveRule) {
-        self.inner.write().heads.insert((rule, attribute), head);
+        self.content.heads.insert((rule, attribute), head);
     }
 
     /// The rules root of the tree at `root`: the root a commit that
@@ -769,13 +787,11 @@ impl RuleCache {
         derived: &[Entity],
         sole: &Option<Entity>,
     ) -> Option<Selecting> {
-        let inner = self.inner.read();
         let key = (descriptor.this(), derived.to_vec(), sole.clone());
-        inner
+        self.content
             .selecting
-            .get(&key)
+            .get_cached(&key)
             .filter(|found| found.descriptor == *descriptor)
-            .cloned()
     }
 
     /// Record the selecting rules built for `descriptor`.
@@ -786,23 +802,20 @@ impl RuleCache {
         selecting: Selecting,
     ) {
         let key = (selecting.descriptor.this(), derived, sole);
-        self.inner.write().selecting.insert(key, selecting);
+        self.content.selecting.insert(key, selecting);
     }
 
     /// The body `rule` decoded to from `bytes`, if decoded before.
     pub(crate) fn body(&self, rule: &Entity, bytes: &[u8]) -> Option<DeductiveRule> {
-        self.inner
-            .read()
+        self.content
             .bodies
-            .get(&(rule.clone(), Blake3Hash::hash(bytes)))
-            .cloned()
+            .get_cached(&(rule.clone(), Blake3Hash::hash(bytes)))
     }
 
     /// Cache the body `rule` decoded to from `bytes`, once it was checked
     /// to be stored under its content address.
     pub(crate) fn record_body(&self, rule: Entity, bytes: &[u8], body: DeductiveRule) {
-        self.inner
-            .write()
+        self.content
             .bodies
             .insert((rule, Blake3Hash::hash(bytes)), body);
     }
@@ -854,18 +867,15 @@ impl RuleCache {
     /// The inductive body `rule` decoded to from `bytes`, if decoded
     /// before.
     pub(crate) fn inductive(&self, rule: &Entity, bytes: &[u8]) -> Option<InductiveRule> {
-        self.inner
-            .read()
+        self.content
             .inductive
-            .get(&(rule.clone(), Blake3Hash::hash(bytes)))
-            .cloned()
+            .get_cached(&(rule.clone(), Blake3Hash::hash(bytes)))
     }
 
     /// Cache the inductive body `rule` decoded to from `bytes`, once it
     /// was checked to be stored under its content address.
     pub(crate) fn record_inductive(&self, rule: Entity, bytes: &[u8], body: InductiveRule) {
-        self.inner
-            .write()
+        self.content
             .inductive
             .insert((rule, Blake3Hash::hash(bytes)), body);
     }
