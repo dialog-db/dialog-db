@@ -2,7 +2,7 @@
 
 mod credential_store;
 mod loader;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod native;
 mod router;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -26,7 +26,7 @@ use crate::provider::{Space, Volatile};
 use crate::resource::Pool;
 
 pub use credential_store::CredentialStore;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use native::NativeSpace;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub use web::{WebOpfsSpace, WebSpace};
