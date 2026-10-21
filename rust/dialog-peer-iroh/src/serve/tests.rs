@@ -6,6 +6,9 @@
 //! proving is that a peer performs exactly what was authorized and
 //! nothing else.
 
+#[cfg(target_arch = "wasm32")]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
 use super::*;
 use dialog_capability::{Ability, Principal};
 use dialog_common::{Buffer, Checksum};

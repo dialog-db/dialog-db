@@ -89,6 +89,9 @@ mod tests {
     //! Tests verifying that `#[derive(Site)]` produces the expected types
     //! and trait impls.
 
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
     use super::*;
     use dialog_capability::Subject;
     use dialog_capability::{Fork, Provider, SiteFork};

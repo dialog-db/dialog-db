@@ -8,6 +8,9 @@
 //! which iroh proves separately and which nothing in this crate can
 //! influence.
 
+#[cfg(target_arch = "wasm32")]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
 use super::*;
 use crate::channel::{Channel, ChannelError};
 use crate::helpers::Volatile;
