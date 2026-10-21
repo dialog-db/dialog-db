@@ -1,12 +1,14 @@
 use super::commit::session_delegation;
-use dialog_artifacts::history::RevisionRecord;
+use dialog_artifacts::history::{
+    Record as HistoryRecord, RevisionRecord, TreeHistory, Version, novelty,
+};
 use std::collections::BTreeSet;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::FromKey as _;
-use dialog_artifacts::history::Context;
+use dialog_artifacts::history::{Context, History as _};
 use dialog_artifacts::merge;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_capability::Provider;
@@ -14,12 +16,15 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
+use futures_util::TryStreamExt as _;
 use futures_util::future::{Either, join_all};
 
 use super::fetch::fetch_one;
 use super::migrate::aligned;
 use super::resolve::resolve;
+use crate::RemoteFallback;
 use crate::ResolveEnv;
+use crate::repository::archive::networked::Reads;
 use crate::repository::archive::persist;
 use crate::{
     Branch, Checkpoint, Index, NetworkedIndex, PublishError, PullError, Revision, TreeReference,
@@ -416,6 +421,43 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             .as_ref()
             .is_some_and(|theirs| merge::unacquainted(&local_context, theirs));
 
+        // Rival merges: two replicas that pulled each other at the same
+        // moment each minted a merge of the same history. The two hold
+        // the same data and differ only by their own revision records, so
+        // a merge of them matches neither tree, and minting it would hand
+        // the other side a new rival, round after round. Settle on the
+        // greater version instead, which both sides choose alike: the
+        // greater side keeps its head and advances only the sync base; the
+        // lesser adopts the greater head by its root, as a fast-forward
+        // does. The lesser merge holds no claim of its own, so dropping it
+        // loses nothing, and its version is never minted again: the next
+        // revision of its origin sits above the adopted head's edition.
+        if let Some(local) = &local_revision
+            && let Some(theirs) = &upstream_revision.context
+            && rival_merges(
+                branch,
+                &store,
+                (local, &local_context),
+                (&upstream_revision, theirs),
+            )
+            .await?
+        {
+            let new_revision = if upstream_revision.version() > local.version() {
+                contexts.insert(upstream_revision.version(), theirs.clone());
+                upstream_revision.clone()
+            } else {
+                local.clone()
+            };
+            return Ok(PreparedPull::Merged(Box::new(Merged {
+                branch,
+                head,
+                new_revision,
+                merges: upstream_revision.clone(),
+                sync: upstream.with_tree(upstream_revision.tree.clone()),
+                base,
+            })));
+        }
+
         // The upstream published its watermark with its head: two frugal
         // paths can short-circuit the tree merge entirely, both gated on
         // comparing the two contexts (O(#origins), no reads).
@@ -431,6 +473,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: current.clone(),
+                        merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
                     })));
@@ -454,6 +497,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     branch,
                     head,
                     new_revision: upstream_revision.clone(),
+                    merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
                 })));
@@ -677,6 +721,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: upstream_revision.clone(),
+                        merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
                     })));
@@ -686,6 +731,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: local.clone(),
+                        merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
                     })));
@@ -743,6 +789,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     branch,
                     head,
                     new_revision: revision,
+                    merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
                 })));
@@ -845,6 +892,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: upstream_revision.clone(),
+                        merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
                     })));
@@ -854,6 +902,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: local.clone(),
+                        merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
                     })));
@@ -915,6 +964,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     branch,
                     head,
                     new_revision: revision,
+                    merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
                 })));
@@ -1146,10 +1196,48 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             branch,
             head,
             new_revision,
+            merges: upstream_revision.clone(),
             sync: upstream.with_tree(upstream_revision.tree),
             base,
         })))
     }
+}
+
+/// Whether the local head and the upstream head are rival merges of one
+/// history: each is the one revision the other side has not seen, and
+/// both are merges. Their parents then summarize the same ancestry, so
+/// the two hold the same data.
+///
+/// The contexts decide most pulls at no reads; only a pair that passes
+/// them reads the two revision records, to tell a merge from a commit of
+/// its own claims, which two concurrent commits on a shared base would be.
+async fn rival_merges(
+    branch: &Branch,
+    store: &NetworkedIndex<'_, dyn Reads>,
+    (local, ours): (&Revision, &Context),
+    (upstream, theirs): (&Revision, &Context),
+) -> Result<bool, PullError> {
+    let (local_version, upstream_version) = (local.version(), upstream.version());
+    let one_apart = ours.divergence(theirs) == 1
+        && theirs.divergence(ours) == 1
+        && !theirs.observes(&local_version)
+        && !ours.observes(&upstream_version);
+    if !one_apart {
+        return Ok(false);
+    }
+    for (revision, version) in [(local, local_version), (upstream, upstream_version)] {
+        let record = TreeHistory::from_root_with_cache(
+            revision.tree.hash(),
+            store.clone(),
+            branch.node_cache(),
+        )
+        .revision_record(&version)
+        .await?;
+        if record.is_none_or(|record| record.parents.len() <= 1) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// A rebased pull awaiting its cell advance — the output of
@@ -1169,6 +1257,18 @@ pub enum PreparedPull<'a> {
     Merged(Box<Merged<'a>>),
 }
 
+/// One revision a pull brings in, as [`PreparedPull::novelty`] lists it.
+#[derive(Debug, Clone)]
+pub struct NewRevision {
+    /// The revision's version.
+    pub version: Version,
+    /// What the revision states about itself: its issuer, the authority it
+    /// names, and its parents. Verified against its version and signature.
+    pub record: RevisionRecord,
+    /// The claims the revision made, each an assertion or a retraction.
+    pub claims: Vec<HistoryRecord>,
+}
+
 /// The payload of a [`PreparedPull::Merged`] — a rebased merge ready to land.
 pub struct Merged<'a> {
     /// The branch whose cells the commit advances.
@@ -1179,6 +1279,10 @@ pub struct Merged<'a> {
     head: Checkpoint<Revision>,
     /// The merged revision to publish as the new head.
     new_revision: Revision,
+    /// The upstream revision this merge brings in: the head the prepare
+    /// fetched and verified, and the only one the commit adopts, however
+    /// far the upstream has moved since.
+    merges: Revision,
     /// The upstream entry just pulled from, its sync base already advanced
     /// to the tree merged in — the tracking state to upsert.
     sync: Upstream,
@@ -1198,6 +1302,85 @@ impl PreparedPull<'_> {
             PreparedPull::NoOp => None,
             PreparedPull::Merged(merged) => Some(&merged.new_revision),
         }
+    }
+
+    /// The upstream revision this pull merges, if any: the head the prepare
+    /// fetched and verified.
+    ///
+    /// The commit adopts this revision and no other. An upstream that moved
+    /// after the prepare is not followed: a caller that checks the
+    /// revisions up to this head (see [`novelty`](Self::novelty)) commits
+    /// exactly what it checked, and pulls again for the newer head.
+    pub fn upstream(&self) -> Option<&Revision> {
+        match self {
+            PreparedPull::NoOp => None,
+            PreparedPull::Merged(merged) => Some(&merged.merges),
+        }
+    }
+
+    /// The revisions this pull brings into the branch, ancestors first, each
+    /// with its record — its issuer, its authority, its parents — and the
+    /// claims it made: the upstream revisions from [`upstream`](Self::upstream)
+    /// back to what the branch already holds.
+    ///
+    /// For a caller that decides, before it [`commit`](Self::commit)s,
+    /// whether each new revision may enter the branch — checking the
+    /// authority each one names, say. The branch's own history decides what
+    /// is new: a revision the branch records needs no second look. A
+    /// revision of the upstream's history whose record is not present — a
+    /// head whose history the peer does not serve — fails the walk with
+    /// [`IncompleteHistory`](dialog_artifacts::DialogArtifactsError::IncompleteHistory),
+    /// where a history walk of [`log`](dialog_artifacts::history::log)
+    /// would skip it. Each record is verified as it is read, so a forged
+    /// one fails too.
+    ///
+    /// Reads that miss locally fall back to the upstream's peer, as the
+    /// prepare's own reads do. A no-op pull brings nothing, and neither
+    /// does one whose commit keeps the branch's head and advances only the
+    /// sync base: what the upstream holds then enters no history the
+    /// branch reads.
+    pub async fn novelty<Env>(&self, env: &Env) -> Result<Vec<NewRevision>, PullError>
+    where
+        Env: ResolveEnv,
+    {
+        let merged = match self {
+            PreparedPull::NoOp => return Ok(Vec::new()),
+            PreparedPull::Merged(merged) => merged,
+        };
+        let branch = merged.branch;
+        if branch.revision().map(|head| head.version()) == Some(merged.new_revision.version()) {
+            return Ok(Vec::new());
+        }
+        let upstream = TreeHistory::from_root_with_cache(
+            merged.merges.tree.hash(),
+            NetworkedIndex::new(env, branch.archive().index(), merged.sync.fallback()),
+            branch.node_cache(),
+        )
+        .with_record_cache(branch.records());
+        // What the branch holds is local, so its history reads nothing from
+        // the network.
+        let local = NetworkedIndex::new(env, branch.archive().index(), RemoteFallback::None);
+        let known = match branch.revision() {
+            Some(head) => {
+                TreeHistory::from_root_with_cache(head.tree.hash(), local, branch.node_cache())
+            }
+            None => TreeHistory::empty_with_cache(local, branch.node_cache()),
+        };
+        let novel = novelty(&merged.merges.version(), &upstream, &known).await?;
+        let mut revisions = Vec::with_capacity(novel.len());
+        for (version, record) in novel {
+            let claims = upstream
+                .select(version)
+                .map_ok(|(_, record)| record)
+                .try_collect()
+                .await?;
+            revisions.push(NewRevision {
+                version,
+                record,
+                claims,
+            });
+        }
+        Ok(revisions)
     }
 
     /// Phase two: advance the branch cells — the head to the merged revision
@@ -1234,6 +1417,7 @@ impl PreparedPull<'_> {
             new_revision,
             sync,
             base,
+            ..
         } = match self {
             PreparedPull::NoOp => return Ok(None),
             PreparedPull::Merged(merged) => *merged,
@@ -1312,6 +1496,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use super::PreparedPull;
     use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_peer::helpers::test_session_with_peer;
@@ -1672,6 +1857,82 @@ mod tests {
         Ok(())
     }
 
+    /// A prepared pull names the upstream head it merges, lists each
+    /// revision that head brings in — what the branch lacks, ancestors
+    /// first, with its issuer, its authority, and its claims — and its
+    /// commit adopts that head and no newer one, however far the upstream
+    /// moves meanwhile.
+    #[dialog_common::test]
+    async fn it_prepares_a_pull_of_one_named_head_and_lists_its_novelty() -> Result<()> {
+        use dialog_effects::authority::{Identify, OperatorExt as _};
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let assert = |entity: &str, name: &str| -> Result<Vec<Instruction>> {
+            Ok(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: entity.parse()?,
+                    is: Value::String(name.to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )])
+        };
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(assert("user:seed", "Seed")?))
+            .perform(&operator)
+            .await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature.pull().perform(&operator).await?;
+
+        main.commit(stream::iter(assert("user:two", "Two")?))
+            .perform(&operator)
+            .await?;
+        main.commit(stream::iter(assert("user:three", "Three")?))
+            .perform(&operator)
+            .await?;
+        let checked = main.revision().expect("main has a head");
+
+        let prepared = feature.pull().prepare(&operator).await?;
+
+        assert_eq!(prepared.upstream(), Some(&checked));
+        let novelty = prepared.novelty(&operator).await?;
+        assert_eq!(novelty.len(), 2, "the two commits the feature lacks");
+        assert_eq!(novelty[1].version, checked.version());
+        let identity = Identify.perform(&operator).await?;
+        for (revision, name) in novelty.iter().zip(["Two", "Three"]) {
+            assert_eq!(revision.record.issuer, operator.did().to_string());
+            assert_eq!(revision.record.authority, identity.profile().to_string());
+            assert!(
+                revision.claims.iter().any(|record| record.is_assertion()
+                    && record.claim().is == Value::String(name.to_string())),
+                "{name}: {:?}",
+                revision.claims
+            );
+        }
+
+        // The upstream moves on after the prepare: the commit still adopts
+        // the head that was checked.
+        main.commit(stream::iter(assert("user:four", "Four")?))
+            .perform(&operator)
+            .await?;
+        prepared.commit(&operator).await?;
+        assert_eq!(
+            feature.revision().expect("the feature has a head").tree,
+            checked.tree
+        );
+        assert_ne!(main.revision().expect("main has a head").tree, checked.tree);
+        // A no-op pull names nothing and brings nothing.
+        let noop = PreparedPull::NoOp;
+        assert!(noop.upstream().is_none());
+        assert!(noop.novelty(&operator).await?.is_empty());
+
+        Ok(())
+    }
+
     /// A no-op pull (upstream hasn't moved) prepares to `NoOp` and commits to
     /// `Ok(None)` without touching the cells.
     #[dialog_common::test]
@@ -1903,7 +2164,7 @@ mod tests {
 
 #[cfg(test)]
 mod history_tests {
-    use super::SMALL_DIVERGENCE;
+    use super::{PreparedPull, SMALL_DIVERGENCE};
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -2027,6 +2288,153 @@ mod history_tests {
             }
         }
         assert!(quiesced, "mutual pulls must reach a fixed point");
+        assert_eq!(
+            a.revision().map(|r| r.tree),
+            b.revision().map(|r| r.tree),
+            "both replicas converge on the same tree"
+        );
+        Ok(())
+    }
+
+    /// A pull from an upstream that moved, but only to what the branch has
+    /// seen already, keeps the branch's head and advances the sync base: it
+    /// brings nothing into the branch, so it names nothing new.
+    #[dialog_common::test]
+    async fn it_names_nothing_new_from_a_pull_that_keeps_its_head() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let a = repo.branch("a").open().perform(&operator).await?;
+        let b = repo.branch("b").open().perform(&operator).await?;
+
+        a.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Sword",
+        )]))
+        .perform(&operator)
+        .await?;
+        b.pull().from(&a).perform(&operator).await?;
+        a.pull().from(&b).perform(&operator).await?;
+        a.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Mace",
+        )]))
+        .perform(&operator)
+        .await?;
+        b.pull().from(&a).perform(&operator).await?;
+
+        let head = a.revision().map(|revision| revision.version());
+        let seen = a.pull().from(&b).prepare(&operator).await?;
+        assert!(
+            matches!(&seen, PreparedPull::Merged(merged) if Some(merged.new_revision.version()) == head),
+            "the pull keeps the branch's head"
+        );
+        assert!(
+            seen.novelty(&operator).await?.is_empty(),
+            "a pull that keeps its head brings nothing new"
+        );
+        Ok(())
+    }
+
+    /// Convergence when two replicas pull each other at the same moment:
+    /// each prepares its pull before the other's lands, so each mints a
+    /// merge of the same two heads. The two merges hold the same data but
+    /// differ by their own revision records, so a merge of them matches
+    /// neither tree. Unless the pull settles the two rivals on one head,
+    /// every round of simultaneous pulls mints two new merges, forever.
+    ///
+    /// A prepared pull names only what its commit brings into the branch:
+    /// the greater side of the settle keeps its head and brings nothing, and
+    /// the lesser side brings exactly the rival merge it adopts.
+    #[dialog_common::test]
+    async fn it_quiesces_after_simultaneous_mutual_pulls() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let a = repo.branch("a").open().perform(&operator).await?;
+        let b = repo.branch("b").open().perform(&operator).await?;
+
+        a.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Sword",
+        )]))
+        .perform(&operator)
+        .await?;
+        b.pull().from(&a).perform(&operator).await?;
+        a.pull().from(&b).perform(&operator).await?;
+
+        a.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Mace",
+        )]))
+        .perform(&operator)
+        .await?;
+
+        b.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Spear",
+        )]))
+        .perform(&operator)
+        .await?;
+
+        // Both prepare before either commits, so each mints a merge of the
+        // same two heads: two rival merges.
+        let into_a = a.pull().from(&b).prepare(&operator).await?;
+        let into_b = b.pull().from(&a).prepare(&operator).await?;
+        into_a.commit(&operator).await?;
+        into_b.commit(&operator).await?;
+
+        // The settle round: the greater merge's side keeps its head and the
+        // lesser side adopts the greater merge.
+        let (a_head, b_head) = (
+            a.revision().expect("a merged").version(),
+            b.revision().expect("b merged").version(),
+        );
+        assert_ne!(a_head, b_head, "the two sides hold rival merges");
+        let into_a = a.pull().from(&b).prepare(&operator).await?;
+        let into_b = b.pull().from(&a).prepare(&operator).await?;
+        let (greater, lesser, greater_head) = if a_head > b_head {
+            (&into_a, &into_b, a_head)
+        } else {
+            (&into_b, &into_a, b_head)
+        };
+        assert!(
+            greater.novelty(&operator).await?.is_empty(),
+            "the side that keeps its head brings nothing new"
+        );
+        let adopted = lesser.novelty(&operator).await?;
+        assert_eq!(
+            adopted
+                .iter()
+                .map(|revision| revision.version)
+                .collect::<Vec<_>>(),
+            vec![greater_head],
+            "the side that adopts the greater merge brings exactly that merge"
+        );
+        into_a.commit(&operator).await?;
+        into_b.commit(&operator).await?;
+
+        let mut quiesced = false;
+        for _ in 0..4 {
+            // Both prepare before either commits: the two pulls run at once.
+            let into_a = a.pull().from(&b).prepare(&operator).await?;
+            let into_b = b.pull().from(&a).prepare(&operator).await?;
+            let pulled_a = into_a.commit(&operator).await?;
+            let pulled_b = into_b.commit(&operator).await?;
+            if pulled_a.is_none() && pulled_b.is_none() {
+                quiesced = true;
+                break;
+            }
+        }
+        assert!(
+            quiesced,
+            "simultaneous mutual pulls must reach a fixed point"
+        );
         assert_eq!(
             a.revision().map(|r| r.tree),
             b.revision().map(|r| r.tree),

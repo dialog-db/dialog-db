@@ -312,6 +312,9 @@ pub struct PeerBuilder<K = Unset, St = Unset, M = Local> {
     /// The peer a session is built from, whose records of spaces it reads
     /// (see [`Inner::holder`]).
     holder: Option<Did>,
+    /// The replica a session writes as, when it is not the home (see
+    /// [`Inner::profile`]).
+    profile: Option<Did>,
     mode: PhantomData<M>,
 }
 
@@ -333,6 +336,7 @@ impl<M> PeerBuilder<Unset, Unset, M> {
             steps: Vec::new(),
             sites: None,
             holder: None,
+            profile: None,
             mode: PhantomData,
         }
     }
@@ -370,12 +374,34 @@ impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>, Session> {
             steps: Vec::new(),
             sites: Some(Arc::new(peer.clone())),
             holder: Some(peer.did()),
+            profile: None,
             mode: PhantomData,
         }
     }
 }
 
 impl<K, St, M> PeerBuilder<K, St, M> {
+    /// The replica this peer writes as: the profile that its revisions
+    /// name as their authority, and that every entity it writes derives
+    /// from. By default it is the home, the repository of the state branch.
+    ///
+    /// A peer that is given another space as its home, because that space
+    /// is the one storage it can reach, still writes as the replica whose
+    /// key delegated to it: a session of a persona that writes into a space
+    /// of that persona names the persona, and so does a device of a persona
+    /// whose state branch is in a repository of the device.
+    ///
+    /// The profile names the replica, not only the authority: what a branch
+    /// keeps about the replica it lives on derives from it too. A branch
+    /// opened by a peer given a profile keeps its metadata, its tracking
+    /// (the host its routes resolve under, and its upstreams), and its
+    /// records in the registry (the replica, and the branch it has active)
+    /// under the profile's replica of the repository, not under the home's.
+    pub fn profile(mut self, profile: Did) -> Self {
+        self.profile = Some(profile);
+        self
+    }
+
     /// Where the home repository's space lives: mounted at open, and
     /// created holding the home's public identity when it is not there
     /// yet, then checked to be the space the home names.
@@ -476,6 +502,7 @@ impl<St> PeerBuilder<PeerKey, St, Local> {
             steps: self.steps,
             sites: self.sites,
             holder: self.holder,
+            profile: self.profile,
             mode: PhantomData,
         }
     }
@@ -521,6 +548,7 @@ impl<St, M> PeerBuilder<Unset, St, M> {
             steps: self.steps,
             sites: self.sites,
             holder: self.holder,
+            profile: self.profile,
             mode: PhantomData,
         }
     }
@@ -555,6 +583,7 @@ impl<K, M, S: Clone> With<Storage<S>> for PeerBuilder<K, Unset, M> {
             steps: self.steps,
             sites: self.sites,
             holder: self.holder,
+            profile: self.profile,
             mode: PhantomData,
         }
     }
@@ -854,6 +883,7 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                 connections: Mutex::default(),
                 sites: self.sites,
                 holder,
+                profile: self.profile,
             },
         );
 
