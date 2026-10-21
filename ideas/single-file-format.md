@@ -85,6 +85,41 @@ not of the file.
 > well successive versions of a node actually compress against each
 > other. Direction 2 rests on that number, so measure it first.
 
+## Prior art
+
+The Dat DEPs are worth reading before spiking this, in particular
+[DEP-0004 HyperDB](https://www.datprotocol.com/deps/0004-hyperdb/). HyperDB
+keeps a key/value trie inside one append-only log. Each entry carries the
+trie pointers it changed and refers back to earlier entries by log index
+for everything else, so a node is never copied forward: the trie is
+spread over the log and realized by following pointers. That is the
+cross-node sharing I am after, done for tree structure rather than for
+tokens, and it is proof the realize-on-read model works at a database
+scale.
+
+Where the analogy breaks, and it breaks in the places that matter for us:
+
+- HyperDB addresses an entry by its position in a writer's log, not by
+  the hash of its content. Our contract is the opposite, a node is named
+  by the hash of its wire form and two replicas producing the same tree
+  produce the same names. The log position has no meaning outside its
+  feed.
+- Hypercore never removes anything. Deletions are tombstones that
+  "persist in the database forever" and there is no compaction in any
+  DEP. It answers none of direction 1.
+- The merkle tree over the log is Hypercore's, fixed by position, and
+  verification is of ranges of the log against a signed root. That is
+  the whole-file BAO idea, and it is the part worth borrowing as is.
+- One writer per feed. Multi-writer (DEP-0008) layers vector clocks over
+  several feeds. Our tree is deterministic across writers, so we do not
+  need that layer, but it also means none of their trie-merging applies.
+
+[DEP-0002 Hypercore](https://www.datprotocol.com/deps/0002-hypercore/) has
+the flat-tree layout and the hashing, and
+[DEP-0009](https://www.datprotocol.com/deps/0009-sleep-headers/) the SLEEP
+file headers. Neither specifies an on-disk body layout, so there is no
+file format to copy, only the idea.
+
 ## Goal
 
 Find out whether a single-file format can hold a replica at a fraction of
