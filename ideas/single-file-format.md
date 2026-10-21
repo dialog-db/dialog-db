@@ -39,6 +39,18 @@ is content-addressed and a peer can verify a byte range of it.
 > 160 KB written per commit of a couple of facts). A format that shares
 > bytes across node versions attacks the same thing from the other side.
 
+## Constraints
+
+Whatever the file does inside, the replication contract stays: one node is
+one block under its existing hash, every commit keeps a stable content
+address, and a push after a commit ships one small block. Three designs
+from the summer were rejected for bending this. Compaction can drop
+blocks, it cannot change what a block is.
+
+> 💭 The columnar node format is on main, but nobody has measured how
+> well successive versions of a node actually compress against each
+> other. Direction 2 rests on that number, so measure it first.
+
 ## Goal
 
 Find out whether a single-file format can hold a replica at a fraction of
