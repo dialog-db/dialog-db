@@ -254,10 +254,16 @@ nobody ever ran a read benchmark against it. It stored whole blocks, so it
 grew exactly like the directory it replaced. The index, footer and
 recovery design is still worth reusing.
 
-It is worth revisiting now for a reason that did not hold then. That
-spike predates the columnar segment encoding and the hitchhiker-style
-novelty buffers the tree has today. It stored whole opaque blocks, so
-the compression wins this idea rests on, tokens shared across nodes and
-frames that are mostly offsets, were not even testable. Now the tree
-already tokenizes within a node, and the question of doing it across the
-whole file is one we can actually measure.
+Space was not that spike's goal. It asked what if a replica were one
+file, the way SQLite is one file, and once it fell behind the block
+store on speed there was not much value left in answering. It also
+predates the columnar segment encoding and the hitchhiker-style novelty
+buffers the tree has today. It stored whole opaque blocks, so the
+compression this idea rests on, tokens shared across nodes and frames
+that are mostly offsets, was not even testable then.
+
+This time the value is space, and the columnar encoding is what makes
+the gain plausible rather than hoped for. Speed is a constraint, not the
+promise. I do not expect it to be faster out of the gate, though with
+enough effort on it there is no reason it could not end up faster than
+what we have today.
