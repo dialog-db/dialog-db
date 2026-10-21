@@ -1358,6 +1358,69 @@ mod tests {
         Ok(())
     }
 
+    /// A boot statement set on a head stays as it was set: a push publishes
+    /// it on the upstream's head, a branch that pulls with nothing of its
+    /// own takes it with the head, and a reload reads it back.
+    #[dialog_common::test]
+    async fn it_keeps_the_boot_statement_of_a_head_through_push_and_pull() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:1".parse()?,
+                    is: Value::String("Alice".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
+            .perform(&operator)
+            .await?;
+
+        let statement = vec![0xb0; 200];
+        let mut head = feature.revision().expect("feature has a head");
+        head.boot = Some(statement.clone());
+        feature.reset(head.clone()).perform(&operator).await?;
+        let reloaded = repo.branch("feature").load().perform(&operator).await?;
+        let stored = reloaded.revision().expect("feature has a head");
+        assert_eq!(stored.boot.as_deref(), Some(&statement[..]));
+        stored.verify()?;
+
+        feature.push().perform(&operator).await?;
+        let published = repo
+            .branch("main")
+            .load()
+            .perform(&operator)
+            .await?
+            .revision()
+            .expect("main has a head");
+        assert_eq!(
+            published.boot.as_deref(),
+            Some(&statement[..]),
+            "a push publishes it"
+        );
+
+        let follower = repo.branch("follower").open().perform(&operator).await?;
+        follower.set_upstream(&main).perform(&operator).await?;
+        follower.pull().perform(&operator).await?;
+        assert_eq!(
+            follower
+                .revision()
+                .expect("follower has a head")
+                .boot
+                .as_deref(),
+            Some(&statement[..]),
+            "a pull with nothing of its own takes it"
+        );
+
+        Ok(())
+    }
+
     /// Pushing a spilling value ships its block to the local upstream, a
     /// spilled value shared by many facts ships once, and a re-push with
     /// nothing new is a no-op (no re-upload).

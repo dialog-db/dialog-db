@@ -2946,6 +2946,7 @@ mod history_tests {
             edition: Edition::GENESIS,
             context: None,
             signature: Vec::new(),
+            boot: None,
         };
         evil.reset(forged).perform(&operator).await?;
 

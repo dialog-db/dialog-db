@@ -134,6 +134,19 @@ pub struct Revision {
     /// root is only final at publish time) — see [`Revision::verify`].
     #[serde(default, with = "serde_bytes")]
     pub signature: Vec<u8>,
+
+    /// A statement about what the branch is run with, which the host of
+    /// the replica that holds the head puts there, when it says. Dialog DB
+    /// keeps its bytes as they are when it stores, publishes, and fetches
+    /// the head, and does not judge them: the host signs and checks its
+    /// own form. The head's signature does not cover it (it is not part of
+    /// [`Revision::payload`]), so a host can set it on a head that a
+    /// session signed, and a reader that predates the field decodes and
+    /// verifies the head as it always did. A head minted by
+    /// [`Revision::new`], [`Revision::advance`], or [`Revision::merge`]
+    /// carries none.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
+    pub boot: Option<Vec<u8>>,
 }
 
 impl Revision {
@@ -147,6 +160,7 @@ impl Revision {
             edition: Edition::GENESIS,
             context: None,
             signature: Vec::new(),
+            boot: None,
         }
     }
 
@@ -171,6 +185,7 @@ impl Revision {
             edition: self.edition.successor(),
             context: None,
             signature: Vec::new(),
+            boot: None,
         }
     }
 
@@ -197,6 +212,7 @@ impl Revision {
             edition: self.edition.max(upstream.edition).successor(),
             context: None,
             signature: Vec::new(),
+            boot: None,
         }
     }
 
@@ -553,5 +569,81 @@ mod tests {
         assert_eq!(first.precedence(&second), Precedence::Before);
         assert_eq!(first.precedence(&first.clone()), Precedence::Same);
         assert_eq!(second.precedence(&other), Precedence::Concurrent);
+    }
+
+    /// The head as a reader that predates the boot field knows it.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct HeadBefore {
+        branch: Entity,
+        issuer: Did,
+        tree: TreeReference,
+        edition: Edition,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<Context>,
+        #[serde(default, with = "serde_bytes")]
+        signature: Vec<u8>,
+    }
+
+    /// A head carries a boot statement that its signature does not cover:
+    /// the statement leaves the payload as it was, the head verifies with
+    /// it, and it survives the wire byte for byte.
+    #[test]
+    fn it_carries_a_boot_statement_that_its_signature_does_not_cover() {
+        let head = signed_head(&key(1), |_| {});
+        let mut carrying = head.clone();
+        carrying.boot = Some(vec![0x5a; 160]);
+
+        assert_eq!(carrying.payload(), head.payload());
+        carrying.verify().unwrap();
+
+        let bytes = serde_ipld_dagcbor::to_vec(&carrying).unwrap();
+        let read: Revision = serde_ipld_dagcbor::from_slice(&bytes).unwrap();
+        assert_eq!(read, carrying);
+        assert_eq!(serde_ipld_dagcbor::to_vec(&read).unwrap(), bytes);
+        read.verify().unwrap();
+    }
+
+    /// A reader from before the field decodes a head that carries one as
+    /// the head it always read, and its signature verifies; a head from a
+    /// writer before the field reads as one with no statement.
+    #[test]
+    fn it_lets_a_reader_from_before_ignore_a_boot_statement() {
+        let head = signed_head(&key(1), |_| {});
+        let mut carrying = head.clone();
+        carrying.boot = Some(vec![1, 2, 3]);
+
+        let before: HeadBefore =
+            serde_ipld_dagcbor::from_slice(&serde_ipld_dagcbor::to_vec(&carrying).unwrap())
+                .unwrap();
+        Revision {
+            branch: before.branch.clone(),
+            issuer: before.issuer.clone(),
+            tree: before.tree.clone(),
+            edition: before.edition,
+            context: before.context.clone(),
+            signature: before.signature.clone(),
+            boot: None,
+        }
+        .verify()
+        .unwrap();
+
+        let read: Revision =
+            serde_ipld_dagcbor::from_slice(&serde_ipld_dagcbor::to_vec(&before).unwrap()).unwrap();
+        assert_eq!(read, head);
+        assert_eq!(read.boot, None);
+    }
+
+    /// A head that a commit or a merge mints carries no statement: the
+    /// host puts one on each head it holds.
+    #[test]
+    fn it_mints_heads_with_no_boot_statement() {
+        let mut head = genesis(&key(1));
+        head.boot = Some(vec![9]);
+        let tree = TreeReference::from([8u8; 32]);
+        let branch: Entity = "branch:opaque".parse().unwrap();
+        let next = head.advance(tree.clone(), branch.clone(), did_of(&key(1)));
+        assert_eq!(next.boot, None);
+        let merged = next.merge(&head, tree, branch, did_of(&key(2)));
+        assert_eq!(merged.boot, None);
     }
 }
