@@ -14,6 +14,10 @@
 //! cargo test -p dialog-repository --release --features integration-tests \
 //!     read_amplification -- --ignored --nocapture
 //! ```
+//!
+//! The causal context's own weight, by how many origins a head's
+//! ancestry includes, is measured by `context_cost_by_origins` the same
+//! way (`DIALOG_RA_MAX_ORIGINS` caps its sweep).
 
 use std::env;
 use std::time::Instant;
@@ -452,6 +456,133 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
          canonical {canonical_ms}ms | buffered-per-batch {per_batch_ms}ms | \
          buffered-deferred-flush {deferred_ms}ms |"
     );
+    Ok(())
+}
+
+/// What a head whose ancestry includes `origins` one-commit origins
+/// costs: the head on the wire and under the signature, a commit on top
+/// of it, the memo entry it occupies, and the block reads of the two
+/// frugal pulls (fast-forward and nothing-new) that every device runs.
+///
+/// The origins are minted the way a passing participant mints one: a
+/// branch adopts the previous branch's head and commits once, so each
+/// branch is one more `(branch, issuer)` origin and no merge revision
+/// dilutes the count.
+async fn measure_origins(origins: usize) -> Result<()> {
+    use std::mem::size_of;
+
+    use dialog_artifacts::history::{Origin, Watermark};
+
+    let (operator, profile) = test_session_with_peer().await;
+    let env = Counting::new(operator);
+    let repo = profile
+        .space(unique_name("bench"))
+        .open()
+        .perform(&env)
+        .await?;
+
+    let mut previous: Option<crate::Branch> = None;
+    for i in 0..origins {
+        let writer = repo
+            .branch(format!("writer-{i}"))
+            .open()
+            .perform(&env)
+            .await?;
+        if let Some(previous) = &previous {
+            writer.pull().from(previous).perform(&env).await?;
+        }
+        writer
+            .commit(stream::iter(vec![assert_fact(i, "origin")]))
+            .perform(&env)
+            .await?;
+        previous = Some(writer);
+    }
+    let last = previous.expect("at least one origin");
+
+    // The branch under measurement starts from the last writer's head and
+    // commits on top of it.
+    let main = repo.branch("main").open().perform(&env).await?;
+    main.pull().from(&last).perform(&env).await?;
+    main.commit(stream::iter(vec![assert_fact(origins, "main")]))
+        .perform(&env)
+        .await?;
+
+    const COMMITS: usize = 100;
+    let started = Instant::now();
+    for i in 0..COMMITS {
+        main.commit(stream::iter(vec![assert_fact(origins + 1 + i, "measure")]))
+            .perform(&env)
+            .await?;
+    }
+    let commit_ms = started.elapsed().as_secs_f64() * 1_000.0 / COMMITS as f64;
+
+    let head = main.revision().expect("main has a head");
+    let published = head
+        .context
+        .clone()
+        .map(|context| context.len())
+        .unwrap_or(0);
+    let encoded = serde_ipld_dagcbor::to_vec(&head)?.len();
+    let payload = head.payload().len();
+    let memo = main
+        .contexts()
+        .cached(&head.version())
+        .await
+        .map(|context| context.len())
+        .unwrap_or(0);
+    // A lower bound: the entries alone, without the map's node overhead.
+    let memo_bytes = memo * (size_of::<Origin>() + size_of::<Watermark>());
+
+    let feature = repo.branch("feature").open().perform(&env).await?;
+    feature.set_upstream(&main).perform(&env).await?;
+    feature.pull().perform(&env).await?;
+    main.commit(stream::iter(vec![assert_fact(origins + COMMITS + 1, "ff")]))
+        .perform(&env)
+        .await?;
+    env.reset();
+    feature.pull().perform(&env).await?;
+    let ff_reads = env.block_reads();
+    // Nothing new: the upstream moves, but only to a head we already
+    // hold (it adopts our commit).
+    feature
+        .commit(stream::iter(vec![assert_fact(
+            origins + COMMITS + 2,
+            "noop",
+        )]))
+        .perform(&env)
+        .await?;
+    main.pull().from(&feature).perform(&env).await?;
+    env.reset();
+    feature.pull().perform(&env).await?;
+    let noop_reads = env.block_reads();
+
+    println!(
+        "| {origins:>6} | {published:>9} | {encoded:>10} | {payload:>13} | {commit_ms:>9.2} | \
+         {memo_bytes:>14} | {ff_reads:>8} | {noop_reads:>10} |"
+    );
+    Ok(())
+}
+
+/// Prints, per origin count, what the published causal context costs.
+/// `#[ignore]`d: a measurement, not an assertion; see the module docs.
+#[dialog_common::test]
+#[ignore]
+async fn context_cost_by_origins() -> Result<()> {
+    let cap: usize = env::var("DIALOG_RA_MAX_ORIGINS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(10_000);
+    println!(
+        "| origins | published | head bytes | payload bytes | commit ms | \
+         memo bytes (≥) | ff reads | noop reads |"
+    );
+    println!(
+        "|---------|-----------|------------|---------------|-----------|\
+         ----------------|----------|------------|"
+    );
+    for origins in [10, 1_000, 10_000].into_iter().filter(|n| *n <= cap) {
+        measure_origins(origins).await?;
+    }
     Ok(())
 }
 
