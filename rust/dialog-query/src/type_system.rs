@@ -26,7 +26,8 @@ pub mod wire;
 use crate::artifact::Type as ValueType;
 use crate::artifact::Value;
 use crate::artifact::{decode_value, encode_value_owned};
-use serde::{Deserialize, Serialize};
+use serde::de::Error as DeError;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fmt::{Display, Formatter, Result as FmtResult};
@@ -122,6 +123,14 @@ impl Primitive {
             | Self::bit_for(ValueType::Float),
     };
 
+    /// The numeric primitives a result that may be negative or have a
+    /// fraction can take: `SignedInt`, `Float`. The bound of a formula
+    /// output declared signed (`math/difference`'s `is`): a natural
+    /// minus a natural is an integer.
+    pub const SIGNED_NUMERIC: Self = Self {
+        bits: Self::bit_for(ValueType::SignedInt) | Self::bit_for(ValueType::Float),
+    };
+
     /// String-like primitives: `String`, `Symbol`.
     pub const STRING_LIKE: Self = Self {
         bits: Self::bit_for(ValueType::String) | Self::bit_for(ValueType::Symbol),
@@ -165,6 +174,16 @@ impl Primitive {
             ValueType::Entity => 1 << 6,
             ValueType::Symbol => 1 << 7,
             ValueType::Record => 1 << 8,
+            // Any number: all three number types.
+            ValueType::Number => (1 << 2) | (1 << 3) | (1 << 4),
+            // A sized number type is a member of its storage type.
+            ValueType::U8 | ValueType::U16 | ValueType::U32 | ValueType::U64 | ValueType::U128 => {
+                1 << 2
+            }
+            ValueType::I8 | ValueType::I16 | ValueType::I32 | ValueType::I64 | ValueType::I128 => {
+                1 << 3
+            }
+            ValueType::F32 | ValueType::F64 => 1 << 4,
         }
     }
 
@@ -200,6 +219,13 @@ impl Primitive {
             None
         } else {
             Some(merged)
+        }
+    }
+
+    /// This set without the members of `other`. May be empty.
+    pub fn without(self, other: Self) -> Self {
+        Self {
+            bits: self.bits & !other.bits,
         }
     }
 
@@ -262,7 +288,13 @@ impl From<ValueType> for Primitive {
 }
 
 impl From<ValueType> for Type {
+    /// A sized number type is any number read through the view: its
+    /// membership is every number type, so views over different storage
+    /// types meet (`natural:16` and `integer:8` read 0 to 127), and the view filters.
     fn from(vt: ValueType) -> Self {
+        if vt.is_view() {
+            return Type::Refined(Primitive::NUMERIC, Refinement::view(vt));
+        }
         Type::Primitive(Primitive::singleton(vt))
     }
 }
@@ -366,6 +398,67 @@ pub struct Refinement {
     /// the attribute string alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_shape: Option<NameShape>,
+    /// sized number types (`natural:8` .. `float:64`) the value is read through,
+    /// all of them: a row is read through each, which filters what is
+    /// out of its range and rounds what it reads less precisely, and is
+    /// admitted when each holds what it reads. The meet unions the set
+    /// (a `natural:16` field joined with an `integer:8` one reads 0 to 127), and a
+    /// view another in the set nests in is dropped.
+    #[serde(default, skip_serializing_if = "Views::is_empty")]
+    pub views: Views,
+}
+
+/// A set of sized number types (`natural:8` .. `float:64`), one bit each, so a
+/// refinement carrying them stays small.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Views(u16);
+
+impl Views {
+    fn bit(view: ValueType) -> u16 {
+        debug_assert!(view.is_view());
+        1 << (u8::from(view) - u8::from(ValueType::U8))
+    }
+
+    /// Whether the set holds no view.
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
+    /// The views, in type order.
+    pub fn iter(&self) -> impl Iterator<Item = ValueType> + '_ {
+        ValueType::ALL
+            .into_iter()
+            .filter(|view| view.is_view() && self.0 & Self::bit(*view) != 0)
+    }
+}
+
+impl FromIterator<ValueType> for Views {
+    fn from_iter<I: IntoIterator<Item = ValueType>>(views: I) -> Self {
+        Views(
+            views
+                .into_iter()
+                .fold(0, |bits, view| bits | Self::bit(view)),
+        )
+    }
+}
+
+impl Serialize for Views {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter())
+    }
+}
+
+impl<'de> Deserialize<'de> for Views {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let views = Vec::<ValueType>::deserialize(deserializer)?;
+        if let Some(view) = views.iter().find(|view| !view.is_view()) {
+            return Err(DeError::custom(format!(
+                "`{}` is not a sized number type",
+                view.uri()
+            )));
+        }
+        Ok(views.into_iter().collect())
+    }
 }
 
 /// An interval over a single COMPARABLE value type, proved by
@@ -548,6 +641,27 @@ impl Refinement {
         }
     }
 
+    fn view(view: ValueType) -> Refinement {
+        Refinement {
+            views: Views::from_iter([view]),
+            ..Refinement::default()
+        }
+    }
+
+    /// `views` without the ones another in the set nests in: reading
+    /// through `natural:8` already holds whatever `natural:16` would.
+    fn narrowest(views: impl IntoIterator<Item = ValueType>) -> Views {
+        let views: Views = views.into_iter().collect();
+        views
+            .iter()
+            .filter(|view| {
+                !views
+                    .iter()
+                    .any(|other| other != *view && other.nests_in(*view))
+            })
+            .collect()
+    }
+
     /// True when the refinement constrains nothing — the shape the
     /// constructors collapse to an unrefined type.
     fn is_empty(&self) -> bool {
@@ -555,6 +669,7 @@ impl Refinement {
             && self.conforms.is_empty()
             && self.interval.is_none()
             && self.name_shape.is_none()
+            && self.views.is_empty()
     }
 
     /// Meet: the conjunction of both constraints. Two prefixes are
@@ -590,11 +705,13 @@ impl Refinement {
             (Some(a), Some(b)) if a != b => return None,
             (a, b) => a.or(b),
         };
+        let views = Self::narrowest(self.views.iter().chain(other.views.iter()));
         Some(Refinement {
             prefix,
             conforms,
             interval,
             name_shape,
+            views,
         })
     }
 
@@ -632,11 +749,25 @@ impl Refinement {
         let name_shape = self
             .name_shape
             .filter(|shape| other.name_shape == Some(*shape));
+        // The join reads what either side reads: each view of one side
+        // the other side's views all nest in, or the wider of a pair.
+        let views = Self::narrowest(self.views.iter().flat_map(|mine| {
+            other.views.iter().filter_map(move |theirs| {
+                if mine.nests_in(theirs) {
+                    Some(theirs)
+                } else if theirs.nests_in(mine) {
+                    Some(mine)
+                } else {
+                    None
+                }
+            })
+        }));
         let joined = Refinement {
             prefix,
             conforms,
             interval,
             name_shape,
+            views,
         };
         if joined.is_empty() {
             None
@@ -664,9 +795,14 @@ impl Refinement {
             (Some(_), None) => false,
             (None, _) => true,
         };
+        let views_implied = self
+            .views
+            .iter()
+            .all(|mine| other.views.iter().any(|theirs| theirs.nests_in(mine)));
         prefix_implied
             && interval_implied
             && shape_implied
+            && views_implied
             && self.conforms.is_subset(&other.conforms)
     }
 
@@ -697,7 +833,7 @@ impl Refinement {
                 return false;
             }
         }
-        true
+        self.views.iter().all(|view| view.holds(value))
     }
 }
 
@@ -724,6 +860,13 @@ impl Display for Refinement {
                 write!(f, " & ")?;
             }
             write!(f, "conforms-to {concept}")?;
+            separate = true;
+        }
+        for view in self.views.iter() {
+            if separate {
+                write!(f, " & ")?;
+            }
+            write!(f, "viewed-as {}", view.uri())?;
             separate = true;
         }
         if let Some(interval) = &self.interval {
@@ -779,6 +922,39 @@ impl Type {
             Type::Primitive(p) => Type::Primitive(p.union(Primitive::NOTHING)),
             Type::Refined(p, r) => Type::Refined(p.union(Primitive::NOTHING), r),
         }
+    }
+
+    /// `value` as this type reads it, or `None` when the type does not
+    /// admit it. A number of a type this one does not list is read through
+    /// the number type it does list, as [`Value::viewed_as`] reads it: a
+    /// natural field sees an integer `5` as the natural `5`, and does not
+    /// see `-3`. Every other value is admitted as it is or not at all.
+    pub fn view(&self, value: Value) -> Option<Value> {
+        let mut value = value;
+        if let Type::Refined(_, refinement) = self {
+            for view in refinement.views.iter() {
+                value = value.viewed_as(view)?;
+            }
+        }
+        let primitive = self.primitive_part();
+        let value = if primitive.contains(value.data_type()) || !value.data_type().is_number() {
+            value
+        } else {
+            [
+                ValueType::SignedInt,
+                ValueType::UnsignedInt,
+                ValueType::Float,
+            ]
+            .into_iter()
+            .filter(|number| primitive.contains(*number))
+            .find_map(|number| {
+                value
+                    .clone()
+                    .viewed_as(number)
+                    .filter(|viewed| viewed.data_type() == number)
+            })?
+        };
+        self.admits(&value).then_some(value)
     }
 
     /// True when the given runtime value inhabits this type: the
@@ -928,6 +1104,54 @@ impl Type {
         }
     }
 
+    /// Whether this type's interval proves every number it admits is
+    /// not negative: a lower bound of `>= b` with `b > -1`, or `> b`
+    /// with `b >= -1`. Integers above such a bound are naturals.
+    pub fn proves_non_negative(&self) -> bool {
+        let Some(interval) = self.refinement().and_then(|r| r.interval.as_deref()) else {
+            return false;
+        };
+        let Some(lower) = &interval.lower else {
+            return false;
+        };
+        let Some((bound, _)) = decode_value(interval.value_type, &lower.encoded) else {
+            return false;
+        };
+        match bound {
+            Value::UnsignedInt(_) => true,
+            Value::SignedInt(bound) => {
+                if lower.inclusive {
+                    bound > -1
+                } else {
+                    bound >= -1
+                }
+            }
+            Value::Float(bound) => {
+                if lower.inclusive {
+                    bound > -1.0
+                } else {
+                    bound >= -1.0
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// This type as the number band reads it: an integer the type's
+    /// interval proves non-negative (`?n >= 0`) is a natural, since
+    /// every non-negative number reads as one. A float stays a float,
+    /// a type without such a bound is returned as it is.
+    pub fn normalized(self) -> Type {
+        let membership = self.primitive_part();
+        if !membership.contains(ValueType::SignedInt) || !self.proves_non_negative() {
+            return self;
+        }
+        let narrowed = membership
+            .without(Primitive::singleton(ValueType::SignedInt))
+            .union(Primitive::singleton(ValueType::UnsignedInt));
+        self.with_primitive_part(narrowed)
+    }
+
     /// Rebuild this type around a replacement primitive part,
     /// preserving its refinement structure. The unifier uses this
     /// so a resolution that narrows membership does not silently
@@ -1031,6 +1255,76 @@ mod tests {
     }
     fn o(vt: ValueType) -> Type {
         Type::from(vt).optional()
+    }
+
+    /// The band reads an integer a lower bound proves non-negative as
+    /// a natural: `>= 0`, `> -1` and `>= -0.5` prove it, `>= -1`,
+    /// `> -2` and an upper bound do not. A float keeps its type under
+    /// every bound, and a natural is one already.
+    #[dialog_common::test]
+    fn it_reads_a_non_negative_integer_as_a_natural() {
+        let integer = Type::from(ValueType::SignedInt);
+        let natural = Type::from(ValueType::UnsignedInt);
+        let proving: [(Value, bool); 4] = [
+            (Value::UnsignedInt(0), true),
+            (Value::SignedInt(0), true),
+            (Value::SignedInt(-1), false),
+            (Value::Float(-0.5), true),
+        ];
+        for (bound, inclusive) in proving {
+            let bounded = integer
+                .clone()
+                .with_interval(&bound, inclusive, true)
+                .expect("an integer admits an interval");
+            assert!(
+                bounded.proves_non_negative(),
+                "{bounded} proves non-negative"
+            );
+            let narrowed = bounded.clone().normalized();
+            assert_eq!(
+                narrowed.primitive_part(),
+                natural.primitive_part(),
+                "{bounded} reads as a natural"
+            );
+            assert_eq!(
+                narrowed.refinement(),
+                bounded.refinement(),
+                "the bound is kept"
+            );
+        }
+        let leaving: [(Value, bool, bool); 3] = [
+            (Value::SignedInt(-1), true, true),
+            (Value::SignedInt(-2), false, true),
+            (Value::SignedInt(10), true, false),
+        ];
+        for (bound, inclusive, lower) in leaving {
+            let bounded = integer
+                .clone()
+                .with_interval(&bound, inclusive, lower)
+                .expect("an integer admits an interval");
+            assert!(
+                !bounded.proves_non_negative(),
+                "{bounded} admits a negative"
+            );
+            assert_eq!(
+                bounded.clone().normalized(),
+                bounded,
+                "{bounded} stays an integer"
+            );
+        }
+        let float = Type::from(ValueType::Float)
+            .with_interval(&Value::UnsignedInt(0), true, true)
+            .expect("a float admits an interval");
+        assert_eq!(float.clone().normalized(), float, "a float stays a float");
+        let open = Type::from(Primitive::NUMERIC)
+            .with_interval(&Value::UnsignedInt(0), true, true)
+            .expect("a number admits an interval");
+        assert_eq!(
+            open.normalized().primitive_part(),
+            Primitive::singleton(ValueType::UnsignedInt)
+                .union(Primitive::singleton(ValueType::Float)),
+            "an open number above zero is a natural or a float"
+        );
     }
 
     /// Interval refinements meet by intersection and join by convex hull
@@ -1680,5 +1974,56 @@ mod tests {
         );
         let read: Type = serde_json::from_str(&old_wire).unwrap();
         assert_eq!(read, old);
+    }
+
+    /// A sized number type kind reads a row through the view: it filters
+    /// what is out of range, and two views meet to the numbers both read.
+    #[dialog_common::test]
+    fn views_read_rows_by_range() {
+        let byte = p(ValueType::U8);
+        assert_eq!(byte.view(Value::SignedInt(300)), None);
+        assert_eq!(byte.view(Value::SignedInt(5)), Some(Value::UnsignedInt(5)));
+        assert_eq!(byte.view(Value::Float(2.7)), Some(Value::UnsignedInt(2)));
+        assert_eq!(byte.view(Value::String("5".into())), None);
+
+        // `natural:16` and `integer:8` together read 0 to 127, which no one view is.
+        let both = p(ValueType::U16)
+            .intersect(&p(ValueType::I8))
+            .expect("they overlap");
+        assert_eq!(both.view(Value::SignedInt(-5)), None);
+        assert!(
+            both.view(Value::SignedInt(100))
+                .is_some_and(|read| read.same_number(&Value::UnsignedInt(100)))
+        );
+        assert_eq!(both.view(Value::SignedInt(200)), None);
+
+        // A view nested in another drops the wider one from a meet.
+        let narrow = p(ValueType::U8)
+            .intersect(&p(ValueType::U16))
+            .expect("nested");
+        assert_eq!(narrow, p(ValueType::U8));
+        assert!(p(ValueType::U16).includes(&p(ValueType::U8)));
+        assert!(!p(ValueType::U8).includes(&p(ValueType::U16)));
+
+        // `float:32` rounds what it reads.
+        assert_eq!(
+            p(ValueType::F32).view(Value::Float(0.1)),
+            Some(Value::Float(f64::from(0.1f32)))
+        );
+    }
+
+    /// Views survive the kind wire format.
+    #[dialog_common::test]
+    fn views_round_trip_through_the_wire() {
+        for kind in [
+            p(ValueType::U8),
+            p(ValueType::F32),
+            p(ValueType::U16)
+                .intersect(&p(ValueType::I8))
+                .expect("overlap"),
+        ] {
+            let json = wire::encode(&kind);
+            assert_eq!(wire::decode(&json).expect("decodes"), kind, "{json}");
+        }
     }
 }

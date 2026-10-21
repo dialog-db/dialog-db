@@ -1,17 +1,29 @@
 mod batch;
 mod induce;
+#[cfg(test)]
+mod invariants;
+#[cfg(test)]
+mod migration;
+#[cfg(test)]
+mod oracle;
+#[cfg(test)]
+mod quarantine;
+pub(crate) use induce::induction_ignores;
 mod query;
+mod succession;
 pub use batch::*;
 pub use query::{TransactionQuery, TransactionSelectQuery};
+pub(crate) use succession::ReadSettlement;
 
 use crate::Commit;
+use crate::repository::branch::QueryLayer;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::source::SourceRef;
-use crate::rules::{SharedRuleCache, TriggerFootprint, on_attr, reads_attr};
+use crate::rules::{SharedRuleCache, TriggerFootprint, is_rule_attribute, on_attr, reads_attr};
 use crate::{Branch, CommitError, RemoteSite, Revision, Snapshot, Staged};
 use dialog_artifacts::{Changes, Statement};
 use dialog_capability::{Fork, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify};
 use dialog_effects::blob::Import as BlobImport;
@@ -87,8 +99,8 @@ impl<Line> Transaction<Line> {
     /// Integrate an external [`Changes`] batch into this transaction.
     ///
     /// Each instruction is replayed as if it had been asserted or
-    /// retracted on the transaction directly — `Assert`/`Replace`
-    /// become additive entries, `Retract` becomes a retraction entry —
+    /// retracted on the transaction directly — `Assert` becomes an
+    /// entry under its pick, `Retract` a retraction entry —
     /// and the batch's asset changes are staged on the transaction.
     /// Useful for callers that build a [`Changes`] independently
     /// (e.g. a reactor accumulating effect outputs across rounds) and
@@ -110,7 +122,7 @@ impl<Line> Transaction<Line> {
     pub fn commit(self) -> TransactionCommit<Line> {
         TransactionCommit {
             line: self.line,
-            changes: self.changes.export(),
+            changes: self.changes.clone(),
             transients: self.transients.export(),
             allow_empty: false,
             canonicalize: false,
@@ -191,7 +203,7 @@ impl Snapshot {
 /// durable batch.
 pub struct TransactionCommit<Line> {
     pub(super) line: Line,
-    pub(super) changes: Changes,
+    pub(super) changes: Staged,
     pub(super) transients: Changes,
     pub(super) allow_empty: bool,
     pub(super) canonicalize: bool,
@@ -234,11 +246,20 @@ impl TransactionCommit<&Snapshot> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
         let snapshot = self.line;
-        let mut changes = self.changes;
+        let source = SourceRef::Snapshot(snapshot);
+        let operator = Identify.perform(env).await?;
+        let mut changes = Box::pin(succession::settle(
+            vec![source.to_source()],
+            QueryLayer::from(source).overlay(&operator),
+            &self.changes,
+            env,
+        ))
+        .await?;
         // A snapshot commit reports only its revision: the transients
         // induction emitted surface on a staged
         // [`TransactionBatch::induced`] alone.
@@ -252,6 +273,7 @@ impl TransactionCommit<&Snapshot> {
 
         let previous = snapshot.revision();
         let touches_rules = touches_rules(&changes);
+        let touches_rule_facts = touches_rule_facts(&changes);
         let machinery =
             store_assets(SourceRef::Snapshot(snapshot), changes.take_assets(), env).await?;
 
@@ -271,6 +293,11 @@ impl TransactionCommit<&Snapshot> {
                 &revision,
             );
         }
+        if !touches_rule_facts {
+            SourceRef::Snapshot(snapshot)
+                .rule_cache()
+                .carry_rules_root(Some(*previous.tree.hash()), Some(*revision.tree.hash()));
+        }
         Ok(revision)
     }
 }
@@ -283,6 +310,18 @@ pub(crate) fn touches_rules(changes: &Changes) -> bool {
     changes
         .iter()
         .any(|(_, attribute, _)| *attribute == on || *attribute == reads)
+}
+
+/// Whether a settled change batch writes a rule fact
+/// ([`is_rule_attribute`]): when it does not, the tree it commits holds
+/// the rule facts of the tree it was committed onto, which carries its
+/// rules root to the new head (see [`RuleCache::rules_root`]).
+///
+/// [`RuleCache::rules_root`]: crate::RuleCache
+pub(crate) fn touches_rule_facts(changes: &Changes) -> bool {
+    changes
+        .iter()
+        .any(|(_, attribute, _)| is_rule_attribute(attribute))
 }
 
 /// Carry the trigger footprint cached at `previous` forward to
@@ -338,6 +377,7 @@ impl Branch {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {

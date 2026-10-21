@@ -17,7 +17,6 @@
 //! [fsapi]: https://developer.mozilla.org/en-US/docs/Web/API/File_System_API
 
 use super::{FileReader, FileSystem, FileSystemError, FileSystemHandle};
-use dialog_effects::MethodExt as _;
 use futures_util::StreamExt;
 use js_sys::Uint8Array;
 use std::rc::Rc;
@@ -867,16 +866,35 @@ async fn write_via_writable(
 /// handle is exclusive, so it is acquired, used, and closed within this call;
 /// truncating to the content length drops any stale tail from a shorter
 /// rewrite.
+///
+/// WebKit hands out sync access handles in a ServiceWorker without exposing
+/// the `FileSystemSyncAccessHandle` interface there, so an `instanceof` check
+/// rejects a working handle. Check for the methods this write uses instead.
 async fn write_via_sync_access(
     file_handle: &FileSystemFileHandle,
     contents: &[u8],
 ) -> Result<(), FileSystemError> {
-    let access: web_sys::FileSystemSyncAccessHandle =
-        JsFuture::from(file_handle.create_sync_access_handle())
-            .await
-            .map_err(|e| js_io_error("creating sync access handle", e))?
-            .dyn_into()
-            .map_err(|_| FileSystemError::Io("expected FileSystemSyncAccessHandle".into()))?;
+    if !has_method(file_handle, "createSyncAccessHandle") {
+        return Err(FileSystemError::Io(
+            "this browser cannot write to the origin private file system here: \
+             neither createWritable nor createSyncAccessHandle is available"
+                .into(),
+        ));
+    }
+    let access = JsFuture::from(file_handle.create_sync_access_handle())
+        .await
+        .map_err(|e| js_io_error("creating sync access handle", e))?;
+    if !["truncate", "write", "flush", "close"]
+        .iter()
+        .all(|method| has_method(&access, method))
+    {
+        return Err(FileSystemError::Io(
+            "createSyncAccessHandle returned an object without the \
+             FileSystemSyncAccessHandle methods"
+                .into(),
+        ));
+    }
+    let access: web_sys::FileSystemSyncAccessHandle = access.unchecked_into();
 
     let result = (|| {
         let options = web_sys::FileSystemReadWriteOptions::new();
@@ -1388,6 +1406,38 @@ mod tests {
         let second = b"short".to_vec();
         super::write_via_sync_access(&file_handle, &second).await?;
         assert_eq!(super::read_optional(&handle).await?, Some(second));
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_writes_via_sync_access_handle_without_the_global_interface() -> anyhow::Result<()> {
+        // WebKit's ServiceWorker scope returns sync access handles from
+        // createSyncAccessHandle but does not expose the
+        // FileSystemSyncAccessHandle interface. Hide the global to reproduce
+        // that scope in the dedicated-worker runner.
+        use wasm_bindgen::JsValue;
+
+        let global = js_sys::global();
+        let key = JsValue::from_str("FileSystemSyncAccessHandle");
+        let interface = js_sys::Reflect::get(&global, &key).expect("global is readable");
+        assert!(js_sys::Reflect::delete_property(&global, &key).unwrap_or(false));
+
+        let provider = opfs_provider("web-sync-access-no-global").await;
+        let handle = provider.resolve("archive")?.resolve("cell.bin")?;
+        let (parent, name) = handle
+            .navigate_parent(true)
+            .await?
+            .expect("file path has a parent");
+        let file_handle = super::get_file_handle(&parent, &name, true)
+            .await?
+            .expect("file handle is created");
+
+        let contents = b"written without the interface".to_vec();
+        let result = super::write_via_sync_access(&file_handle, &contents).await;
+        js_sys::Reflect::set(&global, &key, &interface).expect("global is restored");
+
+        result?;
+        assert_eq!(super::read_optional(&handle).await?, Some(contents));
         Ok(())
     }
 

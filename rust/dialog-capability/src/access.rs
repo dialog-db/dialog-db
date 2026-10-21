@@ -785,6 +785,33 @@ pub enum AuthorizeError {
         at: u64,
     },
 
+    /// The invocation was issued too long before it was presented, or
+    /// does not say when it was issued where that is required.
+    ///
+    /// Like [`Expired`](Self::Expired), nothing about the authority is in
+    /// question: an invocation is good once, when it is made, so a fresh
+    /// one is expected to succeed. Refusing a stale one is what stops a
+    /// captured invocation being presented again later.
+    #[error("Invocation issued at {issued_at:?} is too old to accept at {at}")]
+    Stale {
+        /// Unix timestamp the invocation says it was issued at, if it
+        /// says.
+        issued_at: Option<u64>,
+        /// Unix timestamp the check was made at.
+        at: u64,
+    },
+
+    /// The invocation was presented before.
+    ///
+    /// An invocation carries a nonce, so one made again is never the
+    /// same: this one was copied. A fresh invocation is expected to
+    /// succeed.
+    #[error("Invocation {invocation} was presented before")]
+    Replayed {
+        /// The invocation's content identifier.
+        invocation: String,
+    },
+
     /// Authority in the chain has been withdrawn.
     ///
     /// Terminal in a way [`Expired`](Self::Expired) is not: re-obtaining a
@@ -794,6 +821,28 @@ pub enum AuthorizeError {
     Revoked {
         /// The subject whose authority was withdrawn.
         subject: Did,
+        /// The revoked certificate, as the text of its CID, when the
+        /// responder knows which link of the presented chain it was.
+        /// A holder that retains more than one chain for the subject
+        /// can then retract this one and prove through another; with
+        /// no certificate named it can only stop. Absent from a
+        /// responder that predates the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        certificate: Option<String>,
+        /// The signed revocation of that certificate, as a UCAN container
+        /// in its base64url tagged form (`C` followed by the unpadded
+        /// base64url of the container's DAG-CBOR bytes), when the
+        /// responder keeps the document.
+        ///
+        /// The evidence for [`certificate`](Self::Revoked::certificate):
+        /// a holder retracts the named certificate only once this verifies
+        /// as a revocation of it, signed by a principal entitled to revoke
+        /// it. A refusal without it, or with one that does not verify,
+        /// names a certificate the holder has no reason to believe was
+        /// revoked, so the holder retracts nothing and reports the refusal
+        /// as it came. Absent from a responder that predates the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revocation: Option<String>,
     },
 
     /// The chain authorizes the request and the responder declined it
@@ -884,6 +933,23 @@ impl From<crate::StorageError> for AuthorizeError {
     }
 }
 
+/// An error that may carry a responder's refusal.
+///
+/// Every effect's error type wraps [`AuthorizeError`] in some variant, so
+/// a caller that performs effects generically (a fork dispatcher) can read
+/// the reason a responder gave through this trait and act on it, where
+/// `From<AuthorizeError>` only lets it build one.
+pub trait AuthorizationFailure {
+    /// The refusal this error carries, if it is one.
+    fn authorization_failure(&self) -> Option<&AuthorizeError>;
+}
+
+impl AuthorizationFailure for AuthorizeError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        Some(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_arch = "wasm32")]
@@ -936,6 +1002,15 @@ mod tests {
                 },
                 AuthorizeError::Revoked {
                     subject: subject.clone(),
+                    certificate: None,
+                    revocation: None,
+                },
+                AuthorizeError::Revoked {
+                    subject: subject.clone(),
+                    certificate: Some(
+                        "bafyreigdmqpykrgxyaxtlafqpqhzrb7qy2rh75nldvfd4tucqmqqme5yje".into(),
+                    ),
+                    revocation: Some("Cg2ZjdG4tdjGA".into()),
                 },
                 AuthorizeError::InvalidSignature {
                     issuer: subject.clone(),
@@ -948,12 +1023,38 @@ mod tests {
             }
         }
 
+        // The fields a refusal gained are additive both ways: a payload
+        // from a responder that predates them reads with neither, and a
+        // refusal with neither writes the payload such a responder sent.
+        #[dialog_common::test]
+        async fn it_reads_a_revocation_refusal_from_an_older_responder() {
+            let subject = did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX");
+            let older = format!(r#"{{"kind":"Revoked","subject":"{subject}"}}"#);
+
+            let decoded: AuthorizeError = serde_json::from_str(&older).expect("deserializes");
+            assert_eq!(
+                decoded,
+                AuthorizeError::Revoked {
+                    subject,
+                    certificate: None,
+                    revocation: None,
+                }
+            );
+            assert_eq!(
+                serde_json::to_string(&decoded).expect("serializes"),
+                older,
+                "absent fields are not written"
+            );
+        }
+
         // The tag is part of the protocol: renaming a variant renames
         // the wire form, so this pins what the service must emit.
         #[dialog_common::test]
         async fn it_names_the_reason_in_the_payload() {
             let encoded = serde_json::to_string(&AuthorizeError::Revoked {
                 subject: did!("key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"),
+                certificate: None,
+                revocation: None,
             })
             .expect("serializes");
             assert!(
@@ -1022,6 +1123,8 @@ mod tests {
             };
             let withdrawn = AuthorizeError::Revoked {
                 subject: did!("key:zSubject"),
+                certificate: None,
+                revocation: None,
             };
 
             assert!(matches!(lapsed, AuthorizeError::Expired { .. }));

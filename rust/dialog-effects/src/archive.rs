@@ -20,6 +20,7 @@ use std::marker::PhantomData;
 
 use crate::Rejection;
 pub use dialog_capability::Constraint;
+use dialog_capability::access::AuthorizationFailure;
 pub use dialog_capability::{
     Attenuate, Attenuation, Capability, DialogCapabilityPerformError, Effect, Policy, StorageError,
     Subject, access::AuthorizeError,
@@ -338,6 +339,15 @@ pub enum ArchiveError {
     /// Storage backend error.
     #[error("Storage error: {0}")]
     Storage(String),
+}
+
+impl AuthorizationFailure for ArchiveError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 impl From<StorageError> for ArchiveError {

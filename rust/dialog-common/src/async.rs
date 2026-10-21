@@ -38,7 +38,7 @@ use std::pin::Pin;
 
 #[cfg(target_arch = "wasm32")]
 use futures_util::future::try_join_all;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use tokio::sync::oneshot::channel;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -66,8 +66,10 @@ pub enum DialogAsyncError {
 ///
 /// - **Native (tokio)**: Uses `tokio::spawn`, which runs the task on the
 ///   tokio runtime's thread pool. Requires `F: Send`.
-/// - **WebAssembly**: Uses `wasm_bindgen_futures::spawn_local`, which runs
-///   the task on the single-threaded wasm executor. Does not require `Send`.
+/// - **WebAssembly in the browser**: Uses `wasm_bindgen_futures::spawn_local`,
+///   which runs the task on the single-threaded wasm executor. Does not
+///   require `Send`.
+/// - **WebAssembly elsewhere** (WASI): Runs the future where it is awaited.
 ///
 /// # Errors
 ///
@@ -94,7 +96,7 @@ where
     F: Future + ConditionalSend + 'static,
     F::Output: ConditionalSend + 'static,
 {
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     {
         let (tx, rx) = channel();
 
@@ -104,6 +106,14 @@ where
         });
 
         rx.await.map_err(|_| DialogAsyncError::JoinError)
+    }
+
+    // Outside the browser, such as in a component on `wasm32-wasip3`, there is
+    // no executor of its own to hand the task to: the future runs where it is
+    // awaited, on the single thread of the instance.
+    #[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
+    {
+        Ok(future.await)
     }
 
     #[cfg(not(target_arch = "wasm32"))]

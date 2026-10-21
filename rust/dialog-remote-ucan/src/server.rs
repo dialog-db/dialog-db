@@ -17,11 +17,14 @@
 //! content type, a version and a body, which the embedder relays
 //! however it serves HTTP.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Did, Policy, Provider, Subject};
-use dialog_common::{Blake3Hash, Buffer, Checksum, ConditionalSync};
+use dialog_common::time::{self, UNIX_EPOCH};
+use dialog_common::{Blake3Hash, Buffer, Checksum, ConditionalSend, ConditionalSync};
 use dialog_did_web::{CachingResolver, Resolve, WebResolver};
 use dialog_effects::MethodExt as _;
 use dialog_effects::Rejection;
@@ -31,11 +34,11 @@ use dialog_effects::blob::prelude::{BlobImportExt as _, BlobReadExt as _};
 use dialog_effects::blob::{self, BlobError, BlobReader};
 use dialog_effects::memory::prelude::MemoryExt as _;
 use dialog_effects::memory::{self, Cell, PublishAttenuation, Space};
-use dialog_remote_ucan_s3::{Args, FromUcanArgs, verify_invocation};
+use dialog_remote_ucan_s3::{Args, FromUcanArgs, verify_invocation, verify_invocation_at};
 use dialog_ucan_core::revocation::RevocationChecker;
 use dialog_ucan_core::{Container, InvocationChain, UnverifiedRevocations};
 use dialog_varsig::AnySignature;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::direct::{OBJECT_MEDIA_TYPE, credential_container, is_credential};
 
@@ -43,11 +46,101 @@ use crate::direct::{OBJECT_MEDIA_TYPE, credential_container, is_credential};
 /// shape the client reads back.
 pub const REFUSAL_MEDIA_TYPE: &str = "application/json";
 
+/// The media type of a conflict's body: what the cell a write named holds
+/// instead, its [`memory::CellState`] as DAG-CBOR, so the writer can
+/// rebase onto it and write again without a read of its own.
+pub const CELL_STATE_MEDIA_TYPE: &str = "application/vnd.dialog.cell-state+cbor";
+
+/// How long after it was issued an invocation is accepted, and how far
+/// ahead of the service's clock its issue time may be: an invocation is
+/// good when it is made, and the window allows for its trip and for
+/// clocks that disagree.
+pub const FRESHNESS: Duration = Duration::from_secs(30);
+
+/// Whether an invocation must say when it was issued.
+///
+/// One that says is refused once it is older than the freshness window,
+/// whichever way it arrives. One that does not say cannot be aged, so
+/// where a captured invocation would grant lasting access (a watch,
+/// which follows a cell for as long as its chain holds) saying is
+/// required, and elsewhere it is not, so clients that predate it are
+/// still served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Issuance {
+    /// An invocation that does not say when it was issued is refused.
+    Required,
+    /// An invocation that does not say when it was issued is accepted.
+    Optional,
+}
+
+/// The invocations a service accepted lately, remembered so that one
+/// presented again is refused.
+///
+/// An invocation carries a nonce, so one made again is never the same as
+/// one made before: an invocation presented twice was copied. It need
+/// only be remembered while it is fresh, since after that it is refused
+/// as stale anyway.
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+pub trait Presented: ConditionalSync {
+    /// Remember `invocation`, its content identifier, until `until` (Unix
+    /// seconds), answering `false` when it is remembered already. `now` is
+    /// what the service's clock reads, by which what was remembered until
+    /// before now may be forgotten.
+    async fn record(&self, invocation: &str, until: u64, now: u64) -> bool;
+}
+
+/// What a service's clock reads, in Unix seconds: the time it judges how
+/// long ago an invocation was issued by, and checks a running watch's
+/// authority as of.
+///
+/// The system clock by default ([`Access::with_clock`] to change it).
+pub trait Clock: ConditionalSend + ConditionalSync {
+    /// What the clock reads now, in Unix seconds.
+    fn now(&self) -> u64;
+}
+
+impl<F> Clock for F
+where
+    F: Fn() -> u64 + ConditionalSend + ConditionalSync,
+{
+    fn now(&self) -> u64 {
+        self()
+    }
+}
+
+/// Presented invocations remembered in the memory of one process: what
+/// a service that runs in one process, or keeps one instance per space,
+/// needs. A service spread over many processes shares a record they all
+/// reach instead.
+#[derive(Debug, Default)]
+pub struct RecentInvocations(Mutex<HashMap<String, u64>>);
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Presented for RecentInvocations {
+    async fn record(&self, invocation: &str, until: u64, now: u64) -> bool {
+        let mut presented = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        presented.retain(|_, remembered| *remembered >= now);
+        if presented.contains_key(invocation) {
+            return false;
+        }
+        presented.insert(invocation.to_string(), until);
+        true
+    }
+}
+
 /// An access service over a provider of the effects it performs.
 pub struct Access<P, Resolver = CachingResolver<WebResolver>, Revocations = UnverifiedRevocations> {
     provider: P,
     resolver: Arc<Resolver>,
     revocations: Arc<Revocations>,
+    freshness: Duration,
+    presented: Arc<dyn Presented>,
+    clock: Arc<dyn Clock>,
 }
 
 impl<P: std::fmt::Debug, Resolver, Revocations> std::fmt::Debug
@@ -83,6 +176,9 @@ impl<P, Resolver> Access<P, Resolver> {
             provider,
             resolver,
             revocations: Arc::new(UnverifiedRevocations),
+            freshness: FRESHNESS,
+            presented: Arc::new(RecentInvocations::default()),
+            clock: Arc::new(now_s),
         }
     }
 }
@@ -95,7 +191,40 @@ impl<P, Resolver, Revocations> Access<P, Resolver, Revocations> {
             provider: self.provider,
             resolver: self.resolver,
             revocations: Arc::new(revocations),
+            freshness: self.freshness,
+            presented: self.presented,
+            clock: self.clock,
         }
+    }
+
+    /// The same service, judging time by `clock` rather than the system
+    /// clock: an embedder whose platform keeps time its own way, or a test
+    /// of a service whose clock differs from its clients'.
+    pub fn with_clock(mut self, clock: impl Clock + 'static) -> Self {
+        self.clock = Arc::new(clock);
+        self
+    }
+
+    /// What the service's clock reads, in Unix seconds: the time to hand
+    /// [`Access::recheck`], and a session's deliveries, so a watch's
+    /// authority is checked by the clock it was accepted by.
+    pub fn now(&self) -> u64 {
+        self.clock.now()
+    }
+
+    /// The same service, accepting an invocation for `freshness` after it
+    /// was issued (see [`FRESHNESS`]).
+    pub fn with_freshness(mut self, freshness: Duration) -> Self {
+        self.freshness = freshness;
+        self
+    }
+
+    /// The same service, remembering the invocations it accepts in
+    /// `presented`: an embedder that builds a service per request keeps
+    /// one record across them.
+    pub fn with_presented(mut self, presented: Arc<dyn Presented>) -> Self {
+        self.presented = presented;
+        self
     }
 
     /// The provider the service performs operations with.
@@ -227,6 +356,9 @@ pub struct Response {
     pub version: Option<String>,
     /// The body's length, when known before the body is read.
     pub length: Option<u64>,
+    /// How many seconds a refused request should wait before it is tried
+    /// again, for the `Retry-After` header, when the refusal said.
+    pub retry_after: Option<u64>,
     /// The body.
     pub body: Content,
 }
@@ -238,6 +370,7 @@ impl Response {
             content_type: OBJECT_MEDIA_TYPE,
             version: None,
             length: Some(body.len() as u64),
+            retry_after: None,
             body: Content::Bytes(body),
         }
     }
@@ -259,6 +392,7 @@ impl Response {
             content_type: OBJECT_MEDIA_TYPE,
             version: None,
             length,
+            retry_after: None,
             body: Content::Stream(body),
         }
     }
@@ -270,12 +404,37 @@ impl Response {
             content_type: REFUSAL_MEDIA_TYPE,
             version: None,
             length: Some(body.len() as u64),
+            retry_after: None,
             body: Content::Bytes(body),
         }
     }
 
     fn rejected(status: u16, rejection: Rejection) -> Self {
-        Self::json(status, &rejection)
+        Self {
+            retry_after: rejection.retry_after(),
+            ..Self::json(status, &rejection)
+        }
+    }
+
+    /// A write refused because the cell is not at the version it named,
+    /// carrying what the cell holds instead, when that is known: the
+    /// state as the body, and its version as the `ETag`.
+    fn conflict(current: memory::Current) -> Self {
+        let Some(state) = current.state() else {
+            return Self::status(412);
+        };
+        let version = state
+            .as_ref()
+            .and_then(|edition| String::from_utf8(edition.version.as_bytes().to_vec()).ok());
+        let body = serde_ipld_dagcbor::to_vec(&state).unwrap_or_default();
+        Self {
+            status: 412,
+            content_type: CELL_STATE_MEDIA_TYPE,
+            version,
+            length: Some(body.len() as u64),
+            retry_after: None,
+            body: Content::Bytes(body),
+        }
     }
 
     /// Whether the status reports success.
@@ -306,7 +465,9 @@ impl Refusal {
             AuthorizeError::InvalidSignature { .. }
             | AuthorizeError::InvalidAudience { .. }
             | AuthorizeError::Expired { .. }
-            | AuthorizeError::NotValidBefore { .. } => 401,
+            | AuthorizeError::NotValidBefore { .. }
+            | AuthorizeError::Stale { .. }
+            | AuthorizeError::Replayed { .. } => 401,
             AuthorizeError::UnprovenSubject { .. }
             | AuthorizeError::CommandEscalation { .. }
             | AuthorizeError::PolicyViolation { .. }
@@ -349,6 +510,54 @@ impl Verified {
     /// The command's segments.
     pub fn command(&self) -> Vec<&str> {
         self.chain.command().0.iter().map(String::as_str).collect()
+    }
+}
+
+/// A watch the service accepted: the cell it follows, and the invocation
+/// that authorized it, kept so that its authority can be checked again
+/// for as long as the watch runs.
+///
+/// Plain data, so a service that keeps its watches between messages (a
+/// Durable Object that hibernates, say) stores it and reads it back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Subscription {
+    invocation: String,
+    subject: Did,
+    space: String,
+    cell: String,
+    container: Vec<u8>,
+    checked: u64,
+}
+
+impl Subscription {
+    /// The watch invocation's content identifier, which names the watch.
+    pub fn invocation(&self) -> &str {
+        &self.invocation
+    }
+
+    /// The subject whose cell the watch follows.
+    pub fn subject(&self) -> &Did {
+        &self.subject
+    }
+
+    /// The space the cell the watch follows is in.
+    pub fn space(&self) -> &str {
+        &self.space
+    }
+
+    /// The cell the watch follows.
+    pub fn cell(&self) -> &str {
+        &self.cell
+    }
+
+    /// Whether the watch follows the cell `cell` in `space` of `subject`.
+    pub fn follows(&self, subject: &Did, space: &str, cell: &str) -> bool {
+        &self.subject == subject && self.space == space && self.cell == cell
+    }
+
+    /// When the watch's authority was last found to hold, in Unix seconds.
+    pub fn checked(&self) -> u64 {
+        self.checked
     }
 }
 
@@ -397,11 +606,148 @@ where
     Resolver: Provider<Resolve> + ConditionalSync,
     Revocations: RevocationChecker + ConditionalSync,
 {
-    /// Verify the invocation `container` carries.
+    /// Verify the invocation `container` carries, accepting one that does
+    /// not say when it was issued.
     pub async fn verify(&self, container: Container) -> Result<Verified, Refusal> {
+        self.admit(container, Issuance::Optional).await
+    }
+
+    /// Verify the invocation `container` carries, and accept it only when
+    /// it is fresh and was not presented before.
+    ///
+    /// The issue time and the record are consulted after the chain
+    /// verifies, so an invocation is only ever refused as stale or as
+    /// replayed when it is authentic.
+    pub async fn admit(
+        &self,
+        container: Container,
+        issuance: Issuance,
+    ) -> Result<Verified, Refusal> {
         let chain =
             verify_invocation(container, self.resolver.as_ref(), &*self.revocations).await?;
+        let at = self.clock.now();
+        let window = self.freshness.as_secs();
+        let issued_at = chain.invocation.issued_at().map(|issued| issued.to_unix());
+        let fresh = match issued_at {
+            Some(issued) => {
+                issued.saturating_add(window) >= at && issued <= at.saturating_add(window)
+            }
+            None => issuance == Issuance::Optional,
+        };
+        if !fresh {
+            return Err(AuthorizeError::Stale { issued_at, at }.into());
+        }
+        let invocation = chain.invocation.to_cid().to_string();
+        let until = issued_at.unwrap_or(at).saturating_add(window);
+        if !self.presented.record(&invocation, until, at).await {
+            return Err(AuthorizeError::Replayed { invocation }.into());
+        }
         Ok(Verified { chain })
+    }
+
+    /// Accept a watch: admit the invocation, which must say when it was
+    /// issued (see [`Issuance`]), and answer the subscription with what
+    /// the cell holds now.
+    ///
+    /// A watch is authority that lasts, so an invocation that could not
+    /// be aged is not accepted for one. Anything that is not a watch, or
+    /// does not verify, is answered as a request would be.
+    pub async fn subscribe(
+        &self,
+        container: Container,
+    ) -> Result<(Subscription, memory::CellState), Answer>
+    where
+        P: Store,
+    {
+        let bytes = container.to_bytes().map_err(|error| {
+            Answer::Refused(Refusal(AuthorizeError::Malformed {
+                detail: error.to_string(),
+            }))
+        })?;
+        let verified = self
+            .admit(container, Issuance::Required)
+            .await
+            .map_err(Answer::Refused)?;
+        if verified.command() != ["use", "get", "memory", "cell", "watch"] {
+            return Err(Answer::Unsupported);
+        }
+        let subject = verified.subject().clone();
+        let watch = memory::Watch::capability_from_args(&subject, verified.chain().arguments())
+            .map_err(|error| {
+                Answer::Refused(Refusal(AuthorizeError::Malformed {
+                    detail: error.to_string(),
+                }))
+            })?;
+        let space = Space::<dialog_effects::method::Get>::of(&watch)
+            .space
+            .clone();
+        let cell = Cell::<dialog_effects::method::Get>::of(&watch).cell.clone();
+        // What the cell holds now is what a resolve of it would read: the
+        // same cell, named by the same arguments.
+        let resolve = memory::Resolve::capability_from_args(&subject, verified.chain().arguments())
+            .map_err(|error| {
+                Answer::Refused(Refusal(AuthorizeError::Malformed {
+                    detail: error.to_string(),
+                }))
+            })?;
+        let state = match Provider::<memory::Resolve>::execute(&self.provider, resolve).await {
+            Ok(state) => state,
+            Err(error) => {
+                return Err(match Failure::from(error) {
+                    Failure::Refused(refusal) => Answer::Refused(refusal),
+                    Failure::Answered(response) => Answer::Performed(response),
+                });
+            }
+        };
+        let subscription = Subscription {
+            invocation: verified.chain().invocation.to_cid().to_string(),
+            subject,
+            space,
+            cell,
+            container: bytes,
+            checked: self.clock.now(),
+        };
+        Ok((subscription, state))
+    }
+
+    /// Check, before delivering to `subscription` at `at` (Unix seconds),
+    /// that the authority behind the watch still holds, when it was last
+    /// found to hold more than `interval` before.
+    ///
+    /// The invocation's chain is verified again as of `at`: a delegation
+    /// that lapsed or was revoked since the watch began is refused, as
+    /// [`AuthorizeError::Expired`] or [`AuthorizeError::Revoked`], and so
+    /// is the watch's own invocation once its `exp` passes. Its issue time
+    /// is not judged again: it was fresh when the watch began. Checking
+    /// only when there is something to deliver means a watch nothing
+    /// happens to costs nothing, and that what reaches a watcher after its
+    /// authority ends is bounded by `interval`.
+    pub async fn recheck(
+        &self,
+        subscription: &mut Subscription,
+        interval: Duration,
+        at: u64,
+    ) -> Result<(), Refusal> {
+        if subscription.checked.saturating_add(interval.as_secs()) > at {
+            return Ok(());
+        }
+        let container = Container::from_bytes(&subscription.container).map_err(|error| {
+            Refusal(AuthorizeError::Malformed {
+                detail: error.to_string(),
+            })
+        })?;
+        let time = dialog_ucan_core::time::Timestamp::new(
+            dialog_ucan_core::time::timestamp::UNIX_EPOCH
+                + dialog_ucan_core::time::timestamp::Duration::from_secs(at),
+        )
+        .map_err(|error| {
+            Refusal(AuthorizeError::Unavailable {
+                detail: error.to_string(),
+            })
+        })?;
+        verify_invocation_at(container, self.resolver.as_ref(), &*self.revocations, time).await?;
+        subscription.checked = at;
+        Ok(())
     }
 
     /// Answer a request: read the invocation out of its `Authorization`
@@ -425,7 +771,19 @@ where
                 }));
             }
         };
-        match self.verify(container).await {
+        self.answer(container, payload, Issuance::Optional).await
+    }
+
+    /// Answer the invocation `container` carries: admit it under
+    /// `issuance` and perform it with `payload`, the bytes a write stores.
+    ///
+    /// What a request is answered with, whatever carried it: the
+    /// `Authorization` header and body of a request, or a frame.
+    pub async fn answer(&self, container: Container, payload: Payload, issuance: Issuance) -> Answer
+    where
+        P: Store,
+    {
+        match self.admit(container, issuance).await {
             Ok(verified) => self.perform(verified, payload).await,
             Err(refusal) => Answer::Refused(refusal),
         }
@@ -583,13 +941,31 @@ where
         if Checksum::sha256(&payload) != bound.checksum {
             return Err(Failure::checksum_mismatch());
         }
+        let space = Space::of(&attenuated).space.clone();
+        let cell = Cell::of(&attenuated).cell.clone();
         let capability = Subject::from(subject.clone())
             .writer()
             .memory()
             .attenuate(Space::of(&attenuated).clone())
             .attenuate(Cell::of(&attenuated).clone())
             .invoke(memory::Publish::new(payload, bound.when.clone()));
-        let version = Provider::<memory::Publish>::execute(&self.provider, capability).await?;
+        let version = match Provider::<memory::Publish>::execute(&self.provider, capability).await {
+            Ok(version) => version,
+            // The cell is not at the version the write named. One that
+            // holds what the write would leave is where the writer wanted
+            // it, whoever wrote it: a publish whose answer was lost, sent
+            // again, finds its own write. Otherwise the writer is told
+            // what the cell holds, to rebase onto.
+            Err(memory::MemoryError::VersionMismatch { current, .. }) => {
+                match self.holding(subject, &space, &cell, current).await? {
+                    Some(edition) if Checksum::sha256(&edition.content) == bound.checksum => {
+                        edition.version
+                    }
+                    state => return Err(Failure::conflict(state.into())),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(Response::versioned(200, render(&version)?, Vec::new()))
     }
 
@@ -598,8 +974,57 @@ where
         P: Store,
     {
         let capability = memory::Retract::capability_from_args(subject, args)?;
-        Provider::<memory::Retract>::execute(&self.provider, capability).await?;
-        Ok(Response::status(204))
+        let space = Space::of(&capability).space.clone();
+        let cell = Cell::of(&capability).cell.clone();
+        match Provider::<memory::Retract>::execute(&self.provider, capability).await {
+            Ok(()) => Ok(Response::status(204)),
+            // A cell already empty is where the retract would leave it.
+            Err(memory::MemoryError::VersionMismatch { current, .. }) => {
+                match self.holding(subject, &space, &cell, current).await? {
+                    None => Ok(Response::status(204)),
+                    state => Err(Failure::conflict(state.into())),
+                }
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// What the cell holds, as the store that refused a write said, or,
+    /// when it did not say, as read now on behalf of the write, whose
+    /// authority verified.
+    async fn holding(
+        &self,
+        subject: &Did,
+        space: &str,
+        cell: &str,
+        current: memory::Current,
+    ) -> Result<memory::CellState, Failure>
+    where
+        P: Store,
+    {
+        match current {
+            memory::Current::Holds(edition) => Ok(Some(edition)),
+            memory::Current::Empty => Ok(None),
+            memory::Current::Unknown => self.held(subject, space, cell).await,
+        }
+    }
+
+    /// What the cell holds now, read on behalf of a write whose authority
+    /// verified, to tell the writer where the cell stands.
+    async fn held(
+        &self,
+        subject: &Did,
+        space: &str,
+        cell: &str,
+    ) -> Result<memory::CellState, Failure>
+    where
+        P: Store,
+    {
+        let resolve =
+            memory::prelude::CellScope::new(Subject::from(subject.clone()), space, cell).resolve();
+        Provider::<memory::Resolve>::execute(&self.provider, resolve)
+            .await
+            .map_err(Failure::from)
     }
 }
 
@@ -677,10 +1102,13 @@ impl Failure {
     }
 
     fn storage(detail: String) -> Self {
-        Self::Answered(Response::rejected(
-            503,
-            Rejection::Unavailable { reason: detail },
-        ))
+        Self::Answered(Response::rejected(503, Rejection::unavailable(detail)))
+    }
+
+    /// A write refused for naming a version the cell is not at, with what
+    /// the cell holds instead when that is known.
+    fn conflict(current: memory::Current) -> Self {
+        Self::Answered(Response::conflict(current))
     }
 }
 
@@ -741,7 +1169,7 @@ impl From<BlobError> for Failure {
 impl From<memory::MemoryError> for Failure {
     fn from(error: memory::MemoryError) -> Self {
         match error {
-            memory::MemoryError::VersionMismatch { .. } => Self::Answered(Response::status(412)),
+            memory::MemoryError::VersionMismatch { current, .. } => Self::conflict(current),
             memory::MemoryError::Authorization(reason) => Self::Refused(Refusal(reason)),
             memory::MemoryError::Rejected(rejection) => {
                 Self::Answered(Response::rejected(503, rejection))
@@ -749,4 +1177,12 @@ impl From<memory::MemoryError> for Failure {
             memory::MemoryError::Storage(detail) => Self::storage(detail),
         }
     }
+}
+
+/// The service's clock, in Unix seconds.
+fn now_s() -> u64 {
+    time::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default()
 }

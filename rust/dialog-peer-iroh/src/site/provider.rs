@@ -121,9 +121,7 @@ where
     let connection = match site.connection().await {
         Ok(connection) => connection,
         Err(error) => {
-            return Err(E::from(Rejection::Unavailable {
-                reason: error.to_string(),
-            }));
+            return Err(E::from(Rejection::unavailable(error.to_string())));
         }
     };
 
@@ -138,9 +136,7 @@ where
         // and the caller's retry is what brings it back.
         Err(error) => {
             site.broke(&connection, &error).await;
-            return Err(E::from(Rejection::Unavailable {
-                reason: error.to_string(),
-            }));
+            return Err(E::from(Rejection::unavailable(error.to_string())));
         }
     };
 
@@ -219,6 +215,6 @@ fn refused<E: From<AuthorizeError> + From<Rejection>>(refusal: Refusal) -> E {
         Refusal::Malformed(detail) => E::from(Rejection::Unclassified {
             detail: format!("the peer could not read the request: {detail}"),
         }),
-        Refusal::Internal(reason) => E::from(Rejection::Unavailable { reason }),
+        Refusal::Internal(reason) => E::from(Rejection::unavailable(reason)),
     }
 }

@@ -55,10 +55,29 @@ pub trait Number:
     + TryFrom<Value, Error = ArtifactTypeError>
     + dialog_common::ConditionalSync
 {
+    /// This type read as a number that may be negative: the integer
+    /// for a natural, itself for an integer or a float. The type of a
+    /// difference of two values of this type.
+    type Signed: Number;
+
     /// Addition; `None` on overflow or mixed types.
     fn add(self, other: Self) -> Option<Self>;
     /// Subtraction; `None` on overflow or mixed types.
     fn subtract(self, other: Self) -> Option<Self>;
+    /// Subtraction into [`Self::Signed`]: a natural minus a larger
+    /// natural is a negative integer, not `None`. `None` on overflow
+    /// or mixed types.
+    fn subtract_signed(self, other: Self) -> Option<Self::Signed>;
+    /// The greatest integer not above this number, as the integer;
+    /// `None` when it has none (a non-finite float) or it is past
+    /// the integer's range.
+    fn floor(self) -> Option<i128>;
+    /// This number rounded to the nearest integer, half away from
+    /// zero; `None` as for [`Self::floor`].
+    fn round(self) -> Option<i128>;
+    /// This number with its fraction dropped, toward zero; `None` as
+    /// for [`Self::floor`].
+    fn truncate(self) -> Option<i128>;
     /// Multiplication; `None` on overflow or mixed types.
     fn multiply(self, other: Self) -> Option<Self>;
     /// Division; `None` on division by zero (integers), overflow, or
@@ -70,17 +89,33 @@ pub trait Number:
 }
 
 macro_rules! impl_integer_number {
-    ($ty:ty) => {
+    ($ty:ty, $signed:ty) => {
         impl SchemeBound for $ty {
             const BOUND: Primitive = Primitive::NUMERIC;
         }
 
         impl Number for $ty {
+            type Signed = $signed;
+
             fn add(self, other: Self) -> Option<Self> {
                 self.checked_add(other)
             }
             fn subtract(self, other: Self) -> Option<Self> {
                 self.checked_sub(other)
+            }
+            fn subtract_signed(self, other: Self) -> Option<$signed> {
+                let a: i128 = i128::try_from(self).ok()?;
+                let b: i128 = i128::try_from(other).ok()?;
+                <$signed>::try_from(a.checked_sub(b)?).ok()
+            }
+            fn floor(self) -> Option<i128> {
+                i128::try_from(self).ok()
+            }
+            fn round(self) -> Option<i128> {
+                i128::try_from(self).ok()
+            }
+            fn truncate(self) -> Option<i128> {
+                i128::try_from(self).ok()
             }
             fn multiply(self, other: Self) -> Option<Self> {
                 self.checked_mul(other)
@@ -95,21 +130,48 @@ macro_rules! impl_integer_number {
     };
 }
 
-impl_integer_number!(u64);
-impl_integer_number!(i64);
-impl_integer_number!(u128);
-impl_integer_number!(i128);
+impl_integer_number!(u64, i64);
+impl_integer_number!(i64, i64);
+impl_integer_number!(u128, i128);
+impl_integer_number!(i128, i128);
+
+/// A float as the integer it rounds to under `round`, the way the
+/// band reads a float: through the decimal it prints as, so `1e30`
+/// is `10^30` and a float with no finite value has no integer.
+fn float_to_integer(float: f64, round: impl FnOnce(f64) -> f64) -> Option<i128> {
+    if !float.is_finite() {
+        return None;
+    }
+    match Value::Float(round(float)).viewed_as(ValueType::SignedInt)? {
+        Value::SignedInt(integer) => Some(integer),
+        _ => None,
+    }
+}
 
 impl SchemeBound for f64 {
     const BOUND: Primitive = Primitive::NUMERIC;
 }
 
 impl Number for f64 {
+    type Signed = f64;
+
     fn add(self, other: Self) -> Option<Self> {
         Some(self + other)
     }
     fn subtract(self, other: Self) -> Option<Self> {
         Some(self - other)
+    }
+    fn subtract_signed(self, other: Self) -> Option<f64> {
+        Some(self - other)
+    }
+    fn floor(self) -> Option<i128> {
+        float_to_integer(self, f64::floor)
+    }
+    fn round(self) -> Option<i128> {
+        float_to_integer(self, f64::round)
+    }
+    fn truncate(self) -> Option<i128> {
+        float_to_integer(self, f64::trunc)
     }
     fn multiply(self, other: Self) -> Option<Self> {
         Some(self * other)
@@ -152,7 +214,21 @@ impl Numeric {
         match (self, other) {
             (Numeric::UnsignedInt(a), Numeric::UnsignedInt(b)) => u(a, b).map(Numeric::UnsignedInt),
             (Numeric::SignedInt(a), Numeric::SignedInt(b)) => i(a, b).map(Numeric::SignedInt),
-            (Numeric::Float(a), Numeric::Float(b)) => f(a, b).map(Numeric::Float),
+            // A natural and an integer are one band of numbers: the
+            // natural is read as the integer it is, and the operation
+            // runs on integers. (A natural past the integer's range has
+            // no integer reading, and the pair has no value.)
+            (Numeric::UnsignedInt(a), Numeric::SignedInt(b)) => {
+                i(i128::try_from(a).ok()?, b).map(Numeric::SignedInt)
+            }
+            (Numeric::SignedInt(a), Numeric::UnsignedInt(b)) => {
+                i(a, i128::try_from(b).ok()?).map(Numeric::SignedInt)
+            }
+            // NaN is not a value: a float operation producing one (`0.0 /
+            // 0.0`, `inf - inf`) has no result.
+            (Numeric::Float(a), Numeric::Float(b)) => {
+                f(a, b).filter(|float| !float.is_nan()).map(Numeric::Float)
+            }
             // Mixed variants: no value of a single type is the
             // result — strict, no promotion.
             _ => None,
@@ -293,6 +369,8 @@ impl SchemeBound for Numeric {
 }
 
 impl Number for Numeric {
+    type Signed = Numeric;
+
     fn add(self, other: Self) -> Option<Self> {
         self.binary(other, u128::checked_add, i128::checked_add, |a, b| {
             Some(a + b)
@@ -302,6 +380,43 @@ impl Number for Numeric {
         self.binary(other, u128::checked_sub, i128::checked_sub, |a, b| {
             Some(a - b)
         })
+    }
+    fn subtract_signed(self, other: Self) -> Option<Self> {
+        match (self, other) {
+            // Two naturals subtract as integers, so the difference
+            // may be negative. A difference that is not is the natural
+            // it is, the form the band stores a non-negative number in.
+            (Numeric::UnsignedInt(a), Numeric::UnsignedInt(b)) => {
+                if a >= b {
+                    return Some(Numeric::UnsignedInt(a - b));
+                }
+                let a = i128::try_from(a).ok()?;
+                let b = i128::try_from(b).ok()?;
+                a.checked_sub(b).map(Numeric::SignedInt)
+            }
+            (a, b) => a.subtract(b),
+        }
+    }
+    fn floor(self) -> Option<i128> {
+        match self {
+            Numeric::UnsignedInt(natural) => Number::floor(natural),
+            Numeric::SignedInt(integer) => Some(integer),
+            Numeric::Float(float) => Number::floor(float),
+        }
+    }
+    fn round(self) -> Option<i128> {
+        match self {
+            Numeric::UnsignedInt(natural) => Number::round(natural),
+            Numeric::SignedInt(integer) => Some(integer),
+            Numeric::Float(float) => Number::round(float),
+        }
+    }
+    fn truncate(self) -> Option<i128> {
+        match self {
+            Numeric::UnsignedInt(natural) => Number::truncate(natural),
+            Numeric::SignedInt(integer) => Some(integer),
+            Numeric::Float(float) => Number::truncate(float),
+        }
     }
     fn multiply(self, other: Self) -> Option<Self> {
         self.binary(other, u128::checked_mul, i128::checked_mul, |a, b| {
@@ -333,6 +448,21 @@ mod tests {
         let a = Numeric::Float(2.0);
         let b = Numeric::Float(1.5);
         assert_eq!(a.add(b), Some(Numeric::Float(3.5)));
+    }
+
+    /// NaN is not a value, so a float operation whose IEEE result is
+    /// NaN has no result, where one producing an infinity has.
+    #[dialog_common::test]
+    fn it_yields_no_nan() {
+        assert_eq!(Numeric::Float(0.0).divide(Numeric::Float(0.0)), None);
+        assert_eq!(
+            Numeric::Float(f64::INFINITY).subtract(Numeric::Float(f64::INFINITY)),
+            None
+        );
+        assert_eq!(
+            Numeric::Float(1.0).divide(Numeric::Float(0.0)),
+            Some(Numeric::Float(f64::INFINITY))
+        );
     }
 
     /// Mixed variants are a non-match, never a promotion: dialog's

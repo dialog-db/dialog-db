@@ -96,13 +96,13 @@ impl From<ConnectedReplica> for RemoteFallback {
 /// When the tracked remote failed to load ([`RemoteFallback::Unavailable`]),
 /// local hits still succeed and the first miss fails loudly with the
 /// load failure as context.
-pub struct NetworkedIndex<'a, Env> {
+pub struct NetworkedIndex<'a, Env: ?Sized> {
     local: LocalIndex<'a, Env>,
     remote: RemoteFallback,
     priority: Priority,
 }
 
-impl<Env> Clone for NetworkedIndex<'_, Env> {
+impl<Env: ?Sized> Clone for NetworkedIndex<'_, Env> {
     fn clone(&self) -> Self {
         Self {
             local: self.local.clone(),
@@ -112,7 +112,7 @@ impl<Env> Clone for NetworkedIndex<'_, Env> {
     }
 }
 
-impl<'a, Env> NetworkedIndex<'a, Env> {
+impl<'a, Env: ?Sized> NetworkedIndex<'a, Env> {
     /// Create a networked index. With [`RemoteFallback::Remote`] (or a
     /// `Some(remote)`), reads that miss locally fall back to the remote
     /// and cache the result; see [`RemoteFallback`] for the other modes.
@@ -137,9 +137,47 @@ impl<'a, Env> NetworkedIndex<'a, Env> {
     }
 }
 
+/// What a [`NetworkedIndex`] reads through, as one trait object.
+///
+/// The tree code a read or a commit runs is generic over its store, and
+/// the store names the environment it reads through. An index built over
+/// each concrete environment therefore copies that tree code once per
+/// environment type, in every crate that names one: a peer's storage and
+/// mode, and each wrapper an embedder puts around it. Built over this
+/// object instead, the copies collapse into one.
+///
+/// The index's own impls do not ask `Env: 'static`, and must not. The
+/// object's lifetime is a region, which rustc erases when it checks that
+/// a future holding the index is `Send` for every lifetime it borrows;
+/// an outlives bound on it then cannot be shown, and every provider that
+/// commits stops being `Send` (rust-lang/rust#100013).
+pub(crate) trait Reads:
+    Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync
+{
+}
+
+impl<T> Reads for T where T: Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync
+{}
+
+impl<'a> NetworkedIndex<'a, dyn Reads> {
+    /// [`NetworkedIndex::new`], reading through `env` as a [`Reads`]
+    /// object, so every environment shares one copy of the tree code
+    /// that reads through the index.
+    pub(crate) fn erased<Env>(
+        env: &'a Env,
+        index: CatalogScope,
+        remote: impl Into<RemoteFallback>,
+    ) -> Self
+    where
+        Env: Reads + 'static,
+    {
+        Self::new(env, index, remote)
+    }
+}
+
 impl<Env> NetworkedIndex<'_, Env>
 where
-    Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<Hydrate> + ConditionalSync,
 {
     /// The block stored under `hash`: the local archive's copy, or else the
     /// tracked remote's, hydrated into the local archive as it is read.
@@ -189,14 +227,21 @@ where
             lane,
             priority: self.priority,
         };
-        let hydrated = Provider::<Hydrate>::execute(self.local.env(), request).await?;
+        let hydrated = Provider::<Hydrate>::execute(self.local.env(), request)
+            .await
+            .map_err(|error| {
+                ArchiveError::Storage(format!(
+                    "block {hash} is not in the local archive and could not hydrate on \
+                     lane {lane:?}: {error}"
+                ))
+            })?;
         Ok(hydrated.map(|bytes| Buffer::from(bytes.as_ref().clone())))
     }
 }
 
 impl<Env> NetworkedIndex<'_, Env>
 where
-    Env: Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync,
 {
     /// The spilled value stored under `hash`: the local copy (blob store,
     /// then the block catalog for values spilled before they moved to
@@ -216,7 +261,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<LoadBlock> for NetworkedIndex<'_, Env>
 where
-    Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<Hydrate> + ConditionalSync,
 {
     async fn execute(
         &self,
@@ -235,7 +280,7 @@ where
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<LoadBlob> for NetworkedIndex<'_, Env>
 where
-    Env: Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<BlobRead> + Provider<Hydrate> + ConditionalSync,
 {
     async fn execute(
         &self,

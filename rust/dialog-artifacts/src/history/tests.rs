@@ -9,13 +9,13 @@ use dialog_search_tree::MemoryBlocks;
 use ed25519_dalek::SigningKey;
 use futures_util::TryStreamExt as _;
 
-use crate::tree::{ArtifactTree, ArtifactTreeExt as _};
-use crate::{Artifact, Attribute, DialogArtifactsError, Entity, Instruction, Value, encode_bytes};
+use crate::tree::{ArtifactTree, ArtifactTreeExt as _, SpillCache};
+use crate::{Artifact, DialogArtifactsError, Entity, Instruction, Relation, Value, encode_bytes};
 
 use super::{
     Authority, Causality, CausalityCache, Cause, Claim, Edition, History, HistorySelector,
     MemoryHistory, Origin, Revision, RevisionRecord, TreeHistory, Version, causality,
-    common_ancestor, extend_skips, log,
+    common_ancestor, extend_skips, log, novelty,
 };
 
 #[cfg(target_arch = "wasm32")]
@@ -35,8 +35,8 @@ fn tree(seed: u8) -> [u8; 32] {
     [seed; 32]
 }
 
-fn name_attribute() -> Attribute {
-    Attribute::from_str("profile/name").unwrap()
+fn name_attribute() -> Relation {
+    Relation::from_str("profile/name").unwrap()
 }
 
 fn name_claim(of: &Entity, value: &str, cause: Cause) -> Claim {
@@ -531,7 +531,7 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = |value: &str| Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -564,8 +564,20 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
         Ok(())
     };
 
-    apply(&mut tree, &store, first, Instruction::Assert(title("Hej"))).await?;
-    apply(&mut tree, &store, second, Instruction::Replace(title("Hi"))).await?;
+    apply(
+        &mut tree,
+        &store,
+        first,
+        Instruction::Assert(title("Hej"), crate::Pick::All),
+    )
+    .await?;
+    apply(
+        &mut tree,
+        &store,
+        second,
+        Instruction::Assert(title("Hi"), crate::Pick::Last),
+    )
+    .await?;
 
     // The replacement's record supersedes the first claim, detectable via
     // the tiered conflict detection over the same tree
@@ -607,6 +619,139 @@ async fn it_records_history_in_the_artifact_tree() -> Result<()> {
     Ok(())
 }
 
+/// A succession elects among the cell's stored claims in the write that
+/// lands its value: the elected claim is retracted, the new claim's
+/// record cites its versions, and every other claim stays. Writing a
+/// value the cell holds records nothing.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_succeeds_the_claim_the_succession_elects() -> Result<()> {
+    use crate::Pick;
+    use futures_util::stream;
+
+    let store = MemoryBlocks::new();
+    let entity = Entity::new()?;
+    let the: Relation = "org/salary".parse()?;
+    let salary = |value: u32| Artifact {
+        the: the.clone(),
+        of: entity.clone(),
+        is: Value::UnsignedInt(value.into()),
+        cause: None,
+    };
+    let first = Version::new(Origin::from([7u8; 32]), Edition::new(0));
+    let second = Version::new(Origin::from([7u8; 32]), Edition::new(1));
+    let third = Version::new(Origin::from([7u8; 32]), Edition::new(2));
+    let fourth = Version::new(Origin::from([7u8; 32]), Edition::new(3));
+    let fifth = Version::new(Origin::from([7u8; 32]), Edition::new(4));
+
+    let mut tree = ArtifactTree::empty();
+    let apply = async |tree: &mut ArtifactTree,
+                       store: &MemoryBlocks,
+                       version: Version,
+                       instruction: Instruction|
+           -> Result<bool> {
+        let mut delta = ArchiveDelta::zero();
+        let changed = tree
+            .apply_versioned(
+                store,
+                &mut delta,
+                Some(version),
+                stream::iter(vec![instruction]),
+            )
+            .await?;
+        delta.flush_into(store);
+        Ok(changed)
+    };
+    let held = async |tree: &ArtifactTree, store: &MemoryBlocks| -> Result<Vec<u128>> {
+        let selector = crate::ArtifactSelector::new()
+            .of(entity.clone())
+            .the(the.clone());
+        let rows: Vec<Artifact> = tree
+            .clone()
+            .scan_owned(store.clone(), SpillCache::with_budget(0), selector)
+            .try_collect()
+            .await?;
+        let mut values: Vec<u128> = rows
+            .into_iter()
+            .filter_map(|artifact| match artifact.is {
+                Value::UnsignedInt(value) => Some(value),
+                _ => None,
+            })
+            .collect();
+        values.sort();
+        Ok(values)
+    };
+
+    apply(
+        &mut tree,
+        &store,
+        first,
+        Instruction::Assert(salary(100), crate::Pick::All),
+    )
+    .await?;
+    apply(
+        &mut tree,
+        &store,
+        second,
+        Instruction::Assert(salary(200), crate::Pick::All),
+    )
+    .await?;
+
+    // `max` elects 200, the greatest, and 150 succeeds it; 100 stays.
+    assert!(
+        apply(
+            &mut tree,
+            &store,
+            third,
+            Instruction::Assert(salary(150), Pick::Max)
+        )
+        .await?
+    );
+    assert_eq!(held(&tree, &store).await?, vec![100, 150]);
+    let history = TreeHistory::new(tree.clone(), store.clone());
+    let records = history
+        .select(HistorySelector::All)
+        .try_collect::<Vec<_>>()
+        .await?;
+    assert_eq!(records.len(), 3);
+    let (version, record) = &records[2];
+    assert_eq!(*version, third);
+    assert!(record.is_assertion());
+    assert!(record.claim().cause.contains(&second));
+    assert!(!record.claim().cause.contains(&first));
+
+    // The value stands already: nothing changes, nothing is recorded.
+    assert!(
+        !apply(
+            &mut tree,
+            &store,
+            fourth,
+            Instruction::Assert(salary(150), Pick::Max)
+        )
+        .await?
+    );
+    assert_eq!(held(&tree, &store).await?, vec![100, 150]);
+
+    // `last` elects the newest, 150, and 300 succeeds it; 100 stays.
+    apply(
+        &mut tree,
+        &store,
+        fifth,
+        Instruction::Assert(salary(300), Pick::Last),
+    )
+    .await?;
+    assert_eq!(held(&tree, &store).await?, vec![100, 300]);
+    let history = TreeHistory::new(tree.clone(), store.clone());
+    let records = history
+        .select(HistorySelector::All)
+        .try_collect::<Vec<_>>()
+        .await?;
+    assert_eq!(records.len(), 4);
+    assert!(records[3].1.claim().cause.contains(&third));
+
+    Ok(())
+}
+
 /// `select(version)` returns exactly the records one revision wrote, and
 /// `select(All)` the whole region — the same records `records()` collects.
 ///
@@ -622,7 +767,7 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = |value: &str| Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -649,12 +794,12 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
 
     // The middle revision writes TWO claims, so the scan has to return a
     // set rather than a single record.
-    let other: Attribute = "post/slug".parse()?;
+    let other: Relation = "post/slug".parse()?;
     apply(
         &mut tree,
         &store,
         first,
-        vec![Instruction::Assert(title("Hej"))],
+        vec![Instruction::Assert(title("Hej"), crate::Pick::All)],
     )
     .await?;
     apply(
@@ -662,13 +807,16 @@ async fn it_selects_the_records_of_one_revision() -> Result<()> {
         &store,
         second,
         vec![
-            Instruction::Replace(title("Hi")),
-            Instruction::Assert(Artifact {
-                the: other.clone(),
-                of: entity.clone(),
-                is: Value::String("hi".into()),
-                cause: None,
-            }),
+            Instruction::Assert(title("Hi"), crate::Pick::Last),
+            Instruction::Assert(
+                Artifact {
+                    the: other.clone(),
+                    of: entity.clone(),
+                    is: Value::String("hi".into()),
+                    cause: None,
+                },
+                crate::Pick::All,
+            ),
         ],
     )
     .await?;
@@ -739,7 +887,7 @@ async fn it_selects_records_whose_values_spilled() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/body".parse()?;
+    let the: Relation = "post/body".parse()?;
     // Well above any inline threshold, so the value lands in its own block.
     let body = "x".repeat(4096);
     let version = Version::new(Origin::from([9u8; 32]), Edition::new(0));
@@ -750,12 +898,15 @@ async fn it_selects_records_whose_values_spilled() -> Result<()> {
         &store,
         &mut delta,
         Some(version),
-        stream::iter(vec![Instruction::Assert(Artifact {
-            the: the.clone(),
-            of: entity.clone(),
-            is: Value::String(body.clone()),
-            cause: None,
-        })]),
+        stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: the.clone(),
+                of: entity.clone(),
+                is: Value::String(body.clone()),
+                cause: None,
+            },
+            crate::Pick::All,
+        )]),
     )
     .await?;
     delta.flush_into(&store);
@@ -845,7 +996,7 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
         in_flight: Arc::new(AtomicUsize::new(0)),
         peak: Arc::new(AtomicUsize::new(0)),
     };
-    let the: Attribute = "post/body".parse()?;
+    let the: Relation = "post/body".parse()?;
     let version = Version::new(Origin::from([9u8; 32]), Edition::new(0));
     // Well above any inline threshold, so every value lands in its own
     // block; distinct per claim so each is its own fetch.
@@ -856,12 +1007,15 @@ async fn it_fetches_spilled_history_values_concurrently() -> Result<()> {
     let mut delta = ArchiveDelta::zero();
     let mut claims = Vec::new();
     for body in &bodies {
-        claims.push(Instruction::Assert(Artifact {
-            the: the.clone(),
-            of: Entity::new()?,
-            is: Value::String(body.clone()),
-            cause: None,
-        }));
+        claims.push(Instruction::Assert(
+            Artifact {
+                the: the.clone(),
+                of: Entity::new()?,
+                is: Value::String(body.clone()),
+                cause: None,
+            },
+            crate::Pick::All,
+        ));
     }
     tree.apply_versioned(&store, &mut delta, Some(version), stream::iter(claims))
         .await?;
@@ -925,7 +1079,7 @@ impl History for CountingHistory<'_> {
         &self,
         version: &Version,
         of: &Entity,
-        the: &Attribute,
+        the: &Relation,
     ) -> Result<Vec<Claim>, DialogArtifactsError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.inner.claims_at(version, of, the).await
@@ -1068,7 +1222,7 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1085,7 +1239,7 @@ async fn it_collapses_a_same_batch_assert_and_retract() -> Result<()> {
             &mut delta,
             Some(version),
             stream::iter(vec![
-                Instruction::Assert(title.clone()),
+                Instruction::Assert(title.clone(), crate::Pick::All),
                 Instruction::Retract(title),
             ]),
         )
@@ -1131,7 +1285,7 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1151,7 +1305,7 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
         &store,
         &mut delta,
         Some(first),
-        stream::iter(vec![Instruction::Assert(title.clone())]),
+        stream::iter(vec![Instruction::Assert(title.clone(), crate::Pick::All)]),
     )
     .await?;
     delta.flush_into(&store);
@@ -1164,7 +1318,7 @@ async fn it_keeps_a_fact_retracted_and_re_asserted_in_one_batch() -> Result<()> 
             Some(second),
             stream::iter(vec![
                 Instruction::Retract(title.clone()),
-                Instruction::Assert(title.clone()),
+                Instruction::Assert(title.clone(), crate::Pick::All),
             ]),
         )
         .await?;
@@ -1210,7 +1364,7 @@ async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
     let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
     let big = Value::String("z".repeat(inline_n + 1));
     let entity = Entity::new()?;
-    let the: Attribute = "doc/body".parse()?;
+    let the: Relation = "doc/body".parse()?;
     let doc = |value: Value| Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1222,10 +1376,13 @@ async fn it_reads_spilled_claim_values_back_through_history() -> Result<()> {
 
     let mut tree = ArtifactTree::empty();
     for (version, instruction) in [
-        (first, Instruction::Assert(doc(big.clone()))),
+        (
+            first,
+            Instruction::Assert(doc(big.clone()), crate::Pick::All),
+        ),
         (
             second,
-            Instruction::Replace(doc(Value::String("v2".into()))),
+            Instruction::Assert(doc(Value::String("v2".into())), crate::Pick::Last),
         ),
     ] {
         let mut delta = ArchiveDelta::zero();
@@ -1263,7 +1420,7 @@ async fn it_ignores_a_retraction_of_a_nonexistent_fact() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1323,7 +1480,7 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1335,12 +1492,15 @@ async fn it_folds_same_batch_records_at_one_history_key() -> Result<()> {
 
     let mut tree = ArtifactTree::empty();
     for (version, instructions) in [
-        (old, vec![Instruction::Assert(title.clone())]),
+        (
+            old,
+            vec![Instruction::Assert(title.clone(), crate::Pick::All)],
+        ),
         (
             new,
             vec![
                 Instruction::Retract(title.clone()),
-                Instruction::Assert(title.clone()),
+                Instruction::Assert(title.clone(), crate::Pick::All),
             ],
         ),
     ] {
@@ -1416,7 +1576,7 @@ async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "task/label".parse()?;
+    let the: Relation = "task/label".parse()?;
     let urgent = Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1433,8 +1593,11 @@ async fn it_covers_every_observed_claim_of_a_retracted_value() -> Result<()> {
 
     let mut tree = ArtifactTree::empty();
     for (version, instruction) in [
-        (bob, Instruction::Assert(urgent.clone())),
-        (mallory, Instruction::Assert(urgent.clone())),
+        (bob, Instruction::Assert(urgent.clone(), crate::Pick::All)),
+        (
+            mallory,
+            Instruction::Assert(urgent.clone(), crate::Pick::All),
+        ),
         (retractor, Instruction::Retract(urgent.clone())),
     ] {
         let mut delta = ArchiveDelta::zero();
@@ -1486,7 +1649,7 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "task/label".parse()?;
+    let the: Relation = "task/label".parse()?;
     let urgent = Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1508,7 +1671,7 @@ async fn it_unions_contended_claim_versions_in_either_direction() -> Result<()> 
             &store,
             &mut delta,
             Some(version),
-            stream::iter(vec![Instruction::Assert(urgent.clone())]),
+            stream::iter(vec![Instruction::Assert(urgent.clone(), crate::Pick::All)]),
         )
         .await?;
         delta.flush_into(&store);
@@ -1590,7 +1753,7 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = |value: &str| Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -1623,21 +1786,42 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
 
     // Two values stand at the same (entity, attribute) — assertions are
     // additive, so this is the cardinality-many shape.
-    apply(&mut tree, &store, first, Instruction::Assert(title("Hej"))).await?;
-    apply(&mut tree, &store, second, Instruction::Assert(title("Hi"))).await?;
+    apply(
+        &mut tree,
+        &store,
+        first,
+        Instruction::Assert(title("Hej"), crate::Pick::All),
+    )
+    .await?;
+    apply(
+        &mut tree,
+        &store,
+        second,
+        Instruction::Assert(title("Hi"), crate::Pick::All),
+    )
+    .await?;
 
-    // Replacing with one of the standing values repairs the anomaly:
-    // the different-valued claim is superseded, the same-valued one stays.
-    let changed = apply(&mut tree, &store, third, Instruction::Replace(title("Hi"))).await?;
-    assert!(changed, "superseding a standing value is a change");
+    // A `last` write succeeds the one claim a `last` read returns, the
+    // newer: that claim is superseded, the other stays beside the
+    // written value.
+    let changed = apply(
+        &mut tree,
+        &store,
+        third,
+        Instruction::Assert(title("Hello"), crate::Pick::Last),
+    )
+    .await?;
+    assert!(changed, "succeeding a standing value is a change");
 
-    let data = tree.select_data(store.clone(), &entity, &the).await?;
-    assert_eq!(data.len(), 1);
+    let mut data = tree.select_data(store.clone(), &entity, &the).await?;
+    data.sort_by_key(|datum| datum.version.map(|version| version.edition));
+    assert_eq!(data.len(), 2);
     assert_eq!(
         data[0].version,
-        Some(second),
-        "the surviving claim keeps its original version"
+        Some(first),
+        "the older claim keeps its original version"
     );
+    assert_eq!(data[1].version, Some(third));
 
     let history = TreeHistory::new(tree.clone(), store.clone());
     let records = history
@@ -1646,21 +1830,21 @@ async fn it_supersedes_only_different_values_when_replacing_many() -> Result<()>
         .await?;
     assert_eq!(records.len(), 3);
     let (_, replacement) = &records[2];
-    assert!(replacement.claim().cause.contains(&first));
+    assert!(replacement.claim().cause.contains(&second));
     assert!(
-        !replacement.claim().cause.contains(&second),
-        "the surviving same-valued claim is not superseded"
+        !replacement.claim().cause.contains(&first),
+        "the older claim the read did not return is not superseded"
     );
 
-    // And replaying the exact same replacement is now a pure no-op.
+    // Writing a value the cell holds is a pure no-op.
     let changed = apply(
         &mut tree,
         &store,
         Version::new(Origin::from([7u8; 32]), Edition::new(3)),
-        Instruction::Replace(title("Hi")),
+        Instruction::Assert(title("Hello"), crate::Pick::Last),
     )
     .await?;
-    assert!(!changed, "re-replacing the only standing value is a no-op");
+    assert!(!changed, "re-writing a standing value is a no-op");
 
     Ok(())
 }
@@ -1678,20 +1862,23 @@ async fn it_disambiguates_truncated_history_keys_in_queries() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let head = "test/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    let long_x: Attribute = format!("{head}x").parse()?;
-    let long_y: Attribute = format!("{head}y").parse()?;
+    let long_x: Relation = format!("{head}x").parse()?;
+    let long_y: Relation = format!("{head}y").parse()?;
     let shared = "test:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let left: Entity = format!("{shared}left").parse()?;
     let right: Entity = format!("{shared}right").parse()?;
 
     let version = Version::new(Origin::from([7u8; 32]), Edition::new(0));
-    let claim = |of: &Entity, the: &Attribute, value: &str| {
-        Instruction::Assert(Artifact {
-            the: the.clone(),
-            of: of.clone(),
-            is: Value::String(value.into()),
-            cause: None,
-        })
+    let claim = |of: &Entity, the: &Relation, value: &str| {
+        Instruction::Assert(
+            Artifact {
+                the: the.clone(),
+                of: of.clone(),
+                is: Value::String(value.into()),
+                cause: None,
+            },
+            crate::Pick::All,
+        )
     };
 
     let mut tree = ArtifactTree::empty();
@@ -1871,7 +2058,7 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
 async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
     use crate::merge::observe_revisions;
     use base58::ToBase58 as _;
-    use dialog_search_tree::{Cache, Manifest, PersistentTree};
+    use dialog_search_tree::{Manifest, PersistentTree};
     use ed25519_dalek::Signer as _;
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
@@ -1904,7 +2091,8 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
         panic!("a record larger than inline_n spills");
     };
 
-    let mut tree: ArtifactTree = PersistentTree::empty_with_manifest(small.clone(), Cache::new());
+    let mut tree: ArtifactTree =
+        PersistentTree::empty_with_manifest(small.clone(), dialog_search_tree::NodeCache::new());
     let mut delta = ArchiveDelta::zero();
     tree.record(&store, &mut delta, entries).await?;
     delta.flush_into(&store);
@@ -1915,7 +2103,8 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
 
     let storage = store.clone();
     let observed = Arc::new(Mutex::new(BTreeSet::new()));
-    let empty: ArtifactTree = PersistentTree::empty_with_manifest(small, Cache::new());
+    let empty: ArtifactTree =
+        PersistentTree::empty_with_manifest(small, dialog_search_tree::NodeCache::new());
     let changes = observe_revisions(
         empty.differentiate(&tree, &storage, &storage),
         observed.clone(),
@@ -1999,6 +2188,66 @@ async fn it_logs_ancestry_newest_first() -> Result<()> {
         4,
         "a replication hole truncates the walk instead of failing it"
     );
+
+    Ok(())
+}
+
+/// The novelty of a head is what a replica lacks of its history, ancestors
+/// first, and a revision of that history whose record is not present fails
+/// the walk rather than truncating it.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_lists_the_novelty_of_a_head_and_fails_on_a_hole() -> Result<()> {
+    let repo = Entity::new()?;
+    let alice = signing_key(1);
+    let bob = signing_key(2);
+
+    let genesis = revise(&repo, &alice, &[], 0);
+    let a1 = revise(&repo, &alice, &[&genesis], 1);
+    let b1 = revise(&repo, &bob, &[&genesis], 2);
+    let merge = revise(&repo, &bob, &[&a1, &b1], 3);
+    let tip = revise(&repo, &bob, &[&merge], 4);
+
+    let mut upstream = MemoryHistory::default();
+    for revision in [&genesis, &a1, &b1, &merge, &tip] {
+        upstream.record_revision(revision)?;
+    }
+    // The replica holds alice's line.
+    let mut known = MemoryHistory::default();
+    for revision in [&genesis, &a1] {
+        known.record_revision(revision)?;
+    }
+
+    let novel = novelty(&tip.version(), &upstream, &known).await?;
+
+    let versions: Vec<_> = novel.iter().map(|(version, _)| *version).collect();
+    assert_eq!(
+        versions,
+        vec![b1.version(), merge.version(), tip.version()],
+        "what the replica lacks, ancestors first"
+    );
+    assert_eq!(novel[0].1.authority, authority_of(&bob).to_string());
+    assert!(
+        novelty(&a1.version(), &upstream, &known).await?.is_empty(),
+        "a head the replica holds brings nothing"
+    );
+
+    // A hole: b1's record is absent from the upstream's history, so the
+    // merge cannot be vouched for, and the walk fails.
+    let mut holed = MemoryHistory::default();
+    for revision in [&genesis, &a1, &merge, &tip] {
+        holed.record_revision(revision)?;
+    }
+    let error = novelty(&tip.version(), &holed, &known)
+        .await
+        .expect_err("a hole fails the walk");
+    assert!(
+        matches!(error, DialogArtifactsError::IncompleteHistory(_)),
+        "{error:?}"
+    );
+    // The same hole is no hole for a replica that holds b1.
+    known.record_revision(&b1)?;
+    assert_eq!(novelty(&tip.version(), &holed, &known).await?.len(), 2);
 
     Ok(())
 }
@@ -2215,7 +2464,7 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
     let store = MemoryBlocks::new();
 
     let entity = Entity::new()?;
-    let the: Attribute = "post/title".parse()?;
+    let the: Relation = "post/title".parse()?;
     let title = |value: &str| Artifact {
         the: the.clone(),
         of: entity.clone(),
@@ -2229,8 +2478,8 @@ async fn it_mirrors_covering_records_into_the_coverage_region() -> Result<()> {
 
     let mut tree = ArtifactTree::empty();
     for (version, instruction) in [
-        (first, Instruction::Assert(title("Hej"))),
-        (second, Instruction::Replace(title("Hi"))),
+        (first, Instruction::Assert(title("Hej"), crate::Pick::All)),
+        (second, Instruction::Assert(title("Hi"), crate::Pick::Last)),
         (third, Instruction::Retract(title("Hi"))),
     ] {
         let mut delta = ArchiveDelta::zero();

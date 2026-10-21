@@ -4,7 +4,7 @@ use crate::KeyType;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Artifact, AttributeKeyPart, EntityKeyPart, ValueDataType, key::value_payload, key::varkey,
+    Artifact, AttributeKeyPart, EntityKeyPart, ValueDataType, key::fact_key, key::varkey,
     key::varkey::KeyParts, key::varkey::ValuePayload,
 };
 use dialog_search_tree::Manifest;
@@ -53,7 +53,7 @@ where
         AttributeKeyPart(varkey::field(
             self.0.as_ref(),
             ENTITY_KEY_TAG,
-            varkey::Field::Attribute,
+            varkey::Field::Relation,
         ))
     }
 
@@ -145,10 +145,7 @@ impl EntityKey<Key> {
     /// value inlines on one path and spills on the other and the lookup
     /// misses.
     pub fn from_artifact(fact: &Artifact, manifest: &Manifest) -> Self {
-        EntityKey::<Key>::default()
-            .set_entity(EntityKeyPart::from(&fact.of))
-            .set_attribute(AttributeKeyPart::from(&fact.the))
-            .set_value(fact.is.data_type(), value_payload(&fact.is, manifest))
+        Self(fact_key(ENTITY_KEY_TAG, fact, manifest))
     }
 }
 

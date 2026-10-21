@@ -1,6 +1,6 @@
 use crate::{Fetched, Revision, Target, TreeReference};
 use dialog_artifacts::DialogArtifactsError;
-use dialog_capability::access::AuthorizeError;
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_capability::identity::IdentityError;
 use dialog_common::Blake3Hash;
 use dialog_credentials::Ed25519SignerError;
@@ -8,7 +8,7 @@ use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
 use dialog_effects::authority::AuthorityError;
 use dialog_effects::blob::BlobError;
-use dialog_effects::memory::{MemoryError, Version};
+use dialog_effects::memory::{Current, MemoryError, Version};
 use dialog_effects::peer::PeerError as ContactError;
 use dialog_effects::storage::StorageError;
 use dialog_search_tree::DialogSearchTreeError;
@@ -34,6 +34,102 @@ pub enum FetchRemoteBranchError {
     /// Persisting the fetched revision to the local cache failed.
     #[error("Failed to persist fetched revision to local cache: {0}")]
     Publish(#[from] PublishError),
+}
+
+/// Errors returned by the observe remote branch command.
+#[derive(Error, Debug)]
+pub enum ObserveRemoteBranchError {
+    /// The observed head is not signed by its issuer.
+    #[error("Observed head does not verify: {0}")]
+    Artifact(#[from] DialogArtifactsError),
+
+    /// Reading the head recorded in the local cache failed.
+    #[error("Failed to read the recorded revision from local cache: {0}")]
+    Resolve(#[from] ResolveError),
+
+    /// Recording the observed head in the local cache failed.
+    #[error("Failed to record observed revision in local cache: {0}")]
+    Publish(#[from] PublishError),
+}
+
+impl From<ObserveRemoteBranchError> for PushError {
+    fn from(error: ObserveRemoteBranchError) -> Self {
+        match error {
+            ObserveRemoteBranchError::Artifact(error) => Self::Artifact(error),
+            ObserveRemoteBranchError::Resolve(error) => Self::Resolve(error),
+            ObserveRemoteBranchError::Publish(error) => Self::Publish(error),
+        }
+    }
+}
+
+/// Errors a watch of a remote branch answers.
+#[derive(Error, Debug)]
+pub enum WatchRemoteBranchError {
+    /// The remote did not follow the branch, or stopped: it cannot
+    /// (`Rejection::Unsupported`), could not be reached, or refused.
+    #[error("Failed to watch the remote branch: {0}")]
+    Watch(#[from] MemoryError),
+
+    /// A head the remote delivered could not be read.
+    #[error("Failed to read a watched head: {0}")]
+    Decode(#[from] ResolveError),
+
+    /// A head the remote delivered could not be recorded.
+    #[error("Failed to record a watched head: {0}")]
+    Observe(#[from] ObserveRemoteBranchError),
+}
+
+/// What went wrong while replicating a branch. None of these end the
+/// replication: it goes on, and tries again on what comes next.
+#[derive(Error, Debug)]
+pub enum ReplicateError {
+    /// An upstream could not be opened to watch.
+    #[error("Failed to open an upstream to watch: {0}")]
+    Open(#[from] OpenRemoteBranchError),
+
+    /// An upstream's head could not be watched, or a watched head not
+    /// recorded.
+    #[error(transparent)]
+    Watch(#[from] WatchRemoteBranchError),
+
+    /// Pulling from the upstreams failed.
+    #[error(transparent)]
+    Pull(#[from] PullError),
+
+    /// Pushing to the upstreams failed.
+    #[error(transparent)]
+    Push(#[from] PushError),
+}
+
+/// Why where a contact is reached could not be learned.
+#[derive(Error, Debug)]
+pub enum DiscoverContactError {
+    /// The contact could not be looked up or recorded.
+    #[error(transparent)]
+    Contact(#[from] AddAddressError),
+
+    /// The contact is not named by a DID, so there is no document to read.
+    #[error("Contact {peer} is not named by a DID")]
+    NotADid {
+        /// The contact's entity.
+        peer: String,
+    },
+
+    /// The contact's DID document could not be read.
+    #[error("Failed to discover {did}: {source}")]
+    Discover {
+        /// The DID discovered.
+        did: String,
+        /// Why it failed.
+        source: dialog_did_web::ResolveError,
+    },
+
+    /// The contact's DID document names no access service.
+    #[error("{did} names no access service")]
+    NoAccessService {
+        /// The DID discovered.
+        did: String,
+    },
 }
 
 /// Errors returned by the publish remote branch command.
@@ -494,6 +590,17 @@ pub enum CommitError {
     #[error("Commit-time induction failed: {0}")]
     Induction(String),
 
+    /// A write succeeding a claim under a choosing pick could not
+    /// read the claims of its cell to elect the one it succeeds.
+    #[error("Succession failed: {0}")]
+    Succession(String),
+
+    /// The branch stores its data the way an earlier release laid it
+    /// out, and this release does not write into such a tree. Run
+    /// [`Branch::migrate`](crate::Branch::migrate) first.
+    #[error("The branch must be migrated before it is written: {0}")]
+    NeedsMigration(String),
+
     /// Reading the registry for what a write replaces failed.
     #[error("Failed to read the registry: {0}")]
     Registry(String),
@@ -710,12 +817,12 @@ pub enum PushError {
 #[derive(Error, Debug)]
 pub enum ResolveError {
     /// CAS edition mismatch — the backing store saw a different edition.
-    #[error("Version mismatch: expected {expected:?}, got {actual:?}")]
+    #[error("Version mismatch: expected {expected:?}, found {current}")]
     VersionMismatch {
         /// The edition we held locally.
         expected: Option<Version>,
-        /// The edition the backing store actually had.
-        actual: Option<Version>,
+        /// What the cell holds instead, as far as the store could tell.
+        current: Current,
     },
 
     /// Storage backend failure.
@@ -740,11 +847,20 @@ pub enum ResolveError {
     Decode(String),
 }
 
+impl AuthorizationFailure for ResolveError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 impl From<MemoryError> for ResolveError {
     fn from(error: MemoryError) -> Self {
         match error {
-            MemoryError::VersionMismatch { expected, actual } => {
-                Self::VersionMismatch { expected, actual }
+            MemoryError::VersionMismatch { expected, current } => {
+                Self::VersionMismatch { expected, current }
             }
             MemoryError::Storage(message) => Self::Storage(message),
             MemoryError::Rejected(error) => Self::Rejected(error),
@@ -757,12 +873,13 @@ impl From<MemoryError> for ResolveError {
 #[derive(Error, Debug)]
 pub enum PublishError {
     /// CAS edition mismatch — another writer won the race.
-    #[error("Version mismatch: expected {expected:?}, got {actual:?}")]
+    #[error("Version mismatch: expected {expected:?}, found {current}")]
     VersionMismatch {
         /// The edition we held locally.
         expected: Option<Version>,
-        /// The edition the backing store actually had.
-        actual: Option<Version>,
+        /// What the cell holds instead, as far as the store could tell
+        /// (see [`MemoryError::VersionMismatch`]).
+        current: Current,
     },
 
     /// Storage backend failure.
@@ -787,6 +904,15 @@ pub enum PublishError {
     Encode(String),
 }
 
+impl AuthorizationFailure for PublishError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 /// Errors returned by cell retract operations.
 #[derive(Error, Debug)]
 pub enum RetractError {
@@ -801,12 +927,13 @@ pub enum RetractError {
     Unobserved,
 
     /// CAS edition mismatch -- the cell moved under us.
-    #[error("Version mismatch: expected {expected:?}, got {actual:?}")]
+    #[error("Version mismatch: expected {expected:?}, found {current}")]
     VersionMismatch {
         /// The edition we expected to remove.
         expected: Option<Version>,
-        /// The edition the backing store actually had.
-        actual: Option<Version>,
+        /// What the cell holds instead, as far as the store could tell
+        /// (see [`MemoryError::VersionMismatch`]).
+        current: Current,
     },
 
     /// Storage backend failure.
@@ -823,11 +950,20 @@ pub enum RetractError {
     Rejected(#[from] Rejection),
 }
 
+impl AuthorizationFailure for RetractError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 impl From<MemoryError> for RetractError {
     fn from(error: MemoryError) -> Self {
         match error {
-            MemoryError::VersionMismatch { expected, actual } => {
-                Self::VersionMismatch { expected, actual }
+            MemoryError::VersionMismatch { expected, current } => {
+                Self::VersionMismatch { expected, current }
             }
             MemoryError::Storage(message) => Self::Storage(message),
             MemoryError::Rejected(error) => Self::Rejected(error),
@@ -839,8 +975,8 @@ impl From<MemoryError> for RetractError {
 impl From<MemoryError> for PublishError {
     fn from(error: MemoryError) -> Self {
         match error {
-            MemoryError::VersionMismatch { expected, actual } => {
-                Self::VersionMismatch { expected, actual }
+            MemoryError::VersionMismatch { expected, current } => {
+                Self::VersionMismatch { expected, current }
             }
             MemoryError::Storage(message) => Self::Storage(message),
             MemoryError::Rejected(error) => Self::Rejected(error),
@@ -881,6 +1017,8 @@ mod tests {
             subject: dialog_capability::did!(
                 "did:key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"
             ),
+            certificate: None,
+            revocation: None,
         }
     }
 

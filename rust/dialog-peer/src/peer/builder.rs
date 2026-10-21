@@ -8,13 +8,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use dialog_capability::access::{Access, Prove};
-use dialog_capability::{Ability, Capability, Constraint, Subject, did};
-use dialog_common::{Held, Holdings};
+use dialog_capability::{Ability, Capability, Command, Constraint, Provider, Subject, did};
+use dialog_common::{ConditionalSync, Held, Holdings, Holds};
 use dialog_credentials::{Credential, Ed25519Signer, Signer, SignerCredential, Verifier};
+use dialog_effects::memory::Resolve;
 use dialog_effects::storage::{self as storage_fx, Directory, Location, LocationExt as _};
 use dialog_identity::access::{Access as Accessor, Claim};
 use dialog_network::Network;
-use dialog_repository::BranchReference;
+use dialog_repository::{BranchReference, HeldCaches};
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Scope, Ucan, UcanCertificate};
 use dialog_ucan_core::subject::Subject as UcanSubject;
@@ -25,7 +26,9 @@ use parking_lot::Mutex;
 
 use super::secret::SiteSecrets;
 use super::upgrade::Step;
-use super::{Grant, Inner, Local, Mode, Peer, PeerSpace, Runtime, Session};
+use super::{
+    Discovery, Grant, Inner, Local, Mode, Peer, PeerSpace, Runtime, Session, default_discovery,
+};
 
 /// A peer built from the branch that holds its state: the same builder
 /// [`Peer::new`] starts, with this branch as its [space](PeerBuilder::space).
@@ -287,7 +290,11 @@ pub struct PeerBuilder<K = Unset, St = Unset, M = Local> {
     location: Option<Location>,
     directory: Option<Directory>,
     network: Network,
+    /// The caches the peer holds for the repositories opened through it;
+    /// its own, with the default budget, when none are given.
+    caches: Option<HeldCaches>,
     runtime: Runtime,
+    discovery: Arc<dyn Discovery>,
     issuer: Option<SignerCredential>,
     allowed: Vec<Allowance>,
     /// Certificates addressed to someone above this peer in its chain:
@@ -303,6 +310,9 @@ pub struct PeerBuilder<K = Unset, St = Unset, M = Local> {
     /// The peer a session is built from, whose records of spaces it reads
     /// (see [`Inner::holder`]).
     holder: Option<Did>,
+    /// The replica a session writes as, when it is not the home (see
+    /// [`Inner::profile`]).
+    profile: Option<Did>,
     mode: PhantomData<M>,
 }
 
@@ -315,13 +325,16 @@ impl<M> PeerBuilder<Unset, Unset, M> {
             location: None,
             directory: None,
             network: Network::default(),
+            caches: None,
             runtime: Runtime::default(),
+            discovery: default_discovery(),
             issuer: None,
             allowed: Vec::new(),
             held: Vec::new(),
             steps: Vec::new(),
             sites: None,
             holder: None,
+            profile: None,
             mode: PhantomData,
         }
     }
@@ -340,7 +353,11 @@ impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>, Session> {
             location: None,
             directory: Some(peer.directory().clone()),
             network: peer.network().clone(),
+            // A session works on its peer's repositories, through the
+            // caches its peer holds.
+            caches: Some(peer.caches()),
             runtime: peer.runtime().clone(),
+            discovery: peer.discovery().clone(),
             issuer: Some(peer.credential().clone()),
             allowed: Vec::new(),
             // The peer's grants from the storage's system: links a
@@ -355,12 +372,34 @@ impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>, Session> {
             steps: Vec::new(),
             sites: Some(Arc::new(peer.clone())),
             holder: Some(peer.did()),
+            profile: None,
             mode: PhantomData,
         }
     }
 }
 
 impl<K, St, M> PeerBuilder<K, St, M> {
+    /// The replica this peer writes as: the profile that its revisions
+    /// name as their authority, and that every entity it writes derives
+    /// from. By default it is the home, the repository of the state branch.
+    ///
+    /// A peer that is given another space as its home, because that space
+    /// is the one storage it can reach, still writes as the replica whose
+    /// key delegated to it: a session of a persona that writes into a space
+    /// of that persona names the persona, and so does a device of a persona
+    /// whose state branch is in a repository of the device.
+    ///
+    /// The profile names the replica, not only the authority: what a branch
+    /// keeps about the replica it lives on derives from it too. A branch
+    /// opened by a peer given a profile keeps its metadata, its tracking
+    /// (the host its routes resolve under, and its upstreams), and its
+    /// records in the registry (the replica, and the branch it has active)
+    /// under the profile's replica of the repository, not under the home's.
+    pub fn profile(mut self, profile: Did) -> Self {
+        self.profile = Some(profile);
+        self
+    }
+
     /// Where the home repository's space lives: mounted at open, and
     /// created holding the home's public identity when it is not there
     /// yet, then checked to be the space the home names.
@@ -393,6 +432,15 @@ impl<K, St, M> PeerBuilder<K, St, M> {
     /// speculation queue with other peers over the same storage.
     pub fn runtime(mut self, runtime: Runtime) -> Self {
         self.runtime = runtime;
+        self
+    }
+
+    /// What the peer learns where a DID's subject is reached with, in
+    /// place of resolving `did:key` locally and `did:web` and `did:plc`
+    /// over the network: a host that resolves DIDs its own way, or a test
+    /// that answers from memory.
+    pub fn discovery(mut self, discovery: impl Discovery + 'static) -> Self {
+        self.discovery = Arc::new(discovery);
         self
     }
 
@@ -443,13 +491,16 @@ impl<St> PeerBuilder<PeerKey, St, Local> {
             location: self.location,
             directory: self.directory,
             network: self.network,
+            caches: self.caches,
             runtime: self.runtime,
+            discovery: self.discovery,
             issuer: self.issuer,
             allowed: self.allowed,
             held: self.held,
             steps: self.steps,
             sites: self.sites,
             holder: self.holder,
+            profile: self.profile,
             mode: PhantomData,
         }
     }
@@ -486,13 +537,16 @@ impl<St, M> PeerBuilder<Unset, St, M> {
             location: self.location,
             directory: self.directory,
             network: self.network,
+            caches: self.caches,
             runtime: self.runtime,
+            discovery: self.discovery,
             issuer: self.issuer,
             allowed: self.allowed,
             held: self.held,
             steps: self.steps,
             sites: self.sites,
             holder: self.holder,
+            profile: self.profile,
             mode: PhantomData,
         }
     }
@@ -518,13 +572,16 @@ impl<K, M, S: Clone> With<Storage<S>> for PeerBuilder<K, Unset, M> {
             location: self.location,
             directory: self.directory,
             network: self.network,
+            caches: self.caches,
             runtime: self.runtime,
+            discovery: self.discovery,
             issuer: self.issuer,
             allowed: self.allowed,
             held: self.held,
             steps: self.steps,
             sites: self.sites,
             holder: self.holder,
+            profile: self.profile,
             mode: PhantomData,
         }
     }
@@ -537,6 +594,49 @@ impl<K, St, M> With<Network> for PeerBuilder<K, St, M> {
     fn with(mut self, network: Network) -> Self {
         self.network = network;
         self
+    }
+}
+
+/// The caches the peer holds for the repositories opened through it: how
+/// an embedder bounds them, or has several peers share one set.
+impl<K, St, M> With<HeldCaches> for PeerBuilder<K, St, M> {
+    type Output = Self;
+
+    fn with(mut self, caches: HeldCaches) -> Self {
+        self.caches = Some(caches);
+        self
+    }
+}
+
+/// A peer's storage beside the holdings the peer will have: what its state
+/// branch is opened through, before there is a peer to open it through.
+struct Opening<'a, S: Clone> {
+    storage: &'a Storage<S>,
+    holdings: &'a Holdings,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S: Clone> Provider<Resolve> for Opening<'_, S>
+where
+    Storage<S>: Provider<Resolve> + ConditionalSync,
+{
+    async fn execute(&self, input: <Resolve as Command>::Input) -> <Resolve as Command>::Output {
+        Provider::<Resolve>::execute(self.storage, input).await
+    }
+}
+
+impl<S: Clone> Holds for Opening<'_, S> {
+    fn held(&self, key: &str) -> Option<Held> {
+        self.holdings.held(key)
+    }
+
+    fn hold(&self, key: String, handle: Held) {
+        self.holdings.hold(key, handle)
+    }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+        self.holdings.held_or(key, make)
     }
 }
 
@@ -729,9 +829,19 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
             grants.push(grant);
         }
 
+        // The peer's state branch is opened before the peer exists, so it
+        // is opened through the storage with the holdings the peer will
+        // have: what the branch keeps is then the peer's to hold.
+        let holdings = Holdings::default();
+        if let Some(caches) = &self.caches {
+            caches.hold(&holdings);
+        }
         let state = reference
             .open()
-            .perform(&self.storage)
+            .perform(&Opening {
+                storage: &self.storage,
+                holdings: &holdings,
+            })
             .await
             .map_err(|error| PeerError::State(error.to_string()))?;
 
@@ -752,13 +862,15 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                 directory,
                 network: self.network,
                 runtime: self.runtime,
+                discovery: self.discovery,
                 state,
                 chains: Mutex::default(),
                 grants,
-                holdings: Holdings::default(),
+                holdings,
                 connections: Mutex::default(),
                 sites: self.sites,
                 holder,
+                profile: self.profile,
             },
         );
 

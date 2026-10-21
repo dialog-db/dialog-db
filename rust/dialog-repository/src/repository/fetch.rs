@@ -30,10 +30,9 @@ use std::task::{Context, Poll};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{ArtifactSelector, FetchBudget, Likelihood, PreloadQueue};
-use dialog_capability::{Fork, Provider};
+use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
-use dialog_effects::archive::{Get, Put};
-use dialog_effects::memory::Resolve;
+use dialog_effects::archive::Get;
 use futures_util::future::{FutureExt as _, Shared};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt as _};
@@ -46,8 +45,10 @@ use dialog_search_tree::{
     Buffer, DialogSearchTreeError, LoadBlock, PersistentNode, Traversable as _,
 };
 
+use crate::repository::archive::networked::Reads;
+use crate::repository::branch::Erased;
 use crate::repository::source::Source;
-use crate::{Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite};
+use crate::{Hydrate, Index, NetworkedIndex, RemoteFallback};
 
 #[cfg(not(target_arch = "wasm32"))]
 type FetchFuture<'a> = Pin<Box<dyn Future<Output = Likelihood> + Send + 'a>>;
@@ -78,27 +79,20 @@ type SharedFallback<'a> = Shared<FallbackFuture<'a>>;
 /// shared by every job: the remote a branch tracks does not change while
 /// one evaluation runs, and loading it per job put a store read in front
 /// of every warm-up.
-pub(crate) struct Driven<'a, S, Env> {
+pub(crate) struct Driven<'a, S> {
     inner: S,
     queue: Arc<PreloadQueue>,
     sources: Vec<(Source, SharedFallback<'a>)>,
-    env: &'a Env,
+    env: &'a Erased,
     budget: FetchBudget,
     likely_inflight: usize,
     maybe_inflight: usize,
     inflight: FuturesUnordered<FetchFuture<'a>>,
 }
 
-impl<'a, S, Env> Driven<'a, S, Env>
+impl<'a, S> Driven<'a, S>
 where
     S: Stream + Unpin + 'a,
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Hydrate>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
 {
     /// Wrap `stream` so that polling it also drives the env's queue.
     /// The budget is read once: a per-driver cap, so concurrent driven
@@ -106,7 +100,7 @@ where
     pub(crate) fn new(
         stream: S,
         sources: Vec<Source>,
-        env: &'a Env,
+        env: &'a Erased,
         queue: Arc<PreloadQueue>,
     ) -> Self {
         let sources = sources
@@ -176,16 +170,9 @@ where
     }
 }
 
-impl<'a, S, Env> Stream for Driven<'a, S, Env>
+impl<'a, S> Stream for Driven<'a, S>
 where
     S: Stream + Unpin + 'a,
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Hydrate>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
 {
     type Item = S::Item;
 
@@ -222,22 +209,13 @@ where
 /// takes a site's slot from a demand read. The scope is the selector's exact key range; a subtree the
 /// range cannot touch is never fetched, and warming a conservative
 /// superset at the edges is harmless.
-async fn warm_source<Env>(
+async fn warm_source(
     source: Source,
     fallback: SharedFallback<'_>,
-    env: &Env,
+    env: &Erased,
     selector: &ArtifactSelector<Constrained>,
     likelihood: Likelihood,
-) -> Result<(), DialogSearchTreeError>
-where
-    Env: Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<Hydrate>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<(), DialogSearchTreeError> {
     let Some(root) = source.as_ref().root() else {
         return Ok(());
     };
@@ -249,13 +227,14 @@ where
         return Ok(());
     }
     let catalog = ArchiveScope::new(source.as_ref().subject()).index();
-    let store = NetworkedIndex::new(env, catalog, remote).with_priority(likelihood.into());
+    let reads: &dyn Reads = env;
+    let store = NetworkedIndex::new(reads, catalog, remote).with_priority(likelihood.into());
     let store = CacheThrough {
         cache: source.as_ref().node_cache(),
         store,
     };
     let storage = store;
-    let tree = Index::from_hash(NodeHash::from(root));
+    let tree = Index::from_hash_with_cache(NodeHash::from(root), source.as_ref().node_cache());
 
     let manifest = tree.manifest(&storage).await?;
     let range = selector_range(selector, &manifest);
@@ -279,12 +258,12 @@ where
 /// spine a peer already warmed re-reads nothing), and every miss that
 /// checks as a node lands in it, so the demand read that follows a warm is
 /// served from memory without checking the node again.
-struct CacheThrough<'a, Env> {
+struct CacheThrough<'a, Env: ?Sized> {
     cache: ArtifactNodeCache,
     store: NetworkedIndex<'a, Env>,
 }
 
-impl<Env> Clone for CacheThrough<'_, Env> {
+impl<Env: ?Sized> Clone for CacheThrough<'_, Env> {
     fn clone(&self) -> Self {
         Self {
             cache: self.cache.clone(),
@@ -297,7 +276,7 @@ impl<Env> Clone for CacheThrough<'_, Env> {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl<Env> Provider<LoadBlock> for CacheThrough<'_, Env>
 where
-    Env: Provider<Get> + Provider<Hydrate> + ConditionalSync + 'static,
+    Env: ?Sized + Provider<Get> + Provider<Hydrate> + ConditionalSync,
 {
     async fn execute(
         &self,
@@ -373,12 +352,15 @@ mod tests {
         tree.apply(
             blocks,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(Artifact {
-                the: "profile/name".parse()?,
-                of: Entity::new()?,
-                is: Value::String(name.into()),
-                cause: None,
-            })]),
+            stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "profile/name".parse()?,
+                    of: Entity::new()?,
+                    is: Value::String(name.into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]),
         )
         .await?;
         delta.flush_into(blocks);

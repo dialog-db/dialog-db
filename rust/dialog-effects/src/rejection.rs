@@ -29,6 +29,23 @@ pub enum Rejection {
     Unavailable {
         /// Why, as far as the responder would say.
         reason: String,
+        /// How many seconds to wait before trying again, when the
+        /// responder said (a rate limit, say). Left out of the encoding
+        /// when it did not, so a peer that predates it reads the same.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after: Option<u64>,
+    },
+
+    /// The responder does not carry out requests of this kind at all.
+    ///
+    /// Not retryable as-is, and not an access decision: the same request
+    /// fails the same way for anyone. A caller with another way to get
+    /// what it asked for (resolving a cell again instead of watching it,
+    /// say) takes that way.
+    #[error("The request is not supported: {reason}")]
+    Unsupported {
+        /// What is not supported, as far as the responder would say.
+        reason: String,
     },
 
     /// Not carried out, for a reason this version does not recognize.
@@ -46,11 +63,60 @@ pub enum Rejection {
 }
 
 impl Rejection {
+    /// Temporarily unable to serve, for `reason`, with no word on when
+    /// to try again.
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Rejection::Unavailable {
+            reason: reason.into(),
+            retry_after: None,
+        }
+    }
+
+    /// How many seconds to wait before trying again, when the responder
+    /// said.
+    pub fn retry_after(&self) -> Option<u64> {
+        match self {
+            Rejection::Unavailable { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+
     /// Whether retrying the identical request could succeed.
     ///
     /// True only for [`Rejection::Unavailable`]. An unrecognized
     /// failure is not a known-transient one, so it does not count.
     pub fn is_transient(&self) -> bool {
         matches!(self, Rejection::Unavailable { .. })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use super::Rejection;
+
+    /// A refusal that says when to try again carries it across the wire,
+    /// and one that does not says nothing of it, so a peer that predates
+    /// the field reads it and writes it as before.
+    #[dialog_common::test]
+    fn it_carries_when_to_try_again_and_leaves_it_out_when_unsaid() {
+        let limited = Rejection::Unavailable {
+            reason: "rate limited".into(),
+            retry_after: Some(30),
+        };
+        let encoded = serde_json::to_value(&limited).expect("encodes");
+        assert_eq!(encoded["retry_after"], 30);
+        let decoded: Rejection = serde_json::from_value(encoded).expect("decodes");
+        assert_eq!(decoded.retry_after(), Some(30));
+
+        let unsaid = serde_json::to_value(Rejection::unavailable("down")).expect("encodes");
+        assert!(unsaid.get("retry_after").is_none(), "{unsaid}");
+
+        let older: Rejection =
+            serde_json::from_str(r#"{"kind":"Unavailable","reason":"down"}"#).expect("decodes");
+        assert_eq!(older, Rejection::unavailable("down"));
+        assert_eq!(older.retry_after(), None);
     }
 }

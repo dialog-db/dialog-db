@@ -54,7 +54,7 @@ pub(crate) mod varkey;
 pub const HISTORY_KEY_TAG: u8 = 3;
 
 use crate::{
-    ArtifactSelector, Value, ValueDataType, encode_value_owned, key::varkey::ValuePayload,
+    ArtifactSelector, Value, ValueDataType, encode_key_value_owned, key::varkey::ValuePayload,
     selector::Constrained,
 };
 
@@ -62,7 +62,7 @@ use crate::{
 pub(crate) const TAG_LENGTH: usize = 1;
 /// Maximum attribute length in bytes (still capped for the dictionary column
 /// and for filler-based range bounds).
-pub(crate) const ATTRIBUTE_LENGTH: usize = 64;
+pub(crate) const RELATION_LENGTH: usize = 64;
 /// Length of the value data type field in key bytes
 pub(crate) const VALUE_DATA_TYPE_LENGTH: usize = 1;
 
@@ -94,6 +94,8 @@ pub(crate) fn value_payload(value: &Value, manifest: &Manifest) -> ValuePayload 
 /// check, and the spill store separately — three to five full passes per
 /// instruction on the write hot path.
 pub(crate) struct EncodedValue {
+    /// The type byte the index keys carry for this value: its band.
+    pub value_type: ValueDataType,
     /// The payload the index keys carry for this value.
     pub payload: ValuePayload,
     /// A spilling value's archive block: its 32-byte reference (the hash the
@@ -107,14 +109,16 @@ impl EncodedValue {
     /// exactly as [`value_payload`] does (it delegates here).
     pub(crate) fn new(value: &Value, manifest: &Manifest) -> Self {
         let inline_n = manifest.inline_n as usize;
+        let value_type = value.data_type().band(manifest.value_encoding);
         // Short-circuit: when a provable lower bound on the encoded length
         // already exceeds the threshold, the value spills without running the
         // full order-preserving encode (which is only needed for its length
         // here — the spilled payload is built from the RAW bytes below).
         if encoded_len_lower_bound(value) <= inline_n {
-            let encoded = encode_value_owned(value);
+            let encoded = encode_key_value_owned(value, manifest.value_encoding);
             if encoded.len() <= inline_n {
                 return Self {
+                    value_type,
                     payload: ValuePayload::Inline(encoded),
                     spill: None,
                 };
@@ -126,6 +130,7 @@ impl EncodedValue {
         crate::encode_bytes(&raw[..take], &mut prefix);
         let reference = crate::make_reference(&raw);
         Self {
+            value_type,
             payload: ValuePayload::Spilled {
                 prefix,
                 hash: reference.to_vec(),
@@ -140,7 +145,7 @@ impl EncodedValue {
 ///
 /// Byte-string types escape and terminate, so their encoding is strictly
 /// longer than the raw bytes; numerics encode at their exact fixed width. A
-/// `Symbol`'s raw form (`Attribute::key_bytes`, fixed-width padded) does NOT
+/// `Symbol`'s raw form (`Relation::key_bytes`, fixed-width padded) does NOT
 /// bound its encoding (the string form), so it reports 0 and never
 /// short-circuits.
 fn encoded_len_lower_bound(value: &Value) -> usize {
@@ -149,8 +154,9 @@ fn encoded_len_lower_bound(value: &Value) -> usize {
         Value::Record(bytes) => bytes.len(),
         Value::String(string) => string.len(),
         Value::Entity(entity) => entity.as_str().len(),
-        Value::UnsignedInt(_) | Value::SignedInt(_) => 16,
-        Value::Float(_) => 8,
+        // A number in the one band takes at least its class byte; the
+        // fixed-width bands' 16 or 8 bytes only bound the others.
+        Value::UnsignedInt(_) | Value::SignedInt(_) | Value::Float(_) => 1,
         Value::Boolean(_) => 1,
         Value::Symbol(_) => 0,
     }
@@ -165,11 +171,11 @@ fn encoded_len_lower_bound(value: &Value) -> usize {
 /// other two orderings through `FromKey` (each accessor re-splitting the key)
 /// costs ~ten key walks per instruction; this costs three plain
 /// serializations of the same parts.
-pub(crate) fn artifact_index_keys(
-    artifact: &crate::Artifact,
-    manifest: &Manifest,
-) -> (Key, Key, Key) {
-    artifact_index_keys_with(artifact, value_payload(&artifact.is, manifest))
+///
+/// Public for in-memory stores that key facts the way the tree does.
+pub fn artifact_index_keys(artifact: &crate::Artifact, manifest: &Manifest) -> (Key, Key, Key) {
+    let encoded = EncodedValue::new(&artifact.is, manifest);
+    artifact_index_keys_with(artifact, encoded.value_type, encoded.payload)
 }
 
 /// [`artifact_index_keys`] with the value payload already in hand, so a caller
@@ -177,13 +183,14 @@ pub(crate) fn artifact_index_keys(
 /// [`EncodedValue`]) encodes the value exactly once.
 pub(crate) fn artifact_index_keys_with(
     artifact: &crate::Artifact,
+    value_type: ValueDataType,
     payload: ValuePayload,
 ) -> (Key, Key, Key) {
     let mut parts = varkey::KeyParts {
         tag: ENTITY_KEY_TAG,
         entity: artifact.of.as_str().as_bytes().to_vec(),
         attribute: artifact.the.as_str().as_bytes().to_vec(),
-        value_type: artifact.is.data_type(),
+        value_type,
         value: payload,
         // The fact orderings carry no version; only history/coverage keys do.
         version: None,
@@ -194,6 +201,22 @@ pub(crate) fn artifact_index_keys_with(
     parts.tag = VALUE_KEY_TAG;
     let vae = Key::from(varkey::build_key(&parts));
     (eav, aev, vae)
+}
+
+/// One index key of `artifact`, in the ordering `tag` names, built from its
+/// parts in one serialization (see [`artifact_index_keys`]): what the chained
+/// `set_*` rebuilds produce, without parsing and re-encoding the key once per
+/// field.
+pub(crate) fn fact_key(tag: u8, artifact: &crate::Artifact, manifest: &Manifest) -> Key {
+    let encoded = EncodedValue::new(&artifact.is, manifest);
+    Key::from(varkey::build_key(&varkey::KeyParts {
+        tag,
+        entity: artifact.of.as_str().as_bytes().to_vec(),
+        attribute: artifact.the.as_str().as_bytes().to_vec(),
+        value_type: encoded.value_type,
+        value: encoded.payload,
+        version: None,
+    }))
 }
 
 /// Re-projects an existing index key of any ordering into all three
@@ -227,7 +250,7 @@ pub(crate) fn reproject_index_keys(
 pub(crate) fn value_tail_bytes(value: &Value, manifest: &Manifest) -> Vec<u8> {
     let payload = value_payload(value, manifest);
     let mut tail = Vec::with_capacity(1 + payload.slot_bytes().len());
-    tail.push(value.data_type().into());
+    tail.push(value.data_type().band(manifest.value_encoding).into());
     tail.extend_from_slice(payload.slot_bytes());
     // A spilled key's whole-value hash trails the key; within a same-
     // `(the, of)` group the components between the value slot and the hash
@@ -456,7 +479,7 @@ pub trait KeyViewMut: KeyView {
     /// [`KeyView`].
     fn set_entity(self, entity: EntityKeyPart) -> Self;
 
-    /// Set the [`AttributeKeyPart`], altering the [`Attribute`] part of this
+    /// Set the [`AttributeKeyPart`], altering the [`Relation`] part of this
     /// [`KeyView`].
     fn set_attribute(self, attribute: AttributeKeyPart) -> Self;
 
@@ -494,7 +517,10 @@ pub trait KeyViewMut: KeyView {
         // the fact-building path uses, so a value range narrows to the exact
         // value. The type and payload (with its spill flag) are set together.
         if let Some(value) = selector.value() {
-            key = key.set_value(value.data_type(), value_payload(value, manifest));
+            key = key.set_value(
+                value.data_type().band(manifest.value_encoding),
+                value_payload(value, manifest),
+            );
         }
 
         key
@@ -510,7 +536,7 @@ pub trait KeyView: Sized + Clone {
     /// [`KeyView`].
     fn entity(&self) -> EntityKeyPart<'_>;
 
-    /// Get an [`AttributeKeyPart`] that refers to the [`Attribute`] part of
+    /// Get an [`AttributeKeyPart`] that refers to the [`Relation`] part of
     /// this [`KeyView`].
     fn attribute(&self) -> AttributeKeyPart<'_>;
 
@@ -610,18 +636,80 @@ mod tests {
     use std::str::FromStr;
 
     use super::{AttributeKey, EntityKey, FromKey, KeyView, Manifest, ValueKey, value_payload};
-    use crate::{Artifact, Attribute, Entity, Value, decode_value, key::varkey::ValuePayload};
+    use crate::{Artifact, Entity, Relation, Value, decode_value, key::varkey::ValuePayload};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     fn fact(value: Value) -> Artifact {
         Artifact {
-            the: Attribute::from_str("person/name").unwrap(),
+            the: Relation::from_str("person/name").unwrap(),
             of: Entity::from_str("did:key:z6MkExample").unwrap(),
             is: value,
             cause: None,
         }
+    }
+
+    /// A fact's keys built from their parts in one serialization are the
+    /// bytes the chained `set_*` rebuilds produce, in all three orderings,
+    /// for every value type and for values on both sides of the spill
+    /// boundary, under the default format and a narrow one.
+    #[dialog_common::test]
+    async fn it_builds_fact_keys_as_the_chained_setters_do() -> anyhow::Result<()> {
+        use super::{
+            AttributeKeyPart, EntityKeyPart, KeyType, KeyViewConstruct, artifact_index_keys,
+        };
+
+        fn chained<K: KeyViewConstruct + KeyType>(fact: &Artifact, manifest: &Manifest) -> Vec<u8> {
+            K::default()
+                .set_entity(EntityKeyPart::from(&fact.of))
+                .set_attribute(AttributeKeyPart::from(&fact.the))
+                .set_value(
+                    fact.is.data_type().band(manifest.value_encoding),
+                    value_payload(&fact.is, manifest),
+                )
+                .bytes()
+                .to_vec()
+        }
+
+        let narrow = Manifest {
+            inline_n: 16,
+            spill_prefix: 4,
+            ..Manifest::default()
+        };
+        let mut values = vec![
+            Value::Bytes(vec![0x00, 0xFF, 0x7F, 0x00]),
+            Value::Entity(Entity::from_str("did:key:z6MkOther")?),
+            Value::Boolean(true),
+            Value::UnsignedInt(u128::MAX),
+            Value::SignedInt(-1),
+            Value::Float(1783112056217.0),
+            Value::Record(vec![1, 2, 3]),
+            Value::Symbol(Relation::from_str("open/status")?),
+        ];
+        for length in [0, 1, 15, 16, 17, 63, 64, 65, 300] {
+            values.push(Value::String("x".repeat(length)));
+            values.push(Value::Bytes(vec![0; length]));
+        }
+        for manifest in [Manifest::default(), narrow] {
+            for value in &values {
+                let fact = fact(value.clone());
+                let entity = EntityKey::from_artifact(&fact, &manifest);
+                let attribute = AttributeKey::from_artifact(&fact, &manifest);
+                let value_key = ValueKey::from_artifact(&fact, &manifest);
+                assert_eq!(entity.bytes(), chained::<EntityKey<_>>(&fact, &manifest));
+                assert_eq!(
+                    attribute.bytes(),
+                    chained::<AttributeKey<_>>(&fact, &manifest)
+                );
+                assert_eq!(value_key.bytes(), chained::<ValueKey<_>>(&fact, &manifest));
+                let (eav, aev, vae) = artifact_index_keys(&fact, &manifest);
+                assert_eq!(eav.as_ref(), entity.bytes());
+                assert_eq!(aev.as_ref(), attribute.bytes());
+                assert_eq!(vae.as_ref(), value_key.bytes());
+            }
+        }
+        Ok(())
     }
 
     /// Every value type's key splits into exactly its schema's component
@@ -650,7 +738,7 @@ mod tests {
             Value::Float(-0.0),
             Value::Float(1783112056217.0),
             Value::Record(vec![1, 2, 3]),
-            Value::Symbol(Attribute::from_str("open/status")?),
+            Value::Symbol(Relation::from_str("open/status")?),
         ];
         for value in values {
             let fact = fact(value.clone());
@@ -668,14 +756,22 @@ mod tests {
                     .unwrap_or_else(|| panic!("key must parse: {value:?}"));
                 assert_eq!(parts.entity.as_ref(), fact.of.as_str().as_bytes());
                 assert_eq!(parts.attribute.as_ref(), fact.the.as_str().as_bytes());
-                assert_eq!(parts.value_type, value.data_type());
+                assert_eq!(
+                    parts.value_type,
+                    value.data_type().band(Manifest::default().value_encoding)
+                );
                 let ValueRef::Inline(payload) = parts.value else {
                     panic!("small values stay inline: {value:?}");
                 };
                 let (decoded, rest) =
                     decode_value(parts.value_type, payload).expect("payload decodes");
                 assert!(rest.is_empty(), "payload is exactly one value: {value:?}");
-                assert_eq!(decoded, value, "value round-trips through the key");
+                // A number in the band reads back as the narrowest type
+                // that holds it, so `-0.0` reads as the natural `0`.
+                assert!(
+                    decoded == value || decoded.same_number(&value),
+                    "value round-trips through the key: {value:?} read as {decoded:?}"
+                );
             }
         }
         Ok(())
@@ -779,7 +875,10 @@ mod tests {
         let projected: ValueKey<crate::Key> = FromKey::from_key(&eav);
         assert_eq!(projected.value_payload(), vae.value_payload());
         assert_eq!(projected.value_is_spilled(), vae.value_is_spilled());
-        assert_eq!(projected.value_type(), value.data_type());
+        assert_eq!(
+            projected.value_type(),
+            value.data_type().band(Manifest::default().value_encoding)
+        );
         Ok(())
     }
 

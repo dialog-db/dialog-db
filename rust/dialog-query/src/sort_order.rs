@@ -14,7 +14,7 @@
 //! output sorted on it. Nothing consumes it yet; it is surfaced so the planner
 //! can, without changing how any scan runs today.
 
-use crate::attribute::The;
+use crate::attribute::Relation;
 use crate::attribute::query::all::AttributeQueryAll;
 use crate::attribute::query::dynamic::DynamicAttributeQuery;
 use crate::types::{Any, Typed};
@@ -102,7 +102,7 @@ impl AttributeQueryAll {
 /// index in the same order as the cardinality-many scan, so both sort on the
 /// same variable. Shared by [`AttributeQueryAll::sort_order`] and
 /// [`DynamicAttributeQuery::sort_order`].
-pub(crate) fn sort_order_of(the: &Term<The>, of: &Term<Entity>, is: &Term<Any>) -> SortOrder {
+pub(crate) fn sort_order_of(the: &Term<Relation>, of: &Term<Entity>, is: &Term<Any>) -> SortOrder {
     let entity_bound = matches!(of, Term::Constant(_));
     let value_bound = matches!(is, Term::Constant(_));
     let attribute_bound = matches!(the, Term::Constant(_));
@@ -147,7 +147,7 @@ impl DynamicAttributeQuery {
 #[cfg(test)]
 mod tests {
     use super::SortOrder;
-    use crate::attribute::The;
+    use crate::attribute::Relation;
     use crate::attribute::query::all::AttributeQueryAll;
     use crate::types::{Any, Typed};
     use crate::{Entity, Term, Value};
@@ -163,7 +163,7 @@ mod tests {
 
     /// Build a scan; `cause` and `source` are always anonymous, which they
     /// carry no join order for.
-    fn scan(the: Term<The>, of: Term<Entity>, is: Term<Any>) -> AttributeQueryAll {
+    fn scan(the: Term<Relation>, of: Term<Entity>, is: Term<Any>) -> AttributeQueryAll {
         AttributeQueryAll::new(the, of, is, Term::var("cause"))
     }
 

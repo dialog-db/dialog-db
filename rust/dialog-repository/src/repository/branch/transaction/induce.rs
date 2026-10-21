@@ -35,18 +35,18 @@ use std::collections::{BTreeSet, HashMap};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, Attribute, Change, Changes, DialogArtifactsError, Entity,
-    Instruction, Select, Statement, Value,
+    Artifact, ArtifactSelector, Change, Changes, DialogArtifactsError, Entity, Instruction,
+    Relation, Select, Statement, Value,
 };
 use dialog_capability::{Fork, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
-use dialog_query::attribute::Relation;
+use dialog_query::attribute::The;
 use dialog_query::rule::inductive::Polarity;
 use dialog_query::rule::statement::Reach;
-use dialog_query::{Any, Binding, Cardinality, Environment, InductiveRule, Match, Term};
+use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
 use crate::repository::branch::QueryLayer;
@@ -85,6 +85,7 @@ where
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Holds
         + ConditionalSync
         + 'static,
 {
@@ -140,14 +141,15 @@ where
         // removal can newly enable a rule only through `unless`, which
         // a seed cannot express).
         let mut assert_rows: Vec<Artifact> = Vec::new();
-        let mut retract_attrs: BTreeSet<Attribute> = BTreeSet::new();
-        let mut replace_attrs: BTreeSet<Attribute> = BTreeSet::new();
+        let mut retract_attrs: BTreeSet<Relation> = BTreeSet::new();
+        let mut replace_attrs: BTreeSet<Relation> = BTreeSet::new();
         for instruction in &stimulus {
             match instruction {
-                Instruction::Assert(a) => assert_rows.push(a.clone()),
-                Instruction::Replace(a) => {
+                Instruction::Assert(a, policy) => {
                     assert_rows.push(a.clone());
-                    replace_attrs.insert(a.the.clone());
+                    if policy.elects() {
+                        replace_attrs.insert(a.the.clone());
+                    }
                 }
                 Instruction::Retract(a) => {
                     retract_attrs.insert(a.the.clone());
@@ -161,8 +163,8 @@ where
         let mut touched: BTreeSet<Reach> = stimulus
             .iter()
             .map(|instruction| match instruction {
-                Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Retract(a) => {
-                    Reach::Attribute(a.the.clone())
+                Instruction::Assert(a, _) | Instruction::Retract(a) => {
+                    Reach::Relation(a.the.clone())
                 }
             })
             .collect();
@@ -189,7 +191,7 @@ where
         let mut installed: BTreeSet<Entity> = BTreeSet::new();
         let mut installed_deductive: BTreeSet<Entity> = BTreeSet::new();
         for instruction in &stimulus {
-            if let Instruction::Assert(a) | Instruction::Replace(a) = instruction {
+            if let Instruction::Assert(a, _) = instruction {
                 if a.the == on {
                     installed.insert(a.of.clone());
                 } else if a.the == reads {
@@ -353,9 +355,7 @@ impl OverlayTriggers {
         let mut slice = OverlayTriggers::default();
         for (entity, attribute, change) in changes.iter() {
             if *attribute == on {
-                if let Change::Assert(Value::Entity(key)) | Change::Replace(Value::Entity(key)) =
-                    change
-                {
+                if let Change::Assert(Value::Entity(key), _) = change {
                     slice
                         .on
                         .entry(key.clone())
@@ -363,9 +363,7 @@ impl OverlayTriggers {
                         .push(entity.clone());
                 }
             } else if *attribute == reads {
-                if let Change::Assert(Value::Entity(key)) | Change::Replace(Value::Entity(key)) =
-                    change
-                {
+                if let Change::Assert(Value::Entity(key), _) = change {
                     slice
                         .reads
                         .entry(key.clone())
@@ -374,7 +372,7 @@ impl OverlayTriggers {
                 }
             } else if *attribute == source {
                 match change {
-                    Change::Assert(Value::Bytes(bytes)) | Change::Replace(Value::Bytes(bytes)) => {
+                    Change::Assert(Value::Bytes(bytes), _) => {
                         slice.sources.insert(entity.clone(), bytes.clone());
                     }
                     Change::Retract(_) => {
@@ -384,7 +382,7 @@ impl OverlayTriggers {
                 }
             } else if *attribute == transient {
                 match change {
-                    Change::Assert(_) | Change::Replace(_) => {
+                    Change::Assert(_, _) => {
                         slice.transient.insert(entity.clone());
                     }
                     Change::Retract(_) => {
@@ -597,20 +595,23 @@ impl<'a> Dispatch<'a> {
             + 'static,
     {
         let cache = self.source.rule_cache();
-        if let Some(body) = cache.body(entity) {
-            return Ok(Some(body));
-        }
         let bytes = match overlay.sources.get(entity) {
             Some(bytes) => Some(bytes.clone()),
             None => self.source_bytes(entity, env).await?,
         };
-        Ok(bytes
-            .and_then(|bytes| hydrate(&bytes).ok())
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        if let Some(body) = cache.body(entity, &bytes) {
+            return Ok(Some(body));
+        }
+        Ok(hydrate(&bytes)
+            .ok()
             // Content-address check: forged bytes stored under a
             // mismatching entity are inert.
-            .filter(|body| body.try_this() == Some(entity.clone()))
+            .filter(|body| body.stored_as(entity))
             .inspect(|body| {
-                cache.record_body(entity.clone(), body.clone());
+                cache.record_body(entity.clone(), &bytes, body.clone());
             }))
     }
 
@@ -637,9 +638,6 @@ impl<'a> Dispatch<'a> {
             + 'static,
     {
         let cache = self.source.rule_cache();
-        if let Some(rule) = cache.inductive(entity) {
-            return Ok(Some(rule));
-        }
         let bytes = match overlay.sources.get(entity) {
             Some(bytes) => Some(bytes.clone()),
             None => self.source_bytes(entity, env).await?,
@@ -647,6 +645,9 @@ impl<'a> Dispatch<'a> {
         let Some(bytes) = bytes else {
             return Ok(None);
         };
+        if let Some(rule) = cache.inductive(entity, &bytes) {
+            return Ok(Some(rule));
+        }
         // Undecodable bytes, or bytes whose content address is not the
         // entity they were stored under, are forged or corrupt entries
         // in the carved-out namespace — inert, like any dangling index
@@ -655,10 +656,10 @@ impl<'a> Dispatch<'a> {
         let Ok(rule) = hydrate_inductive(&bytes) else {
             return Ok(None);
         };
-        if rule.try_this() != Some(entity.clone()) {
+        if !rule.stored_as(entity) {
             return Ok(None);
         }
-        cache.record_inductive(entity.clone(), rule.clone());
+        cache.record_inductive(entity.clone(), &bytes, rule.clone());
         Ok(Some(rule))
     }
 
@@ -794,7 +795,7 @@ where
     // select does: a pulled head's changed paths may reference
     // remote-only blocks.
     let remote = source.fallback();
-    let store = crate::NetworkedIndex::new(env, branch.archive().index(), remote);
+    let store = crate::NetworkedIndex::erased(env, branch.archive().index(), remote);
     let raw_store = store.clone();
     let storage = store;
     let previous = crate::Index::from_hash_with_cache(
@@ -830,15 +831,7 @@ where
             .map_err(|error| CommitError::Induction(format!("watermark spilled: {error:?}")))?;
         let fact = Artifact::from_key_datum_with_value(&entry.key, datum, spilled)
             .map_err(|error| CommitError::Induction(format!("watermark datum: {error:?}")))?;
-        // Version-control records (which every commit writes) are
-        // excluded from the lag; the carved-out rule and marker
-        // prefixes pass through, so a rule arriving by pull or raw
-        // commit installs at this instant.
-        let the = fact.the.to_string();
-        if the.starts_with("dialog.")
-            && !the.starts_with("dialog.rule/")
-            && !the.starts_with("dialog.concept/")
-        {
+        if induction_ignores(&fact.the.to_string()) {
             continue;
         }
         if !seen.insert((
@@ -850,12 +843,28 @@ where
             continue;
         }
         lag.push(if arriving {
-            Instruction::Assert(fact)
+            Instruction::Assert(fact, dialog_artifacts::Pick::All)
         } else {
             Instruction::Retract(fact)
         });
     }
     Ok(lag)
+}
+
+/// Whether induction drops facts under `the`: version-control records
+/// (which every commit writes) are excluded from the lag, so catching
+/// up over N commits stimulates rules with the *data* those commits
+/// changed, not their bookkeeping. The carved-out rule and marker
+/// prefixes pass through, so a rule arriving by pull or raw commit
+/// installs at this instant.
+///
+/// A commit whose every fact this drops is an inducing instant with an
+/// empty delta; [`Branch::commit`](crate::Branch::commit) carries the
+/// watermark over such a commit on that ground.
+pub(crate) fn induction_ignores(the: &str) -> bool {
+    the.starts_with("dialog.")
+        && !the.starts_with("dialog.rule/")
+        && !the.starts_with("dialog.concept/")
 }
 
 /// Collect the artifacts a selector matches on the line's committed
@@ -889,22 +898,10 @@ where
 }
 
 /// Collect the artifacts a selector matches in the layered view.
-async fn select<'a, Env>(
-    view: &QueryEnv<'a, Env>,
+async fn select<'a>(
+    view: &QueryEnv<'a>,
     selector: ArtifactSelector<Constrained>,
-) -> Result<Vec<Artifact>, CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<Vec<Artifact>, CommitError> {
     let stream = Provider::<Select<'_>>::execute(view, selector)
         .await
         .map_err(|error| CommitError::Induction(format!("dispatch probe: {error}")))?;
@@ -918,25 +915,13 @@ where
 /// Evaluate one rule's body against the frozen round view and emit its
 /// head for every binding: transient heads into `transients`, durable
 /// heads (novelty-checked against the view) into `novelty`.
-async fn fire<'a, Env>(
+async fn fire<'a>(
     rule: &InductiveRule,
     transient_head: bool,
-    view: &QueryEnv<'a, Env>,
+    view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
-) -> Result<(), CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<(), CommitError> {
     let plan = rule.plan(&Environment::new());
     let matches: Vec<Match> = plan
         .evaluate(Match::new().seed(), view)
@@ -978,26 +963,14 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 /// premise (removal-enabled and derived-premise firings take the
 /// full-body path instead), so seeding is complete for this candidate
 /// class while costing the delta's join fan-out, not relation size.
-async fn fire_seeded<'a, Env>(
+async fn fire_seeded<'a>(
     rule: &InductiveRule,
     transient_head: bool,
     rows: &[Artifact],
-    view: &QueryEnv<'a, Env>,
+    view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
-) -> Result<(), CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<(), CommitError> {
     use dialog_query::{Premise, Proposition};
 
     let mut matches: Vec<Match> = Vec::new();
@@ -1032,7 +1005,7 @@ where
                     && !bind_seed(
                         &mut matched,
                         &mut scope,
-                        query.terms.get(&Relation::key_operand(name)),
+                        query.terms.get(&The::key_operand(name)),
                         Value::String(row.the.name().to_owned()),
                     )
                 {
@@ -1090,7 +1063,9 @@ fn bind_seed(
             scope.add(name.as_ref());
             true
         }
-        Some(Term::Constant(expected)) => *expected == value,
+        // A constant agrees with the number its type reads the row as,
+        // as a scan for that constant admits the row.
+        Some(Term::Constant(expected)) => value.reads_as(expected),
         Some(Term::Variable { name: None, .. }) | None => true,
     }
 }
@@ -1098,26 +1073,14 @@ fn bind_seed(
 /// Emit a rule's head for every produced match: transient heads into
 /// `transients`, durable heads (novelty-checked against the frozen
 /// view) into `novelty`.
-async fn emit_matches<'a, Env>(
+async fn emit_matches<'a>(
     rule: &InductiveRule,
     transient_head: bool,
     matches: Vec<Match>,
-    view: &QueryEnv<'a, Env>,
+    view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
-) -> Result<(), CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+) -> Result<(), CommitError> {
     let conclusion = rule.conclusion();
     for matched in matches {
         // The head subject. A rule whose premises leave `this` unbound
@@ -1140,7 +1103,7 @@ where
             let attribute = match relation.attribute() {
                 Some(attribute) => attribute,
                 None => {
-                    let key = Term::<Any>::var(Relation::key_operand(name));
+                    let key = Term::<Any>::var(The::key_operand(name));
                     let Ok(Binding::Present(Value::String(key))) = matched.lookup(&key) else {
                         continue;
                     };
@@ -1155,24 +1118,18 @@ where
                 Polarity::Retract => {
                     dialog_artifacts::Update::dissociate(&mut head, attribute, this.clone(), value);
                 }
-                Polarity::Assert => match field.descriptor().cardinality() {
-                    Cardinality::One => {
-                        dialog_artifacts::Update::associate_unique(
-                            &mut head,
-                            attribute,
-                            this.clone(),
-                            value,
-                        );
-                    }
-                    Cardinality::Many => {
-                        dialog_artifacts::Update::associate(
-                            &mut head,
-                            attribute,
-                            this.clone(),
-                            value,
-                        );
-                    }
-                },
+                // An asserting head writes as the field's pick says: a
+                // set appends, and a choosing pick succeeds the claim
+                // it elects, resolved against the view at commit.
+                Polarity::Assert => {
+                    dialog_artifacts::Update::associate(
+                        &mut head,
+                        attribute,
+                        this.clone(),
+                        value,
+                        field.descriptor().pick().clone(),
+                    );
+                }
             }
         }
 
@@ -1180,14 +1137,15 @@ where
             head.assert(transients);
             continue;
         }
+        // A head written by succession elects the claim it succeeds
+        // against the round view, as a transaction's own writes do
+        // against the line at commit.
+        Box::pin(super::succession::resolve_against(view, &mut head)).await?;
         for instruction in head.into_instructions() {
             if is_novel(view, &instruction).await? {
                 match instruction {
-                    Instruction::Assert(a) => {
-                        dialog_artifacts::Update::associate(novelty, a.the, a.of, a.is)
-                    }
-                    Instruction::Replace(a) => {
-                        dialog_artifacts::Update::associate_unique(novelty, a.the, a.of, a.is)
+                    Instruction::Assert(a, policy) => {
+                        dialog_artifacts::Update::associate(novelty, a.the, a.of, a.is, policy)
                     }
                     Instruction::Retract(a) => {
                         dialog_artifacts::Update::dissociate(novelty, a.the, a.of, a.is)
@@ -1206,24 +1164,9 @@ where
 /// re-derives existing state terminates for free. The view is the
 /// frozen round view, so siblings within a round judge novelty against
 /// identical state.
-async fn is_novel<'a, Env>(
-    view: &QueryEnv<'a, Env>,
-    instruction: &Instruction,
-) -> Result<bool, CommitError>
-where
-    Env: Provider<BlobRead>
-        + Provider<Get>
-        + Provider<Put>
-        + Provider<Resolve>
-        + Provider<crate::Hydrate>
-        + Provider<dialog_artifacts::Preload>
-        + Provider<dialog_artifacts::Speculation>
-        + Provider<Fork<RemoteSite, Resolve>>
-        + ConditionalSync
-        + 'static,
-{
+async fn is_novel<'a>(view: &QueryEnv<'a>, instruction: &Instruction) -> Result<bool, CommitError> {
     let artifact = match instruction {
-        Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Retract(a) => a,
+        Instruction::Assert(a, _) | Instruction::Retract(a) => a,
     };
     let selector = ArtifactSelector::new()
         .the(artifact.the.clone())
@@ -1231,7 +1174,7 @@ where
         .is(artifact.is.clone());
     let present = !select(view, selector).await?.is_empty();
     Ok(match instruction {
-        Instruction::Assert(_) | Instruction::Replace(_) => !present,
+        Instruction::Assert(_, _) => !present,
         Instruction::Retract(_) => present,
     })
 }
@@ -1243,7 +1186,7 @@ mod tests {
 
     use crate::helpers::test_repo;
     use crate::rules::Transient;
-    use crate::{Branch, CommitError, RemoteSite};
+    use crate::{Branch, CommitError, RemoteSite, Revision};
     use anyhow::Result;
     use dialog_artifacts::{ArtifactSelector, Changes, Entity, Instruction, Value};
     use dialog_capability::{Fork, Provider};
@@ -1290,14 +1233,14 @@ mod tests {
             "description": "Increment a counter on an increment command",
             "assert!": {
                 "with": {
-                    "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                    "count": { "the": "counter/count", "as": "natural:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "counter": { "the": "cmd.increment/counter", "as": "Entity" }
+                            "counter": { "the": "cmd.increment/counter", "as": "entity:" }
                         }
                     },
                     "where": {
@@ -1307,7 +1250,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "count": { "the": "counter/count", "as": "UnsignedInteger" }
+                            "count": { "the": "counter/count", "as": "natural:" }
                         }
                     },
                     "where": {
@@ -1401,6 +1344,258 @@ mod tests {
         Ok(())
     }
 
+    /// The increment rule over a counter declared `integer:`: the band
+    /// stores a non-negative count as a natural whatever type wrote it,
+    /// so the body's integer view must read the stored natural.
+    fn integer_increment_rule() -> InductiveRule {
+        serde_json::from_value(json!({
+            "description": "Increment an integer counter on an increment command",
+            "assert!": {
+                "with": {
+                    "count": { "the": "counter/count", "as": "integer:" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "counter": { "the": "cmd.increment/counter", "as": "entity:" }
+                        }
+                    },
+                    "where": {
+                        "counter": { "?": { "name": "this" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": {
+                            "count": { "the": "counter/count", "as": "integer:" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "count": { "?": { "name": "prev" } }
+                    }
+                },
+                {
+                    "assert": "math/sum",
+                    "where": {
+                        "of": { "?": { "name": "prev" } },
+                        "with": 1,
+                        "is": { "?": { "name": "count" } }
+                    }
+                }
+            ]
+        }))
+        .expect("integer increment rule compiles")
+    }
+
+    /// A count asserted as a natural in the same commit as the increment
+    /// seeds the rule's `integer:` premise. The seed is read through the
+    /// variable's view, as a scan reads it: the natural 40 is the integer
+    /// 40, and the commit increments it rather than failing. The staged
+    /// 40 is not yet a claim the head can succeed, so 41 lands beside it.
+    #[dialog_common::test]
+    async fn it_seeds_an_integer_premise_from_a_natural_fact() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let counter: Entity = "ctr:1".parse()?;
+        branch
+            .transaction()
+            .assert(integer_increment_rule())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(40u128),
+            )
+            .dispatch(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command)
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        assert_eq!(
+            values(&branch, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(40), Value::UnsignedInt(41)],
+            "the seeded natural must read as the integer and be incremented"
+        );
+        Ok(())
+    }
+
+    /// A guarded decrement over a natural counter: `count - 1` is an
+    /// integer, which the natural head takes only once `>= 0` proves it
+    /// a natural. At one the decrement commits zero; at zero the
+    /// difference is `-1`, the guard leaves no row, and the commit
+    /// changes nothing rather than failing or writing a negative.
+    #[dialog_common::test]
+    async fn it_decrements_a_natural_counter_down_to_zero() -> Result<()> {
+        let rule: InductiveRule = serde_json::from_value(json!({
+            "description": "Decrement a counter on a decrement command, never below zero",
+            "assert!": {
+                "with": {
+                    "count": { "the": "counter/count", "as": "natural:" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "counter": { "the": "cmd.decrement/counter", "as": "entity:" }
+                        }
+                    },
+                    "where": {
+                        "counter": { "?": { "name": "this" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": {
+                            "count": { "the": "counter/count", "as": "natural:" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "count": { "?": { "name": "prev" } }
+                    }
+                },
+                {
+                    "assert": "math/difference",
+                    "where": {
+                        "of": { "?": { "name": "prev" } },
+                        "subtract": 1,
+                        "is": { "?": { "name": "count" } }
+                    }
+                },
+                {
+                    "assert": ">=",
+                    "where": {
+                        "of": { "?": { "name": "count" } },
+                        "with": 0
+                    }
+                }
+            ]
+        }))
+        .expect("the guarded decrement compiles");
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let counter: Entity = "ctr:1".parse()?;
+        branch
+            .transaction()
+            .assert(rule)
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        for (command, expected) in [("cmd:1", 0u128), ("cmd:2", 0u128)] {
+            let command: Entity = command.parse()?;
+            branch
+                .transaction()
+                .dispatch(
+                    dialog_query::the!("cmd.decrement/counter")
+                        .of(command)
+                        .is(counter.clone()),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            branch.refresh(&operator).await?;
+            assert_eq!(
+                values(&branch, &operator, "counter/count", &counter).await?,
+                vec![Value::UnsignedInt(expected)],
+                "the counter never goes below zero"
+            );
+        }
+        Ok(())
+    }
+
+    /// The two-replica route: a count written by another replica's rule
+    /// arrives by pull (a raw commit here), so the next local commit
+    /// replays it through the watermark lag as a seed row. It reads back
+    /// as a natural, and must seed the `integer:` premise like a scan
+    /// would, so the increment after a merge commits.
+    #[dialog_common::test]
+    async fn it_increments_an_integer_counter_after_a_pulled_count() -> Result<()> {
+        use dialog_artifacts::{Artifact, Instruction};
+        use futures_util::stream;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let counter: Entity = "ctr:1".parse()?;
+        branch
+            .transaction()
+            .assert(integer_increment_rule())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // The other replica's count lands without local induction.
+        branch
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "counter/count".parse()?,
+                    of: counter.clone(),
+                    is: Value::SignedInt(1),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command)
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        assert_eq!(
+            values(&branch, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)],
+            "the increment after a pull must read the pulled count through the integer view"
+        );
+        Ok(())
+    }
+
     /// A durable write triggers a rule with no command anywhere; the
     /// `unless` guard blocks it while its fact holds; *retracting* the
     /// guard's fact newly enables the rule — the retraction is the
@@ -1415,14 +1610,14 @@ mod tests {
             "description": "A described task that is not done is open",
             "assert!": {
                 "with": {
-                    "desc": { "the": "task.open/desc", "as": "Text" }
+                    "desc": { "the": "task.open/desc", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "desc": { "the": "task/desc", "as": "Text" }
+                            "desc": { "the": "task/desc", "as": "text:" }
                         }
                     },
                     "where": {
@@ -1435,7 +1630,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "done": { "the": "task/done", "as": "Boolean" }
+                            "done": { "the": "task/done", "as": "boolean:" }
                         }
                     },
                     "where": {
@@ -1509,21 +1704,21 @@ mod tests {
 
         let intermediate: ConceptDescriptor = serde_json::from_value(json!({
             "with": {
-                "target": { "the": "cmd.stage/target", "as": "Entity" }
+                "target": { "the": "cmd.stage/target", "as": "entity:" }
             }
         }))?;
 
         let stage: InductiveRule = serde_json::from_value(json!({
             "assert!": {
                 "with": {
-                    "target": { "the": "cmd.stage/target", "as": "Entity" }
+                    "target": { "the": "cmd.stage/target", "as": "entity:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "target": { "the": "cmd.start/target", "as": "Entity" }
+                            "target": { "the": "cmd.start/target", "as": "entity:" }
                         }
                     },
                     "where": {
@@ -1537,14 +1732,14 @@ mod tests {
         let finish: InductiveRule = serde_json::from_value(json!({
             "assert!": {
                 "with": {
-                    "target": { "the": "result/target", "as": "Entity" }
+                    "target": { "the": "result/target", "as": "entity:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "target": { "the": "cmd.stage/target", "as": "Entity" }
+                            "target": { "the": "cmd.stage/target", "as": "entity:" }
                         }
                     },
                     "where": {
@@ -1607,14 +1802,14 @@ mod tests {
         Ok(serde_json::from_value(json!({
             "assert!": {
                 "with": {
-                    "target": { "the": to, "as": "Entity" }
+                    "target": { "the": to, "as": "entity:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "target": { "the": from, "as": "Entity" }
+                            "target": { "the": from, "as": "entity:" }
                         }
                     },
                     "where": {
@@ -1630,7 +1825,7 @@ mod tests {
     fn transient_target(the: &str) -> Result<Transient> {
         let concept: ConceptDescriptor = serde_json::from_value(json!({
             "with": {
-                "target": { "the": the, "as": "Entity" }
+                "target": { "the": the, "as": "entity:" }
             }
         }))?;
         Ok(Transient(concept.this()))
@@ -1643,9 +1838,7 @@ mod tests {
             .into_instructions()
             .into_iter()
             .filter_map(|instruction| match instruction {
-                Instruction::Assert(a) | Instruction::Replace(a) => {
-                    Some((a.the.to_string(), a.of, a.is))
-                }
+                Instruction::Assert(a, _) => Some((a.the.to_string(), a.of, a.is)),
                 Instruction::Retract(_) => None,
             })
             .collect();
@@ -1783,19 +1976,19 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let ping: ConceptDescriptor = serde_json::from_value(json!({
-            "with": { "n": { "the": "cmd.ping/n", "as": "UnsignedInteger" } }
+            "with": { "n": { "the": "cmd.ping/n", "as": "natural:" } }
         }))?;
         let pong: ConceptDescriptor = serde_json::from_value(json!({
-            "with": { "n": { "the": "cmd.pong/n", "as": "UnsignedInteger" } }
+            "with": { "n": { "the": "cmd.pong/n", "as": "natural:" } }
         }))?;
 
         let ping_to_pong: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "n": { "the": "cmd.pong/n", "as": "UnsignedInteger" } }
+                "with": { "n": { "the": "cmd.pong/n", "as": "natural:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "n": { "the": "cmd.ping/n", "as": "UnsignedInteger" } }
+                    "with": { "n": { "the": "cmd.ping/n", "as": "natural:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -1805,11 +1998,11 @@ mod tests {
         }))?;
         let pong_to_ping: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "n": { "the": "cmd.ping/n", "as": "UnsignedInteger" } }
+                "with": { "n": { "the": "cmd.ping/n", "as": "natural:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "n": { "the": "cmd.pong/n", "as": "UnsignedInteger" } }
+                    "with": { "n": { "the": "cmd.pong/n", "as": "natural:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -1860,11 +2053,11 @@ mod tests {
         let stamp = |command: &str, result: &str| -> InductiveRule {
             serde_json::from_value(json!({
                 "assert!": {
-                    "with": { "target": { "the": result, "as": "Entity" } }
+                    "with": { "target": { "the": result, "as": "entity:" } }
                 },
                 "when": [{
                     "assert": {
-                        "with": { "target": { "the": command, "as": "Entity" } }
+                        "with": { "target": { "the": command, "as": "entity:" } }
                     },
                     "where": {
                         "this": { "?": { "name": "this" } },
@@ -1928,14 +2121,14 @@ mod tests {
         let consume: InductiveRule = serde_json::from_value(json!({
             "retract!": {
                 "with": {
-                    "body": { "the": "mailbox.message/body", "as": "Text" }
+                    "body": { "the": "mailbox.message/body", "as": "text:" }
                 }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "message": { "the": "cmd.ack/message", "as": "Entity" }
+                            "message": { "the": "cmd.ack/message", "as": "entity:" }
                         }
                     },
                     "where": {
@@ -1945,7 +2138,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "body": { "the": "mailbox.message/body", "as": "Text" }
+                            "body": { "the": "mailbox.message/body", "as": "text:" }
                         }
                     },
                     "where": {
@@ -2024,11 +2217,11 @@ mod tests {
         // actor.status/duty of ?a is ?d  when  shift/duty of ?a is ?d
         let status: DeductiveRule = serde_json::from_value(json!({
             "deduce": {
-                "with": { "duty": { "the": "actor.status/duty", "as": "Text" } }
+                "with": { "duty": { "the": "actor.status/duty", "as": "text:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "duty": { "the": "shift/duty", "as": "Text" } }
+                    "with": { "duty": { "the": "shift/duty", "as": "text:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -2040,14 +2233,14 @@ mod tests {
         // task/note when a message's actor is (derivedly) on duty.
         let notify: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "note": { "the": "task/note", "as": "Text" } }
+                "with": { "note": { "the": "task/note", "as": "text:" } }
             },
             "when": [
                 {
                     "assert": {
                         "with": {
-                            "actor": { "the": "inbox.message/actor", "as": "Entity" },
-                            "body": { "the": "inbox.message/body", "as": "Text" }
+                            "actor": { "the": "inbox.message/actor", "as": "entity:" },
+                            "body": { "the": "inbox.message/body", "as": "text:" }
                         }
                     },
                     "where": {
@@ -2058,7 +2251,7 @@ mod tests {
                 },
                 {
                     "assert": {
-                        "with": { "duty": { "the": "actor.status/duty", "as": "Text" } }
+                        "with": { "duty": { "the": "actor.status/duty", "as": "text:" } }
                     },
                     "where": {
                         "this": { "?": { "name": "actor" } },
@@ -2142,11 +2335,11 @@ mod tests {
         let stamp = |result: &str| -> InductiveRule {
             serde_json::from_value(json!({
                 "assert!": {
-                    "with": { "target": { "the": result, "as": "Entity" } }
+                    "with": { "target": { "the": result, "as": "entity:" } }
                 },
                 "when": [{
                     "assert": {
-                        "with": { "target": { "the": "cmd.z/target", "as": "Entity" } }
+                        "with": { "target": { "the": "cmd.z/target", "as": "entity:" } }
                     },
                     "where": {
                         "this": { "?": { "name": "this" } },
@@ -2437,11 +2630,11 @@ mod tests {
 
         let drain: InductiveRule = serde_json::from_value(json!({
             "retract!": {
-                "with": { "body": { "the": "queue.item/body", "as": "Text" } }
+                "with": { "body": { "the": "queue.item/body", "as": "text:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "body": { "the": "queue.item/body", "as": "Text" } }
+                    "with": { "body": { "the": "queue.item/body", "as": "text:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -2494,11 +2687,11 @@ mod tests {
 
         let alert: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "duty": { "the": "alert/duty", "as": "Text" } }
+                "with": { "duty": { "the": "alert/duty", "as": "text:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "duty": { "the": "actor.status/duty", "as": "Text" } }
+                    "with": { "duty": { "the": "actor.status/duty", "as": "text:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -2534,11 +2727,11 @@ mod tests {
         // status becomes derivable over the existing shift fact.
         let status: DeductiveRule = serde_json::from_value(json!({
             "deduce": {
-                "with": { "duty": { "the": "actor.status/duty", "as": "Text" } }
+                "with": { "duty": { "the": "actor.status/duty", "as": "text:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "duty": { "the": "shift/duty", "as": "Text" } }
+                    "with": { "duty": { "the": "shift/duty", "as": "text:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -2567,11 +2760,11 @@ mod tests {
     fn tagger() -> InductiveRule {
         serde_json::from_value(json!({
             "assert!": {
-                "with": { "tag": { "the": "derived/tag", "as": "Text" } }
+                "with": { "tag": { "the": "derived/tag", "as": "text:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "title": { "the": "doc/title", "as": "Text" } }
+                    "with": { "title": { "the": "doc/title", "as": "text:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -2580,6 +2773,127 @@ mod tests {
             }]
         }))
         .expect("tagger rule compiles")
+    }
+
+    /// The induction watermark of a branch, as stored.
+    async fn watermark<Env>(branch: &Branch, env: &Env) -> Result<Option<Revision>>
+    where
+        Env: Provider<Resolve> + ConditionalSync,
+    {
+        let cell = branch.induction_cell();
+        cell.resolve().perform(env).await?;
+        Ok(cell.content())
+    }
+
+    /// A machinery commit writes the reserved records induction drops,
+    /// so it is an inducing instant with an empty delta: the watermark
+    /// follows it when it stood at the head the commit built on. A lag
+    /// an application fact left through the raw path stays where it
+    /// is, and the next inducing instant catches up over both.
+    #[dialog_common::test]
+    async fn it_carries_the_watermark_over_a_machinery_commit() -> Result<()> {
+        use dialog_artifacts::{Artifact, Instruction};
+        use futures_util::stream;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(tagger())
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            branch.revision(),
+            "a transaction leaves the watermark at the head"
+        );
+
+        let record = |audience: &str| -> Result<Instruction> {
+            Ok(Instruction::Assert(
+                Artifact {
+                    the: "dialog.ucan/audience".parse()?,
+                    of: "ucan:1".parse()?,
+                    is: Value::String(audience.into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ))
+        };
+
+        // Reserved records alone: the watermark follows the head.
+        branch
+            .commit(stream::iter(vec![record("did:key:zAlice")?]))
+            .machinery()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            branch.revision(),
+            "a machinery commit carries the watermark to its head"
+        );
+        let carried = branch.revision();
+
+        // An application fact through the raw path lags.
+        let doc: Entity = "doc:1".parse()?;
+        branch
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "doc/title".parse()?,
+                    of: doc.clone(),
+                    is: Value::String("hello".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            carried,
+            "a raw commit of an application fact leaves the watermark behind"
+        );
+
+        // A machinery commit over a lag leaves the lag for the next
+        // inducing instant.
+        branch
+            .commit(stream::iter(vec![record("did:key:zBob")?]))
+            .machinery()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            carried,
+            "a machinery commit does not skip a lag"
+        );
+        assert!(
+            values(&branch, &operator, "derived/tag", &doc)
+                .await?
+                .is_empty(),
+            "nothing induced yet"
+        );
+
+        // The next inducing instant catches up over both commits.
+        branch.induce(&operator).await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            values(&branch, &operator, "derived/tag", &doc).await?,
+            vec![Value::String("hello".into())],
+            "the lagged fact induces at the next instant"
+        );
+        assert_eq!(
+            watermark(&branch, &operator).await?,
+            branch.revision(),
+            "the catch-up carries the watermark to the head"
+        );
+        Ok(())
     }
 
     /// A raw [`Branch::commit`] bypasses induction — the model of a
@@ -2608,12 +2922,15 @@ mod tests {
         // Head advances without induction — the pull surrogate.
         let doc: Entity = "doc:1".parse()?;
         branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "doc/title".parse()?,
-                of: doc.clone(),
-                is: Value::String("hello".into()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "doc/title".parse()?,
+                    of: doc.clone(),
+                    is: Value::String("hello".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2655,12 +2972,12 @@ mod tests {
 
         let pair: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "both": { "the": "derived/both", "as": "Text" } }
+                "with": { "both": { "the": "derived/both", "as": "text:" } }
             },
             "when": [
                 {
                     "assert": {
-                        "with": { "p": { "the": "fact.p/v", "as": "Text" } }
+                        "with": { "p": { "the": "fact.p/v", "as": "text:" } }
                     },
                     "where": {
                         "this": { "?": { "name": "this" } },
@@ -2669,7 +2986,7 @@ mod tests {
                 },
                 {
                     "assert": {
-                        "with": { "q": { "the": "fact.q/v", "as": "Text" } }
+                        "with": { "q": { "the": "fact.q/v", "as": "text:" } }
                     },
                     "where": {
                         "this": { "?": { "name": "this" } },
@@ -2691,12 +3008,15 @@ mod tests {
         // P arrives outside any transaction.
         let subject: Entity = "pair:1".parse()?;
         branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "fact.p/v".parse()?,
-                of: subject.clone(),
-                is: Value::String("p".into()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "fact.p/v".parse()?,
+                    of: subject.clone(),
+                    is: Value::String("p".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2747,12 +3067,15 @@ mod tests {
             .await?;
         branch.refresh(&operator).await?;
         branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "doc/title".parse()?,
-                of: old.clone(),
-                is: Value::String("old".into()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "doc/title".parse()?,
+                    of: old.clone(),
+                    is: Value::String("old".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2772,12 +3095,15 @@ mod tests {
         // up at the next instant.
         let fresh: Entity = "doc:new".parse()?;
         branch
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "doc/title".parse()?,
-                of: fresh.clone(),
-                is: Value::String("new".into()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "doc/title".parse()?,
+                    of: fresh.clone(),
+                    is: Value::String("new".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -2885,11 +3211,11 @@ mod tests {
 
         let stamp: InductiveRule = serde_json::from_value(json!({
             "assert!": {
-                "with": { "target": { "the": "result.carry/target", "as": "Entity" } }
+                "with": { "target": { "the": "result.carry/target", "as": "entity:" } }
             },
             "when": [{
                 "assert": {
-                    "with": { "target": { "the": "cmd.carry/target", "as": "Entity" } }
+                    "with": { "target": { "the": "cmd.carry/target", "as": "entity:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -2922,7 +3248,7 @@ mod tests {
                 "member": {
                     "the": { "domain": "todo.list", "keyed": "sequence" },
                     "cardinality": "many",
-                    "as": "Entity"
+                    "as": "entity:"
                 }
             }
         })
@@ -2975,7 +3301,7 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "list": { "the": "todo.item/list", "as": "Entity" }
+                            "list": { "the": "todo.item/list", "as": "entity:" }
                         }
                     },
                     "where": {
@@ -3043,7 +3369,7 @@ mod tests {
             "description": "Record where a member sits",
             "assert!": {
                 "with": {
-                    "key": { "the": "seen/key", "as": "Text" }
+                    "key": { "the": "seen/key", "as": "text:" }
                 }
             },
             "when": [
@@ -3070,11 +3396,11 @@ mod tests {
             .await?;
         branch.refresh(&operator).await?;
 
-        let member: dialog_artifacts::Attribute = "todo.list/N5".parse()?;
+        let member: dialog_artifacts::Relation = "todo.list/N5".parse()?;
         branch
             .transaction()
             .assert(
-                dialog_query::The::from(member)
+                dialog_query::Relation::from(member)
                     .of(list.clone())
                     .is(item.clone()),
             )
@@ -3109,7 +3435,7 @@ mod tests {
                     "entry": {
                         "the": { "domain": "todo.named", "keyed": "dictionary" },
                         "cardinality": "many",
-                        "as": "Entity"
+                        "as": "entity:"
                     }
                 }
             },
@@ -3117,8 +3443,8 @@ mod tests {
                 {
                     "assert": {
                         "with": {
-                            "list": { "the": "todo.item/list", "as": "Entity" },
-                            "name": { "the": "todo.item/name", "as": "Text" }
+                            "list": { "the": "todo.item/list", "as": "entity:" },
+                            "name": { "the": "todo.item/name", "as": "text:" }
                         }
                     },
                     "where": {

@@ -32,6 +32,55 @@ pub struct DidDocument {
     /// The verification methods. May be absent or empty.
     #[serde(default, rename = "verificationMethod")]
     pub verification_method: Vec<VerificationMethod>,
+
+    /// The services the subject is reached at. May be absent or empty.
+    #[serde(default)]
+    pub service: Vec<Service>,
+}
+
+/// A service a DID's subject is reached at: an entry of a document's
+/// `service`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct Service {
+    /// The entry's identifier (e.g. `did:web:example.com#ucan`).
+    #[serde(default)]
+    pub id: Option<String>,
+
+    /// What kind of service it is. A document names one kind or several.
+    #[serde(default, rename = "type", deserialize_with = "one_or_many")]
+    pub kinds: Vec<String>,
+
+    /// Where it is reached: a URL, or a map or set of them.
+    #[serde(default, rename = "serviceEndpoint")]
+    pub endpoint: serde_json::Value,
+}
+
+impl Service {
+    /// Whether the service is of kind `kind`.
+    pub fn is(&self, kind: &str) -> bool {
+        self.kinds.iter().any(|named| named == kind)
+    }
+
+    /// The service's URL, when its endpoint is one.
+    pub fn url(&self) -> Option<&str> {
+        self.endpoint.as_str()
+    }
+}
+
+fn one_or_many<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(kind) => vec![kind],
+        OneOrMany::Many(kinds) => kinds,
+    })
 }
 
 /// A single verification method entry.
@@ -79,6 +128,34 @@ pub struct Jwk {
 }
 
 impl DidDocument {
+    /// The services this document names for `did`, the DID it was resolved
+    /// for.
+    ///
+    /// The document must be `did`'s own, as for [`verifier`](Self::verifier):
+    /// a document served at the DID's URL but naming another DID would
+    /// otherwise point the DID at whatever services that one chose.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ResolveError::MalformedDocument`] if the document's `id` is
+    /// absent or names a different DID.
+    pub fn services(&self, did: &Did) -> Result<Vec<Service>, ResolveError> {
+        self.bound_to(did)?;
+        Ok(self.service.clone())
+    }
+
+    fn bound_to(&self, did: &Did) -> Result<(), ResolveError> {
+        match self.id.as_deref() {
+            Some(id) if id == did.as_str() => Ok(()),
+            Some(id) => Err(ResolveError::MalformedDocument(format!(
+                "document id {id} does not match the resolved DID {did}"
+            ))),
+            None => Err(ResolveError::MalformedDocument(format!(
+                "document for {did} has no id"
+            ))),
+        }
+    }
+
     /// Recover a multi-key verifier from this document.
     ///
     /// A DID document names an *array* of verification methods, and a signature
@@ -128,19 +205,7 @@ impl DidDocument {
         fragment: Option<&str>,
     ) -> Result<MultiVerifier, ResolveError> {
         // The document must be *this* DID's document.
-        match self.id.as_deref() {
-            Some(id) if id == did.as_str() => {}
-            Some(id) => {
-                return Err(ResolveError::MalformedDocument(format!(
-                    "document id {id} does not match the resolved DID {did}"
-                )));
-            }
-            None => {
-                return Err(ResolveError::MalformedDocument(format!(
-                    "document for {did} has no id"
-                )));
-            }
-        }
+        self.bound_to(did)?;
 
         let candidates: Vec<&VerificationMethod> = match fragment {
             Some(frag) => self

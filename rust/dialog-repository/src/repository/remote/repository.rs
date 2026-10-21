@@ -61,6 +61,27 @@ impl ConnectedReplica {
         }
     }
 
+    /// A repository `subject` held at the peer `peer`, reached at
+    /// `addresses`, with its state cached under `host`.
+    ///
+    /// For an embedder that keeps the addresses of its peers itself, rather
+    /// than as contacts of the host (see [`contact`](crate::contact)): it
+    /// reaches the replica without recording `dialog.peer/address`.
+    /// `addresses` is not empty: a peer with nowhere to reach it is not
+    /// connected to.
+    pub fn reached_at(
+        host: Subject,
+        peer: &Did,
+        addresses: Vec<SiteAddress>,
+        subject: Did,
+    ) -> Self {
+        debug_assert!(
+            !addresses.is_empty(),
+            "a replica is reached at one address or more"
+        );
+        Self::new(host, peer.this(), None, addresses, subject)
+    }
+
     /// The replica of `subject` at the peer `connection` reaches, with
     /// its state cached under `host`. Reaching it goes through the
     /// connection's addresses, and shares with every other user of the
@@ -300,7 +321,7 @@ mod tests {
     use dialog_artifacts::Entity;
     use dialog_capability::Subject;
     use dialog_effects::Rejection;
-    use dialog_effects::memory::MemoryError;
+    use dialog_effects::memory::{Current, MemoryError};
     use dialog_remote_s3::Address as S3Address;
     use dialog_varsig::did;
     use std::sync::Mutex;
@@ -362,7 +383,7 @@ mod tests {
                 async {
                     Err(MemoryError::VersionMismatch {
                         expected: None,
-                        actual: None,
+                        current: Current::Unknown,
                     })
                 }
             })
@@ -424,6 +445,7 @@ mod tests {
                     if first {
                         Err(PublishError::Rejected(Rejection::Unavailable {
                             reason: "connection refused".into(),
+                            retry_after: None,
                         }))
                     } else {
                         Ok(())

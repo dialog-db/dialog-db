@@ -1,19 +1,20 @@
 use crate::Cardinality;
 use crate::Claim;
-use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Constrained, decode_value};
-use crate::attribute::The;
+use crate::artifact::{ArtifactSelector, ArtifactsRelation, Constrained, decode_value};
+use crate::attribute::Relation;
 use crate::attribute::query::pipelined;
 use crate::environment::Environment;
 use crate::formula::number::Numeric;
 use crate::query::Application;
 use crate::query::Output;
-use crate::selection::{Match, Selection};
+use crate::selection::{Match, Selection, Standing};
 use crate::type_system::{Primitive, Type as Kind};
 use crate::types::{Any, Record};
 use crate::{
     Binding, Entity, EvaluationError, Field, Parameters, Requirement, Schema, Term, Type, Value,
     try_stream,
 };
+use dialog_artifacts::history::Edition;
 use dialog_artifacts::{Artifact, Cause, DialogArtifactsError, Select};
 use dialog_capability::Provider;
 use serde::{Deserialize, Serialize};
@@ -30,7 +31,7 @@ use std::pin::Pin;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AttributeQueryAll {
     /// The relation identifier (e.g., "person/name")
-    the: Term<The>,
+    the: Term<Relation>,
     /// The entity
     of: Term<Entity>,
     /// The value
@@ -49,7 +50,7 @@ impl AttributeQueryAll {
     /// semantic-layer construct realized by
     /// [`OptionalAttributeQuery`](crate::optional::OptionalAttributeQuery), so a `Nothing` bit
     /// on the `is` term's kind is meaningless here and is stripped.
-    pub fn new(the: Term<The>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
+    pub fn new(the: Term<Relation>, of: Term<Entity>, is: Term<Any>, cause: Term<Cause>) -> Self {
         Self::with_source(the, of, is, cause, Term::<Record>::unique())
     }
 
@@ -58,7 +59,7 @@ impl AttributeQueryAll {
     /// Its claim is never cited, so it takes a blank source rather than
     /// minting a unique one: a query resolves one of these per row.
     pub(crate) fn lookup(
-        the: Term<The>,
+        the: Term<Relation>,
         of: Term<Entity>,
         is: Term<Any>,
         cause: Term<Cause>,
@@ -67,7 +68,7 @@ impl AttributeQueryAll {
     }
 
     fn with_source(
-        the: Term<The>,
+        the: Term<Relation>,
         of: Term<Entity>,
         is: Term<Any>,
         cause: Term<Cause>,
@@ -89,7 +90,7 @@ impl AttributeQueryAll {
     }
 
     /// Get the 'the' (attribute) term.
-    pub fn the(&self) -> &Term<The> {
+    pub fn the(&self) -> &Term<Relation> {
         &self.the
     }
 
@@ -144,8 +145,8 @@ impl AttributeQueryAll {
         &self.source
     }
 
-    /// Map `Term<The>` to `Term<ArtifactsAttribute>`.
-    pub fn attribute(&self) -> Term<ArtifactsAttribute> {
+    /// Map `Term<Relation>` to `Term<ArtifactsRelation>`.
+    pub fn attribute(&self) -> Term<ArtifactsRelation> {
         match &self.the {
             Term::Constant(value) => Term::Constant(value.clone()),
             Term::Variable {
@@ -165,8 +166,13 @@ impl AttributeQueryAll {
         &self,
         candidate: &mut Match,
         artifact: Artifact,
+        version: Option<(Edition, [u8; 32])>,
     ) -> Result<(), EvaluationError> {
         let claim = Claim::from(artifact);
+        let standing = Standing {
+            version,
+            cause: claim.cause().clone(),
+        };
         candidate.reserve(4);
         if let Some(name) = self.the.shared_name() {
             candidate.bind_variable(name, self.the.binding_kind(), Value::from(claim.the()))?;
@@ -189,6 +195,13 @@ impl AttributeQueryAll {
             )?;
         }
         candidate.cite_owned(&self.source, claim);
+        // The fact's standing is cited once, under the variable its
+        // value bound when the scan names one, so a value derived from
+        // it stands as it does; under the scan's own source otherwise.
+        match self.is.shared_name() {
+            Some(name) => candidate.cite_variable_standing(name, standing),
+            None => candidate.cite_standing(&self.source, standing),
+        }
         Ok(())
     }
 
@@ -220,6 +233,16 @@ impl AttributeQueryAll {
     /// never an error. This filter is [`Match::bind`]'s contract:
     /// binding treats a kind mismatch as a violation, on the
     /// premise that scans never feed one.
+    /// `artifact` as this query's typed slots read it, or `None` when they
+    /// do not admit it: a number reaches a slot of another number type
+    /// through its view ([`Kind::view`]).
+    pub(crate) fn admit(&self, mut artifact: Artifact) -> Option<Artifact> {
+        if let Some(kind) = self.is.kind() {
+            artifact.is = kind.view(artifact.is)?;
+        }
+        self.admits(&artifact).then_some(artifact)
+    }
+
     pub(crate) fn admits(&self, artifact: &Artifact) -> bool {
         if let Some(kind) = self.is.kind()
             && !kind.admits(&artifact.is)
@@ -398,7 +421,9 @@ impl AttributeQueryAll {
                     // stored bytes fail validation (`CorruptEntry`) is a
                     // corrupt or foreign-written tree entry: ignore it
                     // rather than failing the query.
-                    let artifact = match artifact?.to_owned() {
+                    let artifact = artifact?;
+                    let standing = artifact.standing();
+                    let artifact = match artifact.to_owned() {
                         Ok(artifact) => artifact,
                         Err(DialogArtifactsError::CorruptEntry(reason)) => {
                             tracing::warn!(%reason, "ignoring corrupt stored row");
@@ -408,11 +433,11 @@ impl AttributeQueryAll {
                     };
                     // Typed `is`/`the` slots filter facts falling
                     // outside their kinds.
-                    if !selector.admits(&artifact) {
+                    let Some(artifact) = selector.admit(artifact) else {
                         continue;
-                    }
+                    };
                     let mut extension = base.clone();
-                    selector.merge(&mut extension, artifact)?;
+                    selector.merge(&mut extension, artifact, standing)?;
                     yield extension;
                 }
             }
@@ -452,7 +477,7 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
 
         match &from.the {
             Term::Constant(the) => {
-                let relation = ArtifactsAttribute::try_from(the.clone()).map_err(|_| {
+                let relation = ArtifactsRelation::try_from(the.clone()).map_err(|_| {
                     EvaluationError::Store("Could not convert value to Attribute".to_string())
                 })?;
                 selector = Some(match selector {
@@ -574,8 +599,8 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                     && let Some(interval) = kind
                         .refinement()
                         .and_then(|refinement| refinement.interval.as_ref())
-                    && let Some(data_type) =
-                        single_comparable_type(kind.primitive_part().required())
+                    && let Some((data_type, across)) =
+                        pushable_type(kind.primitive_part().required(), interval.value_type)
                 {
                     if let Some(bound) = &interval.lower
                         && let Some(value) =
@@ -589,6 +614,9 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
                     {
                         selector = Some(push_bound(selector.take(), value, bound.inclusive, false));
                     }
+                    if across {
+                        selector = selector.map(ArtifactSelector::across_numbers);
+                    }
                 }
             }
         }
@@ -597,6 +625,22 @@ impl TryFrom<&AttributeQueryAll> for ArtifactSelector<Constrained> {
             message: "At least one field must be constrained".to_string(),
         })
     }
+}
+
+/// The type an interval bound is pushed as, if it can be, and whether it
+/// spans number types. A kind of one comparable type pushes as that type.
+/// A kind of several number types pushes its literal as written, marked to
+/// admit every number type: a tree keying numbers in one band scans that
+/// range, and one keying each type in its own band scans without it (see
+/// `ArtifactSelector::across_numbers`).
+fn pushable_type(primitive: Primitive, literal: Type) -> Option<(Type, bool)> {
+    if let Some(single) = single_comparable_type(primitive) {
+        return Some((single, false));
+    }
+    let numbers = !primitive.is_empty()
+        && primitive.intersect(Primitive::NUMERIC) == Some(primitive)
+        && Primitive::NUMERIC.contains(literal);
+    numbers.then_some((literal, true))
 }
 
 /// The single comparable type a primitive set admits, or `None` when it
@@ -680,11 +724,12 @@ mod tests {
 
     use super::*;
     use crate::artifact::encode_value_owned;
+    use crate::attribute::query::DynamicAttributeQuery;
     use crate::query::Output;
     use crate::session::RuleRegistry;
     use crate::source::test::TestEnv;
     use crate::the;
-    use crate::type_system::{Interval, IntervalBound, NameShape, Refinement};
+    use crate::type_system::{Interval, IntervalBound, NameShape, Refinement, Views};
     use dialog_peer::helpers::{test_repo, test_session_with_peer};
     use std::collections::BTreeSet;
 
@@ -709,7 +754,7 @@ mod tests {
             .with_prefix("person/")
             .expect("symbol is textual");
         let query = AttributeQueryAll::new(
-            Term::<The>::var("a").with_kind(attribute_kind),
+            Term::<Relation>::var("a").with_kind(attribute_kind),
             Term::<Entity>::var("e"),
             Term::var("v"),
             Term::var("cause"),
@@ -727,7 +772,7 @@ mod tests {
             .with_name_shape(NameShape::Position)
             .expect("shapes compose with prefixes");
         let query = AttributeQueryAll::new(
-            Term::<The>::var("a").with_kind(members_kind),
+            Term::<Relation>::var("a").with_kind(members_kind),
             Term::<Entity>::var("e"),
             Term::var("v"),
             Term::var("cause"),
@@ -848,8 +893,10 @@ mod tests {
     }
 
     /// The single-comparable-type gate: a kind admitting several
-    /// types pushes no bound (rows of the other types would be
-    /// silently dropped from the scan), and an unadaptable literal
+    /// number types pushes its bound marked to span them all, which
+    /// only a tree keying numbers in one band scans as a range (one
+    /// with a band per type drops it rather than lose rows of the other
+    /// types); any other multi-type kind, and an unadaptable literal,
     /// pushes no bound (no row of the scanned type satisfies it; the
     /// residual comparison filters every one).
     #[dialog_common::test]
@@ -864,10 +911,10 @@ mod tests {
             Term::var("cause"),
         );
         let selector = ArtifactSelector::<Constrained>::try_from(&query)?;
-        assert!(
-            selector.value_lower().is_none() && selector.value_upper().is_none(),
-            "a kind admitting several numeric types pushes nothing"
-        );
+        let lower = selector.value_lower().expect("the bound is pushed");
+        assert_eq!(lower.value, Value::UnsignedInt(30));
+        assert!(lower.across, "it spans every number type");
+        assert!(selector.value_upper().is_none());
 
         // A String bound on a STRING_LIKE kind narrows the membership
         // to String (a non-numeric literal never adapts, so symbol
@@ -896,6 +943,7 @@ mod tests {
                 prefix: None,
                 conforms: BTreeSet::default(),
                 name_shape: None,
+                views: Views::default(),
                 interval: Some(Box::new(Interval {
                     value_type: Type::String,
                     lower: Some(IntervalBound {
@@ -943,6 +991,7 @@ mod tests {
                 prefix: None,
                 conforms: BTreeSet::default(),
                 name_shape: None,
+                views: Views::default(),
                 interval: Some(Box::new(Interval {
                     value_type: Type::String,
                     lower: Some(IntervalBound {
@@ -1052,9 +1101,102 @@ mod tests {
         Ok(())
     }
 
-    /// Mixed numeric rows under a NUMERIC-wide kind: nothing is
-    /// pushed, so every numeric row reaches the residual comparison —
-    /// the scan produces no false negatives.
+    /// A constant names a number, not a spelling: the store keys every
+    /// number in one band, so the integer `+41` and the float `41.0` find
+    /// the natural `41`, and a negative or fractional constant finds
+    /// nothing there.
+    #[dialog_common::test]
+    async fn it_finds_a_number_by_a_constant_of_another_type() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        branch
+            .transaction()
+            .assert(the!("person/age").of(Entity::new()?).is(41u64))
+            .assert(the!("person/score").of(Entity::new()?).is(4.3f64))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        // A constant reads the rows through the lens of its type: an
+        // integer 4 observes the stored 4.3 as 4, a float 4.0 does not.
+        for (attribute, constant, found) in [
+            ("person/age", Value::UnsignedInt(41), 1),
+            ("person/age", Value::SignedInt(41), 1),
+            ("person/age", Value::Float(41.0), 1),
+            ("person/age", Value::SignedInt(-41), 0),
+            ("person/age", Value::Float(41.5), 0),
+            ("person/score", Value::UnsignedInt(4), 1),
+            ("person/score", Value::SignedInt(4), 1),
+            ("person/score", Value::Float(4.3), 1),
+            ("person/score", Value::Float(4.0), 0),
+            ("person/score", Value::UnsignedInt(5), 0),
+        ] {
+            let the: Relation = attribute.parse()?;
+            let query = AttributeQueryAll::new(
+                Term::from(the),
+                Term::<Entity>::var("e"),
+                Term::Constant(constant.clone()),
+                Term::var("cause"),
+            );
+            let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+            let results = query.perform(&source).try_vec().await?;
+            assert_eq!(results.len(), found, "{attribute} is {constant:?}");
+        }
+        Ok(())
+    }
+
+    /// The cardinality-one read finds a number by a constant of another
+    /// type too: the election over `(attribute, entity)` compares values,
+    /// and `+41` and `41.0` are the natural `41`.
+    #[dialog_common::test]
+    async fn it_elects_a_number_by_a_constant_of_another_type() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let person = Entity::new()?;
+        branch
+            .transaction()
+            .assert(the!("person/age").of(person.clone()).is(41u64))
+            .assert(the!("person/score").of(person.clone()).is(4.3f64))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        for (attribute, constant, found) in [
+            ("person/age", Value::SignedInt(41), 1),
+            ("person/age", Value::Float(41.0), 1),
+            ("person/age", Value::Float(41.5), 0),
+            ("person/score", Value::SignedInt(4), 1),
+            ("person/score", Value::Float(4.3), 1),
+            ("person/score", Value::Float(4.0), 0),
+            ("person/score", Value::UnsignedInt(5), 0),
+        ] {
+            let the: Relation = attribute.parse()?;
+            for of in [Term::<Entity>::var("e"), Term::from(person.clone())] {
+                let query = DynamicAttributeQuery::new(
+                    Term::from(the.clone()),
+                    of,
+                    Term::Constant(constant.clone()),
+                    Term::var("cause"),
+                    Some(Cardinality::One),
+                );
+                let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+                let results = query.perform(&source).try_vec().await?;
+                assert_eq!(results.len(), found, "{attribute} is {constant:?}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Mixed numeric rows under a NUMERIC-wide kind: the interval is
+    /// pushed as one scan across the number band, which orders every
+    /// number by value whatever type wrote it, so the natural `5` and
+    /// the float `2.5` pass a bound of `>= 1` and the integer `-3` does
+    /// not — and the scan produces no false negatives.
     #[dialog_common::test]
     async fn it_keeps_mixed_numeric_rows_without_single_type_kind() -> anyhow::Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -1083,10 +1225,15 @@ mod tests {
 
         let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
         let results = query.perform(&source).try_vec().await?;
+        let mut values: Vec<Value> = results
+            .iter()
+            .map(|artifact| artifact.is().clone())
+            .collect();
+        values.sort_by_key(|value| format!("{value:?}"));
         assert_eq!(
-            results.len(),
-            3,
-            "the un-narrowed scan yields every numeric row"
+            values,
+            vec![Value::Float(2.5), Value::UnsignedInt(5)],
+            "every number at or above 1 passes, whatever type wrote it"
         );
         Ok(())
     }
@@ -1112,7 +1259,7 @@ mod tests {
         // One domain, both name shapes: a dictionary entry and an
         // ordered member. A position name is uppercase, outside the
         // `the!` notation, so it is composed at runtime.
-        let member = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
+        let member = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
         branch
             .transaction()
             .assert(
@@ -1134,7 +1281,7 @@ mod tests {
                 .with_name_shape(shape)
                 .expect("shapes compose with prefixes");
             AttributeQueryAll::new(
-                Term::<The>::var("a").with_kind(kind),
+                Term::<Relation>::var("a").with_kind(kind),
                 Term::<Entity>::var("e"),
                 Term::var("v"),
                 Term::var("cause"),
@@ -1168,8 +1315,8 @@ mod tests {
         // One domain, both name shapes: a dictionary entry plus two
         // ordered members. Position names are uppercase, outside the
         // `the!` notation, so they are composed at runtime.
-        let first = The::from(ArtifactsAttribute::try_from("todo.list/N".to_string())?);
-        let second = The::from(ArtifactsAttribute::try_from("todo.list/N5".to_string())?);
+        let first = Relation::from(ArtifactsRelation::try_from("todo.list/N".to_string())?);
+        let second = Relation::from(ArtifactsRelation::try_from("todo.list/N5".to_string())?);
         branch
             .transaction()
             .assert(
@@ -1192,8 +1339,8 @@ mod tests {
                 .expect("symbol is textual")
                 .with_name_shape(shape)
                 .expect("shapes compose with prefixes");
-            let term: Term<The> = Term::<The>::var("a").with_kind(kind);
-            let restored: Term<The> = serde_json::from_str(&serde_json::to_string(&term)?)?;
+            let term: Term<Relation> = Term::<Relation>::var("a").with_kind(kind);
+            let restored: Term<Relation> = serde_json::from_str(&serde_json::to_string(&term)?)?;
             assert_eq!(restored, term, "the refined term survives the round trip");
             Ok(AttributeQueryAll::new(
                 restored,
@@ -1236,7 +1383,7 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let e = Entity::new()?;
-        let symbol = ArtifactsAttribute::try_from("user/name".to_string())?;
+        let symbol = ArtifactsRelation::try_from("user/name".to_string())?;
         branch
             .transaction()
             .assert(the!("tag/kind").of(e.clone()).is(symbol))

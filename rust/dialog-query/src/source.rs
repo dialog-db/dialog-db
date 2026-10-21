@@ -18,6 +18,7 @@ impl Command for SelectRules {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
+    use crate::recall::{BodyMemo, Memo};
     use crate::session::RuleRegistry;
     use dialog_artifacts::selector::Constrained;
     use dialog_artifacts::{
@@ -37,6 +38,26 @@ pub(crate) mod test {
         branch: &'b Branch,
         operator: &'b Operator,
         rules: RuleRegistry,
+        memo: Memo,
+    }
+
+    /// What evaluation keeps between queries is the operator's to hold.
+    impl dialog_common::Holds for TestEnv<'_> {
+        fn held(&self, key: &str) -> Option<dialog_common::Held> {
+            self.operator.held(key)
+        }
+
+        fn hold(&self, key: String, handle: dialog_common::Held) {
+            self.operator.hold(key, handle)
+        }
+
+        fn held_or(
+            &self,
+            key: &str,
+            make: &dyn Fn() -> dialog_common::Held,
+        ) -> dialog_common::Held {
+            self.operator.held_or(key, make)
+        }
     }
 
     impl<'b> TestEnv<'b> {
@@ -45,7 +66,14 @@ pub(crate) mod test {
                 branch,
                 operator,
                 rules,
+                memo: Memo::default(),
             }
+        }
+    }
+
+    impl BodyMemo for TestEnv<'_> {
+        fn memo(&self) -> Option<&Memo> {
+            Some(&self.memo)
         }
     }
 

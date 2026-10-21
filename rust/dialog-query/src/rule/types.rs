@@ -26,6 +26,7 @@ use crate::FormulaQuery;
 use crate::Premise;
 use crate::Proposition;
 use crate::Term;
+use crate::artifact::Type as ValueType;
 use crate::error::InferenceError;
 use crate::formula::number::Numeric;
 use crate::type_system::Primitive;
@@ -48,6 +49,15 @@ pub struct Narrowing {
     pub from: Option<Kind>,
     /// The kind after this premise.
     pub to: Kind,
+}
+
+/// A signed formula output awaiting its type: the scheme variable it
+/// is the signed image of, its own variable, and the name the error
+/// names when the two cannot agree.
+struct SignedImage {
+    scheme: VarId,
+    output: VarId,
+    name: String,
 }
 
 /// A dead-optionality finding: a premise declared the variable
@@ -103,6 +113,22 @@ impl TypeEnv {
     /// another). The variable name is returned with the error so
     /// the caller can surface a useful diagnostic.
     pub fn infer(premises: &[Premise]) -> Result<Self, InferenceError> {
+        Self::infer_for(premises, &[])
+    }
+
+    /// [`Self::infer`] for the body of a rule whose head declares
+    /// `head`: each head field's type and the body variable of the
+    /// same name. A numeric field narrows a variable the body left
+    /// open to what the field holds (an open number feeding a natural
+    /// field is a natural, so the scan feeding it reads naturals), as
+    /// the formula-schemes note has a demanded type flow back into the
+    /// body. A variable the body has already typed is left as it is:
+    /// whether the field reads it is the analyzer's head check, which
+    /// says why not.
+    pub fn infer_for(
+        premises: &[Premise],
+        head: &[(String, Kind)],
+    ) -> Result<Self, InferenceError> {
         let mut ctx = Context::new();
         let mut narrowings: Vec<Narrowing> = Vec::new();
         // Running per-variable kinds, diffed after each premise to
@@ -112,6 +138,11 @@ impl TypeEnv {
         // slot whose content type admits `Nothing`) — the lint's
         // evidence of *declared* optionality.
         let mut widened: Vec<(String, String)> = Vec::new();
+        // Signed formula outputs whose type follows their scheme's
+        // instantiation: settled as each formula is inferred and again
+        // once every premise has contributed, so an operand a later
+        // premise types still decides the output.
+        let mut signed: Vec<SignedImage> = Vec::new();
 
         for premise in premises {
             // Negation premises don't contribute; they filter on
@@ -128,7 +159,8 @@ impl TypeEnv {
             // directly, so formulas take this arm instead of the
             // generic schema walk below.
             if let Proposition::Formula(formula) = proposition {
-                Self::infer_formula(&mut ctx, formula)?;
+                Self::infer_formula(&mut ctx, formula, &mut signed)?;
+                Self::settle_signed(&mut ctx, &signed)?;
                 Self::record_narrowings(&ctx, premise, &mut current, &mut narrowings);
                 continue;
             }
@@ -170,6 +202,57 @@ impl TypeEnv {
             Self::record_narrowings(&ctx, premise, &mut current, &mut narrowings);
         }
 
+        Self::settle_signed(&mut ctx, &signed)?;
+
+        let named: HashMap<String, VarId> = ctx
+            .named_vars()
+            .map(|(name, var)| (name.clone(), *var))
+            .collect();
+        for (field, declared) in head {
+            let Some(var) = named.get(field) else {
+                continue;
+            };
+            let open = match ctx.resolve(&Inferred::Variable(*var)) {
+                Inferred::Static(kind) => kind,
+                Inferred::Variable(root) => Kind::from(ctx.constraint(root)),
+            };
+            // Only a number is narrowed from the head here: the band
+            // is what gives a declared number type a reading of an
+            // open numeric variable. The variable keeps its
+            // optionality either way; the required-head check judges
+            // that separately.
+            let numeric = declared.clone().required().primitive_part();
+            if numeric.intersect(Primitive::NUMERIC) != Some(numeric) {
+                continue;
+            }
+            let target = if open.is_optional() {
+                declared.clone().optional()
+            } else {
+                declared.clone().required()
+            };
+            let membership = open.primitive_part();
+            if membership == target.primitive_part()
+                || !membership.includes(target.primitive_part())
+            {
+                continue;
+            }
+            if let Err(reason) = ctx.unify(&Inferred::Variable(*var), &Inferred::Static(target)) {
+                return Err(InferenceError::Conflict {
+                    variable: field.clone(),
+                    reason: reason.to_string(),
+                });
+            }
+            let narrowed = Self::resolve(&ctx, *var);
+            narrowings.push(Narrowing {
+                variable: field.clone(),
+                premise: format!("head field {field}"),
+                from: current.get(field).cloned(),
+                to: narrowed.clone(),
+            });
+            current.insert(field.clone(), narrowed);
+        }
+        Self::settle_signed(&mut ctx, &signed)?;
+
         let mut by_name = HashMap::new();
         for (name, var_id) in ctx.named_vars() {
             by_name.insert(name.clone(), Self::resolve(&ctx, *var_id));
@@ -207,11 +290,52 @@ impl TypeEnv {
     /// Resolve a unifier variable to its current best kind: the
     /// static it resolved to, or its primitive constraint when no
     /// slot ever gave it a concrete shape.
+    ///
+    /// The kind is read as the number band reads it
+    /// ([`Kind::normalized`]): an integer a comparison proved
+    /// non-negative is a natural.
     fn resolve(ctx: &Context, var: VarId) -> Kind {
         match ctx.resolve(&Inferred::Variable(var)) {
             Inferred::Static(kind) => kind,
-            _ => Kind::from(ctx.constraint(var)),
+            Inferred::Variable(root) => Kind::from(ctx.constraint(root)),
         }
+        .normalized()
+    }
+
+    /// Type each signed formula output from what its scheme has
+    /// resolved to so far: `SignedInt` when the scheme's operands are
+    /// integers (naturals included), `Float` when they are floats, and
+    /// left at the signed bound while the operands are still open.
+    fn settle_signed(ctx: &mut Context, signed: &[SignedImage]) -> Result<(), InferenceError> {
+        for image in signed {
+            // The scheme's root carries its constraint; the image's
+            // own id may have been linked under another variable.
+            let operands = match ctx.resolve(&Inferred::Variable(image.scheme)) {
+                Inferred::Static(kind) => kind.primitive_part(),
+                Inferred::Variable(root) => ctx.constraint(root),
+            };
+            let Some(numeric) = operands.intersect(Primitive::NUMERIC) else {
+                continue;
+            };
+            let float = Primitive::singleton(ValueType::Float);
+            let output = if numeric.intersect(float).is_none() {
+                ValueType::SignedInt
+            } else if numeric == float {
+                ValueType::Float
+            } else {
+                continue;
+            };
+            if let Err(reason) = ctx.unify(
+                &Inferred::Variable(image.output),
+                &Inferred::Static(Kind::from(output)),
+            ) {
+                return Err(InferenceError::Conflict {
+                    variable: image.name.clone(),
+                    reason: reason.to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Diff every named variable's kind against the running
@@ -251,9 +375,13 @@ impl TypeEnv {
     /// too — a literal narrows the scheme it instantiates, and a
     /// literal outside a concrete cell's bound is a compile-time
     /// conflict.
-    fn infer_formula(ctx: &mut Context, formula: &FormulaQuery) -> Result<(), InferenceError> {
+    fn infer_formula(
+        ctx: &mut Context,
+        formula: &FormulaQuery,
+        signed: &mut Vec<SignedImage>,
+    ) -> Result<(), InferenceError> {
         let params = formula.parameters();
-        let mut schemes: HashMap<String, Inferred> = HashMap::new();
+        let mut schemes: HashMap<String, VarId> = HashMap::new();
 
         for (slot_name, cell) in formula.cells().iter() {
             let Some(param) = params.get(slot_name) else {
@@ -261,17 +389,39 @@ impl TypeEnv {
             };
 
             let slot_ty = match cell.scheme_label() {
-                Some(label) => schemes
-                    .entry(label.to_string())
-                    .or_insert_with(|| {
+                // A signed image gets a variable of its own, bounded by
+                // the signed numeric types, tied to its scheme's
+                // variable for `settle_signed` to type it from. The
+                // scheme's variable is allocated here when the image is
+                // met first; every numeric scheme ranges over NUMERIC.
+                Some(label) if cell.is_signed() => {
+                    let scheme = *schemes
+                        .entry(label.to_string())
+                        .or_insert_with(|| ctx.fresh(Primitive::NUMERIC));
+                    let bound = cell
+                        .content_type()
+                        .as_ref()
+                        .map(|kind| kind.primitive_part())
+                        .unwrap_or(Primitive::SIGNED_NUMERIC);
+                    let output = ctx.fresh(bound);
+                    signed.push(SignedImage {
+                        scheme,
+                        output,
+                        name: param.name().unwrap_or(slot_name).to_string(),
+                    });
+                    Inferred::Variable(output)
+                }
+                Some(label) => {
+                    let var = *schemes.entry(label.to_string()).or_insert_with(|| {
                         let bound = cell
                             .content_type()
                             .as_ref()
                             .map(|kind| kind.primitive_part())
                             .unwrap_or(Primitive::ALL);
-                        Inferred::Variable(ctx.fresh(bound))
-                    })
-                    .clone(),
+                        ctx.fresh(bound)
+                    });
+                    Inferred::Variable(var)
+                }
                 None => match cell.content_type() {
                     Some(kind) => lift(kind),
                     None => lift(&Kind::from(Primitive::ALL)),
@@ -414,7 +564,7 @@ mod tests {
 
     use super::*;
     use crate::artifact::{Entity, Type as ValueType};
-    use crate::attribute::The;
+    use crate::attribute::Relation;
     use crate::attribute::query::AttributeQuery;
     use crate::error::TypeError;
     use crate::formula::Formula;
@@ -432,7 +582,7 @@ mod tests {
     /// Helper: an optional (set-widening) binding for `?name`, a
     /// `OptionalAttributeQuery` left-join whose schema admits `Nothing` for the
     /// value slot.
-    fn optional_name_premise(the: Term<The>) -> Premise {
+    fn optional_name_premise(the: Term<Relation>) -> Premise {
         OptionalAttributeQuery::new(
             the,
             Term::<Entity>::var("this"),

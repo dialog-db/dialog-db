@@ -1,5 +1,5 @@
 use base58::{FromBase58, ToBase58};
-use dialog_artifacts::{Artifact, Attribute, Cause, Entity, Value};
+use dialog_artifacts::{Artifact, Cause, Entity, Relation, Value};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
@@ -64,7 +64,7 @@ fn parts_to_value(value_type: &str, is: &str) -> Result<Value, DialogArtifactsEr
             })?))
         }
         "record" => Ok(Value::Record(is.from_base58().map_err(parse_err)?)),
-        "attribute" => Ok(Value::Symbol(Attribute::from_str(is)?)),
+        "attribute" => Ok(Value::Symbol(Relation::from_str(is)?)),
         _ => Err(DialogArtifactsError::InvalidValue(format!(
             "unknown value type: {value_type}"
         ))),
@@ -88,7 +88,7 @@ impl TryFrom<CsvRow> for Artifact {
     type Error = DialogArtifactsError;
 
     fn try_from(row: CsvRow) -> Result<Self, Self::Error> {
-        let the = Attribute::from_str(&row.the)?;
+        let the = Relation::from_str(&row.the)?;
         let of = Entity::from_str(&row.of)?;
         let is = parts_to_value(&row.value_type, &row.is)?;
         let cause = row

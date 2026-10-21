@@ -127,7 +127,7 @@ where
         + ConditionalSync
         + 'static,
 {
-    let store = NetworkedIndex::new(env, branch.archive().index(), branch.fallback());
+    let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
     let tree = |reference: &TreeReference| {
         Index::from_hash_with_cache(NodeHash::from(*reference.hash()), branch.node_cache())
     };
@@ -213,7 +213,13 @@ where
     revision.context = Some(merged_context.clone());
     revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
-    persist(&branch.archive().index(), &mut delta, env).await?;
+    persist(
+        &branch.archive().index(),
+        &branch.node_cache(),
+        &mut delta,
+        env,
+    )
+    .await?;
     Ok((revision, merged_context))
 }
 
@@ -233,12 +239,15 @@ mod tests {
     use futures_util::{StreamExt, stream};
 
     fn name(of: &str, is: &str) -> Result<Instruction> {
-        Ok(Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: of.parse()?,
-            is: Value::String(is.to_string()),
-            cause: None,
-        }))
+        Ok(Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: of.parse()?,
+                is: Value::String(is.to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        ))
     }
 
     async fn names<Env>(branch: &Branch, env: &Env) -> Result<Vec<Value>>

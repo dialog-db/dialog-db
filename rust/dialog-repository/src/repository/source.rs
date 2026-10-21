@@ -25,6 +25,7 @@ use dialog_search_tree::Cache;
 use dialog_storage::Blake3Hash;
 use std::sync::Arc;
 
+use crate::repository::branch::LayerMetadataMemo;
 use crate::rules::{RuleCache, SharedRuleCache};
 use crate::schema::Replica;
 use crate::{Branch, Ephemeral, NetworkedIndex, RemoteFallback, Revision, Snapshot};
@@ -223,7 +224,9 @@ impl<'a> SourceRef<'a> {
     /// per branch in scope; a snapshot is not a branch and gets none).
     ///
     /// A branch contributes its full
-    /// [`BranchMetadata`](crate::BranchMetadata); a snapshot contributes
+    /// [`BranchMetadata`](crate::BranchMetadata), with the
+    /// [`BranchRevision`](crate::BranchRevision) (the only part that
+    /// moves with the head) folded into `heads`; a snapshot contributes
     /// the [`Replica`] it is a view of. Its revision is already
     /// queryable through the derived
     /// [`Revision`](crate::schema::Revision) concepts, concluded from
@@ -232,12 +235,17 @@ impl<'a> SourceRef<'a> {
         self,
         operator: &Capability<Operator>,
         changes: &mut Changes,
+        heads: &mut Changes,
     ) -> Option<Entity> {
         match self {
             SourceRef::Branch(branch) => {
                 let metadata = branch.metadata(operator);
                 let entity = metadata.branch.this.clone();
-                metadata.assert(changes);
+                metadata.replica.assert(changes);
+                metadata.branch.assert(changes);
+                if let Some(revision) = metadata.revision {
+                    revision.assert(heads);
+                }
                 Some(entity)
             }
             SourceRef::Snapshot(snapshot) => {
@@ -321,23 +329,32 @@ pub(crate) struct Caches {
     pub(crate) contexts: ContextCache,
     /// Verified revision records by version.
     pub(crate) records: Cache<Version, RevisionRecord>,
+    /// Trees rewritten under the current number band, by the root of the
+    /// tree they rewrite.
+    pub(crate) rewrites: Cache<dialog_common::Blake3Hash, dialog_common::Blake3Hash>,
     /// The live buffered spine between commits, keyed by the root it was
     /// persisted as.
     pub(crate) spine: SpineSlot,
+    /// The metadata a query over the branch alone folds in (see
+    /// [`Branch::layer_metadata`](crate::Branch)), so a branch opened again
+    /// does not derive and key it again.
+    pub(crate) metadata: LayerMetadataMemo,
 }
 
 impl Caches {
     /// A cold set.
     pub(crate) fn new() -> Self {
         Self {
-            nodes: Cache::new(),
+            nodes: dialog_search_tree::NodeCache::new(),
             spills: spill_cache(),
             rules: Arc::new(RuleCache::new()),
             plans: PlanCache::default(),
             causality: CausalityCache::new(),
             contexts: ContextCache::new(),
             records: Cache::new(),
+            rewrites: Cache::new(),
             spine: SpineSlot::new(),
+            metadata: LayerMetadataMemo::default(),
         }
     }
 }

@@ -42,9 +42,7 @@ use crate::wire::{BlobAnswer, Refusal, Response, decode, read_frame};
 /// caller retries, which is the right advice when the exchange never
 /// completed.
 fn broken(error: ChannelError) -> BlobError {
-    BlobError::Rejected(Rejection::Unavailable {
-        reason: error.to_string(),
-    })
+    BlobError::Rejected(Rejection::unavailable(error.to_string()))
 }
 
 /// Read the peer's framed answer and unwrap it to a [`BlobAnswer`].
@@ -94,7 +92,7 @@ fn refused(refusal: Refusal) -> BlobError {
         Refusal::Malformed(detail) => BlobError::Rejected(Rejection::Unclassified {
             detail: format!("the peer could not read the request: {detail}"),
         }),
-        Refusal::Internal(reason) => BlobError::Rejected(Rejection::Unavailable { reason }),
+        Refusal::Internal(reason) => BlobError::Rejected(Rejection::unavailable(reason)),
     }
 }
 

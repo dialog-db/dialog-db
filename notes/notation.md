@@ -12,7 +12,7 @@ Dialog uses two notations for describing domain models:
 
 Both attributes and concepts are structurally identified. Their identity is derived from their components, not from a name. However, attributes contain a nominal component (`the`) that captures semantic intent, identifying the relation in `domain/name` format and distinguishing attributes that would otherwise be structurally identical.
 
-An attribute's identity is the tuple `(the, type, cardinality)`. A concept's identity is derived from the sorted set of its constituent attribute identities. Two definitions with the same structure are the same thing, regardless of how they are referred to.
+An attribute's identity is a hash of its relations, type and pick. A concept's identity is derived from the sorted set of its constituent attribute identities. Two definitions with the same structure are the same thing, regardless of how they are referred to.
 
 The `the` component within an attribute is nominal: it carries meaning beyond structure. `diy.cook/quantity` and `diy.cook/price` may both be `(*, Integer, one)` structurally, but they are distinct attributes because `the` denotes the kind of relation they form, which is what makes it part of the identity in the first place.
 
@@ -105,7 +105,7 @@ omits the constraint to take both and split them downstream.
 
 ### References
 
-In the formal notation, all references are structural: attributes are described inline by their full definition `{ the, as, cardinality }` and concepts by their full set of constituent attributes. There are no names to look up; everything is self-describing.
+In the formal notation, all references are structural: attributes are described inline by their full definition `{ the, as, pick }` and concepts by their full set of constituent attributes. There are no names to look up; everything is self-describing.
 
 A relation is referenced by its qualified form `domain/name` with `/` as separator. The combined selector must not exceed 64 bytes:
 
@@ -118,23 +118,38 @@ io.gozala.person/name
 
 ### Attribute
 
-An attribute is a relation elevated with domain-specific invariants. It extends a relation's `domain/name` identifier with type and cardinality constraints, specifying what kind of values the association admits and how many. An attribute's identity is structural: `(the, type, cardinality)`. The `description` field is part of the attribute definition but not part of its identity; two attributes with the same structure but different descriptions are the same attribute.
+An attribute is a relation qualified by a value type and a pick. It extends a relation's `domain/name` identifier with what kind of values the relation is read as (`as`) and which of an entity's claims a read returns (`pick`). An attribute's identity is structural: a hash of the relations it reads, its type, its pick and the values its pick ranks. The `description` field is part of the attribute definition but not part of its identity; two attributes with the same structure but different descriptions are the same attribute.
 
 ```json
 {
   "description": "Name of the person",
   "the": "io.gozala.person/name",
-  "cardinality": "one",
-  "as": "Text"
+  "as": "text:"
 }
 ```
 
 ```yaml
 description: Name of the person
 the: io.gozala.person/name
-cardinality: one
-as: Text
+as: "text:"
 ```
+
+`pick` is one of these entities:
+
+- `last:` (the default): the newest claim;
+- `all:`: every claim, as a set;
+- `top:`: the best ranked of the values listed in `as` or the relations listed in `the`; a list in either implies `top:`;
+- `max:`, `min:`: the greatest or least value of an ordered type.
+
+```yaml
+the: io.gozala.person/email
+as: "text:"
+pick: "all:"
+```
+
+A pick is an entity for the same reason a type is: it is a name the descriptor refers to, not text, and an attribute's identity hashes it as such. The plain names 0.2 wrote (`all`) are read, never written.
+
+`cardinality: one` and `cardinality: many` are the older spellings of `last:` and `all:`. They are read, never written, and `pick` wins when both are given.
 
 <details>
 <summary>Attribute</summary>
@@ -142,7 +157,7 @@ as: Text
 {
   "Attribute": {
     "type": "object",
-    "description": "A relation elevated with domain-specific invariants. An attribute's identity is structural: (the, type, cardinality).",
+    "description": "A relation qualified by a value type and a pick.",
     "properties": {
       "description": {
         "type": "string",
@@ -152,11 +167,11 @@ as: Text
         "type": "string",
         "description": "The relation in domain/name format (e.g. 'diy.cook/quantity')."
       },
-      "cardinality": {
+      "pick": {
         "type": "string",
-        "enum": ["one", "many"],
-        "description": "Cardinality of the attribute. Defaults to 'one' when omitted.",
-        "default": "one"
+        "enum": ["last:", "all:", "top:", "max:", "min:"],
+        "description": "Which of an entity's claims the attribute reads, named by an entity. Defaults to 'last:', or to 'top:' when 'the' or 'as' is a list. The plain names 0.2 wrote ('all') are read, never written.",
+        "default": "last:"
       },
       "optional": {
         "type": "boolean",
@@ -170,7 +185,7 @@ as: Text
       "as": {
         "description": "Value type of the attribute. If omitted, any type is allowed.",
         "type": "string",
-        "enum": ["Bytes", "Entity", "Boolean", "Text", "UnsignedInteger", "SignedInteger", "Float", "Symbol"]
+        "enum": ["bytes:", "entity:", "boolean:", "text:", "natural:", "integer:", "float:", "record:", "symbol:"]
       }
     },
     "required": ["the"]
@@ -181,19 +196,21 @@ as: Text
 
 #### Value Types
 
-The `as` field declares what kind of value the attribute admits. Scalar types from the `dialog` domain can be referenced without qualification:
+The `as` field declares what kind of value the attribute admits. Each type is named by an entity:
 
-| Type              | Description                 |
-|-------------------|-----------------------------|
-| `Bytes`           | Raw byte sequence           |
-| `Entity`          | Reference to another entity |
-| `Boolean`         | `true` or `false`           |
-| `Text`            | UTF-8 string                |
-| `UnsignedInteger` | Unsigned integer            |
-| `SignedInteger`   | Signed integer              |
-| `Float`           | IEEE 754 floating point     |
-| `Record`          | Structured data, opaque to the query layer |
-| `Symbol`          | Symbolic identifier         |
+| Type       | Description                                |
+|------------|--------------------------------------------|
+| `bytes:`   | Raw byte sequence                          |
+| `entity:`  | Reference to another entity                |
+| `boolean:` | `true` or `false`                          |
+| `text:`    | UTF-8 string                               |
+| `natural:` | Unsigned integer                           |
+| `integer:` | Signed integer                             |
+| `float:`   | IEEE 754 floating point                    |
+| `record:`  | Structured data, opaque to the query layer |
+| `symbol:`  | Symbolic identifier                        |
+
+The names an earlier release wrote (`Text`, `UnsignedInteger`, `SignedInteger`, `Bytes`, ...) are still read, and never written.
 
 A concept can additionally require an entity-valued field's target to satisfy
 a concept — see [Concept-typed fields](#concept-typed-fields). That constraint
@@ -214,14 +231,14 @@ fixed set of symbols:
 }
 ```
 
-#### Cardinality
+#### Writing under a pick
 
-Cardinality governs what happens when a new claim is asserted for an attribute an entity already has a value for.
+A pick governs what happens when a new claim is asserted through an attribute an entity already has a value for.
 
-- `one` (default): asserting a new value retracts the prior claim so at most one value exists at a time.
-- `many`: new claims are added alongside existing ones.
+- `all`: the new claim is added alongside the existing ones.
+- Every other pick: the new claim succeeds the claim a read under the pick returns, which is retracted, so a read returns the value just written unless another claim outranks it (a greater value under `max`, a better ranked one under `top`).
 
-The associative layer beneath is indifferent to cardinality; it is the semantic layer that decides what to do with prior claims before asserting new ones.
+The associative layer beneath is indifferent to picks; it is the semantic layer that decides what to do with prior claims before asserting new ones.
 
 ### Concept
 
@@ -238,14 +255,12 @@ In the formal notation all attributes are inlined with their full form:
     "name": {
       "description": "Name of the person",
       "the": "io.gozala.person/name",
-      "cardinality": "one",
-      "as": "Text"
+      "as": "text:"
     },
     "address": {
       "description": "Address of the person",
       "the": "io.gozala.person/address",
-      "cardinality": "one",
-      "as": "Text"
+      "as": "text:"
     }
   }
 }
@@ -257,13 +272,11 @@ with:
   name:
     description: Name of the person
     the: io.gozala.person/name
-    cardinality: one
-    as: Text
+    as: "text:"
   address:
     description: Address of the person
     the: io.gozala.person/address
-    cardinality: one
-    as: Text
+    as: "text:"
 ```
 
 <details>
@@ -311,18 +324,18 @@ block. A concept must still declare at least one required attribute.
     "instruction": {
       "description": "What to do in this step",
       "the": "diy.cook.recipe-step/instruction",
-      "as": "Text"
+      "as": "text:"
     },
     "after": {
       "description": "Step that must be completed before this one",
       "the": "diy.cook.recipe-step/after",
-      "as": "Entity",
+      "as": "entity:",
       "optional": true
     },
     "duration": {
       "description": "Time in minutes this step takes",
       "the": "diy.cook.recipe-step/duration",
-      "as": "UnsignedInteger",
+      "as": "natural:",
       "optional": true
     }
   }
@@ -353,12 +366,12 @@ symbol-named half is a **dictionary**, the position-named half a
 ```json
 {
   "with": {
-    "title": { "the": "todo.list/title", "as": "Text" },
+    "title": { "the": "todo.list/title", "as": "text:" },
     "member": {
       "description": "The list's members, in order",
       "the": { "domain": "todo.list", "keyed": "sequence" },
-      "cardinality": "many",
-      "as": "Text"
+      "pick": "all:",
+      "as": "text:"
     }
   }
 }
@@ -366,7 +379,7 @@ symbol-named half is a **dictionary**, the position-named half a
 
 The facts behind such a field are ordinary claims whose attribute's name half
 is the entry's key: `todo.list/N` and `todo.list/N5` are two members. A
-collection field is therefore *many facts* by construction; `cardinality` is
+collection field is therefore *many facts* by construction; its `pick` is
 per entry (whether one key may hold two values), not about the collection.
 
 A collection field cannot be optional: it is zero-or-more already, and an
@@ -487,17 +500,49 @@ An advanced form of composition that goes beyond stitching attributes together. 
     "required": ["?"]
   },
   "Constant": {
-    "description": "A concrete value: string, number, or boolean.",
+    "description": "A concrete value: bare (string, number, boolean, or a list of bytes), or tagged by the entity naming its type.",
     "oneOf": [
       { "type": "string" },
       { "type": "number" },
       { "type": "integer" },
-      { "type": "boolean" }
+      { "type": "boolean" },
+      { "type": "array", "items": { "type": "integer", "minimum": 0, "maximum": 255 } },
+      {
+        "type": "object",
+        "description": "A tagged constant: one key, the entity naming its type.",
+        "minProperties": 1,
+        "maxProperties": 1,
+        "propertyNames": {
+          "enum": ["text:", "entity:", "symbol:", "integer:", "natural:", "float:", "boolean:", "bytes:", "record:"]
+        }
+      }
     ]
   }
 }
 </pre>
 </details>
+
+#### Constants
+
+A constant is a value a premise matches exactly. Every constant names its
+type by an entity, as an attribute does: `{"text:": "Alice"}`,
+`{"entity:": "did:web:cdata.earth"}`, `{"integer:": 5}`. That is how a
+stored rule writes each constant, and what its identity hashes, so two rules
+that match the same spelling under different types (the text `foo:` and the
+entity `foo:`) are two rules, and a constant reads back as the type it was
+written as.
+
+JSON may write a constant bare, and writes one bare wherever the bare
+spelling reads back as the same value: `"Alice"`, `5`, `true`. A bare string
+that parses as a URI reads as an entity and any other as text, and a bare
+integer reads as natural unless it is negative. A field that declares its
+type conforms a bare constant to it: `5` under `integer:` is a signed
+integer, and `"home:"` under `text:` is text. The tagged form says which type
+is meant where no field declares one.
+
+```json
+{ "rank": 5, "slug": "home:", "link": { "text:": "https://example.com" } }
+```
 
 #### Variables
 
@@ -611,17 +656,17 @@ A concept definition is effectively a rule with an implied conjunction. Every pa
       "name": {
         "description": "Ingredient name",
         "the": "diy.cook/ingredient-name",
-        "as": "Text"
+        "as": "text:"
       },
       "quantity": {
         "description": "Amount needed",
         "the": "diy.cook/quantity",
-        "as": "UnsignedInteger"
+        "as": "natural:"
       },
       "unit": {
         "description": "Unit of measurement",
         "the": "diy.cook/unit",
-        "as": "Text"
+        "as": "text:"
       }
     }
   },
@@ -629,7 +674,7 @@ A concept definition is effectively a rule with an implied conjunction. Every pa
     {
       "assert": {
         "with": {
-          "name": { "the": "diy.cook/ingredient-name", "as": "Text" }
+          "name": { "the": "diy.cook/ingredient-name", "as": "text:" }
         }
       },
       "where": {
@@ -640,7 +685,7 @@ A concept definition is effectively a rule with an implied conjunction. Every pa
     {
       "assert": {
         "with": {
-          "quantity": { "the": "diy.cook/quantity", "as": "UnsignedInteger" }
+          "quantity": { "the": "diy.cook/quantity", "as": "natural:" }
         }
       },
       "where": {
@@ -651,7 +696,7 @@ A concept definition is effectively a rule with an implied conjunction. Every pa
     {
       "assert": {
         "with": {
-          "unit": { "the": "diy.cook/unit", "as": "Text" }
+          "unit": { "the": "diy.cook/unit", "as": "text:" }
         }
       },
       "where": {
@@ -675,12 +720,12 @@ Disjunction is expressed by defining multiple rules that deduce the same concept
       "name": {
         "description": "Employee name",
         "the": "org.employee/name",
-        "as": "Text"
+        "as": "text:"
       },
       "role": {
         "description": "Employee role",
         "the": "org.employee/role",
-        "as": "Text"
+        "as": "text:"
       }
     }
   },
@@ -688,8 +733,8 @@ Disjunction is expressed by defining multiple rules that deduce the same concept
     {
       "assert": {
         "with": {
-          "name": { "the": "org/name", "as": "Text" },
-          "title": { "the": "org/title", "as": "Text" }
+          "name": { "the": "org/name", "as": "text:" },
+          "title": { "the": "org/title", "as": "text:" }
         }
       },
       "where": {
@@ -709,12 +754,12 @@ Disjunction is expressed by defining multiple rules that deduce the same concept
       "name": {
         "description": "Employee name",
         "the": "org.employee/name",
-        "as": "Text"
+        "as": "text:"
       },
       "role": {
         "description": "Employee role",
         "the": "org.employee/role",
-        "as": "Text"
+        "as": "text:"
       }
     }
   },
@@ -722,8 +767,8 @@ Disjunction is expressed by defining multiple rules that deduce the same concept
     {
       "assert": {
         "with": {
-          "name": { "the": "org/name", "as": "Text" },
-          "position": { "the": "org/position", "as": "Text" }
+          "name": { "the": "org/name", "as": "text:" },
+          "position": { "the": "org/position", "as": "text:" }
         }
       },
       "where": {
@@ -749,17 +794,17 @@ Because disjunction is expressed by separate rules, a new rule deriving an exist
       "attendee": {
         "description": "Person attending the meal",
         "the": "diy.planner.safe-meal/attendee",
-        "as": "Entity"
+        "as": "entity:"
       },
       "recipe": {
         "description": "Recipe for the meal",
         "the": "diy.planner.safe-meal/recipe",
-        "as": "Entity"
+        "as": "entity:"
       },
       "occasion": {
         "description": "The occasion",
         "the": "diy.planner.safe-meal/occasion",
-        "as": "Entity"
+        "as": "entity:"
       }
     }
   },
@@ -767,9 +812,9 @@ Because disjunction is expressed by separate rules, a new rule deriving an exist
     {
       "assert": {
         "with": {
-          "attendee": { "the": "diy.planner/attendee", "as": "Entity" },
-          "recipe": { "the": "diy.planner/recipe", "as": "Entity" },
-          "occasion": { "the": "diy.planner/occasion", "as": "Entity" }
+          "attendee": { "the": "diy.planner/attendee", "as": "entity:" },
+          "recipe": { "the": "diy.planner/recipe", "as": "entity:" },
+          "occasion": { "the": "diy.planner/occasion", "as": "entity:" }
         }
       },
       "where": {
@@ -783,8 +828,8 @@ Because disjunction is expressed by separate rules, a new rule deriving an exist
     {
       "assert": {
         "with": {
-          "person": { "the": "diy.planner/person", "as": "Entity" },
-          "recipe": { "the": "diy.planner/recipe", "as": "Entity" }
+          "person": { "the": "diy.planner/person", "as": "entity:" },
+          "recipe": { "the": "diy.planner/recipe", "as": "entity:" }
         }
       },
       "where": {
@@ -808,16 +853,16 @@ ordinary concept, so a reducing rule's conclusion composes like any other.
 {
   "deduce": {
     "with": {
-      "dept":  { "the": "org.employee/dept",  "as": "Entity" },
-      "total": { "the": "org.employee/total", "as": "UnsignedInteger" }
+      "dept":  { "the": "org.employee/dept",  "as": "entity:" },
+      "total": { "the": "org.employee/total", "as": "natural:" }
     }
   },
   "when": [
     {
       "assert": {
         "with": {
-          "dept":   { "the": "org.employee/dept",   "as": "Entity" },
-          "salary": { "the": "org.employee/salary", "as": "UnsignedInteger" }
+          "dept":   { "the": "org.employee/dept",   "as": "entity:" },
+          "salary": { "the": "org.employee/salary", "as": "natural:" }
         }
       },
       "where": {
@@ -886,7 +931,7 @@ An equality constraint asserts that two terms must hold equal values. It can fil
     {
       "assert": {
         "with": {
-          "name": { "the": "org.employee/name", "as": "Text" }
+          "name": { "the": "org.employee/name", "as": "text:" }
         }
       },
       "where": {
@@ -936,7 +981,7 @@ Like Datomic's range predicates, these take direct advantage of the value index:
     {
       "assert": {
         "with": {
-          "name": { "the": "org.employee/name", "as": "Text" }
+          "name": { "the": "org.employee/name", "as": "text:" }
         }
       },
       "where": {
@@ -1009,7 +1054,7 @@ A pure computation, similar to formulas in a spreadsheet. Given bound input fiel
     {
       "assert": {
         "with": {
-          "quantity": { "the": "diy.cook/quantity", "as": "UnsignedInteger" }
+          "quantity": { "the": "diy.cook/quantity", "as": "natural:" }
         }
       },
       "where": {
@@ -1045,7 +1090,7 @@ A pure computation, similar to formulas in a spreadsheet. Given bound input fiel
 }
 ```
 
-**Difference**: Subtracts the second value from the first (saturating at 0).
+**Difference**: Subtracts the second value from the first. The difference is a number that may be negative: a natural minus a natural is an integer (`3 - 5` is `-2`). A head field declared `natural:` does not take it until a comparison in the body (`>= 0` on the result) proves it a natural.
 
 ```json
 { 
@@ -1101,6 +1146,18 @@ A pure computation, similar to formulas in a spreadsheet. Given bound input fiel
 }
 ```
 
+**Floor**, **Round**, **Truncate**: Take a number of any type to an integer, the way from a float to an `integer:` field. `math/floor` is the greatest integer not above the number (`2.7` to `2`, `-2.3` to `-3`), `math/round` the nearest integer with halves away from zero (`2.5` to `3`, `-2.5` to `-3`), `math/truncate` the number with its fraction dropped (`2.7` to `2`, `-2.7` to `-2`). An integer is its own floor, rounding and truncation. A float with no finite value yields no result.
+
+```json
+{ 
+  "assert": "math/floor", 
+  "where": { 
+    "of": { "?": { "name": "price" } }, 
+    "is": { "?": { "name": "whole" } } 
+  } 
+}
+```
+
 <details>
 <summary>MathFormula</summary>
 <pre>
@@ -1117,11 +1174,11 @@ A pure computation, similar to formulas in a spreadsheet. Given bound input fiel
   },
   "math/difference": {
     "type": "object",
-    "description": "Subtracts second from first (saturating at 0): is = of - subtract.",
+    "description": "Subtracts second from first: is = of - subtract. The difference may be negative: a natural minus a natural is an integer.",
     "properties": {
       "of":       { "$ref": "#/$defs/Term", "description": "Minuend." },
       "subtract": { "$ref": "#/$defs/Term", "description": "Subtrahend." },
-      "is":       { "$ref": "#/$defs/Term", "description": "Derived: difference (saturating)." }
+      "is":       { "$ref": "#/$defs/Term", "description": "Derived: difference, an integer for integer operands and a float for float operands." }
     },
     "required": ["of", "subtract", "is"]
   },
@@ -1154,6 +1211,33 @@ A pure computation, similar to formulas in a spreadsheet. Given bound input fiel
       "is": { "$ref": "#/$defs/Term", "description": "Derived: remainder (empty if by = 0)." }
     },
     "required": ["of", "by", "is"]
+  },
+  "math/floor": {
+    "type": "object",
+    "description": "The greatest integer not above a number: floor(2.7) = 2, floor(-2.3) = -3. No result for a float with no finite value.",
+    "properties": {
+      "of": { "$ref": "#/$defs/Term", "description": "The number." },
+      "is": { "$ref": "#/$defs/Term", "description": "Derived: its floor, an integer." }
+    },
+    "required": ["of", "is"]
+  },
+  "math/round": {
+    "type": "object",
+    "description": "The integer nearest a number, halves away from zero: round(2.5) = 3, round(-2.5) = -3. No result for a float with no finite value.",
+    "properties": {
+      "of": { "$ref": "#/$defs/Term", "description": "The number." },
+      "is": { "$ref": "#/$defs/Term", "description": "Derived: the nearest integer." }
+    },
+    "required": ["of", "is"]
+  },
+  "math/truncate": {
+    "type": "object",
+    "description": "A number with its fraction dropped, toward zero: truncate(2.7) = 2, truncate(-2.7) = -2. No result for a float with no finite value.",
+    "properties": {
+      "of": { "$ref": "#/$defs/Term", "description": "The number." },
+      "is": { "$ref": "#/$defs/Term", "description": "Derived: the number truncated, an integer." }
+    },
+    "required": ["of", "is"]
   }
 }
 </pre>
@@ -1461,7 +1545,7 @@ The abbreviated notation is a YAML-only shorthand that expands into the formal n
 
 Since `domain/name` is usually unique enough to identify an attribute in a single application context it serves as a practical shorthand.
 
-> ℹ️ It is highly unlikely to have several attributes for same relation, but with different types or cardinality.
+> ℹ️ It is highly unlikely to have several attributes for same relation, but with different types or picks.
 
 All abbreviated addresses expand to structural reference in the formal notation.
 
@@ -1473,7 +1557,7 @@ The **label** under which an attribute is defined implies its name; the **enclos
 diy.cook:
   quantity:
     description: Amount needed
-    as: UnsignedInteger
+    as: "natural:"
 ```
 
 Expands to:
@@ -1481,11 +1565,10 @@ Expands to:
 ```yaml
 description: Amount needed
 the: diy.cook/quantity
-cardinality: one
-as: UnsignedInteger
+as: "natural:"
 ```
 
-The label `quantity` becomes the name, the enclosing key `diy.cook` becomes the domain, and `cardinality` defaults to `one`.
+The label `quantity` becomes the name, the enclosing key `diy.cook` becomes the domain, and `pick` defaults to `last`.
 
 #### Relative addressing
 
@@ -1570,7 +1653,7 @@ The field `name` in this concept is backed by an attribute from a completely dif
 
 ### Attribute
 
-The abbreviated notation infers `the` and `cardinality` from document structure. An immediate name implies attribute name, and enclosing key implies attribute domain. Cardinality when omitted defaults to `one`.
+The abbreviated notation infers `the` from document structure. An immediate name implies attribute name, and enclosing key implies attribute domain. `pick` when omitted defaults to `last`.
 
 #### Overriding name
 
@@ -1581,7 +1664,7 @@ diy.cook:
   quantity-int:
     the: ./quantity
     description: Quantity as a whole number
-    as: UnsignedInteger
+    as: "natural:"
 ```
 
 Expands to:
@@ -1589,8 +1672,7 @@ Expands to:
 ```yaml
 description: Quantity as a whole number
 the: diy.cook/quantity
-cardinality: one
-as: UnsignedInteger
+as: "natural:"
 ```
 
 The label `quantity-int` is the key used for referencing this definition, but `the` overrides the actual attribute name to `quantity`. This attribute is referenceable as `diy.cook/quantity-int` in the abbreviated notation.
@@ -1604,7 +1686,7 @@ diy.cook:
   quantity:
     the: io.gozala.person/.
     description: Quantity as a person attribute
-    as: UnsignedInteger
+    as: "natural:"
 ```
 
 Expands to:
@@ -1612,8 +1694,7 @@ Expands to:
 ```yaml
 description: Quantity as a person attribute
 the: io.gozala.person/quantity
-cardinality: one
-as: UnsignedInteger
+as: "natural:"
 ```
 
 The name `quantity` comes from the label, but the domain is overridden to `io.gozala.person`.
@@ -1662,10 +1743,10 @@ A concept can reference pre-defined attributes by address instead of inlining th
 io.gozala.person:
   name:
     description: Name of the person
-    as: Text
+    as: "text:"
   address:
     description: Address of the person
-    as: Text
+    as: "text:"
 
 io.gozala:
   Person:
@@ -1683,10 +1764,10 @@ The same can be expressed more concisely through punning, where `.` references t
 io.gozala.person:
   name:
     description: Name of the person
-    as: Text
+    as: "text:"
   address:
     description: Address of the person
-    as: Text
+    as: "text:"
 
 io.gozala:
   Person:
@@ -1705,12 +1786,12 @@ Expands to:
     "name": {
       "description": "Name of the person",
       "the": "io.gozala.person/name",
-      "as": "Text"
+      "as": "text:"
     },
     "address": {
       "description": "Address of the person",
       "the": "io.gozala.person/address",
-      "as": "Text"
+      "as": "text:"
     }
   }
 }
@@ -1733,10 +1814,10 @@ io.gozala:
     with:
       name:
         description: Name of the person
-        as: Text
+        as: "text:"
       address:
         description: Address of the person
-        as: Text
+        as: "text:"
 ```
 
 Expands to:
@@ -1748,14 +1829,12 @@ Expands to:
     "name": {
       "description": "Name of the person",
       "the": "io.gozala.person/name",
-      "cardinality": "one",
-      "as": "Text"
+      "as": "text:"
     },
     "address": {
       "description": "Address of the person",
       "the": "io.gozala.person/address",
-      "cardinality": "one",
-      "as": "Text"
+      "as": "text:"
     }
   }
 }
@@ -1815,9 +1894,9 @@ Expands to:
   "deduce": {
     "description": "An ingredient",
     "with": {
-      "name": { "the": "diy.cook/ingredient-name", "as": "Text" },
-      "quantity": { "the": "diy.cook/quantity", "as": "UnsignedInteger" },
-      "unit": { "the": "diy.cook/unit", "as": "Text" }
+      "name": { "the": "diy.cook/ingredient-name", "as": "text:" },
+      "quantity": { "the": "diy.cook/quantity", "as": "natural:" },
+      "unit": { "the": "diy.cook/unit", "as": "text:" }
     }
   },
   "when": [

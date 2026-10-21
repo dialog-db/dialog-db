@@ -163,3 +163,54 @@ scheme labels), so `?a < ?b` does not statically force `?a` and
 `?b` to one numeric type. Soundness lives in evaluation; the
 planned per-atom interval refinements are the place linking (and
 range pushdown) becomes worth carrying through the lattice.
+
+## Addendum: the number band
+
+Since 0.3.0 numbers are one band (`notes/identity-storage-notation.md`):
+a non-negative number is stored and read back as a natural whatever
+type wrote it, an `integer:` field reads it as the integer it is, and a
+`float:` field as the float. That retires the first ground of "No
+implicit numeric promotion" above for naturals and integers, which now
+have a common type by construction, while the second (data-dependent
+output types) still stands. The scheme model is kept, with these
+amendments:
+
+- **A difference is signed.** `math/difference`'s `is` is the scheme's
+  *signed image* (`Number::Signed`, `Cell::signed_of`): `SignedInt` when
+  the operands are integers, naturals included, `Float` when they are
+  floats, and left at `SIGNED_NUMERIC` while the operands are open. A
+  natural minus a larger natural is the negative integer it is, not a
+  non-match. The type is fixed by the operands' type, not by the row,
+  so inference stays static. At run time two integer-typed values of
+  different storage variants (a natural and a negative integer) compute
+  as integers; a float paired with an integer is still a non-match.
+
+- **A head field reads the band.** The analyzer checks every numeric
+  head field against its variable's inferred type through the band's
+  readings: a natural reads as an integer and a float, an integer as a
+  float; an integer does not read as a natural (it may be negative) and
+  a float not as an integer (it may have a fraction).
+  `TypeError::HeadField` names the field, the variable, both types, the
+  reason, the way out (`?n >= 0`, `math/floor`, or widening the field)
+  and the premise that gave the variable the offending shape. A head
+  field also *narrows* an open numeric variable to what it holds, the
+  bidirectional flow the "Inference" section promises, so a count read
+  through an untyped field and stepped by a polymorphic literal is a
+  natural when the head is.
+
+- **A comparison narrows an integer to a natural.** A lower bound that
+  proves every value non-negative (`>= 0`, `> -1`) makes an integer's
+  type a natural (`Type::normalized`), so a guarded decrement
+  (`difference`, then `>= 0`) satisfies a natural head, and the guard is
+  the author's own visible filter on the negative case.
+
+- **Floats reach integers through a formula.** `math/floor`,
+  `math/round` and `math/truncate` take any number to an integer; they
+  are the explicit crossing from a float to an `integer:` field, as the
+  "release valve" paragraph wants data crossings to be.
+
+What is still not done: a subtype lattice in the unifier. `sum(?n, -1)`
+with `?n` a natural is still a compile-time conflict, since the scheme
+asks all three cells to share one type and `-1` is no natural; the
+head check and the signed difference cover the cases this came up for.
+

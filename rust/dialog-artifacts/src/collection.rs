@@ -41,7 +41,7 @@ use std::collections::btree_map;
 use ::serde::{Deserialize, Serialize};
 
 use crate::position::Position;
-use crate::{Attribute, Name, Symbol};
+use crate::{Name, Relation, Symbol};
 
 /// A [`Symbol`]-keyed dictionary of `T` values: the named entries of
 /// one domain.
@@ -95,7 +95,7 @@ impl<T> Directory<T> {
     /// [`Sequence`] instead, and attributes outside the strict
     /// name vocabulary are not admitted either. The caller scopes the
     /// scan to one domain; this classifies by name shape alone.
-    pub fn admit(&mut self, attribute: &Attribute, value: T) -> bool {
+    pub fn admit(&mut self, attribute: &Relation, value: T) -> bool {
         match Name::try_from(attribute.name()) {
             Ok(Name::Symbol(key)) => {
                 self.insert(key, value);
@@ -196,7 +196,7 @@ impl<T> Sequence<T> {
     /// Symbol-named entries belong to a [`Directory`] instead. The
     /// caller scopes the scan to one domain; this classifies by name
     /// shape alone.
-    pub fn admit(&mut self, attribute: &Attribute, value: T) -> bool {
+    pub fn admit(&mut self, attribute: &Relation, value: T) -> bool {
         match Name::try_from(attribute.name()) {
             Ok(Name::Position(position)) => {
                 self.insert(position, value);
@@ -256,11 +256,11 @@ mod tests {
     #[dialog_common::test]
     fn it_classifies_a_mixed_domain_scan() {
         let domain: Symbol = "todo.list".parse().unwrap();
-        let title = Attribute::compose(&domain, Symbol::from_str("title").unwrap()).unwrap();
+        let title = Relation::compose(&domain, Symbol::from_str("title").unwrap()).unwrap();
         let first = insert(&Bias::derive(b"milk"), ..).unwrap();
         let second = insert(&Bias::derive(b"bread"), &first..).unwrap();
-        let head = Attribute::compose(&domain, first.clone()).unwrap();
-        let tail = Attribute::compose(&domain, second.clone()).unwrap();
+        let head = Relation::compose(&domain, first.clone()).unwrap();
+        let tail = Relation::compose(&domain, second.clone()).unwrap();
 
         let scan = [
             (title.clone(), Value::String("Groceries".into())),
@@ -299,7 +299,7 @@ mod tests {
     /// admitted by neither collection.
     #[dialog_common::test]
     fn it_declines_nonconforming_names() {
-        let legacy = Attribute::from_str("person/display_name").unwrap();
+        let legacy = Relation::from_str("person/display_name").unwrap();
         let mut fields: Directory<Value> = Directory::new();
         let mut members: Sequence<Value> = Sequence::new();
         assert!(!fields.admit(&legacy, Value::Boolean(true)));

@@ -92,6 +92,7 @@ use dialog_capability::identity::Entity;
 use dialog_capability::{Capability, Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync, Held, Holdings, Holds};
 use dialog_credentials::SignerCredential;
+use dialog_did_web::{CachingResolver, Discover, ResolveError, Service, WebResolver};
 use dialog_effects::authority::{Attest, Identify, Operator as AuthOperator};
 use dialog_effects::peer::PeerConnection;
 use dialog_effects::storage::{Directory, Location};
@@ -100,7 +101,8 @@ use dialog_identity::access::Access;
 use dialog_identity::{Authority, CredentialHandle, SpaceHandle};
 use dialog_network::{HydrationScheduler, Network};
 use dialog_repository::{
-    Branch, By, ContactConnection, ContactReference, RemoteSite, ReplicaReference, contact,
+    Branch, By, ContactConnection, ContactReference, HeldCaches, RemoteSite, ReplicaReference,
+    contact,
 };
 use dialog_storage::provider::space::SpaceProvider;
 use dialog_storage::provider::storage::Storage;
@@ -110,6 +112,29 @@ use dialog_varsig::{Did, Principal};
 use parking_lot::Mutex;
 
 use access::ChainCache;
+
+/// What a peer learns where a DID's subject is reached with: the services
+/// its document names (see [`Discover`]).
+///
+/// By default a peer resolves `did:key` locally and `did:web` and `did:plc`
+/// over the network, and caches nothing of it (see
+/// [`PeerBuilder::discovery`] to change that).
+pub trait Discovery: Provider<Discover> + ConditionalSend + ConditionalSync {}
+
+impl<T> Discovery for T where T: Provider<Discover> + ConditionalSend + ConditionalSync {}
+
+/// The discovery a peer has when it is given none.
+pub(crate) fn default_discovery() -> Arc<dyn Discovery> {
+    Arc::new(CachingResolver::new(WebResolver::new()))
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<S: Clone + ConditionalSend + ConditionalSync, M: Mode> Provider<Discover> for Peer<S, M> {
+    async fn execute(&self, input: Discover) -> Result<Vec<Service>, ResolveError> {
+        self.inner.discovery.execute(input).await
+    }
+}
 
 /// The space provider bound a peer's storage must satisfy for the peer
 /// to provide every effect, including the remote forks, and to mount its
@@ -241,9 +266,13 @@ pub(crate) struct Inner {
     /// grant from the peer extends.
     held: Vec<Grant>,
     /// The repository holding this peer's own state, and the replica
-    /// identity every entity it writes derives from: the repository of
-    /// the state branch the peer was given.
+    /// identity every entity it writes derives from, unless `profile`
+    /// names another: the repository of the state branch the peer was
+    /// given.
     home: Did,
+    /// The replica this peer writes as, when it is not `home`: the profile
+    /// of its authority. See `PeerBuilder::profile`.
+    profile: Option<Did>,
     /// Base directory for resolving space names, until the registry
     /// resolves them by fact.
     directory: Directory,
@@ -251,6 +280,8 @@ pub(crate) struct Inner {
     network: Network,
     /// The shared runtime: hydration scheduler and speculation queue.
     runtime: Runtime,
+    /// What the peer learns where a DID's subject is reached with.
+    discovery: Arc<dyn Discovery>,
     /// The branch that holds this peer's state, opened. Proofs resolve
     /// from its `dialog.ucan/*` facts and retained delegations commit
     /// into it.
@@ -395,9 +426,21 @@ impl<S: Clone, M: Mode> Peer<S, M> {
         &self.inner.network
     }
 
+    /// The caches this peer holds for the repositories opened through it:
+    /// the ones it was built with, or its own. Bound them when building the
+    /// peer; let a repository's go with [`HeldCaches::release`].
+    pub fn caches(&self) -> HeldCaches {
+        HeldCaches::of(self)
+    }
+
     /// The shared runtime this peer performs through.
     pub fn runtime(&self) -> &Runtime {
         &self.inner.runtime
+    }
+
+    /// What the peer learns where a DID's subject is reached with.
+    pub(crate) fn discovery(&self) -> &Arc<dyn Discovery> {
+        &self.inner.discovery
     }
 
     /// The scheduler every remote block read of this peer goes through:
@@ -506,7 +549,7 @@ impl<S: PeerSpace, M: Mode> Peer<S, M> {
     pub(crate) fn assemble(storage: Storage<S>, inner: Inner) -> Self {
         let authority = Authority::new(
             "peer",
-            inner.home.clone(),
+            inner.profile.clone().unwrap_or_else(|| inner.home.clone()),
             inner.credential.signer().clone(),
         );
         let peer = Peer {
@@ -566,6 +609,10 @@ impl<S: Clone, M: Mode> Holds for Peer<S, M> {
     fn hold(&self, key: String, handle: Held) {
         self.inner.holdings.hold(key, handle)
     }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+        self.inner.holdings.held_or(key, make)
+    }
 }
 
 impl<S: Clone, M: Mode> Principal for Peer<S, M> {
@@ -582,7 +629,7 @@ mod tests {
     use super::*;
     use crate::helpers::{
         open_peer, test_credential_store, test_grant, test_peer, test_session_with_peer,
-        test_storage, test_system, unique_name,
+        test_state, test_storage, test_system, unique_name,
     };
     use crate::{ClaimExt as _, OpenCredential};
     use anyhow::Result;
@@ -593,6 +640,7 @@ mod tests {
     use dialog_credentials::{Credential, SignerCredential};
     use dialog_effects::credential as credential_fx;
     use dialog_effects::storage::Location;
+    use dialog_repository::schema::Replica;
     use dialog_repository::{
         OpenReplicaBranchError, Repository, RepositoryAtExt as _, RepositoryExt as _, secrets,
     };
@@ -972,6 +1020,91 @@ mod tests {
             .perform(&second)
             .await?;
         assert_eq!(proof.proofs().len(), 2, "space -> peer ++ peer -> worker");
+        Ok(())
+    }
+
+    /// A session given a profile writes as that replica: its authority
+    /// names the profile, its home stays the repository of the branch it
+    /// is given, and a branch it opens keeps its metadata under the
+    /// profile's replica of that repository, not the home's.
+    #[dialog_common::test]
+    async fn it_writes_a_session_as_the_profile_it_is_given() -> Result<()> {
+        use dialog_effects::authority::OperatorExt as _;
+
+        let peer = open_peer(
+            test_storage().await,
+            Location::temp(unique_name("ephemeral")),
+        )
+        .await?;
+        let replica = Ed25519Signer::generate().await?.did();
+
+        let worker = peer
+            .session(b"writer")
+            .space(Repository::from(peer.home().clone()).branch("main"))
+            .profile(replica.clone())
+            .allow(Subject::any())
+            .await?;
+
+        assert_eq!(worker.home(), peer.home());
+        assert_eq!(worker.build_authority(peer.did()).profile(), &replica);
+        let plain = peer
+            .session(b"plain")
+            .space(Repository::from(peer.home().clone()).branch("main"))
+            .allow(Subject::any())
+            .await?;
+        assert_eq!(plain.build_authority(peer.did()).profile(), peer.home());
+
+        // The replica a branch keeps its metadata under derives from the
+        // profile: the profiled session's view of the home repository is
+        // the profile's replica of it, the plain session's is the home's.
+        let opened = Repository::from(peer.home().clone())
+            .branch("main")
+            .open()
+            .perform(&worker)
+            .await?;
+        let identity = Identify.perform(&worker).await?;
+        assert_eq!(
+            opened.metadata(&identity).replica,
+            Replica::new(replica.clone(), peer.home().clone())
+        );
+        let plainly = Repository::from(peer.home().clone())
+            .branch("main")
+            .open()
+            .perform(&plain)
+            .await?;
+        let identity = Identify.perform(&plain).await?;
+        assert_eq!(
+            plainly.metadata(&identity).replica,
+            Replica::new(peer.home().clone(), peer.home().clone())
+        );
+        Ok(())
+    }
+
+    /// A peer given a profile writes as that replica, with its own key and
+    /// not as a session: its authority names the profile, and its home
+    /// stays the repository of the branch it is given.
+    #[dialog_common::test]
+    async fn it_writes_a_peer_as_the_profile_it_is_given() -> Result<()> {
+        use dialog_effects::authority::OperatorExt as _;
+
+        let location = Location::temp(unique_name("ephemeral"));
+        let credential = OpenCredential::open(location.name.clone())
+            .at(location.directory.clone())
+            .perform(&test_credential_store())
+            .await?;
+        let replica = Ed25519Signer::generate().await?.did();
+
+        let peer = Peer::new(credential.clone())
+            .at(location)
+            .space(test_state(&credential.did()))
+            .profile(replica.clone())
+            .with(test_storage().await)
+            .grant(test_grant().await)
+            .build()
+            .await?;
+
+        assert_eq!(peer.home(), &credential.did());
+        assert_eq!(peer.build_authority(peer.did()).profile(), &replica);
         Ok(())
     }
 

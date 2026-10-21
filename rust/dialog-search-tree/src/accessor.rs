@@ -82,6 +82,13 @@ where
         hash
     }
 
+    /// The node at `hash` if the cache holds it, with no IO: a way to reach
+    /// what a held node keeps with it (its piece summary, say) without
+    /// loading a node that is not already here.
+    pub(crate) fn cached(&self, hash: &Blake3Hash) -> Option<PersistentNode<Key, Value>> {
+        self.cache.get_cached(hash)
+    }
+
     /// Retrieves a node by its content hash.
     ///
     /// Checks the cache first, then the environment. Returns an error if the
@@ -121,7 +128,8 @@ mod tests {
     use futures_util::future::join_all;
 
     use crate::{
-        Accessor, Buffer, Cache, Delta, PersistentNode, PersistentTree, helpers::ObservingBlocks,
+        Accessor, Buffer, Delta, NodeCache, PersistentNode, PersistentTree,
+        helpers::ObservingBlocks,
     };
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -148,7 +156,7 @@ mod tests {
         }
         let hash = tree.root().clone();
 
-        let accessor = Accessor::new(Cache::new(), &storage);
+        let accessor = Accessor::new(NodeCache::new(), &storage);
         backend.reset();
 
         let reads = join_all((0..8).map(|_| accessor.get_node(&hash))).await;
@@ -178,7 +186,7 @@ mod tests {
         let hash = garbage.blake3_hash().clone();
         storage.store(garbage);
 
-        let accessor = Accessor::<[u8; 4], Vec<u8>, _>::new(Cache::new(), &storage);
+        let accessor = Accessor::<[u8; 4], Vec<u8>, _>::new(NodeCache::new(), &storage);
         backend.reset();
 
         assert!(accessor.get_node(&hash).await.is_err());

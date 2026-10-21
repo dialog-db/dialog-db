@@ -38,7 +38,7 @@ use rkyv::{
 
 use crate::{
     DialogSearchTreeError, Distribution, Entry, Key, Link, LoadBlock, NodeBody, NoveltyEntry,
-    NoveltyOp, PersistentNode, PersistentTree, Value, into_owned, resolve_pending,
+    NoveltyOp, PersistentNode, PersistentTree, Separator, Value, into_owned, resolve_pending,
 };
 
 /// How many frontier blocks a comparison pass fetches concurrently in the
@@ -393,14 +393,14 @@ where
         match slot {
             SparseTreeNode::Ref(link) if link.node == *node.hash() => {
                 *slot = SparseTreeNode::Loaded {
-                    lower_bound: link.separator.clone(),
+                    lower_bound: link.separator.to_vec(),
                     pending: Vec::new(),
                     node,
                 };
             }
             SparseTreeNode::Pending { link, pending } if link.node == *node.hash() => {
                 *slot = SparseTreeNode::Loaded {
-                    lower_bound: link.separator.clone(),
+                    lower_bound: link.separator.to_vec(),
                     pending: core::mem::take(pending),
                     node,
                 };
@@ -454,7 +454,7 @@ where
                 seen: HashSet::from([root.clone()]),
                 missing,
                 unresolved: vec![Link {
-                    separator: Vec::new(),
+                    separator: Separator::default(),
                     node: root.clone(),
                     // Advisory only, and unknowable for an unread root.
                     scale: crate::Scale::MAX,
@@ -961,7 +961,7 @@ where
                     }
                     resolved.sort_by(|(left, _), (right, _)| left.cmp(right));
                     for (key, value) in resolved {
-                        yield Entry { key: Key::try_from_bytes(&key)?, value };
+                        yield Entry::new(Key::try_from_bytes(&key)?, value);
                     }
                     continue;
                 }
@@ -981,7 +981,7 @@ where
                             None if self.missing == MissingBlocks::Boundary => {
                                 for (key, op) in winning_ops(&pending) {
                                     if let NoveltyOp::Assert(value) = op {
-                                        yield Entry { key: Key::try_from_bytes(&key)?, value };
+                                        yield Entry::new(Key::try_from_bytes(&key)?, value);
                                     }
                                 }
                                 continue;
@@ -1014,7 +1014,7 @@ where
                     let Some(node) = node else {
                         for (key, op) in winning_ops(&inherited) {
                             if let NoveltyOp::Assert(value) = op {
-                                yield Entry { key: Key::try_from_bytes(&key)?, value };
+                                yield Entry::new(Key::try_from_bytes(&key)?, value);
                             }
                         }
                         continue;
@@ -1122,10 +1122,7 @@ where
                                     }
                                     let (buffered_key, op) = buffered.next().expect("peeked");
                                     if let NoveltyOp::Assert(value) = op {
-                                        yield Entry {
-                                            key: Key::try_from_bytes(&buffered_key)?,
-                                            value,
-                                        };
+                                        yield Entry::new(Key::try_from_bytes(&buffered_key)?, value);
                                     }
                                 }
 
@@ -1137,29 +1134,18 @@ where
                                 ) {
                                     let (buffered_key, op) = buffered.next().expect("peeked");
                                     if let NoveltyOp::Assert(value) = op {
-                                        yield Entry {
-                                            key: Key::try_from_bytes(&buffered_key)?,
-                                            value,
-                                        };
+                                        yield Entry::new(Key::try_from_bytes(&buffered_key)?, value);
                                     }
                                     continue;
                                 }
 
-                                yield Entry {
-                                    // `key` borrows the decoder's reused buffer;
-                                    // this owns the single copy.
-                                    key: Key::try_from_bytes(key)?,
-                                    value: into_owned(segment.value_at(at)?)?,
-                                };
+                                yield Entry::new(Key::try_from_bytes(key)?, into_owned(segment.value_at(at)?)?);
                             }
 
                             // Buffered inserts past the last stored entry.
                             for (buffered_key, op) in buffered {
                                 if let NoveltyOp::Assert(value) = op {
-                                    yield Entry {
-                                        key: Key::try_from_bytes(&buffered_key)?,
-                                        value,
-                                    };
+                                    yield Entry::new(Key::try_from_bytes(&buffered_key)?, value);
                                 }
                             }
                         }
@@ -4023,10 +4009,7 @@ mod tests {
         let mut storage = CountingBackend::new();
         let mut tree = build([(1, vec![10])], &mut storage).await?;
 
-        let changes = vec![Change::Add(Entry {
-            key: key(2),
-            value: vec![20],
-        })];
+        let changes = vec![Change::Add(Entry::new(key(2), vec![20]))];
 
         let mut delta = Delta::zero();
         tree = tree
@@ -4051,10 +4034,7 @@ mod tests {
         let root = tree.root().clone();
 
         // Add same entry - should be no-op
-        let changes = vec![Change::Add(Entry {
-            key: key(1),
-            value: vec![10],
-        })];
+        let changes = vec![Change::Add(Entry::new(key(1), vec![10]))];
 
         let mut delta = Delta::zero();
         tree = tree
@@ -4085,10 +4065,7 @@ mod tests {
         let new_value = vec![20u8];
         let existing_value = vec![10u8];
 
-        let changes = vec![Change::Add(Entry {
-            key: key(1),
-            value: new_value.clone(),
-        })];
+        let changes = vec![Change::Add(Entry::new(key(1), new_value.clone()))];
 
         let mut delta = Delta::zero();
         tree = tree
@@ -4116,10 +4093,7 @@ mod tests {
         let mut storage = CountingBackend::new();
         let mut tree = build([(1, vec![10]), (2, vec![20])], &mut storage).await?;
 
-        let changes = vec![Change::Remove(Entry {
-            key: key(1),
-            value: vec![10],
-        })];
+        let changes = vec![Change::Remove(Entry::new(key(1), vec![10]))];
 
         let mut delta = Delta::zero();
         tree = tree
@@ -4143,10 +4117,7 @@ mod tests {
         let mut tree = build([(1, vec![10])], &mut storage).await?;
 
         // Remove non-existent entry - should be no-op
-        let changes = vec![Change::Remove(Entry {
-            key: key(2),
-            value: vec![20],
-        })];
+        let changes = vec![Change::Remove(Entry::new(key(2), vec![20]))];
 
         let mut delta = Delta::zero();
         tree = tree
@@ -4170,10 +4141,8 @@ mod tests {
         let mut tree = build([(1, vec![10])], &mut storage).await?;
 
         // Try to remove with wrong value - should be no-op (concurrent update)
-        let changes = vec![Change::Remove(Entry {
-            key: key(1),
-            value: vec![20], // Wrong value
-        })];
+        // Wrong value
+        let changes = vec![Change::Remove(Entry::new(key(1), vec![20]))];
 
         let mut delta = Delta::zero();
         tree = tree
