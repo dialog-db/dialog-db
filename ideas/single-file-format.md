@@ -46,7 +46,7 @@ and new frames.
 The dictionary itself can be a tree in the log. Each index node over the
 tokens is written as a frame that points at earlier index frames by
 offset, so a lookup hops across the log instead of reading a dictionary
-whole. HyperDB does exactly this for its trie, see prior art.
+whole. HyperDB arrived at the same shape for its trie, see prior art.
 
 The node as the rest of the system sees it does not change. When a node
 is read or sent, the file realizes it copy-on-write into the current wire
@@ -92,7 +92,8 @@ the spike should spend its time:
   wire-hash to frame-offset index is one more tree in the log.
 - **Verified range reads.** The whole file as a BAO stream, so a peer
   can verify a frame or a token range against the file's root. Hypercore
-  does this per log and it is the part of Dat worth borrowing as is.
+  verifies its log the same way, and their experience with it is the
+  most direct lesson Dat has for us.
 
 ## Constraints
 
@@ -109,24 +110,29 @@ fine. Determinism is a property of the tree, not of the file.
 
 ## Prior art
 
+None of this is new ground, and the point of this section is to learn
+from people who walked it, not to lift their designs. The Dat project is
+the closest in spirit.
 [DEP-0004 HyperDB](https://www.datprotocol.com/deps/0004-hyperdb/) keeps a
 key/value trie inside one append-only log. Each entry carries only the
 trie pointers it changed and refers back to earlier entries by log index
-for the rest, so a node is never copied forward. That is this idea applied
-to structure rather than tokens, and it shows realize-on-read works at
-database scale. Where it breaks: entries are addressed by position in a
-writer's feed, not by content hash, so names mean nothing across replicas;
-nothing is ever removed, deletions are tombstones that "persist in the
-database forever"; and the merkle tree over the log is per writer.
-[DEP-0002](https://www.datprotocol.com/deps/0002-hypercore/) has the
-flat-tree hashing. No DEP specifies an on-disk body layout, so there is
-no file format to copy, only the idea.
+for the rest, so a node is never copied forward. That is the same
+instinct as this idea, applied to structure rather than tokens, and it is
+evidence that realize-on-read holds up at database scale. Where our
+situation differs: their entries are addressed by position in a writer's
+feed, not by content hash, so names mean nothing across replicas; nothing
+is ever removed, deletions are tombstones that "persist in the database
+forever"; and the merkle tree over the log is per writer.
+[DEP-0002](https://www.datprotocol.com/deps/0002-hypercore/) describes the
+flat-tree hashing. No DEP specifies an on-disk body layout, so what there
+is to take from Dat is the thinking and the lessons, not a format.
 
-Other places to look, each for one thing:
+Other places to learn from, each for one thing:
 
 - **FSST** (Boncz, Neumann, Leis 2020): a static symbol table for string
   compression that decodes any single string without touching the rest.
-  The token region could be FSST-coded without losing random access.
+  The token region could use the same trick without losing random
+  access.
 - **Lucene's term dictionary**: a finite state transducer over sorted
   terms, prefix-shared and randomly addressable. The closest existing
   thing to "the dictionary is a tree you hop across".
@@ -203,7 +209,7 @@ provider. The spike reports both numbers and the ratio, and where it
 lands between the two bars is a judgment I will make on the numbers, not
 one the spike makes for me.
 
-## What we tried before
+## What we tried before, and why now
 
 DCAA on `claude/perf-6-dcaa-spike` (July 2026): append-only, blake3
 addressed, BAO outboard for range verification, sorted index with
@@ -214,3 +220,11 @@ at 933 ms on the same replay, so the gap is the fsync, not the format, but
 nobody ever ran a read benchmark against it. It stored whole blocks, so it
 grew exactly like the directory it replaced. The index, footer and
 recovery design is still worth reusing.
+
+It is worth revisiting now for a reason that did not hold then. That
+spike predates the columnar segment encoding and the hitchhiker-style
+novelty buffers the tree has today. It stored whole opaque blocks, so
+the compression wins this idea rests on, tokens shared across nodes and
+frames that are mostly offsets, were not even testable. Now the tree
+already tokenizes within a node, and the question of doing it across the
+whole file is one we can actually measure.
