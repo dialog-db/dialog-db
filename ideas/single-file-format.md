@@ -50,6 +50,12 @@ address, and a push after a commit ships one small block. Three designs
 from the summer were rejected for bending this. Compaction can drop
 blocks, it cannot change what a block is.
 
+The tree is deterministic and stays that way: the same facts give the same
+nodes and the same hashes on every replica. The file is not. Two replicas
+holding the same tree can lay their bytes out differently, compact at
+different times, and that is fine. Determinism is a property of the tree,
+not of the file.
+
 > 💭 The columnar node format is on main, but nobody has measured how
 > well successive versions of a node actually compress against each
 > other. Direction 2 rests on that number, so measure it first.
