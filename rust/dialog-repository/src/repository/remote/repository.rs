@@ -75,6 +75,10 @@ impl ConnectedReplica {
         addresses: Vec<SiteAddress>,
         subject: Did,
     ) -> Self {
+        debug_assert!(
+            !addresses.is_empty(),
+            "a replica is reached at one address or more"
+        );
         Self::new(host, peer.this(), None, addresses, subject)
     }
 

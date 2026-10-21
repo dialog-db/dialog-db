@@ -639,6 +639,7 @@ mod tests {
     use dialog_credentials::{Credential, SignerCredential};
     use dialog_effects::credential as credential_fx;
     use dialog_effects::storage::Location;
+    use dialog_repository::schema::Replica;
     use dialog_repository::{
         OpenReplicaBranchError, Repository, RepositoryAtExt as _, RepositoryExt as _, secrets,
     };
@@ -1022,8 +1023,9 @@ mod tests {
     }
 
     /// A session given a profile writes as that replica: its authority
-    /// names the profile, and its home stays the repository of the branch it
-    /// is given.
+    /// names the profile, its home stays the repository of the branch it
+    /// is given, and a branch it opens keeps its metadata under the
+    /// profile's replica of that repository, not the home's.
     #[dialog_common::test]
     async fn it_writes_a_session_as_the_profile_it_is_given() -> Result<()> {
         use dialog_effects::authority::OperatorExt as _;
@@ -1050,6 +1052,30 @@ mod tests {
             .allow(Subject::any())
             .await?;
         assert_eq!(plain.build_authority(peer.did()).profile(), peer.home());
+
+        // The replica a branch keeps its metadata under derives from the
+        // profile: the profiled session's view of the home repository is
+        // the profile's replica of it, the plain session's is the home's.
+        let opened = Repository::from(peer.home().clone())
+            .branch("main")
+            .open()
+            .perform(&worker)
+            .await?;
+        let identity = Identify.perform(&worker).await?;
+        assert_eq!(
+            opened.metadata(&identity).replica,
+            Replica::new(replica.clone(), peer.home().clone())
+        );
+        let plainly = Repository::from(peer.home().clone())
+            .branch("main")
+            .open()
+            .perform(&plain)
+            .await?;
+        let identity = Identify.perform(&plain).await?;
+        assert_eq!(
+            plainly.metadata(&identity).replica,
+            Replica::new(peer.home().clone(), peer.home().clone())
+        );
         Ok(())
     }
 

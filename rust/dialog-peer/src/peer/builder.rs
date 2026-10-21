@@ -379,6 +379,27 @@ impl<S: PeerSpace> PeerBuilder<PeerKey, Storage<S>, Session> {
 }
 
 impl<K, St, M> PeerBuilder<K, St, M> {
+    /// The replica this peer writes as: the profile that its revisions
+    /// name as their authority, and that every entity it writes derives
+    /// from. By default it is the home, the repository of the state branch.
+    ///
+    /// A peer that is given another space as its home, because that space
+    /// is the one storage it can reach, still writes as the replica whose
+    /// key delegated to it: a session of a persona that writes into a space
+    /// of that persona names the persona, and so does a device of a persona
+    /// whose state branch is in a repository of the device.
+    ///
+    /// The profile names the replica, not only the authority: what a branch
+    /// keeps about the replica it lives on derives from it too. A branch
+    /// opened by a peer given a profile keeps its metadata, its tracking
+    /// (the host its routes resolve under, and its upstreams), and its
+    /// records in the registry (the replica, and the branch it has active)
+    /// under the profile's replica of the repository, not under the home's.
+    pub fn profile(mut self, profile: Did) -> Self {
+        self.profile = Some(profile);
+        self
+    }
+
     /// Where the home repository's space lives: mounted at open, and
     /// created holding the home's public identity when it is not there
     /// yet, then checked to be the space the home names.
@@ -454,22 +475,6 @@ impl<K, St, M> PeerBuilder<K, St, M> {
     /// grant is the deliberate case, so it has its own name.
     pub fn allow(mut self, allowance: impl Into<Allowance>) -> Self {
         self.allowed.push(allowance.into().unbounded());
-        self
-    }
-}
-
-impl<K, St, M> PeerBuilder<K, St, M> {
-    /// The replica this peer writes as: the profile that its revisions
-    /// name as their authority, and that every entity it writes derives
-    /// from. By default it is the home, the repository of the state branch.
-    ///
-    /// A peer that is given another space as its home, because that space
-    /// is the one storage it can reach, still writes as the replica whose
-    /// key delegated to it: a session of a persona that writes into a space
-    /// of that persona names the persona, and so does a device of a persona
-    /// whose state branch is in a repository of the device.
-    pub fn profile(mut self, profile: Did) -> Self {
-        self.profile = Some(profile);
         self
     }
 }
