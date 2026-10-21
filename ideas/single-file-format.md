@@ -68,7 +68,7 @@ leaves its frame behind, an offset array per column, and that is a
 per-commit cost that never goes away. The deferral is only as long as
 that frame is small next to the tokens it points at, on a real workload.
 
-## Assets and redaction
+## Assets
 
 Nothing here says assets get inlined. They are separate blocks today and
 they can stay that way, external to the file, with the file holding the
@@ -76,29 +76,15 @@ tree and the facts. Inlining them is a choice the spike can make if the
 measurements favour it, not something the format implies, and I do not
 want to impose either way.
 
-Redaction has to be possible whichever way that goes. An asset someone
-uploaded, or a fact, may have to be removed on request, and in an
-append-only file removal means zeroing the bytes in place: the record
-still exists, nothing that pointed at it moves, and it can no longer be
-read. The summer DCAA spec (`notes/dcaa.md` on
-`claude/perf-6-dcaa-spike`) already had this, as a redaction sentinel in
-the index that readers refuse and writers reject, and that design should
-carry over.
-
-Two things redaction runs into here that it did not there:
-
-- A zeroed record no longer matches its hash, so verification of that
-  block, and of any whole-file BAO range that covers it, has to know the
-  record is redacted rather than corrupt. The DCAA sentinel is what
-  distinguishes the two.
-- In a shared dictionary a redacted fact's tokens are very likely shared
-  with live facts. Zeroing the frame removes the fact. Zeroing the tokens
-  would remove other people's facts too. So redaction is of frames and
-  of asset bytes, and a token survives as long as anything live points at
-  it, which means a redacted value can still be sitting in the token
-  region. Whether that is acceptable depends on what was redacted and
-  why, and the spike should say what it does about it rather than leave
-  it implicit.
+One consideration that bears on that choice, not a requirement for the
+spike: an asset someone uploaded may have to be removed on request, and
+in an append-only file removal means redaction, zeroing the bytes in
+place so the record still exists but cannot be read. The summer DCAA spec
+(`notes/dcaa.md` on `claude/perf-6-dcaa-spike`) had a redaction sentinel
+for exactly this. Redacting an external block is trivial. Redacting bytes
+inside the file means verification has to tell redacted from corrupt,
+and anything shared in the dictionary stays shared. Worth keeping in mind
+when deciding where assets live.
 
 ## What has to be true for reads
 
