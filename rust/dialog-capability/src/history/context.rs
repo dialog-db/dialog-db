@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Edition, Origin, Version};
+use super::{EDITION_CEILING, Edition, HistoryError, Origin, Version};
 
 /// The causal context of a revision: a per-origin watermark summarizing
 /// everything in the revision's ancestry.
@@ -50,6 +50,40 @@ pub struct Watermark {
     pub count: u64,
 }
 
+impl Watermark {
+    /// Refuse a watermark no legitimate chain can produce: an edition at or
+    /// above [`EDITION_CEILING`], or a count above `edition + 1`.
+    ///
+    /// The ceiling keeps a validly signed hostile entry near `u64::MAX`
+    /// from pinning the origin as fully seen on every replica that merges
+    /// it. The count bound holds because an origin's chain has strictly
+    /// increasing editions, so at most `edition + 1` of its revisions fit
+    /// at or below the watermark; an inflated count would misroute every
+    /// peer's merge direction.
+    ///
+    /// This is the check every watermark crosses at the trust boundary,
+    /// wherever it was read from: a head's published context
+    /// ([`Revision::verify`](crate::identity::Revision::verify)) or a
+    /// tree's context region.
+    pub fn check(&self) -> Result<(), HistoryError> {
+        if self.edition.value() >= EDITION_CEILING {
+            return Err(HistoryError::InvalidReference(format!(
+                "watermark edition {} exceeds the protocol ceiling; \
+                 no legitimate chain reaches it",
+                self.edition
+            )));
+        }
+        if self.count > self.edition.value().saturating_add(1) {
+            return Err(HistoryError::InvalidReference(format!(
+                "watermark count {} exceeds its edition {} — more revisions \
+                 than the chain can hold",
+                self.count, self.edition
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Serde encodes a [`Context`] as an ordered array of
 /// `(origin, edition, count)` triples, NOT as the derive's map: heads
 /// travel as dag-cbor, whose spec allows only string map keys, while a
@@ -95,6 +129,12 @@ impl Context {
             .get(&version.origin)
             .map(|watermark| version.edition <= watermark.edition)
             .unwrap_or(false)
+    }
+
+    /// The watermark this context holds for `origin`, if it has observed
+    /// any of its revisions.
+    pub fn get(&self, origin: &Origin) -> Option<&Watermark> {
+        self.0.get(origin)
     }
 
     /// Whether this context has observed ANY revision minted by
@@ -405,6 +445,51 @@ mod tests {
             9,
             "six original + three new revisions, the stale one uncounted"
         );
+    }
+
+    /// The watermark bounds refuse exactly what no chain can produce: an
+    /// edition at the ceiling, and a count above `edition + 1`; a genesis
+    /// watermark (edition 0, one revision) and a dense chain pass.
+    #[test]
+    fn it_refuses_watermarks_no_chain_can_produce() {
+        let sound = [
+            Watermark {
+                edition: Edition::new(0),
+                count: 1,
+            },
+            Watermark {
+                edition: Edition::new(9),
+                count: 10,
+            },
+            Watermark {
+                edition: Edition::new(EDITION_CEILING - 1),
+                count: 1,
+            },
+        ];
+        for watermark in sound {
+            watermark.check().expect("a producible watermark passes");
+        }
+
+        let hostile = [
+            Watermark {
+                edition: Edition::new(EDITION_CEILING),
+                count: 1,
+            },
+            Watermark {
+                edition: Edition::new(u64::MAX),
+                count: 1,
+            },
+            Watermark {
+                edition: Edition::new(9),
+                count: 11,
+            },
+        ];
+        for watermark in hostile {
+            assert!(
+                matches!(watermark.check(), Err(HistoryError::InvalidReference(_))),
+                "{watermark:?} must be refused"
+            );
+        }
     }
 
     #[test]

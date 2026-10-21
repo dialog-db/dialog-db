@@ -293,19 +293,7 @@ impl Revision {
         ceiling(&self.edition, "head")?;
         if let Some(context) = &self.context {
             for (_, watermark) in context.iter() {
-                ceiling(&watermark.edition, "watermark")?;
-                // A count can never exceed the observed prefix's depth:
-                // an origin's chain has strictly increasing editions, so
-                // at most `edition + 1` revisions fit below the
-                // watermark. A hostile inflated count would misroute
-                // every peer's merge direction.
-                if watermark.count > watermark.edition.value().saturating_add(1) {
-                    return Err(HistoryError::InvalidReference(format!(
-                        "watermark count {} exceeds its edition {} — more revisions \
-                         than the chain can hold",
-                        watermark.count, watermark.edition
-                    )));
-                }
+                watermark.check()?;
             }
         }
         Ok(())
@@ -366,12 +354,7 @@ pub enum Precedence {
 /// from being a prefix of another.
 pub const HEAD_SIGNING_DOMAIN: &[u8] = b"dialog/head@1\n";
 
-/// The highest edition a verified head (or any watermark entry it
-/// publishes) may carry. Editions grow by one per commit or merge, so no
-/// legitimate chain approaches 2^62 sequential operations; anything at or
-/// above it is protocol corruption, refused at the trust boundary before
-/// the saturating successor arithmetic could ever be reached.
-pub const EDITION_CEILING: u64 = 1 << 62;
+pub use crate::history::EDITION_CEILING;
 
 #[cfg(test)]
 mod tests {
