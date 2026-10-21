@@ -10,11 +10,23 @@ On the Stack Exchange replay at 2048 commits the live tree is ~49 MB and
 the store on disk is ~450 MB, about 9×, and it keeps climbing with
 commits. That 9× is retained tree shape, not accidental duplicate stores.
 
-The replay is the mild case. Chris reported about 2 GB after roughly a
-thousand commits on a real tonk workload, which is 2 MB per commit, ten
-times what the replay pays. That number is the reason to ship this: if a
+The replay is the mild case. One real tonk replica reached about 2 GB
+after roughly a thousand commits, which is 2 MB per commit, ten times
+what the replay pays. That number is the reason to ship this: if a
 replica like that comes out way smaller, the format earns its place
 whatever the perf gate says within reason.
+
+The thing to keep in view is what those superseded blocks are for. Once
+history moves on they are redundant for every read of the current
+revision, and useful for exactly one thing: checking out an old revision.
+They give you that for free. The only other way to get it with the
+current architecture is to replay history and rebuild the blocks, which
+is complicated and far too slow to be an option. So today the choice is
+keep everything and pay 9× or more, or write a garbage collector and lose
+old revisions. If everything in the file boils down to offsets you jump
+through, retaining every block costs almost nothing and we never have to
+write that garbage collector. That is the real motivation, more than the
+size number on its own.
 
 Segment nodes already tokenize and column-encode: within one node an
 entity, an attribute, a domain shows up once, and the node's slices point
@@ -50,7 +62,10 @@ on the wire.
 Compaction is the fallback, not the plan: if frames alone still grow too
 fast, the file moves things around, evicts frames nothing references, and
 leans on the history index to rebuild what it dropped. I would rather not
-need it.
+need it. Whether we do is a measurement: a superseded node still leaves
+its frame behind, an offset array per column, and that is a per-commit
+cost that never goes away. "No garbage collector" holds only if that
+frame is small next to the tokens it points at, on a real workload.
 
 ## What has to be true for reads
 
@@ -162,7 +177,7 @@ with the new format swapped in as the archive. Wall-clock medians from
 
 Size means bytes on disk per live fact on the Stack Exchange replay, at
 2048 and 4096 commits, next to the file-per-block directory and the live
-tree. It also means Chris's workload, or one shaped like it, replayed
+tree. It also means the 2 GB replica, or one shaped like it, replayed
 through both stores. The spike should get hold of that replica or a
 recording of its commits before it measures anything else, because the
 replay understates the problem by an order of magnitude.
