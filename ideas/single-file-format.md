@@ -10,6 +10,12 @@ On the Stack Exchange replay at 2048 commits the live tree is ~49 MB and
 the store on disk is ~450 MB, about 9×, and it keeps climbing with
 commits. That 9× is retained tree shape, not accidental duplicate stores.
 
+The replay is the mild case. Chris reported about 2 GB after roughly a
+thousand commits on a real tonk workload, which is 2 MB per commit, ten
+times what the replay pays. That number is the reason to ship this: if a
+replica like that comes out way smaller, the format earns its place
+whatever the perf gate says within reason.
+
 Segment nodes already tokenize and column-encode: within one node an
 entity, an attribute, a domain shows up once, and the node's slices point
 into that buffer. What that does not do is help across nodes, and that is
@@ -156,7 +162,10 @@ with the new format swapped in as the archive. Wall-clock medians from
 
 Size means bytes on disk per live fact on the Stack Exchange replay, at
 2048 and 4096 commits, next to the file-per-block directory and the live
-tree.
+tree. It also means Chris's workload, or one shaped like it, replayed
+through both stores. The spike should get hold of that replica or a
+recording of its commits before it measures anything else, because the
+replay understates the problem by an order of magnitude.
 
 Success is no major slowdown and a clear win on space:
 
