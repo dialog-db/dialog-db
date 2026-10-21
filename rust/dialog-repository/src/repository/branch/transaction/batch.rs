@@ -965,6 +965,54 @@ mod tests {
         Ok(())
     }
 
+    /// A batch publishes while another writer has left the watermark behind
+    /// its base: the head lands, and the watermark is not dragged forward
+    /// from where the other writer left it, since it stands neither at the
+    /// base nor at no revision. A watermark left behind is caught up at the
+    /// next inducing instant.
+    #[dialog_common::test]
+    async fn it_publishes_a_batch_past_a_watermark_left_behind() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let genesis = branch
+            .transaction()
+            .assert(note("genesis")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let batch = branch
+            .transaction()
+            .assert(note("staged")?)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let tip = batch.revision();
+
+        // Another writer moves the watermark back to `genesis`.
+        let other = repo.branch("main").induction();
+        other.resolve().perform(&operator).await?;
+        other.publish(genesis.clone()).perform(&operator).await?;
+
+        let head = batch.publish().perform(&operator).await?;
+        assert_eq!(head, tip);
+        assert_eq!(branch.revision(), Some(tip));
+
+        let watermark = repo.branch("main").induction();
+        watermark.resolve().perform(&operator).await?;
+        assert_eq!(watermark.content(), Some(genesis));
+        Ok(())
+    }
+
     /// Two writers over one replica: the first lands `tip` on `seed`, and
     /// before it advances the watermark, the second lands `tip2` on `tip`
     /// and advances the watermark to `tip2`. The first writer's advance
