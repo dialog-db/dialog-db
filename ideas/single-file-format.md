@@ -24,9 +24,10 @@ current architecture is to replay history and rebuild the blocks, which
 is complicated and far too slow to be an option. So today the choice is
 keep everything and pay 9× or more, or write a garbage collector and lose
 old revisions. If everything in the file boils down to offsets you jump
-through, retaining every block costs almost nothing and we never have to
-write that garbage collector. That is the real motivation, more than the
-size number on its own.
+through, retaining every block costs very little, and the garbage
+collector we would otherwise need now can be deferred for a long time,
+longer still if the frames compress well. That is the real motivation,
+more than the size number on its own.
 
 Segment nodes already tokenize and column-encode: within one node an
 entity, an attribute, a domain shows up once, and the node's slices point
@@ -59,13 +60,45 @@ on the wire.
 > a fraction of that, so this attacks write amplification from the same
 > side.
 
-Compaction is the fallback, not the plan: if frames alone still grow too
-fast, the file moves things around, evicts frames nothing references, and
-leans on the history index to rebuild what it dropped. I would rather not
-need it. Whether we do is a measurement: a superseded node still leaves
-its frame behind, an offset array per column, and that is a per-commit
-cost that never goes away. "No garbage collector" holds only if that
-frame is small next to the tokens it points at, on a real workload.
+Compaction, rearranging the file, trimming old nodes: that is a second
+tier, a follow-up that could be built on top of this once it exists, and
+it is roughly what a garbage collector would be. We may still need it.
+Whether we do, and how soon, is a measurement: a superseded node still
+leaves its frame behind, an offset array per column, and that is a
+per-commit cost that never goes away. The deferral is only as long as
+that frame is small next to the tokens it points at, on a real workload.
+
+## Assets and redaction
+
+Nothing here says assets get inlined. They are separate blocks today and
+they can stay that way, external to the file, with the file holding the
+tree and the facts. Inlining them is a choice the spike can make if the
+measurements favour it, not something the format implies, and I do not
+want to impose either way.
+
+Redaction has to be possible whichever way that goes. An asset someone
+uploaded, or a fact, may have to be removed on request, and in an
+append-only file removal means zeroing the bytes in place: the record
+still exists, nothing that pointed at it moves, and it can no longer be
+read. The summer DCAA spec (`notes/dcaa.md` on
+`claude/perf-6-dcaa-spike`) already had this, as a redaction sentinel in
+the index that readers refuse and writers reject, and that design should
+carry over.
+
+Two things redaction runs into here that it did not there:
+
+- A zeroed record no longer matches its hash, so verification of that
+  block, and of any whole-file BAO range that covers it, has to know the
+  record is redacted rather than corrupt. The DCAA sentinel is what
+  distinguishes the two.
+- In a shared dictionary a redacted fact's tokens are very likely shared
+  with live facts. Zeroing the frame removes the fact. Zeroing the tokens
+  would remove other people's facts too. So redaction is of frames and
+  of asset bytes, and a token survives as long as anything live points at
+  it, which means a redacted value can still be sitting in the token
+  region. Whether that is acceptable depends on what was redacted and
+  why, and the spike should say what it does about it rather than leave
+  it implicit.
 
 ## What has to be true for reads
 
