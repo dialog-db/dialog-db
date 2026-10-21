@@ -197,6 +197,7 @@ mod tests {
             region: false,
             count: None,
             signature: Vec::new(),
+            boot: None,
         };
         branch
             .reset(revision.clone())

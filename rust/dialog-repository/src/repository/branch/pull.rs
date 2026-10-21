@@ -3279,6 +3279,7 @@ mod history_tests {
             region: false,
             count: None,
             signature: Vec::new(),
+            boot: None,
         };
         evil.reset(forged).perform(&operator).await?;
 
