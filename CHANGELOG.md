@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A head carries its active watermarks, and its tree carries the whole causal context
 
-[#624](https://github.com/dialog-db/dialog-db/issues/624)
+[#625](https://github.com/dialog-db/dialog-db/pull/625)
 
 A head no longer carries one watermark per origin its history ever
 included. It carries its active set, the `ACTIVE_CONTEXT` (64)
