@@ -20,8 +20,9 @@
 //!
 //! The last link of the chain, from the sharer to the joiner, carries `peer`
 //! and `name` again in its `meta`, under [`META_PEER`] and [`META_NAME`], so
-//! the signature of the sharer covers them. It also carries the kernel record
-//! of the `main` of the sharer, under [`META_KERNEL`].
+//! the signature of the sharer covers them. It also carries the kernel stamp
+//! of the head of the `main` of the sharer, under [`META_KERNEL`], and the
+//! edition of that head, under [`META_EDITION`].
 //! [`Invite::check_signed_fields`] refuses an invite whose `peer` or `name` is
 //! not the one that the sharer signed. The routes are hints, and no signature
 //! covers them.
@@ -57,20 +58,30 @@ pub const META_PEER: &str = "sapling.invite/peer";
 pub const META_NAME: &str = "sapling.invite/name";
 
 /// The key of the `meta` of the last link of the chain that holds the bytes
-/// of the kernel record of the `main` of the sharer. Absent when the sharer
-/// held none.
+/// of the kernel stamp of the head of the `main` of the sharer. Absent when
+/// that head held none.
 pub const META_KERNEL: &str = "sapling.invite/kernel";
 
+/// The key of the `meta` of the last link of the chain that holds the edition
+/// of the head of the `main` of the sharer, as an integer. Present with
+/// [`META_KERNEL`].
+pub const META_EDITION: &str = "sapling.invite/edition";
+
 /// The `meta` of the link from the sharer to the joiner of an invite whose
-/// peer is `peer`, whose name is `name`, and whose kernel record is
-/// `kernel`.
-pub fn meta(peer: &Did, name: Option<&str>, kernel: Option<&[u8]>) -> BTreeMap<String, Ipld> {
+/// peer is `peer`, whose name is `name`, and whose kernel stamp and edition
+/// of the head of `main` are `kernel`.
+pub fn meta(
+    peer: &Did,
+    name: Option<&str>,
+    kernel: Option<(&[u8], u64)>,
+) -> BTreeMap<String, Ipld> {
     let mut meta = BTreeMap::from([(META_PEER.to_owned(), Ipld::String(peer.to_string()))]);
     if let Some(name) = name {
         meta.insert(META_NAME.to_owned(), Ipld::String(name.to_owned()));
     }
-    if let Some(kernel) = kernel {
-        meta.insert(META_KERNEL.to_owned(), Ipld::Bytes(kernel.to_vec()));
+    if let Some((stamp, edition)) = kernel {
+        meta.insert(META_KERNEL.to_owned(), Ipld::Bytes(stamp.to_vec()));
+        meta.insert(META_EDITION.to_owned(), Ipld::Integer(i128::from(edition)));
     }
     meta
 }
