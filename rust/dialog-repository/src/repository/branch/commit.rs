@@ -465,7 +465,7 @@ pub(crate) struct Minted {
     /// Its signed in-tree record, for the verified-record memo.
     pub(crate) record: RevisionRecord,
     /// Its causal context, for the context memo.
-    pub(crate) context: Context,
+    pub(crate) context: Arc<Context>,
 }
 
 /// How a [`Mint`] came out.
@@ -523,7 +523,7 @@ pub(crate) struct Amended {
     /// The revision's signed in-tree record.
     pub(crate) record: RevisionRecord,
     /// The revision's causal context.
-    pub(crate) context: Context,
+    pub(crate) context: Arc<Context>,
 }
 
 impl<Changes> Mint<'_, Changes>
@@ -779,30 +779,36 @@ where
         // the line's memo, or (once, for lineages minted before heads
         // carried contexts) the ancestry walk — so every head published
         // from here on carries its watermark for peers to read.
+        //
+        // The successor is the one copy of the map a commit pays for:
+        // the parent's context is shared with the memo, and the new one
+        // is shared with the head's memo entry once it is published.
         let contexts = source.contexts();
-        let base_context = base_revision.as_ref().and_then(|base| base.context.clone());
         let context = {
-            let mut context = match (base_revision.as_ref(), base_context) {
-                (None, _) => Context::new(),
-                (Some(_), Some(context)) => context,
-                (Some(base), None) => {
-                    let parent = base.version();
-                    match contexts.cached(&parent).await {
-                        Some(context) => context,
-                        None => {
-                            let history = TreeHistory::from_root_with_cache(
-                                base.tree.hash(),
-                                store.clone(),
-                                source.node_cache(),
-                            )
-                            .with_record_cache(source.records());
-                            context_of(&parent, &history).await?
-                        }
+            let mut context = match base_revision.as_ref() {
+                None => Context::new(),
+                Some(base) => match &base.context {
+                    Some(context) => context.clone(),
+                    None => {
+                        let parent = base.version();
+                        let context = match contexts.cached(&parent).await {
+                            Some(context) => context,
+                            None => {
+                                let history = TreeHistory::from_root_with_cache(
+                                    base.tree.hash(),
+                                    store.clone(),
+                                    source.node_cache(),
+                                )
+                                .with_record_cache(source.records());
+                                Arc::new(context_of(&parent, &history).await?)
+                            }
+                        };
+                        Context::clone(&context)
                     }
-                }
+                },
             };
             context.record(version);
-            context
+            Arc::new(context)
         };
 
         // The revision's tree root is set after the seal below (its own
@@ -863,7 +869,7 @@ where
         .await?;
 
         revision.tree = TreeReference::from(*tree.root().as_bytes());
-        revision.context = Some(context.clone());
+        revision.context = Some(Context::clone(&context));
         // Sign the head last: only now are the tree root and context
         // final, and the head signature is what binds them to the issuer
         // (the in-tree record cannot contain the root of the tree it

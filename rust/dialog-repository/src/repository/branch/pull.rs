@@ -384,13 +384,14 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // signature), or — only for lineages minted before heads carried
         // contexts — by the O(ancestry) walk, once.
         let contexts = branch.contexts();
-        let local_context = match &local_revision {
+        let local_context: Arc<Context> = match &local_revision {
             Some(revision) => match contexts.cached(&revision.version()).await {
                 Some(context) => context,
                 None => match &revision.context {
                     Some(context) => {
+                        let context = Arc::new(context.clone());
                         contexts.insert(revision.version(), context.clone());
-                        context.clone()
+                        context
                     }
                     None => {
                         let history = branch.history(env);
@@ -398,7 +399,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     }
                 },
             },
-            None => Context::new(),
+            None => Arc::new(Context::new()),
         };
 
         // Replicas that have never observed one another (no origin in
@@ -558,7 +559,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // exactly the novel ones.
                 if !contested.is_empty() {
                     let (changed_side, screen_context) = if ours_smaller {
-                        (&local_tree, theirs.clone())
+                        (&local_tree, Arc::new(theirs.clone()))
                     } else {
                         (&upstream_tree, local_context.clone())
                     };
@@ -716,7 +717,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     .record(&store, &mut delta, record.entries(&manifest)?)
                     .await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
-                let mut context = local_context.clone();
+                let mut context = Context::clone(&local_context);
                 context.merge(theirs);
                 context.record(revision.version());
                 revision.context = Some(context.clone());
@@ -881,7 +882,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     .record(&store, &mut delta, record.entries(&manifest)?)
                     .await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
-                let mut context = local_context.clone();
+                let mut context = Context::clone(&local_context);
                 context.merge(theirs);
                 context.record(revision.version());
                 revision.context = Some(context.clone());
@@ -996,7 +997,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // revisions we may have lacked, so this equals the ancestry walk
         // without paying it.
         let merged_context = {
-            let mut context = local_context;
+            let mut context = Arc::unwrap_or_clone(local_context);
             let observed = mem::take(
                 &mut *observed
                     .lock()
@@ -3198,7 +3199,7 @@ mod history_tests {
     /// an over-watermark drops live claims).
     #[dialog_common::test]
     async fn it_maintains_the_context_memo_incrementally() -> Result<()> {
-        use dialog_artifacts::history::context_of;
+        use dialog_artifacts::history::{Context, context_of};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -3229,6 +3230,7 @@ mod history_tests {
                     .cached(&head.version())
                     .await
                     .expect("the memo is primed");
+                let memo = Context::clone(&memo);
                 let history = branch.history(operator);
                 let walked = context_of(&head.version(), &history).await?;
                 anyhow::Ok((memo, walked))

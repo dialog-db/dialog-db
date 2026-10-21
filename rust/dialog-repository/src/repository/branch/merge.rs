@@ -96,9 +96,9 @@ where
 
 /// The context of `head`: the one it published, or the one remembered
 /// for it.
-async fn context_of(branch: &Branch, head: &Revision) -> Option<Context> {
+async fn context_of(branch: &Branch, head: &Revision) -> Option<Arc<Context>> {
     match &head.context {
-        Some(context) => Some(context.clone()),
+        Some(context) => Some(Arc::new(context.clone())),
         None => branch.contexts().cached(&head.version()).await,
     }
 }
@@ -111,7 +111,7 @@ async fn merged<Env>(
     base: Option<&Revision>,
     mine: &Revision,
     theirs: &Revision,
-    context: Context,
+    context: Arc<Context>,
     env: &Env,
 ) -> Result<(Revision, Context), CommitError>
 where
@@ -182,7 +182,7 @@ where
     .await?
     .persist(delta.blocks())?;
 
-    let mut merged_context = context;
+    let mut merged_context = Arc::unwrap_or_clone(context);
     merged_context.absorb(mem::take(
         &mut *observed
             .lock()

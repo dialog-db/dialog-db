@@ -336,10 +336,14 @@ pub fn unacquainted(ours: &Context, theirs: &Context) -> bool {
 /// by the receiver's causal context (R1); incoming guarded removes pass
 /// through (R2). Run — and integrate — after [`screen_history`]'s pass,
 /// so coverage has already retired what causality decided.
-pub fn screen_data<'a, C>(changes: C, context: Context) -> impl Differential<Key, State<Datum>> + 'a
+pub fn screen_data<'a, C>(
+    changes: C,
+    context: impl Into<Arc<Context>>,
+) -> impl Differential<Key, State<Datum>> + 'a
 where
     C: Differential<Key, State<Datum>> + 'a,
 {
+    let context: Arc<Context> = context.into();
     async_stream::try_stream! {
         futures_util::pin_mut!(changes);
         while let Some(change) = futures_util::StreamExt::next(&mut changes).await {
