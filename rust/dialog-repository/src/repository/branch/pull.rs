@@ -1313,7 +1313,10 @@ impl PreparedPull<'_> {
     /// one fails too.
     ///
     /// Reads that miss locally fall back to the upstream's peer, as the
-    /// prepare's own reads do. A no-op pull brings nothing.
+    /// prepare's own reads do. A no-op pull brings nothing, and neither
+    /// does one whose commit keeps the branch's head and advances only the
+    /// sync base: what the upstream holds then enters no history the
+    /// branch reads.
     pub async fn novelty<Env>(&self, env: &Env) -> Result<Vec<NewRevision>, PullError>
     where
         Env: ResolveEnv,
@@ -1323,6 +1326,9 @@ impl PreparedPull<'_> {
             PreparedPull::Merged(merged) => merged,
         };
         let branch = merged.branch;
+        if branch.revision().map(|head| head.version()) == Some(merged.new_revision.version()) {
+            return Ok(Vec::new());
+        }
         let upstream = TreeHistory::from_root_with_cache(
             merged.merges.tree.hash(),
             NetworkedIndex::new(env, branch.archive().index(), merged.sync.fallback()),
@@ -2136,7 +2142,7 @@ mod tests {
 
 #[cfg(test)]
 mod history_tests {
-    use super::SMALL_DIVERGENCE;
+    use super::{PreparedPull, SMALL_DIVERGENCE};
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -2268,12 +2274,58 @@ mod history_tests {
         Ok(())
     }
 
+    /// A pull from an upstream that moved, but only to what the branch has
+    /// seen already, keeps the branch's head and advances the sync base: it
+    /// brings nothing into the branch, so it names nothing new.
+    #[dialog_common::test]
+    async fn it_names_nothing_new_from_a_pull_that_keeps_its_head() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let a = repo.branch("a").open().perform(&operator).await?;
+        let b = repo.branch("b").open().perform(&operator).await?;
+
+        a.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Sword",
+        )]))
+        .perform(&operator)
+        .await?;
+        b.pull().from(&a).perform(&operator).await?;
+        a.pull().from(&b).perform(&operator).await?;
+        a.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Mace",
+        )]))
+        .perform(&operator)
+        .await?;
+        b.pull().from(&a).perform(&operator).await?;
+
+        let head = a.revision().map(|revision| revision.version());
+        let seen = a.pull().from(&b).prepare(&operator).await?;
+        assert!(
+            matches!(&seen, PreparedPull::Merged(merged) if Some(merged.new_revision.version()) == head),
+            "the pull keeps the branch's head"
+        );
+        assert!(
+            seen.novelty(&operator).await?.is_empty(),
+            "a pull that keeps its head brings nothing new"
+        );
+        Ok(())
+    }
+
     /// Convergence when two replicas pull each other at the same moment:
     /// each prepares its pull before the other's lands, so each mints a
     /// merge of the same two heads. The two merges hold the same data but
     /// differ by their own revision records, so a merge of them matches
     /// neither tree. Unless the pull settles the two rivals on one head,
     /// every round of simultaneous pulls mints two new merges, forever.
+    ///
+    /// A prepared pull names only what its commit brings into the branch:
+    /// the greater side of the settle keeps its head and brings nothing, and
+    /// the lesser side brings exactly the rival merge it adopts.
     #[dialog_common::test]
     async fn it_quiesces_after_simultaneous_mutual_pulls() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
@@ -2299,6 +2351,7 @@ mod history_tests {
         )]))
         .perform(&operator)
         .await?;
+
         b.commit(stream::iter(vec![assert_one(
             "item/name",
             "item:sword",
@@ -2306,6 +2359,43 @@ mod history_tests {
         )]))
         .perform(&operator)
         .await?;
+
+        // Both prepare before either commits, so each mints a merge of the
+        // same two heads: two rival merges.
+        let into_a = a.pull().from(&b).prepare(&operator).await?;
+        let into_b = b.pull().from(&a).prepare(&operator).await?;
+        into_a.commit(&operator).await?;
+        into_b.commit(&operator).await?;
+
+        // The settle round: the greater merge's side keeps its head and the
+        // lesser side adopts the greater merge.
+        let (a_head, b_head) = (
+            a.revision().expect("a merged").version(),
+            b.revision().expect("b merged").version(),
+        );
+        assert_ne!(a_head, b_head, "the two sides hold rival merges");
+        let into_a = a.pull().from(&b).prepare(&operator).await?;
+        let into_b = b.pull().from(&a).prepare(&operator).await?;
+        let (greater, lesser, greater_head) = if a_head > b_head {
+            (&into_a, &into_b, a_head)
+        } else {
+            (&into_b, &into_a, b_head)
+        };
+        assert!(
+            greater.novelty(&operator).await?.is_empty(),
+            "the side that keeps its head brings nothing new"
+        );
+        let adopted = lesser.novelty(&operator).await?;
+        assert_eq!(
+            adopted
+                .iter()
+                .map(|revision| revision.version)
+                .collect::<Vec<_>>(),
+            vec![greater_head],
+            "the side that adopts the greater merge brings exactly that merge"
+        );
+        into_a.commit(&operator).await?;
+        into_b.commit(&operator).await?;
 
         let mut quiesced = false;
         for _ in 0..4 {
