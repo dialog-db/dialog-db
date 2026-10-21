@@ -1,4 +1,4 @@
-//! Native (non-WASM) type aliases and defaults.
+//! Native and WASI type aliases and defaults: every build but a browser's.
 
 use crate::provider::{FileSystem, Space, Storage};
 

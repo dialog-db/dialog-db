@@ -130,7 +130,7 @@ impl S3BlobSource {
                 .map(|b| b.to_vec())
                 .map_err(|e| BlobError::Storage(e.to_string()))
         }));
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        #[cfg(target_arch = "wasm32")]
         let stream: ByteStream = Box::pin(futures_util::stream::once(async move {
             response
                 .bytes()

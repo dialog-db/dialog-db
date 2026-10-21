@@ -2351,6 +2351,36 @@ mod tests {
 
     #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), tokio::test)]
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
+    async fn it_gives_the_time_an_invocation_was_issued_at() -> TestResult {
+        let subject = test_signer(11).await;
+        let invoker = test_signer(12).await;
+        let issued = Timestamp::now();
+
+        let stamped = InvocationBuilder::new()
+            .issuer(invoker.clone())
+            .audience(&subject)
+            .subject(&subject)
+            .command(vec!["test".to_string()])
+            .proofs(vec![])
+            .issued_at(issued)
+            .try_build()
+            .await?;
+        let unstamped = InvocationBuilder::new()
+            .issuer(invoker.clone())
+            .audience(&subject)
+            .subject(&subject)
+            .command(vec!["test".to_string()])
+            .proofs(vec![])
+            .try_build()
+            .await?;
+
+        assert_eq!(stamped.issued_at(), Some(issued));
+        assert_eq!(unstamped.issued_at(), None);
+        Ok(())
+    }
+
+    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), tokio::test)]
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     async fn chain_check_narrows_time_range_across_chain() -> TestResult {
         // Two-hop chain where each delegation has different time bounds.
         // The result should be the intersection: [later nbf, earlier exp].
