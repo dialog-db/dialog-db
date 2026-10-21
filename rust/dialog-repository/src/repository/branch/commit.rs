@@ -1,3 +1,4 @@
+use super::context::{full_context, region_of};
 use super::merge::merge_with_winner;
 use super::transaction::induction_ignores;
 use crate::repository::archive::persist;
@@ -8,10 +9,13 @@ use crate::{
 };
 use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::history::{
-    Context, Edition, Origin, RevisionRecord, TreeHistory, Version, context_of, extend_skips,
+    ACTIVE_CONTEXT, Context, Edition, Origin, RevisionRecord, TreeHistory, Version, context_writes,
+    extend_skips,
 };
 use dialog_artifacts::tree::{Stamp, WriteScope};
-use dialog_artifacts::{Datum, DialogArtifactsError, Entity, Instruction, Key, NUMBER_BAND, State};
+use dialog_artifacts::{
+    Datum, DialogArtifactsError, Entity, Instruction, Key, NUMBER_BAND, State, context_entry,
+};
 use dialog_capability::{Did, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -775,40 +779,56 @@ where
         };
 
         // The new head's causal context: the parent's plus this commit's
-        // own version. Sourced from the parent head's published context,
-        // the line's memo, or (once, for lineages minted before heads
-        // carried contexts) the ancestry walk — so every head published
-        // from here on carries its watermark for peers to read.
+        // own version. The parent's comes from the line's memo, from the
+        // parent's tree's context region, from the parent head itself (a
+        // head minted before the region carries its whole context), or
+        // once, for lineages minted before heads carried contexts, from
+        // the ancestry walk.
         //
-        // The successor is the one copy of the map a commit pays for:
-        // the parent's context is shared with the memo, and the new one
-        // is shared with the head's memo entry once it is published.
+        // The successor is the one copy of the map a commit pays for: the
+        // parent's context is shared with the memo, and the new one is
+        // shared with the head's memo entry once it is published. What the
+        // commit writes and signs is bounded instead: the region entries
+        // that changed (its own origin's, in the steady state; the whole
+        // map once, atop a parent minted before the region existed), and
+        // the head's projection, computed from the parent's when the
+        // committing origin is still active.
         let contexts = source.contexts();
+        let parent_context = match base_revision.as_ref() {
+            None => None,
+            Some(base) => {
+                let history = TreeHistory::from_root_with_cache(
+                    base.tree.hash(),
+                    store.clone(),
+                    source.node_cache(),
+                )
+                .with_record_cache(source.records());
+                Some(full_context(base, &contexts, &store, &source.node_cache(), &history).await?)
+            }
+        };
         let context = {
-            let mut context = match base_revision.as_ref() {
-                None => Context::new(),
-                Some(base) => match &base.context {
-                    Some(context) => context.clone(),
-                    None => {
-                        let parent = base.version();
-                        let context = match contexts.cached(&parent).await {
-                            Some(context) => context,
-                            None => {
-                                let history = TreeHistory::from_root_with_cache(
-                                    base.tree.hash(),
-                                    store.clone(),
-                                    source.node_cache(),
-                                )
-                                .with_record_cache(source.records());
-                                Arc::new(context_of(&parent, &history).await?)
-                            }
-                        };
-                        Context::clone(&context)
-                    }
-                },
-            };
+            let mut context = parent_context.as_deref().cloned().unwrap_or_default();
             context.record(version);
             Arc::new(context)
+        };
+        let projection = match base_revision.as_ref() {
+            Some(Revision {
+                context: Some(active),
+                spill: Some(spill),
+                ..
+            }) => context.project_from(ACTIVE_CONTEXT, (active, spill), &version.origin),
+            _ => context.project(ACTIVE_CONTEXT),
+        };
+        // A parent whose tree carries its region differs from this commit's
+        // context in one entry, this commit's own; a parent minted before
+        // the region (or no parent) has every entry written.
+        let region = match (base_revision.as_ref(), parent_context.as_deref()) {
+            (Some(base), Some(parent)) if region_of(base, parent).is_some() => context
+                .get(&version.origin)
+                .map(|watermark| context_entry(&version.origin, watermark))
+                .into_iter()
+                .collect(),
+            _ => context_writes(&context, &[None]),
         };
 
         // The revision's tree root is set after the seal below (its own
@@ -842,7 +862,9 @@ where
         // The entries are appended to the batch's still open buffered tree:
         // they ride the same buffered write as the data, so the record costs
         // a buffer append instead of a second canonical spine-to-leaf edit.
-        let entries = record.entries(batch.manifest())?;
+        let mut entries = record.entries(batch.manifest())?;
+        // The context region's changed entries ride with the record.
+        entries.entries.extend(region);
         // The caller's machinery entries (blob-index tombstones) ride the same
         // batch as the revision record, so one seal covers data, record,
         // and entries together.
@@ -869,7 +891,8 @@ where
         .await?;
 
         revision.tree = TreeReference::from(*tree.root().as_bytes());
-        revision.context = Some(Context::clone(&context));
+        let (active, spill) = projection;
+        revision.publish_projection(active, spill);
         // Sign the head last: only now are the tree root and context
         // final, and the head signature is what binds them to the issuer
         // (the in-tree record cannot contain the root of the tree it

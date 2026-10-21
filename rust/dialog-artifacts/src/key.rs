@@ -43,6 +43,9 @@ pub use blob::*;
 mod history;
 pub use history::*;
 
+mod context;
+pub use context::*;
+
 mod part;
 pub use part::*;
 

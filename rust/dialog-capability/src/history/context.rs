@@ -1,4 +1,9 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::collections::btree_map;
+use std::fmt::{self, Debug};
+use std::iter::{Peekable, empty};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -25,8 +30,119 @@ use super::{EDITION_CEILING, Edition, HistoryError, Origin, Version};
 ///
 /// In CRDT terms this is the causal context of an optimized OR-set,
 /// with `(Origin, Edition)` versions as its dots.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Context(BTreeMap<Origin, Watermark>);
+///
+/// A context holds one watermark per origin its ancestry ever included,
+/// and every commit derives its successor from its parent's by raising
+/// one of them. Copying the map for that would make every commit cost the
+/// number of origins, so the map is kept in two parts: settled entries,
+/// shared behind a reference count by every context derived from them,
+/// and the few entries written since, which a copy duplicates. The recent
+/// part settles into a fresh map once it outgrows the square root of the
+/// settled one, so a copy and an amortized settle both stay well below
+/// the size of the map. Two contexts holding the same watermarks are
+/// equal however their entries are split.
+#[derive(Clone, Default)]
+pub struct Context(Watermarks);
+
+/// The storage behind a [`Context`]: settled entries shared between the
+/// contexts derived from them, and the entries written since, which take
+/// precedence over a settled entry for the same origin.
+#[derive(Clone, Default)]
+struct Watermarks {
+    settled: Arc<BTreeMap<Origin, Watermark>>,
+    recent: BTreeMap<Origin, Watermark>,
+    /// How many origins the two parts hold between them.
+    len: usize,
+}
+
+/// The fewest recent entries a context keeps before it settles them.
+const SETTLE_FLOOR: usize = 64;
+
+impl Watermarks {
+    fn get(&self, origin: &Origin) -> Option<&Watermark> {
+        self.recent.get(origin).or_else(|| self.settled.get(origin))
+    }
+
+    fn contains(&self, origin: &Origin) -> bool {
+        self.recent.contains_key(origin) || self.settled.contains_key(origin)
+    }
+
+    fn insert(&mut self, origin: Origin, watermark: Watermark) {
+        if self.recent.insert(origin, watermark).is_none() && !self.settled.contains_key(&origin) {
+            self.len += 1;
+        }
+        if self.recent.len() > SETTLE_FLOOR.max(self.settled.len().isqrt()) {
+            // Copies the settled map only when another context shares it.
+            Arc::make_mut(&mut self.settled).append(&mut self.recent);
+        }
+    }
+
+    fn iter(&self) -> Entries<'_> {
+        Entries {
+            settled: self.settled.iter().peekable(),
+            recent: self.recent.iter().peekable(),
+        }
+    }
+}
+
+impl From<BTreeMap<Origin, Watermark>> for Watermarks {
+    fn from(settled: BTreeMap<Origin, Watermark>) -> Self {
+        Self {
+            len: settled.len(),
+            settled: Arc::new(settled),
+            recent: BTreeMap::new(),
+        }
+    }
+}
+
+/// A context's watermarks in ascending origin order: the settled and
+/// recent parts merged, a recent entry standing in for a settled one.
+struct Entries<'a> {
+    settled: Peekable<btree_map::Iter<'a, Origin, Watermark>>,
+    recent: Peekable<btree_map::Iter<'a, Origin, Watermark>>,
+}
+
+impl<'a> Iterator for Entries<'a> {
+    type Item = (&'a Origin, &'a Watermark);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match (self.settled.peek(), self.recent.peek()) {
+            (Some((settled, _)), Some((recent, _))) => match settled.cmp(recent) {
+                Ordering::Less => self.settled.next(),
+                Ordering::Greater => self.recent.next(),
+                Ordering::Equal => {
+                    self.settled.next();
+                    self.recent.next()
+                }
+            },
+            (Some(_), None) => self.settled.next(),
+            (None, _) => self.recent.next(),
+        }
+    }
+}
+
+impl PartialEq for Context {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len == other.0.len && self.iter().eq(other.iter())
+    }
+}
+
+impl Eq for Context {}
+
+impl Debug for Context {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Context").field(&DebugEntries(self)).finish()
+    }
+}
+
+/// A context's watermarks rendered as one map, however they are split.
+struct DebugEntries<'a>(&'a Context);
+
+impl Debug for DebugEntries<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map().entries(self.0.iter()).finish()
+    }
+}
 
 /// One origin's entry in a [`Context`]: the highest edition seen from it,
 /// and how many of its revisions the ancestry actually contains.
@@ -84,6 +200,80 @@ impl Watermark {
     }
 }
 
+/// How many watermarks a head carries inline: its **active set**.
+///
+/// A head publishes the `ACTIVE_CONTEXT` watermarks with the highest
+/// editions (ties broken by origin bytes) and a [`Spill`] summarizing the
+/// rest; the full map lives in its tree's context region. Ranking by
+/// edition is what lets a passing participant fall off on its own: an
+/// origin stays inline until this many other origins have written after
+/// it, and then it costs its region entry and nothing per head.
+///
+/// A protocol constant: two replicas must project the same map to the
+/// same bytes, and a head carrying more inline entries is refused. It
+/// bounds the inline part of a head at 48 bytes times this many.
+pub const ACTIVE_CONTEXT: usize = 64;
+
+/// The domain tag opening every spill digest's input, so the digest can
+/// never collide with a hash of any other dialog structure.
+const SPILL_DOMAIN: &[u8] = b"dialog/context-spill@1\n";
+
+/// What a head says about the watermarks it does not carry inline: the
+/// part of its context outside the active set.
+///
+/// Two heads whose spills are equal have identical spilled watermarks
+/// (the digest is a hash of every one of them), so comparing two such
+/// heads' contexts needs only their active sets: the spilled parts are
+/// the same entries on both sides and contribute nothing to inclusion or
+/// divergence. That is the steady state of a device pulling its own
+/// upstream, and it is what keeps that pull at zero reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Spill {
+    /// Blake3 of every spilled watermark, in origin order, as
+    /// `origin (32) ++ edition (8, big-endian) ++ count (8, big-endian)`
+    /// after a domain tag.
+    #[serde(with = "serde_bytes")]
+    pub digest: [u8; 32],
+    /// How many watermarks are spilled.
+    pub count: u64,
+    /// The highest edition among the spilled watermarks, genesis when none
+    /// are. Every active watermark sits at or above it: that is what makes
+    /// the active set the top of the map, checkable from the head alone.
+    pub highest: Edition,
+}
+
+impl Spill {
+    /// The spill of a context that fits its active set: nothing spilled.
+    pub fn empty() -> Self {
+        Self::of(empty())
+    }
+
+    /// The spill summarizing `entries`, which must arrive in origin order.
+    fn of<'a>(entries: impl Iterator<Item = (&'a Origin, &'a Watermark)>) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(SPILL_DOMAIN);
+        let mut count = 0u64;
+        let mut highest = Edition::GENESIS;
+        for (origin, watermark) in entries {
+            hasher.update(origin.key_bytes());
+            hasher.update(&watermark.edition.key_bytes());
+            hasher.update(&watermark.count.to_be_bytes());
+            count += 1;
+            highest = highest.max(watermark.edition);
+        }
+        Self {
+            digest: *hasher.finalize().as_bytes(),
+            count,
+            highest,
+        }
+    }
+
+    /// Whether nothing is spilled.
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}
+
 /// Serde encodes a [`Context`] as an ordered array of
 /// `(origin, edition, count)` triples, NOT as the derive's map: heads
 /// travel as dag-cbor, whose spec allows only string map keys, while a
@@ -95,8 +285,8 @@ impl Watermark {
 impl Serialize for Context {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq;
-        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
-        for (origin, watermark) in &self.0 {
+        let mut seq = serializer.serialize_seq(Some(self.0.len))?;
+        for (origin, watermark) in self.iter() {
             seq.serialize_element(&(origin, watermark.edition, watermark.count))?;
         }
         seq.end()
@@ -106,12 +296,10 @@ impl Serialize for Context {
 impl<'de> Deserialize<'de> for Context {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let entries = Vec::<(Origin, Edition, u64)>::deserialize(deserializer)?;
-        Ok(Self(
-            entries
-                .into_iter()
-                .map(|(origin, edition, count)| (origin, Watermark { edition, count }))
-                .collect(),
-        ))
+        Ok(entries
+            .into_iter()
+            .map(|(origin, edition, count)| (origin, Watermark { edition, count }))
+            .collect())
     }
 }
 
@@ -148,7 +336,7 @@ impl Context {
     /// context encoding (deltas with backlinks, say) only has to keep
     /// this lookup cheap, never a full origin listing.
     pub fn observes_origin(&self, origin: &Origin) -> bool {
-        self.0.contains_key(origin)
+        self.0.contains(origin)
     }
 
     /// Extend the context by one NEWLY MINTED revision: its origin's
@@ -163,20 +351,21 @@ impl Context {
     /// counting a revision that arrives below an already-raised
     /// watermark.
     pub fn record(&mut self, version: Version) {
-        match self.0.get_mut(&version.origin) {
-            None => {
-                self.0.insert(
-                    version.origin,
-                    Watermark {
-                        edition: version.edition,
-                        count: 1,
-                    },
-                );
-            }
-            Some(watermark) if version.edition > watermark.edition => {
-                watermark.edition = version.edition;
-                watermark.count += 1;
-            }
+        match self.0.get(&version.origin).copied() {
+            None => self.0.insert(
+                version.origin,
+                Watermark {
+                    edition: version.edition,
+                    count: 1,
+                },
+            ),
+            Some(watermark) if version.edition > watermark.edition => self.0.insert(
+                version.origin,
+                Watermark {
+                    edition: version.edition,
+                    count: watermark.count + 1,
+                },
+            ),
             Some(_) => {}
         }
     }
@@ -187,12 +376,17 @@ impl Context {
     /// folded exactly once (an ancestry walk's visited set, a delta's
     /// per-version-unique record keys); double-folding overcounts.
     pub fn tally(&mut self, version: Version) {
-        let entry = self.0.entry(version.origin).or_insert(Watermark {
-            edition: version.edition,
-            count: 0,
-        });
-        entry.edition = entry.edition.max(version.edition);
-        entry.count += 1;
+        let watermark = match self.0.get(&version.origin) {
+            Some(watermark) => Watermark {
+                edition: watermark.edition.max(version.edition),
+                count: watermark.count + 1,
+            },
+            None => Watermark {
+                edition: version.edition,
+                count: 1,
+            },
+        };
+        self.0.insert(version.origin, watermark);
     }
 
     /// Union with another context: per origin, the entry with the higher
@@ -201,13 +395,17 @@ impl Context {
     /// the union's count). This is the context of a merge — the merged
     /// head's ancestry is the union of its parents' ancestries.
     pub fn merge(&mut self, other: &Context) {
-        for (origin, watermark) in &other.0 {
-            let entry = self.0.entry(*origin).or_insert(*watermark);
-            if watermark.edition > entry.edition {
-                *entry = *watermark;
-            } else if watermark.edition == entry.edition {
+        for (origin, watermark) in other.iter() {
+            match self.0.get(origin).copied() {
+                None => self.0.insert(*origin, *watermark),
+                Some(ours) if watermark.edition > ours.edition => {
+                    self.0.insert(*origin, *watermark);
+                }
                 // Same prefix; counts should agree, tolerate drift by max.
-                entry.count = entry.count.max(watermark.count);
+                Some(ours) if watermark.edition == ours.edition && watermark.count > ours.count => {
+                    self.0.insert(*origin, *watermark);
+                }
+                Some(_) => {}
             }
         }
     }
@@ -241,26 +439,99 @@ impl Context {
             entry.count += 1;
         }
         for (origin, addition) in news {
-            match self.0.get_mut(&origin) {
-                Some(watermark) => {
-                    watermark.edition = watermark.edition.max(addition.edition);
-                    watermark.count += addition.count;
-                }
-                None => {
-                    self.0.insert(origin, addition);
-                }
-            }
+            let watermark = match self.0.get(&origin) {
+                Some(watermark) => Watermark {
+                    edition: watermark.edition.max(addition.edition),
+                    count: watermark.count + addition.count,
+                },
+                None => addition,
+            };
+            self.0.insert(origin, watermark);
         }
+    }
+
+    /// Project the context onto what a head carries: the active set of at
+    /// most `limit` watermarks with the highest editions (ties broken by
+    /// ascending origin bytes), and the [`Spill`] summarizing the rest.
+    ///
+    /// A pure function of the map, so every replica that holds the same
+    /// context, however it was assembled (commit by commit, by an ancestry
+    /// walk, by a merge, or read back from a tree's context region), lands
+    /// on identical bytes. Linear in the size of the map: the active set is
+    /// selected, not sorted, and the spilled watermarks are hashed once.
+    pub fn project(&self, limit: usize) -> (Context, Spill) {
+        if self.0.len <= limit {
+            return (self.clone(), Spill::empty());
+        }
+        let mut ranked: Vec<(&Origin, &Watermark)> = self.iter().collect();
+        let rank = |a: &(&Origin, &Watermark), b: &(&Origin, &Watermark)| {
+            b.1.edition.cmp(&a.1.edition).then_with(|| a.0.cmp(b.0))
+        };
+        if limit > 0 {
+            ranked.select_nth_unstable_by(limit - 1, rank);
+        }
+        let active: Context = ranked[..limit]
+            .iter()
+            .map(|(origin, watermark)| (**origin, **watermark))
+            .collect();
+        let spill = Spill::of(
+            self.iter()
+                .filter(|(origin, _)| !active.observes_origin(origin)),
+        );
+        (active, spill)
+    }
+
+    /// The projection of this context, given the projection of the
+    /// context it was derived from by raising `origin`'s watermark alone.
+    ///
+    /// A raised watermark only climbs the ranking, so when `origin` was
+    /// already active the active set keeps its members and the spill does
+    /// not change: the projection is the previous active set with
+    /// `origin`'s entry replaced, at the cost of the active set alone.
+    /// That is the commit of a writer that is still active. Otherwise the
+    /// membership changes, and the projection is recomputed in full.
+    pub fn project_from(
+        &self,
+        limit: usize,
+        previous: (&Context, &Spill),
+        origin: &Origin,
+    ) -> (Context, Spill) {
+        let (active, spill) = previous;
+        match (active.observes_origin(origin), self.0.get(origin)) {
+            (true, Some(watermark)) if active.len() <= limit => {
+                let mut active = active.clone();
+                active.0.insert(*origin, *watermark);
+                (active, *spill)
+            }
+            _ => self.project(limit),
+        }
+    }
+
+    /// The full context of a head whose spill equals the spill this
+    /// context projects to beside `ours`, its active set, when that head's
+    /// active set is `theirs`.
+    ///
+    /// Equal spills are equal spilled watermarks, so the other head's full
+    /// context is this one with the active parts exchanged: what we spill
+    /// is what it spills, and its active set is the rest. That is how a
+    /// pull learns an upstream's whole context from its head alone, with
+    /// no read, whenever the two sides spill the same origins.
+    pub fn exchange_active(&self, ours: &Context, theirs: &Context) -> Context {
+        self.iter()
+            .filter(|(origin, _)| !ours.observes_origin(origin))
+            .chain(theirs.iter())
+            .map(|(origin, watermark)| (*origin, *watermark))
+            .collect()
     }
 
     /// Number of origins this context has observed.
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.0.len
     }
 
     /// Whether the context observes nothing.
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0.len == 0
     }
 
     /// Whether this context has observed everything `other` has: for
@@ -272,7 +543,7 @@ impl Context {
     /// adopted wholesale where we have no local novelty (nothing we
     /// know could contradict what survived its screen).
     pub fn includes(&self, other: &Context) -> bool {
-        other.0.iter().all(|(origin, theirs)| {
+        other.iter().all(|(origin, theirs)| {
             self.0
                 .get(origin)
                 .is_some_and(|ours| ours.edition >= theirs.edition)
@@ -302,13 +573,22 @@ impl Context {
     /// ten-thousand-deep history is ONE revision to send, not ten
     /// thousand.
     pub fn divergence(&self, other: &Context) -> u64 {
-        self.0
-            .iter()
+        self.iter()
             .map(|(origin, watermark)| match other.0.get(origin) {
                 Some(seen) => watermark.count.saturating_sub(seen.count),
                 None => watermark.count,
             })
             .fold(0u64, u64::saturating_add)
+    }
+}
+
+/// A context assembled from `(origin, watermark)` entries, as a tree's
+/// context region lists them. A repeated origin keeps its last entry.
+impl FromIterator<(Origin, Watermark)> for Context {
+    fn from_iter<I: IntoIterator<Item = (Origin, Watermark)>>(entries: I) -> Self {
+        Self(Watermarks::from(
+            entries.into_iter().collect::<BTreeMap<_, _>>(),
+        ))
     }
 }
 
@@ -447,6 +727,59 @@ mod tests {
         );
     }
 
+    /// A context holds the same watermarks however its storage is split:
+    /// one built commit by commit past many settles, one collected at once,
+    /// and copies of either compare equal and iterate in origin order, and
+    /// a copy raised afterwards leaves the context it was copied from as it
+    /// was.
+    #[test]
+    fn it_keeps_its_watermarks_across_settles_and_copies() {
+        let mut expected = BTreeMap::new();
+        let mut built = Context::new();
+        let mut copies = Vec::new();
+        for i in 0u32..5_000 {
+            let mut seed = [0u8; 32];
+            seed[..4].copy_from_slice(&i.wrapping_mul(2_654_435_761).to_be_bytes());
+            let origin = Origin::from(seed);
+            let version = Version::new(origin, Edition::new(u64::from(i)));
+            built.record(version);
+            expected.insert(
+                origin,
+                Watermark {
+                    edition: version.edition,
+                    count: 1,
+                },
+            );
+            if i % 997 == 0 {
+                copies.push((built.clone(), expected.clone()));
+            }
+        }
+        let collected: Context = expected.iter().map(|(o, w)| (*o, *w)).collect();
+        assert_eq!(built, collected);
+        assert_eq!(built.len(), expected.len());
+        assert!(built.iter().map(|(o, w)| (*o, *w)).eq(expected.clone()));
+
+        for (copy, at) in copies {
+            assert_eq!(copy.len(), at.len(), "a copy keeps what it was copied with");
+            assert!(copy.iter().map(|(o, w)| (*o, *w)).eq(at));
+        }
+
+        let mut raised = built.clone();
+        let (origin, watermark) = expected
+            .iter()
+            .next()
+            .map(|(o, w)| (*o, *w))
+            .expect("entries");
+        raised.record(Version::new(origin, watermark.edition.successor()));
+        assert_ne!(raised, built);
+        assert_eq!(
+            built.get(&origin),
+            Some(&watermark),
+            "the original is untouched"
+        );
+        assert_eq!(raised.get(&origin).map(|w| w.count), Some(2));
+    }
+
     /// The watermark bounds refuse exactly what no chain can produce: an
     /// edition at the ceiling, and a count above `edition + 1`; a genesis
     /// watermark (edition 0, one revision) and a dense chain pass.
@@ -488,6 +821,194 @@ mod tests {
             assert!(
                 matches!(watermark.check(), Err(HistoryError::InvalidReference(_))),
                 "{watermark:?} must be refused"
+            );
+        }
+    }
+
+    /// A context of `origins` origins, origin `i` (seeded `i`) at
+    /// edition `i` with one revision.
+    fn spread(origins: u8) -> Vec<Version> {
+        (0..origins).map(|i| version(i, u64::from(i))).collect()
+    }
+
+    /// The projection is a function of the map alone: built commit by
+    /// commit, absorbed out of order, or merged from two halves, the same
+    /// context projects to the same active set and the same spill.
+    #[test]
+    fn it_projects_identically_however_the_context_was_assembled() {
+        let versions = spread(100);
+
+        let mut recorded = Context::new();
+        for version in &versions {
+            recorded.record(*version);
+        }
+
+        let mut absorbed = Context::new();
+        // A fixed stride visits every index once, out of order.
+        absorbed.absorb((0..versions.len()).map(|i| versions[(i * 37) % versions.len()]));
+
+        let mut low = Context::new();
+        let mut high = Context::new();
+        for version in &versions {
+            if version.edition.value() % 2 == 0 {
+                low.record(*version);
+            } else {
+                high.record(*version);
+            }
+        }
+        high.merge(&low);
+
+        assert_eq!(recorded, absorbed);
+        assert_eq!(recorded, high);
+        let projection = recorded.project(ACTIVE_CONTEXT);
+        assert_eq!(absorbed.project(ACTIVE_CONTEXT), projection);
+        assert_eq!(high.project(ACTIVE_CONTEXT), projection);
+
+        let (active, spill) = projection;
+        assert_eq!(active.len(), ACTIVE_CONTEXT);
+        assert_eq!(spill.count, (100 - ACTIVE_CONTEXT) as u64);
+        assert!(
+            active
+                .iter()
+                .all(|(_, watermark)| watermark.edition > spill.highest),
+            "the active set is the top of the map"
+        );
+    }
+
+    /// Ties at one edition are broken by origin bytes, so two origins that
+    /// wrote at the same depth land in the active set deterministically.
+    #[test]
+    fn it_breaks_edition_ties_by_origin() {
+        let mut context = Context::new();
+        for seed in 0..3 {
+            context.record(version(seed, 5));
+        }
+        let (active, spill) = context.project(2);
+        assert!(active.observes_origin(&Origin::from([0u8; 32])));
+        assert!(active.observes_origin(&Origin::from([1u8; 32])));
+        assert_eq!(spill.count, 1);
+        assert_eq!(spill.highest, Edition::new(5));
+    }
+
+    /// An origin stays active until `ACTIVE_CONTEXT` other origins have
+    /// written after it, and leaves the active set on exactly that write.
+    #[test]
+    fn it_spills_an_origin_once_enough_others_write_after_it() {
+        let passing = Origin::from([255u8; 32]);
+        let mut context = Context::new();
+        context.record(Version::new(passing, Edition::new(0)));
+
+        for later in 1..=ACTIVE_CONTEXT {
+            let seed = u8::try_from(later).expect("the active set fits a byte");
+            context.record(version(seed, later as u64));
+            let (active, spill) = context.project(ACTIVE_CONTEXT);
+            if later < ACTIVE_CONTEXT {
+                assert!(
+                    active.observes_origin(&passing),
+                    "after {later} later writers the passing origin is still active"
+                );
+                assert!(spill.is_empty());
+            } else {
+                assert!(
+                    !active.observes_origin(&passing),
+                    "the {later}th later writer pushes the passing origin out"
+                );
+                assert_eq!(spill.count, 1);
+            }
+        }
+    }
+
+    /// The digest covers every spilled watermark: two contexts that differ
+    /// only in one spilled entry, by edition or by count, digest apart.
+    #[test]
+    fn it_digests_every_spilled_watermark() {
+        let base: Context = spread(100).into_iter().fold(Context::new(), |mut c, v| {
+            c.record(v);
+            c
+        });
+        let (_, spill) = base.project(ACTIVE_CONTEXT);
+
+        let mut raised = base.clone();
+        // Origin 1 sits deep in the spill; raising it a little keeps it there.
+        raised.record(version(1, 2));
+        let (_, raised_spill) = raised.project(ACTIVE_CONTEXT);
+        assert_ne!(raised_spill.digest, spill.digest, "an edition change shows");
+
+        let mut recounted = base.clone();
+        recounted.tally(version(1, 1));
+        let (_, recounted_spill) = recounted.project(ACTIVE_CONTEXT);
+        assert_ne!(recounted_spill.digest, spill.digest, "a count change shows");
+    }
+
+    /// Two contexts whose spills are equal compare exactly through their
+    /// active sets: inclusion and divergence agree with the full maps, and
+    /// either side's full map is the other's with the active parts
+    /// exchanged.
+    #[test]
+    fn it_compares_equal_spills_through_the_active_sets_alone() {
+        let shared: Context = spread(100).into_iter().fold(Context::new(), |mut c, v| {
+            c.record(v);
+            c
+        });
+
+        // Both sides move on from the shared history with writers of their
+        // own, high enough to stay active, so neither spill changes.
+        let mut ours = shared.clone();
+        ours.record(version(200, 500));
+        ours.record(version(201, 501));
+        let mut theirs = shared.clone();
+        theirs.record(version(200, 500));
+        theirs.record(version(202, 502));
+
+        let (our_active, our_spill) = ours.project(ACTIVE_CONTEXT);
+        let (their_active, their_spill) = theirs.project(ACTIVE_CONTEXT);
+        assert_eq!(
+            our_spill, their_spill,
+            "the same origins spill on both sides"
+        );
+        assert_ne!(our_active, their_active);
+
+        assert_eq!(our_active.includes(&their_active), ours.includes(&theirs));
+        assert_eq!(their_active.includes(&our_active), theirs.includes(&ours));
+        assert_eq!(
+            our_active.divergence(&their_active),
+            ours.divergence(&theirs)
+        );
+        assert_eq!(
+            their_active.divergence(&our_active),
+            theirs.divergence(&ours)
+        );
+        assert_eq!(ours.exchange_active(&our_active, &their_active), theirs);
+
+        assert_eq!(theirs.exchange_active(&their_active, &our_active), ours);
+
+        // An active writer moving on keeps the spill, and inclusion still
+        // reads off the active sets.
+        let mut ahead = theirs.clone();
+        ahead.record(version(202, 600));
+        let (ahead_active, ahead_spill) = ahead.project(ACTIVE_CONTEXT);
+        assert_eq!(ahead_spill, their_spill);
+        assert!(ahead_active.includes(&their_active) && ahead.includes(&theirs));
+        assert!(!their_active.includes(&ahead_active) && !theirs.includes(&ahead));
+    }
+
+    /// The successor projection, taken from the parent's, equals the one
+    /// computed from scratch, whether the committing origin was active or
+    /// not.
+    #[test]
+    fn it_projects_a_successor_from_its_parents_projection() {
+        let parent: Context = spread(100).into_iter().fold(Context::new(), |mut c, v| {
+            c.record(v);
+            c
+        });
+        let (active, spill) = parent.project(ACTIVE_CONTEXT);
+        for seed in [99u8, 50, 3, 250] {
+            let mut child = parent.clone();
+            child.record(version(seed, 1_000));
+            assert_eq!(
+                child.project_from(ACTIVE_CONTEXT, (&active, &spill), &Origin::from([seed; 32])),
+                child.project(ACTIVE_CONTEXT),
+                "a commit by origin {seed}"
             );
         }
     }

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::FromKey as _;
-use dialog_artifacts::history::Context;
+use dialog_artifacts::history::{Context, context_writes};
 use dialog_artifacts::merge;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_capability::Provider;
@@ -15,6 +15,7 @@ use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
 use futures_util::future::{Either, join_all};
 
+use super::context::{exchanged_context, full_context, published_context, region_of};
 use super::fetch::fetch_one;
 use super::migrate::aligned;
 use super::resolve::resolve;
@@ -379,27 +380,69 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // but the cache no longer holds (deleted facts carry no
         // tombstone; see `notes/version-control.md`).
         //
-        // Answered from the branch memo, or from the watermark the head
-        // itself published (heads carry their context under the head
-        // signature), or — only for lineages minted before heads carried
-        // contexts — by the O(ancestry) walk, once.
+        // Answered from the branch memo, or from the context region of the
+        // local head's tree (local blocks, read once per head), or from the
+        // head itself when it predates the region, or — only for lineages
+        // minted before heads carried contexts — by the O(ancestry) walk,
+        // once.
         let contexts = branch.contexts();
         let local_context: Arc<Context> = match &local_revision {
-            Some(revision) => match contexts.cached(&revision.version()).await {
-                Some(context) => context,
-                None => match &revision.context {
-                    Some(context) => {
-                        let context = Arc::new(context.clone());
-                        contexts.insert(revision.version(), context.clone());
-                        context
-                    }
-                    None => {
-                        let history = branch.history(env);
-                        contexts.context_of(&revision.version(), &history).await?
-                    }
-                },
-            },
+            Some(revision) => {
+                let history = branch.history(env);
+                full_context(revision, &contexts, &store, &branch.node_cache(), &history).await?
+            }
             None => Arc::new(Context::new()),
+        };
+
+        // A replica with no head and no sync base adopts an upstream that
+        // publishes a context by root: nothing it holds can contradict
+        // anything, which is the fast-forward gate below with an empty
+        // side. That needs nothing of the upstream's context, so none of
+        // it is read here; it is remembered when the head carries all of
+        // it, and the first commit on top reads the rest.
+        if local_revision.is_none() && base.is_none() && upstream_revision.context.is_some() {
+            if let Some(context) = upstream_revision.inline_context() {
+                contexts.insert(upstream_revision.version(), context.clone());
+            }
+            return Ok(PreparedPull::Merged(Box::new(Merged {
+                branch,
+                head,
+                new_revision: upstream_revision.clone(),
+                sync: upstream.with_tree(upstream_revision.tree.clone()),
+                base,
+            })));
+        }
+
+        // The upstream's full context, which every gate below compares
+        // ours with. When both heads spill the same origins (the steady
+        // state of a device pulling its own upstream with a stable set of
+        // writers), it is ours with the active sets exchanged: no read.
+        // Otherwise the upstream's tree's context region is read through
+        // the store that serves its blocks (its root and the region's few
+        // leaves) and checked against the head before anything acts on
+        // it; that is first contact, or a new writer entering the
+        // upstream's active set. A head that predates the region carries
+        // its whole context, and one that predates contexts carries none,
+        // in which case the frugal paths are skipped.
+        let upstream_context: Option<Arc<Context>> = match contexts
+            .cached(&upstream_revision.version())
+            .await
+        {
+            Some(context) => Some(context),
+            None => match local_revision
+                .as_ref()
+                .and_then(|local| exchanged_context(local, &local_context, &upstream_revision))
+            {
+                Some(context) => {
+                    let context = Arc::new(context);
+                    contexts.insert(upstream_revision.version(), context.clone());
+                    Some(context)
+                }
+                None => {
+                    published_context(&upstream_revision, &contexts, &store, &branch.node_cache())
+                        .await?
+                }
+            },
         };
 
         // Replicas that have never observed one another (no origin in
@@ -411,15 +454,15 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // shape of a device joining an account it was seeded apart
         // from. Decided from the two watermarks at zero reads; an
         // upstream that published no watermark is screened as before.
-        let unacquainted = upstream_revision
-            .context
-            .as_ref()
+        let unacquainted = upstream_context
+            .as_deref()
             .is_some_and(|theirs| merge::unacquainted(&local_context, theirs));
 
         // The upstream published its watermark with its head: two frugal
         // paths can short-circuit the tree merge entirely, both gated on
         // comparing the two contexts (O(#origins), no reads).
-        if let Some(theirs) = &upstream_revision.context {
+        if let Some(their_context) = &upstream_context {
+            let theirs: &Context = their_context;
             // Nothing new: everything the upstream has seen, we have
             // seen. Every claim live there is live or covered here
             // already, so the merge would change nothing. Keep the head
@@ -449,7 +492,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 == local_tree.as_ref().map(|tree| tree.hash())
                 && theirs.includes(&local_context)
             {
-                contexts.insert(upstream_revision.version(), theirs.clone());
+                contexts.insert(upstream_revision.version(), their_context.clone());
                 return Ok(PreparedPull::Merged(Box::new(Merged {
                     branch,
                     head,
@@ -516,11 +559,15 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     .divergent_bounds(),
                 );
                 let pieces = merge::partition_spans(&ours_spans, &theirs_spans);
-                let contested: Vec<_> = pieces
-                    .iter()
-                    .filter(|(_, source)| *source == merge::SpanSource::Contested)
-                    .map(|(span, _)| span.clone())
-                    .collect();
+                // The context region is never integrated entry by entry: the
+                // merge revision minted below writes its full context there.
+                let contested = merge::without_context(
+                    pieces
+                        .iter()
+                        .filter(|(_, source)| *source == merge::SpanSource::Contested)
+                        .map(|(span, _)| span.clone())
+                        .collect(),
+                );
 
                 // Stitch: each unilaterally-changed span adopts the
                 // changed side's subtree; unchanged space is identical
@@ -559,7 +606,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // exactly the novel ones.
                 if !contested.is_empty() {
                     let (changed_side, screen_context) = if ours_smaller {
-                        (&local_tree, Arc::new(theirs.clone()))
+                        (&local_tree, their_context.clone())
                     } else {
                         (&upstream_tree, local_context.clone())
                     };
@@ -672,7 +719,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // Head selection mirrors the other merge paths, so
                 // mutual pulls quiesce.
                 if merged_tree == upstream_revision.tree {
-                    contexts.insert(upstream_revision.version(), theirs.clone());
+                    contexts.insert(upstream_revision.version(), their_context.clone());
                     return Ok(PreparedPull::Merged(Box::new(Merged {
                         branch,
                         head,
@@ -713,14 +760,24 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // inline-vs-spill threshold, so read it off the tree rather
                 // than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
-                merged
-                    .record(&store, &mut delta, record.entries(&manifest)?)
-                    .await?;
-                revision.tree = TreeReference::from(*merged.root().as_bytes());
+                // The merged head's context is the union of both sides' plus
+                // its own version. The stitched tree's
+                // context region is pieced from both sides' regions, so the
+                // entries either side may hold differently are written.
                 let mut context = Context::clone(&local_context);
                 context.merge(theirs);
                 context.record(revision.version());
-                revision.context = Some(context.clone());
+                let mut entries = record.entries(&manifest)?;
+                entries.entries.extend(context_writes(
+                    &context,
+                    &[
+                        region_of(local, &local_context),
+                        region_of(&upstream_revision, theirs),
+                    ],
+                ));
+                merged.record(&store, &mut delta, entries).await?;
+                revision.tree = TreeReference::from(*merged.root().as_bytes());
+                revision.publish_context(&context);
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
 
@@ -814,7 +871,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 let screened_data = if unacquainted {
                     Either::Left(data_changes)
                 } else {
-                    Either::Right(merge::screen_data(data_changes, theirs.clone()))
+                    Either::Right(merge::screen_data(data_changes, their_context.clone()))
                 };
                 let screened = futures_util::StreamExt::chain(screened_history, screened_data);
 
@@ -833,7 +890,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // arms the integrate produced no new nodes, so there is
                 // nothing to import.
                 if merged_tree == upstream_revision.tree {
-                    contexts.insert(upstream_revision.version(), theirs.clone());
+                    contexts.insert(upstream_revision.version(), their_context.clone());
                     return Ok(PreparedPull::Merged(Box::new(Merged {
                         branch,
                         head,
@@ -878,14 +935,21 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // inline-vs-spill threshold, so read it off the tree rather
                 // than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
-                merged
-                    .record(&store, &mut delta, record.entries(&manifest)?)
-                    .await?;
-                revision.tree = TreeReference::from(*merged.root().as_bytes());
+                // The merged head's context is the union of both sides' plus
+                // its own version. The merged tree started as
+                // theirs, so its context region is theirs, and the entries it
+                // holds differently are written.
                 let mut context = Context::clone(&local_context);
                 context.merge(theirs);
                 context.record(revision.version());
-                revision.context = Some(context.clone());
+                let mut entries = record.entries(&manifest)?;
+                entries.entries.extend(context_writes(
+                    &context,
+                    &[region_of(&upstream_revision, theirs)],
+                ));
+                merged.record(&store, &mut delta, entries).await?;
+                revision.tree = TreeReference::from(*merged.root().as_bytes());
+                revision.publish_context(&context);
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
 
@@ -996,6 +1060,9 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // The records in the delta are exactly the upstream-ancestry
         // revisions we may have lacked, so this equals the ancestry walk
         // without paying it.
+        // The local context as it stood: the merged tree started as ours, so
+        // its context region is what this held.
+        let local_full = Arc::clone(&local_context);
         let merged_context = {
             let mut context = Arc::unwrap_or_clone(local_context);
             let observed = mem::take(
@@ -1075,16 +1142,22 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // inline-vs-spill threshold, so read it off the tree rather
                 // than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
-                merged
-                    .record(&store, &mut delta, record.entries(&manifest)?)
-                    .await?;
-                revision.tree = TreeReference::from(*merged.root().as_bytes());
                 // The minted head publishes its watermark: the merged
-                // context plus its own version, signed with the rest of
-                // the head so peers can adopt it without walking.
+                // context plus its own version, its active set signed with
+                // the rest of the head and the whole of it in the tree's
+                // context region, so peers can adopt it without walking.
+                // The merged tree started as ours (or as the empty tree,
+                // with no head of our own), so its region is what ours held.
                 let mut context = merged_context.clone();
                 context.record(revision.version());
-                revision.context = Some(context);
+                let held = local
+                    .as_ref()
+                    .and_then(|local| region_of(local, &local_full));
+                let mut entries = record.entries(&manifest)?;
+                entries.entries.extend(context_writes(&context, &[held]));
+                merged.record(&store, &mut delta, entries).await?;
+                revision.tree = TreeReference::from(*merged.root().as_bytes());
+                revision.publish_context(&context);
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
                 revision
@@ -1881,6 +1954,9 @@ mod tests {
 }
 
 #[cfg(test)]
+mod context_tests;
+
+#[cfg(test)]
 mod history_tests {
     use super::SMALL_DIVERGENCE;
     #[cfg(target_arch = "wasm32")]
@@ -2628,6 +2704,7 @@ mod history_tests {
             tree: TreeReference::from([9u8; 32]),
             edition: Edition::GENESIS,
             context: None,
+            spill: None,
             signature: Vec::new(),
         };
         evil.reset(forged).perform(&operator).await?;

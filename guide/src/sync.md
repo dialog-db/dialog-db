@@ -84,7 +84,7 @@ On S3 the swap in step 4 is a conditional `PUT` with `If-Match` on the cell's ET
 
 ## Pull
 
-A pull brings the remote peer's changes in. It reads the remote peer's head, checks the head's signature, and then looks at two watermarks: the one in the remote peer's head, and the one in the local head. Each watermark says what its side has seen (see [Commits and History](./history.md)). Comparing them tells the replica which case it is in:
+A pull brings the remote peer's changes in. It reads the remote peer's head, checks the head's signature, and then looks at two watermarks: the remote peer's, and the local one. Each watermark says what its side has seen (see [Commits and History](./history.md)). When both heads summarize the same rows outside their active sets, the two heads alone are enough to compare them. Otherwise the replica first reads the remote peer's watermark from its tree, a few blocks. Comparing them tells the replica which case it is in:
 
 | Case | What the replica says | What it does |
 |---|---|---|

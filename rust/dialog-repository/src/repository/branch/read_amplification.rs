@@ -81,12 +81,17 @@ fn routed(ours: &Context, theirs: &Context) -> &'static str {
 }
 
 /// The `routed` label for a pull of `upstream` into `branch`, from their
-/// published heads; "legacy" when either head predates watermarks.
-fn routed_label(branch: &crate::Branch, upstream: &crate::Branch) -> &'static str {
-    match (
-        branch.revision().and_then(|r| r.context),
-        upstream.revision().and_then(|r| r.context),
-    ) {
+/// full contexts as the branch memo holds them (a head carries only its
+/// active set); "legacy" when either is unknown.
+async fn routed_label(branch: &crate::Branch, upstream: &crate::Branch) -> &'static str {
+    let context = |branch: &crate::Branch| {
+        let branch = branch.clone();
+        async move {
+            let head = branch.revision()?;
+            branch.contexts().cached(&head.version()).await
+        }
+    };
+    match (context(branch).await, context(upstream).await) {
         (Some(ours), Some(theirs)) => routed(&ours, &theirs),
         _ => "legacy",
     }
@@ -254,7 +259,10 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
         samples,
         env,
         depth,
-        format!("triangle: adopt alice [{}]", routed_label(&us, &alice)),
+        format!(
+            "triangle: adopt alice [{}]",
+            routed_label(&us, &alice).await
+        ),
         us.pull().from(&alice).perform(&env).await?
     );
     // A 3-commit late delta sits under the graft threshold: this row
@@ -263,7 +271,7 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
         samples,
         env,
         depth,
-        format!("triangle: bob small [{}]", routed_label(&us, &bob)),
+        format!("triangle: bob small [{}]", routed_label(&us, &bob).await),
         us.pull().from(&bob).perform(&env).await?
     );
     // A dozen more late commits push Bob's delta past the threshold:
@@ -281,7 +289,7 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
         samples,
         env,
         depth,
-        format!("triangle: bob bulky [{}]", routed_label(&us, &bob)),
+        format!("triangle: bob bulky [{}]", routed_label(&us, &bob).await),
         us.pull().from(&bob).perform(&env).await?
     );
 
@@ -530,8 +538,28 @@ async fn measure_origins(origins: usize) -> Result<()> {
         .await
         .map(|context| context.len())
         .unwrap_or(0);
-    // A lower bound: the entries alone, without the map's node overhead.
+    // The size of one full context, a lower bound: the entries alone,
+    // without the map's node overhead. The memo's entries for successive
+    // heads share most of it.
     let memo_bytes = memo * (size_of::<Origin>() + size_of::<Watermark>());
+
+    // The control: a history as deep, written by one origin, so the
+    // difference between the two commit times is the context's alone.
+    let control = repo.branch("control").open().perform(&env).await?;
+    for i in 0..=origins {
+        control
+            .commit(stream::iter(vec![assert_fact(i, "control")]))
+            .perform(&env)
+            .await?;
+    }
+    let started = Instant::now();
+    for i in 0..COMMITS {
+        control
+            .commit(stream::iter(vec![assert_fact(origins + 1 + i, "measure")]))
+            .perform(&env)
+            .await?;
+    }
+    let control_ms = started.elapsed().as_secs_f64() * 1_000.0 / COMMITS as f64;
 
     let feature = repo.branch("feature").open().perform(&env).await?;
     feature.set_upstream(&main).perform(&env).await?;
@@ -557,8 +585,8 @@ async fn measure_origins(origins: usize) -> Result<()> {
     let noop_reads = env.block_reads();
 
     println!(
-        "| {origins:>6} | {published:>9} | {encoded:>10} | {payload:>13} | {commit_ms:>9.2} | \
-         {memo_bytes:>14} | {ff_reads:>8} | {noop_reads:>10} |"
+        "| {origins:>7} | {published:>9} | {encoded:>10} | {payload:>13} | {commit_ms:>9.2} | \
+         {control_ms:>10.2} | {memo_bytes:>13} | {ff_reads:>8} | {noop_reads:>10} |"
     );
     Ok(())
 }
@@ -574,11 +602,11 @@ async fn context_cost_by_origins() -> Result<()> {
         .unwrap_or(10_000);
     println!(
         "| origins | published | head bytes | payload bytes | commit ms | \
-         memo bytes (≥) | ff reads | noop reads |"
+         control ms | context bytes | ff reads | noop reads |"
     );
     println!(
         "|---------|-----------|------------|---------------|-----------|\
-         ----------------|----------|------------|"
+         ------------|---------------|----------|------------|"
     );
     for origins in [10, 1_000, 10_000].into_iter().filter(|n| *n <= cap) {
         measure_origins(origins).await?;
