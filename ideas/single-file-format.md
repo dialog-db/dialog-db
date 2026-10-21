@@ -131,6 +131,11 @@ Along with it, the measurements below against the current system, on the
 same workloads, so the decision to adopt it is a comparison and not a
 guess.
 
+It does not have to replace the directory store. It can ship as another
+provider an embedder picks, the way a browser build picks IndexedDB or
+OPFS today. One embedder wants the smallest replica, another wants the
+fastest, and the measurements are what let them choose.
+
 ## Goal
 
 Find out whether one append-only, columnar log can hold a replica with
@@ -167,9 +172,12 @@ Failure is very little gain on space with a loss on performance: under 2×
 smaller, or slower than today by more than the gate allows. A spike that
 lands there has answered the question with a no, which is also fine.
 
-Anything in between (a big space win with a real slowdown, or a small win
-at equal speed) is not a verdict, it is a trade-off, and the spike should
-report the numbers and stop rather than pick for me.
+In between it is about the ratio. A modest slowdown bought with a large
+space win is still a win, especially as an alternative provider rather
+than the default. A small space win at equal speed is not worth a second
+provider. The spike reports both numbers and the ratio, and where it
+lands between the two bars is a judgment I will make on the numbers, not
+one the spike makes for me.
 
 ## What we tried before
 
