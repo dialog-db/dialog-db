@@ -3,45 +3,32 @@
 ## Idea
 
 A replica on native is a directory of files, one per block. That is simple
-but it is the wrong shape for what the dialog search tree actually does: every
-commit supersedes a spine of nodes and nothing ever reclaims the old ones,
-so the directory is the sum of every node version ever written. On the
-Stack Exchange replay at 2048 commits the live tree is ~49 MB and the
-store on disk is ~450 MB, about 9×, and it keeps climbing with commits.
-That 9× is retained tree shape, not accidental duplicate stores, so the
-two directions below attack it from different sides.
+but it is the wrong shape for what the dialog search tree actually does:
+every commit supersedes a spine of nodes and nothing ever reclaims the
+old ones, so the directory is the sum of every node version ever written.
+On the Stack Exchange replay at 2048 commits the live tree is ~49 MB and
+the store on disk is ~450 MB, about 9×, and it keeps climbing with
+commits. That 9× is retained tree shape, not accidental duplicate stores.
 
-I want a single file instead. We spiked one over the summer, DCAA on
-`claude/perf-6-dcaa-spike`: append-only, blake3 addressed, BAO outboard for
-range verification, sorted index with per-commit deltas. As built, with an
-fdatasync per commit, it was slower than file-per-block on every write
-row (2.74 s vs 1.69 s on the 500 commit SE replay), and I decided against
-it. With the fsync taken out it came in at 933 ms on the same replay, so
-the gap is the fsync, not the format, but nobody ever ran a read
-benchmark against it, so speed is open, not settled. The part that is
-settled: it was append-only and had exactly the same growth as the
-directory it replaced. Append-only on its own just keeps growing.
+Segment nodes already tokenize and column-encode: within one node an
+entity, an attribute, a domain shows up once, and the node's slices point
+into that buffer. What that does not do is help across nodes, and that is
+where the duplication is. The same entity sits in the EAV, AEV and VAE
+nodes, and every superseded version of a node carries the same tokens
+again.
 
-There are two ways I think this could go, and I would like both explored:
+What I want is one append-only log with the same kind of encoding applied
+to the whole file. A token is written once, at the first commit that
+mentions it, and from then on every node that needs it points at its
+offset. A node becomes a columnar frame of offsets, not of bytes. Three
+indexes and every superseded version of a node then share one copy of
+every token, and the log only grows by what is genuinely new: new tokens
+and new frames.
 
-1. **The file moves things around.** It compacts, evicts intermediary nodes
-   that nothing references any more, and leans on the history index to
-   rebuild what it dropped if we ever need it. The file is a cache of the
-   tree, the history is the truth.
-
-2. **The file never removes anything**, but it encodes columnar, so that
-   successive versions of a node mostly share bytes and the superseded
-   ones compress away to almost nothing. If that works, append-only is no
-   longer a big deal and we keep the crash-safety that comes with it.
-
-Worth unpacking what direction 2 actually means. Segment nodes already
-tokenize and column-encode: within one node an entity, an attribute, a
-domain shows up once, and the node's slices point into that buffer. What
-that does not do is help across nodes, and that is where the duplication
-is. The same entity sits in the EAV, AEV and VAE nodes, and every
-superseded version of a node carries the same tokens again. In one file
-with the same kind of encoding there would be no copies of a token
-anywhere: nodes, indexes and old versions all point into one dictionary.
+The dictionary itself can be a tree in the log. Each index node over the
+tokens is written as a frame that points at earlier index frames by
+offset, so a lookup hops across the log instead of reading a dictionary
+whole. HyperDB does exactly this for its trie, see prior art.
 
 The node as the rest of the system sees it does not change. When a node
 is read or sent, the file realizes it copy-on-write into the current wire
@@ -49,82 +36,96 @@ format, an independent block, and it is still referenced by the hash of
 that wire form. The file stores something else, the hash is of what goes
 on the wire.
 
-What that opens up, and nobody has sized yet:
-
-- The file needs an index from wire hash to where the node's pieces live,
-  since the hash is no longer the hash of any bytes stored.
-- Realizing and hashing a node on every read is CPU the file-per-block
-  store does not spend. Caching the realized block is the obvious answer,
-  so this is a measurement, not a blocker.
-- The dictionary grows too. How it gets compacted when tokens die with
-  their last node is its own question.
-
-Either way it is still an archive: you look up a block by hash and get it
-back verified. Whole-file BAO is the obvious extension, so the file itself
-is content-addressed and a peer can verify a byte range of it.
-
 > 💭 The root-frame re-encode is where the bytes come from today (~120 to
-> 160 KB written per commit of a couple of facts). A format that shares
-> bytes across node versions attacks the same thing from the other side.
+> 160 KB written per commit of a couple of facts). A frame of offsets is
+> a fraction of that, so this attacks write amplification from the same
+> side.
+
+Compaction is the fallback, not the plan: if frames alone still grow too
+fast, the file moves things around, evicts frames nothing references, and
+leans on the history index to rebuild what it dropped. I would rather not
+need it.
+
+## What has to be true for reads
+
+The goal is to remove the duplication without giving up the lookup and
+read cost of the block-based store. That is the hard part and it is where
+the spike should spend its time:
+
+- **A key comparison must not cost a hop.** Binary search over a frame
+  compares keys, and if every comparison dereferences a token offset the
+  descent becomes a random walk over the file. Either the frame carries
+  enough of the key inline to decide (a prefix, a fingerprint), or the
+  token region is small enough to sit in memory. The live token set is
+  roughly the live fact bytes, tens of MB on the replay, so the second
+  may just be true.
+- **Pointer overhead versus token bytes.** An offset is 4 to 8 bytes, a
+  front-coded token in today's node is often not much more. The saving
+  is entirely cross-node: three indexes times every version. HyperDB
+  pays O(M log M) metadata for the same shape of design. Measure the
+  frame size against today's block on the replay before building
+  anything else.
+- **Realizing a node on read.** The wire block has to be rebuilt and
+  hashed for every read and every send, which is CPU the directory store
+  never spends. A cache of realized blocks is the obvious answer, and the
+  wire-hash to frame-offset index is one more tree in the log.
+- **Verified range reads.** The whole file as a BAO stream, so a peer
+  can verify a frame or a token range against the file's root. Hypercore
+  does this per log and it is the part of Dat worth borrowing as is.
 
 ## Constraints
 
 Whatever the file does inside, the replication contract stays: one node is
 one block under its existing hash, every commit keeps a stable content
 address, and a push after a commit ships one small block. Three designs
-from the summer were rejected for bending this. Compaction can drop
-blocks, it cannot change what a block is.
+from the summer were rejected for bending this. The file can store a node
+however it likes, it cannot change what a block is.
 
 The tree is deterministic and stays that way: the same facts give the same
 nodes and the same hashes on every replica. The file is not. Two replicas
-holding the same tree can lay their bytes out differently, compact at
-different times, and that is fine. Determinism is a property of the tree,
-not of the file.
-
-> 💭 The columnar node format is on main, but nobody has measured how
-> well successive versions of a node actually compress against each
-> other. Direction 2 rests on that number, so measure it first.
+holding the same tree can lay their bytes out differently, and that is
+fine. Determinism is a property of the tree, not of the file.
 
 ## Prior art
 
-The Dat DEPs are worth reading before spiking this, in particular
-[DEP-0004 HyperDB](https://www.datprotocol.com/deps/0004-hyperdb/). HyperDB
-keeps a key/value trie inside one append-only log. Each entry carries the
+[DEP-0004 HyperDB](https://www.datprotocol.com/deps/0004-hyperdb/) keeps a
+key/value trie inside one append-only log. Each entry carries only the
 trie pointers it changed and refers back to earlier entries by log index
-for everything else, so a node is never copied forward: the trie is
-spread over the log and realized by following pointers. That is the
-cross-node sharing I am after, done for tree structure rather than for
-tokens, and it is proof the realize-on-read model works at a database
-scale.
+for the rest, so a node is never copied forward. That is this idea applied
+to structure rather than tokens, and it shows realize-on-read works at
+database scale. Where it breaks: entries are addressed by position in a
+writer's feed, not by content hash, so names mean nothing across replicas;
+nothing is ever removed, deletions are tombstones that "persist in the
+database forever"; and the merkle tree over the log is per writer.
+[DEP-0002](https://www.datprotocol.com/deps/0002-hypercore/) has the
+flat-tree hashing. No DEP specifies an on-disk body layout, so there is
+no file format to copy, only the idea.
 
-Where the analogy breaks, and it breaks in the places that matter for us:
+Other places to look, each for one thing:
 
-- HyperDB addresses an entry by its position in a writer's log, not by
-  the hash of its content. Our contract is the opposite, a node is named
-  by the hash of its wire form and two replicas producing the same tree
-  produce the same names. The log position has no meaning outside its
-  feed.
-- Hypercore never removes anything. Deletions are tombstones that
-  "persist in the database forever" and there is no compaction in any
-  DEP. It answers none of direction 1.
-- The merkle tree over the log is Hypercore's, fixed by position, and
-  verification is of ranges of the log against a signed root. That is
-  the whole-file BAO idea, and it is the part worth borrowing as is.
-- One writer per feed. Multi-writer (DEP-0008) layers vector clocks over
-  several feeds. Our tree is deterministic across writers, so we do not
-  need that layer, but it also means none of their trie-merging applies.
-
-[DEP-0002 Hypercore](https://www.datprotocol.com/deps/0002-hypercore/) has
-the flat-tree layout and the hashing, and
-[DEP-0009](https://www.datprotocol.com/deps/0009-sleep-headers/) the SLEEP
-file headers. Neither specifies an on-disk body layout, so there is no
-file format to copy, only the idea.
+- **FSST** (Boncz, Neumann, Leis 2020): a static symbol table for string
+  compression that decodes any single string without touching the rest.
+  The token region could be FSST-coded without losing random access.
+- **Lucene's term dictionary**: a finite state transducer over sorted
+  terms, prefix-shared and randomly addressable. The closest existing
+  thing to "the dictionary is a tree you hop across".
+- **WiscKey and other key/value-separated LSMs**: keys in the index,
+  values in an append-only log by offset. Same split as frames and
+  tokens, and their garbage collection is what direction 1 would look
+  like if we ever need it.
+- **Parquet and DuckDB dictionary pages**: dictionary encoding per column
+  chunk, which is what segment nodes already do. Useful mostly as the
+  thing this idea generalizes past.
+- **Datomic and XTDB segments**: immutable, content-addressed segments in
+  a blob store with retraction and no deletion. The same growth problem,
+  solved there by not caring.
 
 ## Goal
 
-Find out whether a single-file format can hold a replica at a fraction of
-the size of file-per-block without giving up performance, and which of the
-two directions gets there.
+Find out whether one append-only, columnar log can hold a replica with
+every token stored once, at a fraction of the size of file-per-block,
+with lookups and reads as cheap or nearly as cheap as the block-based
+store.
 
 ## What success looks like
 
@@ -151,3 +152,15 @@ tree.
 A spike that only hits the size target by giving up the archive property,
 or only hits performance by growing like today, has answered the question
 with a no, which is also fine.
+
+## What we tried before
+
+DCAA on `claude/perf-6-dcaa-spike` (July 2026): append-only, blake3
+addressed, BAO outboard for range verification, sorted index with
+per-commit deltas. As built, with an fdatasync per commit, it was slower
+than file-per-block on every write row (2.74 s vs 1.69 s on the 500 commit
+SE replay), and I decided against it. With the fsync taken out it came in
+at 933 ms on the same replay, so the gap is the fsync, not the format, but
+nobody ever ran a read benchmark against it. It stored whole blocks, so it
+grew exactly like the directory it replaced. The index, footer and
+recovery design is still worth reusing.
