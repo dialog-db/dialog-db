@@ -13,11 +13,14 @@ two directions below attack it from different sides.
 
 I want a single file instead. We spiked one over the summer, DCAA on
 `claude/perf-6-dcaa-spike`: append-only, blake3 addressed, BAO outboard for
-range verification, sorted index with per-commit deltas. It was 1.8× faster
-than file-per-block at equal durability, so the machinery is not the
-problem. It stalled because it was append-only and had exactly the same
-growth as the directory it replaced. Append-only on its own just keeps
-growing.
+range verification, sorted index with per-commit deltas. As built, with an
+fdatasync per commit, it was slower than file-per-block on every write
+row (2.74 s vs 1.69 s on the 500 commit SE replay), and I decided against
+it. With the fsync taken out it came in at 933 ms on the same replay, so
+the gap is the fsync, not the format, but nobody ever ran a read
+benchmark against it, so speed is open, not settled. The part that is
+settled: it was append-only and had exactly the same growth as the
+directory it replaced. Append-only on its own just keeps growing.
 
 There are two ways I think this could go, and I would like both explored:
 
