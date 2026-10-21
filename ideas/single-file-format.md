@@ -34,6 +34,31 @@ There are two ways I think this could go, and I would like both explored:
    ones compress away to almost nothing. If that works, append-only is no
    longer a big deal and we keep the crash-safety that comes with it.
 
+Worth unpacking what direction 2 actually means. Segment nodes already
+tokenize and column-encode: within one node an entity, an attribute, a
+domain shows up once, and the node's slices point into that buffer. What
+that does not do is help across nodes, and that is where the duplication
+is. The same entity sits in the EAV, AEV and VAE nodes, and every
+superseded version of a node carries the same tokens again. In one file
+with the same kind of encoding there would be no copies of a token
+anywhere: nodes, indexes and old versions all point into one dictionary.
+
+The node as the rest of the system sees it does not change. When a node
+is read or sent, the file realizes it copy-on-write into the current wire
+format, an independent block, and it is still referenced by the hash of
+that wire form. The file stores something else, the hash is of what goes
+on the wire.
+
+What that opens up, and nobody has sized yet:
+
+- The file needs an index from wire hash to where the node's pieces live,
+  since the hash is no longer the hash of any bytes stored.
+- Realizing and hashing a node on every read is CPU the file-per-block
+  store does not spend. Caching the realized block is the obvious answer,
+  so this is a measurement, not a blocker.
+- The dictionary grows too. How it gets compacted when tokens die with
+  their last node is its own question.
+
 Either way it is still an archive: you look up a block by hash and get it
 back verified. Whole-file BAO is the obvious extension, so the file itself
 is content-addressed and a peer can verify a byte range of it.
