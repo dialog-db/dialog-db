@@ -3,7 +3,7 @@
 ## Idea
 
 A replica on native is a directory of files, one per block. That is simple
-but it is the wrong shape for what the prolly tree actually does: every
+but it is the wrong shape for what the dialog search tree actually does: every
 commit supersedes a spine of nodes and nothing ever reclaims the old ones,
 so the directory is the sum of every node version ever written. On the
 Stack Exchange replay at 2048 commits the live tree is ~49 MB and the
