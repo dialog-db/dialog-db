@@ -82,6 +82,132 @@ than a commit on a history as deep written by one origin. A dead origin
 costs its 48 region bytes once per replica instead of once per
 operation.
 
+### A snapshot can be exported without the bytes of its assets
+
+[#623](https://github.com/dialog-db/dialog-db/pull/623)
+
+`SnapshotExport::without_assets` exports a revision's tree and its spilled
+values, and leaves the bytes of each asset the revision records where they
+are. A replica that adopts the head this way holds every fact of it, such as
+`dialog.asset/size`, and none of the bytes those facts name; they come on the
+first read of the asset, as they do after a pull.
+
+What this changes for you:
+
+- `SnapshotExport::without_assets()` is new. An export that does not call it
+  carries the asset bytes, as before.
+
+Why: a member who joins a space should not download every file in it before
+they can read its facts. With the bytes left behind, a file they never open
+costs them its facts alone.
+
+### A pull settles rival merges of simultaneous mutual pulls on one head
+
+[#623](https://github.com/dialog-db/dialog-db/pull/623)
+
+Two replicas that pull each other at the same moment each mint a merge of the
+same history. The two merges hold the same data and differ only by their own
+revision records, so a merge of them matched neither tree, and every round of
+simultaneous pulls minted two new merges. A pull now recognises the pair, from
+the two heads' contexts and revision records, and both sides settle on the
+merge with the greater version: that side keeps its head and advances only its
+sync base, and the other adopts that head by its root, as a fast-forward does.
+
+What this changes for you:
+
+- Two replicas that keep pulling each other reach the same head and stop
+  minting merges, where they used to mint two more every round.
+- The side that adopts the greater merge drops its own, which recorded no
+  claim of its own.
+
+Why: two replicas that sync with each other continuously, as two devices of
+one person do, pulled at the same moment often enough to grow their history
+without bound.
+
+### A batch lands when another writer moved the induction watermark
+
+[#623](https://github.com/dialog-db/dialog-db/pull/623)
+
+Publishing a batch advances the branch's induction watermark to the head it
+landed. A second writer over the same replica, another process over the same
+store, can land a commit on that head and advance the watermark in the window
+before this write. The publish then failed with `VersionMismatch`, though its
+head had landed. It now reads the watermark again and moves it to its head
+only while the watermark still stands at the head the batch built on, or at
+none; anywhere else, another writer moved it on.
+
+What this changes for you:
+
+- `TransactionPublish::perform` no longer fails with
+  `PublishError::VersionMismatch` from the induction watermark after its head
+  has landed. It still fails that way when the head itself moved.
+
+Why: a commit whose head has landed is in the branch. Failing it told the
+caller to retry a write that had already happened.
+
+### A peer or a session names the replica it writes as
+
+[#623](https://github.com/dialog-db/dialog-db/pull/623)
+
+`PeerBuilder::profile` names the profile a peer writes as, where it is not the
+peer's home. A session of a persona that writes into a space of that persona
+names the persona, and so does a device of a persona whose state branch is in
+a repository of the device. The profile names the replica, not only the
+authority: a branch the peer opens keeps its metadata, its tracking and its
+records in the registry under the profile's replica of the repository.
+
+What this changes for you:
+
+- `PeerBuilder::profile(did)` is new. A peer that does not call it writes as
+  its home, as before.
+- With a profile, each revision names the profile as its authority, and every
+  entity the peer writes derives from the profile's replica, not the home's.
+
+Why: a Wasm component that holds a space is given that space as the one
+storage it can reach, yet it writes on behalf of a persona. Its revisions have
+to say so, and what it records about its replica has to be the persona's.
+
+### A prepared pull names what it merges and what is new in it
+
+[#623](https://github.com/dialog-db/dialog-db/pull/623)
+
+A caller can now decide, before it commits a pull, whether each revision the
+pull brings in may enter the branch: checking the authority each one names,
+say. `PreparedPull::upstream` is the head the prepare fetched and verified,
+the one revision the commit adopts. `PreparedPull::novelty` lists the
+revisions the commit brings into the branch, ancestors first, each as a
+`NewRevision` with its record and its claims. `history::novelty` in
+`dialog-artifacts` is the walk underneath it.
+
+What this changes for you:
+
+- `PreparedPull::upstream`, `PreparedPull::novelty`, `NewRevision` and
+  `dialog_artifacts::history::novelty` are new.
+- A revision whose record neither the upstream nor the branch holds fails
+  the walk with `DialogArtifactsError::IncompleteHistory`, where
+  `history::log` skips it.
+- A no-op pull names nothing new, and neither does one whose commit keeps the
+  branch's head and advances only its sync base.
+
+Why: a pull adopted whatever its peer's head held. A replica that checks what
+it accepts needs to see every revision a pull would bring in before it lands.
+
+### A replica can be reached at addresses its embedder keeps
+
+[#623](https://github.com/dialog-db/dialog-db/pull/623)
+
+`ConnectedReplica::reached_at` reaches a replica held at a peer at addresses
+the embedder gives it, without recording them as contacts of the host.
+
+What this changes for you:
+
+- `ConnectedReplica::reached_at(host, peer, addresses, subject)` is new. Its
+  `addresses` must not be empty.
+
+Why: an embedder that keeps the addresses of its peers itself, as a daemon
+that dials its peers does, had to record each one as a contact before it
+could reach the replica.
+
 ### Dialog builds for WASI, and a key held outside the process can sign
 
 [#594](https://github.com/dialog-db/dialog-db/pull/594)
@@ -676,6 +802,8 @@ thread multiplies whatever it holds by the size of the thread pool.
   needed beyond that.
 - `ACTIVE_CONTEXT` is part of the format. Two replicas must project a
   map to the same bytes, so changing it is a format change of its own.
+- Nothing stored is rewritten by the changes of #623, an older release reads
+  what this one writes, and an embedder runs nothing.
 - `UcanAddress` encodes an optional `socket`, left out when absent, so an address without one keeps its bytes. An older replica reads an address that names a socket and drops the socket, reaching the peer over requests.
 - Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
 - The socket carries text `ping` and `pong` messages beside its frames. A service's socket must answer `ping` with `pong`, or a client closes the connection every `Liveness::deadline`; no released service has a socket, so none predates this.

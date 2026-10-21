@@ -290,13 +290,16 @@ impl BatchPublish {
                 }
                 .into());
             }
-            if induction.content().as_ref() != Some(&tip) {
-                induction.publish(tip.clone()).perform(env).await?;
-            }
+            advance_watermark(&induction, &tip, Some(tip.version()), env).await?;
             retract_from_overlay(&overlay, overlay_retractions)?;
             return Ok(tip);
         }
 
+        // The head the chain built on, by the first parent of its first
+        // link: where the watermark stands when no other writer moved it.
+        let base = chain
+            .first()
+            .and_then(|(_, record)| record.parents.first().cloned());
         head.publish(tip.clone(), env).await?;
         retract_from_overlay(&overlay, overlay_retractions)?;
 
@@ -313,11 +316,50 @@ impl BatchPublish {
 
         // Advance the induction watermark: every staged commit ran
         // commit-time induction, so the published head is fully induced.
-        if induction.content().as_ref() != Some(&tip) {
-            induction.publish(tip.clone()).perform(env).await?;
-        }
+        advance_watermark(&induction, &tip, base, env).await?;
 
         Ok(tip)
+    }
+}
+
+/// Advance the induction watermark `induction` to `tip`, the head this
+/// writer has just landed, built on the head whose version is `base`.
+///
+/// The watermark is local to a replica, but one replica can have more
+/// than one writer: two processes over one store, say. In the window
+/// after the head moved and before this write, another writer can land
+/// a commit on `tip` and advance the watermark itself. A lost CAS here
+/// must not fail a commit whose head has already landed. So the cell is
+/// read again, and moved to `tip` only while it still stands at `base`,
+/// or at no revision. Anywhere else, another writer moved it on, or left
+/// it behind, which the next inducing instant catches up over.
+async fn advance_watermark<Env>(
+    induction: &Cell<Revision>,
+    tip: &Revision,
+    base: Option<Version>,
+    env: &Env,
+) -> Result<(), CommitError>
+where
+    Env: Provider<Publish> + Provider<Resolve> + ConditionalSync,
+{
+    if induction.content().as_ref() == Some(tip) {
+        return Ok(());
+    }
+    match induction.publish(tip.clone()).perform(env).await {
+        Err(PublishError::VersionMismatch { .. }) => {}
+        other => return other.map_err(CommitError::from),
+    }
+    induction.resolve().perform(env).await?;
+    if induction.content().as_ref() == Some(tip) {
+        return Ok(());
+    }
+    let standing = induction.content().map(|revision| revision.version());
+    if standing.is_some() && standing != base {
+        return Ok(());
+    }
+    match induction.publish(tip.clone()).perform(env).await {
+        Err(PublishError::VersionMismatch { .. }) => Ok(()),
+        other => other.map_err(CommitError::from),
     }
 }
 
@@ -921,6 +963,167 @@ mod tests {
             vec!["interloper", "seed", "staged"]
         );
 
+        Ok(())
+    }
+
+    /// A batch publishes while another writer has left the watermark behind
+    /// its base: the head lands, and the watermark is not dragged forward
+    /// from where the other writer left it, since it stands neither at the
+    /// base nor at no revision. A watermark left behind is caught up at the
+    /// next inducing instant.
+    #[dialog_common::test]
+    async fn it_publishes_a_batch_past_a_watermark_left_behind() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let genesis = branch
+            .transaction()
+            .assert(note("genesis")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let batch = branch
+            .transaction()
+            .assert(note("staged")?)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let tip = batch.revision();
+
+        // Another writer moves the watermark back to `genesis`.
+        let other = repo.branch("main").induction();
+        other.resolve().perform(&operator).await?;
+        other.publish(genesis.clone()).perform(&operator).await?;
+
+        let head = batch.publish().perform(&operator).await?;
+        assert_eq!(head, tip);
+        assert_eq!(branch.revision(), Some(tip));
+
+        let watermark = repo.branch("main").induction();
+        watermark.resolve().perform(&operator).await?;
+        assert_eq!(watermark.content(), Some(genesis));
+        Ok(())
+    }
+
+    /// Two writers over one replica: the first lands `tip` on `seed`, and
+    /// before it advances the watermark, the second lands `tip2` on `tip`
+    /// and advances the watermark to `tip2`. The first writer's advance
+    /// loses its compare-and-set against a cell it last saw at `seed`; it
+    /// does not fail, and leaves the watermark at `tip2`, past its own
+    /// head.
+    #[dialog_common::test]
+    async fn it_leaves_a_watermark_another_writer_moved_past_the_tip() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let seed = branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        // The first writer's view of the watermark, read before the moves.
+        let stale = repo.branch("main").induction();
+        stale.resolve().perform(&operator).await?;
+        assert_eq!(stale.content(), Some(seed.clone()));
+
+        let tip = branch
+            .transaction()
+            .assert(note("tip")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        // The second writer, through a handle of its own, lands `tip2` on
+        // `tip` and advances the watermark to it.
+        let other = repo.branch("main").open().perform(&operator).await?;
+        let tip2 = other
+            .transaction()
+            .assert(note("tip2")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let standing = repo.branch("main").induction();
+        standing.resolve().perform(&operator).await?;
+        assert_eq!(
+            standing.content(),
+            Some(tip2.clone()),
+            "the other writer moved it on"
+        );
+
+        super::advance_watermark(&stale, &tip, Some(seed.version()), &operator).await?;
+
+        let watermark = repo.branch("main").induction();
+        watermark.resolve().perform(&operator).await?;
+        assert_eq!(watermark.content(), Some(tip2));
+        Ok(())
+    }
+
+    /// A writer whose view of the watermark is behind its head's base loses
+    /// its first compare-and-set to another writer that advanced the
+    /// watermark to that base. Read again, the cell stands at the base, so
+    /// the writer publishes again and lands the watermark at its tip.
+    #[dialog_common::test]
+    async fn it_advances_a_watermark_another_writer_left_at_the_base() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let seed = branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        // The writer's view of the watermark, read while it stood at `seed`.
+        let stale = repo.branch("main").induction();
+        stale.resolve().perform(&operator).await?;
+        assert_eq!(stale.content(), Some(seed));
+
+        // Another writer lands `base` and advances the watermark to it.
+        let base = branch
+            .transaction()
+            .assert(note("base")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        // The writer's own head, built on `base`.
+        let tip = branch
+            .transaction()
+            .assert(note("tip")?)
+            .commit()
+            .perform(&operator)
+            .await?
+            .revision();
+
+        let standing = repo.branch("main").induction();
+        standing.resolve().perform(&operator).await?;
+        assert_eq!(
+            standing.content(),
+            Some(base.clone()),
+            "the other writer left it at the base"
+        );
+
+        super::advance_watermark(&stale, &tip, Some(base.version()), &operator).await?;
+
+        let watermark = repo.branch("main").induction();
+        watermark.resolve().perform(&operator).await?;
+        assert_eq!(watermark.content(), Some(tip));
         Ok(())
     }
 
