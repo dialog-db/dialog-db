@@ -203,9 +203,9 @@ Index optimized for finding entities with specific attribute values. This index 
 
 Generic term for Probabilistic B-Tree structures maintaining sorted access to facts. DialogDB maintains three indexes (EAV, AEV, VAE) simultaneously, ensuring all common query patterns have optimal access paths without requiring query planning or index selection.
 
-### Probabilistic B-Tree (Prolly Tree)
+### Probabilistic B-Tree (Probabilistic Search Tree)
 
-Deterministic, content-addressed tree structure ensuring same data produces same tree regardless of insertion order. Prolly trees use content-based splitting decisions rather than child count, making them more optimal for replication.
+Deterministic, content-addressed tree structure ensuring same data produces same tree regardless of insertion order. Probabilistic search trees use content-based splitting decisions rather than child count, making them more optimal for replication. DialogDB's implementation is the dialog search tree (crate `dialog-search-tree`). Do not call the structure a "prolly tree".
 
 ### Index Node
 

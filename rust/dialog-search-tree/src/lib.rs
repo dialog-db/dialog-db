@@ -3,7 +3,7 @@
 //! A content-addressed search tree implementation.
 //!
 //! This crate provides [`PersistentTree`], a persistent key-value store backed
-//! by a prolly tree with content-addressed storage. Trees support efficient
+//! by a probabilistic search tree with content-addressed storage. Trees support efficient
 //! lookups, insertions, deletions, and range queries while maintaining
 //! structural sharing across versions.
 //!

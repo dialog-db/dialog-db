@@ -224,7 +224,7 @@ impl Exporter for Collect {
 /// A selector that constrains the entity, the attribute and the value
 /// pins every component of the index key, so the scan range collapses
 /// to a single exact key. Regression guard: the range must be treated
-/// inclusively or the entry is unreachable (the old prolly tree papered
+/// inclusively or the entry is unreachable (the old probabilistic search tree papered
 /// over this with a point-lookup special case for start == end ranges).
 #[dialog_common::test]
 async fn it_selects_fully_constrained_artifacts() -> Result<()> {

@@ -17,7 +17,7 @@ pub enum DialogArtifactsError {
     #[error("Storage operation failed: {0}")]
     Storage(String),
 
-    /// An error occurred in prolly tree-related code
+    /// An error occurred in probabilistic search tree-related code
     #[error("Tree operation failed: {0}")]
     Tree(String),
 
