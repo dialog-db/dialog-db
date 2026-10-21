@@ -120,6 +120,17 @@ Other places to look, each for one thing:
   a blob store with retraction and no deletion. The same growth problem,
   solved there by not caring.
 
+## Deliverable
+
+A single-file store that provides the capabilities dialog needs today, as
+a provider the rest of the system can be pointed at without knowing the
+difference. It serves `archive` (get, put, import of blocks by hash) and
+ideally `memory` too (cells, resolve, publish, watch), so a replica is one
+file. Archive only is acceptable for the spike, memory can come after.
+Along with it, the measurements below against the current system, on the
+same workloads, so the decision to adopt it is a comparison and not a
+guess.
+
 ## Goal
 
 Find out whether one append-only, columnar log can hold a replica with
@@ -142,16 +153,23 @@ Size means bytes on disk per live fact on the Stack Exchange replay, at
 2048 and 4096 commits, next to the file-per-block directory and the live
 tree.
 
-- The perf gate holds with the new archive underneath it.
+Success is no major slowdown and a clear win on space:
+
+- The perf gate holds with the new archive underneath it, or comes within
+  10% of today on instructions and bytes where it does not.
 - On-disk size at least an order of magnitude smaller than the
   file-per-block directory for the same replay, and growing with the live
   facts rather than with the number of commits.
 - Get by hash still works and still verifies.
 - A crash leaves the last commit intact.
 
-A spike that only hits the size target by giving up the archive property,
-or only hits performance by growing like today, has answered the question
-with a no, which is also fine.
+Failure is very little gain on space with a loss on performance: under 2×
+smaller, or slower than today by more than the gate allows. A spike that
+lands there has answered the question with a no, which is also fine.
+
+Anything in between (a big space win with a real slowdown, or a small win
+at equal speed) is not a verdict, it is a trade-off, and the spike should
+report the numbers and stop rather than pick for me.
 
 ## What we tried before
 
