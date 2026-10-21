@@ -154,7 +154,7 @@ The query layer treats both identically. It carries the bytes, and the consumer 
 
 ## Future: Records From Storage
 
-Today the storage layer fully deserializes every datum into an `Artifact` before the query layer sees it. Ideally, record values would arrive as raw bytes wrapped in `Record::from(bytes)`, with deserialization deferred to `realize` on demand. The prolly tree keys already encode enough information for filtering and grouping without deserializing the datum. Getting there requires changes to `ArtifactStore` and its consumers, but the `Record` type is designed with this path in mind.
+Today the storage layer fully deserializes every datum into an `Artifact` before the query layer sees it. Ideally, record values would arrive as raw bytes wrapped in `Record::from(bytes)`, with deserialization deferred to `realize` on demand. The probabilistic search tree keys already encode enough information for filtering and grouping without deserializing the datum. Getting there requires changes to `ArtifactStore` and its consumers, but the `Record` type is designed with this path in mind.
 
 ## Decision
 

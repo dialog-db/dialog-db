@@ -33,7 +33,7 @@ intrinsic, content-derived metadata lives in the blob index.
 
 ## The blob index
 
-The triple store maintains three index orderings over one prolly tree,
+The triple store maintains three index orderings over one probabilistic search tree,
 distinguished by a leading key tag: EAV (`0`), AEV (`1`), VAE (`2`). Two further
 tags are allocated after them:
 

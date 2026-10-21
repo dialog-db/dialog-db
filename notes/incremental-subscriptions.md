@@ -59,7 +59,7 @@ over the existing top-down engine.
 | Demand cone that **grows with data** (recursion, activated negation) | **Dynamic Magic Sets**: magic atoms maintained during evaluation; sound/complete for stratified | Alviano, *Dynamic Magic Sets* |
 | Demand **through stratified negation** | **`n.p` complement predicate** + stratified evaluation order; optimal (only query-relevant facts, O(1) per firing) | Tekle-Liu, *Extended Magic for Negation* (arXiv:1909.08246); Balbin et al. 1991 |
 | **Incremental** maintenance with retraction | **DRed** (over-delete, re-derive, insert); **FBF** for facts with multiple derivations | Gupta-Mumick-Subrahmanian 1993; Tekle-Liu |
-| Signed, range-scopable **delta** | prolly-tree `differentiate(range)` (`Add`/`Remove`, lazy, hash-skipping) | `dialog-prolly-tree` |
+| Signed, range-scopable **delta** | probabilistic search tree `differentiate(range)` (`Add`/`Remove`, lazy, hash-skipping) | `dialog-search-tree` |
 
 ### Negation via `n.p`
 
@@ -100,7 +100,7 @@ over-deleted set. Cardinality-one winner-selection is an instance: retracting th
   `env`/`binds`/`requires`, with `TryFrom<&AttributeQueryAll> for ArtifactSelector` restricting fetches
   to bound slots. The engine is already a top-down, SIPS-driven demand evaluator; what's absent is
   *reifying* that SIPS into a demand program.
-- **`dialog-prolly-tree::differentiate(other)`** yields `Stream<Change = Add | Remove>`: a signed delta
+- **`dialog-search-tree::differentiate(other)`** yields `Stream<Change = Add | Remove>`: a signed delta
   (`Remove` = negative weight / retraction), lazy and hash-skipping (`O(changed subtrees)`), and
   range-scopable via `expand(range)`. This is the delta source. The EAV/AEV/VAE indexes are three sort
   orders, giving three prefix-scopable diff views.
@@ -134,7 +134,7 @@ over-deleted set. Cardinality-one winner-selection is an instance: retracting th
 ## Pointers
 
 - This repo: `notes/dbsp.md` (IVM / selective-pull exploration + DBSP formalism), 
-  `dialog-prolly-tree/src/differential.rs` (delta + merge primitives), `dialog-query/src/planner/`
+  `dialog-search-tree/src/differential.rs` (delta + merge primitives), `dialog-query/src/planner/`
   (the implicit SIPS).
 - Papers: Tekle-Liu *Extended Magic for Negation* (arXiv:1909.08246): `n.p`, optimality, FBF; Alviano
   *Dynamic Magic Sets*: SIPS formalization + dynamic maintenance; Balbin et al. 1991 *Efficient

@@ -47,7 +47,7 @@ impl Relation {
     /// Returns a byte representation of this relation suitable for use within a key.
     ///
     /// The returned byte array is used for indexing and comparison operations
-    /// within the prolly tree structure.
+    /// within the probabilistic search tree structure.
     pub fn key_bytes(&self) -> &[u8; RELATION_LENGTH] {
         &self.0.key
     }

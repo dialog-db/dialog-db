@@ -8,7 +8,7 @@ We have a working Datalog query engine with a data store of facts represented as
 2. **Cycle Analyzer**: Detects cycles in queries during planning phase and rejects non-evaluable queries  
 3. **Selective Data Loading**: Only loads relevant subset of the data store during queries (can be a tiny slice of huge fact graphs)
 
-**Storage Architecture**: Similar to Datomic but using **probabilistic b-trees (prolly trees)** instead of traditional b-trees. The store is implemented as:
+**Storage Architecture**: Similar to Datomic but using **probabilistic b-trees (probabilistic search trees)** instead of traditional b-trees. The store is implemented as:
 
 - **Hash-addressed blobs** stored in commodity blob storage (e.g., S3)
 - **Partial replication** at query time with hierarchical caching:
@@ -18,7 +18,7 @@ We have a working Datalog query engine with a data store of facts represented as
 - **Mutable pointer** to latest store tree root (our revision concept)
 - **EAV, AEV, VAE indexes** with embedded values for efficient access patterns
 
-**Key Insight**: Incremental view maintenance can leverage prolly tree properties - when the root pointer changes, we can selectively replicate only the changed subtrees that are relevant to our queries, achieving partial replication of just the data needed for incremental updates.
+**Key Insight**: Incremental view maintenance can leverage probabilistic search tree properties - when the root pointer changes, we can selectively replicate only the changed subtrees that are relevant to our queries, achieving partial replication of just the data needed for incremental updates.
 
 The data store has the following interaction interface
 
@@ -126,11 +126,11 @@ We want to adopt DBSP for **incremental view maintenance** while preserving the 
 
 ## Hypothesis
 
-**Primary Hypothesis**: We can exploit properties of our prolly tree-based triple store and existing query planning capabilities to enable DBSP-based incremental view maintenance that only pulls facts relevant to specific queries, rather than processing all fact changes.
+**Primary Hypothesis**: We can exploit properties of our probabilistic search tree-based triple store and existing query planning capabilities to enable DBSP-based incremental view maintenance that only pulls facts relevant to specific queries, rather than processing all fact changes.
 
 **Secondary Hypothesis**: If we can successfully implement selective fact pulling for incremental maintenance, the same mechanism should work for initial query evaluation, allowing us to replace our top-down evaluation with a unified DBSP approach that maintains the same efficiency characteristics.
 
-**Key Insight**: Our existing query planner's ability to reorder conjuncts and detect cycles, combined with the prolly tree's EAV/AEV/VAE indexes and partial replication capabilities, should allow us to:
+**Key Insight**: Our existing query planner's ability to reorder conjuncts and detect cycles, combined with the probabilistic search tree's EAV/AEV/VAE indexes and partial replication capabilities, should allow us to:
 
 1. **Detect relevant changes** by comparing root pointers (revisions) 
 2. **Selectively replicate** only changed subtrees that contain facts relevant to our queries
@@ -239,7 +239,7 @@ Given our existing query planning and cycle detection capabilities, let's explor
 The exploration should validate whether we can:
 
 1. **For Incremental Maintenance**: When the store root pointer changes (indicating new facts), use our query planner's analysis to:
-   - Determine which prolly tree subtrees could contain facts affecting existing materialized views
+   - Determine which probabilistic search tree subtrees could contain facts affecting existing materialized views
    - Leverage EAV/AEV/VAE index structure to identify relevant subtree ranges
    - Replicate only those subtrees through our partial replication system
    - Process the replicated fact changes through DBSP operators
@@ -255,7 +255,7 @@ Specifically, we want to compute matches like `{ person: Entity, name: string, a
 
 - Using our **existing query planner** to determine optimal conjunct ordering and identify required index access patterns
 - Leveraging **cycle detection** to ensure queries are evaluable 
-- Exploiting **prolly tree structure** and **EAV/AEV/VAE indexes** to determine which subtrees need replication
+- Exploiting **probabilistic search tree structure** and **EAV/AEV/VAE indexes** to determine which subtrees need replication
 - Using **query structure knowledge** (attributes, entities) to identify specific subtree ranges in the indexes
 - After evaluating conjuncts, using **variable bindings** to further constrain subsequent subtree replication
 - Leveraging **partial replication and caching hierarchy** to minimize data transfer and storage overhead
@@ -263,5 +263,5 @@ Specifically, we want to compute matches like `{ person: Entity, name: string, a
 
 The key question is whether this approach can provide a **unified evaluation strategy** that works for both initial queries and incremental maintenance while:
 - Preserving current performance characteristics through selective subtree replication
-- Leveraging prolly tree properties for efficient change detection and partial replication
+- Leveraging probabilistic search tree properties for efficient change detection and partial replication
 - Minimizing blob store access through intelligent caching and replication strategies

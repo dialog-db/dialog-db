@@ -5,12 +5,12 @@
 //!
 //! A Terminal User Interface (TUI) for debugging and inspecting Dialog databases.
 //! This crate provides interactive tools to explore database contents, view facts,
-//! and navigate the prolly tree structure that underpins Dialog DB.
+//! and navigate the probabilistic search tree structure that underpins Dialog DB.
 //!
 //! ## Features
 //!
 //! - **Facts Viewer**: Browse and inspect database facts in a table format
-//! - **Tree Explorer**: Navigate the prolly tree structure with expandable nodes
+//! - **Tree Explorer**: Navigate the probabilistic search tree structure with expandable nodes
 //! - **Interactive Navigation**: Keyboard-driven interface for efficient exploration
 //! - **CSV Import**: Load data from CSV files for analysis
 //!

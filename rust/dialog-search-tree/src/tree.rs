@@ -26,7 +26,7 @@ use crate::{
 /// side it cuts through (`None` where the range runs past the node's edge).
 type Cut<'a> = (Blake3Hash, Option<&'a [u8]>, Option<&'a [u8]>);
 
-/// A key-value store backed by a ranked prolly tree with content-addressed
+/// A key-value store backed by a ranked probabilistic search tree with content-addressed
 /// storage.
 ///
 /// The [`PersistentTree`] represents an immutable, persistent data structure
@@ -2557,7 +2557,7 @@ mod tests {
             }
         }
 
-        // A canonical prolly tree must produce the same structure — and
+        // A canonical probabilistic search tree must produce the same structure — and
         // therefore the same root hash — for the same set of entries,
         // regardless of insertion order.
         assert_eq!(

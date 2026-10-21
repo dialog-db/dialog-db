@@ -2,7 +2,7 @@ use crate::{BOTTOM_RANK, Hashed, Manifest};
 
 pub mod audit;
 
-/// The rank of a node in the prolly tree.
+/// The rank of a node in the probabilistic search tree.
 pub type Rank = u64;
 
 /// Strategy for assigning ranks to keys and separators, and for deriving the

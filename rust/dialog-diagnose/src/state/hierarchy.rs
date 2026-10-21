@@ -1,4 +1,4 @@
-//! Tree hierarchy module for loading and navigating prolly tree nodes.
+//! Tree hierarchy module for loading and navigating probabilistic search tree nodes.
 
 use std::sync::mpsc::Sender;
 
@@ -9,7 +9,7 @@ use dialog_storage::Blake3Hash;
 use super::store::WorkerMessage;
 use crate::Blocks;
 
-/// Represents a node in the prolly tree hierarchy.
+/// Represents a node in the probabilistic search tree hierarchy.
 ///
 /// Tree nodes can be either leaf segments containing actual data entries,
 /// or branch nodes containing references to child nodes.
@@ -34,7 +34,7 @@ pub enum TreeNode {
 /// Background worker for loading tree node hierarchy data.
 ///
 /// This worker loads individual tree nodes on-demand as the UI navigates
-/// the prolly tree structure.
+/// the probabilistic search tree structure.
 pub struct ArtifactsHierarchy {
     /// Where the tree's blocks load from
     storage: Blocks,
@@ -47,7 +47,7 @@ impl ArtifactsHierarchy {
     ///
     /// # Arguments
     ///
-    /// * `tree` - The prolly tree index to load nodes from
+    /// * `tree` - The probabilistic search tree index to load nodes from
     /// * `tx` - Channel sender for worker messages
     pub fn new(storage: Blocks, tx: Sender<WorkerMessage>) -> Self {
         Self { storage, tx }

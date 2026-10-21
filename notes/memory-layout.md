@@ -56,4 +56,4 @@ remote/{name}/branch/{branch}/revision    Cell<Revision>
 - `SiteAddress` -- enum: `S3(Address)` | `Ucan(UcanAddress)`. Connection info only.
 - `RemoteAddress` -- wraps `SiteAddress` with a `subject: Did` identifying which repository at the site.
 - `UpstreamState` -- enum: `Local { branch, tree }` | `Remote { name, branch, tree }`. The `subject` DID lives on the `RemoteAddress`, not on `UpstreamState`.
-- `Revision` -- `{ subject, issuer, authority, tree, cause, period, moment }`. The `tree` is a `NodeReference` (blake3 hash of the prolly tree root).
+- `Revision` -- `{ subject, issuer, authority, tree, cause, period, moment }`. The `tree` is a `NodeReference` (blake3 hash of the probabilistic search tree root).

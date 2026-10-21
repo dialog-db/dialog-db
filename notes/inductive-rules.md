@@ -771,7 +771,7 @@ complete input history, which partial replication falsifies (missing
 fork/merge of arrangements is undefined.
 
 But an arrangement is just an indexed collection of tuples — and the
-EAV/AEV/VAE prolly trees *are* that, already CoW-forkable, already
+EAV/AEV/VAE probabilistic search trees *are* that, already CoW-forkable, already
 demand-replicable, already the merge substrate. **Dialog is DBSP
 where the only arrangements are the base indexes** and intermediate
 results are recomputed per firing — TREAT's position exactly. The
@@ -783,7 +783,7 @@ selective per-rule materialization re-enters.
 1. **Bud's evaluation discipline**: semi-naive delta-joins — stimulus
    rows bind the triggering premise, remaining premises probe the
    tree indexes. Cost per firing ∝ delta join fan-out, never relation
-   size; the prolly tree plays the role Bud's in-memory collections
+   size; the probabilistic search tree plays the role Bud's in-memory collections
    play.
 2. **Dispatch caches** (footprint, discrimination, reads-closure),
    head-keyed, recompiled on rule churn, content-address-shared.
