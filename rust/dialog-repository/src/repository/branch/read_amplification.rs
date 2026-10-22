@@ -625,6 +625,102 @@ async fn context_cost_by_origins() -> Result<()> {
     Ok(())
 }
 
+/// What one point query costs on a replica that adopted a head by root
+/// and remembers nothing, the first query a device that faults blocks in
+/// on demand runs: the root frame's bytes, and the blocks and bytes the
+/// query reads in all. The head's history carries 100 facts and then
+/// `origins` one-commit origins, each a writer adopting the previous one's
+/// head.
+async fn measure_first_query(origins: usize) -> Result<()> {
+    use dialog_common::Blake3Hash;
+    use dialog_query::attribute::Relation;
+    use dialog_query::query::Output as _;
+    use dialog_query::{AttributeQuery, Claim, Term, the};
+
+    let (operator, profile) = test_session_with_peer().await;
+    let name = unique_name("first-query");
+    let repo = profile
+        .space(name.clone())
+        .open()
+        .perform(&operator)
+        .await?;
+    let main = repo.branch("main").open().perform(&operator).await?;
+    main.commit(stream::iter((0..100).map(|i| assert_fact(i, "seed"))))
+        .perform(&operator)
+        .await?;
+    let mut previous = main.clone();
+    for i in 0..origins {
+        let writer = repo
+            .branch(format!("writer-{i}"))
+            .open()
+            .perform(&operator)
+            .await?;
+        writer.pull().from(&previous).perform(&operator).await?;
+        writer
+            .commit(stream::iter(vec![assert_fact(100 + i, "origin")]))
+            .perform(&operator)
+            .await?;
+        previous = writer;
+    }
+    main.pull().from(&previous).perform(&operator).await?;
+
+    let reader = profile
+        .session(b"reader")
+        .space(profile.state())
+        .allow(dialog_capability::Subject::any())
+        .await?;
+    let reader = Counting::new(reader);
+    let local = profile.space(name).open().perform(&reader).await?;
+    let upstream = local.branch("main").open().perform(&reader).await?;
+    let adopter = local.branch("adopter").open().perform(&reader).await?;
+    adopter.pull().from(&upstream).perform(&reader).await?;
+    let head = adopter.revision().expect("the adopter took main's head");
+
+    let cache = adopter.node_cache();
+    let before = cache.bytes();
+    reader.reset();
+    let store = crate::NetworkedIndex::new(&reader, adopter.archive().index(), None);
+    crate::Index::from_hash_with_cache(Blake3Hash::from(*head.tree.hash()), cache.clone())
+        .manifest(&store)
+        .await?;
+    let root = cache.bytes() - before;
+
+    let rows: Vec<Claim> = adopter
+        .query()
+        .select(AttributeQuery::from(
+            Term::<Relation>::from(the!("bench/field"))
+                .of(Term::<dialog_artifacts::Entity>::from(
+                    "user:7".parse::<dialog_artifacts::Entity>()?,
+                ))
+                .is(Term::<String>::var("is")),
+        ))
+        .perform(&reader)
+        .try_vec()
+        .await?;
+    assert_eq!(rows.len(), 1, "the point query finds its fact");
+    let reads = reader.block_reads();
+    let bytes = cache.bytes() - before;
+    println!("| {origins:>7} | {root:>10} | {reads:>10} | {bytes:>10} |");
+    Ok(())
+}
+
+/// Prints, per origin count, what a first point query costs on a replica
+/// that adopted a head by root. `#[ignore]`d: a measurement.
+#[dialog_common::test]
+#[ignore]
+async fn first_query_by_origins() -> Result<()> {
+    let cap: usize = env::var("DIALOG_RA_MAX_ORIGINS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(10_000);
+    println!("| origins | root bytes | block reads | bytes read |");
+    println!("|---------|------------|-------------|------------|");
+    for origins in [1, 1_000, 10_000].into_iter().filter(|n| *n <= cap) {
+        measure_first_query(origins).await?;
+    }
+    Ok(())
+}
+
 /// Prints a table of block reads, total effect dispatches, and wall
 /// time per scenario and depth. `#[ignore]`d: a measurement, not an
 /// assertion; see the module docs for the invocation.
