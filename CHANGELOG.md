@@ -14,6 +14,76 @@ says how to cut a release.
 
 ## Unreleased
 
+### A head carries no causal context, and its tree carries all of it
+
+[#625](https://github.com/dialog-db/dialog-db/pull/625)
+
+A head no longer carries one watermark per origin its history ever
+included. It carries none, and a signed marker saying its tree holds
+them, in a new context region with one entry per origin. The region is
+exact for every origin except the head's own: that entry is where the
+writer's chain of commits began, and a reader brings it up to the head
+from the head's edition, one edition and one revision per commit. A
+commit on a head of its own origin therefore writes nothing to the
+region. A commit on another origin's head writes two entries, and a
+merge writes its own entry and every entry its two sides hold
+differently. A pull decides "nothing new" from its own context and the
+upstream head's version, and a fast-forward from the two heads' editions
+when they share an origin, at zero reads; a fast-forward across origins
+reads the upstream's region, its root and a leaf.
+
+What this changes for you:
+
+- `Revision` has a field `region: bool`. A struct literal must name it.
+- `Revision::context` is `None` on every head this release mints. A
+  head's whole context is in its branch's memo
+  (`Branch::contexts().cached(&version)`), in its tree
+  (`history::context_in`, then `Revision::context_from_region`), or
+  derived by the ancestry walk (`history::context_of`).
+  `Revision::inline_context` gives the context of a head minted before
+  the region, and `Revision::publish_region` marks a head as carrying
+  its context in its tree.
+- `Context::get`, `Context::set` and `FromIterator<(Origin, Watermark)>`
+  are new, and so is `Watermark::check`, the per-entry bounds
+  `Revision::verify` applies. `EDITION_CEILING` moves to
+  `dialog_capability::history` and stays exported from `identity`.
+- `ContextCache` holds `Arc<Context>`. `cached` and `context_of` return
+  one, and `insert` takes anything that converts into one.
+  `merge::screen_data` takes anything that converts into an
+  `Arc<Context>`.
+- The context region is `CONTEXT_KEY_TAG` (6). It comes with
+  `context_key`, `context_entry`, `read_context_entry`,
+  `merge::context_scope`, `merge::without_context`,
+  `history::context_in`, `history::region_writes` and `history::Held`.
+- `Revision::verify` refuses a head that claims both an inline context
+  and a context region. A pull refuses a head whose region holds no
+  entry for the head's own origin, holds it above the head, or holds an
+  entry outside the watermark bounds, as `DialogArtifactsError::InvalidKey`,
+  and keeps its own head.
+- `Revision::precedence` compares two heads by their contexts only when
+  both carry them inline, and orders two heads of one origin exactly by
+  edition. Any other pair is answered from editions without reading
+  either tree: a higher edition is `After`, and one at or below the
+  other's is `Concurrent`, never `Before`. A cell watcher therefore
+  fetches a lower head of another origin (a branch reset to it, or one
+  delivered out of order) instead of dropping it as stale.
+- A fast-forward between heads of different origins now reads the
+  upstream's root and the path to its region's leaf (3 blocks in the
+  tests); before, it read nothing.
+- `diagnose --head <revision cell>` prints the origin count and recent
+  writers of a head that carries its context inline, and
+  `ContextProfile::from_region` profiles one from its region's entries.
+
+Why: every head carried every origin that ever wrote, so every commit
+signed and every pull and cell watcher moved a head whose size grew with
+the number of writers, dead ones included. Atop 10 000 origins a head
+was 390 kB, its signed payload 480 kB, and a one-fact commit took
+5.4 ms, against 0.25 ms atop 10. Now the head is under 300 bytes and its
+signed payload 183 bytes at any origin count, and a one-fact commit atop
+10 000 origins costs what one atop a history as deep from one origin
+does (2.4 ms against 2.3 ms). A dead origin costs its 48
+region bytes once per replica instead of once per operation.
+
 ### A differential over a buffer holding several ops for one key compares the newest op on each side
 
 [#630](https://github.com/dialog-db/dialog-db/pull/630)
@@ -783,8 +853,17 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
-- Nothing stored is rewritten by the changes of #623, an older release reads
-  what this one writes, and an embedder runs nothing.
+- An older replica holds heads that carry their whole context inline,
+  or none, and trees with no context region. Nothing is rewritten on
+  upgrade: those heads verify under their own payload shapes and pull as
+  before. The first head this release mints on top of one writes the
+  whole map into its tree's region, once, in the same batch as its
+  revision record.
+- An older release cannot verify a head this release mints: its signed
+  payload ends in a `0x02` marker the older release does not know, so
+  its pull refuses the head as an invalid signature. Upgrade every
+  replica that pulls from one running this release. Nothing an embedder
+  runs is needed beyond that.
 - `UcanAddress` encodes an optional `socket`, left out when absent, so an address without one keeps its bytes. An older replica reads an address that names a socket and drops the socket, reaching the peer over requests.
 - Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
 - The socket carries text `ping` and `pong` messages beside its frames. A service's socket must answer `ping` with `pong`, or a client closes the connection every `Liveness::deadline`; no released service has a socket, so none predates this.

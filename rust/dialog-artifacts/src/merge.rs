@@ -61,9 +61,9 @@ use crate::key::varkey::{ValueRef, parse_key, parse_key_ref};
 use crate::tree::ArtifactTree;
 use crate::tree::fetch_spilled;
 use crate::{
-    AttributeKey, AttributeKeyPart, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum, ENTITY_KEY_TAG, Entity,
-    EntityKey, EntityKeyPart, FromKey as _, HISTORY_KEY_TAG, Key, KeyViewConstruct,
-    KeyViewMut as _, Relation, State, VALUE_KEY_TAG, ValueKey,
+    AttributeKey, AttributeKeyPart, BLOB_KEY_TAG, CONTEXT_KEY_TAG, COVERAGE_KEY_TAG, Datum,
+    ENTITY_KEY_TAG, Entity, EntityKey, EntityKeyPart, FromKey as _, HISTORY_KEY_TAG, Key,
+    KeyViewConstruct, KeyViewMut as _, Relation, State, VALUE_KEY_TAG, ValueKey,
 };
 
 /// The full key span of one region tag.
@@ -115,6 +115,45 @@ pub fn full_scope() -> [RangeInclusive<Key>; 1] {
 /// records, enumerated by graft repair.
 pub fn coverage_scope() -> [RangeInclusive<Key>; 1] {
     [tag_span(COVERAGE_KEY_TAG)]
+}
+
+/// The context region's key range: one watermark per origin the tree's
+/// head has observed (see [`context_key`](crate::context_key)).
+///
+/// No merge pass integrates it. Every head minted by a merge writes the
+/// region entries it changes directly
+/// ([`region_writes`](crate::history::region_writes)), so the screens
+/// never see a context entry, and a graft's contested spans leave it out
+/// ([`without_context`]).
+pub fn context_scope() -> [RangeInclusive<Key>; 1] {
+    [tag_span(CONTEXT_KEY_TAG)]
+}
+
+/// `spans` with the context region cut out of each, for a merge pass that
+/// integrates entries: the region is written whole by the head the merge
+/// mints, never merged entry by entry.
+pub fn without_context(spans: Vec<RangeInclusive<Key>>) -> Vec<RangeInclusive<Key>> {
+    let [region] = context_scope();
+    let (low, high) = (region.start().clone(), region.end().clone());
+    let mut kept = Vec::with_capacity(spans.len());
+    for span in spans {
+        let (start, end) = span.into_inner();
+        if end < low || start > high {
+            kept.push(start..=end);
+            continue;
+        }
+        if start < low
+            && let Some(below) = predecessor_of(&low)
+        {
+            kept.push(start.clone()..=below);
+        }
+        if end > high
+            && let Some(above) = key_successor(&high)
+        {
+            kept.push(above..=end);
+        }
+    }
+    kept
 }
 
 /// Convert conservative divergence bounds (as reported by
@@ -336,10 +375,14 @@ pub fn unacquainted(ours: &Context, theirs: &Context) -> bool {
 /// by the receiver's causal context (R1); incoming guarded removes pass
 /// through (R2). Run — and integrate — after [`screen_history`]'s pass,
 /// so coverage has already retired what causality decided.
-pub fn screen_data<'a, C>(changes: C, context: Context) -> impl Differential<Key, State<Datum>> + 'a
+pub fn screen_data<'a, C>(
+    changes: C,
+    context: impl Into<Arc<Context>>,
+) -> impl Differential<Key, State<Datum>> + 'a
 where
     C: Differential<Key, State<Datum>> + 'a,
 {
+    let context: Arc<Context> = context.into();
     async_stream::try_stream! {
         futures_util::pin_mut!(changes);
         while let Some(change) = futures_util::StreamExt::next(&mut changes).await {
@@ -509,7 +552,7 @@ fn key_successor(key: &Key) -> Option<Key> {
         // successor here would hand `partition_spans` a cursor above the
         // top, closing a degenerate final piece whose start sorts above
         // its end — and a divergence span reaching the top is the common
-        // case, since the coverage region is the highest region.
+        // case, since the history-side regions sort highest.
         return None;
     }
     let filler_at = bytes.len().checked_sub(KEY_SPAN_FILLER);
@@ -665,6 +708,8 @@ fn predecessor_of(key: &Key) -> Option<Key> {
 #[cfg(test)]
 mod span_tests {
     use super::*;
+    use crate::context_key;
+    use crate::history::Origin;
 
     fn key(at: u8) -> Key {
         Key::from(vec![at])
@@ -676,6 +721,30 @@ mod span_tests {
 
     fn bottom() -> Key {
         bottom_key()
+    }
+
+    /// Cutting the context region out of a span leaves exactly the keys
+    /// on either side of it: a span inside the region vanishes, one
+    /// across it splits in two, and one beside it is untouched.
+    #[test]
+    fn it_cuts_the_context_region_out_of_spans() {
+        let [region] = context_scope();
+        let inside = context_key(&Origin::from([7u8; 32]));
+        assert!(region.contains(&inside));
+
+        assert!(without_context(vec![inside.clone()..=inside.clone()]).is_empty());
+        assert_eq!(
+            without_context(vec![key(0)..=key(4)]),
+            vec![key(0)..=key(4)],
+            "a span below the region is untouched"
+        );
+
+        let split = without_context(vec![bottom()..=top()]);
+        assert_eq!(split.len(), 2);
+        assert!(split.iter().all(|span| !span.contains(&inside)));
+        assert!(split[0].contains(&key(5)), "coverage keys stay in");
+        assert!(split[1].contains(&key(7)), "keys above the region stay in");
+        assert!(split[0].end() < region.start() && split[1].start() > region.end());
     }
 
     #[test]

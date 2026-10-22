@@ -40,6 +40,8 @@ pub use claims::*;
 mod commit;
 pub use commit::*;
 
+pub(crate) mod context;
+
 mod delegation;
 pub use delegation::*;
 
@@ -673,10 +675,14 @@ impl Branch {
         self.causality_cache.clone()
     }
 
-    /// A shared handle to this branch's causal-context memo. Pull reads
-    /// the local head's context through it (one O(ancestry) walk on the
-    /// first miss) and writes the successor head's context back, derived
-    /// incrementally — so steady-state sync never re-walks the DAG.
+    /// A shared handle to this branch's causal-context memo: the full
+    /// context of each head it has resolved, by head version. A head
+    /// carries only its active set, so this is where the whole context of
+    /// a head is read from. Pull reads the local head's context through it
+    /// (on the first miss, from the head's tree's context region, or by
+    /// one O(ancestry) walk for a head minted before heads carried
+    /// contexts) and writes the successor head's context back, derived
+    /// incrementally — so steady-state sync never re-reads it.
     pub fn contexts(&self) -> ContextCache {
         self.context_cache.clone()
     }

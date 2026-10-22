@@ -236,6 +236,46 @@ mod tests {
         Ok(())
     }
 
+    /// A head of another origin at a lower edition than the one known is
+    /// not taken for a stale one: without contexts on the heads nothing
+    /// says it is older, and it is what a remote branch reset to another
+    /// writer's head looks like. It is reported as diverged, which every
+    /// watcher fetches, and nothing is recorded.
+    #[dialog_common::test]
+    async fn it_does_not_drop_a_lower_head_of_another_origin_as_stale() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let ahead = repo.branch("ahead").open().perform(&operator).await?;
+        let mut known = commit(&ahead, "ahead-0", &operator).await?;
+        for i in 1..10 {
+            known = commit(&ahead, &format!("ahead-{i}"), &operator).await?;
+        }
+        let reset = repo.branch("reset").open().perform(&operator).await?;
+        let mut lower = commit(&reset, "reset-0", &operator).await?;
+        for i in 1..5 {
+            lower = commit(&reset, &format!("reset-{i}"), &operator).await?;
+        }
+        assert!(lower.edition < known.edition);
+        assert_ne!(lower.origin(), known.origin());
+
+        let origin = connect("origin", unreachable(), repo.did(), &operator).await?;
+        let remote = origin.branch("main").open().perform(&operator).await?;
+        remote
+            .observe(edition(&known, b"known"))
+            .perform(&operator)
+            .await?;
+        let observed = remote
+            .observe(edition(&lower, b"lower"))
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(observed, Observation::Diverged, "not dropped as stale");
+        let remote = origin.branch("main").open().perform(&operator).await?;
+        assert_eq!(remote.revision(), Some(known));
+        Ok(())
+    }
+
     /// A head its issuer did not sign is refused, and nothing is recorded.
     #[dialog_common::test]
     async fn it_refuses_an_unsigned_head() -> Result<()> {

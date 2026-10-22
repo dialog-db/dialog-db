@@ -39,9 +39,9 @@ use rkyv::rancor::Error as RkyvError;
 
 use crate::key::varkey::{self, ValuePayload};
 use crate::{
-    ATTRIBUTE_KEY_TAG, AttributeKey, BLOB_KEY_TAG, BlobRecord, COVERAGE_KEY_TAG, Datum,
-    DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, HISTORY_KEY_TAG, Key, KeyView, State,
-    VALUE_KEY_TAG, Value, ValueKey, decode_value,
+    ATTRIBUTE_KEY_TAG, AttributeKey, BLOB_KEY_TAG, BlobRecord, CONTEXT_KEY_LENGTH, CONTEXT_KEY_TAG,
+    COVERAGE_KEY_TAG, Datum, DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, HISTORY_KEY_TAG, Key,
+    KeyView, State, VALUE_KEY_TAG, Value, ValueKey, decode_value,
 };
 
 /// The raw content hash a [`LoadBlock`] resolves: the same 32 bytes a
@@ -431,6 +431,7 @@ fn tag_name(tag: u8) -> &'static str {
         HISTORY_KEY_TAG => "history",
         BLOB_KEY_TAG => "blob",
         COVERAGE_KEY_TAG => "coverage",
+        CONTEXT_KEY_TAG => "context",
         _ => "unknown",
     }
 }
@@ -542,6 +543,15 @@ pub fn key_components(bytes: &[u8]) -> Vec<KeyComponent> {
                 let tail_key = Key::from(synthetic);
                 push_fields(&mut out, [0, 1, 2, 3], fact_fields(&EntityKey(&tail_key)));
             }
+        }
+        // Context: tag ‖ origin, one watermark per origin.
+        CONTEXT_KEY_TAG if bytes.len() == CONTEXT_KEY_LENGTH => {
+            let origin = &bytes[1..];
+            out.push(KeyComponent::new(
+                "origin",
+                format!("origin:{}", hex(origin)),
+                origin.to_vec(),
+            ));
         }
         // Blob: tag ‖ blob hash, one content-addressed reference.
         BLOB_KEY_TAG => {

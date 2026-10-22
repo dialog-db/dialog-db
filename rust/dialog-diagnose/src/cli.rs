@@ -17,6 +17,13 @@ pub struct DiagnoseCli {
     #[arg(short, long)]
     pub tree: bool,
 
+    /// Print the causal-context profile of the branch head stored in this
+    /// file (a dag-cbor `revision` cell) and exit, instead of opening the
+    /// TUI
+    #[arg(long, value_name = "REVISION_FILE")]
+    pub head: Option<PathBuf>,
+
     /// Path to the CSV file to import and analyze
-    pub csv: PathBuf,
+    #[arg(required_unless_present = "head")]
+    pub csv: Option<PathBuf>,
 }

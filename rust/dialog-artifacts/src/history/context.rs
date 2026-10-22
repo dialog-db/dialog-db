@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use dialog_search_tree::Cache;
 
@@ -59,6 +60,11 @@ pub async fn context_of<H: History>(
 /// bounded ([`Cache`] evicts with SIEVE); an evicted context simply
 /// re-derives by the ancestry walk.
 ///
+/// Entries are shared, not copied: a context holds one watermark per
+/// origin the ancestry ever included, so a hit, an insert, and every
+/// reader holding one are a reference count, and only a caller that
+/// derives a successor context pays for a copy of the map.
+///
 /// The walk is the expensive path — O(ancestry) record reads, each with
 /// an issuer-signature verification — so callers that know how a head
 /// was *constructed* should derive its context incrementally and
@@ -68,7 +74,7 @@ pub async fn context_of<H: History>(
 /// `merge::observe_revisions`), paying zero extra reads.
 #[derive(Clone, Debug, Default)]
 pub struct ContextCache {
-    contexts: Cache<Version, Context>,
+    contexts: Cache<Version, Arc<Context>>,
 }
 
 impl ContextCache {
@@ -84,18 +90,18 @@ impl ContextCache {
         &self,
         head: &Version,
         history: &H,
-    ) -> Result<Context, DialogArtifactsError> {
+    ) -> Result<Arc<Context>, DialogArtifactsError> {
         Ok(self
             .contexts
             .get_or_fetch::<_, DialogArtifactsError>(head, async |head| {
-                context_of(head, history).await.map(Some)
+                context_of(head, history).await.map(Arc::new).map(Some)
             })
             .await?
             .expect("the context fetcher always yields a context"))
     }
 
     /// The memoized context of `head`, if present. Never derives.
-    pub async fn cached(&self, head: &Version) -> Option<Context> {
+    pub async fn cached(&self, head: &Version) -> Option<Arc<Context>> {
         self.contexts
             .get_or_fetch::<_, DialogArtifactsError>(head, async |_| Ok(None))
             .await
@@ -104,8 +110,8 @@ impl ContextCache {
 
     /// Remember `context` as the context of `head` — for callers that
     /// derived it incrementally from the head's construction.
-    pub fn insert(&self, head: Version, context: Context) {
-        self.contexts.insert(head, context);
+    pub fn insert(&self, head: Version, context: impl Into<Arc<Context>>) {
+        self.contexts.insert(head, context.into());
     }
 }
 
