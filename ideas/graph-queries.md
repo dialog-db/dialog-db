@@ -2,460 +2,197 @@
 
 ## Idea
 
-A concept describes one entity: the attributes it must carry, read under
-their picks. When one of those attributes points at another entity, the
-concept says `entity` and stops there. Whoever reads the result gets a
-URI and has to know, on their own, which concept to read it under next.
+A concept's entity-valued field today is `as: entity`. The reader gets a
+URI and has to know which concept to read it under. The idea is to let
+the field name a concept, so a concept describes a graph, a query over
+it returns the graph, and a subscription delivers changes anywhere in
+it.
 
-The original intent was always that a concept could say more: a field
-can name *another concept* as its type, the way a field in a GraphQL
-schema names an object type, so that a concept describes a graph and not
-one node of it. Querying a concept would then return the graph, and
-subscribing to it would deliver changes anywhere in that graph, a
-renamed author under a comment under an issue as much as a retitled
-issue.
+Views made this less obvious than it was. A view renders one concept and
+mounts a nested `<tonk-display>` per reference, each choosing its own
+model and facet and loading lazily. That works for rendering. It does
+not help an agent: the graph is only recorded inside view templates. The
+orientation trial (`tonk/plans/2026-10-05-agent-orientation-trial.md`)
+dumped a small space's schema at 55 KB and the agent's output truncated.
+A route maps to a concept (`guide-routes.md`), so sharing a route gives
+an agent a starting point; typed edges would let it walk from there.
 
-That never got built as a whole, and once tonk's views landed it was no
-longer obvious it should be. Views compose layer by layer: a view renders
-a concept, and wherever a field holds a reference it mounts a nested
-`<tonk-display>` over it, which picks its own model and facet, loads
-lazily and updates on its own. The concept does not decide what the
-reader wants from a referenced entity; the subview does. For rendering
-that is the right shape.
+## What exists
 
-It is the wrong shape for an agent. An agent invited into a space faces
-every concept at once, with nothing that says where to start or how they
-connect. The orientation trial (`tonk/plans/2026-10-05-agent-orientation-trial.md`)
-dumped the full schema of a small space at 55 KB, 1434 lines, and the
-agent's tool output truncated it. Sharing a route instead of a bare space
-helps: a route already maps to a concept (`guide-routes.md`), so an agent
-handed one has a place to start, and from the concept it can read the
-schema and the rules over it. But from there it hits the same wall the
-template author does. `issue.assignee` is `as: entity`. Under what
-concept is the assignee to be read? A view answers that inside a template
-string (`<tonk-display entity={author} model=person …>`), where an agent
-reading the schema will not look. The graph exists, but only the views
-know it.
+- `conforms` on a concept field (`#[dialog(conforms = C)]`, `"conforms"`
+  on the wire, `as: .Ingredient` in `notes/notation.md`). It conjoins the
+  target concept onto the field's variable
+  (`dialog-query/src/rule/deductive.rs`, `field_premises`): a filter.
+- `dialog-query/src/concept/query/affected.rs` propagates subscription
+  changes through nested concept premises.
+- Only `this` of the target is projected. Results are flat rows with the
+  target as a URI.
+- Tonk notation does not expose `conforms`; the library uses
+  `as: entity` throughout.
 
-So the idea resurfaces: let a concept declare its edges by naming the
-concept on the other end. Then a route maps to a concept, and the concept
-is the whole connected schema an agent needs, discoverable by walking it.
-And a query over that concept can return the graph in one read instead
-of one read per layer.
+## Constraints
 
-## What exists already
+- **Self-reference.** A conforming field holds its target as a
+  `Box<ConceptDescriptor>` and the concept's identity hashes the
+  target's reference. `person.manager: person` or `block.next: block`
+  cannot be expressed. Options: name the target by bookmark on cyclic
+  edges, or hash mutually recursive concepts as one group (as Unison
+  does).
+- **Least fixpoint.** A concept is a rule. `person` requiring
+  `manager: person`, with no other rule for `person`, derives nothing.
+  A required cyclic edge yields an empty concept, so cyclic edges can
+  only shape results, never filter them. This also keeps matching
+  non-recursive.
+- **Inner join.** Conformance is required and cannot be optional (the
+  engine refuses absence over a derived predicate). As a graph read this
+  means an issue drops out when its assignee lacks a name, and an issue
+  with no conforming comments drops out instead of returning an empty
+  list.
 
-Part of this is built, and the spike should start from it rather than
-from scratch.
+## Design
 
-- **Concept-typed fields as a filter.** dialog has `conforms` on a field
-  (`#[dialog(conforms = C)]` in the derive, `"conforms": "concept:…"` on
-  the wire, `as: .Ingredient` in dialog's abbreviated notation, see
-  `notes/notation.md`, *Concept-typed fields*). It desugars to the target
-  concept conjoined as a premise over the field's variable
-  (`dialog-query/src/rule/deductive.rs`, `field_premises`): the row
-  survives only when the target entity satisfies the target concept.
-- **Incremental maintenance through nested concepts.**
-  `dialog-query/src/concept/query/affected.rs` discovers which head
-  entities a change can affect by a delta-join through concept premises,
-  to arbitrary depth, bottom-up. A subscription to `Report` already
-  re-derives the reports whose manager lost their badge.
-- **What it does not do.** "Only `this` is projected; the target's own
-  fields stay internal to the premise." The answer is still one flat row
-  per tuple with the referenced entity as a URI. The target is checked,
-  then thrown away.
-- **Tonk does not expose it.** Nothing under `tonk-notation`,
-  `tonk-schema` or the library YAML says `conforms`; every reference in
-  the library is `as: entity`.
+Datomic pull ([spec](https://docs.datomic.com/query/query-pull.html))
+is the main reference. `:where` selects entities; `(pull ?e pattern)`
+then shapes each one by walking references. Properties that carry over:
 
-So the filter half is done. The projection half (the graph in the
-result), the subscription half (deltas addressed into the graph) and the
-notation half (tonk can say it) are not.
+- Shaping runs after matching and cannot change which entities matched.
+  In dialog terms it sits above the query's stratum, so reading absence
+  there is sound. The spike should check this against
+  `session/dependencies.rs`.
+- Missing attributes are omitted; an empty many-valued reference is an
+  empty vector; the parent is kept.
+- Recursion is explicit (`{:person/manager 3}`, `...`); an entity
+  already seen returns its id only.
+- Reverse references (`:release/_artists`). Tonk's library points
+  children at parents (`xyz.tonk.notebook.block/notebook`), so a
+  notebook with its blocks needs one. The VAE index makes it a prefix
+  scan.
+- `*` follows component references and returns ids for others, which
+  bounds the walk.
+- Patterns are data and can be query inputs.
 
-## Where the current design stops
+What pull lacks: refs are untyped, so the pattern author must already
+know the graph; patterns carry no predicates; there are no
+subscriptions.
 
-Two limits of `conforms` decide most of what this spike has to do, and
-it is better to see them before writing any code.
+Proposal:
 
-**A concept cannot refer to itself.** A conforming field holds its target
-as a `Box<ConceptDescriptor>`, and a concept's identity hashes its
-conformance targets' references (`CHANGELOG.md`, 0.3.0, *merkle
-references*). `person.manager: person`, `block.next: block`,
-`comment.reply-to: comment` would need a concept whose identity contains
-its own identity. Real schemas are full of these cycles; tonk's
-notebook library chains blocks with `block.next`. Without an answer
-here "the whole graph" means "the acyclic part of the graph", which is
-not the idea. Unison's hashing of mutually recursive definitions as one
-cycle group is the prior art to look at; naming the target by bookmark
-instead of by hash is the cheap answer and gives up structural identity
-for those edges.
+1. **Schema.** A field may name a concept as its type. Possibly also
+   mark the edge as owned (component) or a reference.
+2. **Matching.** On a root, a required typed edge filters, as
+   `conforms` does today.
+3. **Shaping.** Every other edge, and every edge of a non-root entity,
+   shapes only. The default pattern is the concept's typed edges,
+   following owned edges and stopping at references. A query may give
+   its own pattern.
+4. **Receiver-side conformance.** For each entity an edge reaches, the
+   server returns an attribute bag: the attributes the target concept
+   names, read under their picks, whichever the entity has. The
+   receiver checks the bag and keeps, drops or flags the node, with a
+   reason ("`c3` is not a `comment`: `author` missing").
+5. **Views.** Unchanged. A nested `<tonk-display>` is one map spec; a
+   view may state a pattern to get the subgraph in one frame.
 
-There is a second reason a cyclic edge cannot be a filter, independent
-of identity. A concept is a rule, and rules are read at their least
-fixpoint. `person` requiring `manager: person` derives a person only from
-a person already derived, so with no other rule for `person` it derives
-nothing at all, not even for data where every chain ends in a cycle. A
-required self-typed edge is therefore not a stricter concept, it is an
-empty one. Cyclic edges can only ever shape, never match, which is also
-what keeps typed edges from making the matching stage recursive (see
-*Performance*).
+Receiver-side conformance:
 
-**Conformance is a filter, and graph reads mostly want a left join.**
-Today a conforming field is required and cannot be optional
-(`TypeError` "optional conformance is absence over a derived predicate,
-rejected until stratification"). For a filter that is right. For a graph
-it means an issue whose assignee has no name drops out of the issue
-list, and retracting one person's name retracts every issue they are
-assigned to. GraphQL made the other choice: a field whose object cannot
-be resolved is `null`, and the parent stays. A many-valued edge
-(`comment: pick all`) has the same problem one level up: an issue with
-no conforming comments drops out instead of returning an empty list.
-Both semantics are useful, and the optional one is exactly the
-absence-over-a-derived-predicate the engine currently refuses *when it
-decides whether the row exists*. Datomic's pull gets the left join by
-not deciding membership at all: it shapes rows the query already
-matched. That is the route this proposal takes (see *Start from Datomic
-pull*), and it means the filter stays as it is and the left join lives
-in a later stage, not in the concept's rule.
+- Makes server-side shaping entity-local (EAV prefix reads, no target
+  premise, no fixpoint), maintained on the existing per-entity path.
+- Lets the server over-approximate reachability: the receiver computes
+  it from edge values in the bags, so stale nodes can be pruned lazily
+  and only new reachability must be prompt.
+- Gives per (entity, attribute) deltas.
+- Explains non-conformance to agents and views.
 
-## Start from Datomic pull
+Limits:
 
-The closest prior art is not GraphQL, it is Datomic's
-[pull](https://docs.datomic.com/query/query-pull.html). Datomic is the
-system dialog's data model descends from: entities, attributes, values,
-datalog over them. Pull is how it answers the question this idea asks,
-on that model, and it has had a decade of use. The spike should read
-the pull spec before it designs anything, and should depart from it
-only where it can say why.
-
-What pull is:
-
-```clojure
-[:find (pull ?issue [:issue/title
-                     {:issue/assignee [:person/name]}
-                     {:issue/comment [:comment/body
-                                      {:comment/author [:person/name]}]}])
- :where [?issue :issue/status :status/open]]
-```
-
-`:where` decides *which* entities match. `pull` decides *what shape* to
-return for each, by walking references from it. The pattern is data: it
-can be passed to a query as an input, stored, and handed around.
-
-What it gets right, each of which maps onto a problem this idea has:
-
-- **Matching and shaping are separate stages.** This is the important
-  one. A conforming field today is matching: it decides whether the row
-  exists. A graph projection is shaping: it decides what comes back for
-  a row that already exists. Pull runs after the query has its answer,
-  so nothing in a pattern can change which entities matched. In dialog
-  terms the shaping stage sits above the query in the stratification by
-  construction, and "omit the assignee if they do not conform to
-  `person`" is absence read over a predicate that is already at
-  fixpoint. That is the sound version of the optional conformance the
-  engine refuses today (see *Where the current design stops*), and it
-  is sound for the same reason negation over a lower stratum is. The
-  spike should check this argument against `session/dependencies.rs`
-  rather than take it from here.
-- **Missing is omitted, not fatal.** "Attribute specifications that do
-  not match an entity are omitted from that entity's result map, rather
-  than e.g. appearing with a nil value." A many-valued reference with no
-  matches is an empty vector. The parent is never dropped. That is the
-  left join a graph read wants.
-- **Cycles return a reference.** Recursion is explicit,
-  `{:person/manager 3}` for a depth or `{:person/manager ...}` for no
-  limit, and "if a recursive subselect encounters an entity that it has
-  already seen, it will not apply the pattern, instead returning only
-  the `:db/id` of the entity." That is the normalized result proposed
-  under *Result shape*, arrived at from the other end.
-- **Reverse references.** `:release/_artists` walks an attribute
-  backwards. Tonk's library points children at parents
-  (`xyz.tonk.notebook.block/notebook`), so "a notebook with its blocks"
-  is a reverse edge, which a concept field cannot express at all today.
-  dialog's VAE index makes the reverse walk a prefix scan, so the cost
-  is there to be had.
-- **Ownership bounds the walk.** `*` pulls every attribute and follows
-  *component* references recursively; a plain reference gives only the
-  `:db/id`. That is Datomic's answer to "the whole reachable graph is
-  the whole org chart": follow what the entity owns (an issue's
-  comments), stop at what it merely points at (a comment's author), and
-  let the pattern ask for more.
-- **Bounded fan-out.** A many-valued reference returns at most 1000
-  values unless `:limit` says otherwise. A graph read needs some bound
-  like it.
-
-What pull does not do, and where this idea has to add to it:
-
-- **References are untyped.** Datomic's schema says `:issue/assignee` is
-  a ref and nothing about what it refers to. The pattern supplies that
-  knowledge, so whoever writes the pattern already has to know the
-  graph. That is exactly the agent's problem: pull gives a good way to
-  read a graph you understand and no way to discover one. Concept-typed
-  edges are the missing half.
-- **No predicates inside a pattern.** Pull shapes and never narrows: a
-  nested edge returns all its values (up to `:limit`) or none. Narrowing
-  is `:where`'s job and stops at the roots. See *Narrowing*.
-- **No subscriptions.** Pull is a read API; nothing in it says how a
-  pulled tree changes when a transaction lands. The differential half of
-  the deliverable is new ground, built on dialog's own subscriptions.
-- **Patterns name attributes, not concepts.** A dialog pattern would
-  name concepts at each step (`assignee` read as `person`), so a step
-  carries the target concept's rules, picks and conformance with it,
-  which a Datomic attribute step does not have.
-
-So the proposal is pull over concepts:
-
-1. **Schema.** A concept may type an entity field with another concept,
-   and, as a direction to explore, say whether the edge is owned (a
-   component) or a reference. That makes the graph discoverable from
-   any concept, and it is what a route hands an agent.
-2. **Matching.** A *required* typed edge keeps meaning what
-   conformance means today: a filter, inner join. An issue whose
-   comment author is not a person is not this kind of issue. That is
-   the original intent of the idea, and nothing about it changes.
-3. **Shaping.** An *optional* or *many-valued* typed edge does not
-   filter at all; it only shapes. So does every edge a query's pattern
-   asks for, and so does every edge of an entity reached by shaping
-   rather than matched as a root. Shaping runs after the match, the way
-   pull does, and it does not decide conformance: for each entity an
-   edge reaches it returns the attributes the target concept names,
-   whatever subset the entity has, and the receiver decides whether
-   that bag conforms (see *Conformance on the receiving end*). A cycle
-   returns the entity; reverse edges are allowed. The default pattern, when the
-   query names none, is the concept's own typed edges, followed through
-   owned edges and stopping at references, which is `*` translated.
-   Whether that default is right is a question the spike answers (see
-   below).
-4. **Views stay as they are.** A view is already a pattern, written in
-   HTML: each nested `<tonk-display>` is one map spec. A view that
-   wants the subgraph in one frame can state its pattern and get it;
-   one that wants to stay lazy mounts nested displays as today.
-
-The GraphQL lesson is the same one in other clothes: the schema is a
-graph and may be cyclic, the query selects a finite tree from it. Pull
-is the version of that lesson that grew up on our data model.
-
-If the spike finds that the shaping stage is unnecessary, that "the
-concept decides everything" works in practice, that is a result worth
-reporting. It is not the default assumption.
-
-## Conformance on the receiving end
-
-The step after separating matching from shaping is to stop deciding
-conformance in the shaping stage at all. The roots are matched exactly,
-as today. For every entity reached through an edge, the query returns
-an **attribute bag**: the attributes the target concept names, read
-under their picks, for whichever of them the entity has. A bag can be
-partial. The receiver checks the bag against the concept and keeps,
-drops or flags the node.
-
-What it buys:
-
-- **The server's work is entity-local.** Shaping becomes "read these
-  attributes of this entity": prefix scans on EAV, no target concept
-  premise, no fixpoint, no conjunction across entities. Maintaining it
-  is the per-entity path subscriptions already take for entity-local
-  rules, so a change deep in a cycle costs what a change to a flat
-  attribute costs. This is most of the answer to the recursion bar in
-  *Performance*.
-- **Reachability becomes a superset the server may over-approximate.**
-  Which nodes are in the result is decided by the receiver too, from the
-  edge values in the bags. So the server can keep shipping a node that
-  is no longer reachable and prune lazily; only *new* reachability has
-  to be prompt. That replaces DRed over the edge relation with an
-  additive walk, which is the cheap direction.
-- **Deltas are per (entity, attribute).** The finest grain the data
-  has, and the one dialog's facts are already in. A node changing
-  conformance is not a server-side event; it is the receiver's check
-  flipping when an attribute arrives or goes.
-- **The receiver can say why.** "`c3` is not a `comment`: `author`
-  missing." "`alice` is not a `person`: `name` is a number." "`c2`'s
-  `author` does not conform to `person`." For an agent orienting in a
-  space this is the schema explaining itself against real data, which
-  is the problem the idea started from. For a view it is a place to
-  render a broken reference instead of silently showing nothing.
-
-Where it stops:
-
-- **Derived attributes stay on the server.** If an attribute the target
-  concept names is derived by a rule, the receiver cannot compute it
-  from stored claims, so the server evaluates it and ships the value in
-  the bag. That is still cheap for an entity-local rule. For a rule that
-  reads other entities' facts it is the fixpoint again, and the spike
-  should report how often the library's concepts have such attributes.
-  What moves to the receiver is only the *conjunction*: are the required
-  attributes present, are their values of the declared types, do the
-  required edges' targets conform in turn.
-- **Roots stay exact.** A required typed edge on a root decides whether
-  the root matches, so it is matching and stays on the server. The bag
-  applies to entities reached by shaping.
-- **One check, two places.** If the receiver's conformance check is its
-  own implementation it will drift from the engine's. It has to be one
-  pure function in `dialog-query`, over a bag and the bags its required
-  edges reach, used by the engine for roots and by the receiver for
-  nodes. tonk-display already runs Rust compiled to wasm, so this is a
-  dependency, not a port. The function follows least-fixpoint
-  semantics, which is safe because required edges are acyclic (see
-  *Where the current design stops*).
-- **Bytes for nodes that do not conform.** A bag for an entity that
-  fails the check is shipped and then dropped. On most data that is
-  noise; on a space where an edge mostly points at entities of another
-  shape it is not, and the spike should measure it.
+- Derived attributes are evaluated on the server and shipped in the
+  bag; cheap for entity-local rules, a fixpoint for rules reading other
+  entities. Only the conjunction moves to the receiver.
+- The check must be one function in `dialog-query`, used by the engine
+  for roots and by the receiver (tonk-display already runs Rust as
+  wasm). A second implementation would drift.
+- Bags for non-conforming nodes cost bytes; measure them.
 
 ## Narrowing
 
-`<tonk-display>` narrows what it shows in two ways today: by entity
-(`entity=`), and by equality on the model's own fields
-(`model="person?name=Alice"`, which `tonk-template/src/resolve.rs` turns
-into a constant on that field's term). Nothing reaches past the first
-layer. "Issues assigned to someone named Alice" needs a hand-written
-join across two expressions with a shared variable, which a view cannot
-state and an agent has to know to write.
+`<tonk-display>` narrows by entity and by equality on the model's own
+fields (`model="person?name=Alice"`, `tonk-template/src/resolve.rs`).
+Nothing nested. Two cases:
 
-With a graph that gets worse, because most interesting narrowing is
-through an edge. There are two different things here, and they belong
-to the two different stages:
+- **Roots by a nested attribute** ("issues assigned to Alice"). Matching;
+  may drop a root. Datomic does it in `:where`. In dialog, a constant on
+  a nested field pushed into the target premise, which today receives
+  only `this`.
+- **A nested edge** ("each issue, only Alice's comments"). Shaping;
+  never drops the parent. Pull cannot express it (`:as`, `:limit`,
+  `:default`, `:xform` only). GraphQL field arguments and EdgeDB nested
+  `filter` can.
 
-- **Narrowing the roots by a nested attribute.** "Issues whose assignee
-  is named Alice." This decides which issues match, so it is matching,
-  an inner join, and it can drop a root. Datomic does this in `:where`,
-  not in pull: `[?i :issue/assignee ?p] [?p :person/name "Alice"]`, then
-  pull the shape of `?i`. In dialog it is a constant on a nested field,
-  pushed into the target concept's premise, which today only receives
-  `this`.
-- **Narrowing a nested edge.** "Each issue, with only Alice's comments."
-  This decides what an edge returns, so it is shaping, and it never
-  drops the issue. Datomic's pull cannot say this: its attribute options
-  are `:as`, `:limit`, `:default` and `:xform`, none of them a
-  predicate, so a filtered edge in Datomic is a second query. GraphQL
-  can, through arguments on any field (`comments(author: "alice")`), and
-  so can EdgeDB, with `filter` inside a nested shape.
-
-So on this point pull is the weaker model and the spike should go
-further than it. A pattern should be able to carry constraints at any
-depth, and the notation has to make it obvious which stage a constraint
-lands in, since one can drop a root and the other cannot. The same
-constraints should reach `<tonk-display>`'s `model=…?` filters, which
-today are equality on the top layer only.
-
-Whichever stage it lands in, a constraint must narrow what is *read*,
-not filter what was read: the constant goes into the scan, so it shrinks
-the demand cover a subscription is gated on. A nested filter applied
-after reading the whole edge would make "only Alice's comments" cost
-what "all comments" costs, and wake the subscription for every comment.
+The notation must make the stage of a constraint clear. In both cases
+the constant goes into the scan, so it narrows what is read and the
+subscription's demand cover.
 
 ## Example
 
-A small issue tracker. Today, in tonk notation, every reference is
-`as: entity`:
+Today:
 
 ```yaml
 concept!: &person
   with:
-    name:
-      the: xyz.tonk.person/name
-      as: text
+    name: { the: xyz.tonk.person/name, as: text }
 
 concept!: &comment
   with:
-    body:
-      the: xyz.tonk.comment/body
-      as: text
-    author:
-      the: xyz.tonk.comment/author
-      as: entity
+    body:   { the: xyz.tonk.comment/body, as: text }
+    author: { the: xyz.tonk.comment/author, as: entity }
 
 concept!: &issue
   with:
-    title:
-      the: xyz.tonk.issue/title
-      as: text
-    assignee:
-      the: xyz.tonk.issue/assignee
-      as: entity
-    comment:
-      the: xyz.tonk.issue/comment
-      as: entity
-      pick: :all
+    title:    { the: xyz.tonk.issue/title, as: text }
+    assignee: { the: xyz.tonk.issue/assignee, as: entity }
+    comment:  { the: xyz.tonk.issue/comment, as: entity, pick: :all }
 ```
 
-With typed edges, `as` names the concept on the other end. The spelling
-below is a placeholder; settling it (a concept name in `as`, a separate
-`conforms:` key mirroring the wire, how a bookmark resolves) is part of
-the spike:
+With typed edges (spelling is a placeholder):
 
 ```yaml
 concept!: &comment
   with:
-    body:
-      the: xyz.tonk.comment/body
-      as: text
-    author:
-      the: xyz.tonk.comment/author
-      as: person               # target must be a person
+    body:   { the: xyz.tonk.comment/body, as: text }
+    author: { the: xyz.tonk.comment/author, as: person }
 
 concept!: &issue
   with:
-    title:
-      the: xyz.tonk.issue/title
-      as: text
-    assignee:
-      the: xyz.tonk.issue/assignee
-      as: person
-      optional: true           # shapes only: an unassigned issue is still an issue
-    comment:
-      the: xyz.tonk.issue/comment
-      as: comment
-      pick: :all               # shapes only: zero or more, never filters
+    title:    { the: xyz.tonk.issue/title, as: text }
+    assignee: { the: xyz.tonk.issue/assignee, as: person, optional: true }
+    comment:  { the: xyz.tonk.issue/comment, as: comment, pick: :all }
 ```
 
-`comment.author` is required: queried as a root, a comment whose author
-is not a `person` is not a `comment`, and the server does not return it.
-`issue.assignee` and `issue.comment` only shape, in the stage after the
-match, so an issue with no assignee or no comments is still returned.
-And a comment reached through `issue.comment` is not a root, so its
-`author` edge is checked by the receiver, not the server.
+Queried as a root, a comment whose author is not a `person` is not
+returned. Reached through `issue.comment`, it is shipped as a bag and
+checked by the receiver.
 
-The query does not change:
-
-```yaml
-issue:
-  this: ?issue
-```
-
-Today it returns one flat `QueryResult` per tuple (`tonk-worker-api`,
-`evaluate.rs`), with `assignee` and each `comment` as a URI, two comments
-meaning two rows. With graph queries, the same query returns the issue
-with its subgraph:
+The query `issue: { this: ?issue }` today returns one flat row per
+tuple (`tonk-worker-api/src/evaluate.rs`). With graph queries:
 
 ```yaml
 - this: did:key:…issue-1
   title: Sync stalls after resume
-  assignee:
-    this: did:key:…alice
-    name: Alice
+  assignee: { this: did:key:…alice, name: Alice }
   comment:
     - this: did:key:…c1
       body: Repro attached
-      author:
-        this: did:key:…bob
-        name: Bob
+      author: { this: did:key:…bob, name: Bob }
     - this: did:key:…c2
       body: Looking into it
-      author:
-        this: did:key:…alice
-        name: Alice
+      author: { this: did:key:…alice, name: Alice }
 ```
 
-Suppose `issue-1` also has a comment `c3` with a body and no author. The
-server ships `c3`'s bag, `{this: c3, body: "+1"}`, because it does not
-decide conformance for nested nodes. The receiver's check drops `c3`
-from the `comment` list above and can report it: `c3` is not a
-`comment`, `author` is missing.
+A comment `c3` with a body and no author is shipped as
+`{this: c3, body: "+1"}`; the receiver drops it and reports the missing
+`author`.
 
-A query that wants a different shape states a pattern, pull style. The
-spelling is again a placeholder; this one asks for less than the
-default, and walks a reverse edge the concepts do not declare:
+A custom pattern, with a reverse edge:
 
 ```yaml
 issue:
@@ -463,258 +200,129 @@ issue:
   shape:
     title: .
     assignee: [name]
-    xyz.tonk.issue/_blocks: [title]   # issues this one blocks, walked backwards
+    xyz.tonk.issue/_blocks: [title]
 ```
 
-And a subscription to the default shape delivers, each case starting
-from the result above:
+Subscription deltas, each from the result above:
 
-- `issue-1` retitled: a change to the issue node.
-- Alice renamed: a change to the `person` node for Alice, which appears
-  twice in the tree above but is one node.
-- `c1` retracted: the `comment` edge from `issue-1` to `c1` goes, and
-  with it `c1`. Bob's node was reachable only through `c1`, so it
-  leaves the result too, though nothing about Bob changed.
-- `issue-1` reassigned to Bob: the `assignee` edge moves from Alice to
-  Bob. Both nodes were already in the result, so no node changes, just
-  an edge.
+- `issue-1` retitled: change on the issue node.
+- Alice renamed: one change on Alice's node, though it appears twice.
+- `c1` retracted: the edge and `c1` go; Bob is no longer reachable.
+- Reassigned to Bob: the `assignee` edge moves; no node changes.
 
 ## Result shape and deltas
 
-The tree above is what a reader wants to look at. It is not what the
-engine should produce or what a subscription should emit, and deciding
-this is probably the most consequential design choice in the spike.
+A tree repeats shared entities and is infinite over a cycle. A
+normalized result avoids both: nodes (entity and attribute bag) and
+edges (the entity-valued attributes in the bags). Relay and Apollo
+caches use this shape; pull falls back to it only on cycles.
+`tonk-display`'s `select_rows` already folds rows by `this`. Deltas are
+per node and edge; the tree is a receiver-side fold.
 
-The same entity under the same concept can appear many times in a tree
-(Alice above), and in a cyclic schema the tree is infinite. A
-**normalized** result has neither problem: a set of nodes, each an
-entity with its attribute bag, and a set of edges, each
-`(parent, field, child)`, which with bags are just the entity-valued
-attributes in them. Which concept a node is read as, and whether it
-conforms, is the receiver's fold over that set. That is what Relay and Apollo
-converge on client side. Datomic's pull returns trees, and duplicates
-Alice, but falls back to the entity id exactly where a tree would
-recurse forever; a normalized result is that fallback applied
-everywhere. It is also close to what dialog already has: rows
-keyed by entity, which `tonk-display`'s `select_rows` already folds by
-`this`. A delta is then node rows asserted and retracted plus edges
-asserted and retracted, each row change happens once however many paths
-reach it, and the tree is a client-side fold.
+Path-addressed deltas (`issue-1/comment/c2/author/name`) match template
+bindings but repeat a change once per path. Pick one and measure the
+other where they differ (a person reachable from many issues).
 
-The alternative, path-addressed deltas (`issue-1/comment/c2/author/name`),
-is closer to what a template binds against and duplicates every change
-by the number of paths that reach it. The spike should pick one and say
-why, with the other's cost measured on at least one shape where they
-differ (a person reachable from many issues).
+Either way:
 
-Two things the delta has to get right whichever shape it takes:
-
-- **Reachability.** A node enters the result when the first edge to it
-  appears, and that has to be prompt. It leaves when the last edge goes,
-  which with receiver-side conformance can be lazy, since the receiver
-  computes reachability from the bags itself (see *Conformance on the
-  receiving end*). Without that, this is DRed over the edge relation.
-- **Equality of a row.** `ConceptConclusion` equality is entity plus
-  resolved values, which is what stops re-derivation emitting
-  retract-and-reassert of unchanged rows. Nested values must not break
-  that: if a parent's row embeds its children, every child change
-  re-emits the parent. A normalized result sidesteps it.
+- New reachability must be delivered promptly; lost reachability can be
+  lazy under receiver-side conformance, otherwise it needs DRed over
+  edges.
+- `ConceptConclusion` equality (entity plus values) must not see nested
+  values, or every child change re-emits the parent.
 
 ## Performance
 
-The hard constraint: **a query that reads no typed edges must cost what
-it costs today.** Graph queries are opt-in at the schema; a concept with
-no conforming field compiles to exactly the rule it does now.
-
-Two other paths can change and the spike must measure both:
-
-- **Existing `conforms` users.** A conforming field today projects only
-  `this`. If projecting the target's fields becomes the default, every
-  existing conforming query reads more. Either the projection is asked
-  for, or the spike shows it costs nothing for a target already scanned
-  by the filter (it should be close: the filter already reads the
-  target's facts to decide, and throws them away).
-- **Subscriptions.** Recursion does not cost a full recompute today.
-  A subscription over a recursive concept keeps its fixpoint answer
-  table between polls and continues it: additions extend it
-  semi-naively, deletions retract through DRed
-  (`dialog-query/src/concept/query/fixpoint.rs`, `extend` and
-  `retract`; `Subscription::maintain`). It rebuilds only on specific
-  shapes: an addition or deletion matching a negated or optional
-  premise, a non-local nested concept, or one rule body consuming more
-  than one deletion. That is the trade-off the engine has already
-  accepted, and it is the bar.
-
-  Graph queries land on those exact shapes by construction: optional
-  edges, nested concepts, and cycles through them. Put inside the
-  fixpoint, nearly every graph subscription would rebuild on nearly
-  every touching commit. That is not acceptable. The requirement is
-  that **a graph subscription never takes a full-recompute path that
-  the same data read without the graph would not take.** The
-  matching-and-shaping split is what should make that achievable:
-  typed edges never make matching recursive (a cyclic edge cannot
-  match, see *Where the current design stops*), so the matching stage
-  is maintained exactly as today, and the shaping stage is maintained
-  per node and per edge, outside the fixpoint. With conformance decided
-  by the receiver, that per-node work is entity-local attribute reads,
-  and reachability through a cycle only has to be maintained in the
-  additive direction. If the spike keeps conformance on the server
-  instead, reachability through a cycle has to be maintained by DRed
-  over the edge relation, with a rebuild bounded to the affected
-  subgraph at worst, never the whole result.
-
-The comparison that argues for graph queries, as opposed to merely
-against regressions, is against what tonk does now. A directory of N
-issues with an author each, rendered with nested `<tonk-display>`,
-opens three subscriptions per nested display (model, view, entity;
-`tonk-display/README.md`), so roughly `3 + 3N` standing queries. One
-graph subscription replacing them is the win the spike can show.
+- A concept without typed edges compiles to the same rule and costs the
+  same.
+- Existing `conforms` queries must not read more unless asked.
+- Recursive subscriptions are already incremental: a retained fixpoint
+  table, semi-naive for additions, DRed for deletions
+  (`dialog-query/src/concept/query/fixpoint.rs`, `extend`, `retract`).
+  They rebuild when a change matches a negated or optional premise,
+  meets a non-local nested concept, or a rule body consumes more than
+  one deletion. Graph queries hit those shapes. Requirement: a graph
+  subscription takes no full-recompute path that the same data read
+  without the graph would not take.
+- Comparison to make: N issues with nested `<tonk-display>` open about
+  `3 + 3N` subscriptions (model, view, entity per display;
+  `tonk-display/README.md`) against one graph subscription.
 
 ## Deliverable
 
-Graph queries in dialog, usable from tonk notation, with subscriptions:
-
-- In tonk notation, a concept's entity field names another concept, and
-  the engine enforces it.
-- Querying that concept returns the graph below it: each matched entity
-  with the fields of the entities its edges reach, transitively, through
-  the tonk worker's evaluate path.
-- Subscribing to it delivers differential updates: a change to a nested
-  entity, to an edge, or to a top-level entity each arrives as a delta
-  of what changed, not a re-sent result.
-- Matching and shaping as separate stages, pull style: a required
-  typed edge filters, an optional or many-valued one shapes and never
-  drops the parent, with at least one of each exercised.
-- At least one cyclic schema (`person.manager: person` or
-  `block.next: block`) that can be declared, queried and subscribed to,
-  with its subscription maintained incrementally: a rename deep in the
-  cycle, an edge added that closes a cycle, and an edge removed that
-  cuts one each produce a delta without a full recompute.
-- Receiver-side conformance: nested nodes shipped as attribute bags,
-  checked by one function shared with the engine, with a reason for
-  each node that does not conform.
-- Narrowing by a nested attribute in both stages: roots narrowed by a
-  constant on a nested field, and a nested edge narrowed without
-  dropping its parent, each with the constant reaching the scan.
+- Tonk notation: a field names a concept; the engine enforces it on
+  roots.
+- A query returns the graph through the worker's evaluate path.
+- A subscription delivers deltas for nested, edge and root changes.
+- Matching and shaping as separate stages, with required, optional and
+  many-valued edges exercised.
+- Nested nodes as attribute bags, checked by one shared function, with
+  reasons.
+- A cyclic schema (`person.manager` or `block.next`) declared, queried
+  and subscribed to without full recompute: a deep rename, an edge
+  closing a cycle, an edge cutting one.
+- Narrowing by a nested attribute in both stages, with the constant
+  reaching the scan.
 - The measurements below.
 
-Not part of the deliverable, nice to have: `#[derive(Concept)]`
-producing nested Rust types from conforming fields; explicit patterns in
-the query (pull's map specs, reverse edges, depth bounds, `:limit`);
-owned versus referenced edges; migrating a tonk view to a graph
-subscription. The spike should leave room for the pull features even
-where it does not build them.
+Optional: `#[derive(Concept)]` nested types; full pattern features
+(map specs, reverse edges, depth, `:limit`); owned vs reference edges;
+porting a tonk view.
 
 ## Goal
 
-Find out whether concepts can describe a connected graph, and whether a
-query and a subscription over such a concept can return and maintain
-that graph, on top of the existing engine and without making anything
-that does not use it slower.
+Find out whether concepts can describe a graph, and whether queries and
+subscriptions over them can return and maintain it on the existing
+engine without slowing anything that does not use it.
 
-## What success looks like
+## Success
 
-- The deliverable above works end to end through tonk notation.
-- The `dialog-perf` gate holds as it stands: steps exact, blocks within
-  two, bytes within 15%, instructions within 3%, on every existing
-  scenario. No scenario's baseline is re-recorded to make room for this.
-- New `dialog-perf` scenarios for a graph query and a graph subscription
-  (a nested rename, an edge move, a top-level change), recorded as
-  baselines for whoever comes next.
-- One graph subscription is measured against the per-layer subscriptions
-  tonk-display opens for the same render, and the report says which is
-  cheaper and by how much.
-- The change fits the existing architecture: concepts still compile to
-  rules, subscriptions are still demand-gated and pull-driven, and the
-  compiled rule for a concept with no typed edge is unchanged.
+- The deliverable works through tonk notation.
+- The `dialog-perf` gate holds unchanged (steps exact, blocks within
+  two, bytes within 15%, instructions within 3%); no baseline is
+  re-recorded.
+- New scenarios for a graph query and subscription (nested rename, edge
+  move, root change) are added with baselines.
+- The `3 + 3N` comparison is reported.
+- Concepts still compile to rules; subscriptions stay demand-gated and
+  pull-driven.
 
-## What failure looks like
+## Failure
 
-Any of these answers the question with a no, and that is a fine outcome
-if the report shows why:
+- An existing perf scenario regresses and cannot be recovered.
+- It needs a second evaluator, retained operator state, or a change to
+  how every concept compiles.
+- Concepts without typed edges change identity or encoding.
+- Cycles require giving up structural identity everywhere.
+- Shaping cannot be kept above matching, leaving only the inner join.
+- A graph subscription adds a full-recompute path.
+- The receiver's check and the engine's disagree, or cannot share code.
+- Non-conforming bags dominate shipped bytes.
+- Nested narrowing only works as a post-read filter.
 
-- An existing `dialog-perf` scenario regresses beyond its tolerance and
-  the spike cannot get it back without dropping the feature.
-- It takes a rewrite: a second evaluator, operator state retained
-  between polls (the push-model `notes/incremental-subscriptions.md`
-  rejects), or a change to how every concept compiles rather than to
-  concepts with typed edges.
-- It changes stored or synced encodings for concepts that do not use it.
-  A concept with no typed edge must keep its identity.
-- Cycles cannot be expressed without giving up structural concept
-  identity everywhere, not just on the cyclic edges.
-- The shaping stage cannot be kept above the match, so optional and
-  many-valued edges either feed back into membership or have to be
-  refused, and the only graph left is the inner-join one, where one
-  missing name deletes a parent. That is the filter dialog already has,
-  and not worth shipping as "graph queries".
-- A graph subscription takes a full-recompute path that the same data
-  read without the graph would not take. Today's rebuild shapes are the
-  accepted trade-off; graph queries must not add to them.
-- The receiver's conformance check and the engine's disagree on any
-  input, or the shared function cannot be shared and a second
-  implementation is needed.
-- Bags for non-conforming nodes dominate the bytes shipped on a real
-  space, and there is no cheap way to keep them back.
-- Nested narrowing only works as a post-read filter, so a narrowed edge
-  reads, and wakes on, everything the unnarrowed edge does.
+## Open questions
 
-## Questions the spike should answer, not assume
-
-- Is "the concept decides the whole graph" what agents and views
-  actually want, or does it need a query-side selection from day one?
-  Try it with an agent: hand one a route to a concept with typed edges
-  and see whether it navigates the space better than it does from the
-  schema dump.
-- Is the whole reachable graph the right default, given that
-  `person.manager` reachability is the whole org chart? Pull's answer
-  is ownership: follow components, stop at references. Does that
-  distinction exist in tonk's schemas, and who would declare it?
-- What goes in a bag: only the attributes the target concept names, or
-  everything the entity has? The second is `*`, and for an agent
-  exploring a space it may be the more useful default: it shows what an
-  entity actually carries next to what the concept expects of it.
-- Does a pattern belong to the query, to a view, or to the schema as a
-  named thing an agent can find? Datomic passes patterns as query
-  inputs; a view is already a pattern written in HTML; a stored pattern
-  is something a route could point at.
-- Does a typed edge change what an assertion through that concept means?
-  Asserting an issue with `assignee: person` could check the target
-  conforms, write the nested person too, or ignore the type on write.
-  dialog's schema is read-side; the cheap and consistent answer is
-  "ignore on write", but say so.
-- Where does the graph belong in the wire format: inside
-  `QueryResult.fields` as nested values, or as the normalized node and
-  edge sets beside it?
+- Does the concept's default pattern suffice, or is a query-side
+  pattern needed from the start? Test with an agent given a route.
+- What bounds the default walk? Do tonk schemas have an owned/reference
+  distinction, and who declares it?
+- Should a bag hold only the concept's attributes, or everything the
+  entity has (`*`)?
+- Where does a pattern live: the query, a view, or stored and
+  addressable by a route?
+- Does a typed edge affect writes? Suggested: no, schema is read-side.
+- Wire format: nested values in `QueryResult.fields`, or node and edge
+  sets beside it?
 
 ## Prior art
 
-- **GraphQL.** Schema as a typed graph, possibly cyclic; queries as
-  selection sets producing finite trees; nullable fields as the answer
-  to an unresolvable edge; arguments on any field, which is how it
-  narrows a nested edge. Subscriptions there are event streams, not
-  differential, so the model is the schema and query split, not the
-  subscription.
-- **Relay and Apollo normalized caches.** Results flattened to nodes by
-  id with edges between them, the tree reassembled at read. The closest
-  thing to the delta shape proposed here.
-- **Datomic pull** ([spec](https://docs.datomic.com/query/query-pull.html)).
-  The primary reference; see *Start from Datomic pull*. Matching and
-  shaping as separate stages, missing attributes omitted, explicit and
-  cycle-safe recursion, reverse references, components bounding `*`,
-  patterns as data. It is the shaping half done over a schema that has
-  no types on refs at all, and it has no subscriptions. Datascript and
-  XTDB 1.x carry the same pattern language, which is evidence it
-  travels beyond Datomic's own storage.
-- **EdgeDB (Gel) shapes.** Object types with links to other object
-  types, and queries that select a shape through links, with `filter`,
-  `order by` and `limit` allowed inside a nested shape. The closest to
-  "the schema declares the edge's target type", and the reference for
-  narrowing a nested edge, which pull lacks.
-- **Unison.** Hashes mutually recursive definitions as one cycle group,
-  which is the reference for structural identity over a cyclic schema.
-- **This repository.** `notes/incremental-subscriptions.md` for the
-  pull-driven maintenance model graph subscriptions have to stay inside;
-  `notes/optional-fields.md` for set-widening, which optional edges
-  extend; `dialog-query/src/concept/query/affected.rs` for the nested
-  delta-join that already exists.
+- **Datomic pull**: see *Design*. Datascript and XTDB 1.x use the same
+  pattern language.
+- **GraphQL**: typed, possibly cyclic schema; selection sets; nullable
+  fields; field arguments.
+- **EdgeDB (Gel)**: typed links; nested shapes with `filter`,
+  `order by`, `limit`.
+- **Relay, Apollo**: normalized client caches.
+- **Unison**: hashing of mutually recursive definitions.
+- **This repository**: `notes/incremental-subscriptions.md`,
+  `notes/optional-fields.md`, `affected.rs`, `fixpoint.rs`.
