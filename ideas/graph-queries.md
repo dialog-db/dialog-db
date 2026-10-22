@@ -82,13 +82,23 @@ as a `Box<ConceptDescriptor>`, and a concept's identity hashes its
 conformance targets' references (`CHANGELOG.md`, 0.3.0, *merkle
 references*). `person.manager: person`, `block.next: block`,
 `comment.reply-to: comment` would need a concept whose identity contains
-its own identity. Real schemas are full of these cycles, two of the three
-reference fields in tonk's notebook library are one. Without an answer
+its own identity. Real schemas are full of these cycles; tonk's
+notebook library chains blocks with `block.next`. Without an answer
 here "the whole graph" means "the acyclic part of the graph", which is
 not the idea. Unison's hashing of mutually recursive definitions as one
 cycle group is the prior art to look at; naming the target by bookmark
 instead of by hash is the cheap answer and gives up structural identity
 for those edges.
+
+There is a second reason a cyclic edge cannot be a filter, independent
+of identity. A concept is a rule, and rules are read at their least
+fixpoint. `person` requiring `manager: person` derives a person only from
+a person already derived, so with no other rule for `person` it derives
+nothing at all, not even for data where every chain ends in a cycle. A
+required self-typed edge is therefore not a stricter concept, it is an
+empty one. Cyclic edges can only ever shape, never match, which is also
+what keeps typed edges from making the matching stage recursive (see
+*Performance*).
 
 **Conformance is a filter, and graph reads mostly want a left join.**
 Today a conforming field is required and cannot be optional
@@ -182,6 +192,9 @@ What pull does not do, and where this idea has to add to it:
   graph. That is exactly the agent's problem: pull gives a good way to
   read a graph you understand and no way to discover one. Concept-typed
   edges are the missing half.
+- **No predicates inside a pattern.** Pull shapes and never narrows: a
+  nested edge returns all its values (up to `:limit`) or none. Narrowing
+  is `:where`'s job and stops at the roots. See *Narrowing*.
 - **No subscriptions.** Pull is a read API; nothing in it says how a
   pulled tree changes when a transaction lands. The differential half of
   the deliverable is new ground, built on dialog's own subscriptions.
@@ -221,6 +234,48 @@ is the version of that lesson that grew up on our data model.
 If the spike finds that the shaping stage is unnecessary, that "the
 concept decides everything" works in practice, that is a result worth
 reporting. It is not the default assumption.
+
+## Narrowing
+
+`<tonk-display>` narrows what it shows in two ways today: by entity
+(`entity=`), and by equality on the model's own fields
+(`model="person?name=Alice"`, which `tonk-template/src/resolve.rs` turns
+into a constant on that field's term). Nothing reaches past the first
+layer. "Issues assigned to someone named Alice" needs a hand-written
+join across two expressions with a shared variable, which a view cannot
+state and an agent has to know to write.
+
+With a graph that gets worse, because most interesting narrowing is
+through an edge. There are two different things here, and they belong
+to the two different stages:
+
+- **Narrowing the roots by a nested attribute.** "Issues whose assignee
+  is named Alice." This decides which issues match, so it is matching,
+  an inner join, and it can drop a root. Datomic does this in `:where`,
+  not in pull: `[?i :issue/assignee ?p] [?p :person/name "Alice"]`, then
+  pull the shape of `?i`. In dialog it is a constant on a nested field,
+  pushed into the target concept's premise, which today only receives
+  `this`.
+- **Narrowing a nested edge.** "Each issue, with only Alice's comments."
+  This decides what an edge returns, so it is shaping, and it never
+  drops the issue. Datomic's pull cannot say this: its attribute options
+  are `:as`, `:limit`, `:default` and `:xform`, none of them a
+  predicate, so a filtered edge in Datomic is a second query. GraphQL
+  can, through arguments on any field (`comments(author: "alice")`), and
+  so can EdgeDB, with `filter` inside a nested shape.
+
+So on this point pull is the weaker model and the spike should go
+further than it. A pattern should be able to carry constraints at any
+depth, and the notation has to make it obvious which stage a constraint
+lands in, since one can drop a root and the other cannot. The same
+constraints should reach `<tonk-display>`'s `model=…?` filters, which
+today are equality on the top layer only.
+
+Whichever stage it lands in, a constraint must narrow what is *read*,
+not filter what was read: the constant goes into the scan, so it shrinks
+the demand cover a subscription is gated on. A nested filter applied
+after reading the whole edge would make "only Alice's comments" cost
+what "all comments" costs, and wake the subscription for every comment.
 
 ## Example
 
@@ -401,13 +456,32 @@ Two other paths can change and the spike must measure both:
   for, or the spike shows it costs nothing for a target already scanned
   by the filter (it should be close: the filter already reads the
   target's facts to decide, and throws them away).
-- **Subscriptions.** `affected_entities` returns `None` on recursion and
-  the subscription falls back to full re-evaluation. A cyclic schema is
-  recursive by construction, so without work here every graph
-  subscription over a cyclic concept recomputes on every touching
-  commit. That is correct and it is not acceptable as the end state,
-  but it is acceptable for the spike if the report says which shapes
-  fall back.
+- **Subscriptions.** Recursion does not cost a full recompute today.
+  A subscription over a recursive concept keeps its fixpoint answer
+  table between polls and continues it: additions extend it
+  semi-naively, deletions retract through DRed
+  (`dialog-query/src/concept/query/fixpoint.rs`, `extend` and
+  `retract`; `Subscription::maintain`). It rebuilds only on specific
+  shapes: an addition or deletion matching a negated or optional
+  premise, a non-local nested concept, or one rule body consuming more
+  than one deletion. That is the trade-off the engine has already
+  accepted, and it is the bar.
+
+  Graph queries land on those exact shapes by construction: optional
+  edges, nested concepts, and cycles through them. Put inside the
+  fixpoint, nearly every graph subscription would rebuild on nearly
+  every touching commit. That is not acceptable. The requirement is
+  that **a graph subscription never takes a full-recompute path that
+  the same data read without the graph would not take.** The
+  matching-and-shaping split is what should make that achievable:
+  typed edges never make matching recursive (a cyclic edge cannot
+  match, see *Where the current design stops*), so the matching stage
+  is maintained exactly as today, and the shaping stage is maintained
+  per node and per edge, outside the fixpoint. Reachability through a
+  cycle is the one part of shaping that is recursive. It has to be
+  maintained incrementally too, as a DRed over the edge relation, with
+  a rebuild bounded to the affected subgraph at worst, never the whole
+  result.
 
 The comparison that argues for graph queries, as opposed to merely
 against regressions, is against what tonk does now. A directory of N
@@ -433,7 +507,12 @@ Graph queries in dialog, usable from tonk notation, with subscriptions:
   drops the parent, with at least one of each exercised.
 - At least one cyclic schema (`person.manager: person` or
   `block.next: block`) that can be declared, queried and subscribed to,
-  even if its subscription falls back to recompute.
+  with its subscription maintained incrementally: a rename deep in the
+  cycle, an edge added that closes a cycle, and an edge removed that
+  cuts one each produce a delta without a full recompute.
+- Narrowing by a nested attribute in both stages: roots narrowed by a
+  constant on a nested field, and a nested edge narrowed without
+  dropping its parent, each with the constant reaching the scan.
 - The measurements below.
 
 Not part of the deliverable, nice to have: `#[derive(Concept)]`
@@ -486,9 +565,11 @@ if the report shows why:
   refused, and the only graph left is the inner-join one, where one
   missing name deletes a parent. That is the filter dialog already has,
   and not worth shipping as "graph queries".
-- Every graph subscription falls back to full recompute, so subscribing
-  to a graph is strictly worse than the per-layer subscriptions it would
-  replace.
+- A graph subscription takes a full-recompute path that the same data
+  read without the graph would not take. Today's rebuild shapes are the
+  accepted trade-off; graph queries must not add to them.
+- Nested narrowing only works as a post-read filter, so a narrowed edge
+  reads, and wakes on, everything the unnarrowed edge does.
 
 ## Questions the spike should answer, not assume
 
@@ -518,7 +599,8 @@ if the report shows why:
 
 - **GraphQL.** Schema as a typed graph, possibly cyclic; queries as
   selection sets producing finite trees; nullable fields as the answer
-  to an unresolvable edge. Subscriptions there are event streams, not
+  to an unresolvable edge; arguments on any field, which is how it
+  narrows a nested edge. Subscriptions there are event streams, not
   differential, so the model is the schema and query split, not the
   subscription.
 - **Relay and Apollo normalized caches.** Results flattened to nodes by
@@ -533,8 +615,10 @@ if the report shows why:
   XTDB 1.x carry the same pattern language, which is evidence it
   travels beyond Datomic's own storage.
 - **EdgeDB (Gel) shapes.** Object types with links to other object
-  types, and queries that select a shape through links. The closest to
-  "the schema declares the edge's target type".
+  types, and queries that select a shape through links, with `filter`,
+  `order by` and `limit` allowed inside a nested shape. The closest to
+  "the schema declares the edge's target type", and the reference for
+  narrowing a nested edge, which pull lacks.
 - **Unison.** Hashes mutually recursive definitions as one cycle group,
   which is the reference for structural identity over a cyclic schema.
 - **This repository.** `notes/incremental-subscriptions.md` for the
