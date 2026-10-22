@@ -45,6 +45,37 @@ that was not one. A buffer's older ops are history, not state, and the
 differential has to compare state against state, as every other reader of a
 buffer does.
 
+### A dialog peer can be reached over iroh
+
+[#521](https://github.com/dialog-db/dialog-db/pull/521)
+
+`dialog-peer-iroh` reaches another dialog process, on the same machine or
+another one, over iroh QUIC. A peer is named by the `did:key` of its iroh
+endpoint, so its address is `did:key:...?route=...` and the routes are hints:
+a peer that moves is still the same peer. An iroh address is one more address
+a contact can be reached at, carried in `dialog-network`'s table beside the
+other sites, and the same code runs in a browser over a WebRTC data channel.
+Each request is a signed invocation; the payload is bound to it, and carried
+blocks are checked by blake3 rather than trusted by address. Blobs stream over
+a channel of their own. A watch is refused as unsupported until a peer streams
+one; the cell is read by resolving it again.
+
+What this changes for you:
+
+- `dialog-peer-iroh` is new: the site (`Iroh`), the responder that performs a
+  verified invocation against a local store, and the transport.
+- `peer::Hello` (`/use/get/dialog/peer/hello`) asks a peer which peer it is
+  and which key signs for it, and `peer::Spaces`
+  (`/use/get/dialog/peer/spaces`) which spaces it keeps, under the names it
+  recorded them by. `Peer` answers both.
+- `MemoryError`, `ArchiveError`, `BlobError` and `memory::Current` are
+  `Serialize` and `Deserialize`, so a peer that performs an effect can send
+  its refusal back.
+
+Why: every replica holder is a peer, but none of the existing transports
+could reach one that is another dialog process, since they all assume a
+server already reachable at a URL.
+
 ### A snapshot can be exported without the bytes of its assets
 
 [#623](https://github.com/dialog-db/dialog-db/pull/623)
