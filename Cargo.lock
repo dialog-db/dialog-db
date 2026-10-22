@@ -1415,6 +1415,7 @@ dependencies = [
  "dialog-storage",
  "futures-util",
  "ratatui",
+ "serde_ipld_dagcbor",
  "throbber-widgets-tui",
  "tokio",
 ]

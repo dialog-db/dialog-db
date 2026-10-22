@@ -1,8 +1,13 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::collections::btree_map;
+use std::fmt::{self, Debug};
+use std::iter::Peekable;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Edition, Origin, Version};
+use super::{EDITION_CEILING, Edition, HistoryError, Origin, Version};
 
 /// The causal context of a revision: a per-origin watermark summarizing
 /// everything in the revision's ancestry.
@@ -25,8 +30,119 @@ use super::{Edition, Origin, Version};
 ///
 /// In CRDT terms this is the causal context of an optimized OR-set,
 /// with `(Origin, Edition)` versions as its dots.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Context(BTreeMap<Origin, Watermark>);
+///
+/// A context holds one watermark per origin its ancestry ever included,
+/// and every commit derives its successor from its parent's by raising
+/// one of them. Copying the map for that would make every commit cost the
+/// number of origins, so the map is kept in two parts: settled entries,
+/// shared behind a reference count by every context derived from them,
+/// and the few entries written since, which a copy duplicates. The recent
+/// part settles into a fresh map once it outgrows the square root of the
+/// settled one, so a copy and an amortized settle both stay well below
+/// the size of the map. Two contexts holding the same watermarks are
+/// equal however their entries are split.
+#[derive(Clone, Default)]
+pub struct Context(Watermarks);
+
+/// The storage behind a [`Context`]: settled entries shared between the
+/// contexts derived from them, and the entries written since, which take
+/// precedence over a settled entry for the same origin.
+#[derive(Clone, Default)]
+struct Watermarks {
+    settled: Arc<BTreeMap<Origin, Watermark>>,
+    recent: BTreeMap<Origin, Watermark>,
+    /// How many origins the two parts hold between them.
+    len: usize,
+}
+
+/// The fewest recent entries a context keeps before it settles them.
+const SETTLE_FLOOR: usize = 64;
+
+impl Watermarks {
+    fn get(&self, origin: &Origin) -> Option<&Watermark> {
+        self.recent.get(origin).or_else(|| self.settled.get(origin))
+    }
+
+    fn contains(&self, origin: &Origin) -> bool {
+        self.recent.contains_key(origin) || self.settled.contains_key(origin)
+    }
+
+    fn insert(&mut self, origin: Origin, watermark: Watermark) {
+        if self.recent.insert(origin, watermark).is_none() && !self.settled.contains_key(&origin) {
+            self.len += 1;
+        }
+        if self.recent.len() > SETTLE_FLOOR.max(self.settled.len().isqrt()) {
+            // Copies the settled map only when another context shares it.
+            Arc::make_mut(&mut self.settled).append(&mut self.recent);
+        }
+    }
+
+    fn iter(&self) -> Entries<'_> {
+        Entries {
+            settled: self.settled.iter().peekable(),
+            recent: self.recent.iter().peekable(),
+        }
+    }
+}
+
+impl From<BTreeMap<Origin, Watermark>> for Watermarks {
+    fn from(settled: BTreeMap<Origin, Watermark>) -> Self {
+        Self {
+            len: settled.len(),
+            settled: Arc::new(settled),
+            recent: BTreeMap::new(),
+        }
+    }
+}
+
+/// A context's watermarks in ascending origin order: the settled and
+/// recent parts merged, a recent entry standing in for a settled one.
+struct Entries<'a> {
+    settled: Peekable<btree_map::Iter<'a, Origin, Watermark>>,
+    recent: Peekable<btree_map::Iter<'a, Origin, Watermark>>,
+}
+
+impl<'a> Iterator for Entries<'a> {
+    type Item = (&'a Origin, &'a Watermark);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match (self.settled.peek(), self.recent.peek()) {
+            (Some((settled, _)), Some((recent, _))) => match settled.cmp(recent) {
+                Ordering::Less => self.settled.next(),
+                Ordering::Greater => self.recent.next(),
+                Ordering::Equal => {
+                    self.settled.next();
+                    self.recent.next()
+                }
+            },
+            (Some(_), None) => self.settled.next(),
+            (None, _) => self.recent.next(),
+        }
+    }
+}
+
+impl PartialEq for Context {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len == other.0.len && self.iter().eq(other.iter())
+    }
+}
+
+impl Eq for Context {}
+
+impl Debug for Context {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Context").field(&DebugEntries(self)).finish()
+    }
+}
+
+/// A context's watermarks rendered as one map, however they are split.
+struct DebugEntries<'a>(&'a Context);
+
+impl Debug for DebugEntries<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map().entries(self.0.iter()).finish()
+    }
+}
 
 /// One origin's entry in a [`Context`]: the highest edition seen from it,
 /// and how many of its revisions the ancestry actually contains.
@@ -50,6 +166,40 @@ pub struct Watermark {
     pub count: u64,
 }
 
+impl Watermark {
+    /// Refuse a watermark no legitimate chain can produce: an edition at or
+    /// above [`EDITION_CEILING`], or a count above `edition + 1`.
+    ///
+    /// The ceiling keeps a validly signed hostile entry near `u64::MAX`
+    /// from pinning the origin as fully seen on every replica that merges
+    /// it. The count bound holds because an origin's chain has strictly
+    /// increasing editions, so at most `edition + 1` of its revisions fit
+    /// at or below the watermark; an inflated count would misroute every
+    /// peer's merge direction.
+    ///
+    /// This is the check every watermark crosses at the trust boundary,
+    /// wherever it was read from: a head's published context
+    /// ([`Revision::verify`](crate::identity::Revision::verify)) or a
+    /// tree's context region.
+    pub fn check(&self) -> Result<(), HistoryError> {
+        if self.edition.value() >= EDITION_CEILING {
+            return Err(HistoryError::InvalidReference(format!(
+                "watermark edition {} exceeds the protocol ceiling; \
+                 no legitimate chain reaches it",
+                self.edition
+            )));
+        }
+        if self.count > self.edition.value().saturating_add(1) {
+            return Err(HistoryError::InvalidReference(format!(
+                "watermark count {} exceeds its edition {} — more revisions \
+                 than the chain can hold",
+                self.count, self.edition
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Serde encodes a [`Context`] as an ordered array of
 /// `(origin, edition, count)` triples, NOT as the derive's map: heads
 /// travel as dag-cbor, whose spec allows only string map keys, while a
@@ -61,8 +211,8 @@ pub struct Watermark {
 impl Serialize for Context {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq;
-        let mut seq = serializer.serialize_seq(Some(self.0.len()))?;
-        for (origin, watermark) in &self.0 {
+        let mut seq = serializer.serialize_seq(Some(self.0.len))?;
+        for (origin, watermark) in self.iter() {
             seq.serialize_element(&(origin, watermark.edition, watermark.count))?;
         }
         seq.end()
@@ -72,12 +222,10 @@ impl Serialize for Context {
 impl<'de> Deserialize<'de> for Context {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let entries = Vec::<(Origin, Edition, u64)>::deserialize(deserializer)?;
-        Ok(Self(
-            entries
-                .into_iter()
-                .map(|(origin, edition, count)| (origin, Watermark { edition, count }))
-                .collect(),
-        ))
+        Ok(entries
+            .into_iter()
+            .map(|(origin, edition, count)| (origin, Watermark { edition, count }))
+            .collect())
     }
 }
 
@@ -97,6 +245,21 @@ impl Context {
             .unwrap_or(false)
     }
 
+    /// The watermark this context holds for `origin`, if it has observed
+    /// any of its revisions.
+    pub fn get(&self, origin: &Origin) -> Option<&Watermark> {
+        self.0.get(origin)
+    }
+
+    /// Set `origin`'s watermark to exactly `watermark`, whatever it held.
+    /// For assembling a context whose entries are known exactly, as a
+    /// region reader does; a context that grows by revisions uses
+    /// [`record`](Context::record), [`tally`](Context::tally) or
+    /// [`absorb`](Context::absorb).
+    pub fn set(&mut self, origin: Origin, watermark: Watermark) {
+        self.0.insert(origin, watermark);
+    }
+
     /// Whether this context has observed ANY revision minted by
     /// `origin`.
     ///
@@ -108,7 +271,7 @@ impl Context {
     /// context encoding (deltas with backlinks, say) only has to keep
     /// this lookup cheap, never a full origin listing.
     pub fn observes_origin(&self, origin: &Origin) -> bool {
-        self.0.contains_key(origin)
+        self.0.contains(origin)
     }
 
     /// Extend the context by one NEWLY MINTED revision: its origin's
@@ -123,20 +286,21 @@ impl Context {
     /// counting a revision that arrives below an already-raised
     /// watermark.
     pub fn record(&mut self, version: Version) {
-        match self.0.get_mut(&version.origin) {
-            None => {
-                self.0.insert(
-                    version.origin,
-                    Watermark {
-                        edition: version.edition,
-                        count: 1,
-                    },
-                );
-            }
-            Some(watermark) if version.edition > watermark.edition => {
-                watermark.edition = version.edition;
-                watermark.count += 1;
-            }
+        match self.0.get(&version.origin).copied() {
+            None => self.0.insert(
+                version.origin,
+                Watermark {
+                    edition: version.edition,
+                    count: 1,
+                },
+            ),
+            Some(watermark) if version.edition > watermark.edition => self.0.insert(
+                version.origin,
+                Watermark {
+                    edition: version.edition,
+                    count: watermark.count + 1,
+                },
+            ),
             Some(_) => {}
         }
     }
@@ -147,12 +311,17 @@ impl Context {
     /// folded exactly once (an ancestry walk's visited set, a delta's
     /// per-version-unique record keys); double-folding overcounts.
     pub fn tally(&mut self, version: Version) {
-        let entry = self.0.entry(version.origin).or_insert(Watermark {
-            edition: version.edition,
-            count: 0,
-        });
-        entry.edition = entry.edition.max(version.edition);
-        entry.count += 1;
+        let watermark = match self.0.get(&version.origin) {
+            Some(watermark) => Watermark {
+                edition: watermark.edition.max(version.edition),
+                count: watermark.count + 1,
+            },
+            None => Watermark {
+                edition: version.edition,
+                count: 1,
+            },
+        };
+        self.0.insert(version.origin, watermark);
     }
 
     /// Union with another context: per origin, the entry with the higher
@@ -161,13 +330,17 @@ impl Context {
     /// the union's count). This is the context of a merge — the merged
     /// head's ancestry is the union of its parents' ancestries.
     pub fn merge(&mut self, other: &Context) {
-        for (origin, watermark) in &other.0 {
-            let entry = self.0.entry(*origin).or_insert(*watermark);
-            if watermark.edition > entry.edition {
-                *entry = *watermark;
-            } else if watermark.edition == entry.edition {
+        for (origin, watermark) in other.iter() {
+            match self.0.get(origin).copied() {
+                None => self.0.insert(*origin, *watermark),
+                Some(ours) if watermark.edition > ours.edition => {
+                    self.0.insert(*origin, *watermark);
+                }
                 // Same prefix; counts should agree, tolerate drift by max.
-                entry.count = entry.count.max(watermark.count);
+                Some(ours) if watermark.edition == ours.edition && watermark.count > ours.count => {
+                    self.0.insert(*origin, *watermark);
+                }
+                Some(_) => {}
             }
         }
     }
@@ -201,26 +374,25 @@ impl Context {
             entry.count += 1;
         }
         for (origin, addition) in news {
-            match self.0.get_mut(&origin) {
-                Some(watermark) => {
-                    watermark.edition = watermark.edition.max(addition.edition);
-                    watermark.count += addition.count;
-                }
-                None => {
-                    self.0.insert(origin, addition);
-                }
-            }
+            let watermark = match self.0.get(&origin) {
+                Some(watermark) => Watermark {
+                    edition: watermark.edition.max(addition.edition),
+                    count: watermark.count + addition.count,
+                },
+                None => addition,
+            };
+            self.0.insert(origin, watermark);
         }
     }
 
     /// Number of origins this context has observed.
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.0.len
     }
 
     /// Whether the context observes nothing.
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.0.len == 0
     }
 
     /// Whether this context has observed everything `other` has: for
@@ -232,7 +404,7 @@ impl Context {
     /// adopted wholesale where we have no local novelty (nothing we
     /// know could contradict what survived its screen).
     pub fn includes(&self, other: &Context) -> bool {
-        other.0.iter().all(|(origin, theirs)| {
+        other.iter().all(|(origin, theirs)| {
             self.0
                 .get(origin)
                 .is_some_and(|ours| ours.edition >= theirs.edition)
@@ -262,13 +434,22 @@ impl Context {
     /// ten-thousand-deep history is ONE revision to send, not ten
     /// thousand.
     pub fn divergence(&self, other: &Context) -> u64 {
-        self.0
-            .iter()
+        self.iter()
             .map(|(origin, watermark)| match other.0.get(origin) {
                 Some(seen) => watermark.count.saturating_sub(seen.count),
                 None => watermark.count,
             })
             .fold(0u64, u64::saturating_add)
+    }
+}
+
+/// A context assembled from `(origin, watermark)` entries, as a tree's
+/// context region lists them. A repeated origin keeps its last entry.
+impl FromIterator<(Origin, Watermark)> for Context {
+    fn from_iter<I: IntoIterator<Item = (Origin, Watermark)>>(entries: I) -> Self {
+        Self(Watermarks::from(
+            entries.into_iter().collect::<BTreeMap<_, _>>(),
+        ))
     }
 }
 
@@ -407,6 +588,106 @@ mod tests {
         );
     }
 
+    /// A context holds the same watermarks however its storage is split:
+    /// one built commit by commit past many settles, one collected at once,
+    /// and copies of either compare equal and iterate in origin order, and
+    /// a copy raised afterwards leaves the context it was copied from as it
+    /// was.
+    #[test]
+    fn it_keeps_its_watermarks_across_settles_and_copies() {
+        let mut expected = BTreeMap::new();
+        let mut built = Context::new();
+        let mut copies = Vec::new();
+        for i in 0u32..5_000 {
+            let mut seed = [0u8; 32];
+            seed[..4].copy_from_slice(&i.wrapping_mul(2_654_435_761).to_be_bytes());
+            let origin = Origin::from(seed);
+            let version = Version::new(origin, Edition::new(u64::from(i)));
+            built.record(version);
+            expected.insert(
+                origin,
+                Watermark {
+                    edition: version.edition,
+                    count: 1,
+                },
+            );
+            if i % 997 == 0 {
+                copies.push((built.clone(), expected.clone()));
+            }
+        }
+        let collected: Context = expected.iter().map(|(o, w)| (*o, *w)).collect();
+        assert_eq!(built, collected);
+        assert_eq!(built.len(), expected.len());
+        assert!(built.iter().map(|(o, w)| (*o, *w)).eq(expected.clone()));
+
+        for (copy, at) in copies {
+            assert_eq!(copy.len(), at.len(), "a copy keeps what it was copied with");
+            assert!(copy.iter().map(|(o, w)| (*o, *w)).eq(at));
+        }
+
+        let mut raised = built.clone();
+        let (origin, watermark) = expected
+            .iter()
+            .next()
+            .map(|(o, w)| (*o, *w))
+            .expect("entries");
+        raised.record(Version::new(origin, watermark.edition.successor()));
+        assert_ne!(raised, built);
+        assert_eq!(
+            built.get(&origin),
+            Some(&watermark),
+            "the original is untouched"
+        );
+        assert_eq!(raised.get(&origin).map(|w| w.count), Some(2));
+    }
+
+    /// The watermark bounds refuse exactly what no chain can produce: an
+    /// edition at the ceiling, and a count above `edition + 1`; a genesis
+    /// watermark (edition 0, one revision) and a dense chain pass.
+    #[test]
+    fn it_refuses_watermarks_no_chain_can_produce() {
+        let sound = [
+            Watermark {
+                edition: Edition::new(0),
+                count: 1,
+            },
+            Watermark {
+                edition: Edition::new(9),
+                count: 10,
+            },
+            Watermark {
+                edition: Edition::new(EDITION_CEILING - 1),
+                count: 1,
+            },
+        ];
+        for watermark in sound {
+            watermark.check().expect("a producible watermark passes");
+        }
+
+        let hostile = [
+            Watermark {
+                edition: Edition::new(EDITION_CEILING),
+                count: 1,
+            },
+            Watermark {
+                edition: Edition::new(u64::MAX),
+                count: 1,
+            },
+            Watermark {
+                edition: Edition::new(9),
+                count: 11,
+            },
+        ];
+        for watermark in hostile {
+            assert!(
+                matches!(watermark.check(), Err(HistoryError::InvalidReference(_))),
+                "{watermark:?} must be refused"
+            );
+        }
+    }
+
+    /// A context of `origins` origins, origin `i` (seeded `i`) at
+    /// edition `i` with one revision.
     #[test]
     fn it_merges_as_per_origin_maximum() {
         let mut a = Context::new();

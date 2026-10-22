@@ -1731,6 +1731,55 @@ mod tests {
         Ok(())
     }
 
+    /// A key written on every commit (an application's own bookkeeping
+    /// entry, say) must not grow the root frame: each commit's op for the
+    /// key replaces the one the root buffers, so the frame the commit
+    /// rewrites carries one op for the key however many commits have
+    /// written it. Before the collapse the root held every commit's op and
+    /// grew by one per commit until a cascade.
+    #[dialog_common::test]
+    async fn it_keeps_the_root_frame_flat_under_a_hot_key() -> Result<()> {
+        let mut storage = MemoryBlocks::new();
+
+        // A canonical base wide enough for an index root, so the root
+        // buffers the hot key instead of deferring it to a leaf edit.
+        let keys: Vec<u32> = (0..1200).collect();
+        let base = sequential(&keys, &mut storage).await?;
+        let mut live = TestHitchhiker::open(&base);
+
+        let hot = u32::MAX.to_le_bytes();
+        let mut root_bytes = Vec::new();
+        for commit in 0..100u32 {
+            // Same-sized values, so a flat frame is the only flat outcome.
+            live = live
+                .insert(hot, commit.to_le_bytes().to_vec(), &storage)
+                .await?;
+            let mut delta = Delta::zero();
+            let root = live.persist_mut(&mut delta)?;
+            let frame = delta.get(&root).expect("the persist wrote the root");
+            root_bytes.push(frame.as_ref().len());
+            flush(&mut delta, &mut storage).await?;
+        }
+        for at in [0usize, 9, 49, 99] {
+            println!(
+                "hot-key commit {:>3}: root frame {} bytes",
+                at + 1,
+                root_bytes[at]
+            );
+        }
+
+        assert!(
+            root_bytes.iter().all(|&bytes| bytes == root_bytes[0]),
+            "the root frame must not grow with commits to one key: {root_bytes:?}"
+        );
+        assert_eq!(
+            live.get(&hot, &storage).await?,
+            Some(99u32.to_le_bytes().to_vec()),
+            "the last commit's value stands"
+        );
+        Ok(())
+    }
+
     /// A variable-length opaque key for the small-frame reshape fixture:
     /// long shared prefixes past the separator bound are what veto seams
     /// and push frames into the forced-split regime, which fixed-width

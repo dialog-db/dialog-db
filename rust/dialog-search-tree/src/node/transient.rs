@@ -83,9 +83,19 @@ enum LinkNovelty<Value> {
     /// merged into `run` when full (and by any consumer that needs one flat
     /// sorted list). Both runs are sorted by key with the newest op for a
     /// key last, and every `tail` op is newer than every `run` op FOR THE
-    /// SAME KEY (arrivals only ever land in the tail), so the stable merge
-    /// that keeps `run` entries first on ties reproduces exactly the order
-    /// a single always-sorted buffer would hold.
+    /// SAME KEY (an arrival lands in the tail only when neither run holds
+    /// its key), so the stable merge that keeps `run` entries first on
+    /// ties reproduces exactly the order a single always-sorted buffer
+    /// would hold.
+    ///
+    /// An arriving op for a key the link already buffers REPLACES that
+    /// key's newest op in place (see [`insert`](Self::insert)): nothing
+    /// reads an older op for a key once a newer one is buffered at the
+    /// same link, so keeping it only grew the frame. A key therefore lives
+    /// in at most one run, once, except that a run decoded from a frame an
+    /// older release persisted may still hold several ops for a key,
+    /// oldest first; every reader takes the last, so those read exactly as
+    /// before and fall away at the next flush.
     ///
     /// The split exists because enqueue inserts ops ONE AT A TIME (the
     /// per-op cascade timing is deliberate — batching moved where flushes
@@ -97,8 +107,8 @@ enum LinkNovelty<Value> {
     Open {
         /// The settled ops, sorted by key, oldest ops first within a key.
         run: Vec<NoveltyEntry<Value>>,
-        /// Recent arrivals, sorted by key, chronological within a key,
-        /// every one newer than any `run` op for its key.
+        /// Recent arrivals, sorted by key, every one for a key no `run`
+        /// op holds.
         tail: Vec<NoveltyEntry<Value>>,
     },
     /// Decoded ops WITH their current encoding alongside, the state a
@@ -235,6 +245,16 @@ fn resolve_runs<'a, Value>(
     last_for_key(tail).or_else(|| last_for_key(run))
 }
 
+/// The newest buffered op for `key` in one sorted run, mutably: the last
+/// entry of the key's contiguous span, found by binary search.
+fn newest_for_key_mut<'a, Value>(
+    entries: &'a mut [NoveltyEntry<Value>],
+    key: &[u8],
+) -> Option<&'a mut NoveltyEntry<Value>> {
+    let past = entries.partition_point(|entry| entry.key.as_slice() <= key);
+    (past > 0 && entries[past - 1].key.as_slice() == key).then(move || &mut entries[past - 1])
+}
+
 impl<Value> LinkNovelty<Value>
 where
     Value: self::Value,
@@ -298,39 +318,61 @@ where
         }
     }
 
-    /// Inserts one arriving op, preserving every reader's invariants without
-    /// touching the settled run: the op binary-inserts into the bounded
-    /// sorted tail (after any equal keys, so chronological order within a
-    /// key holds), and a full tail merges into the run first. This is the
-    /// enqueue path's insertion — O(tail limit) per op instead of a re-sort
-    /// of the whole accumulated buffer.
-    fn insert<K>(&mut self, entry: NoveltyEntry<Value>) -> Result<(), DialogSearchTreeError>
+    /// Inserts one arriving op, preserving every reader's invariants
+    /// without touching the settled run's order, and returns the op it
+    /// supersedes, if any.
+    ///
+    /// When this link already buffers the key, the arrival REPLACES the
+    /// key's newest op in place (a binary search, no shift): a later op for
+    /// a key fully supersedes an earlier one under sequential application
+    /// (an assert over a retract nets to the assert, a retract over an
+    /// assert to the retract, an assert over an assert to the newer
+    /// value), every reader resolves a key to its newest op, and a flush
+    /// folds last-wins per key, so the older op had no reader left and
+    /// only grew the frame on every persist. The tail is probed first,
+    /// since its ops are newer than the run's for the same key.
+    ///
+    /// Otherwise the op binary-inserts into the bounded sorted tail, and a
+    /// full tail merges into the run first. This is the enqueue path's
+    /// insertion — O(tail limit) per op instead of a re-sort of the whole
+    /// accumulated buffer.
+    fn insert<K>(
+        &mut self,
+        entry: NoveltyEntry<Value>,
+    ) -> Result<Option<NoveltyEntry<Value>>, DialogSearchTreeError>
     where
         K: self::Key,
     {
-        match self {
-            LinkNovelty::Sealed(buffer) => {
-                *self = LinkNovelty::Open {
-                    run: buffer.entries::<K>()?,
-                    tail: vec![entry],
-                };
-            }
-            LinkNovelty::Cached { entries, .. } => {
-                *self = LinkNovelty::Open {
-                    run: std::mem::take(entries),
-                    tail: vec![entry],
-                };
-            }
-            LinkNovelty::Open { run, tail } => {
-                if tail.len() >= NOVELTY_TAIL_LIMIT {
-                    let merged = merge_runs(std::mem::take(run), std::mem::take(tail));
-                    *run = merged;
+        if let LinkNovelty::Open { run, tail } = self {
+            for held in [&mut *tail, &mut *run] {
+                if let Some(slot) = newest_for_key_mut(held, &entry.key) {
+                    return Ok(Some(std::mem::replace(slot, entry)));
                 }
-                let at = tail.partition_point(|held| held.key <= entry.key);
-                tail.insert(at, entry);
             }
+            if tail.len() >= NOVELTY_TAIL_LIMIT {
+                let merged = merge_runs(std::mem::take(run), std::mem::take(tail));
+                *run = merged;
+            }
+            let at = tail.partition_point(|held| held.key <= entry.key);
+            tail.insert(at, entry);
+            return Ok(None);
         }
-        Ok(())
+
+        // The first write since this link was opened sealed or left cached
+        // by a persist: its decoded ops become the run (dropping the
+        // encoding, which the next persist must redo), and the arrival
+        // either replaces its predecessor there or starts the tail.
+        let mut run = match self {
+            LinkNovelty::Sealed(buffer) => buffer.entries::<K>()?,
+            LinkNovelty::Cached { entries, .. } => std::mem::take(entries),
+            LinkNovelty::Open { .. } => unreachable!("an open link returned above"),
+        };
+        let (superseded, tail) = match newest_for_key_mut(&mut run, &entry.key) {
+            Some(slot) => (Some(std::mem::replace(slot, entry)), Vec::new()),
+            None => (None, vec![entry]),
+        };
+        *self = LinkNovelty::Open { run, tail };
+        Ok(superseded)
     }
 
     /// Takes this link's ops as one flat sorted list, leaving it empty.
@@ -478,11 +520,11 @@ where
     /// Routes `incoming` ops into their link buffers by the children's
     /// bounds (see [`link_bounds`]): one binary search per op, the same
     /// lower-bound rule stored routing uses, with a key below every bound
-    /// clamping into link 0. Each op inserts into its link's bounded sorted
-    /// tail in arrival order (see [`LinkNovelty::insert`]), so for equal
-    /// keys existing ops stay before incoming ones and the newest op for a
-    /// key stays last — the same order the old whole-buffer stable re-sort
-    /// produced, without its O(buffer) cost per op.
+    /// clamping into link 0. Each op either replaces the op its link already
+    /// buffers for the key or inserts into the link's bounded sorted tail
+    /// (see [`LinkNovelty::insert`]), so the newest op for a key is the one
+    /// that stands and the op and weight totals count what is buffered,
+    /// not what arrived.
     pub(crate) fn route<K>(
         &mut self,
         bounds: &[&[u8]],
@@ -496,11 +538,20 @@ where
         }
         for entry in incoming {
             let at = bounds.partition_point(|separator| *separator <= entry.key.as_slice());
-            self.total += 1;
-            if let Some(weight) = self.weight.as_mut() {
-                *weight += novelty_entry_weight(&entry);
+            let arrived = novelty_entry_weight(&entry);
+            match self.link_mut(at).insert::<K>(entry)? {
+                None => {
+                    self.total += 1;
+                    if let Some(weight) = self.weight.as_mut() {
+                        *weight += arrived;
+                    }
+                }
+                Some(superseded) => {
+                    if let Some(weight) = self.weight.as_mut() {
+                        *weight = *weight - novelty_entry_weight(&superseded) + arrived;
+                    }
+                }
             }
-            self.link_mut(at).insert::<K>(entry)?;
         }
         Ok(())
     }
@@ -2556,42 +2607,46 @@ mod novelty_model_tests {
 
     use std::collections::BTreeMap;
 
-    use super::{LinkNovelty, NOVELTY_TAIL_LIMIT, Novelty};
-    use crate::{NoveltyEntry, NoveltyOp};
+    use super::{LinkNovelty, NOVELTY_TAIL_LIMIT, Novelty, novelty_entry_weight};
+    use crate::{Manifest, NoveltyBuffer, NoveltyEntry, NoveltyOp};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     type Val = Vec<u8>;
 
-    /// A reference model of one link's buffer: the chronological op log per
-    /// key. Everything the two-run structure must answer derives from it.
+    /// A reference model of one link's buffer: the newest op per key, which
+    /// is all a buffer keeps. Everything the two-run structure must answer
+    /// derives from it: a read resolves a key to its newest op, a flush
+    /// folds last-wins per key, and an older op for a key has no reader
+    /// once a newer one is buffered at the same link.
     #[derive(Default)]
     struct Model {
-        by_key: BTreeMap<Vec<u8>, Vec<NoveltyOp<Val>>>,
-        total: usize,
+        by_key: BTreeMap<Vec<u8>, NoveltyOp<Val>>,
     }
 
     impl Model {
         fn push(&mut self, key: Vec<u8>, op: NoveltyOp<Val>) {
-            self.by_key.entry(key).or_default().push(op);
-            self.total += 1;
+            self.by_key.insert(key, op);
+        }
+
+        /// The number of ops the buffer holds: one per key written.
+        fn total(&self) -> usize {
+            self.by_key.len()
         }
 
         fn newest(&self, key: &[u8]) -> Option<&NoveltyOp<Val>> {
-            self.by_key.get(key).and_then(|ops| ops.last())
+            self.by_key.get(key)
         }
 
         /// The flat sorted op list the buffer must produce: ascending keys,
-        /// chronological order within a key (newest last).
+        /// one op per key, the newest.
         fn flat(&self) -> Vec<NoveltyEntry<Val>> {
             self.by_key
                 .iter()
-                .flat_map(|(key, ops)| {
-                    ops.iter().map(|op| NoveltyEntry {
-                        key: key.clone(),
-                        op: op.clone(),
-                    })
+                .map(|(key, op)| NoveltyEntry {
+                    key: key.clone(),
+                    op: op.clone(),
                 })
                 .collect()
         }
@@ -2600,11 +2655,19 @@ mod novelty_model_tests {
         fn winners(&self, start: &[u8], end: &[u8]) -> Vec<NoveltyEntry<Val>> {
             self.by_key
                 .range(start.to_vec()..=end.to_vec())
-                .map(|(key, ops)| NoveltyEntry {
+                .map(|(key, op)| NoveltyEntry {
                     key: key.clone(),
-                    op: ops.last().expect("non-empty log").clone(),
+                    op: op.clone(),
                 })
                 .collect()
+        }
+
+        /// The buffered weight under `manifest`, recounted from what the
+        /// buffer holds; the buffer's own figure is kept incrementally
+        /// through every replacement and must agree.
+        fn weight(&self, manifest: &Manifest) -> usize {
+            self.flat().iter().map(novelty_entry_weight).sum::<usize>()
+                + self.total() * manifest.entry_overhead()
         }
     }
 
@@ -2615,18 +2678,30 @@ mod novelty_model_tests {
         (*state >> 32) as u32
     }
 
+    fn entry(key: &[u8], op: NoveltyOp<Val>) -> NoveltyEntry<Val> {
+        NoveltyEntry {
+            key: key.to_vec(),
+            op,
+        }
+    }
+
     /// Single-op routing (the enqueue hot path) against the model, sweeping
     /// seeds and op counts sized to cross the tail limit repeatedly, with a
-    /// small key pool so equal-key chains span run/tail boundaries.
+    /// small key pool so every key is rewritten many times, in the tail and
+    /// in the run.
     #[dialog_common::test]
     async fn it_matches_the_model_through_single_op_routing() {
+        let manifest = Manifest::default();
         for seed in 0..8u64 {
             let mut rng = 0x9E3779B97F4A7C15u64 ^ seed;
             let mut novelty: Novelty<Val> = Novelty::new();
             let mut model = Model::default();
 
             let ops = NOVELTY_TAIL_LIMIT * 3 + 17;
-            let pool = 24u32;
+            // Wide enough that the tail crosses its limit (a key enters the
+            // tail only on its first write), narrow enough that every key
+            // is rewritten many times over.
+            let pool = 300u32;
             for at in 0..ops {
                 let key = (xorshift(&mut rng) % pool).to_be_bytes().to_vec();
                 let op = if xorshift(&mut rng).is_multiple_of(4) {
@@ -2649,11 +2724,24 @@ mod novelty_model_tests {
                         model.newest(&probe).cloned(),
                         "seed {seed}, op {at}: resolve disagrees with the model"
                     );
+                    assert_eq!(
+                        novelty.weight::<[u8; 4]>(&manifest).expect("weight"),
+                        model.weight(&manifest),
+                        "seed {seed}, op {at}: weight disagrees with a recount"
+                    );
                 }
             }
 
-            assert_eq!(novelty.len(), model.total, "seed {seed}: op count");
-            assert_eq!(novelty.peak(), model.total, "seed {seed}: single-link peak");
+            assert!(
+                novelty.len() < ops,
+                "seed {seed}: a rewritten key must not add an op"
+            );
+            assert_eq!(novelty.len(), model.total(), "seed {seed}: op count");
+            assert_eq!(
+                novelty.peak(),
+                model.total(),
+                "seed {seed}: single-link peak"
+            );
 
             // Range winners while the tail is (very likely) non-empty.
             for _ in 0..8 {
@@ -2678,7 +2766,7 @@ mod novelty_model_tests {
             }
 
             // The drained flat list is the stored order: ascending keys,
-            // newest op for a key last. `NoveltyBuffer::from_entries` is a
+            // the newest op for each. `NoveltyBuffer::from_entries` is a
             // pure function of this list, so equality here IS sealed-bytes
             // equality with a buffer built any other way.
             assert_eq!(
@@ -2714,7 +2802,7 @@ mod novelty_model_tests {
                     .expect("route");
             }
 
-            let expected_peak = models.iter().map(|model| model.total).max().unwrap_or(0);
+            let expected_peak = models.iter().map(Model::total).max().unwrap_or(0);
             assert_eq!(novelty.peak(), expected_peak, "seed {seed}: peak");
             for (slot, model) in models.iter().enumerate() {
                 assert_eq!(
@@ -2727,87 +2815,268 @@ mod novelty_model_tests {
         }
     }
 
-    /// The tail-limit boundary exactly: inserting precisely at, below, and
-    /// above the limit keeps every reader consistent (the consolidation
-    /// fires between the limit-th and limit+1-th insert).
+    /// The tail-limit boundary exactly: filling the tail to precisely the
+    /// limit, one below, and one above with fresh keys keeps every reader
+    /// consistent (the consolidation fires between the limit-th and
+    /// limit+1-th fresh key), including for a hot key rewritten after
+    /// every fresh one, which must be found and replaced wherever the
+    /// consolidation left it.
     #[dialog_common::test]
     async fn it_consolidates_exactly_at_the_tail_limit() {
         for extra in [0usize, 1, 2] {
             let mut novelty: Novelty<Val> = Novelty::new();
             let mut model = Model::default();
-            // One shared key so every entry is one equal-key chain — the
-            // hardest shape for "newest last" across a consolidation.
-            let key = 7u32.to_be_bytes().to_vec();
+            let hot = u32::MAX.to_be_bytes().to_vec();
             for at in 0..(NOVELTY_TAIL_LIMIT + extra) {
+                let fresh = (at as u32).to_be_bytes().to_vec();
                 let op = NoveltyOp::Assert(vec![at as u8, (at >> 8) as u8]);
-                model.push(key.clone(), op.clone());
+                model.push(fresh.clone(), op.clone());
+                novelty
+                    .route::<[u8; 4]>(&[], vec![NoveltyEntry { key: fresh, op }])
+                    .expect("route");
+                let op = NoveltyOp::Assert(vec![at as u8, (at >> 8) as u8, 0xff]);
+                model.push(hot.clone(), op.clone());
                 novelty
                     .route::<[u8; 4]>(
                         &[],
                         vec![NoveltyEntry {
-                            key: key.clone(),
+                            key: hot.clone(),
                             op,
                         }],
                     )
                     .expect("route");
                 assert_eq!(
-                    novelty.resolve::<[u8; 4]>(0, &key).expect("resolve"),
-                    model.newest(&key).cloned(),
-                    "extra {extra}, op {at}: newest op must win across the limit"
+                    novelty.resolve::<[u8; 4]>(0, &hot).expect("resolve"),
+                    model.newest(&hot).cloned(),
+                    "extra {extra}, op {at}: the newest op must win across the limit"
+                );
+                assert_eq!(
+                    novelty.len(),
+                    model.total(),
+                    "extra {extra}, op {at}: the hot key must hold one op"
                 );
             }
             assert_eq!(
                 novelty.take_all::<[u8; 4]>().expect("take_all"),
                 model.flat(),
-                "extra {extra}: chronological order within the key must survive"
+                "extra {extra}: the newest op for every key must survive the limit"
             );
         }
     }
 
-    /// `remove_key` drops every op for the key from BOTH runs and keeps the
-    /// accounting exact, without disturbing other keys.
+    /// `remove_key` drops the key's op from whichever run holds it and keeps
+    /// the accounting exact, without disturbing other keys.
     #[dialog_common::test]
     async fn it_removes_keys_across_both_runs() {
+        let manifest = Manifest::default();
         let mut novelty: Novelty<Val> = Novelty::new();
         let mut model = Model::default();
-        // Interleave two keys so, after the limit crossing, the victim key
-        // holds ops in the run AND the tail.
-        let victim = 3u32.to_be_bytes().to_vec();
-        let keeper = 5u32.to_be_bytes().to_vec();
-        for at in 0..(NOVELTY_TAIL_LIMIT + NOVELTY_TAIL_LIMIT / 2) {
-            let key = if at.is_multiple_of(2) {
-                &victim
-            } else {
-                &keeper
-            };
+        // Enough fresh keys after the settled key to push it into the run
+        // through a consolidation, then a late key that stays in the tail.
+        let settled = 3u32.to_be_bytes().to_vec();
+        let late = 5u32.to_be_bytes().to_vec();
+        let mut keys = vec![settled.clone()];
+        keys.extend((100..100 + NOVELTY_TAIL_LIMIT as u32).map(|at| at.to_be_bytes().to_vec()));
+        keys.push(late.clone());
+        for (at, key) in keys.into_iter().enumerate() {
             let op = NoveltyOp::Assert(vec![at as u8]);
             model.push(key.clone(), op.clone());
             novelty
-                .route::<[u8; 4]>(
-                    &[],
-                    vec![NoveltyEntry {
-                        key: key.clone(),
-                        op,
-                    }],
-                )
+                .route::<[u8; 4]>(&[], vec![NoveltyEntry { key, op }])
                 .expect("route");
         }
-        novelty
-            .remove_key::<[u8; 4]>(0, &victim)
-            .expect("remove_key");
-        let dropped = model.by_key.remove(&victim).expect("victim present");
-        model.total -= dropped.len();
+        match &novelty.links[0] {
+            LinkNovelty::Open { run, tail } => {
+                assert!(run.iter().any(|entry| entry.key == settled));
+                assert!(tail.iter().any(|entry| entry.key == late));
+            }
+            other => panic!("routing leaves the link open, not {other:?}"),
+        }
 
-        assert_eq!(novelty.len(), model.total, "count after removal");
-        assert_eq!(
-            novelty.resolve::<[u8; 4]>(0, &victim).expect("resolve"),
-            None,
-            "removed key must not resolve"
-        );
+        for victim in [settled, late] {
+            novelty
+                .remove_key::<[u8; 4]>(0, &victim)
+                .expect("remove_key");
+            model.by_key.remove(&victim).expect("victim present");
+
+            assert_eq!(novelty.len(), model.total(), "count after removal");
+            assert_eq!(
+                novelty.weight::<[u8; 4]>(&manifest).expect("weight"),
+                model.weight(&manifest),
+                "weight after removal"
+            );
+            assert_eq!(
+                novelty.resolve::<[u8; 4]>(0, &victim).expect("resolve"),
+                None,
+                "removed key must not resolve"
+            );
+        }
         assert_eq!(
             novelty.take_all::<[u8; 4]>().expect("take_all"),
             model.flat(),
             "surviving ops must be untouched and ordered"
+        );
+    }
+
+    /// A key written on every commit holds exactly one op however many
+    /// times it is written, and that op is the newest: an assert over a
+    /// retract nets to the assert, a retract over an assert to the retract,
+    /// and the op and weight totals count the one op that stands.
+    #[dialog_common::test]
+    async fn it_collapses_a_hot_key_to_its_newest_op() {
+        let manifest = Manifest::default();
+        let mut novelty: Novelty<Val> = Novelty::new();
+        let hot = 7u32.to_be_bytes();
+        let mut newest = None;
+        for at in 0..(NOVELTY_TAIL_LIMIT * 3) {
+            let op = if at.is_multiple_of(3) {
+                NoveltyOp::Retract
+            } else {
+                NoveltyOp::Assert(vec![at as u8, (at >> 8) as u8])
+            };
+            newest = Some(op.clone());
+            novelty
+                .route::<[u8; 4]>(&[], vec![entry(&hot, op)])
+                .expect("route");
+            assert_eq!(novelty.len(), 1, "op {at}: one op stands for the key");
+            assert_eq!(
+                novelty.resolve::<[u8; 4]>(0, &hot).expect("resolve"),
+                newest.clone(),
+                "op {at}: the newest op wins"
+            );
+            let standing = entry(&hot, newest.clone().expect("written"));
+            assert_eq!(
+                novelty.weight::<[u8; 4]>(&manifest).expect("weight"),
+                novelty_entry_weight(&standing) + manifest.entry_overhead(),
+                "op {at}: the weight is the standing op's alone"
+            );
+        }
+        assert_eq!(
+            novelty.take_all::<[u8; 4]>().expect("take_all"),
+            vec![entry(&hot, newest.expect("written"))],
+            "the drain yields the one standing op"
+        );
+    }
+
+    /// The collapse reaches a key wherever the link holds it: in a sealed
+    /// buffer opened from a stored frame, in the cached entries a persist
+    /// left behind, and in the run after a consolidation. In every state
+    /// the arrival replaces the key's op rather than joining it.
+    #[dialog_common::test]
+    async fn it_collapses_into_every_link_state() {
+        let manifest = Manifest::default();
+        let hot = 7u32.to_be_bytes();
+        let cold = 9u32.to_be_bytes();
+        let stored = vec![
+            entry(&hot, NoveltyOp::Assert(vec![1])),
+            entry(&cold, NoveltyOp::Assert(vec![2])),
+        ];
+        let buffer = NoveltyBuffer::from_entries::<[u8; 4]>(0, stored.clone()).expect("encode");
+
+        let sealed = LinkNovelty::Sealed(buffer.clone());
+        let cached = LinkNovelty::Cached {
+            entries: stored.clone(),
+            buffer,
+        };
+        let open = LinkNovelty::Open {
+            run: stored.clone(),
+            tail: Vec::new(),
+        };
+        for link in [sealed, cached, open] {
+            let state = format!("{link:?}");
+            let mut novelty: Novelty<Val> = Novelty {
+                links: vec![link],
+                total: stored.len(),
+                weight: None,
+            };
+            let before = novelty.weight::<[u8; 4]>(&manifest).expect("weight");
+
+            let arrival = entry(&hot, NoveltyOp::Assert(vec![3, 3, 3]));
+            novelty
+                .route::<[u8; 4]>(&[], vec![arrival.clone()])
+                .expect("route");
+
+            assert_eq!(
+                novelty.len(),
+                2,
+                "{state}: the arrival replaced the standing op"
+            );
+            assert_eq!(
+                novelty.resolve::<[u8; 4]>(0, &hot).expect("resolve"),
+                Some(arrival.op.clone()),
+                "{state}: the arrival wins"
+            );
+            assert_eq!(
+                novelty.weight::<[u8; 4]>(&manifest).expect("weight"),
+                before - novelty_entry_weight(&stored[0]) + novelty_entry_weight(&arrival),
+                "{state}: the weight swaps the superseded op for the arrival"
+            );
+            assert_eq!(
+                novelty.take_all::<[u8; 4]>().expect("take_all"),
+                vec![arrival.clone(), stored[1].clone()],
+                "{state}: the drain holds the arrival in the standing op's place"
+            );
+        }
+    }
+
+    /// A frame persisted before the collapse may hold several ops for one
+    /// key, oldest first. Opened, it reads exactly as it always did (the
+    /// last op wins), an arrival for the key replaces the newest of them,
+    /// and the older ones ride along to the drain, where the flush's
+    /// last-wins fold discards them.
+    #[dialog_common::test]
+    async fn it_keeps_reading_a_frame_holding_several_ops_per_key() {
+        let manifest = Manifest::default();
+        let hot = 7u32.to_be_bytes();
+        let stored = vec![
+            entry(&hot, NoveltyOp::Assert(vec![1])),
+            entry(&hot, NoveltyOp::Retract),
+            entry(&hot, NoveltyOp::Assert(vec![2])),
+        ];
+        let buffer = NoveltyBuffer::from_entries::<[u8; 4]>(0, stored.clone()).expect("encode");
+        let mut novelty: Novelty<Val> = Novelty {
+            links: vec![LinkNovelty::Sealed(buffer)],
+            total: stored.len(),
+            weight: None,
+        };
+        assert_eq!(
+            novelty.resolve::<[u8; 4]>(0, &hot).expect("resolve"),
+            Some(NoveltyOp::Assert(vec![2])),
+            "the sealed frame resolves to its last op for the key"
+        );
+        let mut winners = Vec::new();
+        novelty
+            .collect_winners_in_range::<[u8; 4]>(
+                std::ops::Bound::Unbounded,
+                std::ops::Bound::Unbounded,
+                &mut winners,
+            )
+            .expect("winners");
+        assert_eq!(winners, vec![stored[2].clone()]);
+        let before = novelty.weight::<[u8; 4]>(&manifest).expect("weight");
+
+        let arrival = entry(&hot, NoveltyOp::Retract);
+        novelty
+            .route::<[u8; 4]>(&[], vec![arrival.clone()])
+            .expect("route");
+        assert_eq!(
+            novelty.len(),
+            stored.len(),
+            "the arrival replaced the last op"
+        );
+        assert_eq!(
+            novelty.resolve::<[u8; 4]>(0, &hot).expect("resolve"),
+            Some(NoveltyOp::Retract),
+            "the arrival wins over every stored op"
+        );
+        assert_eq!(
+            novelty.weight::<[u8; 4]>(&manifest).expect("weight"),
+            before - novelty_entry_weight(&stored[2]) + novelty_entry_weight(&arrival),
+        );
+        assert_eq!(
+            novelty.take_all::<[u8; 4]>().expect("take_all"),
+            vec![stored[0].clone(), stored[1].clone(), arrival],
+            "the older ops ride along, the arrival last"
         );
     }
 

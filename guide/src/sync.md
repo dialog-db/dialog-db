@@ -84,12 +84,12 @@ On S3 the swap in step 4 is a conditional `PUT` with `If-Match` on the cell's ET
 
 ## Pull
 
-A pull brings the remote peer's changes in. It reads the remote peer's head, checks the head's signature, and then looks at two watermarks: the one in the remote peer's head, and the one in the local head. Each watermark says what its side has seen (see [Commits and History](./history.md)). Comparing them tells the replica which case it is in:
+A pull brings the remote peer's changes in. It reads the remote peer's head, checks the head's signature, and then asks two questions: has the local replica seen the remote peer's head, and has the remote peer seen the local head? Each watermark says what its side has seen (see [Commits and History](./history.md)), and having seen a head means having seen everything that head had seen. The first question is a lookup in the local watermark. The second needs one row of the remote peer's watermark, which lives in its tree. When both heads were written by the same writer, the editions answer it with no reads, which is the usual case for a device following its upstream. Otherwise the replica reads that row from the remote peer's tree, a few blocks. The answers tell the replica which case it is in:
 
 | Case | What the replica says | What it does |
 |---|---|---|
 | The local head has seen everything the remote peer has | *"Nothing new here."* | keeps its head, updates the sync base |
-| The remote peer has seen everything local, and nothing changed locally since the last sync | *"I'll take yours."* | adopts the remote peer's root as is, reading no blocks at all |
+| The remote peer has seen everything local, and nothing changed locally since the last sync | *"I'll take yours."* | adopts the remote peer's root as is, reading at most the blocks that hold one row of its watermark |
 | Both sides have changes the other has not seen | *"We need to merge."* | merges, then makes a merge commit |
 
 When Bob pulls for the first time, he has no local changes, so he takes Alice's root as it is. He reads no nodes to do it. The nodes arrive later, on demand, as his queries walk through them ([Blocks and Storage](./storage.md)).

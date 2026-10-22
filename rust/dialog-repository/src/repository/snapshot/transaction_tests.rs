@@ -4,6 +4,7 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+use crate::repository::branch::context::head_context;
 use anyhow::Result;
 use dialog_artifacts::history::{History as _, Version};
 use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Instruction, Value};
@@ -325,10 +326,7 @@ async fn it_keeps_one_origin_across_consecutive_transactions() -> Result<()> {
         vec![second.version(), first.version(), base.version()]
     );
     // And the head's context carries both origins' watermarks.
-    let context = second
-        .context
-        .clone()
-        .expect("a minted head carries its context");
+    let context = head_context(&snapshot, &operator).await?;
     assert!(context.observes(&base.version()));
     assert!(context.observes(&second.version()));
     Ok(())

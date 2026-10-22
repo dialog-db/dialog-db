@@ -109,17 +109,19 @@ Each entry carries a second number beside the edition: **how many of that origin
 
 Watermarks also order replicas by knowledge: if every entry of watermark P is at or below the corresponding entry of watermark Q, then Q has seen everything P has (in code: `Q.includes(P)`). The pull scenarios below are gated entirely on this comparison.
 
-**Where the watermark lives.** Three places, in order of authority:
+**Where the watermark lives.** A watermark grows with the number of origins that ever wrote into the history, and nothing removes an entry: a writer that commits once and leaves stays in every downstream watermark, which is the inherent cost of observed-remove without tombstones. What must not grow with it is the per-operation cost, so the map is written down once per tree, the head carries none of it, and a commit writes to it only where a writer's chain of commits changes hands. Three places, in order of authority:
 
-1. **On every head, inside the signature.** A published revision carries its watermark as a field, and the signing payload commits to it byte for byte. This is the branch memory record a peer fetches, so reading a replica's knowledge costs one small read and is exactly as trustworthy as the head itself: tampering with the watermark, or stripping it, fails verification.
-2. **In a per-branch-handle memo**, keyed by head version. A fixed head's watermark never changes, so entries never invalidate. Every commit extends the memo by its own version; every pull writes the merged head's watermark back.
+1. **In the tree's context region.** A reserved key range beside the history and coverage regions, one entry per origin: key `tag ++ origin`, value `(edition, count)`, covered by the head signature through the tree root. It holds every origin's watermark exactly **except the head's own**: that entry is where the head's chain of commits began, and the reader brings it up to the head as `(head edition, count + head edition − stored edition)` (`Revision::context_from_region`). Along one origin's own chain the edition and the revision count each rise by one per commit, so a commit on a head of its own origin writes nothing to the region. A commit on another origin's head writes two entries: the parent origin's, whose chain ends and must now be exact, and its own. A merge writes its own entry (its edition jumps past both parents) and every entry its sides hold differently. One function computes those writes from the parent heads and their contexts for every path that mints a head (`history::region_writes`). Adopt-by-root carries the region with the tree, and no merge pass integrates it entry by entry. Every entry read is bounds-checked like a head's, and a region without the head's own origin, or holding it above the head, is refused.
+2. **In a per-branch-handle memo**, keyed by head version. A fixed head's watermark never changes, so entries never invalidate, and entries are shared rather than copied. Every commit extends the memo by its own version; every pull writes the merged head's watermark back, and the upstream's once it is read.
 3. **Derivable by walking the ancestry records** in the tree. The fallback for heads minted before watermarks were published; costs one signature-verified read per ancestry revision.
 
-A test pins that all three agree (`it_publishes_the_watermark_with_the_head`, `it_maintains_the_context_memo_incrementally`).
+Nothing a pull decides before reading blocks needs the upstream's map. A head's watermark holds its own version and is closed under ancestry, so "everything they have seen, we have seen" is exactly "we have seen their head" (`local.observes(their version)`, a local lookup), and "they have seen everything we have" is exactly "they have seen our head", one entry of their map. Two heads of one origin answer both from their editions, since an origin's revisions form one chain: that is a device following an upstream it fast-forwarded from last time, and it reads nothing. Across origins, nothing-new reads our own context (the memo, or our own tree's region, local blocks), and the fast-forward reads the upstream's region: its root and the path to the region's leaf. A cell watcher compares two heads without reading either tree, so across origins it cannot tell an older head from one a branch was reset to, and fetches both (`Revision::precedence` never answers `Before` across origins without inline contexts). The merge paths, which read blocks anyway, read the upstream's region once, memoized by head version.
+
+Heads minted before the region carry their whole watermark inline, and heads minted before watermarks carry none; both still verify and pull. The first head minted on one of them writes the whole map into its tree's region, once. Tests pin that the region, read the way a reader that remembers nothing reads it, equals the ancestry walk and the memo after every way a head is minted or installed (`it_keeps_the_region_exact_in_every_merge_direction`, `it_writes_both_origins_where_a_chain_changes_hands`, `it_keeps_the_region_exact_through_amend_reset_and_adoption`, `it_maintains_the_context_memo_incrementally`), and that a writer's own chain leaves the region untouched (`it_writes_nothing_to_the_region_along_a_writers_own_chain`).
 
 ## What a revision is made of
 
-**The head** is the small signed value published to the branch cell: the branch identifier, the issuer (session key) DID, the tree root, the edition, the watermark, and the issuer's signature over all of it. The branch identifier is the content-derived branch entity — one opaque hash folding the profile, the repository, and the branch name — NOT the name itself: the name is whatever someone privately called their branch and no peer needs it, so it never travels (though a guessable name remains enumerable from the hash by anyone holding the public DIDs). Those two identity fields are the whole story: the origin derives from exactly `(branch identifier, issuer)`, so the head carries neither the repository DID nor the profile DID separately — the identifier already commits to both, and the in-tree record carries the attribution readably. An origin is never carried as a field, always recomputed, so a hostile issuer cannot mint into anyone else's origin. Parent edges live in the in-tree record, not on the head. A replica verifies the signature **before anything else happens** with a head it did not mint: a forged or tampered head is rejected before a single block of its tree is read. Pull is the trust boundary (`it_refuses_to_pull_a_forged_head`).
+**The head** is the small signed value published to the branch cell: the branch identifier, the issuer (session key) DID, the tree root, the edition, a marker saying its watermark is in its tree's context region, and the issuer's signature over all of it. It carries no watermark entries, so its size does not depend on the number of origins: a few hundred bytes. The marker is covered by the signature, so a head cannot be read as one minted before the region (whose payload carries the whole watermark inline, or nothing). The branch identifier is the content-derived branch entity — one opaque hash folding the profile, the repository, and the branch name — NOT the name itself: the name is whatever someone privately called their branch and no peer needs it, so it never travels (though a guessable name remains enumerable from the hash by anyone holding the public DIDs). Those two identity fields are the whole story: the origin derives from exactly `(branch identifier, issuer)`, so the head carries neither the repository DID nor the profile DID separately — the identifier already commits to both, and the in-tree record carries the attribution readably. An origin is never carried as a field, always recomputed, so a hostile issuer cannot mint into anyone else's origin. Parent edges live in the in-tree record, not on the head. A replica verifies the signature **before anything else happens** with a head it did not mint: a forged or tampered head is rejected before a single block of its tree is read. Pull is the trust boundary (`it_refuses_to_pull_a_forged_head`).
 
 **The record** is the revision's metadata written into the tree itself, one atomic fact in the reserved `dialog.` namespace: parent versions (the edges of the history graph), attribution, skip links, and its own signature. Two details:
 
@@ -164,17 +166,18 @@ flowchart TD
     B -- no --> C{"sync base ==
     upstream tree?"}
     C -- yes --> N2["no-op: upstream unmoved"]
-    C -- no --> D{"upstream watermark
-    included in ours?"}
+    C -- no --> D{"we have seen
+    their head?"}
     D -- yes --> S2["scenario 2: nothing new
     keep head, advance sync base
     zero reads"]
     D -- no --> E{"no local novelty
-    (our tree == sync base) and ours
-    included in theirs?"}
+    (our tree == sync base) and they
+    have seen our head?"}
     E -- yes --> S3["scenario 3: fast-forward
-    adopt head + tree + watermark by root
-    zero reads"]
+    adopt head + tree by root
+    zero reads for one origin;
+    root + region leaf across origins"]
     E -- no --> F{"tracked, and both sides'
     divergence above the
     small-delta threshold?"}
@@ -483,6 +486,22 @@ Commits never touch the network; their cost is CPU plus local writes. Measured i
 
 Levers if interactive single-fact commits need to be cheaper, none started: the leaf-size parameter lives in the tree's format manifest as data, and smaller leaves cut the bytes hashed per commit proportionally, at the price of more, smaller blocks per merge span (a sweep in this harness would find the knee); a durable novelty buffer, where a commit appends its few operations to a small log folded into the root hash and tree shaping is deferred to an amortized flush (structurally a write-ahead log plus checkpoint), would drop the per-commit work to appending a handful of operations plus the signatures; and the record-layout items above shrink the dominant term.
 
+### The cost of the watermark
+
+Measured by `context_cost_by_origins` in the same harness: a branch whose history carries N one-commit origins, each a passing writer that adopted the previous one's head and committed once. Commit time is a one-fact commit on top, averaged over 100; the control is the same commit on a history as deep written by one origin, which separates the watermark's cost from the depth's. Reads are block reads of a fast-forward pull and a nothing-new pull, from a session of their own that remembers nothing about either head.
+
+```text
+            before (whole watermark inline)            after (region, no head context)
+origins   head bytes  payload bytes  commit ms   head bytes  payload bytes  commit ms  control ms
+      1          n/a            n/a        n/a          293            183       0.24        0.21
+     10          700            718       0.25          295            183       0.16        0.18
+    100          n/a            n/a        n/a          296            183       0.28        0.31
+  1 000       39 058         48 239       1.24          294            183       0.46        0.79
+ 10 000      390 058        480 239       5.39          292            183       2.36        2.29
+```
+
+Both pulls read nothing at every origin count, because in this scenario the two heads share an origin, so both gates are answered from their editions. Across origins, nothing-new is answered from our own context: free when the memo holds it, and otherwise our own tree's root and region leaf, local blocks. A fast-forward across origins reads the upstream's root and the path to its region's leaf, three blocks in `it_reads_the_upstreams_region_to_fast_forward_across_origins`. The head is a constant few hundred bytes, and a commit's watermark work does not grow with the number of origins: a commit on its own head writes nothing to the region and signs no watermark, and the copy of the parent's watermark it extends shares everything but the recently written entries (a context settles its recent entries into a fresh shared map once they outgrow the square root of the rest). What still grows with N is history depth, which the control shows costs as much from one origin as from many. In the perf sweep, `commit-rows` (100 one-row commits by one origin) writes main's 112 blocks and 4 640 bytes more than main, the one region entry. A dead origin costs its 48 bytes in every replica's region, which only the history horizon below would reclaim.
+
 ## Rules that must never break
 
 1. **One origin, one sequence.** The watermark is exact only because each origin writes sequentially (per-session keys, head CAS). Never add a way to mint two revisions with the same version; reset is not rewind.
@@ -490,13 +509,14 @@ Levers if interactive single-fact commits need to be cheaper, none started: the 
 3. **Records before facts, one pass, one persist**, in both merge directions.
 4. **A screen consults only the receiver's state** (its tree and watermark) plus the incoming delta: ours in the screened direction, the substrate side's published one in the replay and graft directions. Never mix the two sides' screens.
 5. **Never act on an unverified head.** Signatures are checked before any gate fires, on pull and on push alike; the watermark is only trustworthy because the signature covers it. Verification also refuses any edition (the head's own, or a watermark entry's) at or above the protocol ceiling (2^62): a validly signed hostile edition near `u64::MAX` would otherwise make the saturating successor mint one version twice and pin the origin's watermark so high that every future write from it is silently dropped.
-6. **The `dialog.` namespace is reserved**: revision metadata is written only by the internal record path.
+6. **A tree's context region, with the head's own entry brought up to the head, is its head's watermark.** Every operation that mints a head writes the entries its parents' regions would not derive (`history::region_writes`, the one place that decides), and every operation that adopts a head adopts its tree with it. A commit's edition is its parent's plus one, which is what lets a chain of commits by one origin leave the region untouched; a path that ever minted a revision of its own origin with a larger jump outside a merge would have to write its own entry. Pinned for every minting path in `pull/context_tests.rs`.
+7. **The `dialog.` namespace is reserved**: revision metadata is written only by the internal record path.
 
 ## Not done yet
 
 1. **Mesh sync planning**: with watermarks on every head, choosing the pull order across N peers is greedy set cover over version vectors (pull the peer covering the most of what you lack; peers whose watermark you include are skipped by scenario 2). No new protocol is needed; this is client policy.
 2. **Content erasure** (GDPR): the log retains value bytes in claim records indefinitely, in any merge design. The fix is value indirection (records and index entries carry the content hash; bytes live outside the merkle structure) plus a replicated, grow-only erasure set peers honor by dropping bytes. Hashes of low-entropy values are brute-forceable, so strict erasure of such fields needs app-layer salting or encryption.
 3. **Authority beyond the device**: the bound authority is the profile, a per-device key. Attributing a revision to the account a profile is linked to needs the account's delegation to the profile in the record as well.
-4. **History horizon GC** behind a published bootstrap floor.
+4. **History horizon GC** behind a published bootstrap floor. It is also what would reclaim the context region's entries for origins that are gone: an entry can only be dropped once no replica can still hold a claim its origin wrote, which an open system can only establish by publishing a horizon that late peers rebootstrap from.
 5. **`State::Removed`** survives only for reading old trees; removing the variant is a serialization format change, deliberately deferred.
 6. **Re-asserts citing what they override**, making intentional resurrection first-class in the lineage; nothing depends on it. (The same-batch case landed with the record fold: a retract-then-re-assert of one value in one batch records an assert citing the withdrawn version. The cross-batch case — a plain re-assert after an earlier deletion — still records a genesis assert.)

@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use super::commit::session_delegation;
 use dialog_artifacts::ArchiveDelta;
-use dialog_artifacts::history::{Context, RevisionRecord};
+use dialog_artifacts::history::{Context, RevisionRecord, region_writes};
 use dialog_artifacts::merge;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_capability::Provider;
@@ -31,6 +31,7 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::memory::{Publish, Resolve};
 
+use super::context::{held, published_context};
 use crate::repository::archive::persist;
 use crate::{Branch, CommitError, Index, NetworkedIndex, PublishError, Revision, TreeReference};
 
@@ -70,7 +71,10 @@ where
             // merge with, and adopting over a deletion is not ours to do.
             return Err(lost.into());
         };
-        let Some(context) = context_of(branch, &theirs).await else {
+        let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
+        let Some(context) =
+            published_context(&theirs, &branch.contexts(), &store, &branch.node_cache()).await?
+        else {
             // A head minted before heads carried their context: its
             // ancestry is not known without a walk, so it is not merged.
             return Err(lost.into());
@@ -95,15 +99,6 @@ where
     Err(lost.into())
 }
 
-/// The context of `head`: the one it published, or the one remembered
-/// for it.
-async fn context_of(branch: &Branch, head: &Revision) -> Option<Context> {
-    match &head.context {
-        Some(context) => Some(context.clone()),
-        None => branch.contexts().cached(&head.version()).await,
-    }
-}
-
 /// Mint a revision whose tree is `theirs` with what `mine` changed since
 /// `base` integrated onto it, and whose parents are both, with its
 /// context.
@@ -112,7 +107,7 @@ async fn merged<Env>(
     base: Option<&Revision>,
     mine: &Revision,
     theirs: &Revision,
-    context: Context,
+    context: Arc<Context>,
     env: &Env,
 ) -> Result<(Revision, Context), CommitError>
 where
@@ -183,7 +178,10 @@ where
     .await?
     .persist(delta.blocks())?;
 
-    let mut merged_context = context;
+    // The merged tree started as theirs, so its context region is what
+    // theirs held.
+    let theirs_full = Arc::clone(&context);
+    let mut merged_context = Arc::unwrap_or_clone(context);
     merged_context.absorb(mem::take(
         &mut *observed
             .lock()
@@ -207,7 +205,13 @@ where
     );
     record.signature = Attest::new(record.payload()?).perform(env).await?;
     let manifest = merged.format_manifest(store.clone(), &delta).await?;
+    merged_context.record(revision.version());
     let mut entries = record.entries(&manifest)?;
+    entries.entries.extend(region_writes(
+        revision.version(),
+        &merged_context,
+        &[held(theirs, &theirs_full)],
+    ));
     // The session's delegation goes in with the record the first time
     // this tree holds it.
     if let Some(delegation) = &delegation
@@ -217,8 +221,7 @@ where
     }
     merged.record(&store, &mut delta, entries).await?;
     revision.tree = TreeReference::from(*merged.root().as_bytes());
-    merged_context.record(revision.version());
-    revision.context = Some(merged_context.clone());
+    revision.publish_region();
     revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
     persist(

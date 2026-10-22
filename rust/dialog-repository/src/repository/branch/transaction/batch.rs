@@ -46,6 +46,7 @@ use dialog_effects::blob::Size as BlobSize;
 use dialog_effects::memory::{Current, Publish, Resolve, Version as MemoryVersion};
 use dialog_query::query::Application;
 use dialog_search_tree::Cache;
+use std::sync::Arc;
 
 /// A staged chain of commits on a branch: minted, persisted, invisible.
 ///
@@ -95,7 +96,7 @@ pub struct TransactionBatch {
     /// verified-record memo once the head has actually advanced.
     chain: Vec<(Version, RevisionRecord)>,
     /// The chain tip's causal context, for the branch's context memo.
-    context: Option<Context>,
+    context: Option<Arc<Context>>,
     /// The branch's shared memos, seeded at publish.
     records: Cache<Version, RevisionRecord>,
     contexts: ContextCache,
