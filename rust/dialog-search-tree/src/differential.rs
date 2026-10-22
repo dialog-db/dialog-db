@@ -751,6 +751,20 @@ where
             return Ok(false);
         }
 
+        // A buffer can hold several ops for one key, newest last, and every
+        // reader resolves the key to its newest op (the reduction in
+        // [`winning_ops`]). The comparison below is therefore between
+        // winners: an op that lost to a newer one on its own side is not what
+        // that side holds, so it must neither cancel the other side's winner
+        // nor surface as a change of its own.
+        let winners = |ops: &[NoveltyEntry<Value>]| {
+            winning_ops(ops)
+                .into_iter()
+                .map(|(key, op)| NoveltyEntry { key, op })
+                .collect::<Vec<_>>()
+        };
+        let (ours_ops, theirs_ops) = (winners(&ours_ops), winners(&theirs_ops));
+
         // Ops both sides hold are not changes; keep only what each side adds
         // that the other lacks.
         let retain = |mine: &[NoveltyEntry<Value>], other: &[NoveltyEntry<Value>]| {
@@ -1836,7 +1850,10 @@ mod tests {
     use crate::helpers::{
         JournaledBlocks, TestStorage, Traversable as _, TraversalOrder, TreeNodes as _,
     };
-    use crate::{Buffer, Delta, Entry, LoadBlock, Manifest, PersistentTree, tree_spec};
+    use crate::{
+        Buffer, Delta, Entry, Link, LoadBlock, Manifest, NoveltyEntry, NoveltyOp,
+        PersistentNodeBody, PersistentTree, Scale, tree_spec,
+    };
     use crate::{MemoryBlocks, Traversable as _, Visit};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -2256,10 +2273,20 @@ mod tests {
                 let is_insert = !next().is_multiple_of(3);
                 let key = next() % 400;
                 let value = vec![(next() % 251) as u8];
-                if next().is_multiple_of(2) {
-                    source_ops.push((is_insert, key, value));
+                let side = if next().is_multiple_of(2) {
+                    &mut source_ops
                 } else {
-                    target_ops.push((is_insert, key, value));
+                    &mut target_ops
+                };
+                side.push((is_insert, key, value));
+                // Every fourth op is followed by a second op on the same key
+                // on the same side, so each side's buffers hold several ops
+                // for some keys, newest last. What a side holds at such a key
+                // is its newest op alone, and the differential must compare
+                // that, never an op it has already superseded.
+                if next().is_multiple_of(4) {
+                    let value = vec![(next() % 251) as u8];
+                    side.push((!next().is_multiple_of(3), key, value));
                 }
             }
 
@@ -5458,6 +5485,144 @@ mod tests {
                 "{label}: novel nodes must materialize the target"
             );
         }
+        Ok(())
+    }
+
+    /// A root index node over one shared leaf, carrying `novelty` in its
+    /// buffer, stored and sealed as a tree.
+    ///
+    /// The leaf's separator is `bkey(100)`, non-empty, so an assert of a key
+    /// below it is provably an insert and two such roots settle against each
+    /// other without reading the leaf. Building the frame directly, rather
+    /// than through a hitchhiker edit, pins the stored shape itself: a buffer
+    /// holding several ops for one key, newest last, as a frame persisted by
+    /// an older build can.
+    async fn root_over_shared_leaf(
+        novelty: Vec<NoveltyEntry<Vec<u8>>>,
+        storage: &CountingBackend,
+    ) -> Result<TestTree> {
+        let manifest = Manifest::default();
+        let leaf = PersistentNodeBody::segment_from_entries(
+            vec![
+                Entry::new(bkey(100), vec![100]),
+                Entry::new(bkey(200), vec![200]),
+            ],
+            manifest.clone(),
+        )?;
+        let leaf = Buffer::from(leaf.as_bytes()?);
+        let link = Link {
+            separator: bkey(100).to_vec().into(),
+            node: leaf.blake3_hash().clone(),
+            scale: Scale::EMPTY,
+        };
+        storage.store(leaf);
+
+        let root = PersistentNodeBody::index_from_links::<[u8; 4]>(vec![link], novelty, manifest)?;
+        let root = Buffer::from(root.as_bytes()?);
+        let hash = root.blake3_hash().clone();
+        storage.store(root);
+        Ok(TestTree::from_hash(hash))
+    }
+
+    fn assert_op(key: [u8; 4], value: Vec<u8>) -> NoveltyEntry<Vec<u8>> {
+        NoveltyEntry {
+            key: key.to_vec(),
+            op: NoveltyOp::Assert(value),
+        }
+    }
+
+    /// Splits a change list into its adds and its removes, each as
+    /// `(key, value)` pairs in stream order.
+    #[allow(clippy::type_complexity)]
+    fn split_changes(
+        changes: Vec<Change<[u8; 4], Vec<u8>>>,
+    ) -> (Vec<([u8; 4], Vec<u8>)>, Vec<([u8; 4], Vec<u8>)>) {
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+        for change in changes {
+            match change {
+                Change::Add(entry) => adds.push((entry.key, entry.value)),
+                Change::Remove(entry) => removes.push((entry.key, entry.value)),
+            }
+        }
+        (adds, removes)
+    }
+
+    /// Two roots over the same leaf, differing only in their buffers, where
+    /// one buffer holds two asserts of one key. Every reader resolves the key
+    /// to the newest op, so the settled difference must compare the newest op
+    /// on each side: ours resolves `k` to `v2`, theirs to `v1`, and the
+    /// differential reports exactly that exchange in both directions.
+    ///
+    /// Before the fix, the settle path subtracted theirs' `v1` from ours'
+    /// `[v1, v2]` op for op, leaving theirs with nothing at `k`: the diff
+    /// said theirs held no value there.
+    #[dialog_common::test]
+    async fn it_settles_the_newest_op_against_the_other_sides_newest_op() -> Result<()> {
+        let storage = CountingBackend::new();
+        let k = bkey(50);
+        let ours =
+            root_over_shared_leaf(vec![assert_op(k, vec![1]), assert_op(k, vec![2])], &storage)
+                .await?;
+        let theirs = root_over_shared_leaf(vec![assert_op(k, vec![1])], &storage).await?;
+
+        storage.reset();
+        let (adds, removes) = split_changes(collect_changes(&ours, &theirs, &storage).await?);
+        assert_eq!(
+            storage.reads(),
+            2,
+            "the roots settle against each other; the shared leaf is never read"
+        );
+        assert_eq!(
+            removes,
+            vec![(k, vec![2])],
+            "ours resolves k to its newest op, v2"
+        );
+        assert_eq!(
+            adds,
+            vec![(k, vec![1])],
+            "theirs holds v1 at k, not nothing: its only op is not cancelled by a losing op of ours"
+        );
+
+        let (adds, removes) = split_changes(collect_changes(&theirs, &ours, &storage).await?);
+        assert_eq!(removes, vec![(k, vec![1])], "theirs resolves k to v1");
+        assert_eq!(adds, vec![(k, vec![2])], "ours resolves k to v2");
+        Ok(())
+    }
+
+    /// The complement: when the other side holds exactly the op ours resolves
+    /// to, both sides read the same value at `k` and there is no change to
+    /// report, even though ours also holds an older, losing op for the key.
+    ///
+    /// Before the fix, the settle path subtracted theirs' `v2` from ours'
+    /// `[v1, v2]` and kept `v1`: a spurious change at a key both sides
+    /// resolve identically.
+    #[dialog_common::test]
+    async fn it_does_not_report_a_losing_op_the_other_side_never_held() -> Result<()> {
+        let storage = CountingBackend::new();
+        let k = bkey(50);
+        let ours =
+            root_over_shared_leaf(vec![assert_op(k, vec![1]), assert_op(k, vec![2])], &storage)
+                .await?;
+        let theirs = root_over_shared_leaf(vec![assert_op(k, vec![2])], &storage).await?;
+
+        storage.reset();
+        let changes = collect_changes(&ours, &theirs, &storage).await?;
+        assert_eq!(
+            storage.reads(),
+            2,
+            "the roots settle against each other; the shared leaf is never read"
+        );
+        assert!(
+            changes.is_empty(),
+            "both sides resolve k to v2, so nothing changes; a losing op of ours is not a change, got {changes:?}"
+        );
+
+        let changes = collect_changes(&theirs, &ours, &storage).await?;
+        assert!(
+            changes.is_empty(),
+            "both sides resolve k to v2 in the other direction too, got {changes:?}"
+        );
         Ok(())
     }
 }
