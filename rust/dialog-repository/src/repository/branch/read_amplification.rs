@@ -721,6 +721,191 @@ async fn first_query_by_origins() -> Result<()> {
     Ok(())
 }
 
+/// One commit of one fact to `branch`.
+async fn bump<Env: crate::ResolveEnv>(branch: &crate::Branch, at: usize, env: &Env) -> Result<()> {
+    branch
+        .commit(stream::iter(vec![assert_fact(at, "shape")]))
+        .perform(env)
+        .await?;
+    Ok(())
+}
+
+/// The block reads of every pull shape, at `origins` one-commit origins
+/// in the history, each pull run from a session of its own that
+/// remembers nothing, as a device that faults blocks in on demand would.
+async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>> {
+    let (operator, profile) = test_session_with_peer().await;
+    let name = unique_name("shapes");
+    let repo = profile
+        .space(name.clone())
+        .open()
+        .perform(&operator)
+        .await?;
+    let mut previous: Option<crate::Branch> = None;
+    for i in 0..origins {
+        let writer = repo
+            .branch(format!("writer-{i}"))
+            .open()
+            .perform(&operator)
+            .await?;
+        if let Some(previous) = &previous {
+            writer.pull().from(previous).perform(&operator).await?;
+        }
+        bump(&writer, i, &operator).await?;
+        previous = Some(writer);
+    }
+    let main = repo.branch("main").open().perform(&operator).await?;
+    main.pull()
+        .from(previous.as_ref().expect("at least one origin"))
+        .perform(&operator)
+        .await?;
+    bump(&main, origins, &operator).await?;
+
+    let mut at = origins + 1;
+    let mut next = || {
+        at += 1;
+        at
+    };
+    let follower = |label: &'static str| {
+        let repo = &repo;
+        let main = &main;
+        let operator = &operator;
+        async move {
+            let branch = repo.branch(label).open().perform(operator).await?;
+            branch.set_upstream(main).perform(operator).await?;
+            branch.pull().perform(operator).await?;
+            anyhow::Ok(branch)
+        }
+    };
+    let mut cold = 0u8;
+    let mut measure = |label: &'static str| {
+        cold += 1;
+        let session = cold;
+        let profile = &profile;
+        let name = &name;
+        async move {
+            let device = profile
+                .session([b'd', session])
+                .space(profile.state())
+                .allow(dialog_capability::Subject::any())
+                .await?;
+            let device = Counting::new(device);
+            let local = profile.space(name.clone()).open().perform(&device).await?;
+            let warmup = local
+                .branch(format!("warmup-{session}"))
+                .open()
+                .perform(&device)
+                .await?;
+            let source = local
+                .branch("warmup-source")
+                .open()
+                .perform(&device)
+                .await?;
+            warmup.pull().from(&source).perform(&device).await?;
+            bump(&warmup, 0, &device).await?;
+            let branch = local.branch(label).open().perform(&device).await?;
+            device.reset();
+            branch.pull().perform(&device).await?;
+            anyhow::Ok(device.block_reads())
+        }
+    };
+    // A small branch apart from main's history, which each measuring
+    // session pulls first: what a session does once, on its first publish,
+    // is then not counted against the shape it measures.
+    let warmup_source = repo
+        .branch("warmup-source")
+        .open()
+        .perform(&operator)
+        .await?;
+    bump(&warmup_source, next(), &operator).await?;
+    let mut rows = Vec::new();
+
+    follower("no-op").await?;
+    rows.push(("no-op", measure("no-op").await?));
+
+    let held = follower("nothing-new").await?;
+    bump(&held, next(), &operator).await?;
+    main.pull().from(&held).perform(&operator).await?;
+    rows.push(("nothing-new", measure("nothing-new").await?));
+
+    // Main takes its head back, so the followers hold a head of main's
+    // own origin and main's next commits extend that chain.
+    bump(&main, next(), &operator).await?;
+    follower("ff-same-1").await?;
+    follower("ff-same-k").await?;
+    bump(&main, next(), &operator).await?;
+    rows.push(("ff same origin, 1 ahead", measure("ff-same-1").await?));
+    for _ in 0..9 {
+        bump(&main, next(), &operator).await?;
+    }
+    rows.push(("ff same origin, 10 ahead", measure("ff-same-k").await?));
+
+    follower("ff-other-1").await?;
+    follower("ff-other-k").await?;
+    let third = repo.branch("third").open().perform(&operator).await?;
+    third.pull().from(&main).perform(&operator).await?;
+    bump(&third, next(), &operator).await?;
+    main.pull().from(&third).perform(&operator).await?;
+    rows.push(("ff other origin, 1 ahead", measure("ff-other-1").await?));
+    for _ in 0..9 {
+        bump(&third, next(), &operator).await?;
+    }
+    main.pull().from(&third).perform(&operator).await?;
+    rows.push(("ff other origin, 10 ahead", measure("ff-other-k").await?));
+
+    let screened = follower("screened").await?;
+    let replayed = follower("replay").await?;
+    let grafted = follower("graft").await?;
+    for _ in 0..4 {
+        bump(&screened, next(), &operator).await?;
+    }
+    bump(&replayed, next(), &operator).await?;
+    for _ in 0..(super::pull::SMALL_DIVERGENCE as usize + 2) {
+        bump(&grafted, next(), &operator).await?;
+    }
+    bump(&main, next(), &operator).await?;
+    rows.push(("screened merge", measure("screened").await?));
+    for _ in 0..(super::pull::SMALL_DIVERGENCE as usize + 2) {
+        bump(&main, next(), &operator).await?;
+    }
+    rows.push(("replay", measure("replay").await?));
+    rows.push(("graft", measure("graft").await?));
+
+    // Rival merges: two replicas pull each other at once, each minting a
+    // merge, and the next pull settles on the greater.
+    let a = follower("rival-a").await?;
+    let b = follower("rival-b").await?;
+    bump(&a, next(), &operator).await?;
+    bump(&b, next(), &operator).await?;
+    let into_a = a.pull().from(&b).prepare(&operator).await?;
+    let into_b = b.pull().from(&a).prepare(&operator).await?;
+    into_a.commit(&operator).await?;
+    into_b.commit(&operator).await?;
+    a.set_upstream(&b).perform(&operator).await?;
+    rows.push(("rival settle", measure("rival-a").await?));
+    Ok(rows)
+}
+
+/// Prints the block reads of every pull shape by origin count.
+/// `#[ignore]`d: a measurement.
+#[dialog_common::test]
+#[ignore]
+async fn pull_shapes_by_origins() -> Result<()> {
+    let cap: usize = env::var("DIALOG_RA_MAX_ORIGINS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(10_000);
+    for origins in [1, 10, 100, 1_000, 10_000]
+        .into_iter()
+        .filter(|n| *n <= cap)
+    {
+        for (shape, reads) in measure_pull_shapes(origins).await? {
+            println!("| {origins:>7} | {shape:<26} | {reads:>6} |");
+        }
+    }
+    Ok(())
+}
+
 /// Prints a table of block reads, total effect dispatches, and wall
 /// time per scenario and depth. `#[ignore]`d: a measurement, not an
 /// assertion; see the module docs for the invocation.
