@@ -170,9 +170,7 @@ signature = "2.2"
 stable_deref_trait = "1"
 static_assertions = "1"
 syn = "2"
-# Pin tempfile <3.22: newer versions widen getrandom to >=0.3,<0.5 which
-# resolves to getrandom 0.4 and pulls in a third version. 3.21.x uses ^0.3.
-tempfile = ">=3, <3.22"
+tempfile = "3"
 test-log = "0.2"
 testresult = "0.4"
 thiserror = "2"
