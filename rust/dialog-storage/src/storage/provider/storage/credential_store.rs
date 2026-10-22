@@ -186,6 +186,34 @@ where
         Ok(credential)
     }
 
+    /// Make a key at `location`, in the space that keeps the directory's
+    /// keys, refusing a name that already keeps one. The key is made where
+    /// that space keeps keys, and never passes through here.
+    async fn generate(
+        &self,
+        location: &storage::Location,
+    ) -> Result<Credential, storage::StorageError> {
+        if self.load(location).await?.is_some() {
+            return Err(storage::StorageError::AlreadyExists(format!(
+                "{:?}/{}",
+                location.directory, location.name
+            )));
+        }
+        let Some(space) = self.vault(&location.directory, true).await? else {
+            return Err(failed("the credential store could not be opened"));
+        };
+        let credential = key(&location.name)
+            .generate()
+            .perform(&space)
+            .await
+            .map_err(failed)?;
+        self.kept.insert(
+            credential.did(),
+            (location.directory.clone(), location.name.clone()),
+        );
+        Ok(credential)
+    }
+
     /// Move the signing key the space at `location` in `storage` kept
     /// from before the credential store into this store, leaving the
     /// space its verifier. Idempotent: a space that holds only a verifier
@@ -280,6 +308,22 @@ where
         let location = storage::Location::of(&input);
         let credential = storage::Create::of(&input).credential.clone();
         self.create(location, credential).await
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+impl<S> Provider<storage::Generate> for CredentialStore<S>
+where
+    S: Clone + SpaceProvider + Resource<storage::Location> + ConditionalSend,
+    S::Error: Display,
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(
+        &self,
+        input: Capability<storage::Generate>,
+    ) -> Result<Credential, storage::StorageError> {
+        self.generate(storage::Location::of(&input)).await
     }
 }
 

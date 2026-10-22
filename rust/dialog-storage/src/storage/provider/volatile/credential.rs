@@ -7,7 +7,7 @@ use dialog_effects::credential::prelude::{
     LoadCredentialExt, LoadSecretExt, RetractCredentialExt, RetractSecretExt, SaveCredentialExt,
     SaveSecretExt,
 };
-use dialog_effects::credential::{CredentialError, Load, Retract, Save, Secret};
+use dialog_effects::credential::{CredentialError, Generate, Load, Retract, Save, Secret};
 use dialog_varsig::Principal;
 
 use super::Volatile;
@@ -137,6 +137,17 @@ where
             session.secrets.remove(&key);
         }
         Ok(())
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Provider<Generate> for Volatile
+where
+    Self: ConditionalSend + ConditionalSync,
+{
+    async fn execute(&self, input: Capability<Generate>) -> Result<Credential, CredentialError> {
+        crate::provider::generate::generate(self, &input).await
     }
 }
 
