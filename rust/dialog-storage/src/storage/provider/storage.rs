@@ -297,6 +297,14 @@ impl Storage<VolatileSpace> {
     pub fn volatile() -> Self {
         Self::new()
     }
+
+    /// The archive provider of the space `did`, if it is mounted here: the
+    /// blocks only, so a test harness can reach what the space retains
+    /// (see [`Volatile::retain_blocks`]). No credential is handed over.
+    #[cfg(any(test, feature = "helpers"))]
+    pub fn volatile_archive(&self, did: &Did) -> Option<Volatile> {
+        self.loader.space(did).map(|space| space.archive)
+    }
 }
 
 #[cfg(test)]
