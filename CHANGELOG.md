@@ -14,6 +14,37 @@ says how to cut a release.
 
 ## Unreleased
 
+### A differential over a buffer holding several ops for one key compares the newest op on each side
+
+[#630](https://github.com/dialog-db/dialog-db/pull/630)
+
+A hitchhiker link buffer can hold several ops for one key, newest last, and
+every reader resolves the key to its newest op. The settled-node path of the
+differential (two nodes with identical children that differ only in their
+buffers) subtracted one side's ops from the other's op by op, so an op a side
+had already superseded could cancel the other side's live value, or surface
+as a change neither side could observe. Both sides are now reduced to their
+newest op per key before the comparison.
+
+What this changes for you:
+
+- A differential between two trees sharing a settled node, where one side
+  buffers several ops for a key below the node's lowest separator, now
+  reports what each side resolves the key to. Before, with ours holding
+  `k: v1` then `k: v2` and theirs holding `k: v1`, the diff reported ours'
+  `v2` and nothing for theirs; it now reports ours' `v2` against theirs'
+  `v1`. With theirs holding `k: v2`, the diff reported a spurious change on
+  ours' `v1`; it now reports no change at `k`.
+- Nothing stored is rewritten and no format changes: frames holding several
+  ops for one key read as before, and an older release reads what this one
+  writes.
+
+Why: a pull of one head against another where the newer head re-asserted a
+key it still buffered could miss the older head's value or carry a change
+that was not one. A buffer's older ops are history, not state, and the
+differential has to compare state against state, as every other reader of a
+buffer does.
+
 ### A snapshot can be exported without the bytes of its assets
 
 [#623](https://github.com/dialog-db/dialog-db/pull/623)
