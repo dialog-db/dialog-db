@@ -14,6 +14,35 @@ says how to cut a release.
 
 ## Unreleased
 
+### A key is generated where it is kept
+
+[#PR](https://github.com/dialog-db/dialog-db/pull/PR)
+
+`credential::Generate` asks the store that keeps a key address to make a
+signing key there and hand back its credential, and `storage::Generate` asks a
+credential store to do so for a named key. `OpenCredential` creates a key this
+way: it no longer makes one in process and asks the store to save it. The
+stores in this repository make the key in process as before (non-extractable in
+the browser) and save it, so nothing they keep changes. A store that keeps its
+keys elsewhere, such as the host of a component, makes the key there, and the
+key never enters the process that asked.
+
+What this changes for you:
+
+- `credential::Generate` and `storage::Generate` are new, with
+  `.generate()` on a key and on a location.
+- `SpaceProvider` requires `Provider<credential::Generate>`, and `Space`
+  provides it through its credential store. A space of your own must provide
+  it too.
+- `CredentialKeyExt` has a `Generate` associated type and `generate()`.
+- `OpenCredential::perform` asks its environment for
+  `Provider<storage::Load> + Provider<storage::Generate>` in place of
+  `Provider<storage::Create>`. `CredentialStore` provides both.
+
+Why: a kernel running in a component signs with keys its host holds and never
+reads (Sapling's PDD015). A store that is handed a key the process generated
+can only keep that key, so the process held it first.
+
 ### A dialog peer can be reached over iroh
 
 [#521](https://github.com/dialog-db/dialog-db/pull/521)

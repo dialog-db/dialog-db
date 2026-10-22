@@ -144,6 +144,9 @@ pub trait LocationExt {
 
     /// Create a new space at this location with the given credential.
     fn create(self, credential: Credential) -> Capability<Create>;
+
+    /// Generate a key at this location, in the store that keeps it.
+    fn generate(self) -> Capability<Generate>;
 }
 
 impl LocationExt for Capability<Location> {
@@ -153,6 +156,10 @@ impl LocationExt for Capability<Location> {
 
     fn create(self, credential: Credential) -> Capability<Create> {
         self.invoke(Create::new(credential))
+    }
+
+    fn generate(self) -> Capability<Generate> {
+        self.invoke(Generate)
     }
 }
 
@@ -193,6 +200,20 @@ impl Attenuation for Create {
 }
 
 impl Effect for Create {
+    type Output = Result<Credential, StorageError>;
+}
+
+/// Generate the signing key of a new space at a location, where the store
+/// makes and keeps it, and return its credential. Unlike [`Create`], the key
+/// never exists outside the store.
+#[derive(Debug, Clone, Serialize, Deserialize, Attenuate)]
+pub struct Generate;
+
+impl Attenuation for Generate {
+    type Of = Location;
+}
+
+impl Effect for Generate {
     type Output = Result<Credential, StorageError>;
 }
 

@@ -3,7 +3,7 @@
 
 use dialog_capability::{Capability, Provider, Subject, did};
 use dialog_common::ConditionalSync;
-use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
+use dialog_credentials::{Credential, SignerCredential};
 use dialog_effects::credential::prelude::{
     CredentialCapabilityExt as _, CredentialKeyExt as _, CredentialSubjectExt as _,
 };
@@ -73,7 +73,7 @@ impl OpenCredential {
     /// Execute against a storage provider.
     pub async fn perform<Env>(self, env: &Env) -> Result<SignerCredential, IdentityError>
     where
-        Env: Provider<storage_fx::Load> + Provider<storage_fx::Create> + ConditionalSync,
+        Env: Provider<storage_fx::Load> + Provider<storage_fx::Generate> + ConditionalSync,
     {
         let credential = match self.mode {
             OpenMode::Load => self
@@ -85,20 +85,21 @@ impl OpenCredential {
                     storage_fx::StorageError::NotFound(_) => IdentityError::NotFound,
                     e => IdentityError::Storage(e.to_string()),
                 })?,
-            OpenMode::Create => self
-                .location()
-                .create(generate().await?)
-                .perform(env)
-                .await
-                .map_err(|e| match e {
-                    storage_fx::StorageError::AlreadyExists(_) => IdentityError::AlreadyExists,
-                    e => IdentityError::Storage(e.to_string()),
-                })?,
+            OpenMode::Create => {
+                self.location()
+                    .generate()
+                    .perform(env)
+                    .await
+                    .map_err(|e| match e {
+                        storage_fx::StorageError::AlreadyExists(_) => IdentityError::AlreadyExists,
+                        e => IdentityError::Storage(e.to_string()),
+                    })?
+            }
             OpenMode::OpenOrCreate => match self.location().load().perform(env).await {
                 Ok(credential) => credential,
                 Err(storage_fx::StorageError::NotFound(_)) => self
                     .location()
-                    .create(generate().await?)
+                    .generate()
                     .perform(env)
                     .await
                     .map_err(|e| IdentityError::Storage(e.to_string()))?,
@@ -169,13 +170,6 @@ impl ForgetCredential {
     }
 }
 
-async fn generate() -> Result<Credential, IdentityError> {
-    let signer = Ed25519Signer::generate()
-        .await
-        .map_err(|e| IdentityError::Key(e.to_string()))?;
-    Ok(Credential::Signer(SignerCredential::from(signer)))
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(target_arch = "wasm32")]
@@ -184,7 +178,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use dialog_effects::storage::{Create, Load, StorageError};
+    use dialog_effects::storage::{Generate, Load, StorageError};
     use dialog_storage::provider::storage::{CredentialStore, VolatileSpace};
 
     struct FailingLoad {
@@ -201,8 +195,8 @@ mod tests {
 
     #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-    impl Provider<Create> for FailingLoad {
-        async fn execute(&self, _input: Capability<Create>) -> Result<Credential, StorageError> {
+    impl Provider<Generate> for FailingLoad {
+        async fn execute(&self, _input: Capability<Generate>) -> Result<Credential, StorageError> {
             self.create_called.store(true, Ordering::SeqCst);
             Err(StorageError::AlreadyExists("Profile/tonk".into()))
         }
@@ -217,6 +211,26 @@ mod tests {
             .await
             .unwrap();
         assert!(!credential.did().to_string().is_empty());
+    }
+
+    #[dialog_common::test]
+    async fn it_creates_a_credential_the_store_keeps() {
+        let storage = CredentialStore::<VolatileSpace>::new();
+
+        let created = OpenCredential::create("carol")
+            .perform(&storage)
+            .await
+            .unwrap();
+        let loaded = OpenCredential::load("carol")
+            .perform(&storage)
+            .await
+            .unwrap();
+
+        assert_eq!(created.did(), loaded.did());
+        assert!(matches!(
+            OpenCredential::create("carol").perform(&storage).await,
+            Err(IdentityError::AlreadyExists)
+        ));
     }
 
     #[dialog_common::test]

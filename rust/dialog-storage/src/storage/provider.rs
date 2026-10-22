@@ -37,6 +37,8 @@ pub use indexeddb::*;
 pub mod volatile;
 pub use volatile::*;
 
+mod generate;
+
 pub mod space;
 pub use space::{Space, SpaceProvider};
 
