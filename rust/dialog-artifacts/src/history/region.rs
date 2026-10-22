@@ -76,8 +76,9 @@ pub struct Held<'a> {
 /// entry where the chain began still derives the new head's. A commit on
 /// another origin's head writes two entries, the parent origin's (its
 /// chain ends, so its entry must now be exact) and its own; a merge writes
-/// its own entry, since its edition jumps past both parents, and every
-/// entry its sides hold differently.
+/// its own entry unless the reader would derive it (its edition is
+/// usually more than one past its own origin's parent), and every entry
+/// its sides hold differently.
 pub fn region_writes(
     head: Version,
     context: &Context,

@@ -61,9 +61,12 @@ What this changes for you:
   entry outside the watermark bounds, as `DialogArtifactsError::InvalidKey`,
   and keeps its own head.
 - `Revision::precedence` compares two heads by their contexts only when
-  both carry them inline. Any other pair is ordered by edition, without
-  reading either tree, so two concurrent heads of different origins can
-  read as ordered.
+  both carry them inline, and orders two heads of one origin exactly by
+  edition. Any other pair is answered from editions without reading
+  either tree: a higher edition is `After`, and one at or below the
+  other's is `Concurrent`, never `Before`. A cell watcher therefore
+  fetches a lower head of another origin (a branch reset to it, or one
+  delivered out of order) instead of dropping it as stale.
 - A fast-forward between heads of different origins now reads the
   upstream's root and the path to its region's leaf (3 blocks in the
   tests); before, it read nothing.

@@ -410,9 +410,14 @@ impl Revision {
     /// them. Two heads of one origin are ordered exactly by edition, since
     /// an origin's revisions form one chain. Any other pair, which includes
     /// every pair where a head keeps its context in its tree's region, is
-    /// ordered by edition alone: the heads are compared without reading a
-    /// block of either tree, as the cell watcher needs, at the price of
-    /// reporting concurrent heads of different origins as ordered.
+    /// compared without reading a block of either tree, as the cell watcher
+    /// needs, and so is answered only as far as the heads alone allow: a
+    /// head at a higher edition may have built on the other, and is taken
+    /// to be [`After`](Precedence::After); one at or below the other's
+    /// edition cannot be known to be older, and is
+    /// [`Concurrent`](Precedence::Concurrent). [`Before`](Precedence::Before)
+    /// is never answered across origins without contexts, so a head a
+    /// branch was reset to is never mistaken for a stale one.
     pub fn precedence(&self, other: &Revision) -> Precedence {
         let same = self.tree == other.tree && self.version() == other.version();
         if let (Some(ours), Some(theirs)) = (self.inline_context(), other.inline_context()) {
@@ -423,11 +428,12 @@ impl Revision {
                 _ => Precedence::Concurrent,
             };
         }
+        let one_chain = self.origin() == other.origin();
         match self.edition.cmp(&other.edition) {
             Ordering::Greater => Precedence::After,
-            Ordering::Less => Precedence::Before,
+            Ordering::Less if one_chain => Precedence::Before,
             Ordering::Equal if same => Precedence::Same,
-            Ordering::Equal => Precedence::Concurrent,
+            Ordering::Less | Ordering::Equal => Precedence::Concurrent,
         }
     }
 }
@@ -802,10 +808,10 @@ mod tests {
         }
     }
 
-    /// Heads whose contexts are in their trees' regions are ordered by
-    /// edition without reading either tree: a later head is after an
-    /// earlier one whichever origin minted it, and two different heads at
-    /// one edition are concurrent.
+    /// Heads whose contexts are in their trees' regions are ordered without
+    /// reading either tree: exactly by edition along one origin's chain,
+    /// and across origins only as far as editions allow, so a head at or
+    /// below another origin's edition is concurrent with it, never older.
     #[dialog_common::test]
     fn it_orders_region_heads_by_edition() {
         let mut first = genesis(&key(1));
@@ -819,5 +825,14 @@ mod tests {
         assert_eq!(first.precedence(&second), Precedence::Before);
         assert_eq!(second.precedence(&second.clone()), Precedence::Same);
         assert_eq!(second.precedence(&other), Precedence::Concurrent);
+
+        let mut later = successor(&other, &key(2), 4);
+        later.publish_region();
+        assert_eq!(later.precedence(&first), Precedence::After);
+        assert_eq!(
+            first.precedence(&later),
+            Precedence::Concurrent,
+            "an earlier head of another origin may be one the branch was reset to"
+        );
     }
 }
