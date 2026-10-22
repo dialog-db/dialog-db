@@ -18,7 +18,7 @@ use dialog_effects::memory::{Publish, Resolve};
 use futures_util::TryStreamExt as _;
 use futures_util::future::{Either, join_all};
 
-use super::context::{full_context, held, published_context};
+use super::context::{full_context, head_observes, held, published_context};
 use super::fetch::fetch_one;
 use super::migrate::aligned;
 use super::resolve::resolve;
@@ -434,15 +434,25 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // Decided from our own context and the head's version, at zero
         // reads, whatever shape the upstream's head is.
         // Two heads of one origin answer it from their editions alone, since
-        // an origin's revisions form one chain.
+        // an origin's revisions form one chain; across origins it is one
+        // entry of our own context (`head_observes`): the memo, or one point
+        // read of our own tree's region.
         let seen = match &local_revision {
             None => false,
-            Some(current) if current.origin() == upstream_revision.origin() => {
-                current.edition >= upstream_revision.edition
-            }
-            Some(_) => local_context()
-                .await?
-                .observes(&upstream_revision.version()),
+            Some(current) => match head_observes(
+                current,
+                &upstream_revision.version(),
+                &contexts,
+                &store,
+                &branch.node_cache(),
+            )
+            .await?
+            {
+                Some(seen) => seen,
+                None => local_context()
+                    .await?
+                    .observes(&upstream_revision.version()),
+            },
         };
         if let Some(current) = &local_revision
             && seen
@@ -480,17 +490,21 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // context. When the two heads share an origin (a replica following
         // an upstream it fast-forwarded from before), that origin's
         // revisions form one chain, so an upstream head at or above ours
-        // has seen ours: zero reads. Otherwise the entry is read from the
-        // upstream's region.
+        // has seen ours: zero reads. Otherwise the entry is one point read of
+        // the upstream's region, its root and the path to one leaf, however
+        // many origins it holds (`head_observes`).
         if base.as_ref().map(|base| base.hash()) == local_tree.as_ref().map(|tree| tree.hash()) {
             let seen = match &local_revision {
                 None => true,
-                Some(local) if local.origin() == upstream_revision.origin() => {
-                    upstream_revision.edition >= local.edition
-                }
-                Some(local) => upstream_context()
-                    .await?
-                    .is_some_and(|theirs| theirs.observes(&local.version())),
+                Some(local) => head_observes(
+                    &upstream_revision,
+                    &local.version(),
+                    &contexts,
+                    &store,
+                    &branch.node_cache(),
+                )
+                .await?
+                .unwrap_or(false),
             };
             if seen {
                 return Ok(PreparedPull::Merged(Box::new(Merged {

@@ -17,7 +17,8 @@ use futures_util::StreamExt as _;
 use crate::merge::context_scope;
 use crate::tree::ArtifactTree;
 use crate::{
-    ArchiveReader, Datum, DialogArtifactsError, Key, State, context_entry, read_context_entry,
+    ArchiveReader, Datum, DialogArtifactsError, Key, State, context_entry, context_key,
+    read_context_entry,
 };
 
 use super::{Context, Origin, Version, Watermark};
@@ -45,6 +46,28 @@ where
         context.push(read_context_entry(&entry.key, &entry.value)?);
     }
     Ok(context.into_iter().collect())
+}
+
+/// The entry `tree`'s context region holds for `origin`, as stored, or
+/// `None` when it holds none: one point read, the tree's root and the path
+/// to the leaf holding the key, however many origins the region holds.
+///
+/// The entry is checked like every entry read ([`read_context_entry`]).
+/// For the head's own origin it is where the head's chain began, not the
+/// head's watermark; callers asking about another origin read it exactly.
+pub async fn region_entry<S>(
+    tree: &ArtifactTree,
+    origin: &Origin,
+    store: &S,
+) -> Result<Option<Watermark>, DialogArtifactsError>
+where
+    S: ArchiveReader + Clone + ConditionalSync,
+{
+    let key = context_key(origin);
+    match tree.get(&key, store).await? {
+        None => Ok(None),
+        Some(value) => Ok(Some(read_context_entry(&key, &value)?.1)),
+    }
 }
 
 /// A tree whose context region a newly minted tree starts from: the

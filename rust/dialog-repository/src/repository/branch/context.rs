@@ -10,7 +10,9 @@
 
 use std::sync::Arc;
 
-use dialog_artifacts::history::{Context, ContextCache, Held, History, context_in};
+use dialog_artifacts::history::{
+    Context, ContextCache, Held, History, Version, context_in, region_entry,
+};
 use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_artifacts::{ArchiveReader, DialogArtifactsError};
 use dialog_common::Blake3Hash as NodeHash;
@@ -68,6 +70,47 @@ where
     };
     contexts.insert(version, context.clone());
     Ok(Some(context))
+}
+
+/// Whether `head` has seen `version`, answered as cheaply as the head's
+/// shape allows, or `None` for a head minted before heads carried a
+/// context, whose answer only the ancestry walk gives.
+///
+/// A head's context holds its own version and is closed under ancestry,
+/// so this is also whether the head has seen everything `version`'s head
+/// had. The memo answers when it holds the head's context, and so does an
+/// inline context. Otherwise, for a version of the head's own origin the
+/// editions answer, since an origin's revisions form one chain; for any
+/// other origin the region holds its watermark exactly, and one point read
+/// of that entry answers (the tree's root and the path to its leaf).
+pub(crate) async fn head_observes<S>(
+    head: &Revision,
+    version: &Version,
+    contexts: &ContextCache,
+    store: &S,
+    cache: &ArtifactNodeCache,
+) -> Result<Option<bool>, DialogArtifactsError>
+where
+    S: ArchiveReader + Clone,
+{
+    if let Some(context) = contexts.cached(&head.version()).await {
+        return Ok(Some(context.observes(version)));
+    }
+    if let Some(context) = head.inline_context() {
+        return Ok(Some(context.observes(version)));
+    }
+    if !head.region {
+        return Ok(None);
+    }
+    if version.origin == head.origin() {
+        return Ok(Some(version.edition <= head.edition));
+    }
+    let tree = Index::from_hash_with_cache(NodeHash::from(*head.tree.hash()), cache.clone());
+    Ok(Some(
+        region_entry(&tree, &version.origin, store)
+            .await?
+            .is_some_and(|watermark| watermark.edition >= version.edition),
+    ))
 }
 
 /// The full context of `head`: the one it publishes (see
