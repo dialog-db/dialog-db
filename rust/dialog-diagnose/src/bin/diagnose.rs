@@ -7,7 +7,7 @@
 //!
 //! A command-line tool that provides a TUI for exploring Dialog databases.
 //! This binary creates an interactive terminal interface for browsing database
-//! facts and navigating the prolly tree structure.
+//! facts and navigating the probabilistic search tree structure.
 
 use std::time::Duration;
 

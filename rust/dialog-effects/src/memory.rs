@@ -290,7 +290,7 @@ pub type CellState = Option<Edition<Vec<u8>>>;
 ///
 /// A writer that is told rebases onto it and writes again, with no read of
 /// its own in between; one that is not reads the cell first.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Current {
     /// Whoever refused the write did not say, as S3 does not.
     Unknown,
@@ -447,7 +447,7 @@ impl Effect for Retract {
 pub mod prelude;
 
 /// Errors that can occur during memory operations.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, serde::Serialize, serde::Deserialize)]
 pub enum MemoryError {
     /// CAS edition mismatch: the write named a version the cell is no
     /// longer at.

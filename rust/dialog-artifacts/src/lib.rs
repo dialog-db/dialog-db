@@ -100,7 +100,7 @@ pub use constants::*;
 mod key;
 pub use key::*;
 
-/// Shared tree-ops on the artifact prolly tree.
+/// Shared tree-ops on the artifact search tree.
 mod buffered;
 pub use buffered::*;
 

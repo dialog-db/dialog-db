@@ -1,4 +1,4 @@
-//! Tree analysis module for computing prolly tree statistics.
+//! Tree analysis module for computing probabilistic search tree statistics.
 
 use std::{collections::VecDeque, sync::mpsc::Sender};
 
@@ -8,7 +8,7 @@ use dialog_search_tree::{Accessor, NodeBody, NodeCache, PersistentNode};
 use super::store::WorkerMessage;
 use crate::Blocks;
 
-/// Statistics about the structure and content of a prolly tree.
+/// Statistics about the structure and content of a probabilistic search tree.
 ///
 /// These statistics are computed asynchronously to provide insights
 /// into the tree's structure without blocking the UI.
@@ -28,10 +28,10 @@ pub struct ArtifactsTreeStats {
 
 /// Background worker for computing tree statistics.
 ///
-/// This worker performs a breadth-first traversal of the prolly tree
+/// This worker performs a breadth-first traversal of the probabilistic search tree
 /// to compute various statistics about its structure and contents.
 pub struct ArtifactsTreeAnalysis {
-    /// The prolly tree index to analyze
+    /// The probabilistic search tree index to analyze
     tree: Index,
     /// Where the tree's blocks load from
     storage: Blocks,
@@ -44,7 +44,7 @@ impl ArtifactsTreeAnalysis {
     ///
     /// # Arguments
     ///
-    /// * `tree` - The prolly tree index to analyze
+    /// * `tree` - The probabilistic search tree index to analyze
     /// * `storage` - Where the tree's blocks load from
     /// * `tx` - Channel sender for worker messages
     pub fn new(tree: Index, storage: Blocks, tx: Sender<WorkerMessage>) -> Self {

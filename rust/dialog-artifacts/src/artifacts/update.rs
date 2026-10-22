@@ -744,7 +744,7 @@ impl Stream for ChangeStream {
 ///
 /// # Why this exact component order
 ///
-/// The artifact prolly tree keeps three indexes, each a byte key (see
+/// The artifact search tree keeps three indexes, each a byte key (see
 /// `dialog_artifacts::key`):
 ///
 /// ```text

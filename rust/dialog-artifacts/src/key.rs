@@ -1,4 +1,4 @@
-//! Key structures for indexing artifacts in prolly trees.
+//! Key structures for indexing artifacts in probabilistic search trees.
 //!
 //! This module provides the key layout and manipulation utilities for creating
 //! efficient indexes over semantic triples. Keys are structured to enable fast
@@ -464,7 +464,7 @@ impl TreeKey for Key {
 /// Trait for constructing key views with minimum and maximum values.
 ///
 /// This trait enables the creation of key views for range-based queries, providing
-/// the ability to construct keys with boundary values for efficient prolly tree navigation.
+/// the ability to construct keys with boundary values for efficient probabilistic search tree navigation.
 pub trait KeyViewConstruct: KeyViewMut + Default {
     /// Construct the lowest possible [`KeyView`] (all non-tag bits are zero)
     fn min() -> Self;

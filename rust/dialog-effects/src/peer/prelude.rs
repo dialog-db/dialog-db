@@ -12,12 +12,17 @@
 //!                                     = /use/put/dialog/peer/set-name
 //! host.reader().peers().find(name)    = /use/get/dialog/peer/find
 //! host.reader().peers().connect(peer) = /use/get/dialog/peer/connect
+//! host.reader().peers().hello()       = /use/get/dialog/peer/hello
+//! host.reader().peers().spaces()      = /use/get/dialog/peer/spaces
 //! ```
 
 use dialog_capability::identity::Entity;
 use dialog_capability::{Capability, Constraint};
 
-use super::{AddAddress, Connect, Find, PeerAddress, Peers, RemoveAddress, RemoveName, SetName};
+use super::{
+    AddAddress, Connect, Find, Hello, PeerAddress, Peers, RemoveAddress, RemoveName, SetName,
+    Spaces,
+};
 use crate::{Method, method};
 
 /// Scope a method to the host's peers.
@@ -77,6 +82,10 @@ pub trait ReadPeersExt {
     fn find(self, name: impl Into<String>) -> Capability<Find>;
     /// Connect to `peer`.
     fn connect(self, peer: Entity) -> Capability<Connect>;
+    /// Ask the peer to describe itself.
+    fn hello(self) -> Capability<Hello>;
+    /// Ask the peer which spaces it holds.
+    fn spaces(self) -> Capability<Spaces>;
 }
 
 impl ReadPeersExt for Capability<Peers<method::Get>> {
@@ -86,5 +95,13 @@ impl ReadPeersExt for Capability<Peers<method::Get>> {
 
     fn connect(self, peer: Entity) -> Capability<Connect> {
         self.invoke(Connect { peer })
+    }
+
+    fn hello(self) -> Capability<Hello> {
+        self.invoke(Hello)
+    }
+
+    fn spaces(self) -> Capability<Spaces> {
+        self.invoke(Spaces)
     }
 }

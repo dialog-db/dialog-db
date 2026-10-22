@@ -15,7 +15,7 @@
 //! - **SQLite** modeling the dialog information model faithfully: one
 //!   `facts` table whose primary key is the EAV ordering, plus secondary
 //!   AEV and VAE indexes — the exact three orderings `dialog-artifacts`
-//!   maintains in its prolly tree.
+//!   maintains in its probabilistic search tree.
 //! - **dialog-db** through a repository branch ([`repo::DialogRepo`]):
 //!   `commit` and `select`, over both volatile (in-memory) and native
 //!   on-disk storage.
