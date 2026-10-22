@@ -9,7 +9,7 @@ use dialog_effects::credential::prelude::{
     LoadCredentialExt, LoadSecretExt, RetractCredentialExt, RetractSecretExt, SaveCredentialExt,
     SaveSecretExt,
 };
-use dialog_effects::credential::{CredentialError, Load, Retract, Save, Secret};
+use dialog_effects::credential::{CredentialError, Generate, Load, Retract, Save, Secret};
 use js_sys::Uint8Array;
 use wasm_bindgen::{JsCast, JsValue};
 
@@ -161,6 +161,13 @@ impl Provider<Retract<Secret>> for IndexedDb {
                 Ok(())
             })
             .await
+    }
+}
+
+#[async_trait(?Send)]
+impl Provider<Generate> for IndexedDb {
+    async fn execute(&self, input: Capability<Generate>) -> Result<Credential, CredentialError> {
+        crate::provider::generate::generate(self, &input).await
     }
 }
 

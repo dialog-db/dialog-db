@@ -6,6 +6,7 @@
 //! Subject (profile or repository DID)
 //!   └── Credential (ability: /credential)
 //!         ├── Key { address: String }
+//!         │   ├── Generate → Result<Credential, CredentialError>
 //!         │   ├── Save<Credential> → Result<(), CredentialError>
 //!         │   └── Load<Credential> → Result<Credential, CredentialError>
 //!         └── Site { address: String }
@@ -136,6 +137,23 @@ impl Attenuation for Save<Secret> {
 
 impl Effect for Save<Secret> {
     type Output = Result<(), CredentialError>;
+}
+
+/// Generate a signing key and keep it at a key address, where the store
+/// that keeps it makes it.
+///
+/// Unlike [`Save`], the key never exists outside the store: a store whose
+/// keys live elsewhere, such as in the host of a component, makes the key
+/// there and hands back a credential that signs through it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Attenuate)]
+pub struct Generate;
+
+impl Attenuation for Generate {
+    type Of = Key;
+}
+
+impl Effect for Generate {
+    type Output = Result<dialog_credentials::Credential, CredentialError>;
 }
 
 /// Load a credential or secret from storage.
