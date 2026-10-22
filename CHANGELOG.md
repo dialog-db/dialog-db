@@ -39,9 +39,21 @@ What this changes for you:
   `Provider<storage::Load> + Provider<storage::Generate>` in place of
   `Provider<storage::Create>`. `CredentialStore` provides both.
 
+A key held outside the process (`ed25519::external::SigningKey`) can also run
+its key agreement where it is held: `with_secret` takes an `ExternalSecret`,
+and `Secret::reveal` and `Secret::derive` on such a key go to it. The derived
+key is held there too.
+
+What this changes for you, as well:
+
+- `ExternalSecret`, `SigningKey::with_secret` and their futures are new. A key
+  without one reveals and derives nothing, as before.
+
 Why: a kernel running in a component signs with keys its host holds and never
 reads (Sapling's PDD015). A store that is handed a key the process generated
-can only keep that key, so the process held it first.
+can only keep that key, so the process held it first. A peer derives its
+session key from its own, and opens secrets sealed to it, so a key held in the
+host has to do both there.
 
 ### A dialog peer can be reached over iroh
 

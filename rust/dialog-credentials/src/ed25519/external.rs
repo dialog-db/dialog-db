@@ -5,8 +5,9 @@
 //! through an import of its host is one, so that no key is in its linear
 //! memory. Only the public key is held here.
 //!
-//! Such a key cannot be exported, and cannot run a key agreement, so it cannot
-//! derive a key or reveal a sealed secret.
+//! Such a key cannot be exported. It runs a key agreement only where its
+//! holder does it ([`ExternalSecret`]): then it reveals a sealed secret and
+//! derives a key, which is held there too. Otherwise it can do neither.
 
 use std::fmt;
 use std::future::Future;
@@ -15,6 +16,8 @@ use std::sync::Arc;
 
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_varsig::eddsa::Ed25519Signature;
+
+use crate::secret::{SealedSecret, SecretError};
 
 /// A signature that an [`ExternalSign`] gives back, on its way: `Send` where
 /// the target has threads.
@@ -31,12 +34,43 @@ pub trait ExternalSign: ConditionalSend + ConditionalSync {
     fn sign(&self, payload: &[u8]) -> ExternalSigning;
 }
 
-/// An Ed25519 key held outside this process: its public key, and the
-/// [`ExternalSign`] that signs with it.
+/// What a key held outside this process does with its agreement key, which
+/// stays where the key is: open a secret sealed to it, and derive a key from
+/// it, which is held there too.
+pub trait ExternalSecret: ConditionalSend + ConditionalSync {
+    /// The plaintext of `sealed`, which was sealed to this key in the context
+    /// labelled `context`.
+    fn reveal(&self, context: &'static str, sealed: SealedSecret) -> ExternalRevealing;
+
+    /// The key that this key derives in the context labelled `context` for
+    /// `label`, held where this one is.
+    fn derive(&self, context: &'static str, label: Vec<u8>) -> ExternalDeriving;
+}
+
+/// A plaintext that an [`ExternalSecret`] gives back, on its way.
+pub trait Revealing: Future<Output = Result<Vec<u8>, SecretError>> + ConditionalSend {}
+
+impl<F> Revealing for F where F: Future<Output = Result<Vec<u8>, SecretError>> + ConditionalSend {}
+
+/// The future that [`ExternalSecret::reveal`] returns.
+pub type ExternalRevealing = Pin<Box<dyn Revealing>>;
+
+/// A derived key that an [`ExternalSecret`] gives back, on its way.
+pub trait Deriving: Future<Output = Result<SigningKey, SecretError>> + ConditionalSend {}
+
+impl<F> Deriving for F where F: Future<Output = Result<SigningKey, SecretError>> + ConditionalSend {}
+
+/// The future that [`ExternalSecret::derive`] returns.
+pub type ExternalDeriving = Pin<Box<dyn Deriving>>;
+
+/// An Ed25519 key held outside this process: its public key, the
+/// [`ExternalSign`] that signs with it, and the [`ExternalSecret`] that runs
+/// its key agreement, if the key's holder does.
 #[derive(Clone)]
 pub struct SigningKey {
     verifying_key: ed25519_dalek::VerifyingKey,
     signer: Arc<dyn ExternalSign>,
+    secret: Option<Arc<dyn ExternalSecret>>,
 }
 
 impl SigningKey {
@@ -49,7 +83,20 @@ impl SigningKey {
         Self {
             verifying_key,
             signer: Arc::new(signer),
+            secret: None,
         }
+    }
+
+    /// This key, whose key agreement `secret` runs where the key is held.
+    #[must_use]
+    pub fn with_secret(mut self, secret: impl ExternalSecret + 'static) -> Self {
+        self.secret = Some(Arc::new(secret));
+        self
+    }
+
+    /// What runs this key's agreement, if its holder does.
+    pub(crate) fn secret(&self) -> Option<&Arc<dyn ExternalSecret>> {
+        self.secret.as_ref()
     }
 
     /// The public key.
@@ -105,6 +152,72 @@ mod tests {
     }
 
     const CONTEXT: Context = Context::new("dialog/test/external/v1");
+
+    /// A holder that keeps the key in memory and runs its agreement, as a
+    /// host would on the other side of an import.
+    #[derive(Clone)]
+    struct Holder(Ed25519Signer);
+
+    impl ExternalSign for Holder {
+        fn sign(&self, payload: &[u8]) -> ExternalSigning {
+            let signer = self.0.clone();
+            let payload = payload.to_vec();
+            Box::pin(async move { Ok(signer.signing_key().sign_bytes(&payload).await?.to_bytes()) })
+        }
+    }
+
+    impl ExternalSecret for Holder {
+        fn reveal(&self, context: &'static str, sealed: SealedSecret) -> ExternalRevealing {
+            let signer = self.0.clone();
+            Box::pin(async move { signer.secret(Context::new(context)).reveal(&sealed).await })
+        }
+
+        fn derive(&self, context: &'static str, label: Vec<u8>) -> ExternalDeriving {
+            let signer = self.0.clone();
+            Box::pin(async move {
+                let derived = signer.secret(Context::new(context)).derive(&label).await?;
+                Ok(held_by(Holder(derived)))
+            })
+        }
+    }
+
+    /// The key `holder` keeps, as a key held outside this process.
+    fn held_by(holder: Holder) -> SigningKey {
+        let bytes = holder.0.signing_key().verifying_key().to_bytes();
+        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&bytes).unwrap();
+        SigningKey::new(verifying_key, holder.clone()).with_secret(holder)
+    }
+
+    async fn held_with_secret() -> (Ed25519Signer, Ed25519Signer) {
+        let inner = Ed25519Signer::import(&[9; 32]).await.unwrap();
+        let key = held_by(Holder(inner.clone()));
+        (inner, Ed25519Signer::from(Ed25519SigningKey::from(key)))
+    }
+
+    #[dialog_common::test]
+    async fn it_reveals_a_secret_through_the_holder_of_the_key() {
+        let (_, signer) = held_with_secret().await;
+        let sealed = signer
+            .ed25519_did()
+            .secret(CONTEXT)
+            .conceal(b"a vault key")
+            .await
+            .unwrap();
+
+        let revealed = signer.secret(CONTEXT).reveal(&sealed).await.unwrap();
+
+        assert_eq!(revealed, b"a vault key");
+    }
+
+    #[dialog_common::test]
+    async fn it_derives_through_the_holder_the_key_the_holder_derives() {
+        let (inner, signer) = held_with_secret().await;
+
+        let derived = signer.secret(CONTEXT).derive(b"peer").await.unwrap();
+        let directly = inner.secret(CONTEXT).derive(b"peer").await.unwrap();
+
+        assert_eq!(derived.ed25519_did(), directly.ed25519_did());
+    }
 
     /// A signer over a key held outside this process.
     fn external_signer() -> Ed25519Signer {

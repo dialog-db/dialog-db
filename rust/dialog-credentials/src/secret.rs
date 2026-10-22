@@ -32,8 +32,10 @@
 //! twice therefore produces different bytes, and a later compromise of the
 //! sender's own keys does not open past messages.
 
+use crate::ed25519::external::ExternalSecret;
 use crate::ed25519::{
-    Ed25519Signer, Ed25519Verifier, Extractable, Sealed, X25519PublicKey, X25519SecretKey,
+    Ed25519Signer, Ed25519SigningKey, Ed25519Verifier, Extractable, Sealed, X25519PublicKey,
+    X25519SecretKey,
 };
 use crate::key::ExtractableKey;
 use std::future::Future;
@@ -123,6 +125,9 @@ impl<E> Secret<'_, E> {
     /// different identity or context, or if it has been tampered with. The
     /// cases are deliberately indistinguishable.
     pub async fn reveal(&self, sealed: &SealedSecret) -> Result<Vec<u8>, SecretError> {
+        if let Some(holder) = self.holder() {
+            return holder.reveal(self.context.as_str(), sealed.clone()).await;
+        }
         let key: X25519SecretKey = self.signer.agreement_key().await?;
         platform::reveal(&key, self.signer.ed25519_did(), self.context, sealed).await
     }
@@ -160,10 +165,23 @@ impl<E> Secret<'_, E> {
     /// whose seed is gone and cannot be re-derived. Otherwise returns an error
     /// if a platform crypto operation fails.
     pub async fn derive(&self, label: &[u8]) -> Result<Ed25519Signer<Sealed>, SecretError> {
+        if let Some(holder) = self.holder() {
+            let key = holder.derive(self.context.as_str(), label.to_vec()).await?;
+            return Ok(Ed25519Signer::from(Ed25519SigningKey::from(key)));
+        }
         let seed = self.derive_bytes(label).await?;
         Ed25519Signer::import(&seed)
             .await
             .map_err(|error| SecretError::Crypto(error.to_string()))
+    }
+
+    /// What runs the key agreement of a key held outside this process, where
+    /// its holder runs it.
+    fn holder(&self) -> Option<&std::sync::Arc<dyn ExternalSecret>> {
+        match self.signer.signing_key() {
+            Ed25519SigningKey::External(key) => key.secret(),
+            _ => None,
+        }
     }
 
     /// The derived 32 bytes.
