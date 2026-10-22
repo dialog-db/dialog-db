@@ -138,7 +138,7 @@ The commit then seals the tree and writes the new blocks (see [Blocks and Storag
 - the issuer, the key that signed it,
 - the tree root,
 - the edition,
-- the most active part of the watermark, and a summary of the rest, described below,
+- a marker saying its watermark, described below, is in its tree,
 - the signature over all of the above.
 
 These are the bytes the signature covers:
@@ -168,7 +168,7 @@ These are the bytes the signature covers:
 <rect class="shade" x="540" y="10" width="100" height="30"/>
 <text class="small" x="590.0" y="30" text-anchor="middle">context</text>
 <path class="wire" d="M541,46 v4 H639 v-4"/>
-<text class="label small muted" x="590.0" y="66" text-anchor="middle">active set + spill</text>
+<text class="label small muted" x="590.0" y="66" text-anchor="middle">1-byte marker</text>
 <text class="label small muted" x="321.0" y="92" text-anchor="middle">the issuer signs these bytes; the signature travels with the head</text>
 </svg>
 </figure>
@@ -186,9 +186,9 @@ The watermark says, for every origin, how far into that origin's commits this he
 
 Because an origin writes one commit at a time, "everything up to edition 3" is an exact description of what the head has seen from `oA`. So the question *"has this head seen version v?"* is one lookup: v is seen when its edition is at most the watermark's edition for its origin.
 
-A watermark has one row per origin that ever wrote into the history, and rows are never removed: a device that commits once and is never seen again keeps its row. So the whole watermark is not carried on the head. It is written into the tree itself, in a small region of its own with one entry per origin, and a commit updates only its own origin's entry. The head carries the **active set**, the 64 rows with the highest editions, and a **spill**: a hash of every other row, how many there are, and the highest edition among them. A writer that stops committing drops out of the active set once 64 other origins have committed after it.
+A watermark has one row per origin that ever wrote into the history, and rows are never removed: a device that commits once and is never seen again keeps its row. So the watermark is not carried on the head at all. It is written into the tree itself, in a small region of its own with one entry per origin, and the head only says that it is there.
 
-The spill is what keeps syncing cheap. Two heads whose spills are equal have the same rows outside their active sets, so comparing their active sets compares their whole watermarks. That is the usual case for a device syncing with its own upstream, and it needs no block reads. When the spills differ, because a new writer appeared, the replica reads the other side's watermark region from its tree: a few blocks.
+The region skips one row: the head's own. That row says where the current writer's run of commits began, and a reader brings it up to date from the head, because each commit in a run adds exactly one edition and one commit. So a writer committing on top of its own head writes nothing to the region. A commit on another writer's head writes two rows, the other writer's (its run has ended) and its own, and a merge writes the rows its two sides disagree on.
 
 That one question answers both questions from the start of the chapter. When a change arrives that the receiver has already seen, it can be skipped. And when a fact arrives from another replica that the receiver has seen *and* no longer holds, the receiver knows it was removed on purpose, not missing, and does not bring it back. Deleted facts need no tombstone in the fact indexes. The [Sync](./sync.md) chapter shows this in action.
 

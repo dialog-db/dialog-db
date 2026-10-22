@@ -39,6 +39,10 @@ pub async fn main() -> Result<()> {
         let revision: Revision = serde_ipld_dagcbor::from_slice(&bytes)?;
         match ContextProfile::of(&revision) {
             Some(profile) => println!("{profile}"),
+            None if revision.region => println!(
+                "the head's causal context is in its tree's context region; \
+                 profile it with ContextProfile::from_region and the region's entries"
+            ),
             None => println!("the head publishes no causal context"),
         }
         return Ok(());

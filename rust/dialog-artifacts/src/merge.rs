@@ -120,9 +120,9 @@ pub fn coverage_scope() -> [RangeInclusive<Key>; 1] {
 /// The context region's key range: one watermark per origin the tree's
 /// head has observed (see [`context_key`](crate::context_key)).
 ///
-/// No merge pass integrates it. Every head minted by a merge writes its
-/// own full context into the region directly
-/// ([`context_writes`](crate::history::context_writes)), so the screens
+/// No merge pass integrates it. Every head minted by a merge writes the
+/// region entries it changes directly
+/// ([`region_writes`](crate::history::region_writes)), so the screens
 /// never see a context entry, and a graft's contested spans leave it out
 /// ([`without_context`]).
 pub fn context_scope() -> [RangeInclusive<Key>; 1] {

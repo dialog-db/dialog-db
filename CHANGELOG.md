@@ -14,42 +14,39 @@ says how to cut a release.
 
 ## Unreleased
 
-### A head carries its active watermarks, and its tree carries the whole causal context
+### A head carries no causal context, and its tree carries all of it
 
 [#625](https://github.com/dialog-db/dialog-db/pull/625)
 
 A head no longer carries one watermark per origin its history ever
-included. It carries its active set, the `ACTIVE_CONTEXT` (64)
-watermarks with the highest editions, and a `Spill`: a digest of every
-other watermark, how many there are, and the highest edition among
-them. The whole map is written into the tree, in a new context region
-with one entry per origin. A commit writes its own origin's entry, and a
-merge writes the entries its two sides hold differently. Two heads that
-spill the same origins compare exactly from the heads alone, so a device
-pulling an upstream whose writers are all still active reads nothing for
-the context. A pull reads the upstream's region, its root and a few
-leaves, when the spills differ.
+included. It carries none, and a signed marker saying its tree holds
+them, in a new context region with one entry per origin. The region is
+exact for every origin except the head's own: that entry is where the
+writer's chain of commits began, and a reader brings it up to the head
+from the head's edition, one edition and one revision per commit. A
+commit on a head of its own origin therefore writes nothing to the
+region. A commit on another origin's head writes two entries, and a
+merge writes its own entry and every entry its two sides hold
+differently. A pull decides "nothing new" from its own context and the
+upstream head's version, and a fast-forward from the two heads' editions
+when they share an origin, at zero reads; a fast-forward across origins
+reads the upstream's region, its root and a leaf.
 
 What this changes for you:
 
-- `Revision` has a field `spill: Option<Spill>`. A struct literal must
-  name it.
-- `Revision::context` on a head this release mints is the active set,
-  not the whole context. The whole context of a head is in its branch's
-  memo (`Branch::contexts().cached(&version)`), or in its tree
-  (`history::context_in`), or derived by the ancestry walk
-  (`history::context_of`).
-- `Revision::publish_context` and `Revision::publish_projection` set
-  both fields. `Revision::check_context` checks a context read from a
-  tree against its head, and `Revision::inline_context` gives the whole
-  context when the head carries all of it.
-- `Context::project` and `Context::project_from` compute a head's
-  projection, and `Context::exchange_active` rebuilds the whole context
-  of a head that spills the same origins. `Context::get` and
-  `FromIterator<(Origin, Watermark)>` are new, and so is
-  `Watermark::check`, the per-entry bounds `Revision::verify` applies.
-  `EDITION_CEILING` moves to `dialog_capability::history` and stays
-  exported from `identity`.
+- `Revision` has a field `region: bool`. A struct literal must name it.
+- `Revision::context` is `None` on every head this release mints. A
+  head's whole context is in its branch's memo
+  (`Branch::contexts().cached(&version)`), in its tree
+  (`history::context_in`, then `Revision::context_from_region`), or
+  derived by the ancestry walk (`history::context_of`).
+  `Revision::inline_context` gives the context of a head minted before
+  the region, and `Revision::publish_region` marks a head as carrying
+  its context in its tree.
+- `Context::get`, `Context::set` and `FromIterator<(Origin, Watermark)>`
+  are new, and so is `Watermark::check`, the per-entry bounds
+  `Revision::verify` applies. `EDITION_CEILING` moves to
+  `dialog_capability::history` and stays exported from `identity`.
 - `ContextCache` holds `Arc<Context>`. `cached` and `context_of` return
   one, and `insert` takes anything that converts into one.
   `merge::screen_data` takes anything that converts into an
@@ -57,30 +54,32 @@ What this changes for you:
 - The context region is `CONTEXT_KEY_TAG` (6). It comes with
   `context_key`, `context_entry`, `read_context_entry`,
   `merge::context_scope`, `merge::without_context`,
-  `history::context_in` and `history::context_writes`.
-- `Revision::verify` refuses a head with more than 64 active
-  watermarks, a spill beside an active set that is not full, an active
-  watermark below a spilled one, or a spilled edition at the ceiling.
-  A pull refuses a head whose tree's region does not project to what the
-  head publishes. Both surface as `DialogArtifactsError::InvalidKey`.
-- `Revision::precedence` is exact for two heads that spill the same
-  origins. For two that do not, it reports `Concurrent` only when the
-  heads rule an order out, and otherwise orders them as it orders heads
-  minted before contexts, by edition.
-- A replica with no head of its own adopts an upstream head without
-  resolving its context, so the first commit on top reads the region
-  instead.
-- `diagnose --head <revision cell>` prints a head's origin count and how
-  many origins wrote within the last 100, 1 000 and 10 000 editions.
+  `history::context_in`, `history::region_writes` and `history::Held`.
+- `Revision::verify` refuses a head that claims both an inline context
+  and a context region. A pull refuses a head whose region holds no
+  entry for the head's own origin, holds it above the head, or holds an
+  entry outside the watermark bounds, as `DialogArtifactsError::InvalidKey`,
+  and keeps its own head.
+- `Revision::precedence` compares two heads by their contexts only when
+  both carry them inline. Any other pair is ordered by edition, without
+  reading either tree, so two concurrent heads of different origins can
+  read as ordered.
+- A fast-forward between heads of different origins now reads the
+  upstream's root and the path to its region's leaf (3 blocks in the
+  tests); before, it read nothing.
+- `diagnose --head <revision cell>` prints the origin count and recent
+  writers of a head that carries its context inline, and
+  `ContextProfile::from_region` profiles one from its region's entries.
 
 Why: every head carried every origin that ever wrote, so every commit
-signed and every pull moved a head whose size grew with the number of
-writers, dead ones included. Atop 10 000 origins a head was 390 kB, its
-signed payload 480 kB, and a one-fact commit took 5.4 ms, against
-0.25 ms atop 10. Now the head is 2.9 kB and the commit 1.1 ms, no slower
-than a commit on a history as deep written by one origin. A dead origin
-costs its 48 region bytes once per replica instead of once per
-operation.
+signed and every pull and cell watcher moved a head whose size grew with
+the number of writers, dead ones included. Atop 10 000 origins a head
+was 390 kB, its signed payload 480 kB, and a one-fact commit took
+5.4 ms, against 0.25 ms atop 10. Now the head is under 300 bytes and its
+signed payload 183 bytes at any origin count, and a one-fact commit atop
+10 000 origins costs what one atop a history as deep from one origin
+does (2.4 ms against 2.3 ms). A dead origin costs its 48
+region bytes once per replica instead of once per operation.
 
 ### A snapshot can be exported without the bytes of its assets
 
@@ -796,14 +795,10 @@ thread multiplies whatever it holds by the size of the thread pool.
   whole map into its tree's region, once, in the same batch as its
   revision record.
 - An older release cannot verify a head this release mints: its signed
-  payload has a `0x02` shape the older release does not know, so its
-  pull refuses the head as an invalid signature. Upgrade every replica
-  that pulls from one running this release. Nothing an embedder runs is
-  needed beyond that.
-- `ACTIVE_CONTEXT` is part of the format. Two replicas must project a
-  map to the same bytes, so changing it is a format change of its own.
-- Nothing stored is rewritten by the changes of #623, an older release reads
-  what this one writes, and an embedder runs nothing.
+  payload ends in a `0x02` marker the older release does not know, so
+  its pull refuses the head as an invalid signature. Upgrade every
+  replica that pulls from one running this release. Nothing an embedder
+  runs is needed beyond that.
 - `UcanAddress` encodes an optional `socket`, left out when absent, so an address without one keeps its bytes. An older replica reads an address that names a socket and drops the socket, reaching the peer over requests.
 - Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
 - The socket carries text `ping` and `pong` messages beside its frames. A service's socket must answer `ping` with `pong`, or a client closes the connection every `Liveness::deadline`; no released service has a socket, so none predates this.

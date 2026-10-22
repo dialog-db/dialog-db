@@ -40,7 +40,7 @@ pub use claims::*;
 mod commit;
 pub use commit::*;
 
-mod context;
+pub(crate) mod context;
 
 mod delegation;
 pub use delegation::*;

@@ -483,11 +483,8 @@ async fn measure_origins(origins: usize) -> Result<()> {
 
     let (operator, profile) = test_session_with_peer().await;
     let env = Counting::new(operator);
-    let repo = profile
-        .space(unique_name("bench"))
-        .open()
-        .perform(&env)
-        .await?;
+    let name = unique_name("bench");
+    let repo = profile.space(name.clone()).open().perform(&env).await?;
 
     let mut previous: Option<crate::Branch> = None;
     for i in 0..origins {
@@ -525,11 +522,9 @@ async fn measure_origins(origins: usize) -> Result<()> {
     let commit_ms = started.elapsed().as_secs_f64() * 1_000.0 / COMMITS as f64;
 
     let head = main.revision().expect("main has a head");
-    let published = head
-        .context
-        .clone()
-        .map(|context| context.len())
-        .unwrap_or(0);
+    // What the head carries of its context inline: nothing, for a head
+    // that keeps it in its tree's region.
+    let inline = head.inline_context().map(Context::len).unwrap_or(0);
     let encoded = serde_ipld_dagcbor::to_vec(&head)?.len();
     let payload = head.payload().len();
     let memo = main
@@ -567,25 +562,38 @@ async fn measure_origins(origins: usize) -> Result<()> {
     main.commit(stream::iter(vec![assert_fact(origins + COMMITS + 1, "ff")]))
         .perform(&env)
         .await?;
-    env.reset();
-    feature.pull().perform(&env).await?;
-    let ff_reads = env.block_reads();
+
+    // The two pulls are measured from a session of its own, which holds
+    // only what storage holds: a device following the upstream, with
+    // nothing remembered about either head.
+    let device = profile
+        .session(b"device")
+        .space(profile.state())
+        .allow(dialog_capability::Subject::any())
+        .await?;
+    let device = Counting::new(device);
+    let local = profile.space(name).open().perform(&device).await?;
+    let synced = local.branch("feature").open().perform(&device).await?;
+    device.reset();
+    synced.pull().perform(&device).await?;
+    let ff_reads = device.block_reads();
     // Nothing new: the upstream moves, but only to a head we already
     // hold (it adopts our commit).
-    feature
+    synced
         .commit(stream::iter(vec![assert_fact(
             origins + COMMITS + 2,
             "noop",
         )]))
-        .perform(&env)
+        .perform(&device)
         .await?;
-    main.pull().from(&feature).perform(&env).await?;
-    env.reset();
-    feature.pull().perform(&env).await?;
-    let noop_reads = env.block_reads();
+    let upstream = local.branch("main").open().perform(&device).await?;
+    upstream.pull().from(&synced).perform(&device).await?;
+    device.reset();
+    synced.pull().perform(&device).await?;
+    let noop_reads = device.block_reads();
 
     println!(
-        "| {origins:>7} | {published:>9} | {encoded:>10} | {payload:>13} | {commit_ms:>9.2} | \
+        "| {origins:>7} | {inline:>6} | {encoded:>10} | {payload:>13} | {commit_ms:>9.2} | \
          {control_ms:>10.2} | {memo_bytes:>13} | {ff_reads:>8} | {noop_reads:>10} |"
     );
     Ok(())
@@ -601,14 +609,17 @@ async fn context_cost_by_origins() -> Result<()> {
         .and_then(|value| value.parse().ok())
         .unwrap_or(10_000);
     println!(
-        "| origins | published | head bytes | payload bytes | commit ms | \
+        "| origins | inline | head bytes | payload bytes | commit ms | \
          control ms | context bytes | ff reads | noop reads |"
     );
     println!(
-        "|---------|-----------|------------|---------------|-----------|\
+        "|---------|--------|------------|---------------|-----------|\
          ------------|---------------|----------|------------|"
     );
-    for origins in [10, 1_000, 10_000].into_iter().filter(|n| *n <= cap) {
+    for origins in [1, 10, 100, 1_000, 10_000]
+        .into_iter()
+        .filter(|n| *n <= cap)
+    {
         measure_origins(origins).await?;
     }
     Ok(())

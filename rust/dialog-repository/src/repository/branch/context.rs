@@ -1,31 +1,49 @@
 //! The full causal context of a head, wherever it is written down.
 //!
-//! A head carries its causal context in one of three shapes. Since the
-//! context region, it carries the active set and a spill summary, and the
-//! whole map is in its tree's context region. Before that it carried the
-//! whole map inline, and before that nothing. Every gate a commit or a
-//! pull runs needs the whole map, so this resolves it once per head, from
-//! the branch's memo when it can, and remembers it there.
+//! A head minted since the context region existed carries no context: its
+//! tree's region holds it, exact for every origin except the head's own,
+//! which the head derives from its edition. A head minted before carried
+//! its whole context inline, and one minted before that carried nothing.
+//! Every gate a commit or a merge runs on a head's context needs the whole
+//! map, so this resolves it once per head, from the branch's memo when it
+//! can, and remembers it there.
 
 use std::sync::Arc;
 
-use dialog_artifacts::history::{Context, ContextCache, History, context_in};
+use dialog_artifacts::history::{Context, ContextCache, Held, History, context_in};
 use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_artifacts::{ArchiveReader, DialogArtifactsError};
 use dialog_common::Blake3Hash as NodeHash;
 
 use crate::{Index, Revision};
 
+#[cfg(test)]
+use crate::repository::source::SourceRef;
+#[cfg(test)]
+use crate::{Hydrate, NetworkedIndex};
+#[cfg(test)]
+use dialog_artifacts::history::context_of;
+#[cfg(test)]
+use dialog_capability::Provider;
+#[cfg(test)]
+use dialog_common::ConditionalSync;
+#[cfg(test)]
+use dialog_effects::archive::{Get as ArchiveGet, Put as ArchivePut};
+#[cfg(test)]
+use dialog_effects::blob::Read as BlobRead;
+#[cfg(test)]
+use dialog_effects::memory::Resolve;
+
 /// The full context `head` publishes, or `None` for a head minted before
 /// heads carried one.
 ///
 /// Answered from `contexts` when remembered. A head carrying its whole
-/// context inline (one minted before the region, or one that spills
-/// nothing) is taken as it is, at no read. Otherwise the head's tree's
-/// context region is read through `store` (its root plus the few leaves
-/// the clustered region occupies), and accepted only when it projects to
-/// exactly what the head publishes ([`Revision::check_context`]).
-/// Whatever is resolved is remembered under the head's version.
+/// context inline (one minted before the region) is taken as it is, at no
+/// read. Otherwise the head's tree's context region is read through
+/// `store` (its root plus the few leaves the clustered region occupies)
+/// and the head's own entry derived from its edition
+/// ([`Revision::context_from_region`]), which refuses a region no head
+/// minted. Whatever is resolved is remembered under the head's version.
 pub(crate) async fn published_context<S>(
     head: &Revision,
     contexts: &ContextCache,
@@ -41,13 +59,11 @@ where
     }
     let context = match head.inline_context() {
         Some(context) => Arc::new(context.clone()),
-        None if head.context.is_none() => return Ok(None),
+        None if !head.region => return Ok(None),
         None => {
             let tree =
                 Index::from_hash_with_cache(NodeHash::from(*head.tree.hash()), cache.clone());
-            let context = context_in(&tree, store).await?;
-            head.check_context(&context)?;
-            Arc::new(context)
+            Arc::new(head.context_from_region(context_in(&tree, store).await?)?)
         }
     };
     contexts.insert(version, context.clone());
@@ -74,28 +90,89 @@ where
     }
 }
 
-/// What the context region of `head`'s tree holds, given `context`, the
-/// head's full context: the whole of it for a head that carries a spill,
-/// and nothing for a head minted before the region existed.
-pub(crate) fn region_of<'a>(head: &Revision, context: &'a Context) -> Option<&'a Context> {
-    head.spill.is_some().then_some(context)
+/// What `head`'s tree holds in its context region, for deciding the region
+/// writes of a tree minted from it (`history::region_writes`), given
+/// `context`, the head's full context: `None` for a head minted before the
+/// region existed, whose tree holds no entries.
+pub(crate) fn held<'a>(head: &Revision, context: &'a Context) -> Option<Held<'a>> {
+    head.region.then_some(Held {
+        head: head.version(),
+        context,
+    })
 }
 
-/// The full context of an upstream head whose spill equals ours, without
-/// a read: what we spill is what it spills, so its full context is ours
-/// with the active sets exchanged. `None` when the spills differ, or when
-/// either head does not carry one.
-pub(crate) fn exchanged_context(
-    ours: &Revision,
-    our_context: &Context,
-    theirs: &Revision,
-) -> Option<Context> {
-    match (&ours.context, &ours.spill, &theirs.context, &theirs.spill) {
-        (Some(our_active), Some(our_spill), Some(their_active), Some(their_spill))
-            if our_spill == their_spill =>
-        {
-            Some(our_context.exchange_active(our_active, their_active))
-        }
-        _ => None,
+/// The full context of `source`'s head, resolved as a commit or a pull
+/// resolves it: for tests that assert on a head's context, which the head
+/// itself no longer carries.
+#[cfg(test)]
+pub(crate) async fn head_context<'a, Env>(
+    source: impl Into<SourceRef<'a>>,
+    env: &Env,
+) -> Result<Arc<Context>, DialogArtifactsError>
+where
+    Env: Provider<ArchiveGet>
+        + Provider<ArchivePut>
+        + Provider<BlobRead>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + ConditionalSync
+        + 'static,
+{
+    let source = source.into();
+    let head = source
+        .revision()
+        .ok_or_else(|| DialogArtifactsError::InvalidKey("the line has no head".into()))?;
+    let store = NetworkedIndex::new(env, source.archive().index(), source.fallback());
+    full_context(
+        &head,
+        &source.contexts(),
+        &store,
+        &source.node_cache(),
+        &source.history(env),
+    )
+    .await
+}
+
+/// Check what `source`'s head keeps in its tree's context region, as a
+/// reader that remembers nothing would: the head carries no context and
+/// says its tree holds one, the region read raw and brought up to the head
+/// equals the ancestry walk, and so does what the memo holds for the head
+/// when it holds anything. Returns the region's raw entries and the walked
+/// context, for tests that compare regions across heads.
+#[cfg(test)]
+pub(crate) async fn region_agrees<'a, Env>(
+    source: impl Into<SourceRef<'a>>,
+    env: &Env,
+    what: &str,
+) -> Result<(Context, Context), DialogArtifactsError>
+where
+    Env: Provider<ArchiveGet>
+        + Provider<ArchivePut>
+        + Provider<BlobRead>
+        + Provider<Resolve>
+        + Provider<Hydrate>
+        + ConditionalSync
+        + 'static,
+{
+    let source = source.into();
+    let head = source
+        .revision()
+        .ok_or_else(|| DialogArtifactsError::InvalidKey("the line has no head".into()))?;
+    assert!(
+        head.region && head.context.is_none(),
+        "{what}: the head keeps its context in its tree's region"
+    );
+    let store = NetworkedIndex::new(env, source.archive().index(), source.fallback());
+    let tree = Index::from_hash_with_cache(NodeHash::from(*head.tree.hash()), source.node_cache());
+    let raw = context_in(&tree, &store).await?;
+    let read = head.context_from_region(raw.clone())?;
+    let walked = context_of(&head.version(), &source.history(env)).await?;
+    assert_eq!(
+        read, walked,
+        "{what}: the region reads as the ancestry walk"
+    );
+    if let Some(memo) = source.contexts().cached(&head.version()).await {
+        assert_eq!(*memo, walked, "{what}: the memo holds the ancestry walk");
     }
+    Ok((raw, walked))
 }

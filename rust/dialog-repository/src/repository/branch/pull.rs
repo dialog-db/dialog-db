@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::FromKey as _;
-use dialog_artifacts::history::{Context, History as _, context_writes};
+use dialog_artifacts::history::{Context, History as _, region_writes};
 use dialog_artifacts::merge;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_capability::Provider;
@@ -18,7 +18,7 @@ use dialog_effects::memory::{Publish, Resolve};
 use futures_util::TryStreamExt as _;
 use futures_util::future::{Either, join_all};
 
-use super::context::{exchanged_context, full_context, published_context, region_of};
+use super::context::{full_context, held, published_context};
 use super::fetch::fetch_one;
 use super::migrate::aligned;
 use super::resolve::resolve;
@@ -389,25 +389,31 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // local head's tree (local blocks, read once per head), or from the
         // head itself when it predates the region, or — only for lineages
         // minted before heads carried contexts — by the O(ancestry) walk,
-        // once.
+        // once. Resolved only once a gate needs it: the two gates below
+        // decide a follower's pull from the heads alone.
         let contexts = branch.contexts();
-        let local_context: Arc<Context> = match &local_revision {
-            Some(revision) => {
-                let history = branch.history(env);
-                full_context(revision, &contexts, &store, &branch.node_cache(), &history).await?
+        let local_context = || async {
+            match &local_revision {
+                Some(revision) => {
+                    let history = branch.history(env);
+                    full_context(revision, &contexts, &store, &branch.node_cache(), &history).await
+                }
+                None => Ok(Arc::new(Context::new())),
             }
-            None => Arc::new(Context::new()),
         };
 
         // A replica with no head and no sync base adopts an upstream that
         // publishes a context by root: nothing it holds can contradict
         // anything, which is the fast-forward gate below with an empty
         // side. That needs nothing of the upstream's context, so none of
-        // it is read here; it is remembered when the head carries all of
-        // it, and the first commit on top reads the rest.
-        if local_revision.is_none() && base.is_none() && upstream_revision.context.is_some() {
+        // it is read here; it is remembered when the head carries it
+        // inline, and the first commit on top reads the rest.
+        if local_revision.is_none()
+            && base.is_none()
+            && (upstream_revision.region || upstream_revision.context.is_some())
+        {
             if let Some(context) = upstream_revision.inline_context() {
-                contexts.insert(upstream_revision.version(), context.clone());
+                contexts.insert(upstream_revision.version(), Arc::new(context.clone()));
             }
             return Ok(PreparedPull::Merged(Box::new(Merged {
                 branch,
@@ -419,37 +425,87 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             })));
         }
 
-        // The upstream's full context, which every gate below compares
-        // ours with. When both heads spill the same origins (the steady
-        // state of a device pulling its own upstream with a stable set of
-        // writers), it is ours with the active sets exchanged: no read.
-        // Otherwise the upstream's tree's context region is read through
-        // the store that serves its blocks (its root and the region's few
-        // leaves) and checked against the head before anything acts on
-        // it; that is first contact, or a new writer entering the
-        // upstream's active set. A head that predates the region carries
-        // its whole context, and one that predates contexts carries none,
-        // in which case the frugal paths are skipped.
-        let upstream_context: Option<Arc<Context>> = match contexts
-            .cached(&upstream_revision.version())
-            .await
-        {
-            Some(context) => Some(context),
-            None => match local_revision
-                .as_ref()
-                .and_then(|local| exchanged_context(local, &local_context, &upstream_revision))
-            {
-                Some(context) => {
-                    let context = Arc::new(context);
-                    contexts.insert(upstream_revision.version(), context.clone());
-                    Some(context)
-                }
-                None => {
-                    published_context(&upstream_revision, &contexts, &store, &branch.node_cache())
-                        .await?
-                }
-            },
+        // Nothing new: we have seen the upstream's head. A head's context
+        // holds its own version and is closed under ancestry, so having
+        // seen the head is having seen everything it has seen, and every
+        // claim live there is live or covered here already: the merge
+        // would change nothing. Keep the head and advance only the sync
+        // base, so future diffs start from the upstream's current tree.
+        // Decided from our own context and the head's version, at zero
+        // reads, whatever shape the upstream's head is.
+        // Two heads of one origin answer it from their editions alone, since
+        // an origin's revisions form one chain.
+        let seen = match &local_revision {
+            None => false,
+            Some(current) if current.origin() == upstream_revision.origin() => {
+                current.edition >= upstream_revision.edition
+            }
+            Some(_) => local_context()
+                .await?
+                .observes(&upstream_revision.version()),
         };
+        if let Some(current) = &local_revision
+            && seen
+        {
+            return Ok(PreparedPull::Merged(Box::new(Merged {
+                branch,
+                head,
+                new_revision: current.clone(),
+                merges: upstream_revision.clone(),
+                sync: upstream.with_tree(upstream_revision.tree.clone()),
+                base,
+            })));
+        }
+
+        // The upstream's full context, resolved at most once and only by the
+        // paths that need it: the memo, the head's inline context, or its
+        // tree's context region (its root and the region's few leaves, read
+        // through the store that serves its blocks). `None` for a head
+        // minted before heads carried a context, for which the paths that
+        // compare contexts are skipped.
+        let upstream_context = || async {
+            published_context(&upstream_revision, &contexts, &store, &branch.node_cache()).await
+        };
+
+        // Fast-forward adoption: we have no novelty of our own (our tree is
+        // exactly the sync base) and the upstream has seen our head, so
+        // everything we have. Nothing we know could contradict what
+        // survived its screen, so its tree is adopted by root: no diff, no
+        // import. Blocks hydrate lazily on demand like any partially
+        // replicated region — this is what keeps pull cost independent of
+        // upstream churn in regions we never touch, and what makes adopting
+        // a deep history free.
+        //
+        // Whether the upstream has seen our head is one entry of its
+        // context. When the two heads share an origin (a replica following
+        // an upstream it fast-forwarded from before), that origin's
+        // revisions form one chain, so an upstream head at or above ours
+        // has seen ours: zero reads. Otherwise the entry is read from the
+        // upstream's region.
+        if base.as_ref().map(|base| base.hash()) == local_tree.as_ref().map(|tree| tree.hash()) {
+            let seen = match &local_revision {
+                None => true,
+                Some(local) if local.origin() == upstream_revision.origin() => {
+                    upstream_revision.edition >= local.edition
+                }
+                Some(local) => upstream_context()
+                    .await?
+                    .is_some_and(|theirs| theirs.observes(&local.version())),
+            };
+            if seen {
+                return Ok(PreparedPull::Merged(Box::new(Merged {
+                    branch,
+                    head,
+                    new_revision: upstream_revision.clone(),
+                    merges: upstream_revision.clone(),
+                    sync: upstream.with_tree(upstream_revision.tree.clone()),
+                    base,
+                })));
+            }
+        }
+
+        let upstream_context = upstream_context().await?;
+        let local_context = local_context().await?;
 
         // Replicas that have never observed one another (no origin in
         // common, see `merge::unacquainted`) integrate each other's
@@ -458,8 +514,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // tree once per covering record, the first of them a root-to-
         // leaf descent, before the integrate can begin. This is the
         // shape of a device joining an account it was seeded apart
-        // from. Decided from the two watermarks at zero reads; an
-        // upstream that published no watermark is screened as before.
+        // from. Decided from the two watermarks; an upstream that
+        // published no watermark is screened as before.
         let unacquainted = upstream_context
             .as_deref()
             .is_some_and(|theirs| merge::unacquainted(&local_context, theirs));
@@ -475,6 +531,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // does. The lesser merge holds no claim of its own, so dropping it
         // loses nothing, and its version is never minted again: the next
         // revision of its origin sits above the adopted head's edition.
+        // Neither rival has seen the other, so this cannot be one of the
+        // two gates above.
         if let Some(local) = &local_revision
             && let Some(theirs) = &upstream_context
             && rival_merges(
@@ -486,7 +544,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             .await?
         {
             let new_revision = if upstream_revision.version() > local.version() {
-                contexts.insert(upstream_revision.version(), theirs.clone());
                 upstream_revision.clone()
             } else {
                 local.clone()
@@ -501,51 +558,10 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             })));
         }
 
-        // The upstream published its watermark with its head: two frugal
-        // paths can short-circuit the tree merge entirely, both gated on
-        // comparing the two contexts (O(#origins), no reads).
+        // The upstream published its watermark: the merge paths below that
+        // pick a direction or a strategy compare the two contexts.
         if let Some(their_context) = &upstream_context {
             let theirs: &Context = their_context;
-            // Nothing new: everything the upstream has seen, we have
-            // seen. Every claim live there is live or covered here
-            // already, so the merge would change nothing. Keep the head
-            // and advance only the sync base, so future diffs start
-            // from the upstream's current tree.
-            if local_context.includes(theirs) {
-                if let Some(current) = &local_revision {
-                    return Ok(PreparedPull::Merged(Box::new(Merged {
-                        branch,
-                        head,
-                        new_revision: current.clone(),
-                        merges: upstream_revision.clone(),
-                        sync: upstream.with_tree(upstream_revision.tree.clone()),
-                        base,
-                    })));
-                }
-            }
-            // Fast-forward adoption: we have no novelty of our own (our
-            // tree is exactly the sync base) and the upstream has seen
-            // everything we have. Nothing we know could contradict what
-            // survived its screen, so its tree is adopted by root: no
-            // diff, no block reads, no import. Blocks hydrate lazily on
-            // demand like any partially replicated region — this is what
-            // keeps pull cost independent of upstream churn in regions
-            // we never touch, and what makes adopting a deep history
-            // free.
-            else if base.as_ref().map(|base| base.hash())
-                == local_tree.as_ref().map(|tree| tree.hash())
-                && theirs.includes(&local_context)
-            {
-                contexts.insert(upstream_revision.version(), their_context.clone());
-                return Ok(PreparedPull::Merged(Box::new(Merged {
-                    branch,
-                    head,
-                    new_revision: upstream_revision.clone(),
-                    merges: upstream_revision.clone(),
-                    sync: upstream.with_tree(upstream_revision.tree.clone()),
-                    base,
-                })));
-            }
             // The graft merge, for tracked pulls where at least one
             // side's delta is substantial: partition the key space by
             // each side's node-level divergence from the sync base,
@@ -562,7 +578,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             // threshold the direct paths (replay ours or screen theirs,
             // whichever side is smaller) are strictly cheaper; the
             // graft's economics need bulk on both sides.
-            else if let Some(local) = &local_revision
+            if let Some(local) = &local_revision
                 && let Some(base_sync) = &base
                 && local_context
                     .divergence(theirs)
@@ -815,16 +831,17 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 context.merge(theirs);
                 context.record(revision.version());
                 let mut entries = record.entries(&manifest)?;
-                entries.entries.extend(context_writes(
+                entries.entries.extend(region_writes(
+                    revision.version(),
                     &context,
                     &[
-                        region_of(local, &local_context),
-                        region_of(&upstream_revision, theirs),
+                        held(local, &local_context),
+                        held(&upstream_revision, theirs),
                     ],
                 ));
                 merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
-                revision.publish_context(&context);
+                revision.publish_region();
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
 
@@ -993,13 +1010,14 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 context.merge(theirs);
                 context.record(revision.version());
                 let mut entries = record.entries(&manifest)?;
-                entries.entries.extend(context_writes(
+                entries.entries.extend(region_writes(
+                    revision.version(),
                     &context,
-                    &[region_of(&upstream_revision, theirs)],
+                    &[held(&upstream_revision, theirs)],
                 ));
                 merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
-                revision.publish_context(&context);
+                revision.publish_region();
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
 
@@ -1201,14 +1219,14 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // with no head of our own), so its region is what ours held.
                 let mut context = merged_context.clone();
                 context.record(revision.version());
-                let held = local
-                    .as_ref()
-                    .and_then(|local| region_of(local, &local_full));
+                let started = local.as_ref().and_then(|local| held(local, &local_full));
                 let mut entries = record.entries(&manifest)?;
-                entries.entries.extend(context_writes(&context, &[held]));
+                entries
+                    .entries
+                    .extend(region_writes(revision.version(), &context, &[started]));
                 merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
-                revision.publish_context(&context);
+                revision.publish_region();
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
                 revision
@@ -2220,6 +2238,7 @@ mod context_tests;
 
 #[cfg(test)]
 mod history_tests {
+    use super::super::context::{head_context, region_agrees};
     use super::{PreparedPull, SMALL_DIVERGENCE};
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -2491,6 +2510,10 @@ mod history_tests {
             quiesced,
             "simultaneous mutual pulls must reach a fixed point"
         );
+        // The settle adopts one side's head by root, and the region holds
+        // that head's context.
+        region_agrees(&a, &operator, "a after the rival settle").await?;
+        region_agrees(&b, &operator, "b after the rival settle").await?;
         assert_eq!(
             a.revision().map(|r| r.tree),
             b.revision().map(|r| r.tree),
@@ -3113,7 +3136,7 @@ mod history_tests {
             tree: TreeReference::from([9u8; 32]),
             edition: Edition::GENESIS,
             context: None,
-            spill: None,
+            region: false,
             signature: Vec::new(),
         };
         evil.reset(forged).perform(&operator).await?;
@@ -3754,13 +3777,19 @@ mod history_tests {
         Ok(())
     }
 
-    /// Every published head carries its causal context under the head
-    /// signature: it must equal the ancestry walk exactly, and tampering
-    /// with it must fail verification like tampering with any other
-    /// field.
+    /// Every published head keeps its causal context in its tree's region,
+    /// covered by the head signature through the tree root: read from the
+    /// region (not the memo), with the head's own entry derived from the
+    /// head, it equals the ancestry walk exactly. The signed shape marker
+    /// is covered like any other field: stripping it, or claiming an
+    /// inline context beside it, fails verification.
     #[dialog_common::test]
     async fn it_publishes_the_watermark_with_the_head() -> Result<()> {
-        use dialog_artifacts::history::{Edition, Origin, Version, context_of};
+        use crate::{Index, NetworkedIndex};
+        use dialog_artifacts::history::{
+            Edition, HistoryError, Origin, Version, context_in, context_of,
+        };
+        use dialog_common::Blake3Hash;
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -3777,36 +3806,42 @@ mod history_tests {
         }
 
         let head = main.revision().expect("main has a head");
-        let published = head
-            .context
-            .clone()
-            .expect("a freshly minted head publishes its context");
+        assert!(
+            head.context.is_none() && head.region,
+            "a freshly minted head keeps its context in its tree's region"
+        );
+        let store = NetworkedIndex::new(&operator, main.archive().index(), None);
+        let tree =
+            Index::from_hash_with_cache(Blake3Hash::from(*head.tree.hash()), main.node_cache());
+        let published = head.context_from_region(context_in(&tree, &store).await?)?;
         let history = main.history(&operator);
         let walked = context_of(&head.version(), &history).await?;
         assert_eq!(
             published, walked,
-            "the published watermark must equal the ancestry walk"
+            "the region's watermark must equal the ancestry walk"
         );
 
         head.verify().expect("the untouched head verifies");
 
-        // Inflating the watermark (claiming observation of a revision
-        // that is not in the ancestry) must break the signature.
-        let mut tampered = head.clone();
+        // Claiming an inline context beside the region is refused.
+        let mut inflated = head.clone();
         let mut context = published.clone();
         context.record(Version::new(Origin::from([9u8; 32]), Edition::new(9)));
-        tampered.context = Some(context);
+        inflated.context = Some(context);
         assert!(
-            tampered.verify().is_err(),
-            "a tampered watermark must fail head verification"
+            matches!(
+                inflated.verify(),
+                Err(HistoryError::InvalidSignature(_) | HistoryError::InvalidReference(_))
+            ),
+            "an inline context beside the region must fail head verification"
         );
 
-        // Stripping it entirely must break the signature too.
+        // Stripping the marker breaks the signature.
         let mut stripped = head.clone();
-        stripped.context = None;
+        stripped.region = false;
         assert!(
-            stripped.verify().is_err(),
-            "a stripped watermark must fail head verification"
+            matches!(stripped.verify(), Err(HistoryError::InvalidSignature(_))),
+            "a stripped region marker must fail head verification"
         );
 
         Ok(())
@@ -4038,16 +4073,8 @@ mod history_tests {
         // skip both refuse), and our divergence mass exceeds the
         // author's, so the screened direction fires — their delta onto
         // our tree, R1 rejecting the stale copy.
-        let ours = replica
-            .revision()
-            .expect("replica adopted a head")
-            .context
-            .expect("the head publishes its watermark");
-        let theirs = author
-            .revision()
-            .expect("author has a head")
-            .context
-            .expect("the head publishes its watermark");
+        let ours = (*head_context(&replica, &operator).await?).clone();
+        let theirs = (*head_context(&author, &operator).await?).clone();
         assert!(
             !ours.includes(&theirs) && !theirs.includes(&ours),
             "fixture: both sides carry novelty"
@@ -4245,16 +4272,8 @@ mod history_tests {
         // Routing witness: neither side includes the other, both sit
         // under the graft threshold, and our divergence mass is the
         // smaller, so the replay direction fires.
-        let ours = f
-            .revision()
-            .expect("f has a head")
-            .context
-            .expect("the head publishes its watermark");
-        let theirs = m
-            .revision()
-            .expect("m has a head")
-            .context
-            .expect("the head publishes its watermark");
+        let ours = (*head_context(&f, &operator).await?).clone();
+        let theirs = (*head_context(&m, &operator).await?).clone();
         assert!(
             !ours.includes(&theirs) && !theirs.includes(&ours),
             "fixture: both sides carry novelty"
@@ -4654,16 +4673,8 @@ mod history_tests {
 
         // Pin the routing, not just the cost: the divergence-mass gate
         // must actually select the graft for this fixture.
-        let ours = us
-            .revision()
-            .expect("we have a head")
-            .context
-            .expect("our head publishes its watermark");
-        let theirs = bob
-            .revision()
-            .expect("bob has a head")
-            .context
-            .expect("bob's head publishes its watermark");
+        let ours = (*head_context(&us, &env).await?).clone();
+        let theirs = (*head_context(&bob, &env).await?).clone();
         assert!(
             ours.divergence(&theirs).min(theirs.divergence(&ours)) > SMALL_DIVERGENCE,
             "fixture must route to the graft: ours-beyond {} theirs-beyond {}",
@@ -4782,16 +4793,8 @@ mod history_tests {
         .await?;
 
         // The fixture must route to the graft, not a small-delta path.
-        let ours = us
-            .revision()
-            .expect("we have a head")
-            .context
-            .expect("our head publishes its watermark");
-        let theirs = bob
-            .revision()
-            .expect("bob has a head")
-            .context
-            .expect("bob's head publishes its watermark");
+        let ours = (*head_context(&us, &operator).await?).clone();
+        let theirs = (*head_context(&bob, &operator).await?).clone();
         assert!(
             ours.divergence(&theirs).min(theirs.divergence(&ours)) > SMALL_DIVERGENCE,
             "fixture must route to the graft: ours-beyond {} theirs-beyond {}",

@@ -23,9 +23,9 @@
 // (Revision's fields are built from it, and dialog-artifacts depends on that
 // crate). Re-exported here so this module remains the single import site.
 pub use dialog_capability::history::{
-    ACTIVE_CONTEXT, Authority, Context, EDITION_CEILING, EDITION_LENGTH, Edition, HistoryError,
-    Issuer, ORIGIN_LENGTH, Origin, Signature, Spill, VERSION_LENGTH, Version, Watermark,
-    ed25519_key_of, verify_issuer_signature,
+    Authority, Context, EDITION_CEILING, EDITION_LENGTH, Edition, HistoryError, Issuer,
+    ORIGIN_LENGTH, Origin, Signature, VERSION_LENGTH, Version, Watermark, ed25519_key_of,
+    verify_issuer_signature,
 };
 mod cause;
 pub use cause::*;

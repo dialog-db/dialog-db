@@ -17,7 +17,7 @@ use crate::Did;
 
 use super::Entity;
 use crate::history::{
-    ACTIVE_CONTEXT, Context, Edition, HistoryError, Origin, Spill, Version, verify_issuer_signature,
+    Context, Edition, HistoryError, Origin, Version, Watermark, verify_issuer_signature,
 };
 
 /// The raw 32-byte Blake3 hash a [`TreeReference`] wraps. Kept as a
@@ -114,34 +114,24 @@ pub struct Revision {
     /// revision record (`RevisionRecord::parents`), not on the head.
     pub edition: Edition,
 
-    /// The causal context (per-origin watermark) of this revision's
-    /// ancestry, itself included, as far as the head carries it.
-    /// Publishing it with the head is what lets a peer read a replica's
-    /// knowledge without walking its log: pull seeds its context memo
-    /// from it, skips upstreams whose context is included in ours
-    /// (nothing new), and adopts an upstream's tree wholesale when its
-    /// context includes ours and we have no local novelty. Covered by the
-    /// head signature (see [`Revision::payload`]), so adopting it is as
-    /// trustworthy as adopting the head.
-    ///
-    /// On a head that carries a [`spill`](Revision::spill), this is the
-    /// **active set**: the [`ACTIVE_CONTEXT`] watermarks with the highest
-    /// editions. The full context is in the tree's context region, and
-    /// the spill summarizes what the active set leaves out. On a head
-    /// minted before the region existed it is the whole context, and on
-    /// one minted before heads carried a context it is `None`; readers
-    /// fall back to deriving the context by the ancestry walk.
+    /// The whole causal context (per-origin watermark) of this revision's
+    /// ancestry, itself included, on a head minted before the context
+    /// moved into the tree. Heads minted since carry none, and say so with
+    /// [`region`](Revision::region); a head minted before heads carried a
+    /// context carries neither, and readers derive its context by the
+    /// ancestry walk. Covered by the head signature (see
+    /// [`Revision::payload`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<Context>,
 
-    /// The summary of the watermarks [`context`](Revision::context) leaves
-    /// out: a digest of them, how many there are, and the highest edition
-    /// among them. Present on every head minted since the full context
-    /// moved into the tree's context region, so its presence is also what
-    /// says the head's tree carries that region; `None` on heads minted
-    /// before.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spill: Option<Spill>,
+    /// Whether this head's causal context is in its tree's context region,
+    /// which is how every head minted since the region existed carries it.
+    /// The region holds every origin's watermark exactly except this
+    /// head's own, which [`Revision::context_from_region`] derives from the
+    /// head's edition. Covered by the head signature, so a head cannot be
+    /// read as one of the other two shapes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub region: bool,
 
     /// The issuer's Ed25519 signature over [`Revision::payload`], with the
     /// key the issuer DID names (`did:key`). This is what binds the tree
@@ -163,7 +153,7 @@ impl Revision {
             tree,
             edition: Edition::GENESIS,
             context: None,
-            spill: None,
+            region: false,
             signature: Vec::new(),
         }
     }
@@ -188,7 +178,7 @@ impl Revision {
             tree,
             edition: self.edition.successor(),
             context: None,
-            spill: None,
+            region: false,
             signature: Vec::new(),
         }
     }
@@ -215,65 +205,68 @@ impl Revision {
             tree,
             edition: self.edition.max(upstream.edition).successor(),
             context: None,
-            spill: None,
+            region: false,
             signature: Vec::new(),
         }
     }
 
-    /// Publish `context`, the full causal context of this revision, on
-    /// the head: its active set as [`context`](Revision::context) and the
-    /// summary of the rest as [`spill`](Revision::spill). The caller
-    /// writes the full context into the tree's context region.
-    pub fn publish_context(&mut self, context: &Context) {
-        let (active, spill) = context.project(ACTIVE_CONTEXT);
-        self.publish_projection(active, spill);
+    /// Mark this head as carrying its causal context in its tree's context
+    /// region, the shape every head is minted in. The caller writes the
+    /// region entries the head needs (see `history::region_writes` in
+    /// `dialog-artifacts`).
+    pub fn publish_region(&mut self) {
+        self.context = None;
+        self.region = true;
     }
 
-    /// Publish an already computed projection of this revision's full
-    /// context (see [`Context::project`] and [`Context::project_from`]).
-    pub fn publish_projection(&mut self, active: Context, spill: Spill) {
-        self.context = Some(active);
-        self.spill = Some(spill);
-    }
-
-    /// The head's whole causal context, when the head carries all of it:
-    /// a head minted before the context region existed, or one whose
-    /// active set holds every watermark (nothing spilled). `None` when the
-    /// whole context is only in the tree's context region, or when the
-    /// head carries no context at all.
+    /// The head's whole causal context, when the head carries it inline:
+    /// a head minted before the context moved into the tree. `None` for a
+    /// head whose context is in its tree's region, and for one minted
+    /// before heads carried a context.
     pub fn inline_context(&self) -> Option<&Context> {
-        match (&self.context, &self.spill) {
-            (Some(context), None) => Some(context),
-            (Some(context), Some(spill)) if spill.is_empty() => Some(context),
-            _ => None,
+        match self.region {
+            true => None,
+            false => self.context.as_ref(),
         }
     }
 
-    /// Check that `context`, read from this head's tree, is the context the
-    /// head publishes: it projects to exactly the head's active set and
-    /// spill. A head that publishes its whole context inline must equal it.
+    /// This head's full causal context, from `region`, the entries its
+    /// tree's context region holds.
     ///
-    /// This is what binds a tree's context region to the head that names
-    /// it. The signature covers the region through the tree root, but only
-    /// this check says the region agrees with what the head itself claims;
-    /// a context that does not is refused before any gate acts on it.
-    pub fn check_context(&self, context: &Context) -> Result<(), HistoryError> {
-        let agrees = match (&self.context, &self.spill) {
-            (Some(active), Some(spill)) => {
-                let (projected, projected_spill) = context.project(ACTIVE_CONTEXT);
-                &projected == active && &projected_spill == spill
-            }
-            (Some(full), None) => full == context,
-            (None, _) => false,
+    /// The region holds every origin's watermark exactly except this
+    /// head's own. Along one origin's own chain of commits the edition and
+    /// the revision count each rise by one per commit, so the region keeps
+    /// the entry from where the chain began and the reader brings it up to
+    /// the head: `(head edition, count + head edition - stored edition)`.
+    /// A commit whose parent head has the same origin then writes nothing
+    /// to the region, and every head that breaks the chain (a merge, or a
+    /// commit on another origin's head) writes the entries it changes.
+    ///
+    /// A region without an entry for this head's origin, or with one above
+    /// the head's edition, is not one any head minted, and is refused; so
+    /// is a derived entry outside [`Watermark::check`]'s bounds.
+    pub fn context_from_region(&self, mut region: Context) -> Result<Context, HistoryError> {
+        let version = self.version();
+        let refuse = |why: String| Err(HistoryError::InvalidReference(why));
+        let Some(stored) = region.get(&version.origin).copied() else {
+            return refuse(format!(
+                "the context region of head {version} holds no entry for its own origin"
+            ));
         };
-        if agrees {
-            Ok(())
-        } else {
-            Err(HistoryError::InvalidReference(format!(
-                "the context of head {} does not project to what the head publishes",
-                self.version()
-            )))
-        }
+        let Some(run) = self.edition.value().checked_sub(stored.edition.value()) else {
+            return refuse(format!(
+                "the context region of head {version} holds its own origin at edition {}, \
+                 above the head",
+                stored.edition
+            ));
+        };
+        let derived = Watermark {
+            edition: self.edition,
+            count: stored.count.saturating_add(run),
+        };
+        derived.check()?;
+        region.set(version.origin, derived);
+        Ok(region)
     }
 
     /// The [`Origin`] of this revision: the branch-scoped identity of its
@@ -305,24 +298,24 @@ impl Revision {
     /// (length (8, big-endian) ++ UTF-8) for branch, issuer
     /// tree (32)
     /// edition (8, big-endian)
-    /// context, when present without a spill (the whole context inline):
+    /// whole context inline (a head minted before the region):
     ///     0x01 ++ entry count (8, big-endian)
     ///          ++ entries (origin (32) ++ edition (8, big-endian)
     ///                      ++ revision count (8, big-endian), sorted)
-    /// active set and spill, when a spill is present:
-    ///     0x02 ++ entry count (8, big-endian) ++ entries (as above)
-    ///          ++ spill digest (32) ++ spilled count (8, big-endian)
-    ///          ++ highest spilled edition (8, big-endian)
+    /// context in the tree's region:
+    ///     0x02
     /// ```
     ///
-    /// A head without a context appends nothing after the edition (the
-    /// pre-context payload shape), a head carrying its whole context
-    /// appends the `0x01` marker plus the sorted watermark entries, and a
-    /// head carrying its active set appends the `0x02` marker, the entries,
-    /// and the spill. The marker byte sits at the same offset in both
-    /// shapes that have one, and the pre-context shape ends where they
-    /// begin, so the encoding stays injective: a signature over one shape
-    /// can never validate another.
+    /// A head minted before heads carried a context appends nothing after
+    /// the edition, one carrying its whole context inline appends `0x01`
+    /// and its entries, and one whose context is in its tree's region
+    /// appends the lone `0x02`. The marker byte sits at the same offset in
+    /// the two shapes that have one, and the pre-context shape ends where
+    /// they begin, so the encoding stays injective: a signature over one
+    /// shape never validates another. A head claiming both a region and an
+    /// inline context is refused by [`Revision::verify`]; it signs as the
+    /// `0x02` marker followed by the entries, so the payload stays total
+    /// and injective.
     pub fn payload(&self) -> Vec<u8> {
         let mut bytes = HEAD_SIGNING_DOMAIN.to_vec();
         for field in [self.branch.as_str(), self.issuer.as_str()] {
@@ -339,20 +332,17 @@ impl Revision {
                 bytes.extend_from_slice(&watermark.count.to_be_bytes());
             }
         };
-        match (&self.context, &self.spill) {
-            (None, None) => {}
-            (Some(context), None) => {
+        match (self.region, &self.context) {
+            (false, None) => {}
+            (false, Some(context)) => {
                 bytes.push(0x01);
                 entries(&mut bytes, context);
             }
-            // A spill without an active set is refused by `verify`; it
-            // signs as an empty active set so the payload stays total.
-            (context, Some(spill)) => {
+            (true, context) => {
                 bytes.push(0x02);
-                entries(&mut bytes, context.as_ref().unwrap_or(&Context::new()));
-                bytes.extend_from_slice(&spill.digest);
-                bytes.extend_from_slice(&spill.count.to_be_bytes());
-                bytes.extend_from_slice(&spill.highest.key_bytes());
+                if let Some(context) = context {
+                    entries(&mut bytes, context);
+                }
             }
         }
         bytes
@@ -394,57 +384,9 @@ impl Revision {
                 watermark.check()?;
             }
         }
-        if let Some(spill) = &self.spill {
-            self.verify_projection(spill)?;
-        }
-        Ok(())
-    }
-
-    /// The checks a head carrying an active set and a spill passes from the
-    /// head alone: the active set is bounded by [`ACTIVE_CONTEXT`], and it
-    /// is the top of the map. Whether the spill is what the tree's region
-    /// actually holds is checked when the region is read
-    /// ([`Revision::check_context`]).
-    fn verify_projection(&self, spill: &Spill) -> Result<(), HistoryError> {
-        let refuse = |why: String| Err(HistoryError::InvalidReference(why));
-        let Some(active) = &self.context else {
-            return refuse("a head carries a spill without an active set".into());
-        };
-        if active.len() > ACTIVE_CONTEXT {
-            return refuse(format!(
-                "a head carries {} active watermarks, more than the {ACTIVE_CONTEXT} allowed",
-                active.len()
-            ));
-        }
-        if spill.is_empty() {
-            if *spill != Spill::empty() {
-                return refuse("an empty spill carries a digest or edition".into());
-            }
-            return Ok(());
-        }
-        // Something spilled, so the active set must be full: the
-        // projection only spills what does not fit.
-        if active.len() < ACTIVE_CONTEXT {
-            return refuse(format!(
-                "a head spills {} watermarks beside an active set of only {}",
-                spill.count,
-                active.len()
-            ));
-        }
-        if spill.highest.value() >= EDITION_CEILING {
-            return refuse(format!(
-                "spilled edition {} exceeds the protocol ceiling",
-                spill.highest
-            ));
-        }
-        // The active set is the top of the map by edition.
-        if let Some((_, low)) = active
-            .iter()
-            .find(|(_, watermark)| watermark.edition < spill.highest)
-        {
-            return refuse(format!(
-                "active watermark at edition {} sits below a spilled one at {}",
-                low.edition, spill.highest
+        if self.region && self.context.is_some() {
+            return Err(HistoryError::InvalidReference(
+                "a head carries both an inline context and a context region".into(),
             ));
         }
         Ok(())
@@ -458,86 +400,35 @@ impl Revision {
     /// context includes the one before, and its edition is higher.
     /// Comparing contexts orders two heads without trusting whoever
     /// delivered them, which is what lets a head observed out of order
-    /// be recognized as stale. Heads minted before contexts were
-    /// published are ordered by edition alone.
+    /// be recognized as stale.
     ///
     /// [`Precedence::Concurrent`] means neither head built on the other:
     /// the branch was reset, or recreated, or written by something other
     /// than a fast-forward publish, and neither head says which is newer.
     ///
-    /// Heads that carry only their active sets are compared exactly when
-    /// their spills are equal (the spilled watermarks are then the same on
-    /// both sides). Otherwise each side is asked only what its head can
-    /// rule out: a head that cannot include the other is told apart for
-    /// certain, and one that may include it is taken to, which is the
-    /// order a head minted before contexts were published gets by edition.
+    /// Two heads that carry their whole contexts inline are compared by
+    /// them. Two heads of one origin are ordered exactly by edition, since
+    /// an origin's revisions form one chain. Any other pair, which includes
+    /// every pair where a head keeps its context in its tree's region, is
+    /// ordered by edition alone: the heads are compared without reading a
+    /// block of either tree, as the cell watcher needs, at the price of
+    /// reporting concurrent heads of different origins as ordered.
     pub fn precedence(&self, other: &Revision) -> Precedence {
         let same = self.tree == other.tree && self.version() == other.version();
-        match (self.knowledge(), other.knowledge()) {
-            (Some(ours), Some(theirs)) => match (ours.includes(&theirs), theirs.includes(&ours)) {
+        if let (Some(ours), Some(theirs)) = (self.inline_context(), other.inline_context()) {
+            return match (ours.includes(theirs), theirs.includes(ours)) {
                 (true, true) if same => Precedence::Same,
                 (true, false) => Precedence::After,
                 (false, true) => Precedence::Before,
                 _ => Precedence::Concurrent,
-            },
-            _ => match self.edition.cmp(&other.edition) {
-                Ordering::Greater => Precedence::After,
-                Ordering::Less => Precedence::Before,
-                Ordering::Equal if same => Precedence::Same,
-                Ordering::Equal => Precedence::Concurrent,
-            },
+            };
         }
-    }
-}
-
-impl Revision {
-    /// What this head says about its context, for [`Revision::precedence`]:
-    /// a head carrying its whole context inline reads as an active set
-    /// with nothing spilled.
-    fn knowledge(&self) -> Option<Knowledge<'_>> {
-        let active = self.context.as_ref()?;
-        Some(Knowledge {
-            edition: self.edition,
-            active,
-            spill: self.spill.unwrap_or_else(Spill::empty),
-        })
-    }
-}
-
-/// One head's published knowledge, as [`Revision::precedence`] compares it.
-struct Knowledge<'a> {
-    edition: Edition,
-    active: &'a Context,
-    spill: Spill,
-}
-
-impl Knowledge<'_> {
-    /// Whether the full context behind this head may include the one behind
-    /// `other`. Exact when the spills are equal; otherwise `false` only when
-    /// the heads alone rule inclusion out.
-    fn includes(&self, other: &Knowledge<'_>) -> bool {
-        if self.spill == other.spill {
-            return self.active.includes(other.active);
+        match self.edition.cmp(&other.edition) {
+            Ordering::Greater => Precedence::After,
+            Ordering::Less => Precedence::Before,
+            Ordering::Equal if same => Precedence::Same,
+            Ordering::Equal => Precedence::Concurrent,
         }
-        // Including the other head means having seen its own version, the
-        // highest edition in its context; a head's edition is the highest in
-        // its own. And an included map has no more origins than the one
-        // including it.
-        if self.edition < other.edition
-            || (other.active.len() as u64).saturating_add(other.spill.count)
-                > (self.active.len() as u64).saturating_add(self.spill.count)
-        {
-            return false;
-        }
-        other
-            .active
-            .iter()
-            .all(|(origin, theirs)| match self.active.get(origin) {
-                Some(ours) => ours.edition >= theirs.edition,
-                // Not active here, so it can only be among what we spill, all
-                // of which sits at or below the highest spilled edition.
-                None => !self.spill.is_empty() && theirs.edition <= self.spill.highest,
-            })
     }
 }
 
@@ -568,8 +459,6 @@ pub use crate::history::EDITION_CEILING;
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-
-    use std::iter::once;
 
     use base58::ToBase58;
     use ed25519_dalek::Signer as _;
@@ -749,51 +638,22 @@ mod tests {
         assert_eq!(second.precedence(&other), Precedence::Concurrent);
     }
 
-    /// One way to reshape a head before it is signed.
-    type Edit<'a> = Box<dyn Fn(&mut Revision) + 'a>;
-
-    /// A context of `origins` passing origins plus the head's own, the head
-    /// at the top.
-    fn crowded(head: &Revision, origins: u8) -> Context {
-        let mut context = Context::new();
-        for seed in 0..origins {
-            context.record(Version::new(
-                Origin::from([seed; 32]),
-                Edition::new(u64::from(seed)),
-            ));
-        }
-        context.record(head.version());
-        context
-    }
-
-    /// A signed head at edition 1 000 publishing the projection of a
-    /// context of `origins` passing origins plus its own.
-    fn projected(issuer: &ed25519_dalek::SigningKey, origins: u8) -> (Revision, Context) {
-        let mut full = None;
-        let head = signed_head(issuer, |head| {
+    /// A signed head at edition 1 000 whose context is in its tree's region.
+    fn regional(issuer: &ed25519_dalek::SigningKey) -> Revision {
+        signed_head(issuer, |head| {
             head.edition = Edition::new(1_000);
-            let context = crowded(head, origins);
-            head.publish_context(&context);
-            full = Some(context);
-        });
-        (head, full.expect("the edit ran"))
+            head.publish_region();
+        })
     }
 
-    /// A head carrying its active set and spill verifies and survives the
-    /// dag-cbor wire byte for byte, and carries no more than the active
-    /// set inline however many origins its context holds.
+    /// A head whose context is in its tree's region verifies, survives the
+    /// dag-cbor wire byte for byte, and carries no watermark at all: its
+    /// size does not depend on how many origins its history holds.
     #[test]
-    fn it_roundtrips_a_projected_head_through_dagcbor() {
-        let (head, full) = projected(&key(1), 200);
-        head.verify().expect("a projected head verifies");
-        assert_eq!(
-            head.context.as_ref().map(Context::len),
-            Some(ACTIVE_CONTEXT)
-        );
-        assert_eq!(
-            head.spill.map(|spill| spill.count),
-            Some((full.len() - ACTIVE_CONTEXT) as u64)
-        );
+    fn it_roundtrips_a_region_head_through_dagcbor() {
+        let head = regional(&key(1));
+        head.verify().expect("a region head verifies");
+        assert!(head.context.is_none() && head.region);
 
         let bytes = serde_ipld_dagcbor::to_vec(&head).expect("head encodes");
         let decoded: Revision = serde_ipld_dagcbor::from_slice(&bytes).expect("head decodes");
@@ -801,220 +661,163 @@ mod tests {
         decoded
             .verify()
             .expect("the decoded head still carries a valid signature");
+        assert!(
+            bytes.len() < 400 && head.payload().len() < 400,
+            "a head is a few hundred bytes: {} encoded, {} signed",
+            bytes.len(),
+            head.payload().len()
+        );
     }
 
-    /// The three payload shapes (no context, the whole context inline, an
-    /// active set and spill) sign apart: a signature over one never
-    /// verifies a head reshaped into another.
+    /// The three payload shapes (no context, the whole context inline, the
+    /// context in the region) sign apart: a signature over any one of them
+    /// never verifies the same head reshaped into another.
     #[test]
     fn it_signs_each_context_shape_apart() {
-        let (projected, full) = projected(&key(1), 200);
-
-        let mut inline = projected.clone();
-        inline.context = Some(full.clone());
-        inline.spill = None;
-        assert!(
-            matches!(inline.verify(), Err(HistoryError::InvalidSignature(_))),
-            "a projected head's signature does not cover the inline shape"
-        );
-
-        let mut bare = projected.clone();
-        bare.context = None;
-        bare.spill = None;
-        assert!(
-            matches!(bare.verify(), Err(HistoryError::InvalidSignature(_))),
-            "nor the pre-context shape"
-        );
-
-        let legacy = signed_head(&key(1), |head| {
-            head.edition = projected.edition;
-            head.context = Some(full.clone());
-        });
-        legacy.verify().expect("the inline shape still verifies");
-        let mut reshaped = legacy.clone();
-        reshaped.context = projected.context.clone();
-        reshaped.spill = projected.spill;
-        assert!(
-            matches!(reshaped.verify(), Err(HistoryError::InvalidSignature(_))),
-            "an inline head's signature does not cover the projected shape"
-        );
-        assert_ne!(legacy.payload(), projected.payload());
+        let mut inline = Context::new();
+        inline.record(Version::new(Origin::from([1u8; 32]), Edition::new(4)));
+        let shapes: [(&str, Option<Context>, bool); 3] = [
+            ("pre-context", None, false),
+            ("inline", Some(inline), false),
+            ("region", None, true),
+        ];
+        for (signed_as, context, region) in &shapes {
+            let head = signed_head(&key(1), |head| {
+                head.context = context.clone();
+                head.region = *region;
+            });
+            head.verify()
+                .unwrap_or_else(|error| panic!("the {signed_as} shape verifies: {error}"));
+            for (read_as, context, region) in &shapes {
+                if read_as == signed_as {
+                    continue;
+                }
+                let mut reshaped = head.clone();
+                reshaped.context = context.clone();
+                reshaped.region = *region;
+                assert!(
+                    matches!(reshaped.verify(), Err(HistoryError::InvalidSignature(_))),
+                    "a signature over the {signed_as} shape must not verify the {read_as} shape"
+                );
+            }
+        }
     }
 
-    /// Projections no map can produce are refused at verification even
-    /// when validly signed: more active watermarks than allowed, a spill
-    /// beside an active set that is not full, an active watermark below a
-    /// spilled one, a spilled edition at the ceiling, a spill without an
-    /// active set, and an empty spill that names a digest.
+    /// A head claiming both an inline context and a context region is
+    /// refused even when validly signed: no minter produces one, and a
+    /// reader could not tell which of the two to believe.
     #[test]
-    fn it_refuses_projections_no_map_can_produce() {
-        let (template, full) = projected(&key(1), 200);
-        let active = template.context.clone().expect("projected");
-        let spill = template.spill.expect("projected");
+    fn it_refuses_a_head_with_both_an_inline_context_and_a_region() {
+        let head = signed_head(&key(1), |head| head.region = true);
+        assert!(head.context.is_some());
+        assert!(matches!(
+            head.verify(),
+            Err(HistoryError::InvalidReference(_))
+        ));
+    }
 
-        let mut short = Context::new();
-        for (origin, watermark) in active.iter().take(10) {
-            short.merge(&once((*origin, *watermark)).collect());
-        }
+    /// The region holds every origin exactly except the head's own, whose
+    /// entry is where the head's chain of commits began: the reader brings
+    /// it up to the head, one edition and one revision per commit, and
+    /// leaves every other entry as stored.
+    #[test]
+    fn it_derives_the_heads_own_entry_from_the_region() {
+        let head = regional(&key(1));
+        let own = head.origin();
+        let other = Origin::from([9u8; 32]);
+        let mut region = Context::new();
+        region.set(
+            own,
+            Watermark {
+                edition: Edition::new(990),
+                count: 40,
+            },
+        );
+        region.set(
+            other,
+            Watermark {
+                edition: Edition::new(500),
+                count: 3,
+            },
+        );
 
-        let hostile: Vec<(&str, Edit<'_>)> = vec![
-            (
-                "too many active watermarks",
-                Box::new(|head: &mut Revision| {
-                    head.context = Some(full.clone());
-                    head.spill = Some(Spill::empty());
-                }),
-            ),
-            (
-                "a spill beside a short active set",
-                Box::new(|head: &mut Revision| {
-                    head.context = Some(short.clone());
-                    head.spill = Some(spill);
-                }),
-            ),
-            (
-                "an active watermark below a spilled one",
-                Box::new(|head: &mut Revision| {
-                    head.context = Some(active.clone());
-                    head.spill = Some(Spill {
-                        highest: Edition::new(999),
-                        ..spill
-                    });
-                }),
-            ),
-            (
-                "a spilled edition at the ceiling",
-                Box::new(|head: &mut Revision| {
-                    head.edition = Edition::new(EDITION_CEILING - 1);
-                    head.context = Some(active.clone());
-                    head.spill = Some(Spill {
-                        highest: Edition::new(EDITION_CEILING),
-                        ..spill
-                    });
-                }),
-            ),
-            (
-                "a spill without an active set",
-                Box::new(|head: &mut Revision| {
-                    head.context = None;
-                    head.spill = Some(spill);
-                }),
-            ),
-            (
-                "an empty spill naming a digest",
-                Box::new(|head: &mut Revision| {
-                    head.context = Some(short.clone());
-                    head.spill = Some(Spill { count: 0, ..spill });
-                }),
-            ),
+        let context = head
+            .context_from_region(region.clone())
+            .expect("the region is one a head minted");
+        assert_eq!(
+            context.get(&own),
+            Some(&Watermark {
+                edition: Edition::new(1_000),
+                count: 50,
+            }),
+            "ten commits since the chain began"
+        );
+        assert_eq!(context.get(&other), region.get(&other));
+        assert_eq!(context.len(), 2);
+
+        // A chain that begins at the head itself derives nothing new.
+        let mut exact = region.clone();
+        exact.set(
+            own,
+            Watermark {
+                edition: Edition::new(1_000),
+                count: 50,
+            },
+        );
+        assert_eq!(head.context_from_region(exact.clone()).unwrap(), exact);
+    }
+
+    /// A region no head could have minted is refused, with nothing derived:
+    /// one without the head's own origin, one holding it above the head,
+    /// and one whose derived entry counts more revisions than its edition
+    /// leaves room for.
+    #[test]
+    fn it_refuses_a_region_no_head_minted() {
+        let head = regional(&key(1));
+        let own = head.origin();
+        let at = |edition: u64, count: u64| {
+            let mut region = Context::new();
+            region.set(
+                own,
+                Watermark {
+                    edition: Edition::new(edition),
+                    count,
+                },
+            );
+            region
+        };
+        let hostile = [
+            ("no entry for the head's origin", Context::new()),
+            ("its own origin above the head", at(1_001, 1)),
+            ("more revisions than editions", at(999, 1_001)),
         ];
-        for (why, edit) in hostile {
-            let head = signed_head(&key(1), |head| {
-                head.edition = template.edition;
-                edit(head);
-            });
+        for (why, region) in hostile {
             assert!(
-                matches!(head.verify(), Err(HistoryError::InvalidReference(_))),
-                "{why} must be refused despite the valid signature"
+                matches!(
+                    head.context_from_region(region),
+                    Err(HistoryError::InvalidReference(_))
+                ),
+                "{why} must be refused"
             );
         }
     }
 
-    /// A context read back from a head's tree is accepted only when it is
-    /// the one the head publishes: for a projected head, one that projects
-    /// to its active set and spill; for an inline head, its context.
-    #[test]
-    fn it_checks_a_region_against_the_head_that_names_it() {
-        let (head, full) = projected(&key(1), 200);
-        head.check_context(&full)
-            .expect("the full context projects to the head");
-
-        let mut spilled_raised = full.clone();
-        spilled_raised.record(Version::new(Origin::from([1u8; 32]), Edition::new(2)));
-        assert!(matches!(
-            head.check_context(&spilled_raised),
-            Err(HistoryError::InvalidReference(_))
-        ));
-
-        let mut extra = full.clone();
-        extra.record(Version::new(Origin::from([250u8; 32]), Edition::new(0)));
-        assert!(matches!(
-            head.check_context(&extra),
-            Err(HistoryError::InvalidReference(_))
-        ));
-
-        let inline = signed_head(&key(1), |head| head.context = Some(full.clone()));
-        inline
-            .check_context(&full)
-            .expect("an inline head names its context");
-        assert!(matches!(
-            inline.check_context(&extra),
-            Err(HistoryError::InvalidReference(_))
-        ));
-    }
-
-    /// Heads that carry only their active sets are ordered exactly while
-    /// their spills agree, and a head that cannot include another, by
-    /// edition or by an active watermark above everything it spills, is
-    /// never ordered after it.
+    /// Heads whose contexts are in their trees' regions are ordered by
+    /// edition without reading either tree: a later head is after an
+    /// earlier one whichever origin minted it, and two different heads at
+    /// one edition are concurrent.
     #[dialog_common::test]
-    fn it_orders_projected_heads() {
-        let mut full = Context::new();
+    fn it_orders_region_heads_by_edition() {
         let mut first = genesis(&key(1));
-        for seed in 0..150u8 {
-            full.record(Version::new(
-                Origin::from([seed; 32]),
-                Edition::new(u64::from(seed)),
-            ));
-        }
-        first.edition = Edition::new(150);
-        full.record(first.version());
-        first.publish_context(&full);
+        first.publish_region();
+        let mut second = successor(&first, &key(1), 2);
+        second.publish_region();
+        let mut other = successor(&first, &key(2), 3);
+        other.publish_region();
 
-        let step =
-            |previous: &Revision, full: &Context, issuer: &ed25519_dalek::SigningKey, tree: u8| {
-                let mut next = previous.advance(
-                    TreeReference::from([tree; 32]),
-                    previous.branch.clone(),
-                    did_of(issuer),
-                );
-                let mut context = full.clone();
-                context.record(next.version());
-                next.publish_context(&context);
-                (next, context)
-            };
-
-        let (second, second_full) = step(&first, &full, &key(1), 2);
-        let (third, _) = step(&second, &second_full, &key(1), 3);
-        assert_eq!(
-            first.spill, second.spill,
-            "an active writer keeps the spill"
-        );
         assert_eq!(second.precedence(&first), Precedence::After);
         assert_eq!(first.precedence(&second), Precedence::Before);
-        assert_eq!(third.precedence(&first), Precedence::After);
         assert_eq!(second.precedence(&second.clone()), Precedence::Same);
-
-        // Two heads built apart on the same head, by writers that keep the
-        // spill, are concurrent.
-        let (ours, _) = step(&second, &second_full, &key(1), 4);
-        let mut theirs = second.advance(
-            TreeReference::from([5u8; 32]),
-            second.branch.clone(),
-            did_of(&key(1)),
-        );
-        // Same writer, same edition, different tree: neither built on the
-        // other.
-        let mut context = second_full.clone();
-        context.record(theirs.version());
-        theirs.publish_context(&context);
-        assert_eq!(ours.precedence(&theirs), Precedence::Concurrent);
-
-        // A new writer changes the spill; the older head still cannot be
-        // ordered after the newer one.
-        let (fresh, _) = step(&second, &second_full, &key(9), 6);
-        assert_ne!(fresh.spill, second.spill, "a new writer pushes one out");
-        assert_eq!(fresh.precedence(&second), Precedence::After);
-        assert_eq!(second.precedence(&fresh), Precedence::Before);
+        assert_eq!(second.precedence(&other), Precedence::Concurrent);
     }
 }

@@ -1,47 +1,71 @@
-//! The causal context once it outgrows a head: more origins than the
-//! active set holds, so every head here spills, and the whole map lives in
-//! the tree's context region.
+//! The causal context in the tree: a head carries none, and its tree's
+//! context region holds every origin's watermark exactly except the head's
+//! own, which the head's edition brings up to date.
 //!
-//! Every test builds its history with more than [`ACTIVE_CONTEXT`]
-//! origins, one per passing writer branch, so the spill is never empty.
+//! One test per way a head is minted or installed, each checking the region
+//! the way a reader that remembers nothing would read it
+//! ([`region_agrees`]): brought up to the head, it equals the ancestry walk
+//! and the memo. Then what the design buys and what it costs: a writer's
+//! own chain of commits writes nothing to the region, a follower
+//! fast-forwards at zero reads, and a fast-forward across origins reads the
+//! upstream's region.
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
 use anyhow::Result;
-use std::iter::once;
 
-use dialog_artifacts::history::{
-    ACTIVE_CONTEXT, Context, EDITION_CEILING, Edition, HistoryError, Origin, Spill, Version,
-    Watermark, context_in, context_of,
-};
-use dialog_artifacts::{Artifact, DialogArtifactsError, Instruction, Value};
+use dialog_artifacts::history::{EDITION_CEILING, Edition, Origin, Watermark};
+use dialog_artifacts::{Artifact, DialogArtifactsError, Instruction, Value, context_entry};
 use dialog_capability::Subject;
-use dialog_common::Blake3Hash as NodeHash;
 use dialog_effects::authority::Attest;
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use futures_util::stream;
 
+use super::super::context::region_agrees;
 use crate::helpers::Counting;
-use crate::{Branch, Index, NetworkedIndex, PullError, RepositoryExt as _, Revision};
+use crate::{Branch, PullError, RepositoryExt as _, Revision};
 
-/// One way to reshape a head before it is signed.
-type Edit<'a> = Box<dyn Fn(&mut Revision) + 'a>;
+fn artifact(of: &str) -> Artifact {
+    Artifact {
+        the: "post/title".parse().expect("attribute parses"),
+        of: of.parse().expect("entity parses"),
+        is: Value::String("body".to_string()),
+        cause: None,
+    }
+}
 
-/// More origins than a head carries inline, with room for the writers a
-/// test adds on top.
-const CROWD: usize = ACTIVE_CONTEXT + 8;
+fn assert_one(of: &str) -> Instruction {
+    Instruction::Assert(artifact(of), dialog_artifacts::Pick::All)
+}
 
-fn assert_one(the: &str, of: &str, value: &str) -> Instruction {
-    Instruction::Assert(
-        Artifact {
-            the: the.parse().expect("attribute parses"),
-            of: of.parse().expect("entity parses"),
-            is: Value::String(value.to_string()),
-            cause: None,
-        },
-        dialog_artifacts::Pick::All,
-    )
+pub mod note {
+    #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct Body(pub String);
+}
+
+/// A note, for the transaction paths, which take statements.
+#[derive(dialog_query::Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Note {
+    pub this: dialog_query::Entity,
+    pub body: note::Body,
+}
+
+fn note(body: &str) -> Result<Note> {
+    Ok(Note {
+        this: dialog_query::Entity::new()?,
+        body: note::Body(body.into()),
+    })
+}
+
+/// Commit one fact to `$branch` through `$env`.
+macro_rules! commit {
+    ($branch:expr, $env:expr, $of:expr) => {
+        $branch
+            .commit(stream::iter(vec![assert_one(&format!("{}", $of))]))
+            .perform($env)
+            .await?
+    };
 }
 
 /// `count` passing writers, each a fresh branch that adopts the previous
@@ -62,10 +86,14 @@ macro_rules! passing_writers {
                 writer.pull().from(previous).perform($env).await?;
             }
             writer
-                .commit(stream::iter(vec![assert_one(
-                    "writer/mark",
-                    &format!("mark:{tag}-{i}"),
-                    "passing",
+                .commit(stream::iter(vec![Instruction::Assert(
+                    Artifact {
+                        the: "writer/mark".parse().expect("attribute parses"),
+                        of: format!("mark:{tag}-{i}").parse().expect("entity parses"),
+                        is: Value::String("passing".to_string()),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
                 )]))
                 .perform($env)
                 .await?;
@@ -75,227 +103,218 @@ macro_rules! passing_writers {
     }};
 }
 
-/// What `branch`'s head says about its context, checked three ways: the
-/// context region of its tree equals the ancestry walk, the head is the
-/// projection of it, and so is what the memo remembers when it remembers.
-macro_rules! assert_region_agrees {
-    ($branch:expr, $env:expr, $what:expr) => {{
-        let branch: &Branch = $branch;
-        let head = branch.revision().expect("the branch has a head");
-        let store = NetworkedIndex::new($env, branch.archive().index(), None);
-        let tree =
-            Index::from_hash_with_cache(NodeHash::from(*head.tree.hash()), branch.node_cache());
-        let region = context_in(&tree, &store).await?;
-        let walked = context_of(&head.version(), &branch.history($env)).await?;
-        assert_eq!(
-            region, walked,
-            "{}: the region is the head's context",
-            $what
-        );
-        head.check_context(&region)
-            .unwrap_or_else(|error| panic!("{}: the head projects the region: {error}", $what));
-        assert!(
-            head.spill.is_some_and(|spill| !spill.is_empty()),
-            "{}: the head spills",
-            $what
-        );
-        if let Some(memo) = branch.contexts().cached(&head.version()).await {
-            assert_eq!(*memo, walked, "{}: the memo is the head's context", $what);
-        }
-        walked
+/// A head minted by `$operator` from `$template` with `$edit` applied,
+/// validly signed, installed as `$branch`'s head.
+macro_rules! plant_signed {
+    ($branch:expr, $operator:expr, $template:expr, $edit:expr) => {{
+        let mut head: Revision = $template.clone();
+        let edit: &dyn Fn(&mut Revision) = &$edit;
+        edit(&mut head);
+        head.signature = Attest::new(head.payload()).perform($operator).await?;
+        $branch.reset(head.clone()).perform($operator).await?;
+        head
     }};
 }
 
-/// A head whose ancestry holds more origins than the active set carries
-/// publishes its active set and spill, and its tree's context region is the
-/// whole context: equal to the ancestry walk, projecting to the head.
-/// Tampering with the spill breaks the signature like any other field.
+/// Along one writer's chain the region is written once, by the chain's
+/// first commit; every commit after it on its own head leaves the
+/// region's entries exactly as they were, and the region still reads as
+/// each head's context. That is the per-commit cost the design removes.
 #[dialog_common::test]
-async fn it_publishes_the_active_set_and_spill_digest() -> Result<()> {
+async fn it_writes_nothing_to_the_region_along_a_writers_own_chain() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
-    let name = unique_name("repo");
     let repo = profile
-        .space(name.clone())
+        .space(unique_name("repo"))
         .open()
         .perform(&operator)
         .await?;
+    let main = repo.branch("main").open().perform(&operator).await?;
 
-    let last = passing_writers!(repo, &operator, None, CROWD);
-    let head = last.revision().expect("the last writer has a head");
-    assert_eq!(
-        head.context.as_ref().map(Context::len),
-        Some(ACTIVE_CONTEXT)
-    );
-    assert_eq!(
-        head.spill.map(|spill| spill.count),
-        Some((CROWD - ACTIVE_CONTEXT) as u64)
-    );
-    head.verify().expect("the head verifies");
-    let context = assert_region_agrees!(&last, &operator, "a commit");
-    assert_eq!(context.len(), CROWD);
+    commit!(main, &operator, "post:0");
+    let (first, _) = region_agrees(&main, &operator, "the first commit").await?;
+    assert_eq!(first.len(), 1, "the first commit writes its own entry");
+    for i in 1..4 {
+        commit!(main, &operator, format!("post:{i}"));
+        let (raw, _) = region_agrees(&main, &operator, "a commit on its own head").await?;
+        assert_eq!(
+            raw, first,
+            "commit {i} on its own head leaves the region as it was"
+        );
+    }
+    Ok(())
+}
 
-    let mut tampered = head.clone();
-    tampered.spill = tampered.spill.map(|mut spill| {
-        spill.count += 1;
-        spill
-    });
-    assert!(
-        matches!(tampered.verify(), Err(HistoryError::InvalidSignature(_))),
-        "a tampered spill must fail head verification"
+/// Where a chain changes hands the region is written: A commits, B commits
+/// on A's head, A commits again on B's. Each commit on another origin's
+/// head writes that origin's final entry and its own, and the region reads
+/// as each head's context, the case a reader that only patched the head's
+/// own entry would get wrong.
+#[dialog_common::test]
+async fn it_writes_both_origins_where_a_chain_changes_hands() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = profile
+        .space(unique_name("repo"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let a = repo.branch("a").open().perform(&operator).await?;
+    let b = repo.branch("b").open().perform(&operator).await?;
+
+    commit!(a, &operator, "post:a0");
+    commit!(a, &operator, "post:a1");
+    region_agrees(&a, &operator, "A's chain").await?;
+    let a_origin = a.revision().expect("A has a head").origin();
+
+    b.pull().from(&a).perform(&operator).await?;
+    commit!(b, &operator, "post:b0");
+    let (after_b, walked) = region_agrees(&b, &operator, "B on A's head").await?;
+    assert_eq!(walked.len(), 2);
+    assert_eq!(
+        after_b.get(&a_origin),
+        walked.get(&a_origin),
+        "A's chain ended, so its entry is exact"
     );
+    commit!(b, &operator, "post:b1");
+    region_agrees(&b, &operator, "B's chain").await?;
+
+    a.pull().from(&b).perform(&operator).await?;
+    commit!(a, &operator, "post:a2");
+    region_agrees(&a, &operator, "A again, on B's head").await?;
+    commit!(a, &operator, "post:a3");
+    region_agrees(&a, &operator, "A's chain again").await?;
     Ok(())
 }
 
 /// After every way a pull lands (fast-forward adoption, nothing new, the
-/// screened merge, the replay, the graft), the head's tree carries the
-/// head's whole context in its region, and the head projects it.
+/// screened merge, the replay, the graft, and the reverse pull), the head's
+/// tree carries the head's context in its region, and so does a commit on
+/// a merge.
 #[dialog_common::test]
-async fn it_keeps_the_region_equal_to_the_head_context_in_every_merge_direction() -> Result<()> {
+async fn it_keeps_the_region_exact_in_every_merge_direction() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
-    let name = unique_name("repo");
     let repo = profile
-        .space(name.clone())
+        .space(unique_name("repo"))
         .open()
         .perform(&operator)
         .await?;
 
-    let seed = passing_writers!(repo, &operator, None, CROWD);
+    let seed = passing_writers!(repo, &operator, None, 5);
     let main = repo.branch("main").open().perform(&operator).await?;
     main.pull().from(&seed).perform(&operator).await?;
-    main.commit(stream::iter(vec![assert_one(
-        "post/title",
-        "post:0",
-        "main",
-    )]))
-    .perform(&operator)
-    .await?;
-    assert_region_agrees!(&main, &operator, "a commit by a new writer");
+    commit!(main, &operator, "post:0");
+    region_agrees(&main, &operator, "a commit on a passing writer's head").await?;
 
-    // Fast-forward: feature tracks main and has nothing of its own.
     let feature = repo.branch("feature").open().perform(&operator).await?;
     feature.set_upstream(&main).perform(&operator).await?;
     feature.pull().perform(&operator).await?;
-    main.commit(stream::iter(vec![assert_one(
-        "post/title",
-        "post:1",
-        "main",
-    )]))
-    .perform(&operator)
-    .await?;
+    commit!(main, &operator, "post:1");
     feature.pull().perform(&operator).await?;
     assert_eq!(feature.revision(), main.revision(), "feature adopted main");
-    assert_region_agrees!(&feature, &operator, "a fast-forward");
+    region_agrees(&feature, &operator, "a fast-forward").await?;
 
-    // Nothing new: main adopts feature's commit, and feature pulls it back.
-    feature
-        .commit(stream::iter(vec![assert_one(
-            "post/title",
-            "post:2",
-            "feature",
-        )]))
-        .perform(&operator)
-        .await?;
+    commit!(feature, &operator, "post:2");
     main.pull().from(&feature).perform(&operator).await?;
     let before = feature.revision();
     feature.pull().perform(&operator).await?;
     assert_eq!(feature.revision(), before, "nothing new keeps the head");
-    assert_region_agrees!(&feature, &operator, "nothing new");
+    region_agrees(&feature, &operator, "nothing new").await?;
 
-    // The screened merge: feature has more than main since the sync base.
     for i in 0..4 {
-        feature
-            .commit(stream::iter(vec![assert_one(
-                "post/title",
-                &format!("post:f{i}"),
-                "feature",
-            )]))
-            .perform(&operator)
-            .await?;
+        commit!(feature, &operator, format!("post:f{i}"));
     }
-    main.commit(stream::iter(vec![assert_one(
-        "post/title",
-        "post:m0",
-        "main",
-    )]))
-    .perform(&operator)
-    .await?;
+    commit!(main, &operator, "post:m0");
     feature.pull().perform(&operator).await?;
-    assert_region_agrees!(&feature, &operator, "the screened merge");
+    region_agrees(&feature, &operator, "the screened merge").await?;
 
-    // The replay: main has more than feature since the sync base.
     for i in 0..4 {
-        main.commit(stream::iter(vec![assert_one(
-            "post/title",
-            &format!("post:m{}", i + 1),
-            "main",
-        )]))
-        .perform(&operator)
-        .await?;
+        commit!(main, &operator, format!("post:m{}", i + 1));
     }
-    feature
-        .commit(stream::iter(vec![assert_one(
-            "post/title",
-            "post:f9",
-            "feature",
-        )]))
-        .perform(&operator)
-        .await?;
+    commit!(feature, &operator, "post:f9");
     feature.pull().perform(&operator).await?;
-    assert_region_agrees!(&feature, &operator, "the replay");
+    region_agrees(&feature, &operator, "the replay").await?;
 
-    // The graft: both sides past the small-divergence threshold, with a
-    // sync base.
     for i in 0..(super::SMALL_DIVERGENCE + 2) {
-        main.commit(stream::iter(vec![assert_one(
-            "post/title",
-            &format!("post:gm{i}"),
-            "main",
-        )]))
-        .perform(&operator)
-        .await?;
-        feature
-            .commit(stream::iter(vec![assert_one(
-                "post/title",
-                &format!("post:gf{i}"),
-                "feature",
-            )]))
-            .perform(&operator)
-            .await?;
+        commit!(main, &operator, format!("post:gm{i}"));
+        commit!(feature, &operator, format!("post:gf{i}"));
     }
     feature.pull().perform(&operator).await?;
-    assert_region_agrees!(&feature, &operator, "the graft");
+    region_agrees(&feature, &operator, "the graft").await?;
 
-    // And the other way round, main pulling everything feature merged.
     main.pull().from(&feature).perform(&operator).await?;
-    assert_region_agrees!(&main, &operator, "the reverse pull");
+    region_agrees(&main, &operator, "the reverse pull").await?;
+    commit!(main, &operator, "post:after");
+    region_agrees(&main, &operator, "a commit on a merge").await?;
     Ok(())
 }
 
-/// A device pulling an upstream another device writes, whose writers all
-/// stay active, reads no block for the context even though both heads
-/// spill: the spills are equal, so the upstream's whole context is ours
-/// with the active sets exchanged. When a new writer enters the upstream's
-/// active set, the pull reads the upstream's region and still
-/// fast-forwards.
-///
-/// The puller is a session of its own, so it remembers only what it
-/// resolved itself; the upstream's heads are minted by the other session.
+/// The other paths that mint or install a head: an amend of a staged
+/// commit that took over another origin's head (the two entries the
+/// takeover wrote must survive the amend), a reset to another branch's
+/// head followed by a commit, and the commit after adopting a head by
+/// root. A head installed from imported blocks is installed by the same
+/// reset.
 #[dialog_common::test]
-async fn it_pulls_a_stable_writer_set_without_reading_the_context() -> Result<()> {
+async fn it_keeps_the_region_exact_through_amend_reset_and_adoption() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = profile
+        .space(unique_name("repo"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let main = repo.branch("main").open().perform(&operator).await?;
+    commit!(main, &operator, "post:0");
+    commit!(main, &operator, "post:1");
+
+    let amended = repo.branch("amended").open().perform(&operator).await?;
+    amended.pull().from(&main).perform(&operator).await?;
+    let batch = amended
+        .transaction()
+        .assert(note("t0")?)
+        .commit()
+        .perform(&operator)
+        .await?;
+    let batch = batch
+        .assert(note("t1")?)
+        .commit()
+        .amend()
+        .perform(&operator)
+        .await?;
+    batch.publish().perform(&operator).await?;
+    region_agrees(&amended, &operator, "an amended takeover").await?;
+    commit!(amended, &operator, "post:t2");
+    region_agrees(&amended, &operator, "a commit after an amend").await?;
+
+    let reset = repo.branch("reset").open().perform(&operator).await?;
+    commit!(reset, &operator, "post:r0");
+    reset
+        .reset(main.revision().expect("main has a head"))
+        .perform(&operator)
+        .await?;
+    region_agrees(&reset, &operator, "a reset").await?;
+    commit!(reset, &operator, "post:r1");
+    region_agrees(&reset, &operator, "a commit after a reset").await?;
+
+    let adopted = repo.branch("adopted").open().perform(&operator).await?;
+    adopted.set_upstream(&main).perform(&operator).await?;
+    adopted.pull().perform(&operator).await?;
+    assert_eq!(adopted.revision(), main.revision());
+    commit!(adopted, &operator, "post:a0");
+    region_agrees(&adopted, &operator, "a commit after adoption by root").await?;
+    Ok(())
+}
+
+/// A replica following an upstream another session writes, whose head is
+/// the one it adopted last time, fast-forwards at zero block reads: the two
+/// heads share an origin, and an origin's revisions form one chain, so the
+/// upstream's edition says it has seen ours. Nothing new is answered from
+/// our own context, also at zero reads.
+#[dialog_common::test]
+async fn it_fast_forwards_a_follower_at_zero_reads() -> Result<()> {
     let (writer, profile) = test_session_with_peer().await;
     let name = unique_name("repo");
     let repo = profile.space(name.clone()).open().perform(&writer).await?;
-
-    let seed = passing_writers!(repo, &writer, None, CROWD);
     let main = repo.branch("main").open().perform(&writer).await?;
-    main.pull().from(&seed).perform(&writer).await?;
-    main.commit(stream::iter(vec![assert_one(
-        "post/title",
-        "post:0",
-        "main",
-    )]))
-    .perform(&writer)
-    .await?;
+    commit!(main, &writer, "post:0");
     let feature = repo.branch("feature").open().perform(&writer).await?;
     feature.set_upstream(&main).perform(&writer).await?;
     feature.pull().perform(&writer).await?;
@@ -306,109 +325,99 @@ async fn it_pulls_a_stable_writer_set_without_reading_the_context() -> Result<()
         .allow(Subject::any())
         .await?;
     let device = Counting::new(device);
-    let local = profile.space(name.clone()).open().perform(&device).await?;
+    let local = profile.space(name).open().perform(&device).await?;
     let synced = local.branch("feature").open().perform(&device).await?;
 
-    // The writer on main is active, so its commits keep the spill.
-    let spill = main.revision().and_then(|head| head.spill);
-    let commit = |i: usize| {
-        let main = main.clone();
-        let writer = &writer;
-        async move {
-            main.commit(stream::iter(vec![assert_one(
-                "post/title",
-                &format!("post:{i}"),
-                "main",
-            )]))
-            .perform(writer)
-            .await?;
-            anyhow::Ok(main.revision().expect("main has a head"))
-        }
-    };
-    let moved = commit(1).await?;
-    assert_eq!(moved.spill, spill, "an active writer keeps the spill");
-
-    // The first pull reads the device's own head's context, once.
-    synced.pull().perform(&device).await?;
-    assert_eq!(synced.revision(), Some(moved), "a fast-forward");
-
-    let moved = commit(2).await?;
+    commit!(main, &writer, "post:1");
     device.reset();
     synced.pull().perform(&device).await?;
-    assert_eq!(synced.revision(), Some(moved.clone()), "a fast-forward");
+    assert_eq!(synced.revision(), main.revision(), "a fast-forward");
     assert_eq!(
         device.block_reads(),
         0,
-        "a stable writer set fast-forwards at zero reads: {:?}",
+        "a follower fast-forwards at zero reads: {:?}",
         device.snapshot()
     );
-    assert!(
-        synced.contexts().cached(&moved.version()).await.is_some(),
-        "the exchanged context is remembered for the adopted head"
-    );
 
-    // Nothing new: the upstream moves to a head the device already holds.
-    let merged = commit(3).await?;
-    synced.pull().perform(&device).await?;
-    feature.pull().from(&main).perform(&writer).await?;
     let relay = repo.branch("relay").open().perform(&writer).await?;
     relay.pull().from(&main).perform(&writer).await?;
-    assert_eq!(relay.revision(), Some(merged.clone()));
+    let relayed = local.branch("relay").open().perform(&device).await?;
+    let before = synced.revision();
     device.reset();
-    synced
-        .pull()
-        .from(&local.branch("relay").open().perform(&device).await?)
-        .perform(&device)
-        .await?;
-    assert_eq!(
-        synced.revision(),
-        Some(merged),
-        "nothing new keeps the head"
-    );
+    synced.pull().from(&relayed).perform(&device).await?;
+    assert_eq!(synced.revision(), before, "nothing new keeps the head");
     assert_eq!(
         device.block_reads(),
         0,
-        "nothing new is detected at zero reads: {:?}",
+        "nothing new is answered from our own context: {:?}",
         device.snapshot()
     );
-
-    // A new writer enters main's active set: the spills now differ, so the
-    // pull reads main's region, and still adopts main's head.
-    let newcomer = repo.branch("newcomer").open().perform(&writer).await?;
-    newcomer.pull().from(&main).perform(&writer).await?;
-    newcomer
-        .commit(stream::iter(vec![assert_one(
-            "post/title",
-            "post:4",
-            "newcomer",
-        )]))
-        .perform(&writer)
-        .await?;
-    main.pull().from(&newcomer).perform(&writer).await?;
-    let moved = main.revision().expect("main has a head");
-    assert_ne!(
-        moved.spill,
-        synced.revision().and_then(|head| head.spill),
-        "the newcomer pushed an origin out of main's active set"
-    );
-    device.reset();
-    synced.pull().perform(&device).await?;
-    assert_eq!(synced.revision(), Some(moved), "still a fast-forward");
-    assert!(
-        device.block_reads() > 0,
-        "a changed spill reads the upstream's region"
-    );
-    assert_region_agrees!(&synced, &device, "an adopted head after a region read");
+    region_agrees(&synced, &device, "a follower's head").await?;
     Ok(())
 }
 
-/// A deletion survives a pull from a stale peer even when the receiver's
-/// knowledge of the deleted fact lives only in its spill: the fact's origin
-/// and the deleter's have both been pushed out of the active set by later
-/// writers, so the screen has to consult the context region to drop the
-/// stale copy. Run through a fresh session, so nothing is remembered.
+/// A fast-forward across origins reads the upstream's region. We follow
+/// main, whose head another writer then built on, so our head and the
+/// upstream's are of different origins and whether the upstream has seen
+/// ours is one entry of its context. The read is the upstream tree's root
+/// and the path to the region's leaf, which the design accepts in exchange
+/// for heads that carry no context; a follower whose upstream's head shares
+/// its origin reads nothing (`it_fast_forwards_a_follower_at_zero_reads`).
 #[dialog_common::test]
-async fn it_does_not_resurrect_a_deleted_fact_whose_origin_spilled() -> Result<()> {
+async fn it_reads_the_upstreams_region_to_fast_forward_across_origins() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    let repo = profile.space(name.clone()).open().perform(&writer).await?;
+    let main = repo.branch("main").open().perform(&writer).await?;
+    commit!(main, &writer, "post:0");
+
+    let device = profile
+        .session(b"device")
+        .space(profile.state())
+        .allow(Subject::any())
+        .await?;
+    let device = Counting::new(device);
+    let local = profile.space(name).open().perform(&device).await?;
+    let ours = local.branch("ours").open().perform(&device).await?;
+    let upstream = local.branch("main").open().perform(&device).await?;
+    ours.set_upstream(&upstream).perform(&device).await?;
+    ours.pull().perform(&device).await?;
+    assert_eq!(ours.revision(), main.revision(), "we follow main");
+
+    // A third writer builds on main's head, and main takes its head.
+    let third = repo.branch("third").open().perform(&writer).await?;
+    third.pull().from(&main).perform(&writer).await?;
+    commit!(third, &writer, "post:third");
+    main.pull().from(&third).perform(&writer).await?;
+    assert_eq!(
+        main.revision(),
+        third.revision(),
+        "main took the third head"
+    );
+    assert_ne!(
+        main.revision().expect("main has a head").origin(),
+        ours.revision().expect("we have a head").origin()
+    );
+
+    device.reset();
+    ours.pull().perform(&device).await?;
+    assert_eq!(ours.revision(), main.revision(), "a fast-forward");
+    let reads = device.block_reads();
+    assert!(
+        (1..=4).contains(&reads),
+        "a fast-forward across origins reads the upstream's root and region leaf, \
+         no more (got {reads}): {:?}",
+        device.snapshot()
+    );
+    Ok(())
+}
+
+/// A deletion survives a pull from a stale peer when the receiver knows of
+/// it only through its region: the deleter's origin is not the receiver's
+/// own, so the screen reads its watermark from the region. Run through a
+/// fresh session, so nothing is remembered.
+#[dialog_common::test]
+async fn it_does_not_resurrect_a_deleted_fact_whose_deleter_is_only_in_the_region() -> Result<()> {
     use dialog_query::attribute::Relation;
     use dialog_query::query::Output as _;
     use dialog_query::{AttributeQuery, Claim, Term, the};
@@ -422,13 +431,7 @@ async fn it_does_not_resurrect_a_deleted_fact_whose_origin_spilled() -> Result<(
         .await?;
 
     let main = repo.branch("main").open().perform(&operator).await?;
-    main.commit(stream::iter(vec![assert_one(
-        "post/title",
-        "post:1",
-        "Hej",
-    )]))
-    .perform(&operator)
-    .await?;
+    commit!(main, &operator, "post:1");
     let feature = repo.branch("feature").open().perform(&operator).await?;
     feature.set_upstream(&main).perform(&operator).await?;
     feature.pull().perform(&operator).await?;
@@ -437,28 +440,11 @@ async fn it_does_not_resurrect_a_deleted_fact_whose_origin_spilled() -> Result<(
     peer.pull().perform(&operator).await?;
 
     feature
-        .commit(stream::iter(vec![Instruction::Retract(Artifact {
-            the: "post/title".parse()?,
-            of: "post:1".parse()?,
-            is: Value::String("Hej".to_string()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Retract(artifact("post:1"))]))
         .perform(&operator)
         .await?;
-
-    // Enough later writers to push both main's and feature's origins out.
-    let last = passing_writers!(repo, &operator, Some(feature.clone()), ACTIVE_CONTEXT + 1);
-    let head = last.revision().expect("the last writer has a head");
-    let active = head
-        .context
-        .clone()
-        .expect("the head carries its active set");
-    let main_origin = main.revision().expect("main has a head").origin();
-    let feature_origin = feature.revision().expect("feature has a head").origin();
-    assert!(
-        !active.observes_origin(&main_origin) && !active.observes_origin(&feature_origin),
-        "both origins spilled"
-    );
+    let deleter = feature.revision().expect("feature has a head").origin();
+    let last = passing_writers!(repo, &operator, Some(feature.clone()), 3);
 
     let titles = |branch: Branch, env| async move {
         let rows: Vec<Claim> = branch
@@ -479,13 +465,12 @@ async fn it_does_not_resurrect_a_deleted_fact_whose_origin_spilled() -> Result<(
         .space(profile.state())
         .allow(Subject::any())
         .await?;
-    let repo = profile.space(name.clone()).open().perform(&cold).await?;
+    let repo = profile.space(name).open().perform(&cold).await?;
     let last = repo.branch(last.name()).open().perform(&cold).await?;
     let peer = repo.branch("peer").open().perform(&cold).await?;
-    assert!(
-        last.contexts().cached(&head.version()).await.is_none(),
-        "the fresh session remembers nothing"
-    );
+    let head = last.revision().expect("the last writer has a head");
+    assert!(head.region && head.context.is_none());
+    assert_ne!(head.origin(), deleter, "the deleter is not the head's own");
 
     assert_eq!(titles(last.clone(), &cold).await?, 0);
     assert_eq!(titles(peer.clone(), &cold).await?, 1, "peer still holds it");
@@ -493,7 +478,7 @@ async fn it_does_not_resurrect_a_deleted_fact_whose_origin_spilled() -> Result<(
     assert_eq!(
         titles(last.clone(), &cold).await?,
         0,
-        "a stale copy must not resurrect a fact whose origin spilled"
+        "a stale copy must not resurrect a fact deleted by an origin only the region holds"
     );
     peer.pull().from(&last).perform(&cold).await?;
     assert_eq!(
@@ -504,24 +489,71 @@ async fn it_does_not_resurrect_a_deleted_fact_whose_origin_spilled() -> Result<(
     Ok(())
 }
 
-/// A head minted by `operator`'s session on `evil`'s branch with `edit`
-/// applied, validly signed, planted as `evil`'s head.
-macro_rules! plant_signed {
-    ($evil:expr, $operator:expr, $template:expr, $edit:expr) => {{
-        let mut head: Revision = $template.clone();
-        let edit: &dyn Fn(&mut Revision) = &$edit;
-        edit(&mut head);
-        head.signature = Attest::new(head.payload()).perform($operator).await?;
-        $evil.reset(head.clone()).perform($operator).await?;
-        head
-    }};
+/// Heads minted before the region (the whole context inline, or no
+/// context at all) still pull as upstreams and as local heads, and the
+/// first head minted on one of them writes the whole map into its tree's
+/// region once.
+#[dialog_common::test]
+async fn it_pulls_and_commits_across_heads_minted_before_the_region() -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = profile
+        .space(unique_name("repo"))
+        .open()
+        .perform(&operator)
+        .await?;
+
+    let last = passing_writers!(repo, &operator, None, 4);
+    let current = last.revision().expect("the last writer has a head");
+    let (_, full) = region_agrees(&last, &operator, "the template").await?;
+
+    let inline = repo.branch("inline").open().perform(&operator).await?;
+    let legacy = plant_signed!(inline, &operator, current, |head: &mut Revision| {
+        head.context = Some(full.clone());
+        head.region = false;
+    });
+    legacy.verify().expect("an inline head still verifies");
+
+    let feature = repo.branch("feature").open().perform(&operator).await?;
+    commit!(feature, &operator, "post:ours");
+    feature.pull().from(&inline).perform(&operator).await?;
+    region_agrees(&feature, &operator, "a merge with an inline upstream").await?;
+
+    commit!(inline, &operator, "post:inline");
+    let (raw, walked) = region_agrees(&inline, &operator, "a commit on an inline head").await?;
+    assert_eq!(raw.len(), walked.len(), "every origin is written");
+
+    let other = repo
+        .branch("other-inline")
+        .open()
+        .perform(&operator)
+        .await?;
+    plant_signed!(other, &operator, current, |head: &mut Revision| {
+        head.context = Some(full.clone());
+        head.region = false;
+    });
+    commit!(feature, &operator, "post:ours-again");
+    other.pull().from(&feature).perform(&operator).await?;
+    region_agrees(&other, &operator, "an inline head pulling a region head").await?;
+
+    let bare = repo.branch("bare").open().perform(&operator).await?;
+    plant_signed!(bare, &operator, current, |head: &mut Revision| {
+        head.context = None;
+        head.region = false;
+    });
+    let plain = repo.branch("plain").open().perform(&operator).await?;
+    commit!(plain, &operator, "post:plain");
+    plain.pull().from(&bare).perform(&operator).await?;
+    region_agrees(&plain, &operator, "a merge with a pre-context upstream").await?;
+    Ok(())
 }
 
-/// Validly signed heads whose published context no map can produce, or
-/// whose tree's context region disagrees with what the head publishes, are
-/// refused at pull with the specific error, and the puller's head stays.
+/// Validly signed heads whose tree's region no head could have minted are
+/// refused at pull with the specific error, and the puller's head stays:
+/// a region without the head's own origin, and one holding an entry at
+/// the edition ceiling or counting more revisions than its edition leaves
+/// room for. Pulled through a fresh session, so the region is read.
 #[dialog_common::test]
-async fn it_refuses_to_pull_a_head_with_an_impossible_context() -> Result<()> {
+async fn it_refuses_to_pull_a_head_whose_region_no_head_minted() -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let name = unique_name("repo");
     let repo = profile
@@ -530,91 +562,62 @@ async fn it_refuses_to_pull_a_head_with_an_impossible_context() -> Result<()> {
         .perform(&operator)
         .await?;
 
-    let last = passing_writers!(repo, &operator, None, CROWD);
-    let template = last.revision().expect("the last writer has a head");
-    let full = context_of(&template.version(), &last.history(&operator)).await?;
+    let main = repo.branch("main").open().perform(&operator).await?;
+    commit!(main, &operator, "post:0");
+    let template = main.revision().expect("main has a head");
 
-    let feature = repo.branch("feature").open().perform(&operator).await?;
-    feature
-        .commit(stream::iter(vec![assert_one(
-            "post/title",
-            "post:0",
-            "ours",
-        )]))
-        .perform(&operator)
-        .await?;
-    let ours = feature.revision();
+    let missing = repo.branch("missing").open().perform(&operator).await?;
+    let stranger: dialog_artifacts::Entity =
+        format!("branch:{}", unique_name("stranger")).parse()?;
+    plant_signed!(missing, &operator, template, |head: &mut Revision| {
+        head.branch = stranger.clone();
+    });
 
-    // A version names one revision, so a head that reuses a known version
-    // is answered from the memo as the head it names. The heads that must
-    // reach the region check carry a branch identity of their own, and so a
-    // version nothing remembers.
-    let hostile: dialog_artifacts::Entity = format!("branch:{}", unique_name("hostile")).parse()?;
-
-    // The template's active set with one entry swapped for a hostile one.
-    let hostile_watermark = |watermark: Watermark| {
-        let template = template.clone();
-        move |head: &mut Revision| {
-            let active = template.context.clone().expect("the template is projected");
-            let dropped = *active.iter().next().expect("an active entry").0;
-            let active: Context = active
-                .iter()
-                .filter(|(origin, _)| **origin != dropped)
-                .map(|(origin, mark)| (*origin, *mark))
-                .chain(once((Origin::from([0xEE; 32]), watermark)))
-                .collect();
-            head.publish_projection(active, template.spill.expect("the template spills"));
-        }
-    };
-
-    let cases: Vec<(&str, Edit<'_>)> = vec![
+    let mut cases = vec![(
+        "a region without the head's own origin",
+        "missing".to_string(),
+    )];
+    for (why, watermark) in [
         (
-            "more active watermarks than allowed",
-            Box::new({
-                let full = full.clone();
-                move |head: &mut Revision| {
-                    head.context = Some(full.clone());
-                    head.spill = Some(Spill::empty());
-                }
-            }),
-        ),
-        (
-            "an active watermark at the edition ceiling",
-            Box::new(hostile_watermark(Watermark {
+            "an entry at the edition ceiling",
+            Watermark {
                 edition: Edition::new(EDITION_CEILING),
                 count: 1,
-            })),
+            },
         ),
         (
-            "an active watermark counting more revisions than its edition holds",
-            Box::new(hostile_watermark(Watermark {
-                edition: Edition::new(template.edition.value()),
-                count: template.edition.value() + 2,
-            })),
+            "an entry counting more revisions than its edition leaves room for",
+            Watermark {
+                edition: Edition::new(3),
+                count: 9,
+            },
         ),
-        (
-            "a spill its tree's region does not hold",
-            Box::new({
-                let hostile = hostile.clone();
-                move |head: &mut Revision| {
-                    head.branch = hostile.clone();
-                    head.spill = head.spill.map(|mut spill| {
-                        spill.digest = [0xAB; 32];
-                        spill
-                    });
-                }
-            }),
-        ),
-    ];
-
-    for (why, edit) in cases {
-        let evil = repo
-            .branch(unique_name("evil"))
+    ] {
+        let evil = unique_name("evil");
+        repo.branch(evil.clone())
             .open()
             .perform(&operator)
+            .await?
+            .commit(stream::iter(vec![assert_one("post:evil")]))
+            .with_entries(vec![context_entry(&Origin::from([0xEE; 32]), &watermark)])
+            .perform(&operator)
             .await?;
-        plant_signed!(evil, &operator, template, |head: &mut Revision| edit(head));
-        let pulled = feature.pull().from(&evil).perform(&operator).await;
+        cases.push((why, evil));
+    }
+
+    let cold = profile
+        .session(b"cold")
+        .space(profile.state())
+        .allow(Subject::any())
+        .await?;
+    let repo = profile.space(name).open().perform(&cold).await?;
+    let puller = repo.branch("puller").open().perform(&cold).await?;
+    commit!(puller, &cold, "post:ours");
+    let ours = puller.revision();
+
+    for (why, from) in cases {
+        let upstream = repo.branch(from).open().perform(&cold).await?;
+        let pulled = puller.pull().from(&upstream).perform(&cold).await;
         assert!(
             matches!(
                 pulled,
@@ -622,106 +625,7 @@ async fn it_refuses_to_pull_a_head_with_an_impossible_context() -> Result<()> {
             ),
             "{why} must be refused; got {pulled:?}"
         );
-        assert_eq!(feature.revision(), ours, "{why}: the head stays");
+        assert_eq!(puller.revision(), ours, "{why}: the head stays");
     }
-
-    // The case the projection check exists for: a head that agrees with
-    // itself but not with its tree's region. Its spill matches a region
-    // built from a different map.
-    let mut raised = full.clone();
-    raised.record(Version::new(
-        *full.iter().next().expect("an origin").0,
-        Edition::new(template.edition.value()),
-    ));
-    let (active, spill) = raised.project(ACTIVE_CONTEXT);
-    let evil = repo
-        .branch(unique_name("evil"))
-        .open()
-        .perform(&operator)
-        .await?;
-    plant_signed!(evil, &operator, template, |head: &mut Revision| {
-        head.branch = hostile.clone();
-        head.publish_projection(active.clone(), spill)
-    });
-    let pulled = feature.pull().from(&evil).perform(&operator).await;
-    assert!(
-        matches!(
-            pulled,
-            Err(PullError::Artifact(DialogArtifactsError::InvalidKey(_)))
-        ),
-        "a head disagreeing with its region must be refused; got {pulled:?}"
-    );
-    assert_eq!(feature.revision(), ours, "the head stays");
-    Ok(())
-}
-
-/// Heads minted before the context region (the whole context inline, or
-/// no context at all) still pull, on either side of the pull, and the
-/// first head minted on top of one writes the whole context into its
-/// tree's region.
-#[dialog_common::test]
-async fn it_pulls_and_commits_across_heads_minted_before_the_region() -> Result<()> {
-    let (operator, profile) = test_session_with_peer().await;
-    let name = unique_name("repo");
-    let repo = profile
-        .space(name.clone())
-        .open()
-        .perform(&operator)
-        .await?;
-
-    let last = passing_writers!(repo, &operator, None, CROWD);
-    let current = last.revision().expect("the last writer has a head");
-    let full = context_of(&current.version(), &last.history(&operator)).await?;
-
-    // The same head, as a release before the region signed it: the whole
-    // context inline, no spill.
-    let inline = repo.branch("inline").open().perform(&operator).await?;
-    let legacy = plant_signed!(inline, &operator, current, |head: &mut Revision| {
-        head.context = Some(full.clone());
-        head.spill = None;
-    });
-    legacy.verify().expect("an inline head still verifies");
-
-    // Pulled as an upstream into a branch with a head of its own.
-    let feature = repo.branch("feature").open().perform(&operator).await?;
-    feature
-        .commit(stream::iter(vec![assert_one(
-            "post/title",
-            "post:0",
-            "ours",
-        )]))
-        .perform(&operator)
-        .await?;
-    feature.pull().from(&inline).perform(&operator).await?;
-    assert_region_agrees!(&feature, &operator, "a merge with an inline upstream");
-
-    // Committed on as the local head.
-    inline
-        .commit(stream::iter(vec![assert_one(
-            "post/title",
-            "post:1",
-            "inline",
-        )]))
-        .perform(&operator)
-        .await?;
-    assert_region_agrees!(&inline, &operator, "a commit on an inline head");
-
-    // And with no context at all, as the first releases signed heads.
-    let bare = repo.branch("bare").open().perform(&operator).await?;
-    plant_signed!(bare, &operator, current, |head: &mut Revision| {
-        head.context = None;
-        head.spill = None;
-    });
-    let other = repo.branch("other").open().perform(&operator).await?;
-    other
-        .commit(stream::iter(vec![assert_one(
-            "post/title",
-            "post:2",
-            "other",
-        )]))
-        .perform(&operator)
-        .await?;
-    other.pull().from(&bare).perform(&operator).await?;
-    assert_region_agrees!(&other, &operator, "a merge with a pre-context upstream");
     Ok(())
 }

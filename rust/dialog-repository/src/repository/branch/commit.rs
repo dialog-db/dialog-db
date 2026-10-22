@@ -1,4 +1,4 @@
-use super::context::{full_context, region_of};
+use super::context::{full_context, held};
 use super::merge::merge_with_winner;
 use super::transaction::induction_ignores;
 use crate::repository::archive::persist;
@@ -9,13 +9,10 @@ use crate::{
 };
 use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::history::{
-    ACTIVE_CONTEXT, Context, Edition, Origin, RevisionRecord, TreeHistory, Version, context_writes,
-    extend_skips,
+    Context, Edition, Origin, RevisionRecord, TreeHistory, Version, extend_skips, region_writes,
 };
 use dialog_artifacts::tree::{Stamp, WriteScope};
-use dialog_artifacts::{
-    Datum, DialogArtifactsError, Entity, Instruction, Key, NUMBER_BAND, State, context_entry,
-};
+use dialog_artifacts::{Datum, DialogArtifactsError, Entity, Instruction, Key, NUMBER_BAND, State};
 use dialog_capability::{Did, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -788,11 +785,10 @@ where
         // The successor is the one copy of the map a commit pays for: the
         // parent's context is shared with the memo, and the new one is
         // shared with the head's memo entry once it is published. What the
-        // commit writes and signs is bounded instead: the region entries
-        // that changed (its own origin's, in the steady state; the whole
-        // map once, atop a parent minted before the region existed), and
-        // the head's projection, computed from the parent's when the
-        // committing origin is still active.
+        // commit writes is the region entries the reader would not derive
+        // (`region_writes`): none on a head of its own origin, two on
+        // another origin's head, and the whole map once, atop a parent
+        // minted before the region existed. The head itself carries none.
         let contexts = source.contexts();
         let parent_context = match base_revision.as_ref() {
             None => None,
@@ -811,25 +807,14 @@ where
             context.record(version);
             Arc::new(context)
         };
-        let projection = match base_revision.as_ref() {
-            Some(Revision {
-                context: Some(active),
-                spill: Some(spill),
-                ..
-            }) => context.project_from(ACTIVE_CONTEXT, (active, spill), &version.origin),
-            _ => context.project(ACTIVE_CONTEXT),
-        };
-        // A parent whose tree carries its region differs from this commit's
-        // context in one entry, this commit's own; a parent minted before
-        // the region (or no parent) has every entry written.
-        let region = match (base_revision.as_ref(), parent_context.as_deref()) {
-            (Some(base), Some(parent)) if region_of(base, parent).is_some() => context
-                .get(&version.origin)
-                .map(|watermark| context_entry(&version.origin, watermark))
-                .into_iter()
-                .collect(),
-            _ => context_writes(&context, &[None]),
-        };
+        let region = region_writes(
+            version,
+            &context,
+            &[base_revision
+                .as_ref()
+                .zip(parent_context.as_deref())
+                .and_then(|(base, parent)| held(base, parent))],
+        );
 
         // The revision's tree root is set after the seal below (its own
         // record must enter the tree before the root is final); until then
@@ -891,8 +876,7 @@ where
         .await?;
 
         revision.tree = TreeReference::from(*tree.root().as_bytes());
-        let (active, spill) = projection;
-        revision.publish_projection(active, spill);
+        revision.publish_region();
         // Sign the head last: only now are the tree root and context
         // final, and the head signature is what binds them to the issuer
         // (the in-tree record cannot contain the root of the tree it
