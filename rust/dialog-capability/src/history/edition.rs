@@ -31,6 +31,13 @@ pub struct Edition(u64);
 /// The byte width of an [`Edition`] in key encodings
 pub const EDITION_LENGTH: usize = 8;
 
+/// The highest edition a verified head (or any watermark entry it
+/// publishes) may carry. Editions grow by one per commit or merge, so no
+/// legitimate chain approaches 2^62 sequential operations; anything at or
+/// above it is protocol corruption, refused at the trust boundary before
+/// the saturating successor arithmetic could ever be reached.
+pub const EDITION_CEILING: u64 = 1 << 62;
+
 impl Edition {
     /// The edition of a genesis revision (one with an empty cause)
     pub const GENESIS: Edition = Edition(0);
