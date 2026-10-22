@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A key is generated where it is kept
 
-[#PR](https://github.com/dialog-db/dialog-db/pull/PR)
+[#631](https://github.com/dialog-db/dialog-db/pull/631)
 
 `credential::Generate` asks the store that keeps a key address to make a
 signing key there and hand back its credential, and `storage::Generate` asks a
