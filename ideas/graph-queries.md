@@ -215,9 +215,13 @@ So the proposal is pull over concepts:
    the original intent of the idea, and nothing about it changes.
 3. **Shaping.** An *optional* or *many-valued* typed edge does not
    filter at all; it only shapes. So does every edge a query's pattern
-   asks for. Shaping runs after the match, the way pull does: an edge
-   that does not resolve is omitted, never fatal; a cycle returns the
-   entity; reverse edges are allowed. The default pattern, when the
+   asks for, and so does every edge of an entity reached by shaping
+   rather than matched as a root. Shaping runs after the match, the way
+   pull does, and it does not decide conformance: for each entity an
+   edge reaches it returns the attributes the target concept names,
+   whatever subset the entity has, and the receiver decides whether
+   that bag conforms (see *Conformance on the receiving end*). A cycle
+   returns the entity; reverse edges are allowed. The default pattern, when the
    query names none, is the concept's own typed edges, followed through
    owned edges and stopping at references, which is `*` translated.
    Whether that default is right is a question the spike answers (see
@@ -234,6 +238,69 @@ is the version of that lesson that grew up on our data model.
 If the spike finds that the shaping stage is unnecessary, that "the
 concept decides everything" works in practice, that is a result worth
 reporting. It is not the default assumption.
+
+## Conformance on the receiving end
+
+The step after separating matching from shaping is to stop deciding
+conformance in the shaping stage at all. The roots are matched exactly,
+as today. For every entity reached through an edge, the query returns
+an **attribute bag**: the attributes the target concept names, read
+under their picks, for whichever of them the entity has. A bag can be
+partial. The receiver checks the bag against the concept and keeps,
+drops or flags the node.
+
+What it buys:
+
+- **The server's work is entity-local.** Shaping becomes "read these
+  attributes of this entity": prefix scans on EAV, no target concept
+  premise, no fixpoint, no conjunction across entities. Maintaining it
+  is the per-entity path subscriptions already take for entity-local
+  rules, so a change deep in a cycle costs what a change to a flat
+  attribute costs. This is most of the answer to the recursion bar in
+  *Performance*.
+- **Reachability becomes a superset the server may over-approximate.**
+  Which nodes are in the result is decided by the receiver too, from the
+  edge values in the bags. So the server can keep shipping a node that
+  is no longer reachable and prune lazily; only *new* reachability has
+  to be prompt. That replaces DRed over the edge relation with an
+  additive walk, which is the cheap direction.
+- **Deltas are per (entity, attribute).** The finest grain the data
+  has, and the one dialog's facts are already in. A node changing
+  conformance is not a server-side event; it is the receiver's check
+  flipping when an attribute arrives or goes.
+- **The receiver can say why.** "`c3` is not a `comment`: `author`
+  missing." "`alice` is not a `person`: `name` is a number." "`c2`'s
+  `author` does not conform to `person`." For an agent orienting in a
+  space this is the schema explaining itself against real data, which
+  is the problem the idea started from. For a view it is a place to
+  render a broken reference instead of silently showing nothing.
+
+Where it stops:
+
+- **Derived attributes stay on the server.** If an attribute the target
+  concept names is derived by a rule, the receiver cannot compute it
+  from stored claims, so the server evaluates it and ships the value in
+  the bag. That is still cheap for an entity-local rule. For a rule that
+  reads other entities' facts it is the fixpoint again, and the spike
+  should report how often the library's concepts have such attributes.
+  What moves to the receiver is only the *conjunction*: are the required
+  attributes present, are their values of the declared types, do the
+  required edges' targets conform in turn.
+- **Roots stay exact.** A required typed edge on a root decides whether
+  the root matches, so it is matching and stays on the server. The bag
+  applies to entities reached by shaping.
+- **One check, two places.** If the receiver's conformance check is its
+  own implementation it will drift from the engine's. It has to be one
+  pure function in `dialog-query`, over a bag and the bags its required
+  edges reach, used by the engine for roots and by the receiver for
+  nodes. tonk-display already runs Rust compiled to wasm, so this is a
+  dependency, not a port. The function follows least-fixpoint
+  semantics, which is safe because required edges are acyclic (see
+  *Where the current design stops*).
+- **Bytes for nodes that do not conform.** A bag for an entity that
+  fails the check is shipped and then dropped. On most data that is
+  noise; on a space where an edge mostly points at entities of another
+  shape it is not, and the spike should measure it.
 
 ## Narrowing
 
@@ -342,10 +409,12 @@ concept!: &issue
       pick: :all               # shapes only: zero or more, never filters
 ```
 
-`comment.author` is required, so it matches and shapes: a comment whose
-author is not a `person` is not a `comment`. `issue.assignee` and
-`issue.comment` only shape, in the stage after the match, so an issue
-with no assignee or no comments is still returned, without them.
+`comment.author` is required: queried as a root, a comment whose author
+is not a `person` is not a `comment`, and the server does not return it.
+`issue.assignee` and `issue.comment` only shape, in the stage after the
+match, so an issue with no assignee or no comments is still returned.
+And a comment reached through `issue.comment` is not a root, so its
+`author` edge is checked by the receiver, not the server.
 
 The query does not change:
 
@@ -377,6 +446,12 @@ with its subgraph:
         this: did:key:…alice
         name: Alice
 ```
+
+Suppose `issue-1` also has a comment `c3` with a body and no author. The
+server ships `c3`'s bag, `{this: c3, body: "+1"}`, because it does not
+decide conformance for nested nodes. The receiver's check drops `c3`
+from the `comment` list above and can report it: `c3` is not a
+`comment`, `author` is missing.
 
 A query that wants a different shape states a pattern, pull style. The
 spelling is again a placeholder; this one asks for less than the
@@ -412,9 +487,11 @@ this is probably the most consequential design choice in the spike.
 
 The same entity under the same concept can appear many times in a tree
 (Alice above), and in a cyclic schema the tree is infinite. A
-**normalized** result has neither problem: a set of nodes, each a
-`(concept, entity)` with its scalar fields, and a set of edges, each
-`(parent node, field, child node)`. That is what Relay and Apollo
+**normalized** result has neither problem: a set of nodes, each an
+entity with its attribute bag, and a set of edges, each
+`(parent, field, child)`, which with bags are just the entity-valued
+attributes in them. Which concept a node is read as, and whether it
+conforms, is the receiver's fold over that set. That is what Relay and Apollo
 converge on client side. Datomic's pull returns trees, and duplicates
 Alice, but falls back to the entity id exactly where a tree would
 recurse forever; a normalized result is that fallback applied
@@ -432,10 +509,11 @@ differ (a person reachable from many issues).
 
 Two things the delta has to get right whichever shape it takes:
 
-- **Reachability.** A node leaves the result when the last edge to it
-  goes, and enters when the first does. That is DRed over the edge
-  relation, which `affected.rs` does for the filter today; the graph
-  needs it for membership too.
+- **Reachability.** A node enters the result when the first edge to it
+  appears, and that has to be prompt. It leaves when the last edge goes,
+  which with receiver-side conformance can be lazy, since the receiver
+  computes reachability from the bags itself (see *Conformance on the
+  receiving end*). Without that, this is DRed over the edge relation.
 - **Equality of a row.** `ConceptConclusion` equality is entity plus
   resolved values, which is what stops re-derivation emitting
   retract-and-reassert of unchanged rows. Nested values must not break
@@ -477,11 +555,13 @@ Two other paths can change and the spike must measure both:
   typed edges never make matching recursive (a cyclic edge cannot
   match, see *Where the current design stops*), so the matching stage
   is maintained exactly as today, and the shaping stage is maintained
-  per node and per edge, outside the fixpoint. Reachability through a
-  cycle is the one part of shaping that is recursive. It has to be
-  maintained incrementally too, as a DRed over the edge relation, with
-  a rebuild bounded to the affected subgraph at worst, never the whole
-  result.
+  per node and per edge, outside the fixpoint. With conformance decided
+  by the receiver, that per-node work is entity-local attribute reads,
+  and reachability through a cycle only has to be maintained in the
+  additive direction. If the spike keeps conformance on the server
+  instead, reachability through a cycle has to be maintained by DRed
+  over the edge relation, with a rebuild bounded to the affected
+  subgraph at worst, never the whole result.
 
 The comparison that argues for graph queries, as opposed to merely
 against regressions, is against what tonk does now. A directory of N
@@ -510,6 +590,9 @@ Graph queries in dialog, usable from tonk notation, with subscriptions:
   with its subscription maintained incrementally: a rename deep in the
   cycle, an edge added that closes a cycle, and an edge removed that
   cuts one each produce a delta without a full recompute.
+- Receiver-side conformance: nested nodes shipped as attribute bags,
+  checked by one function shared with the engine, with a reason for
+  each node that does not conform.
 - Narrowing by a nested attribute in both stages: roots narrowed by a
   constant on a nested field, and a nested edge narrowed without
   dropping its parent, each with the constant reaching the scan.
@@ -568,6 +651,11 @@ if the report shows why:
 - A graph subscription takes a full-recompute path that the same data
   read without the graph would not take. Today's rebuild shapes are the
   accepted trade-off; graph queries must not add to them.
+- The receiver's conformance check and the engine's disagree on any
+  input, or the shared function cannot be shared and a second
+  implementation is needed.
+- Bags for non-conforming nodes dominate the bytes shipped on a real
+  space, and there is no cheap way to keep them back.
 - Nested narrowing only works as a post-read filter, so a narrowed edge
   reads, and wakes on, everything the unnarrowed edge does.
 
@@ -582,6 +670,10 @@ if the report shows why:
   `person.manager` reachability is the whole org chart? Pull's answer
   is ownership: follow components, stop at references. Does that
   distinction exist in tonk's schemas, and who would declare it?
+- What goes in a bag: only the attributes the target concept names, or
+  everything the entity has? The second is `*`, and for an agent
+  exploring a space it may be the more useful default: it shows what an
+  entity actually carries next to what the concept expects of it.
 - Does a pattern belong to the query, to a view, or to the schema as a
   named thing an agent can find? Datomic passes patterns as query
   inputs; a view is already a pattern written in HTML; a stored pattern
