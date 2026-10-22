@@ -34,13 +34,13 @@ use dialog_search_tree::Manifest;
 use futures_util::{StreamExt, stream};
 
 /// Merge sorted artifact streams into one stream whose order matches
-/// what a single physical prolly tree containing every input would
+/// what a single physical probabilistic search tree containing every input would
 /// produce, deduplicating identical claims that appear in more than one
 /// source.
 ///
 /// Each input is assumed sorted by [`sort_key`] under `manifest` — true
 /// of scans of trees written under `manifest` by construction (the
-/// prolly tree stores entries in that order), and of in-memory overlays
+/// probabilistic search tree stores entries in that order), and of in-memory overlays
 /// read with that manifest (`Ephemeral::select`, `Staged::select`),
 /// which sort their materialized rows by it. Implemented as a streaming k-way
 /// merge over per-stream head slots, each holding the front row and its

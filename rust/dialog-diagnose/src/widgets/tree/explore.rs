@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, List, ListState};
 use crate::{DiagnoseState, Promise, TreeNode};
 use base58::ToBase58;
 
-/// Widget for exploring the prolly tree structure interactively.
+/// Widget for exploring the probabilistic search tree structure interactively.
 ///
 /// This widget renders a tree view where users can navigate through branch
 /// and segment nodes. It shows node hashes, types, and hierarchy with

@@ -3,10 +3,10 @@ use ratatui::widgets::{Axis, Block, Chart, Dataset, GraphType};
 
 use crate::ArtifactsTreeStats;
 
-/// Widget for displaying a distribution chart of prolly tree segment sizes.
+/// Widget for displaying a distribution chart of probabilistic search tree segment sizes.
 ///
 /// This widget renders a line chart showing the distribution of segment sizes
-/// across the prolly tree. It visualizes how many segments exist at each size,
+/// across the probabilistic search tree. It visualizes how many segments exist at each size,
 /// helping to understand the tree's balance and structure characteristics.
 ///
 /// The chart displays:

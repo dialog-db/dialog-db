@@ -1,7 +1,7 @@
 //! Internal data representation for storing artifacts in indexes.
 //!
 //! This module defines the [`Datum`] type: the per-entry payload stored
-//! alongside a key in the prolly tree indexes.
+//! alongside a key in the probabilistic search tree indexes.
 //!
 //! The key already carries the entity, attribute, value type, and (for a value
 //! within the inline threshold) the value itself in order-preserving form, so

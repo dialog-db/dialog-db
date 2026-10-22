@@ -134,7 +134,7 @@ changes only the tree's right edge, but inserting into the middle of a large map
 or set shifts every later chunk, so it costs a hash of everything after the
 insertion. Merkle references suit values whose composites are small or append
 mostly; large collections that change in place belong in a structure built for
-it, such as a prolly tree.
+it, such as a probabilistic search tree.
 
 ## Cost
 

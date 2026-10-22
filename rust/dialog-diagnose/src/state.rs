@@ -42,7 +42,7 @@ pub struct FactsState {
 /// State for the Tree explorer view.
 ///
 /// Manages the tree navigation, node selection, and expansion state
-/// for exploring the prolly tree structure of the database.
+/// for exploring the probabilistic search tree structure of the database.
 #[derive(Default)]
 pub struct TreeState {
     /// Hash of the root node of the tree
@@ -179,7 +179,7 @@ impl DiagnoseState {
     /// Creates a new `DiagnoseState` from the given artifacts database.
     ///
     /// This initializes all the state components and sets up the tree view
-    /// to start at the root of the prolly tree.
+    /// to start at the root of the probabilistic search tree.
     pub async fn new(explored: Explored) -> Self {
         let root_hash = *explored.tree.root().as_bytes();
 

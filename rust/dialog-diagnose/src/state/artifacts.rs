@@ -32,7 +32,7 @@ pub struct ArtifactsCursorState {
 pub struct ArtifactsCursor {
     /// Shared state for tracking cursor position
     state: Arc<Mutex<ArtifactsCursorState>>,
-    /// The prolly tree index containing the facts
+    /// The probabilistic search tree index containing the facts
     tree: Index,
     /// Where the tree's blocks load from
     storage: Blocks,
@@ -45,7 +45,7 @@ impl ArtifactsCursor {
     ///
     /// # Arguments
     ///
-    /// * `tree` - The prolly tree index containing facts data
+    /// * `tree` - The probabilistic search tree index containing facts data
     /// * `storage` - Where the tree's blocks load from
     /// * `tx` - Channel sender for worker messages
     pub fn new(tree: Index, storage: Blocks, tx: Sender<WorkerMessage>) -> Self {

@@ -2239,7 +2239,7 @@ mod tests {
             for (label, sel) in scan_modes {
                 // Raw branch scan — bypass the QuerySession overlay so
                 // we see tree-order output without auto-metadata noise.
-                // The branch's prolly tree is the order ground truth.
+                // The branch's search tree is the order ground truth.
                 let select = branch.claims().select(sel.clone());
                 let store = crate::NetworkedIndex::new(&operator, select.catalog(), None);
                 let branch_stream: ArtifactStream<'_> = Box::pin(select.execute(store).await?);

@@ -3264,7 +3264,7 @@ mod tests {
     async fn it_returns_no_nodes_for_identical_trees() -> Result<()> {
         // When trees are identical, no nodes are novel (all are shared).
         // Identical roots are recognized by hash alone: the tree holds its
-        // root lazily, so not even the roots are read (the prolly tree's
+        // root lazily, so not even the roots are read (the probabilistic search tree's
         // eager root load marked these as reads; the search tree improves
         // on that with a zero-read fast path).
         let backend = MemoryBlocks::new();

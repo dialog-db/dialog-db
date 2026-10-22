@@ -10,7 +10,7 @@ pub enum DiagnoseTab {
     /// Facts table view - shows database facts in a tabular format
     #[default]
     Facts,
-    /// Tree explorer view - shows the prolly tree structure with expandable nodes
+    /// Tree explorer view - shows the probabilistic search tree structure with expandable nodes
     Tree,
 }
 
