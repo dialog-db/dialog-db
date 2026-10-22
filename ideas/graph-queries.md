@@ -100,46 +100,125 @@ assigned to. GraphQL made the other choice: a field whose object cannot
 be resolved is `null`, and the parent stays. A many-valued edge
 (`comment: pick all`) has the same problem one level up: an issue with
 no conforming comments drops out instead of returning an empty list.
-Both semantics are useful and they are different concepts, so the
-notation has to be able to say which one it means, and the optional one
-is exactly the absence-over-a-derived-predicate the engine currently
-refuses. The spike has to either make that sound under the existing
-stratification analysis or argue that graph edges can be read without
-it (for example, optional edges whose target is a stored-facts-only
-concept, which has no derived predicate under it).
+Both semantics are useful, and the optional one is exactly the
+absence-over-a-derived-predicate the engine currently refuses *when it
+decides whether the row exists*. Datomic's pull gets the left join by
+not deciding membership at all: it shapes rows the query already
+matched. That is the route this proposal takes (see *Start from Datomic
+pull*), and it means the filter stays as it is and the left join lives
+in a later stage, not in the concept's rule.
 
-## Concepts are the schema, the query picks the tree
+## Start from Datomic pull
 
-GraphQL is the closest prior art, and the lesson worth taking from it is
-not "nest objects in responses". It is the split between the **schema**,
-which is a graph and can be cyclic, and the **query**, which selects a
-finite tree from it. A GraphQL server never returns "the whole graph";
-it returns what the selection set asked for, as deep as the selection
-goes.
+The closest prior art is not GraphQL, it is Datomic's
+[pull](https://docs.datomic.com/query/query-pull.html). Datomic is the
+system dialog's data model descends from: entities, attributes, values,
+datalog over them. Pull is how it answers the question this idea asks,
+on that model, and it has had a decade of use. The spike should read
+the pull spec before it designs anything, and should depart from it
+only where it can say why.
 
-That split also dissolves the tension with views. A view is a selection:
-it decides, per layer, which facet of the referenced concept it wants.
-A concept with typed edges is schema: it says what is on the other end,
-not how much of it to read. Both can be true at once, and they serve
-different readers. An agent walks the schema; a view, or a graph query,
-selects from it.
+What pull is:
 
-So the proposal is:
+```clojure
+[:find (pull ?issue [:issue/title
+                     {:issue/assignee [:person/name]}
+                     {:issue/comment [:comment/body
+                                      {:comment/author [:person/name]}]}])
+ :where [?issue :issue/status :status/open]]
+```
 
-1. A concept may type an entity field with another concept. That is
-   schema. It makes the graph discoverable from any concept, and it is
-   what a route hands an agent.
-2. A query over such a concept may return the graph below it. *How
-   much* of it is a property of the query, not of the concept. The
-   default the deliverable needs is "every edge the concepts declare,
-   to a fixpoint", which is finite because entities are (see *Result
-   shape*), but a depth bound or an explicit selection is the natural
-   next knob and the spike should leave room for it.
-3. Views keep working as they do. A view that wants to stop nesting
-   mounts a `<tonk-display>` as it does today; a view that wants the
-   subgraph in one frame can ask for it.
+`:where` decides *which* entities match. `pull` decides *what shape* to
+return for each, by walking references from it. The pattern is data: it
+can be passed to a query as an input, stored, and handed around.
 
-If the spike finds that the selection half is unnecessary, that "the
+What it gets right, each of which maps onto a problem this idea has:
+
+- **Matching and shaping are separate stages.** This is the important
+  one. A conforming field today is matching: it decides whether the row
+  exists. A graph projection is shaping: it decides what comes back for
+  a row that already exists. Pull runs after the query has its answer,
+  so nothing in a pattern can change which entities matched. In dialog
+  terms the shaping stage sits above the query in the stratification by
+  construction, and "omit the assignee if they do not conform to
+  `person`" is absence read over a predicate that is already at
+  fixpoint. That is the sound version of the optional conformance the
+  engine refuses today (see *Where the current design stops*), and it
+  is sound for the same reason negation over a lower stratum is. The
+  spike should check this argument against `session/dependencies.rs`
+  rather than take it from here.
+- **Missing is omitted, not fatal.** "Attribute specifications that do
+  not match an entity are omitted from that entity's result map, rather
+  than e.g. appearing with a nil value." A many-valued reference with no
+  matches is an empty vector. The parent is never dropped. That is the
+  left join a graph read wants.
+- **Cycles return a reference.** Recursion is explicit,
+  `{:person/manager 3}` for a depth or `{:person/manager ...}` for no
+  limit, and "if a recursive subselect encounters an entity that it has
+  already seen, it will not apply the pattern, instead returning only
+  the `:db/id` of the entity." That is the normalized result proposed
+  under *Result shape*, arrived at from the other end.
+- **Reverse references.** `:release/_artists` walks an attribute
+  backwards. Tonk's library points children at parents
+  (`xyz.tonk.notebook.block/notebook`), so "a notebook with its blocks"
+  is a reverse edge, which a concept field cannot express at all today.
+  dialog's VAE index makes the reverse walk a prefix scan, so the cost
+  is there to be had.
+- **Ownership bounds the walk.** `*` pulls every attribute and follows
+  *component* references recursively; a plain reference gives only the
+  `:db/id`. That is Datomic's answer to "the whole reachable graph is
+  the whole org chart": follow what the entity owns (an issue's
+  comments), stop at what it merely points at (a comment's author), and
+  let the pattern ask for more.
+- **Bounded fan-out.** A many-valued reference returns at most 1000
+  values unless `:limit` says otherwise. A graph read needs some bound
+  like it.
+
+What pull does not do, and where this idea has to add to it:
+
+- **References are untyped.** Datomic's schema says `:issue/assignee` is
+  a ref and nothing about what it refers to. The pattern supplies that
+  knowledge, so whoever writes the pattern already has to know the
+  graph. That is exactly the agent's problem: pull gives a good way to
+  read a graph you understand and no way to discover one. Concept-typed
+  edges are the missing half.
+- **No subscriptions.** Pull is a read API; nothing in it says how a
+  pulled tree changes when a transaction lands. The differential half of
+  the deliverable is new ground, built on dialog's own subscriptions.
+- **Patterns name attributes, not concepts.** A dialog pattern would
+  name concepts at each step (`assignee` read as `person`), so a step
+  carries the target concept's rules, picks and conformance with it,
+  which a Datomic attribute step does not have.
+
+So the proposal is pull over concepts:
+
+1. **Schema.** A concept may type an entity field with another concept,
+   and, as a direction to explore, say whether the edge is owned (a
+   component) or a reference. That makes the graph discoverable from
+   any concept, and it is what a route hands an agent.
+2. **Matching.** A *required* typed edge keeps meaning what
+   conformance means today: a filter, inner join. An issue whose
+   comment author is not a person is not this kind of issue. That is
+   the original intent of the idea, and nothing about it changes.
+3. **Shaping.** An *optional* or *many-valued* typed edge does not
+   filter at all; it only shapes. So does every edge a query's pattern
+   asks for. Shaping runs after the match, the way pull does: an edge
+   that does not resolve is omitted, never fatal; a cycle returns the
+   entity; reverse edges are allowed. The default pattern, when the
+   query names none, is the concept's own typed edges, followed through
+   owned edges and stopping at references, which is `*` translated.
+   Whether that default is right is a question the spike answers (see
+   below).
+4. **Views stay as they are.** A view is already a pattern, written in
+   HTML: each nested `<tonk-display>` is one map spec. A view that
+   wants the subgraph in one frame can state its pattern and get it;
+   one that wants to stay lazy mounts nested displays as today.
+
+The GraphQL lesson is the same one in other clothes: the schema is a
+graph and may be cyclic, the query selects a finite tree from it. Pull
+is the version of that lesson that grew up on our data model.
+
+If the spike finds that the shaping stage is unnecessary, that "the
 concept decides everything" works in practice, that is a result worth
 reporting. It is not the default assumption.
 
@@ -201,12 +280,17 @@ concept!: &issue
     assignee:
       the: xyz.tonk.issue/assignee
       as: person
-      optional: true           # an unassigned issue is still an issue
+      optional: true           # shapes only: an unassigned issue is still an issue
     comment:
       the: xyz.tonk.issue/comment
       as: comment
-      pick: :all               # zero or more; see "left join" above
+      pick: :all               # shapes only: zero or more, never filters
 ```
+
+`comment.author` is required, so it matches and shapes: a comment whose
+author is not a `person` is not a `comment`. `issue.assignee` and
+`issue.comment` only shape, in the stage after the match, so an issue
+with no assignee or no comments is still returned, without them.
 
 The query does not change:
 
@@ -239,8 +323,21 @@ with its subgraph:
         name: Alice
 ```
 
-And a subscription to it delivers, each case starting from the result
-above:
+A query that wants a different shape states a pattern, pull style. The
+spelling is again a placeholder; this one asks for less than the
+default, and walks a reverse edge the concepts do not declare:
+
+```yaml
+issue:
+  this: ?issue
+  shape:
+    title: .
+    assignee: [name]
+    xyz.tonk.issue/_blocks: [title]   # issues this one blocks, walked backwards
+```
+
+And a subscription to the default shape delivers, each case starting
+from the result above:
 
 - `issue-1` retitled: a change to the issue node.
 - Alice renamed: a change to the `person` node for Alice, which appears
@@ -263,8 +360,10 @@ The same entity under the same concept can appear many times in a tree
 **normalized** result has neither problem: a set of nodes, each a
 `(concept, entity)` with its scalar fields, and a set of edges, each
 `(parent node, field, child node)`. That is what Relay and Apollo
-converge on client side, it is what Datomic's pull avoids by being
-bounded by its pattern, and it is close to what dialog already has: rows
+converge on client side. Datomic's pull returns trees, and duplicates
+Alice, but falls back to the entity id exactly where a tree would
+recurse forever; a normalized result is that fallback applied
+everywhere. It is also close to what dialog already has: rows
 keyed by entity, which `tonk-display`'s `select_rows` already folds by
 `this`. A delta is then node rows asserted and retracted plus edges
 asserted and retracted, each row change happens once however many paths
@@ -329,17 +428,20 @@ Graph queries in dialog, usable from tonk notation, with subscriptions:
 - Subscribing to it delivers differential updates: a change to a nested
   entity, to an edge, or to a top-level entity each arrives as a delta
   of what changed, not a re-sent result.
-- At least one optional edge and one many-valued edge, with the
-  semantics the spike chose for each written down.
+- Matching and shaping as separate stages, pull style: a required
+  typed edge filters, an optional or many-valued one shapes and never
+  drops the parent, with at least one of each exercised.
 - At least one cyclic schema (`person.manager: person` or
   `block.next: block`) that can be declared, queried and subscribed to,
   even if its subscription falls back to recompute.
 - The measurements below.
 
 Not part of the deliverable, nice to have: `#[derive(Concept)]`
-producing nested Rust types from conforming fields; selection sets or
-depth bounds in the query; migrating a tonk view to a graph
-subscription.
+producing nested Rust types from conforming fields; explicit patterns in
+the query (pull's map specs, reverse edges, depth bounds, `:limit`);
+owned versus referenced edges; migrating a tonk view to a graph
+subscription. The spike should leave room for the pull features even
+where it does not build them.
 
 ## Goal
 
@@ -379,10 +481,11 @@ if the report shows why:
   A concept with no typed edge must keep its identity.
 - Cycles cannot be expressed without giving up structural concept
   identity everywhere, not just on the cyclic edges.
-- The optional and many-valued edges cannot be made sound and the only
-  graph left is the inner-join one, where one missing name deletes a
-  parent. That is the filter dialog already has, and not worth shipping
-  as "graph queries".
+- The shaping stage cannot be kept above the match, so optional and
+  many-valued edges either feed back into membership or have to be
+  refused, and the only graph left is the inner-join one, where one
+  missing name deletes a parent. That is the filter dialog already has,
+  and not worth shipping as "graph queries".
 - Every graph subscription falls back to full recompute, so subscribing
   to a graph is strictly worse than the per-layer subscriptions it would
   replace.
@@ -395,8 +498,13 @@ if the report shows why:
   and see whether it navigates the space better than it does from the
   schema dump.
 - Is the whole reachable graph the right default, given that
-  `person.manager` reachability is the whole org chart? What bounds it
-  if not the query?
+  `person.manager` reachability is the whole org chart? Pull's answer
+  is ownership: follow components, stop at references. Does that
+  distinction exist in tonk's schemas, and who would declare it?
+- Does a pattern belong to the query, to a view, or to the schema as a
+  named thing an agent can find? Datomic passes patterns as query
+  inputs; a view is already a pattern written in HTML; a stored pattern
+  is something a route could point at.
 - Does a typed edge change what an assertion through that concept means?
   Asserting an issue with `assignee: person` could check the target
   conforms, write the nested person too, or ignore the type on write.
@@ -416,10 +524,14 @@ if the report shows why:
 - **Relay and Apollo normalized caches.** Results flattened to nodes by
   id with edges between them, the tree reassembled at read. The closest
   thing to the delta shape proposed here.
-- **Datomic pull.** A pattern over entity attributes, nested through
-  references, with explicit recursion limits (`{:friend 3}`, `...`).
-  Pull is the selection half done over a schema that has no types on
-  refs at all.
+- **Datomic pull** ([spec](https://docs.datomic.com/query/query-pull.html)).
+  The primary reference; see *Start from Datomic pull*. Matching and
+  shaping as separate stages, missing attributes omitted, explicit and
+  cycle-safe recursion, reverse references, components bounding `*`,
+  patterns as data. It is the shaping half done over a schema that has
+  no types on refs at all, and it has no subscriptions. Datascript and
+  XTDB 1.x carry the same pattern language, which is evidence it
+  travels beyond Datomic's own storage.
 - **EdgeDB (Gel) shapes.** Object types with links to other object
   types, and queries that select a shape through links. The closest to
   "the schema declares the edge's target type".
