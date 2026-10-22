@@ -1,6 +1,7 @@
-//! The write path: bulk and per-row commits, writes that succeed
-//! standing claims, writes to a relation a rule derives, and writes that
-//! dispatch a chain of inductive rules.
+//! The write path: bulk and per-row commits, commits that rewrite one
+//! standing key every time, writes that succeed standing claims, writes
+//! to a relation a rule derives, and writes that dispatch a chain of
+//! inductive rules.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -66,6 +67,43 @@ impl Prepared for Rows {
 pub async fn rows(size: usize) -> Result<Box<dyn Prepared>> {
     let env = Env::open().await?;
     Ok(Box::new(Rows { env, size }))
+}
+
+struct HotKey {
+    env: Env,
+    size: usize,
+}
+
+impl Prepared for HotKey {
+    fn env(&self) -> &Env {
+        &self.env
+    }
+
+    fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
+        Box::pin(async move {
+            // The fact every commit re-asserts: the same entity, attribute
+            // and value each time, so every commit writes the same three
+            // index keys again. An application's own bookkeeping entry
+            // (a context marker, a cursor) has this shape.
+            let marker = entity("marker", 0);
+            for index in 0..self.size {
+                let this = entity("stuff", index);
+                let facts = [
+                    fact(&this, "stuff/name", text(format!("name-{index}"))),
+                    fact(&marker, "marker/context", text("current")),
+                ];
+                self.env.commit(assert_all(facts, Pick::All)).await?;
+            }
+            Ok(Outcome::from([("commits".into(), self.size as u64)]))
+        })
+    }
+}
+
+/// `commit-hot-key`: an empty branch, then `size` commits that each
+/// assert one fresh fact and re-assert one standing fact.
+pub async fn hot_key(size: usize) -> Result<Box<dyn Prepared>> {
+    let env = Env::open().await?;
+    Ok(Box::new(HotKey { env, size }))
 }
 
 struct Succeed {

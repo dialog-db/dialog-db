@@ -73,6 +73,13 @@ pub fn catalog() -> Vec<Spec> {
             prepare: |size| Box::pin(commit::rows(size)),
         },
         Spec {
+            name: "commit-hot-key",
+            size: 100,
+            about: "one commit per entity, each also re-asserting one standing fact: the per-commit cost of a key every commit rewrites",
+            volatile: false,
+            prepare: |size| Box::pin(commit::hot_key(size)),
+        },
+        Spec {
             name: "commit-succeed",
             size: 500,
             about: "one transaction rewriting every entity's name under `last`: each write elects and retracts a standing claim",
