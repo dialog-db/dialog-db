@@ -85,6 +85,33 @@ fn op_buf_bytes(manifest: &Manifest) -> usize {
     }
 }
 
+/// The buffered weight a PUBLISHED root may carry: half the node size
+/// target (`max_segment / 2`, 32 KiB under the default manifest). A settle,
+/// the step before a root is persisted and published, sheds every root
+/// link buffer one level when the root weighs more than this. Disabled
+/// when the manifest disables byte pacing (`max_segment == 0`).
+///
+/// The per-node cap above bounds what any node buffers between flushes; it
+/// is what a commit costs. This bounds what a root costs the replica that
+/// reads it: the first query of a replica that adopted a head by root
+/// reads that root before anything else, and the root carries the write
+/// buffer every commit since the last flush left in it. Half the node
+/// target, draining the root rather than halving it, was measured against
+/// the alternatives (a lower root cap at enqueue, a serialized-size
+/// trigger) on `commit-rows`, `commit-batch`, `commit-hot-key` and
+/// `first-query`: commit instructions within noise, a quarter fewer bytes
+/// written per commit (the root is most of what a commit writes), one
+/// flush of about 13 blocks every 13 commits instead of every 15, and a
+/// mean published root of 17 kB instead of 45. A 16 KiB threshold cost a
+/// quarter more instructions on the hot-key shape. Overridden per tree by
+/// [`HitchhikerTree::with_publish_threshold`].
+fn publish_threshold(manifest: &Manifest) -> usize {
+    match manifest.max_segment {
+        0 => usize::MAX,
+        target => target as usize / 2,
+    }
+}
+
 /// The process-wide `DIALOG_TREE_OP_BUF_BYTES` override, read once.
 fn env_op_buf_bytes() -> Option<usize> {
     #[cfg(not(target_arch = "wasm32"))]
@@ -235,6 +262,9 @@ where
     /// Explicit op-weight cap; `None` derives it from the manifest (see
     /// [`op_buf_bytes`]).
     op_buf_bytes: Option<usize>,
+    /// Explicit published-root weight threshold; `None` derives it from the
+    /// manifest (see [`publish_threshold`]).
+    publish_threshold: Option<usize>,
     policy: FlushPolicy,
     trigger: FlushTrigger,
     /// The tree's format header. Known from opening for an empty tree, which
@@ -286,6 +316,7 @@ where
             cache: tree.node_cache(),
             op_buf_size: env_op_buf_size(),
             op_buf_bytes: env_op_buf_bytes(),
+            publish_threshold: None,
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
             manifest,
@@ -300,6 +331,7 @@ where
             cache: NodeCache::new(),
             op_buf_size: env_op_buf_size(),
             op_buf_bytes: env_op_buf_bytes(),
+            publish_threshold: None,
             policy: FlushPolicy::default(),
             trigger: FlushTrigger::default(),
             manifest: Some(manifest),
@@ -344,6 +376,15 @@ where
     /// the byte trigger.
     pub fn with_op_buf_bytes(mut self, op_buf_bytes: usize) -> Self {
         self.op_buf_bytes = Some(op_buf_bytes.max(1));
+        self
+    }
+
+    /// Sets the buffered weight a published root may carry, in place of
+    /// the one derived from the tree's manifest: a settle sheds every root
+    /// link buffer one level when the root weighs more than this.
+    /// `usize::MAX` disables the publish flush.
+    pub fn with_publish_threshold(mut self, threshold: usize) -> Self {
+        self.publish_threshold = Some(threshold);
         self
     }
 
@@ -446,16 +487,46 @@ where
     /// accumulated: the settle half of batch writing. Buffers that ended the
     /// batch over their trigger cascade now, top-down, each child receiving
     /// its whole accumulated share in one flush.
-    pub async fn settle<Env>(self, storage: &Env) -> Result<Self, DialogSearchTreeError>
+    ///
+    /// A settle is the step before the root is persisted and published, so
+    /// it is also where the published root's cost is bounded: a root whose
+    /// buffered weight exceeds the publish threshold (half the node size
+    /// target, see [`publish_threshold`]) sheds every one of its link
+    /// buffers one level, leaving the root to carry its links alone. The
+    /// children buffer what they receive under the ordinary per-node cap,
+    /// so this is one more flush of the kind an overflow causes, not a
+    /// canonicalize. The flushed root is the canonical index of its links:
+    /// an empty buffer makes an index byte-identical to a fully flushed one.
+    pub async fn settle<Env>(mut self, storage: &Env) -> Result<Self, DialogSearchTreeError>
     where
         Env: Provider<LoadBlock> + ConditionalSync,
     {
         match self.root {
             // Nothing buffered in memory: nothing to settle. (A persisted
             // root's stored buffers settle when a write next loads it.)
-            HitchhikerRoot::Empty | HitchhikerRoot::Unloaded(_) => Ok(self),
-            HitchhikerRoot::Loaded(_) => self.write_with(Vec::new(), storage, true).await,
+            HitchhikerRoot::Empty | HitchhikerRoot::Unloaded(_) => return Ok(self),
+            HitchhikerRoot::Loaded(_) => {
+                self = self.write_with(Vec::new(), storage, true).await?;
+            }
         }
+        let threshold = match self.publish_threshold {
+            Some(threshold) => threshold,
+            None => publish_threshold(&Self::format(&self.manifest)?),
+        };
+        if self.root_weight()? > threshold {
+            self = self.write_draining_root(storage).await?;
+        }
+        Ok(self)
+    }
+
+    /// The metered weight of the ops buffered at the root: 0 when the root
+    /// is not loaded, or is a leaf.
+    fn root_weight(&mut self) -> Result<usize, DialogSearchTreeError> {
+        let HitchhikerRoot::Loaded(TransientNode::Index(index)) = &mut self.root else {
+            return Ok(0);
+        };
+        let manifest = Self::format(&self.manifest)?;
+        index.novelty.weight::<Key>(&manifest)
     }
 
     /// Enqueues a batch of ops into the tree, cascading buffers one level on
@@ -483,10 +554,34 @@ where
     /// tree, the `Immediate` policy) always go to the canonical edit path
     /// immediately — a leaf has no buffer to defer into.
     async fn write_with<Env>(
+        self,
+        msgs: Vec<NoveltyEntry<Value>>,
+        storage: &Env,
+        settle: bool,
+    ) -> Result<Self, DialogSearchTreeError>
+    where
+        Env: Provider<LoadBlock> + ConditionalSync,
+    {
+        self.write_inner(msgs, storage, settle, false).await
+    }
+
+    /// A settle pass that sheds every root link buffer one level, whatever
+    /// the root's weight: the publish flush (see [`settle`](Self::settle)).
+    async fn write_draining_root<Env>(self, storage: &Env) -> Result<Self, DialogSearchTreeError>
+    where
+        Env: Provider<LoadBlock> + ConditionalSync,
+    {
+        self.write_inner(Vec::new(), storage, true, true).await
+    }
+
+    /// [`write_with`](Self::write_with), with `drain_root` making the root
+    /// shed every link buffer regardless of its caps.
+    async fn write_inner<Env>(
         mut self,
         msgs: Vec<NoveltyEntry<Value>>,
         storage: &Env,
         settle: bool,
+        drain_root: bool,
     ) -> Result<Self, DialogSearchTreeError>
     where
         Env: Provider<LoadBlock> + ConditionalSync,
@@ -542,6 +637,7 @@ where
                         policy: self.policy,
                         trigger: self.trigger,
                         settle,
+                        drain_root,
                     },
                     &mut deferred,
                     &accessor,
@@ -1032,6 +1128,10 @@ struct EnqueueConfig {
     policy: FlushPolicy,
     trigger: FlushTrigger,
     settle: bool,
+    /// Whether this node, the root, sheds every link buffer whatever its
+    /// caps say: the publish flush. Cleared for every cascade, so the
+    /// children buffer what they receive as usual.
+    drain_root: bool,
 }
 
 /// Routes `msgs` into the subtree rooted at `node`, cascading one level on
@@ -1101,8 +1201,9 @@ where
         // BYTES do (a value-heavy workload can pack ~200 KB into 256 ops,
         // and buffered weight rides every per-commit root rewrite and every
         // pushed operational block).
-        let over_bytes = config.op_buf_bytes != usize::MAX
-            && index.novelty.weight::<Key>(&config.manifest)? > config.op_buf_bytes;
+        let over_bytes = config.drain_root
+            || (config.op_buf_bytes != usize::MAX
+                && index.novelty.weight::<Key>(&config.manifest)? > config.op_buf_bytes);
         let per_child_threshold = match config.trigger {
             FlushTrigger::Capacity => None,
             FlushTrigger::PerChild { floor } => {
@@ -1143,7 +1244,12 @@ where
         measures.sort_by_key(|&(_, weight, ops)| std::cmp::Reverse((weight, ops)));
         let mut buffered_weight = index.novelty.weight::<Key>(&config.manifest)?;
         let mut buffered_ops = index.novelty.len();
-        let weight_target = if over_bytes {
+        // A publish flush drains the root entirely: the low-water mark is
+        // what keeps the next few enqueues from re-firing an overflow, and
+        // a root that holds nothing has nothing to re-fire on.
+        let weight_target = if config.drain_root {
+            0
+        } else if over_bytes {
             config.op_buf_bytes / 2
         } else {
             usize::MAX
@@ -1188,6 +1294,8 @@ where
                     // the deferral applies only to the arriving batch's
                     // routing.
                     settle: true,
+                    // The publish flush is the root's alone.
+                    drain_root: false,
                     ..config.clone()
                 },
                 deferred,
@@ -1532,7 +1640,7 @@ mod tests {
     use anyhow::Result;
     use dialog_common::Blake3Hash;
 
-    use super::{FlushPolicy, FlushTrigger, HitchhikerTree};
+    use super::{FlushPolicy, FlushTrigger, HitchhikerTree, publish_threshold};
     use crate::helpers::{
         DistributionSimulator, SpecKey, TestStorage as SpecStorage, encode_key, test_storage,
     };
@@ -1776,6 +1884,209 @@ mod tests {
             live.get(&hot, &storage).await?,
             Some(99u32.to_le_bytes().to_vec()),
             "the last commit's value stands"
+        );
+        Ok(())
+    }
+
+    /// One commit of `keys` onto `live`: every key inserted, the batch
+    /// settled as a publish does, and the spine persisted into `storage`.
+    /// Returns the root's buffered weight before the settle, after it, and
+    /// the persisted root's hash.
+    async fn commit_keys(
+        live: &mut TestHitchhiker,
+        keys: impl IntoIterator<Item = u32>,
+        storage: &mut TestStorage,
+    ) -> Result<(usize, usize, Blake3Hash)> {
+        let mut tree = std::mem::replace(live, TestHitchhiker::empty(Manifest::default()));
+        // The test ops weigh 100 each, so the op-count cap (256) would fire
+        // under the weight threshold; lift it, as the artifact tree's
+        // heavier ops do by weight alone.
+        tree = tree.with_op_buf_size(100_000);
+        for key in keys {
+            tree = tree
+                .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), storage)
+                .await?;
+        }
+        let before = tree.root_weight()?;
+        tree = tree.settle(storage).await?;
+        let after = tree.root_weight()?;
+        let mut delta = Delta::zero();
+        let root = tree.persist_mut(&mut delta)?;
+        flush(&mut delta, storage).await?;
+        *live = tree;
+        Ok((before, after, root))
+    }
+
+    /// The publish flush: a settle whose root weighs more than half the
+    /// node target sheds every root link buffer, so no published root
+    /// carries more than that, and a settle under it sheds nothing.
+    #[dialog_common::test]
+    async fn it_flushes_a_published_root_past_half_the_node_target() -> Result<()> {
+        let mut storage = MemoryBlocks::new();
+        let keys: Vec<u32> = (0..1200).collect();
+        let base = sequential(&keys, &mut storage).await?;
+        let manifest = base.manifest(&storage).await?;
+        let threshold = publish_threshold(&manifest);
+        assert_eq!(threshold, manifest.max_segment as usize / 2);
+
+        let mut live = TestHitchhiker::open(&base);
+        let mut crossed = 0usize;
+        let mut next = 1_000_000u32;
+        for _ in 0..60 {
+            let batch: Vec<u32> = (next..next + 40).collect();
+            next += 40;
+            let (before, after, _) = commit_keys(&mut live, batch, &mut storage).await?;
+            if before > threshold {
+                crossed += 1;
+                assert_eq!(
+                    after, 0,
+                    "a settle past the threshold drains the root ({before} -> {after})"
+                );
+            } else {
+                assert_eq!(
+                    after, before,
+                    "a settle under the threshold sheds nothing ({before} -> {after})"
+                );
+            }
+            assert!(
+                after <= threshold,
+                "no published root weighs more than the threshold: {after} > {threshold}"
+            );
+        }
+        assert!(
+            crossed >= 2,
+            "the commits crossed the threshold {crossed} times"
+        );
+
+        for key in 1_000_000u32..next {
+            assert_eq!(
+                live.get(&key.to_le_bytes(), &storage).await?,
+                Some(key.to_le_bytes().to_vec()),
+                "key {key} survives the publish flushes"
+            );
+        }
+        Ok(())
+    }
+
+    /// The flushed root's bytes are what the canonical index of its links
+    /// encodes to: an empty buffer is byte-identical to a fully flushed
+    /// node, pinned on the frame a publish flush produces. The tree it
+    /// roots still canonicalizes to the sequential oracle's root.
+    #[dialog_common::test]
+    async fn it_publishes_a_flushed_root_as_the_canonical_index_of_its_links() -> Result<()> {
+        let mut storage = MemoryBlocks::new();
+        let keys: Vec<u32> = (0..1200).collect();
+        let base = sequential(&keys, &mut storage).await?;
+        let manifest = base.manifest(&storage).await?;
+        let threshold = publish_threshold(&manifest);
+
+        let mut live = TestHitchhiker::open(&base);
+        let mut written: Vec<u32> = Vec::new();
+        let mut flushed_root = None;
+        let mut next = 2_000_000u32;
+        for _ in 0..60 {
+            if flushed_root.is_some() {
+                break;
+            }
+            let batch: Vec<u32> = (next..next + 40).collect();
+            next += 40;
+            written.extend(batch.iter().copied());
+            let (before, _, root) = commit_keys(&mut live, batch, &mut storage).await?;
+            if before > threshold {
+                flushed_root = Some(root);
+            }
+        }
+        let root = flushed_root.expect("a commit crossed the threshold");
+
+        let frame: PersistentNode<[u8; 4], Vec<u8>> =
+            PersistentNode::try_from(storage.get(&root).expect("the root is stored"))?;
+        let index = frame.as_index()?;
+        assert_eq!(index.novelty_len(), 0, "the flushed root buffers nothing");
+        let canonical = crate::PersistentNodeBody::<Vec<u8>>::index_from_links::<[u8; 4]>(
+            index.links()?,
+            Vec::new(),
+            frame.manifest()?,
+        )?
+        .as_bytes()?;
+        assert_eq!(
+            frame.buffer().as_ref(),
+            canonical.as_slice(),
+            "the flushed root is the canonical index of its links, byte for byte"
+        );
+
+        let mut all: Vec<u32> = keys.clone();
+        all.extend(written);
+        let oracle = sequential(&all, &mut storage).await?;
+        let live_canonical = live.canonicalize(&storage, &mut Delta::zero()).await?;
+        assert_eq!(
+            live_canonical.root(),
+            oracle.root(),
+            "the publish-flushed tree canonicalizes to the sequential root"
+        );
+        Ok(())
+    }
+
+    /// A key rewritten every commit holds one op at the root across publish
+    /// flushes: the flush moves the op down, the next write buffers one op
+    /// again, and the collapse keeps it at one.
+    #[dialog_common::test]
+    async fn it_keeps_a_hot_key_to_one_op_across_a_publish_flush() -> Result<()> {
+        let mut storage = MemoryBlocks::new();
+        let keys: Vec<u32> = (0..1200).collect();
+        let base = sequential(&keys, &mut storage).await?;
+        let manifest = base.manifest(&storage).await?;
+        let threshold = publish_threshold(&manifest);
+
+        let hot = u32::MAX;
+        let mut live = TestHitchhiker::open(&base).with_op_buf_size(100_000);
+        let mut flushes = 0usize;
+        let mut next = 3_000_000u32;
+        for commit in 0..160u32 {
+            let mut batch: Vec<u32> = (next..next + 5).collect();
+            next += 5;
+            batch.push(hot);
+            let mut tree = std::mem::replace(&mut live, TestHitchhiker::empty(Manifest::default()))
+                .with_op_buf_size(100_000);
+            for key in batch {
+                let value = if key == hot { commit } else { key };
+                tree = tree
+                    .insert(key.to_le_bytes(), value.to_le_bytes().to_vec(), &storage)
+                    .await?;
+            }
+            let before = tree.root_weight()?;
+            tree = tree.settle(&storage).await?;
+            if before > threshold {
+                flushes += 1;
+            }
+            let mut delta = Delta::zero();
+            let root = tree.persist_mut(&mut delta)?;
+            let frame = delta
+                .get(&root)
+                .expect("the persist wrote the root")
+                .clone();
+            flush(&mut delta, &mut storage).await?;
+            live = tree;
+
+            let frame: PersistentNode<[u8; 4], Vec<u8>> = PersistentNode::try_from(frame)?;
+            let hot_ops = frame
+                .as_index()?
+                .all_novelty::<[u8; 4]>()?
+                .into_iter()
+                .filter(|entry| entry.key == hot.to_le_bytes())
+                .count();
+            assert!(
+                hot_ops <= 1,
+                "commit {commit}: the hot key holds {hot_ops} ops at the root"
+            );
+            assert_eq!(
+                live.get(&hot.to_le_bytes(), &storage).await?,
+                Some(commit.to_le_bytes().to_vec()),
+                "commit {commit}: the newest value stands"
+            );
+        }
+        assert!(
+            flushes >= 2,
+            "the commits crossed the threshold {flushes} times"
         );
         Ok(())
     }

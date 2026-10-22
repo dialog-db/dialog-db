@@ -14,6 +14,51 @@ says how to cut a release.
 
 ## Unreleased
 
+### A published root carries at most half a node's worth of buffered ops
+
+[#PR](https://github.com/dialog-db/dialog-db/pull/PR), for
+[#632](https://github.com/dialog-db/dialog-db/issues/632)
+
+A commit buffers its ops in the root of its tree and flushes them toward
+the leaves when a node's buffer passes the node size target (64 KiB of
+metered weight under the default manifest). The root a replica reads first
+therefore carried up to that much, plus one commit, of other writers'
+recent ops. The settle before a root is persisted now sheds every root
+link buffer one level when the root's buffered weight exceeds half the
+node size target (`max_segment / 2`, 32 KiB by default), so a published
+root holds its links and at most that much buffer. The children buffer
+what they receive under the ordinary per-node cap; nothing is
+canonicalized.
+
+What this changes for you:
+
+- A commit that takes the root past 32 KiB of buffered weight writes the
+  children it flushes into as well as the root: one flush of about 13
+  blocks every 13 one-fact commits, where before it was every 15. The
+  bytes a run of commits writes drop by a quarter, since the root is most
+  of what every commit writes and it is smaller on average. On the perf
+  matrix, `commit-rows` goes from 112 blocks and 3.69 MB to 133 blocks and
+  2.64 MB per 100 commits, `commit-hot-key` from 119 and 3.88 MB to 143 and
+  2.94 MB, with instructions within 2% either way.
+- The first query of a replica that adopted a head by root reads a root of
+  at most 32 KiB of buffer plus links: a mean of 17 kB instead of 45 over
+  the fill-and-flush cycle, with the same number of blocks.
+- `HitchhikerTree::with_publish_threshold` sets the threshold for a tree;
+  `usize::MAX` disables the flush.
+- Nothing stored is rewritten and no format changes: a flushed root is the
+  canonical index of its links, the same bytes a fully flushed node has,
+  and an older release reads what this one writes. Two replicas that
+  commit the same ops from the same root still publish the same root only
+  when their flush histories agree, as before.
+
+Why: on a replica that faults blocks in on demand, the root is the first
+thing a query pays for, and the write buffer that makes commits cheap was
+riding it unbounded by anything but the per-node cap. Half the node
+target, draining the root rather than halving it, was the policy whose
+commit cost was within noise of the current one on every write scenario
+while cutting the published root most; lower thresholds cost a quarter
+more instructions on a key rewritten every commit.
+
 ### A persisted node's bytes can be attributed to what they carry
 
 [#634](https://github.com/dialog-db/dialog-db/pull/634), for
