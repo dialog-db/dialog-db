@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A branch's live spine is held only while a handle of it is open
 
-PR_LINK
+[#637](https://github.com/dialog-db/dialog-db/pull/637)
 
 The environment's caches kept, per repository and branch name, the live
 buffered spine a commit leaves for the next commit on that branch, for the
