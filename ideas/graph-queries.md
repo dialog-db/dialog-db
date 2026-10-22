@@ -85,19 +85,19 @@ Proposal:
    shapes only. The default pattern is the concept's typed edges,
    following owned edges and stopping at references. A query may give
    its own pattern.
-4. **Receiver-side conformance.** For each entity an edge reaches, the
-   server returns an attribute bag: the attributes the target concept
-   names, read under their picks, whichever the entity has. The
-   receiver checks the bag and keeps, drops or flags the node, with a
+4. **Conformance in the application.** For each entity an edge
+   reaches, the query returns an attribute bag: the attributes the
+   target concept names, read under their picks, whichever the entity
+   has. The application checks the bag and keeps, drops or flags the node, with a
    reason ("`c3` is not a `comment`: `author` missing").
 5. **Views.** Unchanged. A nested `<tonk-display>` is one map spec; a
    view may state a pattern to get the subgraph in one frame.
 
-Receiver-side conformance:
+Conformance in the application:
 
-- Makes server-side shaping entity-local (EAV prefix reads, no target
+- Makes shaping in the query engine entity-local (EAV prefix reads, no target
   premise, no fixpoint), maintained on the existing per-entity path.
-- Lets the server over-approximate reachability: the receiver computes
+- Lets the query over-approximate reachability: the application computes
   it from edge values in the bags, so stale nodes can be pruned lazily
   and only new reachability must be prompt.
 - Gives per (entity, attribute) deltas.
@@ -105,13 +105,13 @@ Receiver-side conformance:
 
 Limits:
 
-- Derived attributes are evaluated on the server and shipped in the
-  bag; cheap for entity-local rules, a fixpoint for rules reading other
-  entities. Only the conjunction moves to the receiver.
+- Derived attributes are evaluated by the query engine and returned in
+  the bag; cheap for entity-local rules, a fixpoint for rules reading other
+  entities. Only the conjunction moves to the application.
 - The check must be one function in `dialog-query`, used by the engine
-  for roots and by the receiver (tonk-display already runs Rust as
-  wasm). A second implementation would drift.
-- Bags for non-conforming nodes cost bytes; measure them.
+  for roots and by the application (tonk-display can call it
+  directly). A second implementation would drift.
+- Bags for non-conforming nodes are returned and then dropped; measure them.
 
 ## Narrowing
 
@@ -169,8 +169,8 @@ concept!: &issue
 ```
 
 Queried as a root, a comment whose author is not a `person` is not
-returned. Reached through `issue.comment`, it is shipped as a bag and
-checked by the receiver.
+returned. Reached through `issue.comment`, it is returned as a bag and
+checked by the application.
 
 The query `issue: { this: ?issue }` today returns one flat row per
 tuple (`tonk-worker-api/src/evaluate.rs`). With graph queries:
@@ -188,8 +188,8 @@ tuple (`tonk-worker-api/src/evaluate.rs`). With graph queries:
       author: { this: did:key:…alice, name: Alice }
 ```
 
-A comment `c3` with a body and no author is shipped as
-`{this: c3, body: "+1"}`; the receiver drops it and reports the missing
+A comment `c3` with a body and no author is returned as
+`{this: c3, body: "+1"}`; the application drops it and reports the missing
 `author`.
 
 A custom pattern, with a reverse edge:
@@ -217,7 +217,7 @@ normalized result avoids both: nodes (entity and attribute bag) and
 edges (the entity-valued attributes in the bags). Relay and Apollo
 caches use this shape; pull falls back to it only on cycles.
 `tonk-display`'s `select_rows` already folds rows by `this`. Deltas are
-per node and edge; the tree is a receiver-side fold.
+per node and edge; the application folds it into a tree.
 
 Path-addressed deltas (`issue-1/comment/c2/author/name`) match template
 bindings but repeat a change once per path. Pick one and measure the
@@ -226,7 +226,7 @@ other where they differ (a person reachable from many issues).
 Either way:
 
 - New reachability must be delivered promptly; lost reachability can be
-  lazy under receiver-side conformance, otherwise it needs DRed over
+  lazy when the application checks conformance, otherwise it needs DRed over
   edges.
 - `ConceptConclusion` equality (entity plus values) must not see nested
   values, or every child change re-emits the parent.
@@ -296,8 +296,8 @@ engine without slowing anything that does not use it.
 - Cycles require giving up structural identity everywhere.
 - Shaping cannot be kept above matching, leaving only the inner join.
 - A graph subscription adds a full-recompute path.
-- The receiver's check and the engine's disagree, or cannot share code.
-- Non-conforming bags dominate shipped bytes.
+- The application's check and the engine's disagree, or cannot share code.
+- Non-conforming bags dominate the bytes returned.
 - Nested narrowing only works as a post-read filter.
 
 ## Open questions
@@ -322,7 +322,7 @@ engine without slowing anything that does not use it.
   fields; field arguments.
 - **EdgeDB (Gel)**: typed links; nested shapes with `filter`,
   `order by`, `limit`.
-- **Relay, Apollo**: normalized client caches.
+- **Relay, Apollo**: normalized caches.
 - **Unison**: hashing of mutually recursive definitions.
 - **This repository**: `notes/incremental-subscriptions.md`,
   `notes/optional-fields.md`, `affected.rs`, `fixpoint.rs`.
