@@ -43,6 +43,9 @@ jobs:
         with:
           name: tonk-ops
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          # Only main writes the cache: an upload must not fail a PR's
+          # checks, and an unmerged branch must not write what main reads.
+          skipPush: ${{ github.ref != 'refs/heads/main' }}
       - name: 'Run lints'
         shell: bash
         run: |
@@ -69,6 +72,9 @@ jobs:
         with:
           name: tonk-ops
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          # Only main writes the cache: an upload must not fail a PR's
+          # checks, and an unmerged branch must not write what main reads.
+          skipPush: ${{ github.ref != 'refs/heads/main' }}
       # CARGO_HOME must live on the /nix volume, not under $HOME.
       # nothing-but-nix keeps purging the runner in the background
       # after its step returns, and at its default hatchet protocol
@@ -117,6 +123,9 @@ jobs:
         with:
           name: tonk-ops
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          # Only main writes the cache: an upload must not fail a PR's
+          # checks, and an unmerged branch must not write what main reads.
+          skipPush: ${{ github.ref != 'refs/heads/main' }}
       # CARGO_HOME must live on the /nix volume, not under $HOME, for the
       # reason the Perf gate above gives: this job runs cargo directly,
       # and nothing-but-nix's background purge deletes $HOME/.cargo
@@ -174,6 +183,9 @@ jobs:
         with:
           name: tonk-ops
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          # Only main writes the cache: an upload must not fail a PR's
+          # checks, and an unmerged branch must not write what main reads.
+          skipPush: ${{ github.ref != 'refs/heads/main' }}
       # TMPDIR must live on the large /nix volume, not the root
       # filesystem. nothing-but-nix leaves the root filesystem only
       # root-safe-haven (16GB) of free space, and the wasm build and
