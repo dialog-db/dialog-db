@@ -74,7 +74,15 @@ runs). The `none` profile's request counts are deterministic, so the gate
 holds them tight; shaped profiles gate their lazy-join and download
 totals loosely, and every profile gates duplicate fetches per phase (see
 the `dialog_soak::compare` module docs). The nightly `soak:sync` arm runs
-exactly this against the checked-in baseline under `soak/baseline`.
+exactly this against the checked-in baseline under `soak/baseline`. The
+pull-request workflow's `Replication gate` job (`soak:gate`) runs the
+`none` profile alone against the same baseline, so a change to the
+protocol's shape is caught before it lands; the shaped profiles stay
+nightly.
+
+The baselines are recorded from CI's own run, not a developer machine:
+download the `soak-current` artifact the gate uploads and copy its
+reports over `soak/baseline`, the way `perf/baseline` is kept.
 
 ## Reading a report
 
