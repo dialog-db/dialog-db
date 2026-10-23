@@ -153,7 +153,7 @@ struct QueueState {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PreloadRange {
     /// The keys a selector's facts occupy, in every index it reads.
-    Selector(Box<ArtifactSelector<Constrained>>),
+    Selector(ArtifactSelector<Constrained>),
     /// The tree keys from `start` to `end`, both included.
     Keys {
         /// The first key in the range.
@@ -246,10 +246,7 @@ impl PreloadQueue {
     /// rank is not enqueued twice (the same range is one job); past
     /// [`PENDING_LIMIT`] the rank's oldest pending hint is dropped.
     pub fn preload(&self, request: PreloadRequest) -> bool {
-        self.enqueue(
-            PreloadRange::Selector(Box::new(request.selector)),
-            request.likelihood,
-        )
+        self.enqueue(PreloadRange::Selector(request.selector), request.likelihood)
     }
 
     /// Enqueue a hint for the tree keys from `start` to `end`, both
@@ -366,7 +363,7 @@ mod tests {
         assert_eq!(queue.pending(), 2, "one per selector per rank");
 
         let (first, _) = queue.next(true, false).expect("the likely hint");
-        assert_eq!(first, PreloadRange::Selector(Box::new(selector("a/b"))));
+        assert_eq!(first, PreloadRange::Selector(selector("a/b")));
         assert!(
             queue.next(true, false).is_none(),
             "the duplicates never became jobs"
@@ -391,7 +388,7 @@ mod tests {
         let (front, _) = queue.next(true, true).expect("hints pending");
         assert_eq!(
             front,
-            PreloadRange::Selector(Box::new(selector("later/attr0"))),
+            PreloadRange::Selector(selector("later/attr0")),
             "the oldest hint was the one dropped"
         );
     }
