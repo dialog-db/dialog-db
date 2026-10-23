@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A value asserted again after a `last` write of its cell commits with it
 
-[#PRNUM](https://github.com/dialog-db/dialog-db/pull/PRNUM)
+[#647](https://github.com/dialog-db/dialog-db/pull/647)
 
 A transaction that asserted a value under `all`, wrote the same cell
 under `last`, which succeeds that value, and then asserted the value
