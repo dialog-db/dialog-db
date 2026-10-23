@@ -46,7 +46,7 @@ section() {
   echo "$marker"
   echo "## Cost against the base"
   echo
-  echo "Each gate's sweep on this pull request against the sweep CI recorded for the main commit it lands on. ❌ rows fail the gate; ⚠️ rows grew past tolerance in a scenario whose baseline file this pull request re-records, which accepts them. The gates also compare against the baseline files, as before."
+  echo "Each gate's sweep on this pull request against the sweep CI recorded for the main commit it lands on. ❌ rows fail the gate unless the section says it only reports; ⚠️ rows grew past tolerance in a scenario whose baseline file this pull request re-records, which accepts them. The gates also compare against the baseline files, as before."
   echo
   section "Perf gate" "$perf"
   section "Replication gate" "$soak"

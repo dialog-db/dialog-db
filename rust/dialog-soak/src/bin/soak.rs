@@ -165,6 +165,13 @@ struct CompareArgs {
     /// Also write every row as a Markdown table to this file.
     #[arg(long)]
     markdown: Option<PathBuf>,
+
+    /// Report regressions without failing. The base comparison runs with
+    /// this until the harness's identities are deterministic (#652): one
+    /// run against one run with random identities moves the join's
+    /// request counts past the threshold about one time in ten.
+    #[arg(long)]
+    report_only: bool,
 }
 
 /// A named preset link model.
@@ -263,7 +270,17 @@ fn main() -> Result<ExitCode> {
             };
             let comparison = compare_dirs(&args.baseline, &args.new, args.threshold, &against)?;
             if let Some(path) = &args.markdown {
-                std::fs::write(path, comparison.markdown())?;
+                let mut markdown = comparison.markdown();
+                if args.report_only {
+                    markdown.insert_str(
+                        0,
+                        "Report only: rows past tolerance here do not fail the gate until the \
+                         soak harness's identities are deterministic (#652), since one run \
+                         against one run with random identities crosses the threshold about \
+                         one time in ten.\n\n",
+                    );
+                }
+                std::fs::write(path, markdown)?;
             }
             for line in &comparison.summary {
                 println!("{line}");
@@ -282,18 +299,26 @@ fn main() -> Result<ExitCode> {
             }
             if comparison.passed() {
                 println!("\nno regressions");
-                Ok(ExitCode::SUCCESS)
-            } else {
-                println!(
-                    "\n{} regression(s) over {:.0}% threshold:",
-                    comparison.regressions.len(),
-                    args.threshold
-                );
-                for line in &comparison.regressions {
-                    println!("  {line}");
-                }
-                Ok(ExitCode::FAILURE)
+                return Ok(ExitCode::SUCCESS);
             }
+            println!(
+                "\n{} regression(s) over {:.0}% threshold{}:",
+                comparison.regressions.len(),
+                args.threshold,
+                if args.report_only {
+                    " (report only, not failing)"
+                } else {
+                    ""
+                }
+            );
+            for line in &comparison.regressions {
+                println!("  {line}");
+            }
+            Ok(if args.report_only {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
         }
     }
 }

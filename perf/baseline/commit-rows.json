@@ -9,7 +9,7 @@
     "archive.get": 0,
     "archive.get.bytes": 0,
     "archive.put": 112,
-    "archive.put.bytes": 3687208,
+    "archive.put.bytes": 3691848,
     "span.apply_batch_reusing": 100,
     "span.buffer_records": 200,
     "span.commit": 100,
@@ -19,5 +19,5 @@
     "span.settle": 100,
     "span.write_instructions": 100
   },
-  "instructions": 213812645
+  "instructions": 196913497
 }

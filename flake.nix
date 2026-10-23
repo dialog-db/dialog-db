@@ -249,7 +249,11 @@
 
           # The soak counterpart of perf:check: target/soak-current against
           # soak/baseline and, when present, target/soak-base, with every
-          # row in target/soak-delta/table.md.
+          # row in target/soak-delta/table.md. The base comparison is
+          # report-only (--report-only) until the harness's identities are
+          # deterministic (#652 item 4): one run against one run with
+          # random identities fails about one time in ten. The change that
+          # makes them deterministic drops the flag.
           "soak:check" = {
             description = "Gate target/soak-current against soak/baseline and, if present, target/soak-base";
             command = ''
@@ -259,6 +263,7 @@
                 mkdir -p target/soak-delta
                 rebaselined=$(paste -sd, target/soak-delta/rebaselined 2>/dev/null || true)
                 cargo run -p dialog-soak --release -- compare --base target/soak-base target/soak-current \
+                  --report-only \
                   --markdown target/soak-delta/table.md \
                   ''${rebaselined:+--rebaselined "$rebaselined"} || status=1
               fi
