@@ -1763,11 +1763,11 @@ mod tests {
                 ..salary(of, value)
             }
         };
-        fn write<'a>(
-            transaction: crate::Transaction<&'a Branch>,
+        fn write(
+            transaction: crate::Transaction<&Branch>,
             statement: AttributeStatement,
             write: Write,
-        ) -> crate::Transaction<&'a Branch> {
+        ) -> crate::Transaction<&Branch> {
             match write {
                 Write::Retract(_) => transaction.retract(statement),
                 _ => transaction.assert(statement),
