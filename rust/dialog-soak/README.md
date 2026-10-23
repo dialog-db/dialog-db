@@ -39,6 +39,19 @@ and repeatable.
   complete instantly while virtual time advances by exactly the modeled
   amount. A run over a 300 ms link finishes in real seconds and reports
   deterministic modeled times.
+- Every identity a run mints derives from one **seed**, `DIALOG_SOAK_SEED`
+  (unset is a fixed default): the profile key, the space keys and names,
+  the vault peer, and, through `dialog_common::helpers::entropy`, the line
+  identifier a branch's first commit allocates. Revisions carry no
+  timestamp, so the same seed writes the same tree, byte for byte; every
+  report records its `seed` and the `seeded_root` it wrote. The unshaped
+  `none` profile also runs the simulated link in **lockstep**
+  (`dialog_remote_fs::simulation::lockstep`): each request waits one tick
+  of the paused clock, so the chain counts the rounds the client issued
+  requests in, not the order the filesystem's thread pool returned them
+  in. Together they make a `none` run repeat: the tree, and every count of
+  what each phase fetched, byte for byte; the chain too, but for one
+  phase (see below).
 
 ## Scenarios
 
@@ -97,17 +110,32 @@ cargo run -p dialog-soak --release -- compare soak/baseline target/soak-new
 ```
 
 The sweep runs every scenario (`--scenarios join,catchup,writer`) over
-every profile, each configuration three times, and keeps the median run
-(identities and commit timestamps shift leaf boundaries slightly between
-runs). The `none` profile's request counts are deterministic, so the gate
-holds them tight; shaped profiles gate their lazy-join and download
-totals loosely, and every profile gates duplicate fetches per phase (see
-the `dialog_soak::compare` module docs). The nightly `soak:sync` arm runs
-exactly this against the checked-in baseline under `soak/baseline`. The
-pull-request workflow's `Replication gate` job (`soak:gate`) runs the
-`none` profile alone against the same baseline, so a change to the
-protocol's shape is caught before it lands; the shaped profiles stay
-nightly.
+every profile, each configuration three times, and keeps the median run.
+Under the default fixed seed the repeats must agree (the same seeded root,
+and on `none` the same requests, bytes, duplicates and blob opens in every
+phase) or the sweep fails: something the seed does not reach moved the
+tree. The chain is exact in every phase but one: the join's `filtered`
+reads 106 instead of 107 in about one run in ten (one read-ahead joins the
+round of the read beside it), so it is left to the compare's slack. With `DIALOG_SOAK_SEED=random`
+each run draws its own seed, so the repeats exercise the spread identities
+cause (a leaf seam moves, and a block or two with it between phases).
+
+The `none` profile run under the baseline's seed is exact, so the gate
+holds it tight in every phase; shaped profiles, and a `none` run under
+another seed, gate their lazy-join and download totals loosely, and every
+profile gates duplicate fetches per phase (see the `dialog_soak::compare`
+module docs). The nightly `soak:sync` arm runs this against the
+checked-in baseline under `soak/baseline` with random seeds, so variance
+is still exercised there. The pull-request workflow's `Replication gate`
+job (`soak:gate`) runs the `none` profile alone, under the fixed seed,
+against the same baseline, so a change to the protocol's shape is caught
+before it lands; the shaped profiles stay nightly.
+
+To replay a nightly run, take the `seed` from its report:
+
+```sh
+DIALOG_SOAK_SEED=<seed> cargo run -p dialog-soak --release -- run --scenario join --network mobile
+```
 
 The baselines are recorded from CI's own run, not a developer machine:
 download the `soak-current` artifact the gate uploads and copy its
@@ -119,7 +147,8 @@ Per phase: `virtual_ms` (modeled time), `rounds` (modeled time over the
 per-request serial cost: an upper-bound estimate of the longest
 sequential fetch chain, 0 when unshaped), `chain` (`round_trips` in the
 JSON: the exact longest chain of requests each issued only after the one
-before it completed, counted by the simulation on every profile),
+before it completed, counted by the simulation on every profile; on
+`none`, in lockstep, the rounds requests were issued in),
 `requests`, `unique` (distinct blocks received), `dup` (requests that
 re-downloaded an already-received block), `empty` (requests the remote
 had no block for), `blobs` (blob opens, in either direction), `bytes`,

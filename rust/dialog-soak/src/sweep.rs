@@ -4,10 +4,18 @@
 //!
 //! Each configuration runs in its own child process because the tree
 //! manifest override is read once per process (`DIALOG_TREE_FANOUT_N`).
-//! Run-to-run leaf-boundary wobble (randomized identities shifting leaf
-//! seams) moves a block or two between phases, so every configuration
-//! runs `repeats` times and keeps the run with the median lazy-join
-//! modeled time — the report the regression gate compares.
+//! Every configuration runs `repeats` times and keeps the run with the
+//! median lazy-join modeled time: the report the regression gate compares.
+//!
+//! What the repeats measure depends on the [`Seeding`]. Under a fixed seed
+//! (the per-PR gate) every run mints the same identities and writes the
+//! same tree, so the sweep requires its repeats to agree: the same seeded
+//! root everywhere, and on the unshaped profile the same requests, bytes,
+//! duplicates and blob opens in every phase (see `reproduced`). A
+//! disagreement means something the seed does not reach moved the tree,
+//! and fails the sweep. Under random seeding (the nightly) each
+//! run draws its own identities, which move leaf seams and with them a
+//! block or two between phases: the spread the median absorbs.
 
 use std::fs;
 use std::path::PathBuf;
@@ -16,7 +24,7 @@ use std::process::Command;
 use anyhow::{Context as _, Result};
 
 use crate::report::Report;
-use crate::scenario::Kind;
+use crate::scenario::{Kind, SEED_VARIABLE, Seeding};
 
 /// Configuration for one sweep.
 #[derive(Debug, Clone)]
@@ -36,6 +44,8 @@ pub struct SweepConfig {
     /// Tree branching factors to sweep (`DIALOG_TREE_FANOUT_N`); empty
     /// sweeps only the default.
     pub fanouts: Vec<u8>,
+    /// The seed each run takes.
+    pub seeding: Seeding,
 }
 
 /// Modeled lazy-join time: the sum of every phase but `download`.
@@ -46,6 +56,53 @@ fn lazy_ms(report: &Report) -> u64 {
         .filter(|phase| phase.name != "download")
         .map(|phase| phase.virtual_ms)
         .sum()
+}
+
+/// Check that runs of one seed repeated each other: the same seeded root,
+/// and on the unshaped profile the same requests, duplicates, blob opens
+/// and bytes in every phase.
+///
+/// The chain is not held to it. Every count of what a phase fetched
+/// repeats exactly, but which round one fetch goes out in still moves for
+/// one phase of the join (`filtered`, by one, in about one run in ten):
+/// something in the process that the seed does not reach decides whether
+/// a read-ahead joins the round of the read beside it. The compare's
+/// slack holds the chain instead.
+fn reproduced(runs: &[Report], seed: u64) -> Result<()> {
+    let Some((first, rest)) = runs.split_first() else {
+        return Ok(());
+    };
+    for run in rest {
+        anyhow::ensure!(
+            run.seeded_root == first.seeded_root,
+            "seed {seed} seeded two different trees ({:?} and {:?}): \
+             something the seed does not reach moved the tree",
+            first.seeded_root,
+            run.seeded_root
+        );
+        if run.network != "none" {
+            continue;
+        }
+        for (expected, phase) in first.phases.iter().zip(&run.phases) {
+            let counts = |phase: &crate::report::PhaseReport| {
+                (
+                    phase.traffic.requests,
+                    phase.duplicate_requests,
+                    phase.blob_requests,
+                    phase.traffic.bytes,
+                )
+            };
+            anyhow::ensure!(
+                counts(expected) == counts(phase),
+                "seed {seed} ran phase {} two ways (requests, duplicates, blobs, \
+                 bytes): {:?} and {:?}",
+                phase.name,
+                counts(expected),
+                counts(phase)
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Run one configuration `repeats` times in child processes and return
@@ -59,7 +116,9 @@ fn run_config(
     let exe = std::env::current_exe().context("resolving the soak binary")?;
     let mut runs = Vec::with_capacity(config.repeats);
     for _ in 0..config.repeats {
+        let seed = config.seeding.draw()?;
         let mut command = Command::new(&exe);
+        command.env(SEED_VARIABLE, seed.to_string());
         command
             .arg("run")
             .arg("--scenario")
@@ -83,6 +142,10 @@ fn run_config(
         let report: Report =
             serde_json::from_slice(&output.stdout).context("parsing a soak run's report")?;
         runs.push(report);
+    }
+    if let Seeding::Fixed(seed) = config.seeding {
+        reproduced(&runs, seed)
+            .with_context(|| format!("scenario {scenario} on network {network}"))?;
     }
     runs.sort_by_key(lazy_ms);
     Ok(runs.swap_remove(runs.len() / 2))
