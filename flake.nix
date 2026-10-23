@@ -204,6 +204,14 @@
             '';
           };
 
+          "soak:gate" = {
+            description = "Join cost on the unshaped `none` profile (rust/dialog-soak), gated against soak/baseline";
+            command = ''
+              cargo run -p dialog-soak --release -- sweep --out-dir target/soak-current --networks none
+              cargo run -p dialog-soak --release -- compare soak/baseline target/soak-current
+            '';
+          };
+
           "soak:sync" = {
             description = "Sync/join cost sweep over simulated networks, gated against soak/baseline";
             command = ''
