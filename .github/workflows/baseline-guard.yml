@@ -23,23 +23,26 @@ jobs:
     name: 'Baseline guard'
     runs-on: 'ubuntu-latest'
     steps:
+      # A pull_request run checks out the pull request merged onto the
+      # base branch's current tip, so the merge's first parent is the base
+      # the change lands on. `pull_request.base.sha` can be older, and a
+      # diff against it would count the base branch's own later commits.
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 2
       - name: 'Check for unapproved changes to the gates'
         shell: bash
         env:
-          BASE: ${{ github.event.pull_request.base.sha }}
           APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'gate-change-approved') }}
         run: |
           guarded=$(
-            git diff --name-only "$BASE" HEAD -- \
+            git diff --name-only HEAD^1 HEAD -- \
               'perf/baseline/' \
               'soak/baseline/' \
               'rust/dialog-perf/src/compare.rs' \
               'rust/dialog-soak/src/compare.rs' \
               '.github/workflows/test.yml'
-            git diff --name-only --diff-filter=MDR "$BASE" HEAD -- \
+            git diff --name-only --diff-filter=MDR HEAD^1 HEAD -- \
               '.github/workflows/baseline-guard.yml'
           )
           if [ -z "$guarded" ]; then
