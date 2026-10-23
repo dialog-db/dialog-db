@@ -32,7 +32,6 @@
 
 use dialog_effects::blob::Read as BlobRead;
 use std::collections::{BTreeSet, HashMap};
-use std::mem;
 use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
@@ -427,28 +426,21 @@ fn rule_records(changes: &Changes) -> Changes {
 /// `changes`, as the transients they are. A retract of one has nothing
 /// durable to remove and is dropped.
 fn take_transient(changes: &mut Changes, placements: &Placements) -> Changes {
-    let mut kept = Changes::new();
-    let mut taken = Changes::new();
-    for instruction in mem::take(changes).into_instructions() {
-        let transient = match &instruction {
-            Instruction::Assert(a, _) | Instruction::Retract(a) => placements.is_transient(&a.the),
-        };
-        let into = if transient { &mut taken } else { &mut kept };
-        // Each write moves as written, in its cell's order: the batch
-        // is already settled, and associating it afresh would fold a
-        // `last` write into the next one as if nothing stood between.
-        match instruction {
-            Instruction::Assert(a, pick) => {
-                into.put_cell(a.the, a.of, vec![Change::Assert(a.is, pick)]);
-            }
-            Instruction::Retract(a) if !transient => {
-                into.put_cell(a.the, a.of, vec![Change::Retract(a.is)]);
-            }
-            Instruction::Retract(_) => {}
+    // Each cell moves as written, in its order: the batch is already
+    // settled, and associating it afresh would fold a `last` write into
+    // the next one as if nothing stood between.
+    let taken = changes.take_cells(|the| placements.is_transient(the));
+    if taken.is_empty() {
+        return taken;
+    }
+    // A transient is never held, so a retraction of one retracts nothing.
+    let mut asserted = Changes::new();
+    for instruction in taken.into_instructions() {
+        if let Instruction::Assert(a, pick) = instruction {
+            asserted.put_cell(a.the, a.of, vec![Change::Assert(a.is, pick)]);
         }
     }
-    *changes = kept;
-    taken
+    asserted
 }
 
 /// Whether a rule's conclusion is transient attributes alone: its

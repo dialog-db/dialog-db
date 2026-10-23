@@ -66,8 +66,8 @@ use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    ArtifactSelector, ArtifactView, Change, Changes, DialogArtifactsError, Entity, Instruction,
-    Pick, Relation, Statement, Update, Value,
+    ArtifactSelector, ArtifactView, Change, Changes, DialogArtifactsError, Entity, Pick, Relation,
+    Statement, Update, Value,
 };
 use dialog_query::the;
 use futures_util::TryStreamExt as _;
@@ -478,7 +478,13 @@ impl Placements {
         if !staged.has_successions() {
             return Ok(HashSet::new());
         }
-        let declared = Self::resolve(source, &staged.export(), env).await?;
+        // Only the batch's own declarations bear on where a write lands,
+        // so only their cells are exported to resolve against.
+        let (scope, default, transient) =
+            (scope_attr(), default_attr(), transient_placement_attr());
+        let declarations =
+            staged.export_cells(|the| *the == scope || *the == default || *the == transient);
+        let declared = Self::resolve(source, &declarations, env).await?;
         Ok(staged
             .log()
             .iter()
@@ -491,17 +497,20 @@ impl Placements {
 
     pub(crate) fn partition(
         &self,
-        changes: Changes,
+        mut changes: Changes,
         bindings: &Bindings,
     ) -> Result<Partitioned, CommitError> {
-        let mut tree = Changes::new();
-        let mut session = Changes::new();
+        // Every attribute is routed once, before anything moves, so an
+        // unbound scope fails the batch whole. A batch with nothing bound
+        // for the session store goes to the tree as it is.
         let default = self.default_scope();
-        for instruction in changes.into_instructions() {
-            let attribute = match &instruction {
-                Instruction::Assert(a, _) | Instruction::Retract(a) => a.the.clone(),
-            };
-            let target = match self.scope_of(&attribute) {
+        let mut session: HashSet<Relation> = HashSet::new();
+        let mut routed: HashSet<&Relation> = HashSet::new();
+        for (_, attribute, _) in changes.iter() {
+            if !routed.insert(attribute) {
+                continue;
+            }
+            let target = match self.scope_of(attribute) {
                 None => Target::Tree,
                 Some(scope) if Some(scope) == default => Target::Tree,
                 Some(scope) => match bindings.target(scope) {
@@ -514,20 +523,22 @@ impl Placements {
                     }
                 },
             };
-            let into = match target {
-                Target::Tree => &mut tree,
-                Target::Session => &mut session,
-            };
-            // Each write moves as written, in its cell's order, as
-            // `take_transient` moves a transaction's transients.
-            match instruction {
-                Instruction::Assert(a, pick) => {
-                    into.put_cell(a.the, a.of, vec![Change::Assert(a.is, pick)]);
-                }
-                Instruction::Retract(a) => into.put_cell(a.the, a.of, vec![Change::Retract(a.is)]),
+            if target == Target::Session {
+                session.insert(attribute.clone());
             }
         }
-        Ok(Partitioned { tree, session })
+        drop(routed);
+        // Each cell moves as written, in its order, as `take_transient`
+        // moves a transaction's transients.
+        let session = if session.is_empty() {
+            Changes::new()
+        } else {
+            changes.take_cells(|the| session.contains(the))
+        };
+        Ok(Partitioned {
+            tree: changes,
+            session,
+        })
     }
 }
 

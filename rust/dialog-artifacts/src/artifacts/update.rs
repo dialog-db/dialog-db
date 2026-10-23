@@ -641,6 +641,31 @@ impl Changes {
         changes
     }
 
+    /// Take out every cell whose attribute `selects` accepts, each with its
+    /// changes as recorded, in order, and return them as a batch of their
+    /// own. Asset changes stay. A batch none of whose attributes is
+    /// selected is left as it is, and nothing is allocated for it.
+    pub fn take_cells<F: FnMut(&Relation) -> bool>(&mut self, mut selects: F) -> Changes {
+        let mut taken = Changes::new();
+        self.facts.retain(|entity, attributes| {
+            let mut moved: Option<HashMap<Relation, Vec<Change>>> = None;
+            attributes.retain(|attribute, changes| {
+                if !selects(attribute) {
+                    return true;
+                }
+                moved
+                    .get_or_insert_with(HashMap::new)
+                    .insert(attribute.clone(), take(changes));
+                false
+            });
+            if let Some(moved) = moved {
+                taken.facts.insert(entity.clone(), moved);
+            }
+            !attributes.is_empty()
+        });
+        taken
+    }
+
     /// Record `changes` for one cell, after whatever the cell holds, in
     /// the order given.
     pub fn put_cell(&mut self, the: Relation, of: Entity, changes: Vec<Change>) {
