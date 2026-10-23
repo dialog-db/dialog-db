@@ -458,6 +458,7 @@ where
             }],
             storage,
             false,
+            false,
         )
         .await
     }
@@ -478,6 +479,7 @@ where
                 op: NoveltyOp::Retract,
             }],
             storage,
+            false,
             false,
         )
         .await
@@ -506,7 +508,7 @@ where
             // root's stored buffers settle when a write next loads it.)
             HitchhikerRoot::Empty | HitchhikerRoot::Unloaded(_) => return Ok(self),
             HitchhikerRoot::Loaded(_) => {
-                self = self.write_with(Vec::new(), storage, true).await?;
+                self = self.write_with(Vec::new(), storage, true, false).await?;
             }
         }
         let threshold = match self.publish_threshold {
@@ -514,7 +516,7 @@ where
             None => publish_threshold(&Self::format(&self.manifest)?),
         };
         if self.root_weight()? > threshold {
-            self = self.write_draining_root(storage).await?;
+            self = self.write_with(Vec::new(), storage, true, true).await?;
         }
         Ok(self)
     }
@@ -545,38 +547,21 @@ where
     where
         Env: Provider<LoadBlock> + ConditionalSync,
     {
-        self.write_with(msgs, storage, true).await
+        self.write_with(msgs, storage, true, false).await
     }
 
     /// [`write`](Self::write) with the flush policy made optional: `settle`
     /// false routes the ops and returns (deferred batch writing), true is
     /// the classic behavior. Leaf-bound ops (an empty or segment-rooted
     /// tree, the `Immediate` policy) always go to the canonical edit path
-    /// immediately — a leaf has no buffer to defer into.
+    /// immediately — a leaf has no buffer to defer into. `drain_root` makes
+    /// the root shed every link buffer regardless of its caps: the publish
+    /// flush (see [`settle`](Self::settle)), a settle pass with no ops.
+    ///
+    /// One function rather than a wrapper per mode: this future is the
+    /// write path's largest, and every async layer around it is one more
+    /// move of it per write.
     async fn write_with<Env>(
-        self,
-        msgs: Vec<NoveltyEntry<Value>>,
-        storage: &Env,
-        settle: bool,
-    ) -> Result<Self, DialogSearchTreeError>
-    where
-        Env: Provider<LoadBlock> + ConditionalSync,
-    {
-        self.write_inner(msgs, storage, settle, false).await
-    }
-
-    /// A settle pass that sheds every root link buffer one level, whatever
-    /// the root's weight: the publish flush (see [`settle`](Self::settle)).
-    async fn write_draining_root<Env>(self, storage: &Env) -> Result<Self, DialogSearchTreeError>
-    where
-        Env: Provider<LoadBlock> + ConditionalSync,
-    {
-        self.write_inner(Vec::new(), storage, true, true).await
-    }
-
-    /// [`write_with`](Self::write_with), with `drain_root` making the root
-    /// shed every link buffer regardless of its caps.
-    async fn write_inner<Env>(
         mut self,
         msgs: Vec<NoveltyEntry<Value>>,
         storage: &Env,
