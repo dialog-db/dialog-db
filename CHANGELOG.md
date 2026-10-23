@@ -14,6 +14,29 @@ says how to cut a release.
 
 ## Unreleased
 
+### A persisted node's bytes can be attributed to what they carry
+
+[#634](https://github.com/dialog-db/dialog-db/pull/634), for
+[#632](https://github.com/dialog-db/dialog-db/issues/632)
+
+`PersistentNode::attribution` reports where a node frame's bytes go: the
+prelude, the link hashes, separators and scales of an index, and its
+entries' keys, values and polarity, next to the weight the pacing metered
+for the same entries and a share per key layout. The perf matrix gains
+`first-query`: a replica that adopted a head by root, two hundred
+one-commit origins deep, runs one point query, and the gate holds the
+blocks and bytes it reads and the root frame's bytes.
+
+What this changes for you:
+
+- A new method on `PersistentNode` and a new `FrameAttribution` type in
+  `dialog-search-tree`. Nothing existing moves.
+- Nothing stored or synced changes.
+
+Why: the root a replica's first query reads carries the write buffer the
+history's commits left in it, and choosing a policy for what a published
+root may cost needs the bytes attributed and the shape in the gate first.
+
 ### A head carries no causal context, and its tree carries all of it
 
 [#625](https://github.com/dialog-db/dialog-db/pull/625)

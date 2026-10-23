@@ -24,7 +24,7 @@ pub fn run(scenario: &str, size: Option<usize>) -> Result<Report> {
     let mut prepared = runtime
         .block_on(spec.prepare(size))
         .with_context(|| format!("preparing {scenario}"))?;
-    let before = counters.snapshot(prepared.env().tally());
+    let before = counters.snapshot(prepared.env());
     prepared.env().mark("measure");
 
     let started = Instant::now();
@@ -33,7 +33,7 @@ pub fn run(scenario: &str, size: Option<usize>) -> Result<Report> {
     let elapsed = started.elapsed();
     let outcome = outcome.with_context(|| format!("measuring {scenario}"))?;
 
-    let after = counters.snapshot(prepared.env().tally());
+    let after = counters.snapshot(prepared.env());
     eprintln!("{scenario} (size {size}): measured phase {elapsed:?}");
     Ok(Report {
         scenario: scenario.to_string(),

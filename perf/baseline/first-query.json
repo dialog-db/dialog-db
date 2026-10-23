@@ -1,0 +1,24 @@
+{
+  "scenario": "first-query",
+  "size": 200,
+  "profile": "release",
+  "outcome": {
+    "rows": 1
+  },
+  "counters": {
+    "archive.get": 3,
+    "archive.get.bytes": 152792,
+    "archive.get.root.bytes": 58256,
+    "archive.put": 0,
+    "archive.put.bytes": 0,
+    "span.apply_batch_reusing": 0,
+    "span.buffer_records": 0,
+    "span.commit": 0,
+    "span.resolve_bundle": 1,
+    "span.resolve_rules": 1,
+    "span.seal_batch": 0,
+    "span.settle": 0,
+    "span.write_instructions": 0
+  },
+  "instructions": 2066634
+}
