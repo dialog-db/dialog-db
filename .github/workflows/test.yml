@@ -142,48 +142,6 @@ jobs:
           path: 'target/perf-delta'
           if-no-files-found: ignore
 
-  # TEMPORARY (#653), reverted before merge: eight identical perf sweeps
-  # of one head, each on its own runner, to measure how instruction
-  # counts spread within and across runner CPU models.
-  perf_spread:
-    name: 'Perf spread (${{ matrix.replica }})'
-    needs: ['lint_nix']
-    if: github.event_name == 'pull_request'
-    runs-on: 'ubuntu-latest'
-    strategy:
-      fail-fast: false
-      matrix:
-        replica: [1, 2, 3, 4, 5, 6, 7, 8]
-    steps:
-      - uses: cisagov/action-disable-apparmor@v1
-      - uses: actions/checkout@v4
-      - uses: wimpysworld/nothing-but-nix@main
-        with:
-          root-safe-haven: '16384'
-      - uses: cachix/install-nix-action@v31
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
-      - uses: cachix/cachix-action@v16
-        with:
-          name: tonk-ops
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-      - name: 'Run the sweep'
-        shell: bash
-        run: |
-          sudo mkdir -p /nix/cargo
-          sudo chown "$(id -u):$(id -g)" /nix/cargo
-          nix develop \
-            --accept-flake-config \
-            --set-env-var CARGO_HOME /nix/cargo \
-            --command perf:sweep
-      - name: 'Upload the sweep'
-        uses: actions/upload-artifact@v4
-        with:
-          name: 'perf-spread-${{ matrix.replica }}'
-          path: |
-            target/perf-current/*.json
-            target/perf-current/runner.txt
-
   # What a replica pays to join (rust/dialog-soak): the join scenario
   # over the unshaped `none` network profile, whose request counts are
   # deterministic protocol shape, gated against soak/baseline. The
