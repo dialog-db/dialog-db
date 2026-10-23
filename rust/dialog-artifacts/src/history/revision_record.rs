@@ -169,18 +169,33 @@ impl RevisionRecord {
     /// the query planner to learn per-attribute index availability;
     /// until then both query shapes must be served.)
     ///
-    /// `manifest` is the target tree's format: the record's value rides its key
-    /// through the inline-vs-spill decision, so a read must use the same
-    /// manifest to find it. Under a manifest whose `inline_n` is below the
-    /// record's size the value spills, and the result carries the block to
-    /// store beside the tree.
+    /// The record's value always spills: each key carries the
+    /// order-preserving prefix of the record's bytes and the whole-value
+    /// hash, and the bytes are the block in the result's `spill`, which
+    /// the write paths store beside the tree. A record is never small
+    /// (two DIDs, its parents, a signature, and a skip list that grows
+    /// with the logarithm of the edition), so under the default
+    /// `inline_n` it rode inline at 600 to 800 bytes per key, twice per
+    /// commit, and was most of what a commit added to the root and to the
+    /// leaves it flushed into (issue #636). Spilling by rule rather than
+    /// past a size keeps the key at about a quarter of that whatever the
+    /// edition, and gives readers one rule instead of a threshold that
+    /// flips as the skip list grows. Records written before this rule
+    /// are inline, and every reader accepts both forms
+    /// ([`ArtifactTreeExt::select_record`](crate::tree::ArtifactTreeExt::select_record)
+    /// resolves a key's value inline or through its block); nothing
+    /// rewrites them.
+    ///
+    /// `manifest` is the target tree's format: the key's value prefix is
+    /// `spill_prefix` bytes wide and its type byte is the tree's band, so a
+    /// read must use the same manifest to find the record.
     pub fn entries(&self, manifest: &Manifest) -> Result<RecordEntries, DialogArtifactsError> {
         let version = self.version();
         let artifact = self.to_artifact(&version)?;
 
         // Only the EAV and AEV orderings are written (see above), so the VAE
         // key this builds is dropped.
-        let encoded = EncodedValue::new(&artifact.is, manifest);
+        let encoded = EncodedValue::spilled(&artifact.is, manifest);
         let (entity_key, attribute_key, _) =
             artifact_index_keys_with(&artifact, encoded.value_type, encoded.payload);
         let mut datum = Datum::for_artifact(&artifact);
@@ -232,7 +247,8 @@ pub struct RecordEntries {
     /// The tree entries.
     pub entries: Vec<(Key, State<Datum>)>,
     /// A spilled value's block: the reference its keys carry and the raw
-    /// value bytes stored under it. `None` when every value stays inline.
+    /// value bytes stored under it. Always `Some` for a revision record's
+    /// entries; `None` when every value stays inline.
     pub spill: Option<(dialog_storage::Blake3Hash, Vec<u8>)>,
 }
 

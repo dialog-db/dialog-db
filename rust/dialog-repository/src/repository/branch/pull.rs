@@ -833,9 +833,9 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     Vec::new(),
                 );
                 record.signature = Attest::new(record.payload()?).perform(env).await?;
-                // The record's key carries its value through the tree's own
-                // inline-vs-spill threshold, so read it off the tree rather
-                // than assuming the default.
+                // The record's key carries the tree's own spilled-prefix
+                // width and type band, so read the manifest off the tree
+                // rather than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
                 // The merged head's context is the union of both sides' plus
                 // its own version. The stitched tree's
@@ -1012,9 +1012,9 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     Vec::new(),
                 );
                 record.signature = Attest::new(record.payload()?).perform(env).await?;
-                // The record's key carries its value through the tree's own
-                // inline-vs-spill threshold, so read it off the tree rather
-                // than assuming the default.
+                // The record's key carries the tree's own spilled-prefix
+                // width and type band, so read the manifest off the tree
+                // rather than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
                 // The merged head's context is the union of both sides' plus
                 // its own version. The merged tree started as
@@ -1221,9 +1221,9 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 let mut record =
                     RevisionRecord::create(&revision, authority.profile(), parents, Vec::new());
                 record.signature = Attest::new(record.payload()?).perform(env).await?;
-                // The record's key carries its value through the tree's own
-                // inline-vs-spill threshold, so read it off the tree rather
-                // than assuming the default.
+                // The record's key carries the tree's own spilled-prefix
+                // width and type band, so read the manifest off the tree
+                // rather than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
                 // The minted head publishes its watermark: the merged
                 // context plus its own version, its active set signed with

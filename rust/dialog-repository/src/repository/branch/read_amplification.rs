@@ -30,7 +30,15 @@ use dialog_artifacts::{ArchiveDelta, Artifact, Instruction, Value};
 
 use crate::RepositoryExt as _;
 use crate::helpers::{Counting, prune_unreachable as prune};
-use dialog_peer::helpers::{test_session_with_peer, unique_name};
+use dialog_peer::helpers::{Metered, Tally, test_session_with_peer, unique_name};
+
+/// A counting environment over `inner`, with the tally that meters the
+/// bytes of every archive block read through it. `Counting` counts the
+/// reads; the tally weighs them, beneath every cache the branch keeps.
+fn counting<P>(inner: P) -> (Counting<Metered<P>>, Tally) {
+    let tally = Tally::default();
+    (Counting::new(Metered::new(inner, tally.clone())), tally)
+}
 
 /// How many setup commits a fixture runs between prunes of its store.
 ///
@@ -92,6 +100,7 @@ struct Sample {
     depth: usize,
     scenario: String,
     block_reads: u64,
+    bytes_read: usize,
     effects: u64,
     millis: u128,
 }
@@ -99,8 +108,8 @@ struct Sample {
 impl Sample {
     fn row(&self) -> String {
         format!(
-            "| {:>6} | {:<34} | {:>11} | {:>7} | {:>8} |",
-            self.depth, self.scenario, self.block_reads, self.effects, self.millis
+            "| {:>6} | {:<34} | {:>11} | {:>10} | {:>7} | {:>8} |",
+            self.depth, self.scenario, self.block_reads, self.bytes_read, self.effects, self.millis
         )
     }
 }
@@ -141,18 +150,20 @@ async fn routed_label(branch: &crate::Branch, upstream: &crate::Branch) -> &'sta
     }
 }
 
-/// One measured operation: reset the tally, run, record reads/effects
-/// and wall time.
+/// One measured operation: reset the counts, run, record reads (blocks
+/// and bytes), effects and wall time.
 macro_rules! measured {
-    ($samples:expr, $env:expr, $depth:expr, $name:expr, $op:expr) => {{
+    ($samples:expr, $env:expr, $tally:expr, $depth:expr, $name:expr, $op:expr) => {{
         let scenario = String::from($name);
         $env.reset();
+        let bytes_before = $tally.read_bytes();
         let started = Instant::now();
         let outcome = $op;
         $samples.push(Sample {
             depth: $depth,
             scenario,
             block_reads: $env.block_reads(),
+            bytes_read: $tally.read_bytes() - bytes_before,
             effects: $env.snapshot().values().sum(),
             millis: started.elapsed().as_millis(),
         });
@@ -162,7 +173,7 @@ macro_rules! measured {
 
 async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
-    let env = Counting::new(operator);
+    let (env, tally) = counting(operator);
     let repo = profile
         .space(unique_name("bench"))
         .open()
@@ -188,6 +199,7 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
     measured!(
         samples,
         env,
+        tally,
         depth,
         "initial pull (adopt all)",
         feature.pull().perform(&env).await?
@@ -197,6 +209,7 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
     measured!(
         samples,
         env,
+        tally,
         depth,
         "no-op tick",
         feature.pull().perform(&env).await?
@@ -210,6 +223,7 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
     measured!(
         samples,
         env,
+        tally,
         depth,
         "fast-forward (1 commit)",
         feature.pull().perform(&env).await?
@@ -226,6 +240,7 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
     measured!(
         samples,
         env,
+        tally,
         depth,
         "merge (both sides moved)",
         feature.pull().perform(&env).await?
@@ -239,6 +254,7 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
     measured!(
         samples,
         env,
+        tally,
         depth,
         "context_of alone",
         context_of(&head.version(), &history).await?
@@ -254,7 +270,7 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
 /// for, and the row that shows whether it is doing its job.
 async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
-    let env = Counting::new(operator);
+    let (env, tally) = counting(operator);
     let repo = profile
         .space(unique_name("bench"))
         .open()
@@ -308,6 +324,7 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
     measured!(
         samples,
         env,
+        tally,
         depth,
         format!(
             "triangle: adopt alice [{}]",
@@ -320,6 +337,7 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
     measured!(
         samples,
         env,
+        tally,
         depth,
         format!("triangle: bob small [{}]", routed_label(&us, &bob).await),
         us.pull().from(&bob).perform(&env).await?
@@ -338,6 +356,7 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
     measured!(
         samples,
         env,
+        tally,
         depth,
         format!("triangle: bob bulky [{}]", routed_label(&us, &bob).await),
         us.pull().from(&bob).perform(&env).await?
@@ -789,7 +808,7 @@ async fn bump<Env: crate::ResolveEnv>(branch: &crate::Branch, at: usize, env: &E
 /// The block reads of every pull shape, at `origins` one-commit origins
 /// in the history, each pull run from a session of its own that
 /// remembers nothing, as a device that faults blocks in on demand would.
-async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>> {
+async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64, usize)>> {
     let (operator, profile) = test_session_with_peer().await;
     let name = unique_name("shapes");
     let repo = profile
@@ -845,7 +864,7 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>>
                 .space(profile.state())
                 .allow(dialog_capability::Subject::any())
                 .await?;
-            let device = Counting::new(device);
+            let (device, tally) = counting(device);
             let local = profile.space(name.clone()).open().perform(&device).await?;
             let warmup = local
                 .branch(format!("warmup-{session}"))
@@ -861,8 +880,9 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>>
             bump(&warmup, 0, &device).await?;
             let branch = local.branch(label).open().perform(&device).await?;
             device.reset();
+            let bytes_before = tally.read_bytes();
             branch.pull().perform(&device).await?;
-            anyhow::Ok(device.block_reads())
+            anyhow::Ok((device.block_reads(), tally.read_bytes() - bytes_before))
         }
     };
     // A small branch apart from main's history, which each measuring
@@ -877,12 +897,14 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>>
     let mut rows = Vec::new();
 
     follower("no-op").await?;
-    rows.push(("no-op", measure("no-op").await?));
+    let (reads, bytes) = measure("no-op").await?;
+    rows.push(("no-op", reads, bytes));
 
     let held = follower("nothing-new").await?;
     bump(&held, next(), &operator).await?;
     main.pull().from(&held).perform(&operator).await?;
-    rows.push(("nothing-new", measure("nothing-new").await?));
+    let (reads, bytes) = measure("nothing-new").await?;
+    rows.push(("nothing-new", reads, bytes));
 
     // Main takes its head back, so the followers hold a head of main's
     // own origin and main's next commits extend that chain.
@@ -890,11 +912,13 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>>
     follower("ff-same-1").await?;
     follower("ff-same-k").await?;
     bump(&main, next(), &operator).await?;
-    rows.push(("ff same origin, 1 ahead", measure("ff-same-1").await?));
+    let (reads, bytes) = measure("ff-same-1").await?;
+    rows.push(("ff same origin, 1 ahead", reads, bytes));
     for _ in 0..9 {
         bump(&main, next(), &operator).await?;
     }
-    rows.push(("ff same origin, 10 ahead", measure("ff-same-k").await?));
+    let (reads, bytes) = measure("ff-same-k").await?;
+    rows.push(("ff same origin, 10 ahead", reads, bytes));
 
     follower("ff-other-1").await?;
     follower("ff-other-k").await?;
@@ -902,12 +926,14 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>>
     third.pull().from(&main).perform(&operator).await?;
     bump(&third, next(), &operator).await?;
     main.pull().from(&third).perform(&operator).await?;
-    rows.push(("ff other origin, 1 ahead", measure("ff-other-1").await?));
+    let (reads, bytes) = measure("ff-other-1").await?;
+    rows.push(("ff other origin, 1 ahead", reads, bytes));
     for _ in 0..9 {
         bump(&third, next(), &operator).await?;
     }
     main.pull().from(&third).perform(&operator).await?;
-    rows.push(("ff other origin, 10 ahead", measure("ff-other-k").await?));
+    let (reads, bytes) = measure("ff-other-k").await?;
+    rows.push(("ff other origin, 10 ahead", reads, bytes));
 
     let screened = follower("screened").await?;
     let replayed = follower("replay").await?;
@@ -920,12 +946,15 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>>
         bump(&grafted, next(), &operator).await?;
     }
     bump(&main, next(), &operator).await?;
-    rows.push(("screened merge", measure("screened").await?));
+    let (reads, bytes) = measure("screened").await?;
+    rows.push(("screened merge", reads, bytes));
     for _ in 0..(super::pull::SMALL_DIVERGENCE as usize + 2) {
         bump(&main, next(), &operator).await?;
     }
-    rows.push(("replay", measure("replay").await?));
-    rows.push(("graft", measure("graft").await?));
+    let (reads, bytes) = measure("replay").await?;
+    rows.push(("replay", reads, bytes));
+    let (reads, bytes) = measure("graft").await?;
+    rows.push(("graft", reads, bytes));
 
     // Rival merges: two replicas pull each other at once, each minting a
     // merge, and the next pull settles on the greater.
@@ -938,7 +967,8 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64)>>
     into_a.commit(&operator).await?;
     into_b.commit(&operator).await?;
     a.set_upstream(&b).perform(&operator).await?;
-    rows.push(("rival settle", measure("rival-a").await?));
+    let (reads, bytes) = measure("rival-a").await?;
+    rows.push(("rival settle", reads, bytes));
     Ok(rows)
 }
 
@@ -955,8 +985,8 @@ async fn pull_shapes_by_origins() -> Result<()> {
         .into_iter()
         .filter(|n| *n <= cap)
     {
-        for (shape, reads) in measure_pull_shapes(origins).await? {
-            println!("| {origins:>7} | {shape:<26} | {reads:>6} |");
+        for (shape, reads, bytes) in measure_pull_shapes(origins).await? {
+            println!("| {origins:>7} | {shape:<26} | {reads:>6} | {bytes:>10} |");
         }
     }
     Ok(())
@@ -1000,8 +1030,12 @@ async fn read_amplification_by_depth() -> Result<()> {
     }
     measure_shape(*depths.last().expect("at least one depth")).await?;
 
-    println!("| depth  | scenario                           | block reads | effects | wall ms  |");
-    println!("|--------|------------------------------------|-------------|---------|----------|");
+    println!(
+        "| depth  | scenario                           | block reads | bytes read | effects | wall ms  |"
+    );
+    println!(
+        "|--------|------------------------------------|-------------|------------|---------|----------|"
+    );
     for sample in &samples {
         println!("{}", sample.row());
     }

@@ -1118,7 +1118,10 @@ mod tests {
 
     /// A branch holding enough to exercise every channel: ordinary facts,
     /// a value too large to inline (so it spills to its own block), and a
-    /// blob.
+    /// blob. Two commits mint it (the facts, then the asset the blob
+    /// import records), and each commit's revision record spills to a
+    /// block of its own, so the blob channel carries four blobs: the blob,
+    /// the spilled value and the two records.
     async fn stage() -> Result<Stage> {
         let (env, profile) = test_session_with_peer().await;
         let repository = test_repo(&env, &profile).await;
@@ -1174,8 +1177,8 @@ mod tests {
         assert!(!blocks.is_empty(), "the block channel carried the tree");
         assert_eq!(
             blobs.len(),
-            2,
-            "the blob channel carried the blob and the spilled value"
+            4,
+            "the blob channel carried the blob, the spilled value and the two revision records"
         );
         assert!(
             blobs.iter().any(|(_, bytes)| *bytes == stage.blob_bytes),
@@ -1200,8 +1203,8 @@ mod tests {
         Ok(())
     }
 
-    /// An export without assets carries the tree and the spilled value, and
-    /// no byte of the asset that the revision records.
+    /// An export without assets carries the tree, the spilled value and the
+    /// revision records, and no byte of the asset that the revision records.
     #[dialog_common::test]
     async fn it_exports_no_byte_of_an_asset_without_assets() -> Result<()> {
         let stage = stage().await?;
@@ -1217,7 +1220,11 @@ mod tests {
         .await?;
 
         assert!(!blocks.is_empty(), "the block channel carried the tree");
-        assert_eq!(blobs.len(), 1, "the blob channel carried the spilled value");
+        assert_eq!(
+            blobs.len(),
+            3,
+            "the blob channel carried the spilled value and the two revision records"
+        );
         assert!(
             blobs.iter().all(|(_, bytes)| *bytes != stage.blob_bytes),
             "the asset stays where it is"
@@ -1242,7 +1249,10 @@ mod tests {
         let imported = elsewhere.import(items).perform(&destination).await?;
 
         assert!(imported.blocks > 0, "blocks landed");
-        assert_eq!(imported.blobs, 2, "the blob and the spilled value landed");
+        assert_eq!(
+            imported.blobs, 4,
+            "the blob, the spilled value and the two revision records landed"
+        );
 
         let branch = elsewhere
             .branch("main")
@@ -1271,15 +1281,26 @@ mod tests {
         )
         .await?;
 
-        // The legacy shape: the spilled value is a block, and the blob
-        // store holds nothing.
+        // The legacy shape: every spilled value (the large string and the
+        // two revision records) is a block, and the blob store holds
+        // nothing.
+        let large = "spilled".repeat(dialog_search_tree::Manifest::default().inline_n as usize + 1);
         let spills: Vec<Block> = blobs
             .into_iter()
             .filter(|(_, bytes)| *bytes != stage.blob_bytes)
             .map(|(_, bytes)| Block::new(Buffer::from(bytes)))
             .collect();
-        assert_eq!(spills.len(), 1, "the stage spills one value");
-        let spilled = spills[0].digest.clone();
+        assert_eq!(
+            spills.len(),
+            3,
+            "the stage spills one value and two revision records"
+        );
+        let spilled = spills
+            .iter()
+            .find(|block| block.content.as_ref() == large.as_bytes())
+            .expect("the large value is among the spills")
+            .digest
+            .clone();
 
         let destination = destination_for(&stage).await?;
         let legacy = crate::Repository::from(stage.repository.credential().clone());

@@ -14,6 +14,47 @@ says how to cut a release.
 
 ## Unreleased
 
+### A revision record spills its value to its own block
+
+[#637](https://github.com/dialog-db/dialog-db/pull/637), for
+[#636](https://github.com/dialog-db/dialog-db/issues/636)
+
+A commit writes its revision record as a fact on the revision entity in
+the entity- and attribute-ordered indexes. The record's bytes rode in
+both keys, since a record (two DIDs, its parents, a signature and a
+skip list that grows with the logarithm of the edition) always fits the
+tree's inline threshold. Each key now carries the order-preserving
+prefix of the record's first 64 bytes and the record's whole-value
+hash, and the bytes are a content-addressed block stored beside the
+tree, the spilled form every fact over the threshold already takes. A
+record spills by rule, whatever its size.
+
+What this changes for you:
+
+- A commit's two record keys go from 600 to 800 bytes each at depth to
+  about 190, and the record from most of what a one-fact commit adds to
+  the root to under half of it; a leaf of records shrinks by about the
+  same factor. The pull request carries the measurements.
+- A commit writes one more block, the record's, of a few hundred bytes.
+- A path that reads a record it holds no copy of reads that block too:
+  the history reader (`TreeHistory::revision_record`), the ancestry
+  walk (`history::log`, `history::context_of`) and a pull's lineage
+  verification (`history::novelty`) each read one small block per
+  record where they read a leaf of up to 180 kB. A pull that decides
+  from the heads and the context region reads no record and is
+  unchanged.
+- `RecordEntries::spill` is always `Some` for a revision record's
+  entries.
+- Nothing in the record's content, its signature or its version
+  derivation changes.
+
+Why: the record was about 2.2 kB of a one-fact commit's 2.6 kB of root
+buffer and filled leaves of 160 to 180 kB against 30 to 60 kB for
+leaves of ordinary facts, and the root flush policy cannot touch what
+each commit costs, only how many commits the root holds. Spilling by
+rule rather than past a size gives readers one rule instead of a
+threshold that flips as the skip list grows.
+
 ### A head carries no causal context, and its tree carries all of it
 
 [#625](https://github.com/dialog-db/dialog-db/pull/625)
@@ -853,6 +894,16 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- An older replica holds revision records inline in their keys. Nothing
+  is rewritten on upgrade: every reader of records resolves a key's
+  value inline or through its block, so a tree mixing records of both
+  forms reads as one history (`dialog-artifacts/tests/inline_records.rs`
+  pins it against nodes 0.4.0-rc.3 wrote). The previous release reads
+  a record this release writes: its record reader
+  (`ArtifactTreeExt::select_record` at `v0.4.0-rc.3`) already fetches a
+  spilled key's block, as it does for any fact, and its push and pull
+  ship and fetch spilled value blocks of every ordering. Nothing an
+  embedder runs is needed.
 - An older replica holds heads that carry their whole context inline,
   or none, and trees with no context region. Nothing is rewritten on
   upgrade: those heads verify under their own payload shapes and pull as

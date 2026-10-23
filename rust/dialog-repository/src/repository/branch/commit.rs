@@ -841,9 +841,9 @@ where
             RevisionRecord::create(&revision, &profile, parent.into_iter().collect(), skips);
         record.signature = Attest::new(record.payload()?).perform(env).await?;
         debug_assert_eq!(record.version(), version);
-        // The record's key carries its value through the tree's own
-        // inline-vs-spill threshold, so build its entries under the manifest
-        // the batch captured from the tree rather than assuming the default.
+        // The record's key carries the tree's own spilled-prefix width and
+        // type band, so build its entries under the manifest the batch
+        // captured from the tree rather than assuming the default.
         // The entries are appended to the batch's still open buffered tree:
         // they ride the same buffered write as the data, so the record costs
         // a buffer append instead of a second canonical spine-to-leaf edit.
@@ -1496,6 +1496,117 @@ mod history_tests {
         assert_eq!(data.len(), 1);
         assert_eq!(data[0].version, Some(revision.version()));
 
+        Ok(())
+    }
+
+    /// A commit's revision record spills out of its keys: each of its two
+    /// index entries carries the record's whole-value hash, and the bytes
+    /// are a block of their own beside the tree. The record reads back
+    /// through every reader that follows records: the branch's history
+    /// reader and log (the ancestry walk), a puller's lineage verification
+    /// of the head it adopts, and the context derivation.
+    #[dialog_common::test]
+    async fn it_spills_the_revision_record_and_reads_it_back() -> Result<()> {
+        use dialog_artifacts::history::{REVISION_ATTRIBUTE, RevisionRecord, context_of};
+        use dialog_artifacts::tree::{ArtifactTree, fetch_spilled};
+        use dialog_artifacts::{
+            AttributeKey, AttributeKeyPart, EntityKeyPart, Key, KeyViewConstruct, KeyViewMut as _,
+            Relation, State,
+        };
+        use dialog_common::Blake3Hash;
+        use futures_util::StreamExt as _;
+        use std::str::FromStr as _;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let mut heads = Vec::new();
+        for (post, value) in [("post:1", "Hi"), ("post:2", "Hej"), ("post:3", "Hola")] {
+            let head = main
+                .commit(stream::iter(vec![Instruction::Assert(
+                    title(post, value),
+                    dialog_artifacts::Pick::All,
+                )]))
+                .perform(&operator)
+                .await?;
+            heads.push(head);
+        }
+        let head = heads.last().expect("three commits").clone();
+        let version = head.version();
+
+        // The head's record, as the tree stores it: one attribute-ordered
+        // entry on the revision entity, spilled, whose block decodes to a
+        // record that verifies at the head's version.
+        let store = crate::NetworkedIndex::new(&operator, main.archive().index(), None);
+        let tree = ArtifactTree::from_hash(Blake3Hash::from(*head.tree.hash()));
+        let the = Relation::from_str(REVISION_ATTRIBUTE)?;
+        let of = version.entity();
+        let start = <AttributeKey<Key> as KeyViewConstruct>::min()
+            .set_attribute(AttributeKeyPart::from(&the))
+            .set_entity(EntityKeyPart::from(&of))
+            .into_key();
+        let end = <AttributeKey<Key> as KeyViewConstruct>::max()
+            .set_attribute(AttributeKeyPart::from(&the))
+            .set_entity(EntityKeyPart::from(&of))
+            .into_key();
+        let entries: Vec<_> = tree
+            .stream_range(start..=end, &store)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(entries.len(), 1, "one record entry for the head");
+        let entry = &entries[0];
+        assert!(matches!(entry.value, State::Added(_)));
+        assert!(
+            entry.key.value_spill_hash().is_some(),
+            "the record's key carries its whole-value hash"
+        );
+        let bytes = fetch_spilled(&store, &entry.key)
+            .await?
+            .expect("the record's block is stored");
+        let record = RevisionRecord::try_from_bytes(&bytes)?;
+        record.verify(&version)?;
+        assert_eq!(record.parents, vec![heads[1].version()]);
+
+        // The history reader and the ancestry walk.
+        let history = main.history(&operator);
+        assert_eq!(
+            history.revision_record(&version).await?,
+            Some(record.clone())
+        );
+        let log = main.log(&operator, usize::MAX).await?;
+        assert_eq!(
+            log.iter().map(|(version, _)| *version).collect::<Vec<_>>(),
+            heads
+                .iter()
+                .rev()
+                .map(|head| head.version())
+                .collect::<Vec<_>>(),
+            "the log walks the three records newest first"
+        );
+        assert_eq!(log[0].1, record);
+
+        // Lineage verification: a puller lists what the head brings in by
+        // walking its records from the upstream's tree.
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        let prepared = feature.pull().prepare(&operator).await?;
+        let novelty = prepared.novelty(&operator).await?;
+        assert_eq!(
+            novelty.iter().map(|new| new.version).collect::<Vec<_>>(),
+            heads.iter().map(|head| head.version()).collect::<Vec<_>>(),
+            "the puller vouches for every record, ancestors first"
+        );
+        assert_eq!(novelty[2].record, record);
+        prepared.commit(&operator).await?;
+
+        // The context derivation over the adopted head's records.
+        let context = context_of(&version, &feature.history(&operator)).await?;
+        assert_eq!(context.len(), 1);
+        let watermark = context.get(&version.origin).expect("main's origin");
+        assert_eq!(watermark.edition, version.edition);
+        assert_eq!(watermark.count, 3);
         Ok(())
     }
 }

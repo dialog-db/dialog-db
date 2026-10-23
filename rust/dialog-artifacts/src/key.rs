@@ -127,6 +127,24 @@ impl EncodedValue {
                 };
             }
         }
+        Self::spilled(value, manifest)
+    }
+
+    /// Encodes `value` in its spilled form whatever its size: the key carries
+    /// the order-preserving encoding of its first `manifest.spill_prefix` raw
+    /// bytes and its whole-value hash, and the raw bytes are the block to
+    /// store beside the tree.
+    ///
+    /// [`new`](Self::new) spills only a value whose inline encoding exceeds
+    /// `manifest.inline_n`; this is for a value a writer spills by rule
+    /// rather than by size, the revision record
+    /// ([`RevisionRecord::entries`](crate::history::RevisionRecord::entries)).
+    /// A reader that probes for such a value by its bytes must build the
+    /// probe the same way, since the inline form of the same value is a
+    /// different key; the record's readers scan by entity and attribute and
+    /// never probe by value.
+    pub(crate) fn spilled(value: &Value, manifest: &Manifest) -> Self {
+        let value_type = value.data_type().band(manifest.value_encoding);
         let raw = value.to_bytes();
         let take = (manifest.spill_prefix as usize).min(raw.len());
         let mut prefix = Vec::new();

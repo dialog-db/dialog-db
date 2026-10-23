@@ -820,10 +820,11 @@ impl ArtifactTreeExt for ArtifactTree {
         let stream = self.stream_range(search_start..=search_end, &storage);
         tokio::pin!(stream);
 
-        // A revision record is a large CBOR value, so it normally spills: the
-        // key carries only its reference and the bytes live as an archive
-        // block. Reconstruct through the same path a fact scan uses so both
-        // the inline and spilled cases resolve.
+        // A revision record spills by rule (`RevisionRecord::entries`): the
+        // key carries a prefix of its bytes and its reference, and the bytes
+        // live as an archive block. A record written before that rule is
+        // inline. Reconstruct through the same path a fact scan uses so both
+        // forms resolve.
         let mut records = Vec::new();
         while let Some(entry) = stream.next().await {
             let entry = entry?;

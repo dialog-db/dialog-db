@@ -2049,10 +2049,10 @@ async fn it_refuses_forged_revision_records_in_the_tree() -> Result<()> {
     Ok(())
 }
 
-/// A tree whose `inline_n` is below a revision record's size spills the
-/// record out of its key. Writing it stores the value block beside the
-/// tree, history reads the record back through that block, and the pull
-/// merge's revision observer reads its version from it too.
+/// A revision record spills out of its key under every manifest, the
+/// default included. Writing it stores the value block beside the tree,
+/// history reads the record back through that block, and the pull merge's
+/// revision observer reads its version from it too.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
 async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
@@ -2082,17 +2082,14 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
     };
     record.signature = key.sign(&record.payload()?).to_bytes().to_vec();
 
-    let small = Manifest {
-        inline_n: 32,
-        ..Manifest::default()
-    };
-    let entries = record.entries(&small)?;
+    let manifest = Manifest::default();
+    let entries = record.entries(&manifest)?;
     let Some((reference, _)) = entries.spill.clone() else {
-        panic!("a record larger than inline_n spills");
+        panic!("a record spills under the default manifest");
     };
 
     let mut tree: ArtifactTree =
-        PersistentTree::empty_with_manifest(small.clone(), dialog_search_tree::NodeCache::new());
+        PersistentTree::empty_with_manifest(manifest.clone(), dialog_search_tree::NodeCache::new());
     let mut delta = ArchiveDelta::zero();
     tree.record(&store, &mut delta, entries).await?;
     delta.flush_into(&store);
@@ -2104,7 +2101,7 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
     let storage = store.clone();
     let observed = Arc::new(Mutex::new(BTreeSet::new()));
     let empty: ArtifactTree =
-        PersistentTree::empty_with_manifest(small, dialog_search_tree::NodeCache::new());
+        PersistentTree::empty_with_manifest(manifest, dialog_search_tree::NodeCache::new());
     let changes = observe_revisions(
         empty.differentiate(&tree, &storage, &storage),
         observed.clone(),
@@ -2127,6 +2124,220 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
     );
 
     Ok(())
+}
+
+/// The `did:key` of an Ed25519 signing key.
+fn did_key_of(key: &SigningKey) -> String {
+    use base58::ToBase58 as _;
+    let mut bytes = vec![0xed, 0x01];
+    bytes.extend_from_slice(key.verifying_key().as_bytes());
+    format!("did:key:z{}", bytes.to_base58())
+}
+
+/// A chain of `length` signed records by `key` on `branch`, each record's
+/// skips listing every earlier edition, as a long first-parent run's do.
+fn signed_chain(key: &SigningKey, branch: &Entity, length: usize) -> Result<Vec<RevisionRecord>> {
+    use ed25519_dalek::Signer as _;
+    let issuer = did_key_of(key);
+    let mut records = Vec::new();
+    let mut parents: Vec<Version> = Vec::new();
+    let mut skips: Vec<Version> = Vec::new();
+    for _ in 0..length {
+        let mut record = RevisionRecord {
+            format: super::REVISION_RECORD_FORMAT,
+            branch: branch.clone(),
+            issuer: issuer.clone(),
+            authority: "did:web:example.com".to_string(),
+            parents: parents.clone(),
+            skips: skips.clone(),
+            signature: Vec::new(),
+        };
+        record.signature = key.sign(&record.payload()?).to_bytes().to_vec();
+        let version = record.version();
+        skips.insert(0, version);
+        parents = vec![version];
+        records.push(record);
+    }
+    Ok(records)
+}
+
+/// `record`'s entries in the inline form every release through 0.4.0-rc.3
+/// wrote: the record's bytes in the key, decided by size under `manifest`
+/// exactly as any fact's are.
+fn inline_entries(
+    record: &RevisionRecord,
+    manifest: &dialog_search_tree::Manifest,
+) -> Result<super::RecordEntries> {
+    use crate::{Datum, State, artifact_index_keys};
+    let version = record.version();
+    let artifact = record.to_artifact(&version)?;
+    let (entity_key, attribute_key, _) = artifact_index_keys(&artifact, manifest);
+    assert!(
+        entity_key.value_spill_hash().is_none(),
+        "a record fits the default inline_n, so the size rule keeps it inline"
+    );
+    let mut datum = Datum::for_artifact(&artifact);
+    datum.version = Some(version);
+    let added = State::Added(datum);
+    Ok(super::RecordEntries::from(vec![
+        (entity_key, added.clone()),
+        (attribute_key, added),
+    ]))
+}
+
+/// The history reader, the ancestry walk, lineage verification and the
+/// context derivation all read `records` back from `history` as one chain.
+async fn assert_chain_reads(
+    history: &TreeHistory<MemoryBlocks>,
+    store: &MemoryBlocks,
+    records: &[RevisionRecord],
+) -> Result<()> {
+    use super::context_of;
+    let head = records.last().expect("a chain").version();
+    for record in records {
+        assert_eq!(
+            history.revision_record(&record.version()).await?.as_ref(),
+            Some(record),
+            "the history reader finds and verifies {}",
+            record.version()
+        );
+    }
+    let walked = log(&head, history, usize::MAX).await?;
+    assert_eq!(
+        walked.iter().map(|(_, record)| record).collect::<Vec<_>>(),
+        records.iter().rev().collect::<Vec<_>>(),
+        "the ancestry walk lists the chain newest first"
+    );
+    let empty = TreeHistory::new(ArtifactTree::empty(), store.clone());
+    let novel = novelty(&head, history, &empty).await?;
+    assert_eq!(
+        novel.iter().map(|(_, record)| record).collect::<Vec<_>>(),
+        records.iter().collect::<Vec<_>>(),
+        "lineage verification vouches for every record, ancestors first"
+    );
+    let context = context_of(&head, history).await?;
+    assert_eq!(context.len(), 1);
+    let watermark = context.get(&head.origin).expect("the chain's origin");
+    assert_eq!(watermark.edition, head.edition);
+    assert_eq!(watermark.count, records.len() as u64);
+    Ok(())
+}
+
+/// A revision record spills by rule, not by size: under the default
+/// manifest, whose `inline_n` every record fits, both of its keys carry
+/// the spilled form and the block rides with the entries. At the depth
+/// where the skip list has grown, the spilled key is under a third of the
+/// inline one. A chain of such records reads back through every reader.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_spills_revision_records_whatever_their_size() -> Result<()> {
+    use dialog_search_tree::Manifest;
+
+    let store = MemoryBlocks::new();
+    let key = signing_key(11);
+    let branch = Entity::new()?;
+    // Twelve editions: the last record's skips name eleven versions, the
+    // shape of a record a few thousand commits deep.
+    let records = signed_chain(&key, &branch, 12)?;
+    let manifest = Manifest::default();
+
+    let mut tree = ArtifactTree::empty();
+    let mut delta = ArchiveDelta::zero();
+    for record in &records {
+        let entries = record.entries(&manifest)?;
+        let (reference, bytes) = entries.spill.clone().expect("a record spills by rule");
+        assert_eq!(bytes, record.to_bytes()?);
+        assert_eq!(
+            entries.entries.len(),
+            2,
+            "the entity and attribute orderings"
+        );
+        for (key, _) in &entries.entries {
+            assert_eq!(
+                key.value_spill_hash(),
+                Some(reference.as_ref()),
+                "each key carries the record's whole-value hash"
+            );
+        }
+        tree.record(&store, &mut delta, entries).await?;
+    }
+    delta.flush_into(&store);
+
+    let deepest = records.last().expect("a chain");
+    let spilled = deepest.entries(&manifest)?;
+    let inline = inline_entries(deepest, &manifest)?;
+    let spilled_len: usize = spilled.entries.iter().map(|(key, _)| key.len()).sum();
+    let inline_len: usize = inline.entries.iter().map(|(key, _)| key.len()).sum();
+    assert!(
+        spilled_len * 3 <= inline_len,
+        "the spilled keys ({spilled_len} bytes) are under a third of the inline ones ({inline_len})"
+    );
+
+    let history = TreeHistory::new(tree, store.clone());
+    assert_chain_reads(&history, &store, &records).await
+}
+
+/// A tree holding records of both forms, inline ones a previous release
+/// wrote and spilled ones written since, interleaved along one chain,
+/// keeps its entries ordered and reads back through every reader.
+///
+/// This is the in-memory counterpart of `tests/inline_records.rs`, which
+/// reads the inline form off nodes a pre-change writer stored.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_reads_a_tree_mixing_inline_and_spilled_records() -> Result<()> {
+    use crate::{AttributeKey, AttributeKeyPart, Key, KeyViewConstruct, KeyViewMut as _, State};
+    use dialog_search_tree::Manifest;
+    use futures_util::StreamExt as _;
+
+    let store = MemoryBlocks::new();
+    let key = signing_key(12);
+    let branch = Entity::new()?;
+    let records = signed_chain(&key, &branch, 6)?;
+    let manifest = Manifest::default();
+
+    // Editions 0, 1 and 4 inline; 2, 3 and 5 spilled: both orders of the
+    // two forms occur along the chain.
+    let mut tree = ArtifactTree::empty();
+    let mut delta = ArchiveDelta::zero();
+    let inline = [true, true, false, false, true, false];
+    for (record, inline) in records.iter().zip(inline) {
+        let entries = if inline {
+            inline_entries(record, &manifest)?
+        } else {
+            record.entries(&manifest)?
+        };
+        tree.record(&store, &mut delta, entries).await?;
+    }
+    delta.flush_into(&store);
+
+    let the = Relation::from_str(super::REVISION_ATTRIBUTE)?;
+    let start = <AttributeKey<Key> as KeyViewConstruct>::min()
+        .set_attribute(AttributeKeyPart::from(&the))
+        .into_key();
+    let end = <AttributeKey<Key> as KeyViewConstruct>::max()
+        .set_attribute(AttributeKeyPart::from(&the))
+        .into_key();
+    let mut keys: Vec<(Key, bool)> = Vec::new();
+    {
+        let stream = tree.stream_range(start..=end, &store);
+        futures_util::pin_mut!(stream);
+        while let Some(entry) = stream.next().await {
+            let entry = entry?;
+            assert!(matches!(entry.value, State::Added(_)));
+            let spilled = entry.key.value_spill_hash().is_some();
+            keys.push((entry.key, spilled));
+        }
+    }
+    assert_eq!(keys.len(), records.len());
+    assert_eq!(keys.iter().filter(|(_, spilled)| *spilled).count(), 3);
+    assert!(
+        keys.windows(2).all(|pair| pair[0].0 < pair[1].0),
+        "entries of both forms are in strictly increasing key order"
+    );
+
+    let history = TreeHistory::new(tree, store.clone());
+    assert_chain_reads(&history, &store, &records).await
 }
 
 /// `log` lists the revisions reachable from a head, newest first, in

@@ -517,8 +517,8 @@ impl BufferedBatch {
     ///
     /// Record entries must be built under it (see
     /// [`RevisionRecord::entries`](crate::history::RevisionRecord::entries)):
-    /// the record's value rides its key through the tree's own inline-vs-spill
-    /// threshold, not the default.
+    /// the record's key carries the tree's own spilled-prefix width and type
+    /// band, not the default's.
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
     }
