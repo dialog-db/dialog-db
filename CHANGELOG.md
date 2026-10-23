@@ -87,8 +87,13 @@ refuses a region that does not bring it to the count the head signed. A
 commit on a head of its own origin therefore writes nothing to the
 region and reads nothing of it. A commit on another origin's head writes
 two entries: that origin's exact watermark, which the head carries, and
-its own, from one point read of the region; it never reads the region
-whole. A merge writes its own entry and every entry its two sides hold
+its own, one past what the head holds of its origin. The line knows that
+count without the region when it fast-forwarded to the head from its own
+last commit, which is how two writers taking turns meet each other's
+heads, and records it in a replica-local cell when it does; otherwise one
+point read of the region answers, and a pull that adopts a head by root
+hints that entry to the preload queue, so reads made before the first
+commit warm it. A commit never reads the region whole. A merge writes its own entry and every entry its two sides hold
 differently. A pull answers whether our head has seen the upstream's
 from our head's record when the record names it as a parent or skip
 link, so a pull right after a commit on the upstream's head reads
@@ -133,6 +138,10 @@ What this changes for you:
 - A commit no longer remembers the new head's whole context in the
   branch's memo unless it had the parent's there already. The first
   reader that needs the whole map reads the region then.
+- `PreloadQueue::next` returns a `PreloadRange`, either a selector's
+  range or a range of tree keys, and `PreloadQueue::preload_keys` hints
+  the latter. `PreloadQueue::preload` and `PreloadRequest` are
+  unchanged.
 - `Revision::precedence` compares two heads by their contexts only when
   both carry them inline, and orders two heads of one origin exactly by
   edition. Any other pair is answered from editions without reading
@@ -942,6 +951,12 @@ thread multiplies whatever it holds by the size of the thread pool.
   nothing is rewritten, and a reader derives its count from its region.
   A commit on such a head of another origin reads the head's region for
   the count, as those builds did, and the head it mints carries one.
+- A branch gains a replica-local cell, `own`, recording how many of the
+  line's own revisions one head it fast-forwarded to holds. It is never
+  synced and nothing synced changes for it. An older build ignores it:
+  it never reads the cell, and its takeover commits read the region as
+  before. A line whose cell names a head other than its parent, or that
+  has none, reads the region as before.
 - `UcanAddress` encodes an optional `socket`, left out when absent, so an address without one keeps its bytes. An older replica reads an address that names a socket and drops the socket, reaching the peer over requests.
 - Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
 - The socket carries text `ping` and `pong` messages beside its frames. A service's socket must answer `ping` with `pong`, or a client closes the connection every `Liveness::deadline`; no released service has a socket, so none predates this.

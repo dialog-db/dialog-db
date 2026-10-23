@@ -28,8 +28,7 @@ use std::sync::Arc;
 
 use std::task::{Context, Poll};
 
-use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{ArtifactSelector, FetchBudget, Likelihood, PreloadQueue};
+use dialog_artifacts::{FetchBudget, Likelihood, PreloadQueue, PreloadRange};
 use dialog_capability::Provider;
 use dialog_common::ConditionalSync;
 use dialog_effects::archive::Get;
@@ -133,7 +132,7 @@ where
             if !likely_spare && !maybe_spare {
                 return started;
             }
-            let Some((selector, likelihood)) = self.queue.next(likely_spare, maybe_spare) else {
+            let Some((range, likelihood)) = self.queue.next(likely_spare, maybe_spare) else {
                 return started;
             };
             match likelihood {
@@ -147,7 +146,7 @@ where
                     // Warming is advisory: an error ends this source's
                     // walk silently, and the demand read that actually
                     // needs the data owns the failure.
-                    let _ = warm_source(source, fallback, env, &selector, likelihood).await;
+                    let _ = warm_source(source, fallback, env, &range, likelihood).await;
                 }
                 likelihood
             };
@@ -192,7 +191,7 @@ where
     }
 }
 
-/// Replicate every block `selector`'s range can touch on `source`, level
+/// Replicate every block `range` can touch on `source`, level
 /// by level: each depth's whole frontier fetches concurrently, so a cold
 /// range costs tree-depth round trips instead of block-count round trips
 /// (the level-parallel walk `traverse_available_within` already gives
@@ -213,7 +212,7 @@ async fn warm_source(
     source: Source,
     fallback: SharedFallback<'_>,
     env: &Erased,
-    selector: &ArtifactSelector<Constrained>,
+    range: &PreloadRange,
     likelihood: Likelihood,
 ) -> Result<(), DialogSearchTreeError> {
     let Some(root) = source.as_ref().root() else {
@@ -236,9 +235,14 @@ async fn warm_source(
     let storage = store;
     let tree = Index::from_hash_with_cache(NodeHash::from(root), source.as_ref().node_cache());
 
-    let manifest = tree.manifest(&storage).await?;
-    let range = selector_range(selector, &manifest);
-    let scope = [range.start().as_ref().to_vec()..=range.end().as_ref().to_vec()];
+    let scope = match range {
+        PreloadRange::Selector(selector) => {
+            let manifest = tree.manifest(&storage).await?;
+            let range = selector_range(selector, &manifest);
+            [range.start().as_ref().to_vec()..=range.end().as_ref().to_vec()]
+        }
+        PreloadRange::Keys { start, end } => [start.clone()..=end.clone()],
+    };
 
     let visits = tree.traverse_available_within(&storage, &scope);
     futures_util::pin_mut!(visits);
@@ -308,6 +312,8 @@ mod tests {
     use crate::RepositoryExt as _;
     use crate::helpers::{Counting, connect};
     use crate::repository::source::SourceRef;
+    use dialog_artifacts::ArtifactSelector;
+    use dialog_artifacts::selector::Constrained;
     use dialog_artifacts::tree::ArtifactTreeExt as _;
     use dialog_artifacts::{
         ArchiveDelta, Artifact, Entity, Instruction, Preload, PreloadRequest, Speculation, Value,
