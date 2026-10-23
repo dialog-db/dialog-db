@@ -139,14 +139,6 @@ impl Prepared for Commit {
 
     fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
         Box::pin(async move {
-            // TEMPORARY (#653), reverted before merge: about 42M
-            // instructions of busy work, +5% on number-commit, to show the
-            // gate failing against the base.
-            let mut acc = 0u64;
-            for i in 0..4_630_000u64 {
-                acc = std::hint::black_box(acc.wrapping_mul(31).wrapping_add(i));
-            }
-            std::hint::black_box(acc);
             seed_items(&self.env, self.size).await?;
             Ok(Outcome::from([("facts".into(), 4 * self.size as u64)]))
         })
