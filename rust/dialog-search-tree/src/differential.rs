@@ -21,7 +21,7 @@
 //!   source tree (used to upload exactly the missing blocks to a remote).
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use async_stream::try_stream;
 use dialog_capability::Provider;
@@ -892,44 +892,96 @@ where
     /// Removes nodes that are shared between `self` and `other`, keeping
     /// only nodes that differ.
     ///
-    /// Identity is the content hash alone: in a content-addressed canonical
-    /// tree, an equal hash IS the same entries under the same keys, so a
-    /// matched pair contributes nothing to the difference no matter where
-    /// each side's frontier places it (subtrees line up across height
-    /// mismatches, and a subtree whose separator shifted with a neighbor
-    /// edit still prunes). Within one tree, sibling key ranges are disjoint,
-    /// so a hash cannot recur in a frontier and set matching is exact. This
-    /// is the step that realizes the read-frugality contract: matched nodes
-    /// are discarded while still unloaded.
+    /// Identity is the content hash: in a content-addressed canonical tree,
+    /// an equal hash IS the same entries under the same keys, so a matched
+    /// pair contributes nothing to the difference no matter where each
+    /// side's frontier places it (subtrees line up across height mismatches,
+    /// and a subtree whose separator shifted with a neighbor edit still
+    /// prunes). Within one tree, sibling key ranges are disjoint, so a hash
+    /// cannot recur in a frontier and set matching is exact. This is the step
+    /// that realizes the read-frugality contract: matched nodes are discarded
+    /// while still unloaded.
     ///
-    /// A hash alone stops being sufficient once ops can be pending against a
-    /// node: a buffered op changes what a subtree holds without changing the
-    /// hash it was reached by. So a node carrying pending ops never prunes,
-    /// and a node's *own* buffer is accounted for by the fact that it is part
-    /// of the node's bytes and therefore of its hash. It is the ops'
-    /// *difference* that makes a subtree interesting, not their presence: two
-    /// sides carrying the same op reach the same hash and prune exactly as a
-    /// shared flushed subtree does.
+    /// A node's *own* buffer is part of its bytes and so of its hash: two
+    /// nodes with one hash hold the same own ops. Ops *routed* to a node from
+    /// an ancestor's buffer (see [`SparseTreeNode::Pending`]) are not in its
+    /// hash, so a hash alone stops being sufficient once ops are pending: the
+    /// pair also needs the same winning routed ops (per key, the last one,
+    /// as [`winning_ops`] reduces them). With both equal the pair prunes.
+    /// Pruning it is sound for the change stream and for novelty:
+    ///
+    /// - **What a frontier node contributes.** [`SparseTree::stream`] emits,
+    ///   for each frontier node, its stored entries overlaid by the winners
+    ///   among its own buffers (inside the hash) and its routed ops. Routed
+    ///   ops come from shallower nodes, so they are newer than anything the
+    ///   node holds, and a routed winner for a key supersedes whatever the
+    ///   subtree holds for it: an assert shadows the stored entry, a retract
+    ///   hides it (a delete pending over a stored entry), and a key pending at
+    ///   two depths resolves to its shallowest, newest op, routed or own,
+    ///   exactly as a point read and a flush resolve it. So the node's
+    ///   contribution is a function of its hash and its routed winners alone,
+    ///   and two nodes with equal hash and equal routed winners contribute the
+    ///   same entries.
+    /// - **Each key's value comes from one node per side.** Expansion routes an
+    ///   index's ops to exactly one child each, by the same partition a flush
+    ///   uses (child `at` takes `[sep(at), sep(at + 1))`, the leftmost also
+    ///   takes keys below it, the rightmost is open-ended). Stored keys are
+    ///   partitioned among siblings by the same separators. So within one
+    ///   side, every key's logical value is settled inside a single frontier
+    ///   node, and removing a node removes exactly its contribution and nothing
+    ///   another node depends on.
+    /// - **Differing parent separators.** The routed sets are scoped by each
+    ///   side's *parent* separators, which can differ even when the child hash
+    ///   matches (a neighbor edit moved a seam). The comparison is on the sets
+    ///   as routed, not on what each parent would route in principle, so it
+    ///   is conservative: an op one side routed to this child and the other
+    ///   routed to a neighbor makes the two sets unequal, and the pair is kept
+    ///   and descended as before. Only when both sides route the same winners
+    ///   here are the two contributions provably identical. Removing identical
+    ///   contributions from both sides leaves the comparison of everything
+    ///   else unchanged, so the change stream is unchanged.
+    /// - **Novelty.** A pruned target node names a block whose hash the source
+    ///   side also holds, so it is not novel, as for any shared node. The
+    ///   routed ops' bytes live in the ancestor that buffers them, which the
+    ///   walk expanded and records, and which is reported novel unless the
+    ///   source holds that very block.
+    ///
+    /// A settled node stands for ops rather than stored bytes and has no hash,
+    /// so it never prunes.
     fn prune(&mut self, other: &mut Self) {
-        let prunable = |node: &SparseTreeNode<Key, Value>| pending_ops(node).is_empty();
-        let left: HashSet<Blake3Hash> = self
-            .nodes
-            .iter()
-            .filter(|node| prunable(node))
-            .filter_map(|node| node.hash().cloned())
-            .collect();
-        let right: HashSet<Blake3Hash> = other
-            .nodes
-            .iter()
-            .filter(|node| prunable(node))
-            .filter_map(|node| node.hash().cloned())
-            .collect();
-        self.nodes.retain(|node| {
-            !prunable(node) || !node.hash().is_some_and(|hash| right.contains(hash))
+        let hashed = |nodes: &[SparseTreeNode<Key, Value>]| -> HashMap<Blake3Hash, usize> {
+            nodes
+                .iter()
+                .enumerate()
+                .filter_map(|(at, node)| node.hash().map(|hash| (hash.clone(), at)))
+                .collect()
+        };
+        let ours = hashed(&self.nodes);
+        let theirs = hashed(&other.nodes);
+        let mut ours_shared = HashSet::new();
+        let mut theirs_shared = HashSet::new();
+        for (hash, &at) in &ours {
+            let Some(&other_at) = theirs.get(hash) else {
+                continue;
+            };
+            if same_routed_ops(
+                pending_ops(&self.nodes[at]),
+                pending_ops(&other.nodes[other_at]),
+            ) {
+                ours_shared.insert(at);
+                theirs_shared.insert(other_at);
+            }
+        }
+        let mut at = 0;
+        self.nodes.retain(|_| {
+            at += 1;
+            !ours_shared.contains(&(at - 1))
         });
-        other
-            .nodes
-            .retain(|node| !prunable(node) || !node.hash().is_some_and(|hash| left.contains(hash)));
+        let mut at = 0;
+        other.nodes.retain(|_| {
+            at += 1;
+            !theirs_shared.contains(&(at - 1))
+        });
     }
 
     /// Streams the entries of every node remaining in the frontier, in key
@@ -1181,6 +1233,21 @@ fn pending_ops<Key, Value>(node: &SparseTreeNode<Key, Value>) -> &[NoveltyEntry<
         SparseTreeNode::Pending { pending, .. } => pending,
         SparseTreeNode::Settled { ops, .. } => ops,
         SparseTreeNode::Ref(_) => &[],
+    }
+}
+
+/// Whether two op lists routed to one subtree resolve every key alike: the
+/// same winning op per key (see [`winning_ops`]), and no key one side resolves
+/// that the other does not. Two empty lists are the common case and cost
+/// nothing.
+fn same_routed_ops<Value>(ours: &[NoveltyEntry<Value>], theirs: &[NoveltyEntry<Value>]) -> bool
+where
+    Value: Clone + PartialEq,
+{
+    match (ours.is_empty(), theirs.is_empty()) {
+        (true, true) => true,
+        (false, false) => winning_ops(ours) == winning_ops(theirs),
+        _ => false,
     }
 }
 
@@ -1528,7 +1595,27 @@ where
                         target_idx += 1;
                     }
                     Ordering::Equal => {
-                        if source.nodes[source_idx].hash() != target.nodes[target_idx].hash() {
+                        let source_hash = source.nodes[source_idx].hash();
+                        if source_hash.is_some() && source_hash == target.nodes[target_idx].hash() {
+                            // The same subtree on both sides, kept by `prune`
+                            // because the ops routed to it differ. Its stored
+                            // content is shared, so the difference is wherever
+                            // those ops land: expand both sides, routing them
+                            // one level down by the same partition, so each
+                            // child pair prunes on the next pass unless its own
+                            // routed ops differ. Left unexpanded, the entry
+                            // walk would read the whole subtree on both sides.
+                            // Expanding one block reads it once per side; a
+                            // segment just loads in place and the entry walk
+                            // compares it.
+                            let source_expanded = source.expand_at(&source_bound).await?;
+                            let target_expanded = target.expand_at(&target_bound).await?;
+                            if source_expanded || target_expanded {
+                                expanded = true;
+                                break;
+                            }
+                        } else if source.nodes[source_idx].hash() != target.nodes[target_idx].hash()
+                        {
                             // Two nodes that differ *only* in their buffers hold
                             // identical stored content, so their whole difference
                             // is the two op sets and nothing below is worth
@@ -5622,6 +5709,299 @@ mod tests {
         assert!(
             changes.is_empty(),
             "both sides resolve k to v2 in the other direction too, got {changes:?}"
+        );
+        Ok(())
+    }
+
+    /// Two trees whose roots buffer the same ops, spread across the whole
+    /// key space, differ by one more buffered op on one side: the
+    /// difference is that op, and the walk reads only the path to it.
+    ///
+    /// A root's leftmost separator is empty, so the buffered fast path never
+    /// applies at a root: both roots are expanded, and their buffers' ops are
+    /// routed down to the children. Every child carries the same hash and
+    /// the same routed ops on both sides except the one the extra op lands
+    /// in, so every other child is shared and must prune unread. Reads and
+    /// novel nodes are bounded by the tree's height, not by how many
+    /// children the shared ops reach (#662).
+    #[dialog_common::test]
+    async fn it_prunes_subtrees_both_sides_route_the_same_ops_to() -> Result<()> {
+        let mut storage = CountingBackend::new();
+        // A small segment target, so the base branches into many leaves under
+        // several levels of index: the shared ops must reach many children
+        // for the over-descent to show.
+        let manifest = Manifest {
+            max_segment: 512,
+            frame_ceiling_factor: 0,
+            ..Manifest::default()
+        };
+        let base = build_with_manifest(
+            (0..4_000u32).map(|i| (i, vec![i as u8])),
+            manifest,
+            &mut storage,
+        )
+        .await?;
+        let shared_ops: Vec<(bool, u32, Vec<u8>)> =
+            (0..200u32).map(|i| (true, i * 20 + 1, vec![7])).collect();
+        let shared = buffered(&base, &shared_ops, 1_000_000, &mut storage).await?;
+        let extended =
+            buffered(&shared, &[(true, 1_999, vec![9])], 1_000_000, &mut storage).await?;
+        assert_ne!(shared.root(), extended.root());
+
+        let mut height = 0usize;
+        let mut walk = Some(shared.root().clone());
+        while let Some(hash) = walk.take() {
+            height += 1;
+            let node = crate::PersistentNode::<[u8; 4], Vec<u8>>::try_from(
+                storage.get(&hash).expect("a stored node"),
+            )?;
+            if let crate::NodeBody::Index(index) = node.body() {
+                walk = Some(index.hash_at(0)?.clone());
+            }
+        }
+        assert!(
+            height >= 3,
+            "the base must be deep enough to route below the root's children: {height}"
+        );
+
+        storage.reset();
+        let changes = collect_changes(&shared, &extended, &storage).await?;
+        let reads = storage.reads();
+        assert_eq!(
+            normalize(&changes),
+            BTreeMap::from([(1_999u32.to_le_bytes(), (true, vec![9]))]),
+            "the one extra op is the whole difference"
+        );
+
+        let difference = TreeDifference::compute(&shared, &extended, &storage, &storage).await?;
+        let nodes = difference.novel_nodes();
+        futures_util::pin_mut!(nodes);
+        let mut novel = 0usize;
+        while let Some(node) = nodes.next().await {
+            node?;
+            novel += 1;
+        }
+        eprintln!("height {height}: {reads} reads, {novel} novel nodes");
+        assert!(
+            reads <= 2 * height,
+            "the walk reads the two paths to the extra op, not every child the shared ops reach: \
+             {reads} reads at height {height}"
+        );
+        assert!(
+            novel <= height,
+            "only the extended root is new, with whatever of the path the walk opened: {novel} novel nodes"
+        );
+        Ok(())
+    }
+
+    /// Every block reachable from `root` in `storage`, root first.
+    fn reachable(root: &Blake3Hash, storage: &CountingBackend) -> Result<Vec<Buffer>> {
+        let mut blocks = Vec::new();
+        let mut pending = vec![root.clone()];
+        while let Some(hash) = pending.pop() {
+            let buffer = storage.get(&hash).expect("a reachable block is stored");
+            let node = crate::PersistentNode::<[u8; 4], Vec<u8>>::try_from(buffer.clone())?;
+            if let crate::NodeBody::Index(index) = node.body() {
+                for at in 0..index.len() {
+                    pending.push(index.hash_at(at)?.clone());
+                }
+            }
+            blocks.push(buffer);
+        }
+        Ok(blocks)
+    }
+
+    /// How many levels `tree` has along its leftmost path.
+    fn height(tree: &TestTree, storage: &CountingBackend) -> Result<usize> {
+        let mut levels = 0;
+        let mut walk = Some(tree.root().clone());
+        while let Some(hash) = walk.take() {
+            levels += 1;
+            let node = crate::PersistentNode::<[u8; 4], Vec<u8>>::try_from(
+                storage.get(&hash).expect("a stored node"),
+            )?;
+            if let crate::NodeBody::Index(index) = node.body() {
+                walk = Some(index.hash_at(0)?.clone());
+            }
+        }
+        Ok(levels)
+    }
+
+    /// **The pruning oracle.** Random trees with random buffered ops, the
+    /// shared ones held under divergent flush histories on the two sides:
+    /// the difference must equal the one point reads of every key give,
+    /// read by nothing the differential uses, and the novel nodes must let a
+    /// store holding only the source's blocks read the whole target.
+    ///
+    /// This is what makes pruning a pair by its hash and its routed ops safe
+    /// (#662): a wrong prune drops a change, which the materialized
+    /// comparison catches, or drops a block, which the restore catches. Each
+    /// case draws a segment size and a base size that put the tree at two to
+    /// five levels, so cases land on both sides of a depth boundary, and
+    /// draws per side whether the shared ops stay in the root's buffer,
+    /// cascade part of the way, or flush to the leaves.
+    #[dialog_common::test]
+    async fn it_matches_a_materialized_difference_under_divergent_flush_history() -> Result<()> {
+        // `DIALOG_DIFF_ORACLE_CASES` runs more for a longer local soak.
+        let cases: u64 = std::env::var("DIALOG_DIFF_ORACLE_CASES")
+            .ok()
+            .and_then(|cases| cases.parse().ok())
+            .unwrap_or(240);
+        let mut heights: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        let mut shared_structure = 0usize;
+        for seed in 0..cases {
+            let mut rng = 0xD1B5_4A32_D192_ED03u64 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut next = move || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 32) as u32
+            };
+            let mut storage = CountingBackend::new();
+            let manifest = Manifest {
+                max_segment: [256u32, 512, 2_048][next() as usize % 3],
+                frame_ceiling_factor: 0,
+                ..Manifest::default()
+            };
+            let base_size = 100 + next() % 3_000;
+            let keyspace = base_size + 300;
+            let base = build_with_manifest(
+                (0..base_size).map(|i| (i, vec![(i % 251) as u8])),
+                manifest,
+                &mut storage,
+            )
+            .await?;
+
+            let ops = |count: u32, next: &mut dyn FnMut() -> u32| {
+                (0..count)
+                    .map(|_| {
+                        let insert = !next().is_multiple_of(3);
+                        (insert, next() % keyspace, vec![(next() % 251) as u8])
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let buffer_size =
+                |next: &mut dyn FnMut() -> u32| [1usize, 8, 64, 1_000_000][next() as usize % 4];
+            let shared_ops = ops(next() % 150, &mut next);
+            let source_ops = ops(next() % 4, &mut next);
+            // A quarter of the cases give the target enough ops to split
+            // nodes when they flush, so its height can differ from the
+            // source's and the frontiers must line up across heights.
+            let target_count = if next().is_multiple_of(4) {
+                base_size / 2 + next() % (base_size * 2)
+            } else {
+                1 + next() % 8
+            };
+            let target_ops = ops(target_count, &mut next);
+
+            let source_shared =
+                buffered(&base, &shared_ops, buffer_size(&mut next), &mut storage).await?;
+            let source = buffered(
+                &source_shared,
+                &source_ops,
+                buffer_size(&mut next),
+                &mut storage,
+            )
+            .await?;
+            // Half the cases share the source's very tree under the target's
+            // own ops (the shape #662 is about: one root, more buffered ops);
+            // the rest hold the shared ops under a flush history of their own.
+            let target_shared = if next().is_multiple_of(2) {
+                shared_structure += 1;
+                source_shared.clone()
+            } else if next().is_multiple_of(4) {
+                canonicalized(&base, &shared_ops, buffer_size(&mut next), &mut storage).await?
+            } else {
+                buffered(&base, &shared_ops, buffer_size(&mut next), &mut storage).await?
+            };
+            let target = buffered(
+                &target_shared,
+                &target_ops,
+                buffer_size(&mut next),
+                &mut storage,
+            )
+            .await?;
+            *heights
+                .entry((height(&source, &storage)?, height(&target, &storage)?))
+                .or_default() += 1;
+
+            let mut expected = BTreeMap::new();
+            let mut reverse = BTreeMap::new();
+            let mut target_values = Vec::new();
+            for key in 0..keyspace {
+                let key = key.to_le_bytes();
+                let before = source.get(&key, &storage).await?;
+                let after = target.get(&key, &storage).await?;
+                if before != after {
+                    expected.insert(
+                        key,
+                        match &after {
+                            Some(value) => (true, value.clone()),
+                            None => (false, before.clone().expect("one side holds it")),
+                        },
+                    );
+                    reverse.insert(
+                        key,
+                        match &before {
+                            Some(value) => (true, value.clone()),
+                            None => (false, after.clone().expect("one side holds it")),
+                        },
+                    );
+                }
+                target_values.push((key, after));
+            }
+
+            let changes = collect_changes(&source, &target, &storage).await?;
+            assert_eq!(
+                normalize(&changes),
+                expected,
+                "seed {seed}: the difference must be what point reads of every key give"
+            );
+            let changes = collect_changes(&target, &source, &storage).await?;
+            assert_eq!(
+                normalize(&changes),
+                reverse,
+                "seed {seed}: and so must the difference the other way"
+            );
+
+            let remote = CountingBackend::new();
+            for block in reachable(source.root(), &storage)? {
+                remote.store(block);
+            }
+            let difference = TreeDifference::compute(&source, &target, &storage, &storage).await?;
+            let nodes = difference.novel_nodes();
+            futures_util::pin_mut!(nodes);
+            while let Some(node) = nodes.next().await {
+                remote.store(node?.buffer().clone());
+            }
+            let restored = TestTree::from_hash(target.root().clone());
+            for (key, value) in target_values {
+                assert_eq!(
+                    restored.get(&key, &remote).await?,
+                    value,
+                    "seed {seed}: the source's blocks and the novel nodes must hold the target"
+                );
+            }
+        }
+        eprintln!(
+            "{cases} cases (seeds 0..{cases}), {shared_structure} sharing the source's tree, \
+             (source, target) heights: {heights:?}"
+        );
+        let deepest = heights
+            .keys()
+            .map(|(source, target)| *source.max(target))
+            .max();
+        let shallowest = heights
+            .keys()
+            .map(|(source, target)| *source.min(target))
+            .min();
+        assert!(
+            deepest > shallowest,
+            "the cases must straddle a depth boundary: {heights:?}"
+        );
+        assert!(
+            heights.keys().any(|(source, target)| source != target),
+            "some cases must compare trees of different heights: {heights:?}"
         );
         Ok(())
     }
