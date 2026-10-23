@@ -889,6 +889,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
         latency_ms,
         auth_ms,
         bandwidth_mbps,
+        connections: scenario.network.and_then(|shape| shape.connections),
         fanout_n: manifest.fanout_n,
         max_segment: manifest.max_segment,
         entities: scenario.entities,

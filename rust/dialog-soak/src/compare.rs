@@ -264,6 +264,7 @@ mod tests {
             latency_ms: 0.0,
             auth_ms: 0.0,
             bandwidth_mbps: 0.0,
+            connections: None,
             fanout_n: 8,
             max_segment: 65536,
             entities: 100,

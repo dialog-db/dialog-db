@@ -60,21 +60,31 @@ Modeled time is the fourth number and the one a user feels. It is not a
 cost of its own; it is how a given link combines the three. The presets
 are stated as what they charge per request and per byte:
 
-| preset | round-trip latency | per-request redeem | bandwidth |
-|---|---|---|---|
-| `none` | 0 | 0 | unlimited |
-| `localhost` | 0.4 ms | 0.4 ms | 1 Gbit/s |
-| `broadband` | 30 ms | 50 ms | 100 Mbit/s |
-| `mobile` | 80 ms | 120 ms | 20 Mbit/s |
-| `intercontinental` | 250 ms | 250 ms | 50 Mbit/s |
+| preset | round-trip latency | per-request redeem | bandwidth | connections |
+|---|---|---|---|---|
+| `none` | 0 | 0 | unlimited | unlimited |
+| `localhost` | 0.4 ms | 0.4 ms | 1 Gbit/s | unlimited |
+| `broadband` | 30 ms | 50 ms | 100 Mbit/s | unlimited |
+| `mobile` | 80 ms | 120 ms | 20 Mbit/s | unlimited |
+| `browser` | 80 ms | 120 ms | 20 Mbit/s | 6 |
+| `intercontinental` | 250 ms | 250 ms | 50 Mbit/s | unlimited |
 
 Each request pays the redeem and then the latency; those overlap freely
 across requests in flight together, so a wave of sixteen costs one
 latency. Bytes queue on one shared link, so a wave of sixteen payloads
-costs sixteen payloads' worth of transfer. Modeled time for a phase is
-therefore close to `chain × (redeem + latency) + bytes / bandwidth`, with
-compute on top, and the whole run executes under tokio's paused clock,
-so the number is deterministic for a deterministic schedule. The `none`
+costs sixteen payloads' worth of transfer. A connection cap makes a
+request wait for a connection before it pays anything, so under
+`browser` a wave of sixteen costs three latencies: a browser allows six
+connections per host over HTTP/1.1, tonk's replicas are browsers, and
+the fetch scheduler's window is 64, so the uncapped presets are
+optimistic for exactly that client. The cap changes modeled time and
+not the chain: the chain measures what the client's schedule depends on,
+and a request queued for a connection was still issued when it was.
+Modeled time for a phase is therefore close to
+`chain × (redeem + latency) + bytes / bandwidth`, with compute on top and
+the cap stretching the first term, and the whole run executes under
+tokio's paused clock, so the number is deterministic for a deterministic
+schedule. The `none`
 profile pins the protocol's shape exactly: its counts are what the code
 does, with no timing in them. The decision on a change is made on
 modeled time under the profiles tonk's users are on, mobile and
@@ -87,8 +97,14 @@ of reading a report as the things it counts.
 
 - **Network variance.** Every request pays the same latency; there is
   no jitter, no loss, no retransmission, no slow start, no head-of-line
-  blocking across connections. A real mobile link has a tail the model
+  blocking within a connection. A real mobile link has a tail the model
   has no shape for.
+- **The transport's own shape.** The cap is a count of connections, not
+  a model of HTTP/2 multiplexing, connection setup, keep-alive or
+  request pipelining. A browser over HTTP/2 holds one connection and
+  many streams, which the uncapped presets approximate; one over
+  HTTP/1.1 holds six, which `browser` models; the truth of either has
+  per-connection costs the harness does not charge.
 - **Server-side cost.** The remote is a directory. A real store spends
   CPU and I/O per request and per byte, and an access service spends a
   signature check per redeem; none of that advances the clock here.
