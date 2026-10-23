@@ -10,12 +10,14 @@
   "entities": 4000,
   "facts": 24011,
   "commits": 33,
-  "vault_files": 390,
-  "vault_bytes": 19294103,
+  "vault_files": 384,
+  "vault_bytes": 19298212,
+  "seed": 6840353898566254593,
+  "seeded_root": "5f184d281a3c2cb87a0a8baf3026297f78ddb5f80e62e1f17508579be207fb8d",
   "phases": [
     {
       "name": "pull-1",
-      "virtual_ms": 0,
+      "virtual_ms": 1,
       "rounds": 0.0,
       "round_trips": 1,
       "blob_requests": 0,
@@ -29,16 +31,16 @@
           [
             "memory.resolve",
             1,
-            287
+            291
           ]
         ],
         "requests": 1,
-        "bytes": 287
+        "bytes": 291
       }
     },
     {
       "name": "poll-1",
-      "virtual_ms": 0,
+      "virtual_ms": 2,
       "rounds": 0.0,
       "round_trips": 2,
       "blob_requests": 0,
@@ -52,16 +54,16 @@
           [
             "archive.get",
             2,
-            137912
+            144532
           ]
         ],
         "requests": 2,
-        "bytes": 137912
+        "bytes": 144532
       }
     },
     {
       "name": "pull-10",
-      "virtual_ms": 0,
+      "virtual_ms": 1,
       "rounds": 0.0,
       "round_trips": 1,
       "blob_requests": 0,
@@ -75,16 +77,16 @@
           [
             "memory.resolve",
             1,
-            294
+            291
           ]
         ],
         "requests": 1,
-        "bytes": 294
+        "bytes": 291
       }
     },
     {
       "name": "poll-10",
-      "virtual_ms": 0,
+      "virtual_ms": 11,
       "rounds": 0.0,
       "round_trips": 11,
       "blob_requests": 0,
@@ -98,16 +100,16 @@
           [
             "archive.get",
             11,
-            751052
+            757112
           ]
         ],
         "requests": 11,
-        "bytes": 751052
+        "bytes": 757112
       }
     },
     {
       "name": "pull-100",
-      "virtual_ms": 0,
+      "virtual_ms": 1,
       "rounds": 0.0,
       "round_trips": 1,
       "blob_requests": 0,
@@ -121,21 +123,21 @@
           [
             "memory.resolve",
             1,
-            293
+            295
           ]
         ],
         "requests": 1,
-        "bytes": 293
+        "bytes": 295
       }
     },
     {
       "name": "poll-100",
-      "virtual_ms": 0,
+      "virtual_ms": 80,
       "rounds": 0.0,
-      "round_trips": 83,
+      "round_trips": 80,
       "blob_requests": 0,
       "blob_bytes": 0,
-      "unique_blocks": 83,
+      "unique_blocks": 80,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
       "empty_requests": 0,
@@ -143,17 +145,17 @@
         "rows": [
           [
             "archive.get",
-            83,
-            5358692
+            80,
+            5359604
           ]
         ],
-        "requests": 83,
-        "bytes": 5358692
+        "requests": 80,
+        "bytes": 5359604
       }
     },
     {
       "name": "pull-10x3",
-      "virtual_ms": 0,
+      "virtual_ms": 4,
       "rounds": 0.0,
       "round_trips": 4,
       "blob_requests": 0,
@@ -167,26 +169,26 @@
           [
             "archive.get",
             3,
-            163912
+            129228
           ],
           [
             "memory.resolve",
             1,
-            293
+            294
           ]
         ],
         "requests": 4,
-        "bytes": 164205
+        "bytes": 129522
       }
     },
     {
       "name": "poll-10x3",
-      "virtual_ms": 0,
+      "virtual_ms": 18,
       "rounds": 0.0,
-      "round_trips": 19,
+      "round_trips": 18,
       "blob_requests": 0,
       "blob_bytes": 0,
-      "unique_blocks": 19,
+      "unique_blocks": 18,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
       "empty_requests": 0,
@@ -194,17 +196,17 @@
         "rows": [
           [
             "archive.get",
-            19,
-            1267240
+            18,
+            1216880
           ]
         ],
-        "requests": 19,
-        "bytes": 1267240
+        "requests": 18,
+        "bytes": 1216880
       }
     },
     {
       "name": "pull-100x10",
-      "virtual_ms": 0,
+      "virtual_ms": 3,
       "rounds": 0.0,
       "round_trips": 3,
       "blob_requests": 0,
@@ -218,26 +220,26 @@
           [
             "archive.get",
             2,
-            68052
+            116968
           ],
           [
             "memory.resolve",
             1,
-            291
+            293
           ]
         ],
         "requests": 3,
-        "bytes": 68343
+        "bytes": 117261
       }
     },
     {
       "name": "poll-100x10",
-      "virtual_ms": 0,
+      "virtual_ms": 83,
       "rounds": 0.0,
-      "round_trips": 82,
+      "round_trips": 83,
       "blob_requests": 0,
       "blob_bytes": 0,
-      "unique_blocks": 82,
+      "unique_blocks": 83,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
       "empty_requests": 0,
@@ -245,12 +247,12 @@
         "rows": [
           [
             "archive.get",
-            82,
-            5209112
+            83,
+            5228928
           ]
         ],
-        "requests": 82,
-        "bytes": 5209112
+        "requests": 83,
+        "bytes": 5228928
       }
     }
   ]
