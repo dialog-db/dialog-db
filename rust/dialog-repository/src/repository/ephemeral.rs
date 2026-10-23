@@ -261,10 +261,13 @@ impl StoreChange {
 /// them. See the [module docs](self).
 #[derive(Clone, Debug)]
 pub struct Ephemeral {
-    /// A nonce minted when the store is created: the address a stack
-    /// records for this layer. Two stores never share one, and every
-    /// clone of a store carries the same.
-    entity: Entity,
+    /// A nonce minted the first time the store is addressed: the
+    /// address a stack records for this layer. Two stores never share
+    /// one, and every clone of a store carries the same. Minting it is a
+    /// key generation, and most stores (a snapshot's session store, the
+    /// overlay a query reads beside its lines) are never addressed, so
+    /// they never pay for it.
+    entity: Arc<OnceLock<Entity>>,
     state: Arc<RwLock<State>>,
 }
 
@@ -279,7 +282,7 @@ impl Default for Ephemeral {
 /// [`Ephemeral`] handle to it, as a closing tab's should.
 #[derive(Clone, Debug)]
 pub struct WeakEphemeral {
-    entity: Entity,
+    entity: Arc<OnceLock<Entity>>,
     state: Weak<RwLock<State>>,
 }
 
@@ -324,7 +327,7 @@ impl EphemeralRegistry {
         let layer = Ephemeral::detached();
         let mut entries = self.entries.lock();
         entries.retain(|_, weak| weak.upgrade().is_some());
-        entries.insert(layer.entity.clone(), layer.downgrade());
+        entries.insert(layer.entity().clone(), layer.downgrade());
         layer
     }
 
@@ -1027,7 +1030,7 @@ impl Ephemeral {
     /// An empty layer with a fresh address, registered nowhere.
     pub(crate) fn detached() -> Self {
         Self {
-            entity: Entity::new().expect("the platform can mint a random entity"),
+            entity: Arc::default(),
             state: Arc::default(),
         }
     }
@@ -1077,7 +1080,7 @@ impl Ephemeral {
         }
         state.mint(delta);
         Self {
-            entity: Entity::new().expect("the platform can mint a random entity"),
+            entity: Arc::default(),
             state: Arc::new(RwLock::new(state)),
         }
     }
@@ -1101,11 +1104,12 @@ impl Ephemeral {
         }
     }
 
-    /// The address of this store: a nonce entity minted when it was
-    /// created, shared by every clone of it. A stack records it in
+    /// The address of this store: a nonce entity minted the first time
+    /// it is asked for, shared by every clone of it. A stack records it in
     /// the link facts pointing at this layer.
     pub fn entity(&self) -> &Entity {
-        &self.entity
+        self.entity
+            .get_or_init(|| Entity::new().expect("the platform can mint a random entity"))
     }
 
     /// Whether `other` is a handle to this same store.
@@ -2167,6 +2171,19 @@ mod tests {
         );
         assert!(line.is_empty(), "nothing is held");
         assert_ne!(line.revision(), before, "but it happened");
+    }
+
+    /// The address is minted the first time it is asked for, so a handle
+    /// that asks after another must still see the same one.
+    #[dialog_common::test]
+    fn it_shares_one_address_across_handles_minted_on_first_ask() {
+        let layer = Ephemeral::new();
+        let clone = layer.clone();
+        let weak = layer.downgrade();
+        let address = clone.entity().clone();
+        assert_eq!(layer.entity(), &address);
+        assert_eq!(weak.upgrade().expect("held").entity(), &address);
+        assert_ne!(Ephemeral::new().entity(), &address);
     }
 
     #[dialog_common::test]
