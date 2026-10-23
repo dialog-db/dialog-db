@@ -147,28 +147,12 @@ struct QueueState {
     maybe: Rank,
 }
 
-/// What a speculative job replicates: the range of the tree a selector's
-/// facts occupy, or a range of the tree's keys no selector names (the
-/// context region a commit reads, say).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum PreloadRange {
-    /// The keys a selector's facts occupy, in every index it reads.
-    Selector(ArtifactSelector<Constrained>),
-    /// The tree keys from `start` to `end`, both included.
-    Keys {
-        /// The first key in the range.
-        start: Vec<u8>,
-        /// The last key in the range.
-        end: Vec<u8>,
-    },
-}
-
 /// One rank's pending hints, in arrival order, with one entry per
-/// range: a hint for a range already pending is not a second job.
+/// selector: a hint for a range already pending is not a second job.
 #[derive(Debug, Default)]
 struct Rank {
-    order: VecDeque<PreloadRange>,
-    pending: HashSet<PreloadRange>,
+    order: VecDeque<ArtifactSelector<Constrained>>,
+    pending: HashSet<ArtifactSelector<Constrained>>,
 }
 
 impl Rank {
@@ -176,17 +160,17 @@ impl Rank {
         self.order.len()
     }
 
-    /// Enqueue unless the range is already pending.
-    fn push(&mut self, range: PreloadRange) {
-        if self.pending.insert(range.clone()) {
-            self.order.push_back(range);
+    /// Enqueue unless the selector is already pending.
+    fn push(&mut self, selector: ArtifactSelector<Constrained>) {
+        if self.pending.insert(selector.clone()) {
+            self.order.push_back(selector);
         }
     }
 
-    fn pop(&mut self) -> Option<PreloadRange> {
-        let range = self.order.pop_front()?;
-        self.pending.remove(&range);
-        Some(range)
+    fn pop(&mut self) -> Option<ArtifactSelector<Constrained>> {
+        let selector = self.order.pop_front()?;
+        self.pending.remove(&selector);
+        Some(selector)
     }
 }
 
@@ -246,29 +230,18 @@ impl PreloadQueue {
     /// rank is not enqueued twice (the same range is one job); past
     /// [`PENDING_LIMIT`] the rank's oldest pending hint is dropped.
     pub fn preload(&self, request: PreloadRequest) -> bool {
-        self.enqueue(PreloadRange::Selector(request.selector), request.likelihood)
-    }
-
-    /// Enqueue a hint for the tree keys from `start` to `end`, both
-    /// included, as [`preload`](Self::preload) does a selector's: for a
-    /// range a reader will need that no selector names.
-    pub fn preload_keys(&self, start: Vec<u8>, end: Vec<u8>, likelihood: Likelihood) -> bool {
-        self.enqueue(PreloadRange::Keys { start, end }, likelihood)
-    }
-
-    fn enqueue(&self, range: PreloadRange, likelihood: Likelihood) -> bool {
         let mut state = self.state.lock();
         if state.budget.likely == 0 && state.budget.maybe == 0 {
             return false;
         }
-        let rank = match likelihood {
+        let rank = match request.likelihood {
             Likelihood::Likely => &mut state.likely,
             Likelihood::Maybe => &mut state.maybe,
         };
         if rank.len() >= PENDING_LIMIT {
             rank.pop();
         }
-        rank.push(range);
+        rank.push(request.selector);
         true
     }
 
@@ -284,13 +257,13 @@ impl PreloadQueue {
         &self,
         likely_spare: bool,
         maybe_spare: bool,
-    ) -> Option<(PreloadRange, Likelihood)> {
+    ) -> Option<(ArtifactSelector<Constrained>, Likelihood)> {
         let mut state = self.state.lock();
-        if likely_spare && let Some(range) = state.likely.pop() {
-            return Some((range, Likelihood::Likely));
+        if likely_spare && let Some(selector) = state.likely.pop() {
+            return Some((selector, Likelihood::Likely));
         }
-        if maybe_spare && let Some(range) = state.maybe.pop() {
-            return Some((range, Likelihood::Maybe));
+        if maybe_spare && let Some(selector) = state.maybe.pop() {
+            return Some((selector, Likelihood::Maybe));
         }
         None
     }
@@ -363,7 +336,7 @@ mod tests {
         assert_eq!(queue.pending(), 2, "one per selector per rank");
 
         let (first, _) = queue.next(true, false).expect("the likely hint");
-        assert_eq!(first, PreloadRange::Selector(selector("a/b")));
+        assert_eq!(first, selector("a/b"));
         assert!(
             queue.next(true, false).is_none(),
             "the duplicates never became jobs"
@@ -388,7 +361,7 @@ mod tests {
         let (front, _) = queue.next(true, true).expect("hints pending");
         assert_eq!(
             front,
-            PreloadRange::Selector(selector("later/attr0")),
+            selector("later/attr0"),
             "the oldest hint was the one dropped"
         );
     }

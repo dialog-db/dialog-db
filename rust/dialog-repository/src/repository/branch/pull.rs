@@ -10,7 +10,6 @@ use dialog_artifacts::FromKey as _;
 use dialog_artifacts::history::{Context, History as _, region_writes};
 use dialog_artifacts::merge;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
-use dialog_artifacts::{Likelihood, Speculation, context_key};
 use dialog_capability::Provider;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
@@ -417,20 +416,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         {
             if let Some(context) = upstream_revision.inline_context() {
                 contexts.insert(upstream_revision.version(), Arc::new(context.clone()));
-            }
-            // The first commit on the adopted head (a joiner's claim) is a
-            // takeover that reads one entry of its region: ours, which the
-            // head says how many of our revisions it holds by. Hint it, so
-            // that whatever the application reads before it commits warms
-            // that path too, and the commit finds it local. A hint nobody
-            // drives costs nothing.
-            if upstream_revision.region {
-                let authority = Identify.perform(env).await?;
-                let (_, origin) = branch.commit_identity(authority.profile(), &authority.did());
-                let key = context_key(&origin).as_ref().to_vec();
-                Provider::<Speculation>::execute(env, ())
-                    .await
-                    .preload_keys(key.clone(), key, Likelihood::Likely);
             }
             return Ok(PreparedPull::Merged(Box::new(Merged {
                 branch,

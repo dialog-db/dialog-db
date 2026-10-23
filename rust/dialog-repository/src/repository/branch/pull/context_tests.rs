@@ -16,9 +16,7 @@ wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 use anyhow::Result;
 
 use dialog_artifacts::history::{EDITION_CEILING, Edition, Origin, Watermark};
-use dialog_artifacts::{
-    Artifact, DialogArtifactsError, Instruction, Value, context_entry, context_key,
-};
+use dialog_artifacts::{Artifact, DialogArtifactsError, Instruction, Value, context_entry};
 use dialog_capability::Subject;
 use dialog_effects::authority::Attest;
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
@@ -897,53 +895,5 @@ async fn it_alternates_writers_on_what_their_lines_recorded() -> Result<()> {
         origins[slot] = writer.revision().map(|head| head.origin());
         region_agrees(writer, env, "an alternating takeover").await?;
     }
-    Ok(())
-}
-
-/// A pull that adopts a head by root, with nothing of our own to keep,
-/// hints the one entry of the head's region the first commit on it reads:
-/// our own origin's. Whatever the application reads before it commits
-/// drives the hint, so the commit finds that path local.
-#[dialog_common::test]
-async fn it_hints_our_region_entry_when_it_adopts_by_root() -> Result<()> {
-    let (writer, profile) = test_session_with_peer().await;
-    let name = unique_name("repo");
-    let repo = profile.space(name.clone()).open().perform(&writer).await?;
-    let main = repo.branch("main").open().perform(&writer).await?;
-    commit!(main, &writer, "post:0");
-
-    let device = profile
-        .session(b"joiner")
-        .space(profile.state())
-        .allow(Subject::any())
-        .await?;
-    let local = profile.space(name).open().perform(&device).await?;
-    let upstream = local.branch("main").open().perform(&device).await?;
-    let joiner = local.branch("joiner").open().perform(&device).await?;
-    joiner.set_upstream(&upstream).perform(&device).await?;
-
-    let queue =
-        dialog_capability::Provider::<dialog_artifacts::Speculation>::execute(&device, ()).await;
-    while queue.next(true, true).is_some() {}
-    joiner.pull().perform(&device).await?;
-    assert_eq!(joiner.revision(), main.revision(), "adopted by root");
-
-    commit!(joiner, &device, "post:claim");
-    let ours = context_key(&joiner.revision().expect("the joiner committed").origin());
-    let mut hinted = Vec::new();
-    while let Some(job) = queue.next(true, true) {
-        hinted.push(job);
-    }
-    assert!(
-        hinted.iter().any(|(range, likelihood)| {
-            *likelihood == dialog_artifacts::Likelihood::Likely
-                && *range
-                    == dialog_artifacts::PreloadRange::Keys {
-                        start: ours.as_ref().to_vec(),
-                        end: ours.as_ref().to_vec(),
-                    }
-        }),
-        "the adoption hinted our own region entry: {hinted:?}"
-    );
     Ok(())
 }
