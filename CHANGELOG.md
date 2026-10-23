@@ -14,6 +14,39 @@ says how to cut a release.
 
 ## Unreleased
 
+### A repository can read and write several layers as one stack
+
+[#578](https://github.com/dialog-db/dialog-db/pull/578),
+[notes/state-layers.md](./notes/state-layers.md)
+
+A stack links layers (branches, snapshots and ephemeral layers) under
+scopes and reads them as one composite at the heads it captured. Each
+write goes to the layer its attribute is placed in, a commit stages one
+chain per branch layer and publishes them bottom to top, and rules run
+over the whole view. Ephemeral layers are process resources the
+environment holds, observed through bounded per-observer queues, and a
+channel replicates one between peers. On top of that, a link can be
+read-only, each attribute is read only from the layers of its placement,
+rules run over what enters an upper layer, one layer can sit under two
+scopes, and a channel holds its instants until their commit publishes.
+
+What this changes for you:
+
+- New: `Stack`, `StackTransaction`, `StackQuery`, `StackSubscription`,
+  `Layer`, `Placement`, `DefaultScope`, `TransientAttribute`, `Ephemeral::create`
+  and `Ephemeral::open`, `Observer`, `Channel`.
+- A rule that a transaction dispatches as a command now takes part in
+  that transaction's induction: it fires on the transaction's delta, as a
+  committed rule does. Before, its triggers were not scanned and it did not
+  fire.
+- A placement held in a layer's session store is honoured beside the
+  committed ones, so a process can place its own session state without a
+  commit.
+
+Why: tonk keeps per-process and per-tab state beside a space's
+replicated branch, and needs to read and write both as one database
+without copying session facts into the tree.
+
 ### A transaction's writes to a cell under `last` commit as they would one by one
 
 [#647](https://github.com/dialog-db/dialog-db/pull/647)
@@ -92,6 +125,13 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- Stacks store their wiring as ordinary facts: `dialog.link/*` on
+  `link:` entities, and placements as `dialog.attribute/scope` and
+  `dialog.attribute/default`, all under `Pick::Last`. Nothing an older
+  replica holds is rewritten. An older release reads and syncs these
+  facts as any others and ignores what they mean, so a branch that a
+  stack wrote to stays readable there. Nothing an embedder runs is
+  needed.
 - Nothing a replica stores or syncs changes shape, and nothing is
   rewritten. A head an older release published from such a chain names
   a buffered tree; it stays valid, reads, pulls and merges as before,

@@ -35,7 +35,8 @@ use tokio::sync::OnceCell;
 
 use crate::CommitError;
 use crate::REGISTRY;
-use crate::layer::{Hidden, MergeKeys, filter_hidden, merge_grouped};
+use crate::layer::{Hidden, MergeKeys, filter_hidden, guide_rows, merge_grouped};
+use crate::placement::{Placements, ScopeMap};
 use crate::repository::archive::networked::Reads;
 use crate::repository::branch::select::line_manifest;
 use crate::repository::ephemeral::Window;
@@ -52,6 +53,7 @@ use crate::rules::{
 use crate::schema::{
     Branch as BranchConcept, DidExt as _, Replica, Session, SessionBranch, session,
 };
+use crate::stack::{Guide, GuidedLayer};
 use crate::{Branch, Ephemeral, Hydrate, NetworkedIndex, RemoteSite, Snapshot, Staged};
 
 /// A composable query over one or more lines (branches, snapshots)
@@ -97,7 +99,35 @@ use crate::{Branch, Ephemeral, Hydrate, NetworkedIndex, RemoteSite, Snapshot, St
 #[derive(Default, Clone)]
 pub struct QueryLayer<'a> {
     sources: Vec<SourceRef<'a>>,
+    /// Ephemeral layers joined on their own, not as some tree line's
+    /// session store: the memory layers of a [`Stack`](crate::Stack).
+    ephemerals: Vec<&'a Ephemeral>,
     changes: Changes,
+}
+
+/// The lines a query env reads, owned: every tree line with its
+/// session store, plus every standalone ephemeral layer. What a
+/// [`QueryLayer`] resolves to at perform time, and what a
+/// [`Stack`](crate::Stack) hands its induction.
+#[derive(Default, Clone)]
+pub(crate) struct Composite {
+    pub(crate) sources: Vec<Source>,
+    pub(crate) ephemerals: Vec<Ephemeral>,
+    /// How a read meets each layer, for the composite of a stack: a row
+    /// is read only from the layers of its attribute's scope. See
+    /// [`Guide`](crate::stack::Guide).
+    pub(crate) guide: Option<Arc<Guide>>,
+}
+
+impl Composite {
+    /// A composite of one tree line.
+    pub(crate) fn of(source: Source) -> Self {
+        Self {
+            sources: vec![source],
+            ephemerals: Vec::new(),
+            guide: None,
+        }
+    }
 }
 
 impl<'a> QueryLayer<'a> {
@@ -127,18 +157,29 @@ impl<'a> QueryLayer<'a> {
     pub fn join(mut self, other: impl Into<QueryLayer<'a>>) -> Self {
         let other = other.into();
         self.sources.extend(other.sources);
+        self.ephemerals.extend(other.ephemerals);
         other.changes.assert(&mut self.changes);
         self
+    }
+
+    /// The owned lines this layer reads.
+    pub(crate) fn composite(&self) -> Composite {
+        Composite {
+            sources: self
+                .sources
+                .iter()
+                .map(|source| source.to_source())
+                .collect(),
+            ephemerals: self.ephemerals.iter().map(|line| (*line).clone()).collect(),
+            guide: None,
+        }
     }
 
     /// The branches this layer reads from, in join order.
     pub fn branches(&self) -> Vec<&'a Branch> {
         self.sources
             .iter()
-            .filter_map(|source| match source {
-                SourceRef::Branch(branch) => Some(*branch),
-                SourceRef::Snapshot(_) => None,
-            })
+            .filter_map(|source| source.branch())
             .collect()
     }
 
@@ -148,7 +189,7 @@ impl<'a> QueryLayer<'a> {
             .iter()
             .filter_map(|source| match source {
                 SourceRef::Snapshot(snapshot) => Some(*snapshot),
-                SourceRef::Branch(_) => None,
+                SourceRef::Branch(_) | SourceRef::Pinned(..) => None,
             })
             .collect()
     }
@@ -295,6 +336,17 @@ impl<'a> From<SourceRef<'a>> for QueryLayer<'a> {
     fn from(source: SourceRef<'a>) -> Self {
         Self {
             sources: vec![source],
+            ephemerals: Vec::new(),
+            changes: Changes::new(),
+        }
+    }
+}
+
+impl<'a> From<&'a Ephemeral> for QueryLayer<'a> {
+    fn from(ephemeral: &'a Ephemeral) -> Self {
+        Self {
+            sources: Vec::new(),
+            ephemerals: vec![ephemeral],
             changes: Changes::new(),
         }
     }
@@ -316,6 +368,7 @@ impl From<Changes> for QueryLayer<'_> {
     fn from(changes: Changes) -> Self {
         Self {
             sources: Vec::new(),
+            ephemerals: Vec::new(),
             changes,
         }
     }
@@ -367,9 +420,9 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
                 .map_err(|e| DialogArtifactsError::Storage(format!("identify: {e}")))?;
 
             let overlay = layer.overlay(&operator);
-            let sources: Vec<Source> =
-                layer.sources.iter().map(|source| source.to_source()).collect();
-            let query_env = QueryEnv::new(sources.clone(), overlay, env);
+            let composite = layer.composite();
+            let sources = composite.sources.clone();
+            let query_env = QueryEnv::over(composite, overlay, env);
             let results = Box::pin(query.perform(&query_env));
             // The query's own stream drives the env's preload queue:
             // evaluator hints (its own and any concurrent evaluation's)
@@ -438,6 +491,15 @@ pub(crate) struct QueryEnv<'a> {
     /// erased lifetimes in `QueryEnv<'0>: Provider<Select<'1>>` hit
     /// rustc's #100013 limitation; a named lifetime does not).
     sources: Vec<Source>,
+    /// Standalone ephemeral layers, read live like each tree line's
+    /// session store. Their tombstones hide facts in every tree line:
+    /// a stack's memory layer shadows what the layers beneath it hold.
+    ephemerals: Vec<Ephemeral>,
+    /// The guide of a stack's read, and the placements it reads by,
+    /// resolved from the bottom line on the first read and shared by
+    /// clones. See [`Composite::guide`].
+    guide: Option<Arc<Guide>>,
+    scopes: Arc<OnceCell<Arc<ScopeMap>>>,
     /// The query's own overlay: caller-asserted facts and the
     /// auto-injected metadata, held as a line (see
     /// [`QueryLayer::overlay`]) and read under the lines' format.
@@ -510,6 +572,10 @@ struct Format {
     /// Per line, in line order: its manifest and the tombstone sets its
     /// streams are filtered with.
     lines: Vec<LineFormat>,
+    /// What the standalone ephemeral layers' streams are filtered with,
+    /// keyed under `manifest`: the per-query retracts and the staged
+    /// layers' (see [`LineFormat::staged`]).
+    staged: Hidden,
 }
 
 /// One line's manifest and the tombstone sets its streams are filtered
@@ -544,6 +610,9 @@ impl<'a> QueryEnv<'a> {
         let fetches = sources.iter().any(|source| source.as_ref().fetches());
         Self {
             sources,
+            ephemerals: Vec::new(),
+            guide: None,
+            scopes: Arc::new(OnceCell::new()),
             overlay,
             layers: Vec::new(),
             format: Arc::new(OnceCell::new()),
@@ -554,6 +623,19 @@ impl<'a> QueryEnv<'a> {
             memo: Memo::default(),
             env,
         }
+    }
+
+    /// Build a runtime env over a [`Composite`]: its tree lines and its
+    /// standalone ephemeral layers.
+    pub(crate) fn over(composite: Composite, overlay: Ephemeral, env: &'a Erased) -> Self {
+        let Composite {
+            sources,
+            ephemerals,
+            guide,
+        } = composite;
+        let mut env = Self::new(sources, overlay, env).with_ephemerals(ephemerals);
+        env.guide = guide;
+        env
     }
 
     /// Read `layers` above the lines too: a transaction's writes, held
@@ -578,13 +660,14 @@ impl<'a> QueryEnv<'a> {
     }
 
     /// Every overlay this environment reads: each line's session overlay,
-    /// then the query's own. What names a read's layers names each of
-    /// them by its revision, so none can be read without keying the
-    /// caches built from it.
+    /// then each standalone ephemeral layer, then the query's own. What
+    /// names a read's layers names each of them by its revision, so none
+    /// can be read without keying the caches built from it.
     fn overlays(&self) -> impl Iterator<Item = &Ephemeral> {
         self.sources
             .iter()
             .map(|source| source.as_ref().overlay())
+            .chain(self.ephemerals.iter())
             .chain(once(&self.overlay))
     }
 
@@ -616,7 +699,12 @@ impl<'a> QueryEnv<'a> {
                 .unwrap_or_else(|| super::transaction::ReadSettlement::new(self.pending_edition()));
             // A settlement that failed partway is not kept: the next
             // read starts it again.
-            Box::pin(settlement.advance(&self.sources, &self.overlay, layer, self.env))
+            let view = Composite {
+                sources: self.sources.clone(),
+                ephemerals: self.ephemerals.clone(),
+                guide: self.guide.clone(),
+            };
+            Box::pin(settlement.advance(&view, &self.overlay, layer, self.env))
                 .await
                 .map_err(failed)?;
             let settlements: Vec<CellSettlement> = cells
@@ -637,6 +725,13 @@ impl<'a> QueryEnv<'a> {
             .and_then(|source| source.as_ref().revision())
             .map(|revision| revision.edition.successor())
             .unwrap_or(Edition::GENESIS)
+    }
+
+    /// Read `ephemerals` beside the lines too: standalone ephemeral
+    /// layers, read live, whose tombstones hide facts in every line.
+    pub(crate) fn with_ephemerals(mut self, ephemerals: Vec<Ephemeral>) -> Self {
+        self.ephemerals = ephemerals;
+        self
     }
 
     /// Record every selector this environment executes into
@@ -695,6 +790,32 @@ impl QueryEnv<'_> {
         &self.layers
     }
 
+    /// The guide of a stack's read, with the placements that it reads by,
+    /// resolved from the bottom line once and shared by clones, over the
+    /// pending writes that the read sees: a placement that a transaction
+    /// declares guides a query of it, as it routes its commit. `None` for
+    /// a read that no guide leads.
+    async fn guided(&self) -> Result<Option<(Arc<Guide>, Arc<ScopeMap>)>, DialogArtifactsError> {
+        let (Some(guide), Some(bottom)) = (&self.guide, self.sources.first()) else {
+            return Ok(None);
+        };
+        let scopes = self
+            .scopes
+            .get_or_try_init(|| async {
+                let mut pending = Staged::default();
+                pending.apply(self.overlay.export());
+                for layer in self.layers() {
+                    pending.apply(layer.export());
+                }
+                Placements::resolve(bottom.as_ref(), &pending.export(), self.env)
+                    .await
+                    .map(|placements| Arc::new(placements.scopes()))
+                    .map_err(|error| DialogArtifactsError::Storage(error.to_string()))
+            })
+            .await?;
+        Ok(Some((guide.clone(), scopes.clone())))
+    }
+
     /// The lines' formats and the tombstones keyed under them, resolved
     /// from the lines' tree roots on first use (see [`Format`]).
     async fn format(&self) -> Result<&Format, DialogArtifactsError> {
@@ -713,11 +834,22 @@ impl QueryEnv<'_> {
                 } else {
                     MergeKeys::Fields
                 };
+                // A guided read takes the tombstones of a layer only for the
+                // attributes it reads from that layer, as it does its rows.
+                let guided = self.guided().await?;
+                let held = |store: &Ephemeral, layer: Option<&GuidedLayer>, line: &Manifest| match (
+                    &guided, layer,
+                ) {
+                    (Some((guide, scopes)), Some(layer)) => store
+                        .tombstones_where(line, |attribute| guide.admits(layer, scopes, attribute)),
+                    _ => store.tombstones(line),
+                };
                 let lines = self
                     .sources
                     .iter()
                     .zip(lines)
-                    .map(|(source, line)| {
+                    .enumerate()
+                    .map(|(index, (source, line))| {
                         let changes = self.overlay.tombstones(&line);
                         // Every set is shared, never merged, so this costs
                         // nothing per query however much the layers or the
@@ -726,9 +858,19 @@ impl QueryEnv<'_> {
                         for layer in layers {
                             staged = staged.facts(layer.tombstones(&line));
                         }
-                        let tombstones = staged
-                            .clone()
-                            .facts(source.as_ref().overlay().tombstones(&line));
+                        let guide = guided.as_ref().map(|(guide, _)| guide);
+                        let mut tombstones = staged.clone().facts(held(
+                            source.as_ref().overlay(),
+                            guide.and_then(|guide| guide.lines.get(index)),
+                            &line,
+                        ));
+                        for (at, ephemeral) in self.ephemerals.iter().enumerate() {
+                            tombstones = tombstones.facts(held(
+                                ephemeral,
+                                guide.and_then(|guide| guide.ephemerals.get(at)),
+                                &line,
+                            ));
+                        }
                         LineFormat {
                             manifest: line,
                             staged,
@@ -736,10 +878,15 @@ impl QueryEnv<'_> {
                         }
                     })
                     .collect();
+                let mut staged = Hidden::default().facts(self.overlay.tombstones(&manifest));
+                for layer in &self.layers {
+                    staged = staged.facts(layer.tombstones(&manifest));
+                }
                 Ok(Format {
                     manifest,
                     keys,
                     lines,
+                    staged,
                 })
             })
             .await
@@ -750,6 +897,9 @@ impl Clone for QueryEnv<'_> {
     fn clone(&self) -> Self {
         Self {
             sources: self.sources.clone(),
+            ephemerals: self.ephemerals.clone(),
+            guide: self.guide.clone(),
+            scopes: self.scopes.clone(),
             overlay: self.overlay.clone(),
             layers: self.layers.clone(),
             format: self.format.clone(),
@@ -850,8 +1000,16 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // by the line's session tombstones. Each line's stream is
         // filtered with the tombstones keyed under its own manifest, and
         // borrows only `self.env`.
-        for (source, line) in self.sources.iter().zip(&format.lines) {
-            let raw = select_from_source(source.as_ref(), self.env, input.clone()).await?;
+        // A stack's read is guided by placement: each line yields only
+        // the rows of the attributes placed on its scopes.
+        let guided = self.guided().await?;
+        for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
+            let mut raw = select_from_source(source.as_ref(), self.env, input.clone()).await?;
+            if let Some((guide, scopes)) = &guided
+                && let Some(layer) = guide.lines.get(index)
+            {
+                raw = guide_rows(raw, guide.clone(), layer.clone(), scopes.clone());
+            }
             let mut hidden = line.tombstones.within(&input);
             if !succeeded.is_empty() {
                 hidden = hidden.facts(hidden_in(&line.manifest));
@@ -888,22 +1046,30 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // key range is built once, and not at all when they are empty.
         let window = Window::new(&input);
         let mut session = None;
-        for (source, line) in self.sources.iter().zip(&format.lines) {
-            let rows = source
+        let newest = || {
+            self.sources
+                .iter()
+                .filter_map(|source| source.as_ref().revision())
+                .map(|revision| revision.edition.successor())
+                .fold(pending(), |newest, edition| newest.max(edition))
+                .successor()
+        };
+        for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
+            let mut rows = source
                 .as_ref()
                 .overlay()
                 .select_within(&window, &line.manifest);
+            // A line's session store is memory of that layer: a guided read
+            // takes from it only the attributes placed on the layer.
+            if let Some((guide, scopes)) = &guided
+                && let Some(layer) = guide.lines.get(index)
+            {
+                rows.retain(|fact| guide.admits(layer, scopes, fact.the.as_str()));
+            }
             if rows.is_empty() {
                 continue;
             }
-            let session = *session.get_or_insert_with(|| {
-                self.sources
-                    .iter()
-                    .filter_map(|source| source.as_ref().revision())
-                    .map(|revision| revision.edition.successor())
-                    .fold(pending(), |newest, edition| newest.max(edition))
-                    .successor()
-            });
+            let session = *session.get_or_insert_with(newest);
             let rows: ArtifactStream<'a> = Box::pin(stream::iter(
                 rows.into_iter()
                     .map(move |fact| Ok(ArtifactView::pending(fact, session))),
@@ -913,6 +1079,27 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
                 line.staged.clone(),
                 line.manifest.clone(),
             ));
+        }
+
+        // Each standalone ephemeral layer, read live and filtered the
+        // same way: a layer's own tombstones hide facts beneath it,
+        // never its own. Its rows stand where a session overlay's do.
+        for (index, ephemeral) in self.ephemerals.iter().enumerate() {
+            let mut rows = ephemeral.select(&input, &manifest);
+            if let Some((guide, scopes)) = &guided
+                && let Some(layer) = guide.ephemerals.get(index)
+            {
+                rows.retain(|fact| guide.admits(layer, scopes, fact.the.as_str()));
+            }
+            if rows.is_empty() {
+                continue;
+            }
+            let session = *session.get_or_insert_with(newest);
+            let rows: ArtifactStream<'a> = Box::pin(stream::iter(
+                rows.into_iter()
+                    .map(move |fact| Ok(ArtifactView::pending(fact, session))),
+            ));
+            sessions.push(filter_hidden(rows, format.staged.clone(), manifest.clone()));
         }
 
         // Overlay stream — the per-query changes, read in the lines'
@@ -1178,10 +1365,10 @@ impl<'a> QueryEnv<'a> {
     }
 
     /// The rules under `index` at `key` held in `overlay`: a line's
-    /// session overlay or the query's own. Two range reads each, and a
-    /// body is hydrated once per content address. Recorded as rule
-    /// demand, so a subscription re-evaluates when an overlay rule for
-    /// the concept or attribute arrives or goes.
+    /// session overlay, a standalone ephemeral layer, or the query's own.
+    /// Two range reads each, and a body is hydrated once per content
+    /// address. Recorded as rule demand, so a subscription re-evaluates
+    /// when an overlay rule for the concept or attribute arrives or goes.
     fn overlay_rules(
         &self,
         overlay: &Ephemeral,
@@ -1720,6 +1907,9 @@ impl<'a> QueryEnv<'a> {
         for source in &self.sources {
             rules.extend(self.durable_rules(source, index, key).await?);
             rules.extend(self.overlay_rules(source.as_ref().overlay(), index, key, manifest)?);
+        }
+        for ephemeral in &self.ephemerals {
+            rules.extend(self.overlay_rules(ephemeral, index, key, manifest)?);
         }
         rules.extend(self.overlay_rules(&self.overlay, index, key, manifest)?);
         for layer in &self.layers {
@@ -4225,6 +4415,72 @@ mod rule_tests {
                 (away, Some("case:remote".to_string())),
                 (here, Some("case:replicated".to_string())),
             ]
+        );
+        Ok(())
+    }
+
+    /// A rule asserted into the branch's ephemeral store resolves like
+    /// a committed one: session-held rules are a layer of their own,
+    /// read fresh every query and never head-cached.
+    #[dialog_common::test]
+    async fn it_resolves_a_rule_held_in_the_ephemeral_store() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let bob: Entity = "id:bob".parse()?;
+        branch
+            .transaction()
+            .assert(
+                the!("org/contractor-name")
+                    .of(bob.clone())
+                    .is("Bob".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let employees = || {
+            let mut terms = Parameters::new();
+            terms.insert("this".into(), Term::var("this"));
+            terms.insert("name".into(), Term::var("name"));
+            ConceptQuery {
+                predicate: employee_descriptor(),
+                terms,
+            }
+        };
+        let before: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(before.is_empty(), "no rule, no employees");
+
+        branch
+            .overlay()
+            .assert(rule_with_person_attr("org/contractor-name"))?;
+        let after: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert_eq!(
+            after.iter().map(|c| c.entity().clone()).collect::<Vec<_>>(),
+            vec![bob],
+            "the session rule concludes Bob"
+        );
+
+        branch.overlay().clear();
+        let cleared: Vec<ConceptConclusion> = branch
+            .select(employees())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(
+            cleared.is_empty(),
+            "dropping the session rule drops its conclusions"
         );
         Ok(())
     }
