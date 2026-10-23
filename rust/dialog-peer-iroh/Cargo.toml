@@ -15,6 +15,15 @@ helpers = []
 # custom transport, which is how `tonk-rtc` puts QUIC streams on a WebRTC
 # data channel, and this module is the same iroh API calls either way.
 transport = ["dep:iroh", "dep:tracing", "dep:tokio", "dep:wasm-bindgen-futures"]
+# The QUIC tests: two endpoints on loopback, dialed directly and through a
+# relay this process runs. Off by default because iroh's relay server is
+# a large build that no other test needs; the iroh workflow turns them on.
+iroh-tests = ["transport", "iroh/test-utils"]
+# The QUIC tests that reach a peer through n0's public relay and find it
+# through n0's address lookup. Off by default, like the S3 and R2 tests,
+# because they depend on a network and services this repository does not
+# run.
+iroh-network-tests = ["iroh-tests"]
 integration-tests = ["dialog-common/integration-tests"]
 web-integration-tests = ["dialog-common/web-integration-tests"]
 
@@ -84,10 +93,10 @@ wasm-bindgen-futures = { workspace = true }
 # expands to wasm-bindgen-test instead. Target-gated because tokio's
 # runtime pulls dependencies that do not build for wasm32.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
-  "cfg(feature, values(\"web-integration-tests\", \"helpers\", \"transport\"))",
+  "cfg(feature, values(\"web-integration-tests\", \"helpers\", \"transport\", \"iroh-tests\", \"iroh-network-tests\"))",
   "cfg(dialog_test_wasm_integration)",
 ] }
