@@ -22,9 +22,12 @@ use dialog_effects::authority::Attest;
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use futures_util::stream;
 
-use super::super::context::region_agrees;
+use super::super::context::{head_observes, region_agrees};
 use crate::helpers::Counting;
-use crate::{Branch, PullError, RepositoryExt as _, Revision};
+use crate::{Branch, NetworkedIndex, PullError, RepositoryExt as _, Revision};
+use dialog_artifacts::history::ContextCache;
+use dialog_artifacts::tree::ArtifactNodeCache;
+use dialog_search_tree::Cache;
 
 fn artifact(of: &str) -> Artifact {
     Artifact {
@@ -510,6 +513,7 @@ async fn it_pulls_and_commits_across_heads_minted_before_the_region() -> Result<
     let legacy = plant_signed!(inline, &operator, current, |head: &mut Revision| {
         head.context = Some(full.clone());
         head.region = false;
+        head.count = None;
     });
     legacy.verify().expect("an inline head still verifies");
 
@@ -530,6 +534,7 @@ async fn it_pulls_and_commits_across_heads_minted_before_the_region() -> Result<
     plant_signed!(other, &operator, current, |head: &mut Revision| {
         head.context = Some(full.clone());
         head.region = false;
+        head.count = None;
     });
     commit!(feature, &operator, "post:ours-again");
     other.pull().from(&feature).perform(&operator).await?;
@@ -539,11 +544,30 @@ async fn it_pulls_and_commits_across_heads_minted_before_the_region() -> Result<
     plant_signed!(bare, &operator, current, |head: &mut Revision| {
         head.context = None;
         head.region = false;
+        head.count = None;
     });
     let plain = repo.branch("plain").open().perform(&operator).await?;
     commit!(plain, &operator, "post:plain");
     plain.pull().from(&bare).perform(&operator).await?;
     region_agrees(&plain, &operator, "a merge with a pre-context upstream").await?;
+
+    // A region head minted before heads carried their own count: a commit
+    // on it reads the region for the count, and the head it mints carries
+    // one.
+    let uncounted = repo.branch("uncounted").open().perform(&operator).await?;
+    let planted = plant_signed!(uncounted, &operator, current, |head: &mut Revision| {
+        head.count = None;
+    });
+    planted
+        .verify()
+        .expect("an uncounted region head still verifies");
+    assert!(planted.region && planted.own_watermark().is_none());
+    let taker = repo.branch("taker").open().perform(&operator).await?;
+    taker.pull().from(&uncounted).perform(&operator).await?;
+    commit!(taker, &operator, "post:taker");
+    region_agrees(&taker, &operator, "a takeover of an uncounted head").await?;
+    commit!(uncounted, &operator, "post:uncounted");
+    region_agrees(&uncounted, &operator, "a commit on its own uncounted head").await?;
     Ok(())
 }
 
@@ -627,5 +651,156 @@ async fn it_refuses_to_pull_a_head_whose_region_no_head_minted() -> Result<()> {
         );
         assert_eq!(puller.revision(), ours, "{why}: the head stays");
     }
+    Ok(())
+}
+
+/// A joiner's first commit on a head it adopted by root from another
+/// origin (the claim a join makes) reads nothing of that head's context
+/// region. The head carries its own count, which is the adopted origin's
+/// exact watermark, and the joiner's own entry is one point read of the
+/// region, which a joiner whose origin the head never saw finds absent.
+/// What the commit reads is the data path its facts integrate into, as
+/// any commit does; the region's whole map is never read.
+#[dialog_common::test]
+async fn it_takes_over_an_adopted_head_without_reading_its_region() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    let repo = profile.space(name.clone()).open().perform(&writer).await?;
+    let main = repo.branch("main").open().perform(&writer).await?;
+    commit!(main, &writer, "post:0");
+    let last = passing_writers!(repo, &writer, Some(main.clone()), 12);
+    main.pull().from(&last).perform(&writer).await?;
+
+    let device = profile
+        .session(b"joiner")
+        .space(profile.state())
+        .allow(Subject::any())
+        .await?;
+    let device = Counting::new(device);
+    let local = profile.space(name).open().perform(&device).await?;
+    let upstream = local.branch("main").open().perform(&device).await?;
+    let joiner = local.branch("joiner").open().perform(&device).await?;
+    joiner.set_upstream(&upstream).perform(&device).await?;
+    joiner.pull().perform(&device).await?;
+    let adopted = joiner.revision().expect("the joiner adopted main's head");
+    assert_eq!(Some(&adopted), main.revision().as_ref(), "adopted by root");
+
+    device.reset();
+    commit!(joiner, &device, "post:claim");
+    let takeover = device.block_reads();
+    eprintln!("takeover reads {takeover}: {:?}", device.snapshot());
+
+    let head = joiner.revision().expect("the joiner committed");
+    assert_ne!(head.origin(), adopted.origin(), "a takeover");
+    assert_eq!(
+        head.own_watermark(),
+        Some(Watermark {
+            edition: head.edition,
+            count: 1,
+        }),
+        "the joiner's first revision on this branch"
+    );
+    region_agrees(&joiner, &device, "a takeover of an adopted head").await?;
+    Ok(())
+}
+
+/// A pull right after a takeover commit, from a branch still at the head
+/// the commit took over, is answered from the new head's record at no
+/// read: the record names that head as its parent, so the new head has
+/// seen it, without the point read of the region an observes across
+/// origins otherwise pays. So is the pull after the push, whose upstream
+/// is then our own head.
+#[dialog_common::test]
+async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    let repo = profile.space(name.clone()).open().perform(&writer).await?;
+    let main = repo.branch("main").open().perform(&writer).await?;
+    commit!(main, &writer, "post:0");
+    let last = passing_writers!(repo, &writer, Some(main.clone()), 12);
+    main.pull().from(&last).perform(&writer).await?;
+
+    let device = profile
+        .session(b"joiner")
+        .space(profile.state())
+        .allow(Subject::any())
+        .await?;
+    let device = Counting::new(device);
+    let local = profile.space(name).open().perform(&device).await?;
+    let upstream = local.branch("main").open().perform(&device).await?;
+    let joiner = local.branch("joiner").open().perform(&device).await?;
+    joiner.set_upstream(&upstream).perform(&device).await?;
+    joiner.pull().perform(&device).await?;
+    let adopted = joiner.revision();
+    commit!(joiner, &device, "post:claim");
+    let head = joiner.revision();
+
+    // A branch the joiner never synced with, at the head it took over: the
+    // pull has no sync base to short-circuit on, and asks whether our head
+    // has seen theirs.
+    let mirror = local.branch("mirror").open().perform(&device).await?;
+    mirror.pull().from(&upstream).perform(&device).await?;
+    assert_eq!(mirror.revision(), adopted);
+    device.reset();
+    joiner.pull().from(&mirror).perform(&device).await?;
+    assert_eq!(joiner.revision(), head, "nothing new keeps the head");
+    assert_eq!(
+        device.block_reads(),
+        0,
+        "the takeover's record answers that it built on that head: {:?}",
+        device.snapshot()
+    );
+
+    // The same question asked of a reader with no blocks remembered, so
+    // the region's leaf the commit read is not cached: the record answers
+    // it at no read, and without the record it is the region's point read.
+    let ours = head.clone().expect("the joiner committed");
+    let theirs = adopted
+        .clone()
+        .expect("the joiner adopted a head")
+        .version();
+    let store = NetworkedIndex::new(&device, joiner.archive().index(), joiner.fallback());
+    device.reset();
+    let seen = head_observes(
+        &ours,
+        &theirs,
+        &ContextCache::new(),
+        &joiner.records(),
+        &store,
+        &ArtifactNodeCache::new(),
+    )
+    .await?;
+    assert_eq!(seen, Some(true));
+    assert_eq!(
+        device.block_reads(),
+        0,
+        "the record answers: {:?}",
+        device.snapshot()
+    );
+    let seen = head_observes(
+        &ours,
+        &theirs,
+        &ContextCache::new(),
+        &Cache::new(),
+        &store,
+        &ArtifactNodeCache::new(),
+    )
+    .await?;
+    assert_eq!(seen, Some(true));
+    assert!(
+        device.block_reads() > 0,
+        "without the record the region answers, at a read"
+    );
+
+    joiner.push().perform(&device).await?;
+    device.reset();
+    joiner.pull().perform(&device).await?;
+    assert_eq!(joiner.revision(), head, "the pushed head is our own");
+    assert_eq!(
+        device.block_reads(),
+        0,
+        "a pull after the push reads nothing: {:?}",
+        device.snapshot()
+    );
     Ok(())
 }
