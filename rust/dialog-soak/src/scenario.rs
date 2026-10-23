@@ -116,6 +116,8 @@ pub(crate) struct Site {
     pub vault_files: u64,
     /// Bytes in the vault after seeding.
     pub vault_bytes: u64,
+    /// The run's own vault directory, removed when the run ends.
+    pub run_dir: PathBuf,
 }
 
 impl Site {
@@ -234,6 +236,7 @@ impl Site {
             commits: commits + 1,
             vault_files,
             vault_bytes,
+            run_dir,
         })
     }
 
@@ -329,12 +332,17 @@ pub async fn run(scenario: Scenario) -> Result<Report> {
     simulation::configure(scenario.network);
     simulation::reset_tally();
     let mut phases = Vec::new();
-    match scenario.kind {
-        Kind::Join => crate::join::phases(&site, &scenario, &mut phases).await?,
-        Kind::CatchUp => crate::catchup::phases(&site, &scenario, &mut phases).await?,
-        Kind::Writer => crate::writer::phases(&site, &scenario, &mut phases).await?,
-    }
+    let outcome = match scenario.kind {
+        Kind::Join => crate::join::phases(&site, &scenario, &mut phases).await,
+        Kind::CatchUp => crate::catchup::phases(&site, &scenario, &mut phases).await,
+        Kind::Writer => crate::writer::phases(&site, &scenario, &mut phases).await,
+    };
     simulation::configure(None);
+    // Every run writes a full vault (tens of MiB at the default size); a
+    // sweep runs dozens. Remove it whether the phases passed or failed, so
+    // repeated runs do not fill the disk they write to.
+    let _ = std::fs::remove_dir_all(&site.run_dir);
+    outcome?;
 
     // Every tree in this run was created here, so they all carry the
     // format a new tree takes in this process (which the sweep sets
