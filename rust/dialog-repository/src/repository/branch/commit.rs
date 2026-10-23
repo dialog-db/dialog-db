@@ -737,6 +737,9 @@ where
             && !canonicalizes_tip
             && let Some(base) = base_revision
         {
+            // The batch wrote nothing, so its spine still persists as the
+            // base's root: hand it back for the next commit to append to.
+            batch.release();
             return Ok(Outcome::Unchanged(base));
         }
 

@@ -18,42 +18,44 @@ says how to cut a release.
 
 [#PRNUM](https://github.com/dialog-db/dialog-db/pull/PRNUM)
 
-A staged chain's amend that asked to canonicalize but wrote nothing (a
-retract of a fact the chain never held, say) returned the tip unchanged,
-buffers included. The chain's last link is where a chain canonicalizes,
-so a chain whose last link changed nothing was published buffered, and
-named a root that depends on where its earlier links flushed. An amend
-asked to canonicalize now canonicalizes its tip's tree whether or not
-the link changed anything, and reports the tip unchanged only when that
-tree was already canonical.
+A staged chain canonicalizes at its last link. When that link was an
+amend that changed nothing (a retract of a fact the chain never held, a
+re-assert of a value that stands), the commit returned the tip as it
+was, before the seal that flushes the buffers, so the canonicalize was
+dropped and the chain kept whatever buffered form its earlier links
+left. An amend asked to canonicalize now canonicalizes its tip whether
+or not the link changed anything, and reports the tip unchanged only
+when it was already canonical.
 
 What this changes for you:
 
-- Two replicas that stage the same facts on the same head and
-  canonicalize their chains name the same root, whatever each chain's
-  last link held. Before, a fast-forward between them could find
-  divergence where there was none, and a merge then did work that
-  found nothing.
+- Two replicas holding the same facts no longer disagree on the root
+  because one chain ended in a no-op amend. Before, each named a root
+  that depended on where its earlier links flushed, so a sync saw
+  divergence where there was none and a merge did work that found
+  nothing.
 - `TransactionCommit::amend` with `canonicalize` on a link that changes
-  nothing now returns a batch whose tree is canonical; it reported the
+  nothing returns a batch whose tree is canonical; it returned the
   buffered tip before. A commit that is not an amend keeps its rule: a
   batch that changes nothing mints nothing and canonicalizes nothing,
   unless `allow_empty` asks for a revision.
-- Nothing stored or synced changes shape.
+- A commit that changes nothing hands its live spine back to the line,
+  so the next commit appends to it instead of opening the root frame
+  from bytes again. The bytes written are the same either way.
+  `BufferedBatch::release` and `SpineSlot::root` are new.
 
-Why: the canonicalize request was checked after the no-op check, which
-returned before the seal. The amend path is the one place a commit
-rewrites a revision's tree in place, so it is the one place the request
-has a tree to act on when the link itself wrote nothing.
+Why: the canonicalize request was checked after the no-op return. An
+amend is the one commit that rewrites a revision's tree in place, so it
+has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
-- Nothing a replica stores or syncs is rewritten. A head an older release
-  published from such a chain names its buffered tree and stays valid;
-  it reads, pulls and merges as before. To bring it to the canonical
-  form, publish a canonicalizing commit on it (`allow_empty` with
-  `canonicalize` when there is nothing else to commit). Nothing an
-  embedder has to run.
+- Nothing a replica stores or syncs changes shape, and nothing is
+  rewritten. A head an older release published from such a chain names
+  a buffered tree; it stays valid, reads, pulls and merges as before,
+  and converges on the canonical root at its next canonicalizing commit
+  that mints a revision (one that changes a fact, or one with
+  `allow_empty`). Nothing an embedder has to run.
 
 ### A persisted node's bytes can be attributed to what they carry
 
