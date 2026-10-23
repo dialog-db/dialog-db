@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Assemble the pull request's delta report from the gates' delta
-# artifacts, and post it as one comment, edited in place on every push.
+# artifacts, and post it as one comment, edited in place on every push
+# rather than added again.
 #
 #   scripts/ci/delta-report.sh <perf-delta-dir> <soak-delta-dir> <body-file> [<pr-number>]
 #
