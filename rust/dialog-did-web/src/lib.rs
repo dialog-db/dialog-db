@@ -29,6 +29,8 @@ mod cache;
 mod document;
 mod error;
 mod fetch;
+#[cfg(feature = "mailto")]
+mod mailto;
 mod provider;
 mod resolve;
 mod resolver;
@@ -47,6 +49,12 @@ pub use resolve::Resolve;
 pub use resolver::PerformingResolver;
 pub use url::{did_plc_url, did_web_url};
 pub use verifier::MultiVerifier;
+
+#[cfg(feature = "mailto")]
+pub use mailto::{
+    DEFAULT_DKIM_KEY_TTL, DidMailtoBinding, DkimKeyProvider, MailtoDid, extract_did_key,
+    extract_from_address, multi_verifier_from_bindings, verify_mailto_proof,
+};
 
 #[cfg(feature = "test-fetch")]
 pub use fetch::MapFetch;
