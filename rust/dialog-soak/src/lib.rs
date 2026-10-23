@@ -44,7 +44,7 @@ pub mod join;
 pub mod report;
 pub mod sweep;
 
-pub use compare::{Comparison, compare_dirs};
+pub use compare::{Against, Comparison, Row, Verdict, compare_dirs};
 pub use join::{JoinScenario, run_join};
 pub use report::{PhaseReport, Report, TallyRows};
 pub use sweep::{SweepConfig, sweep};
