@@ -42,6 +42,9 @@ use crate::webauthn::WebAuthnVerifier;
 #[cfg(feature = "webauthn")]
 use dialog_varsig::webauthn::WebAuthnSignature;
 
+#[cfg(feature = "rsa")]
+use crate::rsa::RsaVerifier;
+
 /// Algorithm-agnostic verifier.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verifier {
@@ -54,6 +57,10 @@ pub enum Verifier {
     /// the full WebAuthn assertion structure, not a bare ECDSA signature.
     #[cfg(feature = "webauthn")]
     WebAuthn(WebAuthnVerifier),
+    /// An RSA (PKCS#1 v1.5, SHA-256) verifier. The wrapped verifier carries its
+    /// key size (2048 or 4096), so a single arm serves both.
+    #[cfg(feature = "rsa")]
+    Rsa(RsaVerifier),
 }
 
 impl From<Ed25519Verifier> for Verifier {
@@ -76,6 +83,13 @@ impl From<WebAuthnVerifier> for Verifier {
     }
 }
 
+#[cfg(feature = "rsa")]
+impl From<RsaVerifier> for Verifier {
+    fn from(v: RsaVerifier) -> Self {
+        Self::Rsa(v)
+    }
+}
+
 impl Verifier {
     /// The algorithm this verifier checks.
     #[must_use]
@@ -86,6 +100,10 @@ impl Verifier {
             Self::Es256(_) => AlgorithmTag::Es256,
             #[cfg(feature = "webauthn")]
             Self::WebAuthn(_) => AlgorithmTag::WebAuthn,
+            // The tag depends on the key size (Rsa2048 vs Rsa4096), which the
+            // wrapped verifier carries.
+            #[cfg(feature = "rsa")]
+            Self::Rsa(v) => v.algorithm(),
         }
     }
 
@@ -98,6 +116,8 @@ impl Verifier {
             Self::Es256(_) => None,
             #[cfg(feature = "webauthn")]
             Self::WebAuthn(_) => None,
+            #[cfg(feature = "rsa")]
+            Self::Rsa(_) => None,
         }
     }
 
@@ -110,6 +130,8 @@ impl Verifier {
             Self::Ed25519(_) => None,
             #[cfg(feature = "webauthn")]
             Self::WebAuthn(_) => None,
+            #[cfg(feature = "rsa")]
+            Self::Rsa(_) => None,
         }
     }
 
@@ -122,6 +144,22 @@ impl Verifier {
             Self::Ed25519(_) => None,
             #[cfg(feature = "es256")]
             Self::Es256(_) => None,
+            #[cfg(feature = "rsa")]
+            Self::Rsa(_) => None,
+        }
+    }
+
+    /// Get the RSA verifier, if this is an RSA arm.
+    #[cfg(feature = "rsa")]
+    #[must_use]
+    pub const fn as_rsa(&self) -> Option<&RsaVerifier> {
+        match self {
+            Self::Rsa(v) => Some(v),
+            Self::Ed25519(_) => None,
+            #[cfg(feature = "es256")]
+            Self::Es256(_) => None,
+            #[cfg(feature = "webauthn")]
+            Self::WebAuthn(_) => None,
         }
     }
 
@@ -146,6 +184,12 @@ impl Verifier {
         if let Ok(v) = s.parse::<Es256Verifier>() {
             return Ok(Self::Es256(v));
         }
+        // RSA carries the distinct rsa-pub multicodec (0x1205) and a
+        // variable-length key body; its parser accepts both 2048 and 4096.
+        #[cfg(feature = "rsa")]
+        if let Ok(v) = s.parse::<RsaVerifier>() {
+            return Ok(Self::Rsa(v));
+        }
         Err(DidFromStrError)
     }
 }
@@ -166,6 +210,8 @@ impl std::fmt::Display for Verifier {
             Self::Es256(v) => write!(f, "{v}"),
             #[cfg(feature = "webauthn")]
             Self::WebAuthn(v) => write!(f, "{v}"),
+            #[cfg(feature = "rsa")]
+            Self::Rsa(v) => write!(f, "{v}"),
         }
     }
 }
@@ -178,6 +224,8 @@ impl Principal for Verifier {
             Self::Es256(v) => v.did(),
             #[cfg(feature = "webauthn")]
             Self::WebAuthn(v) => v.did(),
+            #[cfg(feature = "rsa")]
+            Self::Rsa(v) => v.did(),
         }
     }
 }
@@ -211,6 +259,13 @@ impl VarsigVerifier<Signature> for Verifier {
                     .map_err(|_| signature::Error::new())?;
                 v.verify(msg, &sig).await
             }
+            #[cfg(feature = "rsa")]
+            Self::Rsa(v) => {
+                // The RSA verifier works over the agnostic signature directly:
+                // the body is the raw PKCS#1 v1.5 bytes and the key size is
+                // carried by both the tag and the verifier.
+                v.verify(msg, signature).await
+            }
         }
     }
 }
@@ -229,6 +284,9 @@ pub enum Signer {
     /// An ES256 (P-256) signer.
     #[cfg(feature = "es256")]
     Es256(Es256Signer),
+    /// An RSA (PKCS#1 v1.5, SHA-256) signer. Carries its key size internally.
+    #[cfg(feature = "rsa")]
+    Rsa(crate::rsa::RsaSigner),
 }
 
 impl From<Ed25519Signer> for Signer {
@@ -244,6 +302,13 @@ impl From<Es256Signer> for Signer {
     }
 }
 
+#[cfg(feature = "rsa")]
+impl From<crate::rsa::RsaSigner> for Signer {
+    fn from(s: crate::rsa::RsaSigner) -> Self {
+        Self::Rsa(s)
+    }
+}
+
 impl Signer {
     /// The algorithm this signer produces.
     #[must_use]
@@ -252,6 +317,8 @@ impl Signer {
             Self::Ed25519(_) => AlgorithmTag::Ed25519,
             #[cfg(feature = "es256")]
             Self::Es256(_) => AlgorithmTag::Es256,
+            #[cfg(feature = "rsa")]
+            Self::Rsa(s) => s.key_size().algorithm_tag(),
         }
     }
 
@@ -262,6 +329,8 @@ impl Signer {
             Self::Ed25519(s) => Some(s),
             #[cfg(feature = "es256")]
             Self::Es256(_) => None,
+            #[cfg(feature = "rsa")]
+            Self::Rsa(_) => None,
         }
     }
 
@@ -272,6 +341,20 @@ impl Signer {
         match self {
             Self::Es256(s) => Some(s),
             Self::Ed25519(_) => None,
+            #[cfg(feature = "rsa")]
+            Self::Rsa(_) => None,
+        }
+    }
+
+    /// Get the RSA signer, if this is an RSA arm.
+    #[cfg(feature = "rsa")]
+    #[must_use]
+    pub const fn as_rsa(&self) -> Option<&crate::rsa::RsaSigner> {
+        match self {
+            Self::Rsa(s) => Some(s),
+            Self::Ed25519(_) => None,
+            #[cfg(feature = "es256")]
+            Self::Es256(_) => None,
         }
     }
 
@@ -282,6 +365,8 @@ impl Signer {
             Self::Ed25519(s) => Verifier::Ed25519(s.ed25519_did().clone()),
             #[cfg(feature = "es256")]
             Self::Es256(s) => Verifier::Es256(s.es256_did().clone()),
+            #[cfg(feature = "rsa")]
+            Self::Rsa(s) => Verifier::Rsa(s.rsa_did().clone()),
         }
     }
 }
@@ -292,6 +377,8 @@ impl Principal for Signer {
             Self::Ed25519(s) => s.did(),
             #[cfg(feature = "es256")]
             Self::Es256(s) => s.did(),
+            #[cfg(feature = "rsa")]
+            Self::Rsa(s) => s.did(),
         }
     }
 }
@@ -302,6 +389,10 @@ impl VarsigSigner<Signature> for Signer {
             Self::Ed25519(s) => Ok(Signature::from(VarsigSigner::sign(s, msg).await?)),
             #[cfg(feature = "es256")]
             Self::Es256(s) => Ok(Signature::from(VarsigSigner::sign(s, msg).await?)),
+            // The RSA signer already produces an `AnySignature`, so there is no
+            // concrete-to-agnostic conversion step.
+            #[cfg(feature = "rsa")]
+            Self::Rsa(s) => VarsigSigner::sign(s, msg).await,
         }
     }
 }
@@ -460,6 +551,51 @@ mod tests {
         // The signature was produced by the wrapped key, so the key's own
         // verifier accepts it even though the presented DID is did:web.
         verifier.verify(msg, &sig).await.unwrap();
+    }
+
+    #[cfg(feature = "rsa")]
+    #[dialog_common::test]
+    async fn rsa_sign_verify() {
+        // A cached 2048-bit key; generating one per test is far too slow.
+        let der = include_bytes!("rsa/fixtures/test_2048.pkcs1.der");
+        let signer = Signer::from(crate::rsa::RsaSigner::from_pkcs1_der(der).unwrap());
+        let verifier = signer.verifier();
+        let msg = b"agnostic rsa";
+        let sig = VarsigSigner::sign(&signer, msg).await.unwrap();
+        assert_eq!(sig.algorithm(), AlgorithmTag::Rsa2048);
+        assert_eq!(sig.to_bytes().len(), 256);
+        verifier.verify(msg, &sig).await.unwrap();
+    }
+
+    #[cfg(feature = "rsa")]
+    #[dialog_common::test]
+    async fn rsa_cross_algorithm_rejected() {
+        // An ed25519 signature must not verify against an RSA verifier, and the
+        // 256-byte RSA body must not be mistaken for a 64-byte ed25519 body.
+        let der = include_bytes!("rsa/fixtures/test_2048.pkcs1.der");
+        let rsa_verifier =
+            Signer::from(crate::rsa::RsaSigner::from_pkcs1_der(der).unwrap()).verifier();
+        let ed = Signer::from(Ed25519Signer::generate().await.unwrap());
+        let msg = b"agnostic rsa";
+        let sig = VarsigSigner::sign(&ed, msg).await.unwrap();
+        assert!(rsa_verifier.verify(msg, &sig).await.is_err());
+    }
+
+    #[cfg(feature = "rsa")]
+    #[dialog_common::test]
+    async fn rsa_verifier_did_key_roundtrip() {
+        let der = include_bytes!("rsa/fixtures/test_2048.pkcs1.der");
+        let signer = Signer::from(crate::rsa::RsaSigner::from_pkcs1_der(der).unwrap());
+        let verifier = signer.verifier();
+        let did = verifier.did();
+        let parsed = Verifier::from_did_key(did.as_str()).unwrap();
+        assert_eq!(parsed.did(), did);
+        assert_eq!(parsed.algorithm(), AlgorithmTag::Rsa2048);
+
+        // The resolved verifier accepts the signer's signature.
+        let msg = b"rsa did roundtrip";
+        let sig = VarsigSigner::sign(&signer, msg).await.unwrap();
+        parsed.verify(msg, &sig).await.unwrap();
     }
 
     #[cfg(feature = "es256")]

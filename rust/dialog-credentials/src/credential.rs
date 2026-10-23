@@ -181,6 +181,21 @@ impl Credential {
             }
         }
 
+        #[cfg(feature = "rsa")]
+        {
+            use constants::{
+                RSA_PRIVATE_TAG, RSA_PRIVATE_TAG_SIZE, RSA_PUBLIC_TAG, RSA_PUBLIC_TAG_SIZE,
+            };
+            // RSA bodies are variable length, so dispatch on the tag prefix
+            // alone. The private form yields the verifier via the derived key.
+            if bytes.starts_with(RSA_PUBLIC_TAG) {
+                return Self::rsa_verifier_from_pubkey(&bytes[RSA_PUBLIC_TAG_SIZE..]);
+            }
+            if bytes.starts_with(RSA_PRIVATE_TAG) {
+                return Self::rsa_verifier_from_private(&bytes[RSA_PRIVATE_TAG_SIZE..]);
+            }
+        }
+
         Err(CredentialExportError::InvalidFormat(format!(
             "unrecognized credential format: length={}",
             bytes.len()
@@ -209,6 +224,18 @@ impl Credential {
                 && bytes.len() == WEBAUTHN_VERIFIER_EXPORT_SIZE
             {
                 return Self::webauthn_verifier_from_pubkey(&bytes[WEBAUTHN_PUBLIC_TAG_SIZE..]);
+            }
+        }
+        #[cfg(feature = "rsa")]
+        {
+            use constants::{
+                RSA_PRIVATE_TAG, RSA_PRIVATE_TAG_SIZE, RSA_PUBLIC_TAG, RSA_PUBLIC_TAG_SIZE,
+            };
+            if bytes.starts_with(RSA_PUBLIC_TAG) {
+                return Self::rsa_verifier_from_pubkey(&bytes[RSA_PUBLIC_TAG_SIZE..]);
+            }
+            if bytes.starts_with(RSA_PRIVATE_TAG) {
+                return Self::rsa_verifier_from_private(&bytes[RSA_PRIVATE_TAG_SIZE..]);
             }
         }
         Err(CredentialExportError::InvalidFormat(format!(
@@ -243,6 +270,24 @@ impl Credential {
             .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
         Ok(Self::Verifier(VerifierCredential(Verifier::WebAuthn(
             verifier,
+        ))))
+    }
+
+    #[cfg(feature = "rsa")]
+    fn rsa_verifier_from_pubkey(pubkey: &[u8]) -> Result<Self, CredentialExportError> {
+        let key = crate::rsa::RsaVerifyingKey::from_pkcs1_der(pubkey)
+            .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
+        Ok(Self::Verifier(VerifierCredential(Verifier::Rsa(
+            crate::rsa::RsaVerifier(key),
+        ))))
+    }
+
+    #[cfg(feature = "rsa")]
+    fn rsa_verifier_from_private(private_der: &[u8]) -> Result<Self, CredentialExportError> {
+        let signing_key = crate::rsa::RsaSigningKey::from_pkcs1_der(private_der)
+            .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
+        Ok(Self::Verifier(VerifierCredential(Verifier::Rsa(
+            crate::rsa::RsaVerifier(signing_key.verifying_key()),
         ))))
     }
 
@@ -289,6 +334,17 @@ fn tagged_public_bytes(verifier: &Verifier) -> Vec<u8> {
             let mut buffer = Vec::with_capacity(WEBAUTHN_PUBLIC_TAG.len() + compressed.len());
             buffer.extend_from_slice(WEBAUTHN_PUBLIC_TAG);
             buffer.extend_from_slice(&compressed);
+            buffer
+        }
+        #[cfg(feature = "rsa")]
+        Verifier::Rsa(v) => {
+            use constants::RSA_PUBLIC_TAG;
+            // The RSA public key is variable length (PKCS#1 DER), so unlike the
+            // curve keys the body length is not fixed.
+            let key_der = v.0.to_pkcs1_der();
+            let mut buffer = Vec::with_capacity(RSA_PUBLIC_TAG.len() + key_der.len());
+            buffer.extend_from_slice(RSA_PUBLIC_TAG);
+            buffer.extend_from_slice(&key_der);
             buffer
         }
     }

@@ -30,6 +30,11 @@ pub use es256::*;
 #[cfg(feature = "webauthn")]
 pub mod webauthn;
 
+#[cfg(feature = "rsa")]
+pub mod rsa;
+#[cfg(feature = "rsa")]
+pub use rsa::*;
+
 // The algorithm-agnostic identity types. Available whenever ed25519 is (the
 // always-on default); enabling further algorithms adds arms to the enums.
 #[cfg(feature = "ed25519")]

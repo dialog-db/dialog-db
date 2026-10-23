@@ -102,6 +102,8 @@ impl SignerCredential {
             Signer::Es256(signer) => {
                 Ok(SignerCredentialExport(es256_native::export(signer).await?))
             }
+            #[cfg(feature = "rsa")]
+            Signer::Rsa(signer) => Ok(SignerCredentialExport(rsa_native::export(signer))),
         }
     }
 
@@ -140,9 +142,41 @@ impl SignerCredential {
             return Ok(Self(Signer::Es256(signer)));
         }
 
+        #[cfg(feature = "rsa")]
+        if let Some(signer) = rsa_native::try_import(data)? {
+            return Ok(Self(Signer::Rsa(signer)));
+        }
+
         Err(CredentialExportError::InvalidFormat(
             "unrecognized signer credential tags".into(),
         ))
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "rsa"))]
+mod rsa_native {
+    use super::CredentialExportError;
+    use crate::credential::constants::{RSA_PRIVATE_TAG, RSA_PRIVATE_TAG_SIZE};
+    use crate::rsa::RsaSigner;
+
+    /// The RSA private key is variable length, so the stored form is the tag
+    /// followed by the PKCS#1 DER private key. The public key is not stored: it
+    /// is derived from the private key on import.
+    pub(super) fn export(signer: &RsaSigner) -> Vec<u8> {
+        let key_der = signer.to_pkcs1_der();
+        let mut buffer = Vec::with_capacity(RSA_PRIVATE_TAG_SIZE + key_der.len());
+        buffer.extend_from_slice(RSA_PRIVATE_TAG);
+        buffer.extend_from_slice(&key_der);
+        buffer
+    }
+
+    pub(super) fn try_import(data: &[u8]) -> Result<Option<RsaSigner>, CredentialExportError> {
+        if !data.starts_with(RSA_PRIVATE_TAG) {
+            return Ok(None);
+        }
+        let signer = RsaSigner::from_pkcs1_der(&data[RSA_PRIVATE_TAG_SIZE..])
+            .map_err(|e| CredentialExportError::InvalidFormat(e.to_string()))?;
+        Ok(Some(signer))
     }
 }
 
@@ -223,6 +257,12 @@ impl SignerCredential {
                     .map_err(|e| CredentialExportError::Key(e.to_string()))?;
                 Ok(SignerCredentialExport(key_export.into()))
             }
+            // RSA is native-only: there is no browser WebCrypto arm to export a
+            // CryptoKeyPair from, so the web signer store does not handle it.
+            #[cfg(feature = "rsa")]
+            Signer::Rsa(_) => Err(CredentialExportError::InvalidFormat(
+                "RSA signer credentials are not supported in the browser store".into(),
+            )),
         }
     }
 
