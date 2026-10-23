@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A published root carries at most half a node's worth of buffered ops
 
-[#PR](https://github.com/dialog-db/dialog-db/pull/PR), for
+[#640](https://github.com/dialog-db/dialog-db/pull/640), for
 [#632](https://github.com/dialog-db/dialog-db/issues/632)
 
 A commit buffers its ops in the root of its tree and flushes them toward
