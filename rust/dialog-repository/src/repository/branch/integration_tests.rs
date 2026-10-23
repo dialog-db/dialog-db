@@ -28,6 +28,7 @@ use dialog_artifacts::{
 #[cfg(not(feature = "web-integration-tests"))]
 use dialog_artifacts::{Changes, Entity, Update as _};
 use dialog_capability::Subject;
+use dialog_capability::access::AuthorizeError;
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::Buffer;
 use dialog_credentials::SignerCredential;
@@ -3339,9 +3340,10 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
     Ok(())
 }
 
-/// A device keeps its access when its access branch fast-forwards to a
-/// head another writer made: in the process that pulled it, and after a
-/// restart.
+/// What a device holding the access branch can prove depends on how it
+/// pulls that branch, and that is the embedder's choice: dialog adopts a
+/// fast-forward by reference, and only a downloading pull brings the
+/// adopted records local before the head moves.
 ///
 /// The login ([`it_regains_access_by_pulling_the_account`]) proves on
 /// demand because the powerline authorizing each fetch sits in a node of
@@ -3351,20 +3353,80 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
 /// writer rewrote, the root among them, are then named by the device's
 /// head and held nowhere on the device. The proof walk reads the access
 /// branch at its head, so reading those nodes needs a fetch, and the
-/// fetch needs the proof the walk cannot reach. Every read of the branch
-/// fails from then on, across restarts.
-///
-/// Two rounds, because the second fast-forward is from an upstream head of
-/// the same origin as the device's own: the round that reads nothing at
-/// all to decide it may fast-forward.
+/// fetch needs the proof the walk cannot reach: every read of the branch
+/// fails from then on, across restarts. A pull that downloads what it
+/// adopts (`pull().download().operational()`) fetches those nodes while
+/// the head it is leaving still authorizes the fetch.
 ///
 /// This is how a tonk profile whose `main` follows its account locked
 /// up: its head moved to another device's head, edition 498, whose root
 /// it had never stored.
 #[dialog_common::test]
-async fn it_keeps_access_after_fast_forwarding_to_another_writers_head(
+async fn it_loses_access_when_the_access_branch_fast_forwards_by_reference(
     ucan: UcanS3Address,
 ) -> Result<()> {
+    use dialog_peer::PeerError;
+
+    let (proofs, restarted) = fast_forward_the_access_branch(ucan, false).await?;
+    // The first fast-forward decides itself by reading the upstream's
+    // root, so that much is local. The second reads nothing.
+    assert!(
+        matches!(proofs[0], Ok(3)),
+        "after the first pull: {proofs:?}"
+    );
+    assert!(
+        matches!(
+            proofs.get(1),
+            Some(Err(
+                AuthorizeError::Malformed { .. } | AuthorizeError::Unavailable { .. }
+            ))
+        ),
+        "the walk cannot evaluate a claim through nodes it cannot fetch: {proofs:?}"
+    );
+    // Opening the peer reads its records from the access branch.
+    assert!(
+        matches!(restarted, Err(PeerError::State(_))),
+        "the device does not open again: {restarted:?}"
+    );
+    Ok(())
+}
+
+/// The same fast-forwards, pulled with the download: the device proves
+/// its access after each, and after a restart. See
+/// [`it_loses_access_when_the_access_branch_fast_forwards_by_reference`].
+#[dialog_common::test]
+async fn it_keeps_access_when_the_access_branch_downloads_what_it_adopts(
+    ucan: UcanS3Address,
+) -> Result<()> {
+    let (proofs, restarted) = fast_forward_the_access_branch(ucan, true).await?;
+    assert!(
+        proofs.len() == 2 && proofs.iter().all(|proof| matches!(proof, Ok(3))),
+        "space -> account -> profile -> operator after each pull: {proofs:?}"
+    );
+    assert!(
+        matches!(restarted, Ok(Ok(3))),
+        "and after a restart: {restarted:?}"
+    );
+    Ok(())
+}
+
+/// Another writer on an account commits to its access branch twice, and a
+/// device with nothing of its own since its last sync pulls each head,
+/// downloading it when `download`. Answers, after each pull, how many links
+/// the device's proof of its access to a space has, or why it has none;
+/// and the same after the device restarts, or why it could not.
+///
+/// Two rounds, because the second fast-forward is from an upstream head of
+/// the same origin as the device's own: the round that reads nothing at
+/// all to decide it may fast-forward.
+#[allow(clippy::type_complexity)]
+async fn fast_forward_the_access_branch(
+    ucan: UcanS3Address,
+    download: bool,
+) -> Result<(
+    Vec<Result<usize, AuthorizeError>>,
+    Result<Result<usize, AuthorizeError>, dialog_peer::PeerError>,
+)> {
     use dialog_capability::access::{
         Access as AccessAttenuation, Proof as _, Prove, Retain, TimeRange,
     };
@@ -3529,6 +3591,7 @@ async fn it_keeps_access_after_fast_forwarding_to_another_writers_head(
 
     // Another writer on the account commits to its access branch twice,
     // and the device takes each head as it lands.
+    let mut proofs = Vec::new();
     for round in 0..2 {
         // The first round takes the device's pushed head.
         account_branch.pull().perform(&account_operator).await?;
@@ -3551,44 +3614,50 @@ async fn it_keeps_access_after_fast_forwarding_to_another_writers_head(
                 .is_some()
         );
 
-        assert!(
+        let pulled = if download {
             device_branch
                 .pull()
+                .download()
+                .operational()
                 .perform(&device_operator)
-                .await?
-                .is_some(),
-            "round {round}: the device takes the account's head"
-        );
-        match prove(&device_operator.did(), &device_profile.did())
-            .perform(&device_operator)
-            .await
-        {
-            Ok(proof) => assert_eq!(
-                proof.proofs().len(),
-                3,
-                "round {round}: space -> account -> profile -> operator"
+                .await
+        } else {
+            device_branch.pull().perform(&device_operator).await
+        };
+        match pulled {
+            Ok(head) => assert!(
+                head.is_some(),
+                "round {round}: the device takes the account's head"
             ),
-            Err(error) => panic!("round {round}: the device lost its access: {error}"),
+            // Locked out already, the device cannot even ask where the
+            // account stands.
+            Err(_) => break,
         }
+        proofs.push(
+            prove(&device_operator.did(), &device_profile.did())
+                .perform(&device_operator)
+                .await
+                .map(|proof| proof.proofs().len()),
+        );
     }
 
     // The device restarts: a new peer over the same storage, holding
     // nothing in memory.
-    let reopened = open_peer(device_storage, device_location).await?;
-    let reopened_operator = reopened
-        .session(b"device")
-        .space(reopened.state())
-        .allow(Subject::any())
-        .await?;
-    match prove(&reopened_operator.did(), &reopened.did())
-        .perform(&reopened_operator)
-        .await
-    {
-        Ok(proof) => assert_eq!(proof.proofs().len(), 3, "after a restart"),
-        Err(error) => panic!("the device lost its access after a restart: {error}"),
-    }
-
-    Ok(())
+    let restarted = match open_peer(device_storage, device_location).await {
+        Ok(reopened) => {
+            let reopened_operator = reopened
+                .session(b"device")
+                .space(reopened.state())
+                .allow(Subject::any())
+                .await?;
+            Ok(prove(&reopened_operator.did(), &reopened.did())
+                .perform(&reopened_operator)
+                .await
+                .map(|proof| proof.proofs().len()))
+        }
+        Err(error) => Err(error),
+    };
+    Ok((proofs, restarted))
 }
 
 /// The upgrade path, end to end over the access service and local S3:
