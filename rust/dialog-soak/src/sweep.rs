@@ -1,6 +1,6 @@
-//! The sweep: run the join scenario across network profiles (and
-//! optionally tree branching factors), one process per configuration,
-//! keeping the median run per configuration as its report.
+//! The sweep: run each scenario across network profiles (and optionally
+//! tree branching factors), one process per configuration, keeping the
+//! median run per configuration as its report.
 //!
 //! Each configuration runs in its own child process because the tree
 //! manifest override is read once per process (`DIALOG_TREE_FANOUT_N`).
@@ -16,6 +16,7 @@ use std::process::Command;
 use anyhow::{Context as _, Result};
 
 use crate::report::Report;
+use crate::scenario::Kind;
 
 /// Configuration for one sweep.
 #[derive(Debug, Clone)]
@@ -28,6 +29,8 @@ pub struct SweepConfig {
     pub commits: usize,
     /// Runs per configuration; the median by lazy-join time is kept.
     pub repeats: usize,
+    /// Scenarios to sweep.
+    pub scenarios: Vec<Kind>,
     /// Network profile names (`none`, `localhost`, `broadband`, ...).
     pub networks: Vec<String>,
     /// Tree branching factors to sweep (`DIALOG_TREE_FANOUT_N`); empty
@@ -47,13 +50,20 @@ fn lazy_ms(report: &Report) -> u64 {
 
 /// Run one configuration `repeats` times in child processes and return
 /// the median run's report.
-fn run_config(config: &SweepConfig, network: &str, fanout: Option<u8>) -> Result<Report> {
+fn run_config(
+    config: &SweepConfig,
+    scenario: Kind,
+    network: &str,
+    fanout: Option<u8>,
+) -> Result<Report> {
     let exe = std::env::current_exe().context("resolving the soak binary")?;
     let mut runs = Vec::with_capacity(config.repeats);
     for _ in 0..config.repeats {
         let mut command = Command::new(&exe);
         command
             .arg("run")
+            .arg("--scenario")
+            .arg(scenario.label())
             .arg("--network")
             .arg(network)
             .arg("--entities")
@@ -67,7 +77,7 @@ fn run_config(config: &SweepConfig, network: &str, fanout: Option<u8>) -> Result
         let output = command.output().context("spawning a soak run")?;
         anyhow::ensure!(
             output.status.success(),
-            "soak run failed for network {network}: {}",
+            "soak run failed for scenario {scenario} on network {network}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let report: Report =
@@ -91,21 +101,23 @@ pub fn sweep(config: &SweepConfig) -> Result<String> {
     };
 
     let mut written = Vec::new();
-    for network in &config.networks {
-        for fanout in &fanouts {
-            let name = match fanout {
-                Some(fanout) => format!("join-{network}-fanout{fanout}"),
-                None => format!("join-{network}"),
-            };
-            eprintln!(
-                "== {name} (entities={} commits={}, {} repeats)",
-                config.entities, config.commits, config.repeats
-            );
-            let report = run_config(config, network, *fanout)?;
-            let path = config.out_dir.join(format!("{name}.json"));
-            fs::write(&path, serde_json::to_string_pretty(&report)?)
-                .with_context(|| format!("writing {}", path.display()))?;
-            written.push((name, report));
+    for scenario in &config.scenarios {
+        for network in &config.networks {
+            for fanout in &fanouts {
+                let name = match fanout {
+                    Some(fanout) => format!("{scenario}-{network}-fanout{fanout}"),
+                    None => format!("{scenario}-{network}"),
+                };
+                eprintln!(
+                    "== {name} (entities={} commits={}, {} repeats)",
+                    config.entities, config.commits, config.repeats
+                );
+                let report = run_config(config, *scenario, network, *fanout)?;
+                let path = config.out_dir.join(format!("{name}.json"));
+                fs::write(&path, serde_json::to_string_pretty(&report)?)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                written.push((name, report));
+            }
         }
     }
 
@@ -113,22 +125,23 @@ pub fn sweep(config: &SweepConfig) -> Result<String> {
     use std::fmt::Write as _;
     let _ = writeln!(
         table,
-        "| {:<34} | {:<10} | {:>8} | {:>6} | {:>5} | {:>8} |",
-        "config", "phase", "virt ms", "reqs", "dup", "KiB"
+        "| {:<34} | {:<12} | {:>8} | {:>5} | {:>6} | {:>5} | {:>8} |",
+        "config", "phase", "virt ms", "chain", "reqs", "dup", "KiB"
     );
     let _ = writeln!(
         table,
-        "|{:-<36}|{:-<12}|{:-<10}|{:-<8}|{:-<7}|{:-<10}|",
-        "", "", "", "", "", ""
+        "|{:-<36}|{:-<14}|{:-<10}|{:-<7}|{:-<8}|{:-<7}|{:-<10}|",
+        "", "", "", "", "", "", ""
     );
     for (name, report) in &written {
         for phase in &report.phases {
             let _ = writeln!(
                 table,
-                "| {:<34} | {:<10} | {:>8} | {:>6} | {:>5} | {:>8} |",
+                "| {:<34} | {:<12} | {:>8} | {:>5} | {:>6} | {:>5} | {:>8} |",
                 name,
                 phase.name,
                 phase.virtual_ms,
+                phase.round_trips.unwrap_or(0),
                 phase.traffic.requests,
                 phase.duplicate_requests,
                 phase.traffic.bytes / 1024

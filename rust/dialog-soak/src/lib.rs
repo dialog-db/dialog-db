@@ -32,6 +32,7 @@
 //!
 //! ```text
 //! cargo run -p dialog-soak --release -- run --network mobile
+//! cargo run -p dialog-soak --release -- run --scenario catchup --network none
 //! DIALOG_TREE_FANOUT_N=5 cargo run -p dialog-soak --release -- run --network mobile
 //! cargo run -p dialog-soak --release -- sweep --out-dir target/soak-current
 //! cargo run -p dialog-soak --release -- compare soak/baseline target/soak-current
@@ -39,12 +40,15 @@
 //!
 //! [`Fs`]: dialog_remote_fs::Fs
 
+pub mod catchup;
 pub mod compare;
 pub mod join;
 pub mod report;
+pub mod scenario;
 pub mod sweep;
+pub mod writer;
 
 pub use compare::{Comparison, compare_dirs};
-pub use join::{JoinScenario, run_join};
 pub use report::{PhaseReport, Report, TallyRows};
+pub use scenario::{Kind, Scenario, run};
 pub use sweep::{SweepConfig, sweep};
