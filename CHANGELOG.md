@@ -14,41 +14,6 @@ says how to cut a release.
 
 ## Unreleased
 
-### A query pinned to one value of a single-valued attribute reads a cold replica in parallel
-
-[#658](https://github.com/dialog-db/dialog-db/pull/658), for
-[#650](https://github.com/dialog-db/dialog-db/issues/650)
-
-A premise that binds a single-valued attribute to a value without binding
-the entity, such as `status = "open"`, scans the value index for
-candidates and checks each candidate against its entity's stored values,
-so that an entity whose winning value is no longer `"open"` is not
-yielded. Each check now goes out as a preload hint while an earlier one
-is awaited. The other premises' entity probes were already pipelined this
-way. The checks were not, and they were the chain. On a cold replica each
-check fetched one entity leaf, and the probes of the next premise landed
-in that same leaf, so the query cost one round trip per entity leaf it
-touched.
-
-What this changes for you:
-
-- A cold query driven by such a premise takes about a fifth of the round
-  trips it did. The soak's `rule` phase, a rule whose body pins
-  `status = "open"`, goes from a chain of 98 to 18 dependent requests and
-  from 8.4 s to 1.7 s on the broadband profile (22.6 s to 4.7 s on mobile,
-  22.4 s to 6.4 s in a browser). The `filtered` phase, a concept query
-  pinning a status, goes from 8.8 s to 1.7 s on broadband.
-- It fetches no more blocks: the hinted leaves are the ones the checks
-  read anyway. Request and byte counts are unchanged.
-- Results are unchanged, and so is the plan. A replica whose speculation
-  budget is zero (`FetchBudget::ZERO`) behaves as before.
-- Nothing stored or synced changes.
-
-Why: #536 made a rule body plan with its pinned values bound, which is
-correct and reads fewer blocks. It also made the value-pinned premise the
-driver, and that premise's checks were the one per-row read in the
-nested-loop join that nothing read ahead.
-
 ### A transaction's writes to a cell under `last` commit as they would one by one
 
 [#647](https://github.com/dialog-db/dialog-db/pull/647)
@@ -90,6 +55,41 @@ Why: the squash reasons about one value at a time, which is exact only
 while writes of different values commute. A choosing write is the one
 write that does not commute with the others, so a cell holding one has
 to reach the tree in the order it was written.
+
+### A query pinned to one value of a single-valued attribute reads a cold replica in parallel
+
+[#658](https://github.com/dialog-db/dialog-db/pull/658), for
+[#650](https://github.com/dialog-db/dialog-db/issues/650)
+
+A premise that binds a single-valued attribute to a value without binding
+the entity, such as `status = "open"`, scans the value index for
+candidates and checks each candidate against its entity's stored values,
+so that an entity whose winning value is no longer `"open"` is not
+yielded. Each check now goes out as a preload hint while an earlier one
+is awaited. The other premises' entity probes were already pipelined this
+way. The checks were not, and they were the chain. On a cold replica each
+check fetched one entity leaf, and the probes of the next premise landed
+in that same leaf, so the query cost one round trip per entity leaf it
+touched.
+
+What this changes for you:
+
+- A cold query driven by such a premise takes about a fifth of the round
+  trips it did. The soak's `rule` phase, a rule whose body pins
+  `status = "open"`, goes from a chain of 98 to 18 dependent requests and
+  from 8.4 s to 1.7 s on the broadband profile (22.6 s to 4.7 s on mobile,
+  22.4 s to 6.4 s in a browser). The `filtered` phase, a concept query
+  pinning a status, goes from 8.8 s to 1.7 s on broadband.
+- It fetches no more blocks: the hinted leaves are the ones the checks
+  read anyway. Request and byte counts are unchanged.
+- Results are unchanged, and so is the plan. A replica whose speculation
+  budget is zero (`FetchBudget::ZERO`) behaves as before.
+- Nothing stored or synced changes.
+
+Why: #536 made a rule body plan with its pinned values bound, which is
+correct and reads fewer blocks. It also made the value-pinned premise the
+driver, and that premise's checks were the one per-row read in the
+nested-loop join that nothing read ahead.
 
 ### A chain canonicalized at a link that changes nothing is canonical
 
