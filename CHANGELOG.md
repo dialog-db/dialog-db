@@ -942,8 +942,12 @@ thread multiplies whatever it holds by the size of the thread pool.
   invalid signature. Upgrade every replica that pulls from one running
   this release. Nothing an embedder runs is needed beyond that.
 - A head minted by a build of this release from before heads carried
-  their count ends in a lone `0x02` marker. It still verifies and pulls,
-  nothing is rewritten, and a reader derives its count from its region.
+  their count ends in a lone `0x02` marker. No release or pre-release
+  tag carries such a build (none contains #625's commit), so these heads
+  exist only where an untagged build of `main` ran, and the `0x02` shape
+  can be retired before the release. Until then it still verifies and
+  pulls, nothing is rewritten, and a reader derives its count from its
+  region.
   A commit on such a head of another origin reads the head's region for
   the count, as those builds did, and the head it mints carries one.
 - A branch gains a replica-local cell, `own`, recording how many of the
