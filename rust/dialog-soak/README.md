@@ -82,7 +82,11 @@ exactly this against the checked-in baseline under `soak/baseline`. The
 pull-request workflow's `Replication gate` job (`soak:gate`) runs the
 `none` profile alone against the same baseline, so a change to the
 protocol's shape is caught before it lands; the shaped profiles stay
-nightly.
+nightly. On a pull request it also compares against the sweep main's CI
+recorded for the commit the pull request lands on (`compare --base`),
+failing on a regression against either, and the `Delta report` comment
+shows every phase's rows against that base, as for the perf gate (see
+`rust/dialog-perf/README.md`).
 
 The baselines are recorded from CI's own run, not a developer machine:
 download the `soak-current` artifact the gate uploads and copy its

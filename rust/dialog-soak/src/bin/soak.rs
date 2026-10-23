@@ -11,6 +11,8 @@
 //! soak run --network mobile          # one scenario run (JSON to stdout)
 //! soak sweep --out-dir target/soak   # profiles x repeats, median reports
 //! soak compare soak/baseline target/soak   # regression gate
+//! soak compare --base target/soak-base target/soak \
+//!     --markdown target/soak-delta.md      # against the commit landed on
 //! ```
 //!
 //! `run` executes under tokio's paused test clock by default: simulated
@@ -26,7 +28,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use dialog_remote_fs::simulation::NetworkShape;
-use dialog_soak::{JoinScenario, SweepConfig, compare_dirs, run_join, sweep};
+use dialog_soak::{Against, JoinScenario, SweepConfig, compare_dirs, run_join, sweep};
 
 /// Sync/join soak harness over a simulated network.
 #[derive(Debug, Parser)]
@@ -147,6 +149,22 @@ struct CompareArgs {
     /// Percent growth in a total that counts as a regression.
     #[arg(long, default_value_t = 10.0)]
     threshold: f64,
+
+    /// The first directory is another commit's sweep, not the baseline
+    /// files: reports on one side only, or seeded differently, are
+    /// reported rather than skipped or failed.
+    #[arg(long)]
+    base: bool,
+
+    /// With `--base`, reports (file stems, `join-none`) whose baseline
+    /// file the change re-records (comma-separated): their growth is
+    /// reported as accepted.
+    #[arg(long, value_delimiter = ',', requires = "base")]
+    rebaselined: Vec<String>,
+
+    /// Also write every row as a Markdown table to this file.
+    #[arg(long)]
+    markdown: Option<PathBuf>,
 }
 
 /// A named preset link model.
@@ -236,9 +254,31 @@ fn main() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Compare(args) => {
-            let comparison = compare_dirs(&args.baseline, &args.new, args.threshold)?;
+            let against = if args.base {
+                Against::Sweep {
+                    rebaselined: args.rebaselined.into_iter().collect(),
+                }
+            } else {
+                Against::Baseline
+            };
+            let comparison = compare_dirs(&args.baseline, &args.new, args.threshold, &against)?;
+            if let Some(path) = &args.markdown {
+                std::fs::write(path, comparison.markdown())?;
+            }
             for line in &comparison.summary {
                 println!("{line}");
+            }
+            for line in &comparison.notes {
+                println!("{line}");
+            }
+            if !comparison.accepted.is_empty() {
+                println!(
+                    "\n{} growth(s) past the threshold in re-baselined reports, accepted:",
+                    comparison.accepted.len()
+                );
+                for line in &comparison.accepted {
+                    println!("  {line}");
+                }
             }
             if comparison.passed() {
                 println!("\nno regressions");

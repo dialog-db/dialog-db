@@ -11,8 +11,21 @@
 //! The outcome must match exactly: a workload that answers differently
 //! is a different workload (or a wrong answer), and either way the
 //! baseline no longer describes it.
+//!
+//! The same comparison runs against two kinds of reference. Against
+//! the baseline files ([`Against::Baseline`]) every scenario must have
+//! one, so none can drop out of the gate. Against the sweep CI recorded
+//! for the commit a change lands on ([`Against::Sweep`]) the scenarios
+//! may differ, because the change may add, remove or reshape one; those
+//! are reported, and the baseline-file comparison gates them. A change
+//! that re-records a scenario's baseline file has accepted that
+//! scenario's new cost, so its growth against the sweep is reported as
+//! accepted rather than failed. Each comparison yields every row it
+//! looked at, not only the regressions, so a change's whole delta can be
+//! shown ([`Comparison::markdown`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
@@ -59,6 +72,72 @@ impl Default for Tolerance {
     }
 }
 
+/// What the new sweep is compared against.
+#[derive(Debug, Clone)]
+pub enum Against {
+    /// Checked-in baseline files: every scenario must have one.
+    Baseline,
+    /// The sweep of the commit the change lands on. Scenarios present on
+    /// one side only, or whose workload changed, are reported and not
+    /// gated; growth in a scenario named in `rebaselined` (one whose
+    /// baseline file the change re-records) is accepted, not failed.
+    Sweep {
+        /// Scenarios whose baseline file the change re-records.
+        rebaselined: BTreeSet<String>,
+    },
+}
+
+/// How one row of a comparison came out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Unchanged, or moved within the allowance.
+    Within,
+    /// Grew past the allowance: the gate fails.
+    Regressed,
+    /// Shrank past the allowance.
+    Improved,
+    /// Grew past the allowance in a scenario whose baseline file the
+    /// change re-records.
+    Accepted,
+    /// Not gated: volatile instructions, or a scenario present on one
+    /// side only or whose workload changed.
+    Ungated,
+}
+
+impl Verdict {
+    fn marker(self) -> &'static str {
+        match self {
+            Verdict::Within => "",
+            Verdict::Regressed => "❌ past tolerance",
+            Verdict::Improved => "✅ improved past tolerance",
+            Verdict::Accepted => "⚠️ past tolerance, re-baselined",
+            Verdict::Ungated => "not gated",
+        }
+    }
+}
+
+/// One measured quantity of one scenario, on both sides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Row {
+    /// The scenario.
+    pub scenario: String,
+    /// `instructions` or a counter name.
+    pub metric: String,
+    /// The reference's value; `None` when it has none.
+    pub base: Option<u64>,
+    /// The new sweep's value; `None` when it has none.
+    pub new: Option<u64>,
+    /// How the row came out.
+    pub verdict: Verdict,
+}
+
+impl Row {
+    /// Whether the value differs between the two sides.
+    pub fn moved(&self) -> bool {
+        self.base != self.new
+    }
+}
+
 /// The outcome of comparing two sweep directories.
 #[derive(Debug, Clone, Default)]
 pub struct Comparison {
@@ -69,12 +148,110 @@ pub struct Comparison {
     /// Improvements past the allowance, worth a re-baseline so the gate
     /// holds the new level.
     pub improvements: Vec<String>,
+    /// Growth past the allowance in re-baselined scenarios, compared
+    /// against a sweep: shown, not failed.
+    pub accepted: Vec<String>,
+    /// Scenario-level differences that are not rows: a scenario on one
+    /// side only, or one whose workload changed.
+    pub notes: Vec<String>,
+    /// Every quantity compared, in scenario order.
+    pub rows: Vec<Row>,
 }
 
 impl Comparison {
     /// Whether the gate passes (no regressions).
     pub fn passed(&self) -> bool {
         self.regressions.is_empty()
+    }
+
+    /// The comparison as one Markdown table: the rows that moved, then
+    /// the rows that did not, folded into a details block.
+    pub fn markdown(&self) -> String {
+        let mut out = String::new();
+        let past = |verdict| self.rows.iter().filter(|r| r.verdict == verdict).count();
+        let _ = writeln!(
+            out,
+            "{} rows: {} past tolerance, {} improved past tolerance, {} re-baselined.\n",
+            self.rows.len(),
+            past(Verdict::Regressed),
+            past(Verdict::Improved),
+            past(Verdict::Accepted),
+        );
+        for note in &self.notes {
+            let _ = writeln!(out, "- {note}");
+        }
+        if !self.notes.is_empty() {
+            out.push('\n');
+        }
+        let (moved, still): (Vec<&Row>, Vec<&Row>) = self.rows.iter().partition(|r| r.moved());
+        if moved.is_empty() {
+            out.push_str("Nothing moved.\n");
+        } else {
+            table(&mut out, &moved);
+        }
+        if !still.is_empty() {
+            let _ = writeln!(
+                out,
+                "\n<details><summary>{} rows unchanged</summary>\n",
+                still.len()
+            );
+            table(&mut out, &still);
+            out.push_str("\n</details>\n");
+        }
+        out
+    }
+}
+
+fn table(out: &mut String, rows: &[&Row]) {
+    out.push_str("| scenario | metric | base | new | Δ | Δ% | |\n");
+    out.push_str("|---|---|--:|--:|--:|--:|---|\n");
+    for row in rows {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} | {} | {} | {} |",
+            row.scenario,
+            row.metric,
+            count(row.base),
+            count(row.new),
+            delta(row.base, row.new),
+            percent(row.base, row.new),
+            row.verdict.marker(),
+        );
+    }
+}
+
+/// A count with thousands separated, or a dash for none.
+fn count(value: Option<u64>) -> String {
+    let Some(value) = value else {
+        return "–".to_string();
+    };
+    let digits = value.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+fn delta(base: Option<u64>, new: Option<u64>) -> String {
+    match (base, new) {
+        (Some(base), Some(new)) if new >= base => format!("+{}", count(Some(new - base))),
+        (Some(base), Some(new)) => format!("-{}", count(Some(base - new))),
+        _ => "–".to_string(),
+    }
+}
+
+fn percent(base: Option<u64>, new: Option<u64>) -> String {
+    match (base, new) {
+        (Some(base), Some(new)) if base == new => "0%".to_string(),
+        (Some(0), Some(_)) => "new".to_string(),
+        (Some(base), Some(new)) => {
+            format!("{:+.2}%", (new as f64 - base as f64) / base as f64 * 100.0)
+        }
+        _ => "–".to_string(),
     }
 }
 
@@ -116,68 +293,231 @@ fn load(dir: &Path) -> Result<BTreeMap<String, Report>> {
     Ok(reports)
 }
 
-/// Compare the scenarios shared by two sweep directories under
-/// `tolerance`.
-pub fn compare_dirs(baseline: &Path, new: &Path, tolerance: &Tolerance) -> Result<Comparison> {
+/// Compare the scenarios of two sweep directories under `tolerance`,
+/// the first being what `against` says it is.
+pub fn compare_dirs(
+    baseline: &Path,
+    new: &Path,
+    tolerance: &Tolerance,
+    against: &Against,
+) -> Result<Comparison> {
     let baseline = load(baseline)?;
     let new = load(new)?;
-    let shared: Vec<&String> = baseline
-        .keys()
-        .filter(|name| new.contains_key(*name))
-        .collect();
-    anyhow::ensure!(!shared.is_empty(), "no overlapping reports to compare");
+    anyhow::ensure!(
+        baseline.keys().any(|name| new.contains_key(name)),
+        "no overlapping reports to compare"
+    );
 
     let mut comparison = Comparison::default();
-    for name in &shared {
-        compare_reports(&baseline[*name], &new[*name], tolerance, &mut comparison);
-    }
-    // A scenario the sweep ran with no baseline is ungated, and a
-    // baseline no scenario answers gates nothing: both fail, so a
-    // scenario cannot drop out of the gate by being renamed or by its
-    // baseline being deleted.
-    for name in new.keys().filter(|name| !baseline.contains_key(*name)) {
-        comparison.regressions.push(format!(
-            "{name}: no baseline (sweep into the baseline directory to add one)"
-        ));
-    }
-    for name in baseline.keys().filter(|name| !new.contains_key(*name)) {
-        comparison.regressions.push(format!(
-            "{name}: a baseline no scenario in the sweep answers"
-        ));
+    let names: BTreeSet<&String> = baseline.keys().chain(new.keys()).collect();
+    for name in names {
+        match (baseline.get(name), new.get(name), against) {
+            (Some(base), Some(new), _) => {
+                compare_reports(base, new, tolerance, against, &mut comparison)
+            }
+            // A scenario the sweep ran with no baseline is ungated, and
+            // a baseline no scenario answers gates nothing: both fail,
+            // so a scenario cannot drop out of the gate by being renamed
+            // or by its baseline being deleted.
+            (None, Some(_), Against::Baseline) => comparison.regressions.push(format!(
+                "{name}: no baseline (sweep into the baseline directory to add one)"
+            )),
+            (Some(_), None, Against::Baseline) => comparison.regressions.push(format!(
+                "{name}: a baseline no scenario in the sweep answers"
+            )),
+            (None, Some(report), Against::Sweep { .. }) => {
+                comparison
+                    .notes
+                    .push(format!("`{name}`: new, not in the base sweep"));
+                one_sided(&mut comparison, report, false);
+            }
+            (Some(report), None, Against::Sweep { .. }) => {
+                comparison
+                    .notes
+                    .push(format!("`{name}`: in the base sweep, not in this one"));
+                one_sided(&mut comparison, report, true);
+            }
+            (None, None, _) => unreachable!("a name comes from one side or the other"),
+        }
     }
     Ok(comparison)
 }
 
-fn compare_reports(base: &Report, new: &Report, tolerance: &Tolerance, out: &mut Comparison) {
+/// The rows of a scenario only one side ran, ungated.
+fn one_sided(out: &mut Comparison, report: &Report, base_side: bool) {
+    let values = report
+        .instructions
+        .map(|value| ("instructions".to_string(), value))
+        .into_iter()
+        .chain(report.counters.iter().map(|(k, v)| (k.clone(), *v)));
+    for (metric, value) in values {
+        let (base, new) = if base_side {
+            (Some(value), None)
+        } else {
+            (None, Some(value))
+        };
+        out.rows.push(Row {
+            scenario: report.scenario.clone(),
+            metric,
+            base,
+            new,
+            verdict: Verdict::Ungated,
+        });
+    }
+}
+
+/// One scenario's rows: how each is judged and where its verdict goes.
+struct Gate<'a> {
+    scenario: &'a str,
+    /// Whether the two sides ran the same workload.
+    comparable: bool,
+    /// Whether the change re-records this scenario's baseline file.
+    rebaselined: bool,
+}
+
+impl Gate<'_> {
+    /// Record a row and route its verdict: growth past the allowance is
+    /// a regression, or accepted in a re-baselined scenario.
+    fn check(
+        &self,
+        out: &mut Comparison,
+        metric: &str,
+        before: u64,
+        after: u64,
+        slack: u64,
+        pct: f64,
+    ) {
+        let name = self.scenario;
+        let verdict = if !self.comparable {
+            Verdict::Ungated
+        } else if regressed(before, after, slack, pct) {
+            let line = format!("{name}: {metric} {}", change(before, after));
+            if self.rebaselined {
+                out.accepted.push(line);
+                Verdict::Accepted
+            } else {
+                out.regressions.push(line);
+                Verdict::Regressed
+            }
+        } else if regressed(after, before, slack, pct) {
+            out.improvements
+                .push(format!("{name}: {metric} {}", change(before, after)));
+            Verdict::Improved
+        } else {
+            Verdict::Within
+        };
+        self.push(out, metric, before, after, verdict);
+    }
+
+    fn push(&self, out: &mut Comparison, metric: &str, before: u64, after: u64, verdict: Verdict) {
+        out.rows.push(Row {
+            scenario: self.scenario.to_string(),
+            metric: metric.to_string(),
+            base: Some(before),
+            new: Some(after),
+            verdict,
+        });
+    }
+}
+
+fn compare_reports(
+    base: &Report,
+    new: &Report,
+    tolerance: &Tolerance,
+    against: &Against,
+    out: &mut Comparison,
+) {
     let name = &base.scenario;
+    let sweep = matches!(against, Against::Sweep { .. });
+    let rebaselined = match against {
+        Against::Sweep { rebaselined } => rebaselined.contains(name),
+        Against::Baseline => false,
+    };
+
+    // Against a sweep, a scenario run at another size or answering
+    // differently is a workload the change reshaped: its counts are not
+    // comparable, and the baseline file the change re-records gates it.
+    let mut comparable = true;
     if base.size != new.size || base.profile != new.profile {
-        out.regressions.push(format!(
+        let line = format!(
             "{name}: compared at size {} / {} against a baseline at size {} / {}",
             new.size, new.profile, base.size, base.profile
+        );
+        if !sweep {
+            out.regressions.push(line);
+            return;
+        }
+        out.notes.push(format!(
+            "`{line}`: workload changed, not gated against the base"
         ));
-        return;
+        comparable = false;
     }
-    for (key, expected) in &base.outcome {
+    let outcomes: BTreeSet<&String> = base.outcome.keys().chain(new.outcome.keys()).collect();
+    for key in outcomes {
+        let expected = base.outcome.get(key).copied().unwrap_or(0);
         let actual = new.outcome.get(key).copied().unwrap_or(0);
-        if actual != *expected {
+        if actual == expected {
+            continue;
+        }
+        if sweep {
+            out.notes.push(format!(
+                "`{name}`: outcome {key} {expected} -> {actual}, workload changed, not gated against the base"
+            ));
+            comparable = false;
+        } else if base.outcome.contains_key(key) {
             out.regressions.push(format!(
                 "{name}: outcome {key} {expected} -> {actual}: the workload answers differently"
             ));
         }
     }
 
+    let gate = Gate {
+        scenario: name,
+        comparable,
+        rebaselined,
+    };
+
+    let instructions = match (base.instructions, new.instructions) {
+        (Some(before), Some(after)) if base.volatile || new.volatile => {
+            gate.push(out, "instructions", before, after, Verdict::Ungated);
+            format!(
+                "instructions {} (volatile, not gated)",
+                change(before, after)
+            )
+        }
+        (Some(before), Some(after)) => {
+            gate.check(
+                out,
+                "instructions",
+                before,
+                after,
+                tolerance.instructions_slack,
+                tolerance.instructions_pct,
+            );
+            format!("instructions {}", change(before, after))
+        }
+        (Some(before), None) => {
+            if !sweep {
+                out.regressions.push(format!(
+                    "{name}: instructions not measured (baseline {before}); sweep under callgrind"
+                ));
+            }
+            "instructions not measured".to_string()
+        }
+        (None, Some(after)) => format!("instructions {after} (no baseline)"),
+        (None, None) => "no instruction counts".to_string(),
+    };
+
     // Every counter either report has: a step the baseline never took
     // and the new run takes counts from zero.
-    let keys: std::collections::BTreeSet<&String> =
-        base.counters.keys().chain(new.counters.keys()).collect();
+    let keys: BTreeSet<&String> = base.counters.keys().chain(new.counters.keys()).collect();
     let mut moved = Vec::new();
     for key in keys {
         let before = base.counters.get(key).copied().unwrap_or(0);
         let after = new.counters.get(key).copied().unwrap_or(0);
-        if before == after {
-            continue;
+        if before != after {
+            moved.push(format!("{key} {}", change(before, after)));
         }
-        moved.push(format!("{key} {}", change(before, after)));
         let (slack, pct) = if key.ends_with(".bytes") {
             (tolerance.bytes_slack, tolerance.bytes_pct)
         } else if key.starts_with("archive.") {
@@ -185,51 +525,9 @@ fn compare_reports(base: &Report, new: &Report, tolerance: &Tolerance, out: &mut
         } else {
             (tolerance.step_slack, 0.0)
         };
-        if regressed(before, after, slack, pct) {
-            out.regressions
-                .push(format!("{name}: {key} {}", change(before, after)));
-        } else if regressed(after, before, slack, pct) {
-            out.improvements
-                .push(format!("{name}: {key} {}", change(before, after)));
-        }
+        gate.check(out, key, before, after, slack, pct);
     }
 
-    let instructions = match (base.instructions, new.instructions) {
-        (Some(before), Some(after)) if base.volatile || new.volatile => {
-            format!(
-                "instructions {} (volatile, not gated)",
-                change(before, after)
-            )
-        }
-        (Some(before), Some(after)) => {
-            if regressed(
-                before,
-                after,
-                tolerance.instructions_slack,
-                tolerance.instructions_pct,
-            ) {
-                out.regressions
-                    .push(format!("{name}: instructions {}", change(before, after)));
-            } else if regressed(
-                after,
-                before,
-                tolerance.instructions_slack,
-                tolerance.instructions_pct,
-            ) {
-                out.improvements
-                    .push(format!("{name}: instructions {}", change(before, after)));
-            }
-            format!("instructions {}", change(before, after))
-        }
-        (Some(before), None) => {
-            out.regressions.push(format!(
-                "{name}: instructions not measured (baseline {before}); sweep under callgrind"
-            ));
-            "instructions not measured".to_string()
-        }
-        (None, Some(after)) => format!("instructions {after} (no baseline)"),
-        (None, None) => "no instruction counts".to_string(),
-    };
     let moved = if moved.is_empty() {
         "counters unchanged".to_string()
     } else {
@@ -269,6 +567,7 @@ mod tests {
             &report(&[]),
             &report(&[("span.settle_cell", 500)]),
             &Tolerance::default(),
+            &Against::Baseline,
             &mut comparison,
         );
         assert!(
@@ -289,6 +588,7 @@ mod tests {
             &report(&[("archive.put", 0)]),
             &report(&[("archive.put", 2)]),
             &Tolerance::default(),
+            &Against::Baseline,
             &mut comparison,
         );
         assert!(
@@ -296,6 +596,174 @@ mod tests {
             "two blocks written where the baseline wrote none: {:?}",
             comparison.summary
         );
+    }
+
+    fn sweep(rebaselined: &[&str]) -> Against {
+        Against::Sweep {
+            rebaselined: rebaselined.iter().map(|name| name.to_string()).collect(),
+        }
+    }
+
+    fn measured(instructions: u64, counters: &[(&str, u64)]) -> Report {
+        Report {
+            instructions: Some(instructions),
+            ..report(counters)
+        }
+    }
+
+    /// The motivating case: the baseline file sits above where the base
+    /// commit measures, so growth that lands back under the file passes
+    /// it, and the same growth against the base sweep fails.
+    #[test]
+    fn growth_hidden_under_the_file_fails_against_the_base() {
+        let file = measured(100_000_000, &[]);
+        let base = measured(80_000_000, &[]);
+        let new = measured(90_000_000, &[]);
+        let tolerance = Tolerance::default();
+
+        let mut against_file = Comparison::default();
+        compare_reports(
+            &file,
+            &new,
+            &tolerance,
+            &Against::Baseline,
+            &mut against_file,
+        );
+        assert!(against_file.passed(), "{:?}", against_file.regressions);
+
+        let mut against_base = Comparison::default();
+        compare_reports(&base, &new, &tolerance, &sweep(&[]), &mut against_base);
+        assert!(!against_base.passed(), "+12.5% against the base");
+        assert_eq!(against_base.rows[0].verdict, Verdict::Regressed);
+    }
+
+    /// Re-recording a scenario's baseline file accepts its new cost: the
+    /// growth against the base is a row marked accepted, not a failure.
+    #[test]
+    fn a_rebaselined_scenario_is_accepted_against_the_base() {
+        let base = measured(80_000_000, &[]);
+        let new = measured(90_000_000, &[]);
+        let mut comparison = Comparison::default();
+        compare_reports(
+            &base,
+            &new,
+            &Tolerance::default(),
+            &sweep(&["s"]),
+            &mut comparison,
+        );
+        assert!(comparison.passed(), "{:?}", comparison.regressions);
+        assert_eq!(comparison.rows[0].verdict, Verdict::Accepted);
+        assert_eq!(comparison.accepted.len(), 1);
+    }
+
+    /// Against the base, a workload that answers differently is a
+    /// reshaped scenario: reported, its rows ungated. Against the file it
+    /// fails, as before.
+    #[test]
+    fn a_reshaped_workload_is_ungated_against_the_base_only() {
+        let base = measured(80_000_000, &[("span.settle", 1)]);
+        let mut new = measured(90_000_000, &[("span.settle", 5)]);
+        new.outcome.insert("facts".into(), 10);
+
+        let mut comparison = Comparison::default();
+        compare_reports(
+            &base,
+            &new,
+            &Tolerance::default(),
+            &sweep(&[]),
+            &mut comparison,
+        );
+        assert!(comparison.passed(), "{:?}", comparison.regressions);
+        assert!(
+            comparison
+                .rows
+                .iter()
+                .all(|row| row.verdict == Verdict::Ungated)
+        );
+        assert_eq!(comparison.notes.len(), 1);
+
+        let mut comparison = Comparison::default();
+        let mut file = base.clone();
+        file.outcome.insert("facts".into(), 1);
+        compare_reports(
+            &file,
+            &new,
+            &Tolerance::default(),
+            &Against::Baseline,
+            &mut comparison,
+        );
+        assert!(!comparison.passed());
+    }
+
+    /// Every quantity becomes a row, moved or not, and the table shows
+    /// the moved rows first with the rest folded away.
+    #[test]
+    fn every_quantity_is_a_row_and_the_unmoved_fold() {
+        let base = measured(10_000_000, &[("archive.put", 4), ("span.settle", 1)]);
+        let new = measured(10_100_000, &[("archive.put", 4), ("span.settle", 1)]);
+        let mut comparison = Comparison::default();
+        compare_reports(
+            &base,
+            &new,
+            &Tolerance::default(),
+            &sweep(&[]),
+            &mut comparison,
+        );
+        let metrics: Vec<&str> = comparison
+            .rows
+            .iter()
+            .map(|row| row.metric.as_str())
+            .collect();
+        assert_eq!(metrics, ["instructions", "archive.put", "span.settle"]);
+
+        let markdown = comparison.markdown();
+        let (moved, folded) = markdown.split_once("<details>").expect("a fold");
+        assert!(
+            moved.contains("| s | instructions | 10,000,000 | 10,100,000 | +100,000 | +1.00% |  |"),
+            "{markdown}"
+        );
+        assert!(folded.contains("2 rows unchanged"), "{markdown}");
+        assert!(
+            folded.contains("| s | span.settle | 1 | 1 | +0 | 0% |  |"),
+            "{markdown}"
+        );
+    }
+
+    /// A scenario only one side ran is a note and ungated rows against
+    /// the base, and a failure against the files.
+    #[test]
+    fn a_scenario_on_one_side_fails_only_against_the_files() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("dialog-perf-compare-{}", std::process::id()));
+        let (base_dir, new_dir) = (dir.join("base"), dir.join("new"));
+        fs::create_dir_all(&base_dir)?;
+        fs::create_dir_all(&new_dir)?;
+        let write = |dir: &Path, name: &str| -> Result<()> {
+            let report = Report {
+                scenario: name.into(),
+                ..measured(1_000_000, &[("span.settle", 1)])
+            };
+            fs::write(
+                dir.join(format!("{name}.json")),
+                serde_json::to_string(&report)?,
+            )?;
+            Ok(())
+        };
+        write(&base_dir, "kept")?;
+        write(&new_dir, "kept")?;
+        write(&new_dir, "added")?;
+
+        let tolerance = Tolerance::default();
+        let against_base = compare_dirs(&base_dir, &new_dir, &tolerance, &sweep(&[]))?;
+        let against_file = compare_dirs(&base_dir, &new_dir, &tolerance, &Against::Baseline)?;
+        fs::remove_dir_all(&dir)?;
+
+        assert!(against_base.passed(), "{:?}", against_base.regressions);
+        assert_eq!(against_base.notes.len(), 1);
+        assert!(against_base.rows.iter().any(|row| row.scenario == "added"
+            && row.base.is_none()
+            && row.verdict == Verdict::Ungated));
+        assert!(!against_file.passed());
+        Ok(())
     }
 }
 

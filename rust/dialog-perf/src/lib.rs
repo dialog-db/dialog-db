@@ -47,7 +47,7 @@ pub mod run;
 pub mod scenario;
 pub mod sweep;
 
-pub use compare::{Comparison, Tolerance, compare_dirs};
+pub use compare::{Against, Comparison, Row, Tolerance, Verdict, compare_dirs};
 pub use report::Report;
 pub use run::run;
 pub use scenario::{Outcome, Prepared, Spec, catalog, spec};
