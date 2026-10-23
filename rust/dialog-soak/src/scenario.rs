@@ -414,8 +414,8 @@ where
 /// Run `scenario` end to end: seed the site, switch the link model on,
 /// run the scenario's phases over it, and report what they measured.
 pub async fn run(scenario: Scenario) -> Result<Report> {
-    // What the run cannot derive by label (a line's identifier, nonces)
-    // draws from the seed too, on this thread, for the whole run.
+    // A line's identifier, which the run cannot derive by label, draws
+    // from the seed too, on this thread, for the whole run.
     let _entropy = entropy::seed(scenario.seed);
     let site = Site::seed(&scenario).await?;
 

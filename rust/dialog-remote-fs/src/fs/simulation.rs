@@ -969,6 +969,32 @@ mod tests {
         assert_eq!(started.elapsed(), Duration::from_millis(1), "one round");
     }
 
+    /// In lockstep, two requests known to be independent, issued
+    /// together, are one round; two known to be dependent, the second
+    /// issued with the first's response in hand, are two. The rounds bound
+    /// the dependency depth from above: what goes out together counts
+    /// once, what goes out later counts as dependent.
+    #[tokio::test(start_paused = true)]
+    async fn it_counts_an_independent_pair_once_and_a_dependent_pair_twice_in_lockstep() {
+        let _serial = serial().await;
+        configure(None);
+        lockstep(true);
+
+        let before = longest_chain();
+        futures_util::future::join(request(Traffic::ArchiveGet), request(Traffic::ArchiveGet))
+            .await;
+        let independent = longest_chain() - before;
+
+        let before = longest_chain();
+        request(Traffic::ArchiveGet).await;
+        request(Traffic::ArchiveGet).await;
+        let dependent = longest_chain() - before;
+
+        lockstep(false);
+        assert_eq!(independent, 1, "an independent pair is one round");
+        assert_eq!(dependent, 2, "a dependent pair is two");
+    }
+
     /// In lockstep a request's depth is the round it was issued in, so a
     /// shallow branch and a deep one that are served in the same round
     /// give the requests they issue next the same depth, whichever

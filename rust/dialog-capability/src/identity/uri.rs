@@ -60,12 +60,12 @@ impl Uri {
     pub fn unique() -> Result<Self, IdentityError> {
         const PREFIX: &str = "z6Mk";
 
-        // Through `dialog_common::random` on every target: on WASI it is the
-        // source of the target's own WASI version, and a harness that seeds
-        // its thread (see `dialog_common::random`) replays these too.
+        // Through `dialog_common::random::identifier` on every target: the
+        // system's source (on WASI, that of the target's own WASI version),
+        // which a harness that seeds its thread replays.
         let signing_key = {
             let mut seed = [0u8; 32];
-            random::fill(&mut seed)
+            random::identifier(&mut seed)
                 .map_err(|error| IdentityError::InvalidEntity(format!("{error}")))?;
             SigningKey::from_bytes(&seed)
         };

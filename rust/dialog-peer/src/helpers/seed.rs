@@ -10,8 +10,10 @@
 //!
 //! Each key is derived from the seed and a label, not drawn from a stream,
 //! so a change elsewhere that draws one more random value does not move
-//! it. What the harness cannot name (a line's identifier, nonces) comes
-//! from the [seeded entropy](Seed::entropy) of the drawing thread.
+//! it. A line's identifier, which the harness cannot name, comes from the
+//! [seeded identifiers](Seed::entropy) of the drawing thread. Nothing that
+//! generates a key reads that stream: a key the harness does not derive
+//! here stays random.
 //!
 //! ```no_run
 //! # async fn example() -> anyhow::Result<()> {
@@ -68,9 +70,9 @@ impl Seed {
         self.value
     }
 
-    /// Draw the current thread's random bytes from this seed while the
-    /// guard lives: what the run cannot derive by label, such as a line's
-    /// identifier, then replays too.
+    /// Draw the current thread's identifiers from this seed while the
+    /// guard lives: a line's identifier, which the run cannot derive by
+    /// label, then replays too. Keys are never drawn from it.
     pub fn entropy(&self) -> entropy::Seeded {
         entropy::seed(self.value)
     }
@@ -182,18 +184,19 @@ mod tests {
         Ok(())
     }
 
-    /// A seed's entropy replays the key generator too, where it draws from
-    /// `dialog_common::random`. In a browser it is WebCrypto's and cannot
-    /// be seeded, which is why a run derives its keys by label
-    /// (`it_derives_the_same_keys_and_names_from_the_same_seed`).
-    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    /// A seed's entropy reaches identifiers only: under it, line
+    /// identifiers replay while the key generator stays fresh on every
+    /// call, as it is in production.
     #[dialog_common::test]
-    async fn it_replays_generated_keys_under_its_entropy() -> anyhow::Result<()> {
+    async fn it_keeps_generated_keys_fresh_under_its_entropy() -> anyhow::Result<()> {
         let draw = || async {
             let _entropy = Seed::new(7).entropy();
-            anyhow::Ok(<Ed25519Signer<Extractable>>::generate().await?.did())
+            let key = <Ed25519Signer<Extractable>>::generate().await?.did();
+            anyhow::Ok((key, Entity::new()?))
         };
-        assert_eq!(draw().await?, draw().await?);
+        let (first, second) = (draw().await?, draw().await?);
+        assert_ne!(first.0, second.0, "keys stay fresh");
+        assert_eq!(first.1, second.1, "line identifiers replay");
         Ok(())
     }
 

@@ -1,27 +1,30 @@
-//! Seeded entropy for a measurement harness that must replay a run.
+//! Seeded identifiers for a measurement harness that must replay a run.
 //!
-//! Production code draws every random byte through
-//! [`random::fill`](crate::random::fill): keys, nonces, and the fresh
-//! identifiers a branch's first commit mints for its line. Those reach what
-//! a replica stores, so two runs of one scenario write different trees. A
-//! harness that compares runs (the soak harness gates request counts that a
-//! tree's leaf seams decide) needs them to be the same.
+//! A replica mints fresh identifiers as it works: the line a branch's
+//! first commit allocates, which every datum it writes is tagged with.
+//! They reach what a replica stores, so two runs of one scenario write
+//! different trees. A harness that compares runs (the soak harness gates
+//! request counts that a tree's leaf seams decide) needs them to be the
+//! same.
 //!
 //! [`seed`] makes them the same, on the current thread, for as long as the
-//! returned [`Seeded`] guard lives: [`random::fill`](crate::random::fill)
-//! then reads a stream derived from the seed instead of the system's
-//! source. Nothing else switches it on. A build without the `helpers`
-//! feature has no such stream at all, and a build with it (the feature
-//! unifies across a workspace's test builds) draws from the system unless a
-//! caller seeded the thread.
+//! returned [`Seeded`] guard lives:
+//! [`random::identifier`](crate::random::identifier) then reads a stream
+//! derived from the seed instead of the system's source. Nothing else
+//! switches it on, and it reaches identifiers only:
+//! [`random::fill`](crate::random::fill), the source keys and nonces draw
+//! from, never reads it. A build without the `helpers` feature has no such
+//! stream at all, and a build with it (the feature unifies across a
+//! workspace's test builds) draws from the system unless a caller seeded
+//! the thread. Keys a harness needs to repeat it derives itself, by label.
 //!
 //! ```
 //! use dialog_common::helpers::entropy;
 //!
 //! let _seeded = entropy::seed(7);
 //! let mut first = [0u8; 32];
-//! dialog_common::random::fill(&mut first).unwrap();
-//! // Every run that seeds 7 and draws in the same order reads `first`.
+//! dialog_common::random::identifier(&mut first).unwrap();
+//! // Every run that seeds 7 and mints in the same order reads `first`.
 //! ```
 
 use std::cell::RefCell;
@@ -33,7 +36,7 @@ thread_local! {
 /// The context the seed's stream is derived under.
 const CONTEXT: &str = "dialog-common helpers entropy v1";
 
-/// Draw the current thread's random bytes from a stream derived from
+/// Draw the current thread's identifiers from a stream derived from
 /// `seed` until the returned guard drops.
 ///
 /// Seeding a thread that is already seeded replaces its stream; the guard
@@ -46,7 +49,7 @@ pub fn seed(seed: u64) -> Seeded {
     Seeded { previous }
 }
 
-/// While alive, the current thread's random bytes come from a seed. See
+/// While alive, the current thread's identifiers come from a seed. See
 /// [`seed`].
 #[must_use = "the thread draws from its seed only while the guard lives"]
 pub struct Seeded {
@@ -81,11 +84,11 @@ pub(crate) fn draw(bytes: &mut [u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::seed;
-    use crate::random::fill;
+    use crate::random::identifier;
 
     fn draw() -> [u8; 32] {
         let mut bytes = [0u8; 32];
-        fill(&mut bytes).unwrap();
+        identifier(&mut bytes).unwrap();
         bytes
     }
 

@@ -313,6 +313,21 @@ let
       }
     );
 
+    # Every test build of the workspace turns dialog-common's `helpers`
+    # feature on (dev-dependencies unify it), so this is the one place its
+    # unit tests run as a build without it is: the build where seeded
+    # identifiers (`helpers::entropy`) do not exist and every identifier is
+    # the system's.
+    withoutHelpers = craneLib.mkCargoDerivation (
+      commonAttributes
+      // {
+        pname = "dialog-db-without-helpers-check";
+        cargoArtifacts = nativeArtifacts;
+        buildPhaseCargoCommand = "cargo test --locked -p dialog-common --lib";
+        doInstallCargoArtifacts = false;
+      }
+    );
+
     rustfmt = craneLib.cargoFmt {
       src = rustSource;
       pname = "dialog-db-cargo-fmt-check";
