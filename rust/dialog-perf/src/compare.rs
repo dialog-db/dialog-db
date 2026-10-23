@@ -32,6 +32,7 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 
 use crate::report::Report;
+use crate::runner::Runner;
 
 /// How much growth the gate allows.
 #[derive(Debug, Clone)]
@@ -156,6 +157,8 @@ pub struct Comparison {
     pub notes: Vec<String>,
     /// Every quantity compared, in scenario order.
     pub rows: Vec<Row>,
+    /// The CPU each side's sweep ran on, where it recorded one.
+    pub runners: (Option<Runner>, Option<Runner>),
 }
 
 impl Comparison {
@@ -176,6 +179,17 @@ impl Comparison {
             past(Verdict::Regressed),
             past(Verdict::Improved),
             past(Verdict::Accepted),
+        );
+        let runner = |runner: &Option<Runner>| {
+            runner
+                .as_ref()
+                .map_or_else(|| "a CPU it did not record".to_string(), Runner::to_string)
+        };
+        let _ = writeln!(
+            out,
+            "Base swept on {}; this sweep on {}.\n",
+            runner(&self.runners.0),
+            runner(&self.runners.1),
         );
         for note in &self.notes {
             let _ = writeln!(out, "- {note}");
@@ -301,6 +315,7 @@ pub fn compare_dirs(
     tolerance: &Tolerance,
     against: &Against,
 ) -> Result<Comparison> {
+    let (baseline_dir, new_dir) = (baseline, new);
     let baseline = load(baseline)?;
     let new = load(new)?;
     anyhow::ensure!(
@@ -308,7 +323,10 @@ pub fn compare_dirs(
         "no overlapping reports to compare"
     );
 
-    let mut comparison = Comparison::default();
+    let mut comparison = Comparison {
+        runners: (Runner::read(baseline_dir), Runner::read(new_dir)),
+        ..Comparison::default()
+    };
     let names: BTreeSet<&String> = baseline.keys().chain(new.keys()).collect();
     for name in names {
         match (baseline.get(name), new.get(name), against) {

@@ -44,12 +44,14 @@ pub mod counters;
 pub mod env;
 pub mod report;
 pub mod run;
+pub mod runner;
 pub mod scenario;
 pub mod sweep;
 
 pub use compare::{Against, Comparison, Row, Tolerance, Verdict, compare_dirs};
 pub use report::Report;
 pub use run::run;
+pub use runner::Runner;
 pub use scenario::{Outcome, Prepared, Spec, catalog, spec};
 pub use sweep::{SweepConfig, sweep};
 
