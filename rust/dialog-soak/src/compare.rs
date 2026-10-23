@@ -13,7 +13,13 @@
 //! on bytes and modeled time, over lazy-join and download totals). Costs
 //! migrating between phases cancel in the totals; real growth does not.
 //! Duplicate fetches are gated per phase with the same slack as requests:
-//! the baselines carry zero, and any recurrence is replication waste.
+//! the baselines carry zero, and any recurrence is replication waste. So
+//! are the exact round-trip chain and the blob opens, each per phase: a
+//! longer chain is a new dependent request on the critical path, which
+//! no total can be allowed to hide, and a blob count that moves is a
+//! layout change that moved bytes between blocks and blobs. A baseline
+//! recorded before the chain was counted (`round_trips` absent) gates
+//! only what it carries.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -160,6 +166,25 @@ fn compare_reports(name: &str, base: &Report, new: &Report, threshold_pct: f64) 
                 new_phase.name, base_phase.duplicate_requests, new_phase.duplicate_requests
             ));
         }
+        if let (Some(base_chain), Some(new_chain)) = (base_phase.round_trips, new_phase.round_trips)
+            && regressed(base_chain, new_chain, request_slack, request_threshold)
+        {
+            regressions.push(format!(
+                "{name}:{}: round trips {base_chain} -> {new_chain}",
+                new_phase.name
+            ));
+        }
+        if regressed(
+            base_phase.blob_requests,
+            new_phase.blob_requests,
+            request_slack,
+            request_threshold,
+        ) {
+            regressions.push(format!(
+                "{name}:{}: blob requests {} -> {}",
+                new_phase.name, base_phase.blob_requests, new_phase.blob_requests
+            ));
+        }
     }
 
     for (scope, download) in [("lazy-join", false), ("download", true)] {
@@ -217,6 +242,9 @@ mod tests {
             name: name.into(),
             virtual_ms,
             rounds: 0.0,
+            round_trips: Some(requests),
+            blob_requests: 0,
+            blob_bytes: 0,
             unique_blocks: requests,
             duplicate_requests: 0,
             duplicate_bytes: 0,
@@ -236,6 +264,7 @@ mod tests {
             latency_ms: 0.0,
             auth_ms: 0.0,
             bandwidth_mbps: 0.0,
+            connections: None,
             fanout_n: 8,
             max_segment: 65536,
             entities: 100,
@@ -281,6 +310,40 @@ mod tests {
             found
                 .iter()
                 .any(|line| line.contains("duplicate fetches 0 -> 5")),
+            "{found:?}"
+        );
+    }
+
+    /// A longer dependent chain regresses per phase even when the request
+    /// count holds, a baseline without the chain gates nothing on it, and
+    /// blob opens appearing where the baseline had none regress too.
+    #[test]
+    fn it_flags_chain_and_blob_growth() {
+        let base = report("none", vec![phase("render", 10, 1000, 5)]);
+        let mut new = report("none", vec![phase("render", 10, 1000, 5)]);
+        new.phases[0].round_trips = Some(16);
+        let found = compare_reports("join-none.json", &base, &new, 10.0);
+        assert!(
+            found
+                .iter()
+                .any(|line| line.contains("render: round trips 10 -> 16")),
+            "{found:?}"
+        );
+
+        let mut unchained = base.clone();
+        unchained.phases[0].round_trips = None;
+        assert!(
+            compare_reports("join-none.json", &unchained, &new, 10.0).is_empty(),
+            "a baseline without the chain gates nothing on it"
+        );
+
+        new.phases[0].round_trips = Some(10);
+        new.phases[0].blob_requests = 5;
+        let found = compare_reports("join-none.json", &base, &new, 10.0);
+        assert!(
+            found
+                .iter()
+                .any(|line| line.contains("blob requests 0 -> 5")),
             "{found:?}"
         );
     }

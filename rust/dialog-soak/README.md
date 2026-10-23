@@ -30,10 +30,11 @@ and repeatable.
   client).
 - The `Fs` transport meters every remote effect (`dialog_remote_fs::simulation`)
   and, when a `NetworkShape` is configured, delays each one by its modeled
-  cost: per-request **auth latency** (the per-object access-service redeem),
-  **round-trip latency** (overlapping across concurrent requests), and
-  serialization on a **shared bandwidth-limited link** (concurrent payloads
-  queue, as on a real last-mile link).
+  cost: a **connection**, when the shape caps how many a client holds open
+  at once; per-request **auth latency** (the per-object access-service
+  redeem); **round-trip latency** (overlapping across concurrent requests);
+  and serialization on a **shared bandwidth-limited link** (concurrent
+  payloads queue, as on a real last-mile link).
 - The whole run executes under tokio's **paused test clock**: modeled delays
   complete instantly while virtual time advances by exactly the modeled
   amount. A run over a 300 ms link finishes in real seconds and reports
@@ -54,7 +55,10 @@ DIALOG_TREE_FANOUT_N=5 cargo run -p dialog-soak --release -- run --network mobil
 ```
 
 Network presets: `none` (counts only), `localhost`, `broadband`, `mobile`
-(a 4G-ish link: 80 ms RTT, 120 ms redeem, 20 Mbit/s), `intercontinental`.
+(a 4G-ish link: 80 ms RTT, 120 ms redeem, 20 Mbit/s), `browser` (the
+same link with six connections per host, what a browser allows over
+HTTP/1.1 and what tonk's replicas get), `intercontinental`. A custom link
+takes `--connections` too; `DIALOG_FS_NETWORK` takes `connections=6`.
 
 The JSON report goes to stdout, a human-readable table to stderr.
 
@@ -88,10 +92,17 @@ reports over `soak/baseline`, the way `perf/baseline` is kept.
 
 Per phase: `virtual_ms` (modeled time), `rounds` (modeled time over the
 per-request serial cost: an upper-bound estimate of the longest
-sequential fetch chain), `requests`, `unique` (distinct blocks received),
-`dup` (requests that re-downloaded an already-received block), `empty`
-(requests the remote had no block for), `bytes`, and a per-effect-kind
-breakdown (`archive.get`, `memory.resolve`, ...). Things to watch:
+sequential fetch chain, 0 when unshaped), `chain` (`round_trips` in the
+JSON: the exact longest chain of requests each issued only after the one
+before it completed, counted by the simulation on every profile),
+`requests`, `unique` (distinct blocks received), `dup` (requests that
+re-downloaded an already-received block), `empty` (requests the remote
+had no block for), `blobs` (blob opens, in either direction), `bytes`,
+`blob bytes` (the share of `bytes` that streamed through blob readers
+and writers), and a per-effect-kind breakdown (`archive.get`,
+`memory.resolve`, ...). The three costs the harness reports are
+`chain`, `requests` and `bytes`; `notes/replication-cost-model.md` says
+what each stands for. Things to watch:
 
 - **`pull` should stay O(1)** — one head resolve, no block reads (the
   fast-forward adoption by root). If block gets appear here, a merge path
@@ -104,9 +115,10 @@ breakdown (`archive.get`, `memory.resolve`, ...). Things to watch:
 - **`dup` should stay 0 everywhere** — a duplicate fetch means a block
   was paid for and thrown away (the walker's range-bounded read-ahead
   and `NetworkedIndex` hydration exist to prevent exactly this).
-- **`concept`'s `rounds`** is the sequential-chain depth of the query
+- **`concept`'s `chain`** is the sequential-chain depth of the query
   engine's cold join — the number the parallel-replication work (#492)
-  drives down.
+  drives down. `rounds` bounds the same quantity from modeled time and
+  reads higher by the share of the phase that was bytes on the link.
 - **`download`** tracks total space size and the transfer's shape
   (`ceil(blocks/16)` waves of latency + bytes/bandwidth).
 
@@ -119,5 +131,11 @@ breakdown (`archive.get`, `memory.resolve`, ...). Things to watch:
 - Bandwidth is modeled as one shared FIFO link; parallel streams do not
   get extra capacity. Real links are somewhere between this and
   per-stream capacity.
-- Blob bytes are not metered (they move through readers/writers outside
-  the invocation); the join scenario carries no blobs.
+- Without a connection cap the client opens as many requests as it
+  issues, which a fetch window of 64 does and a browser cannot: the
+  `browser` preset is the one to read for a browser replica, and the gap
+  between it and `mobile` is what the window cannot buy there.
+- Blob bytes are metered as they stream through the returned reader or
+  writer, and charged to the shared link like a block's payload. The
+  join scenario carries no blobs (its values fit inline), so its blob
+  columns read zero; a layout change that spills values shows up there.

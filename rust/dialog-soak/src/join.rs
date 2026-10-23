@@ -54,7 +54,7 @@ use dialog_query::{
     Output as _, Parameters, Query, Term,
 };
 use dialog_remote_fs::FsAddress;
-use dialog_remote_fs::simulation::{self, NetworkShape};
+use dialog_remote_fs::simulation::{self, NetworkShape, Traffic};
 use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress, contact};
 use dialog_storage::provider::FileSystem;
 use dialog_storage::provider::storage::VolatileSpace;
@@ -424,6 +424,7 @@ where
 {
     let before_tally = simulation::tally();
     let before_gets = simulation::get_ledger();
+    let before_chain = simulation::longest_chain();
     if std::env::var("DIALOG_SOAK_DUMP_GETS").is_ok() {
         eprintln!("PHASE-START {name}");
     }
@@ -432,6 +433,9 @@ where
     let elapsed = before.elapsed();
     let traffic = simulation::tally().since(&before_tally);
     let gets = simulation::get_ledger().since(&before_gets);
+    let round_trips = simulation::longest_chain() - before_chain;
+    let blob_requests = traffic.count(Traffic::BlobRead) + traffic.count(Traffic::BlobImport);
+    let blob_bytes = traffic.bytes(Traffic::BlobRead) + traffic.bytes(Traffic::BlobImport);
     // With DIALOG_SOAK_DUMP_GETS set, print the phase's most re-requested
     // keys so a duplication investigation can see which blocks they are.
     if std::env::var("DIALOG_SOAK_DUMP_GETS").is_ok() {
@@ -446,6 +450,9 @@ where
         name: name.to_string(),
         virtual_ms: elapsed.as_millis() as u64,
         rounds: 0.0,
+        round_trips: Some(round_trips),
+        blob_requests,
+        blob_bytes,
         unique_blocks: gets.unique_blocks(),
         duplicate_requests: gets.duplicate_requests(),
         duplicate_bytes: gets.duplicate_bytes(),
@@ -942,6 +949,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
         latency_ms,
         auth_ms,
         bandwidth_mbps,
+        connections: scenario.network.and_then(|shape| shape.connections),
         fanout_n: manifest.fanout_n,
         max_segment: manifest.max_segment,
         entities: scenario.entities,
