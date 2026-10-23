@@ -14,6 +14,13 @@
 //! soak compare soak/baseline target/soak   # regression gate
 //! ```
 //!
+//! Every identity a run mints derives from one seed, `DIALOG_SOAK_SEED`
+//! (a number; unset is a fixed default), so a run with the same seed
+//! writes the same tree and repeats its counts exactly. `sweep` passes it
+//! to each run, or with `DIALOG_SOAK_SEED=random` draws a fresh one per
+//! run (the nightly); every report records its `seed`, and
+//! `DIALOG_SOAK_SEED=<seed> soak run ...` replays that run.
+//!
 //! `run` executes under tokio's paused test clock by default: simulated
 //! delays complete instantly while virtual time advances by exactly the
 //! modeled amount, so a run over a 300 ms link finishes in real seconds
@@ -27,7 +34,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use dialog_remote_fs::simulation::NetworkShape;
-use dialog_soak::{Kind, Scenario, SweepConfig, compare_dirs, run, sweep};
+use dialog_soak::{Kind, Scenario, Seeding, SweepConfig, compare_dirs, run, sweep};
 
 /// Sync/join soak harness over a simulated network.
 #[derive(Debug, Parser)]
@@ -207,17 +214,18 @@ fn run_once(args: RunArgs) -> Result<()> {
         network,
         network_label,
         vault_dir: args.vault_dir.clone().unwrap_or_else(std::env::temp_dir),
+        seed: Seeding::from_env()?.draw()?,
     };
 
+    // Paused from the start, so the paused clock and the timer it drives
+    // share their origin: paused later, the clock sits a real-time
+    // fraction of a millisecond off the timer's ticks, and a tick's
+    // deadline rounds differently from one run to the next.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
+        .start_paused(!args.real_time)
         .build()?;
-    let report = runtime.block_on(async {
-        if !args.real_time {
-            tokio::time::pause();
-        }
-        run(scenario).await
-    })?;
+    let report = runtime.block_on(run(scenario))?;
 
     if !args.json_only {
         eprintln!("{}", report.table());
@@ -241,6 +249,7 @@ fn main() -> Result<ExitCode> {
                 scenarios: args.scenarios,
                 networks: args.networks,
                 fanouts: args.fanouts,
+                seeding: Seeding::from_env()?,
             })?;
             eprintln!("reports written to {}", args.out_dir.display());
             eprintln!("{table}");

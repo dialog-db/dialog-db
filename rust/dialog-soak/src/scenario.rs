@@ -11,10 +11,11 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context as _, Result};
+use dialog_common::helpers::entropy;
 use dialog_credentials::SignerCredential;
 use dialog_effects::storage::{Directory, Location};
 use dialog_peer::Peer;
-use dialog_peer::helpers::{test_session_with_peer, unique_name};
+use dialog_peer::helpers::{Seed, unique_name};
 use dialog_remote_fs::FsAddress;
 use dialog_remote_fs::simulation::{self, NetworkShape, Traffic};
 use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress, contact};
@@ -90,6 +91,73 @@ pub struct Scenario {
     /// Directory to place the remote vault in. Created if absent; the
     /// vault is written under a unique subdirectory per run.
     pub vault_dir: PathBuf,
+    /// The seed every identity of the run derives from: the same seed
+    /// writes the same tree, so the run's counts repeat exactly.
+    pub seed: u64,
+}
+
+/// The seed a run takes when `DIALOG_SOAK_SEED` names none. The per-PR
+/// gate runs it, so its counts are exact and its baselines are this
+/// seed's.
+pub const DEFAULT_SEED: u64 = 0x5eed_d1a1_0600_0001;
+
+/// The environment variable a run reads its seed from: a number, or unset
+/// for [`DEFAULT_SEED`]. The sweep also takes `random`, a fresh seed per
+/// run, which each report records so the run can be replayed.
+pub const SEED_VARIABLE: &str = "DIALOG_SOAK_SEED";
+
+/// Which seed the runs take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seeding {
+    /// Every run takes this seed, and so writes the same tree.
+    Fixed(u64),
+    /// Every run draws a fresh seed from the system, so repeats exercise
+    /// the spread identities cause; each report records its seed.
+    Random,
+}
+
+impl Seeding {
+    /// The seeding [`SEED_VARIABLE`] names: unset is [`DEFAULT_SEED`],
+    /// `random` is [`Seeding::Random`], and a number (decimal, or hex
+    /// after `0x`) is that seed.
+    pub fn from_env() -> Result<Self> {
+        match std::env::var(SEED_VARIABLE) {
+            Err(std::env::VarError::NotPresent) => Ok(Seeding::Fixed(DEFAULT_SEED)),
+            Err(error) => Err(error).with_context(|| format!("reading {SEED_VARIABLE}")),
+            Ok(value) => value.parse(),
+        }
+    }
+
+    /// The seed for the next run.
+    pub fn draw(&self) -> Result<u64> {
+        match self {
+            Seeding::Fixed(seed) => Ok(*seed),
+            Seeding::Random => {
+                let mut bytes = [0u8; 8];
+                dialog_common::random::fill(&mut bytes)
+                    .map_err(|error| anyhow::anyhow!("drawing a seed: {error}"))?;
+                Ok(u64::from_le_bytes(bytes))
+            }
+        }
+    }
+}
+
+impl FromStr for Seeding {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        let value = value.trim();
+        if value == "random" {
+            return Ok(Seeding::Random);
+        }
+        let seed = match value.strip_prefix("0x") {
+            Some(hex) => u64::from_str_radix(hex, 16),
+            None => value.parse(),
+        };
+        seed.map(Seeding::Fixed).map_err(|_| {
+            anyhow::anyhow!("{SEED_VARIABLE}={value:?} is neither a number nor `random`")
+        })
+    }
 }
 
 /// The operator every replica of a run performs through.
@@ -110,8 +178,12 @@ pub(crate) struct Site {
     pub vault: Did,
     /// The vault's address.
     pub address: FsAddress,
+    /// What the run's identities derive from.
+    pub seed: Seed,
     /// The seed's commit count, as the report labels it.
     pub commits: usize,
+    /// The tree root of the server's head once seeded, hex.
+    pub root: String,
     /// Files in the vault after seeding.
     pub vault_files: u64,
     /// Bytes in the vault after seeding.
@@ -127,7 +199,8 @@ impl Site {
         simulation::configure(None);
         simulation::reset_tally();
 
-        let (operator, profile) = test_session_with_peer().await;
+        let seed = Seed::new(scenario.seed);
+        let (operator, profile) = seed.session_with_peer().await;
         // Speculative preloading is ambient (the operator's queue, hints
         // default-on). The unshaped profile turns it off: its job is to
         // pin the engine's deterministic demand shape, and replication
@@ -138,8 +211,9 @@ impl Site {
             queue.set_budget(dialog_artifacts::FetchBudget::ZERO);
         }
         let server = profile
-            .space(unique_name("soak-server"))
+            .space(seed.name("soak-server"))
             .create()
+            .with_credential(seed.signer("soak-server").await?)
             .perform(&operator)
             .await?;
         let chain = server
@@ -150,6 +224,9 @@ impl Site {
             .await?;
         profile.access().save(chain).perform(&operator).await?;
 
+        // The vault's directory is the one name not derived from the seed:
+        // runs of one seed share a temp directory, and the path reaches
+        // only the contact, not the tree.
         let run_dir = scenario.vault_dir.join(unique_name("soak-vault"));
         std::fs::create_dir_all(&run_dir)?;
         let location = Location::new(
@@ -157,7 +234,7 @@ impl Site {
             "space",
         );
         let address = seed_vault(&server, &location).await?;
-        let vault = vault_peer().await?;
+        let vault = vault_peer(&seed).await?;
 
         let origin = {
             let site = SiteAddress::Fs(address.clone());
@@ -225,6 +302,14 @@ impl Site {
             .context("seed push should ship the space")?;
 
         let (vault_files, vault_bytes) = vault_stats(&run_dir);
+        let root = branch
+            .revision()
+            .context("the seeded branch has a head")?
+            .tree
+            .hash()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
 
         Ok(Site {
             operator,
@@ -233,7 +318,9 @@ impl Site {
             branch,
             vault,
             address,
+            seed,
             commits: commits + 1,
+            root,
             vault_files,
             vault_bytes,
             run_dir,
@@ -249,6 +336,7 @@ impl Site {
             &self.server,
             &self.vault,
             &self.address,
+            &self.seed,
             name,
         )
         .await
@@ -326,10 +414,16 @@ where
 /// Run `scenario` end to end: seed the site, switch the link model on,
 /// run the scenario's phases over it, and report what they measured.
 pub async fn run(scenario: Scenario) -> Result<Report> {
+    // A line's identifier, which the run cannot derive by label, draws
+    // from the seed too, on this thread, for the whole run.
+    let _entropy = entropy::seed(scenario.seed);
     let site = Site::seed(&scenario).await?;
 
-    // The clients run over the modeled link.
+    // The clients run over the modeled link. Unshaped, they run in
+    // lockstep, so the chain reads the rounds of their schedule and not
+    // the order the filesystem returns their requests in.
     simulation::configure(scenario.network);
+    simulation::lockstep(scenario.network.is_none());
     simulation::reset_tally();
     let mut phases = Vec::new();
     let outcome = match scenario.kind {
@@ -338,6 +432,7 @@ pub async fn run(scenario: Scenario) -> Result<Report> {
         Kind::Writer => crate::writer::phases(&site, &scenario, &mut phases).await,
     };
     simulation::configure(None);
+    simulation::lockstep(false);
     // Every run writes a full vault (tens of MiB at the default size); a
     // sweep runs dozens. Remove it whether the phases passed or failed, so
     // repeated runs do not fill the disk they write to.
@@ -386,6 +481,8 @@ pub async fn run(scenario: Scenario) -> Result<Report> {
         commits: site.commits,
         vault_files: site.vault_files,
         vault_bytes: site.vault_bytes,
+        seed: Some(scenario.seed),
+        seeded_root: Some(site.root),
         phases,
     })
 }

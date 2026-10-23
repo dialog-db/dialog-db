@@ -1,28 +1,34 @@
 //! Compare two soak sweep directories and flag regressions.
 //!
-//! Two noise sources shape the gate. The harness randomizes identities per
-//! run, so tree shape (and with it which phase pays for which shared leaf)
-//! wobbles a block or two between runs. And on *shaped* (delayed) profiles
-//! the latency itself moves request counts nondeterministically: fetch
-//! windows overlap differently run to run. The `none` profile has no
-//! delays, which makes its request counts deterministic protocol shape.
+//! Two noise sources shape the gate. A run's identities decide its tree's
+//! leaf seams, and with them which phase pays for which shared leaf; the
+//! harness derives them all from one seed (`DIALOG_SOAK_SEED`), so two
+//! runs of one seed write the same tree, and runs of different seeds
+//! wobble a block or two between phases. And on *shaped* (delayed)
+//! profiles the latency itself moves request counts nondeterministically:
+//! fetch windows overlap differently run to run. The `none` profile has no
+//! delays, so under the baseline's own seed its counts are exact protocol
+//! shape.
 //!
-//! The gate therefore holds the `none` report tight (threshold, slack 2: a
-//! new round trip on `pull`/`probe`/`claim`/`requery` is a protocol
-//! regression; the join's `claim` and `seeded` take a measured wider
-//! request slack until identities are deterministic, see
-//! `UNSHAPED_REQUEST_SLACK`) and the shaped reports loose (2.5x threshold
-//! on requests, 2x on bytes and modeled time, over lazy-join and download
-//! totals). Costs
-//! migrating between phases cancel in the totals; real growth does not.
-//! Duplicate fetches are gated per phase with the same slack as requests:
-//! the baselines carry zero, and any recurrence is replication waste. So
-//! are the exact round-trip chain and the blob opens, each per phase: a
-//! longer chain is a new dependent request on the critical path, which
-//! no total can be allowed to hide, and a blob count that moves is a
-//! layout change that moved bytes between blocks and blobs. A baseline
-//! recorded before the chain was counted (`round_trips` absent) gates
-//! only what it carries.
+//! The gate therefore holds a `none` report run with the baseline's seed
+//! tight (threshold, slack 2, in every phase: a new round trip on any
+//! phase is a protocol regression) and the shaped reports loose (2.5x
+//! threshold on requests, 2x on bytes and modeled time, over lazy-join and
+//! download totals). Costs migrating between phases cancel in the totals;
+//! real growth does not. Duplicate fetches are gated per phase with the
+//! same slack as requests: the baselines carry zero, and any recurrence is
+//! replication waste. So are the exact round-trip chain and the blob
+//! opens, each per phase: a longer chain is a new dependent request on the
+//! critical path, which no total can be allowed to hide, and a blob count
+//! that moves is a layout change that moved bytes between blocks and
+//! blobs. A baseline recorded before the chain was counted (`round_trips`
+//! absent) gates only what it carries.
+//!
+//! A `none` report run with another seed than its baseline's (the nightly
+//! draws a fresh one per run) is not exact: its seams sit elsewhere. It is
+//! gated as a shaped report is, on its totals and its duplicate fetches,
+//! not phase by phase. A baseline recorded before runs were seeded (`seed`
+//! absent) is held tight as before.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -83,34 +89,6 @@ fn regressed(base: u64, new: u64, slack: u64, threshold_pct: f64) -> bool {
     (new - base) as f64 / base as f64 * 100.0 > threshold_pct
 }
 
-/// Per-phase request slack on the unshaped profile, where the default of 2
-/// is narrower than what randomized identities alone move (#648). Each
-/// run mints its profile, space and session keys at random; they reach the
-/// tree through the revision records, history and context regions, so
-/// they move leaf seams, and the seeded space sits at a tree-depth
-/// boundary. On the deeper side `claim` re-uploads the held nodes under
-/// the path its commit rewrites (#648's over-upload), and `seeded`'s
-/// reverse replay reads whichever leaves the records region shares with
-/// the seed. Each value is the measured spread over 100 runs at the
-/// default fixture (max minus median, plus 1): `claim` 5 to 10, median 5;
-/// `seeded` 59 to 69, median 63. Only requests take the override: the
-/// exact chain, duplicate and blob gates stay at 2 on every phase. This is
-/// a stopgap: deterministic identities in the harness (#652, item 4)
-/// remove the variance, and these entries go with it.
-const UNSHAPED_REQUEST_SLACK: &[(&str, &str, u64)] = &[("join", "claim", 6), ("join", "seeded", 7)];
-
-/// The request slack for `phase` of `scenario`: the unshaped override when
-/// one is listed, else `default`.
-fn request_slack_for(scenario: &str, phase: &str, shaped: bool, default: u64) -> u64 {
-    if shaped {
-        return default;
-    }
-    UNSHAPED_REQUEST_SLACK
-        .iter()
-        .find(|(s, p, _)| *s == scenario && *p == phase)
-        .map_or(default, |(_, _, slack)| *slack)
-}
-
 /// Load every `*.json` report in `dir`, keyed by file name.
 fn load(dir: &Path) -> Result<BTreeMap<String, Report>> {
     let mut reports = BTreeMap::new();
@@ -166,26 +144,22 @@ pub fn compare_dirs(baseline: &Path, new: &Path, threshold_pct: f64) -> Result<C
 
 fn compare_reports(name: &str, base: &Report, new: &Report, threshold_pct: f64) -> Vec<String> {
     let mut regressions = Vec::new();
-    let shaped = new.network != "none";
-    let request_slack = if shaped { 3 } else { 2 };
-    let request_threshold = threshold_pct * if shaped { 2.5 } else { 1.0 };
+    // Exact: the unshaped profile, run with the seed its baseline was
+    // recorded with (or either predates seeding).
+    let exact = new.network == "none"
+        && match (base.seed, new.seed) {
+            (Some(base_seed), Some(new_seed)) => base_seed == new_seed,
+            _ => true,
+        };
+    let loose = !exact;
+    let request_slack = if loose { 3 } else { 2 };
+    let request_threshold = threshold_pct * if loose { 2.5 } else { 1.0 };
 
     let base_phases: BTreeMap<_, _> = base.phases.iter().map(|p| (p.name.as_str(), p)).collect();
     for new_phase in &new.phases {
         let Some(base_phase) = base_phases.get(new_phase.name.as_str()) else {
             continue;
         };
-        if regressed(
-            base_phase.traffic.requests,
-            new_phase.traffic.requests,
-            request_slack_for(&new.scenario, &new_phase.name, shaped, request_slack),
-            request_threshold,
-        ) {
-            regressions.push(format!(
-                "{name}:{}: requests {} -> {}",
-                new_phase.name, base_phase.traffic.requests, new_phase.traffic.requests
-            ));
-        }
         if regressed(
             base_phase.duplicate_requests,
             new_phase.duplicate_requests,
@@ -195,6 +169,22 @@ fn compare_reports(name: &str, base: &Report, new: &Report, threshold_pct: f64) 
             regressions.push(format!(
                 "{name}:{}: duplicate fetches {} -> {}",
                 new_phase.name, base_phase.duplicate_requests, new_phase.duplicate_requests
+            ));
+        }
+        // An unshaped run of another seed moved its seams: a block moves
+        // between phases, which only the totals below see through.
+        if new.network == "none" && !exact {
+            continue;
+        }
+        if regressed(
+            base_phase.traffic.requests,
+            new_phase.traffic.requests,
+            request_slack,
+            request_threshold,
+        ) {
+            regressions.push(format!(
+                "{name}:{}: requests {} -> {}",
+                new_phase.name, base_phase.traffic.requests, new_phase.traffic.requests
             ));
         }
         if let (Some(base_chain), Some(new_chain)) = (base_phase.round_trips, new_phase.round_trips)
@@ -234,14 +224,14 @@ fn compare_reports(name: &str, base: &Report, new: &Report, threshold_pct: f64) 
                 base_total.bytes,
                 new_total.bytes,
                 64 * 1024,
-                threshold_pct * if shaped { 2.0 } else { 1.0 },
+                threshold_pct * if loose { 2.0 } else { 1.0 },
             ),
             (
                 "virtual_ms",
                 base_total.virtual_ms,
                 new_total.virtual_ms,
                 100,
-                threshold_pct * if shaped { 2.0 } else { 1.0 },
+                threshold_pct * if loose { 2.0 } else { 1.0 },
             ),
         ];
         for (metric, base_value, new_value, slack, threshold) in checks {
@@ -303,6 +293,8 @@ mod tests {
             commits: 4,
             vault_files: 10,
             vault_bytes: 1000,
+            seed: Some(7),
+            seeded_root: None,
             phases,
         }
     }
@@ -341,61 +333,6 @@ mod tests {
             found
                 .iter()
                 .any(|line| line.contains("duplicate fetches 0 -> 5")),
-            "{found:?}"
-        );
-    }
-
-    /// The join's `claim` takes its measured request spread on the
-    /// unshaped profile, and only its requests: the measured worst case
-    /// passes, one past the override fails, a longer chain there still
-    /// regresses at the default slack, and a phase without an override
-    /// keeps the default.
-    #[test]
-    fn it_widens_only_listed_request_slack() {
-        // Requests grow, the chain holds at the baseline's. A render phase
-        // sizes the lazy-join total as a real report's, so the total
-        // absorbs the growth the override allows.
-        let render = || phase("render", 600, 1000, 0);
-        let grown = |name: &str, base: u64, requests: u64| {
-            let mut grown = phase(name, requests, 1000, 0);
-            grown.round_trips = Some(base);
-            report("none", vec![grown, render()])
-        };
-        let base = report("none", vec![phase("claim", 5, 1000, 0), render()]);
-        assert!(
-            compare_reports("join-none.json", &base, &grown("claim", 5, 10), 10.0).is_empty(),
-            "claim's measured 10 passes"
-        );
-
-        let found = compare_reports("join-none.json", &base, &grown("claim", 5, 12), 10.0);
-        assert!(
-            found
-                .iter()
-                .any(|line| line.contains("claim: requests 5 -> 12")),
-            "{found:?}"
-        );
-
-        let mut chained = grown("claim", 5, 5);
-        chained.phases[0].round_trips = Some(7);
-        assert!(
-            compare_reports("join-none.json", &base, &chained, 10.0).is_empty(),
-            "the chain on claim keeps the default slack of 2"
-        );
-        chained.phases[0].round_trips = Some(8);
-        let found = compare_reports("join-none.json", &base, &chained, 10.0);
-        assert!(
-            found
-                .iter()
-                .any(|line| line.contains("claim: round trips 5 -> 8")),
-            "{found:?}"
-        );
-
-        let base = report("none", vec![phase("probe", 2, 1000, 0), render()]);
-        let found = compare_reports("join-none.json", &base, &grown("probe", 2, 5), 10.0);
-        assert!(
-            found
-                .iter()
-                .any(|line| line.contains("probe: requests 2 -> 5")),
             "{found:?}"
         );
     }
@@ -463,6 +400,46 @@ mod tests {
             found
                 .iter()
                 .any(|line| line.contains("lazy-join: virtual_ms")),
+            "{found:?}"
+        );
+    }
+
+    /// Under the baseline's seed the unshaped profile is exact, so one
+    /// phase growing past the slack regresses even when another phase
+    /// shrank by as much. Under another seed the seams sit elsewhere: the
+    /// same move is spread, and only growth in the totals regresses.
+    #[test]
+    fn it_holds_phases_exact_only_under_the_baselines_seed() {
+        let base = report(
+            "none",
+            vec![phase("claim", 5, 1000, 0), phase("seeded", 98, 1000, 0)],
+        );
+        let moved = vec![phase("claim", 10, 1000, 0), phase("seeded", 93, 1000, 0)];
+
+        let same_seed = report("none", moved.clone());
+        let found = compare_reports("join-none.json", &base, &same_seed, 10.0);
+        assert!(
+            found
+                .iter()
+                .any(|line| line.contains("claim: requests 5 -> 10")),
+            "{found:?}"
+        );
+
+        let mut other_seed = report("none", moved);
+        other_seed.seed = Some(8);
+        let found = compare_reports("join-none.json", &base, &other_seed, 10.0);
+        assert!(found.is_empty(), "{found:?}");
+
+        let mut grown = report(
+            "none",
+            vec![phase("claim", 10, 1000, 0), phase("seeded", 140, 1000, 0)],
+        );
+        grown.seed = Some(8);
+        let found = compare_reports("join-none.json", &base, &grown, 10.0);
+        assert!(
+            found
+                .iter()
+                .any(|line| line.contains("lazy-join: requests")),
             "{found:?}"
         );
     }

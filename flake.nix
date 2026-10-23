@@ -206,6 +206,8 @@
 
           "soak:gate" = {
             description = "Join cost on the unshaped none profile (rust/dialog-soak), gated against soak/baseline";
+            # One fixed seed (DIALOG_SOAK_SEED, unset is the default), so
+            # every run writes the same tree and the counts are exact.
             command = ''
               cargo run -p dialog-soak --release -- sweep --out-dir target/soak-current --networks none
               cargo run -p dialog-soak --release -- compare soak/baseline target/soak-current
@@ -214,7 +216,10 @@
 
           "soak:sync" = {
             description = "Sync/join cost sweep over simulated networks, gated against soak/baseline";
+            # A fresh seed per run, so the repeats exercise the spread that
+            # identities cause; each report records its seed to replay it.
             command = ''
+              export DIALOG_SOAK_SEED="''${DIALOG_SOAK_SEED:-random}"
               cargo run -p dialog-soak --release -- sweep --out-dir target/soak-current
               cargo run -p dialog-soak --release -- compare soak/baseline target/soak-current
             '';

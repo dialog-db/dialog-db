@@ -42,11 +42,11 @@
 
 use anyhow::{Context as _, Result};
 use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
-use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
+use dialog_credentials::{Credential, SignerCredential};
 use dialog_effects::credential::prelude::*;
 use dialog_effects::storage::Location;
 use dialog_peer::Peer;
-use dialog_peer::helpers::unique_name;
+use dialog_peer::helpers::Seed;
 use dialog_query::rule::DeductiveRuleDescriptor;
 use dialog_query::{
     Concept, ConceptConclusion, ConceptDescriptor, ConceptQuery, DeductiveRule, Entity,
@@ -329,11 +329,14 @@ pub(crate) async fn mount_client(
     server: &Repository<SignerCredential>,
     vault: &Did,
     address: &FsAddress,
+    seed: &Seed,
     name: &str,
 ) -> Result<Branch> {
+    let name = seed.name(name);
     let repo = profile
-        .space(unique_name(name))
-        .open()
+        .space(name.clone())
+        .create()
+        .with_credential(seed.signer(&name).await?)
         .perform(operator)
         .await?;
     let origin = {
@@ -677,8 +680,8 @@ pub(crate) async fn phases(
 
 /// A DID to name the peer a vault directory is by. A directory has no DID
 /// of its own, so the soak gives it one, as an application names a peer
-/// by the DID it was given. Minted once per run: the clients of a run
+/// by the DID it was given. Derived once per run: the clients of a run
 /// share the operator's contacts, and a name is one peer's.
-pub(crate) async fn vault_peer() -> Result<Did> {
-    Ok(Principal::did(&Ed25519Signer::generate().await?))
+pub(crate) async fn vault_peer(seed: &Seed) -> Result<Did> {
+    Ok(Principal::did(&seed.signer("soak-vault").await?))
 }
