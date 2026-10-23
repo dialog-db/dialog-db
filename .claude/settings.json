@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "for f in \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/git-signing.sh \"$CLAUDE_PROJECT_DIR\"/*/.claude/hooks/git-signing.sh; do [ -x \"$f\" ] && exec \"$f\"; done; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}
