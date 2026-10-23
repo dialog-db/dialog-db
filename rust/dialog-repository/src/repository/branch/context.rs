@@ -11,14 +11,13 @@
 use std::sync::Arc;
 
 use dialog_artifacts::history::{
-    Context, ContextCache, Held, History, Origin, RevisionRecord, Version, Watermark, context_in,
+    Context, ContextCache, Held, History, RevisionRecord, Version, Watermark, context_in,
     region_entry, region_writes,
 };
 use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_artifacts::{ArchiveReader, Datum, DialogArtifactsError, Key, State, context_entry};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_search_tree::Cache;
-use serde::{Deserialize, Serialize};
 
 use crate::{Index, Revision};
 
@@ -147,71 +146,6 @@ where
     }
 }
 
-/// How many of a line's own origin's revisions a head the line adopted
-/// holds: `count` of them, the last at `own`.
-///
-/// A commit on another origin's head (a takeover) signs its own count,
-/// one more than the parent holds, and the parent's region is the only
-/// thing that says how many that is. The line knows it without the
-/// region in one case: it fast-forwarded to `head` from a head of its own
-/// origin, which was its latest revision (an origin is one sequential
-/// writer, and this line is that writer), and the head it adopted has
-/// seen that revision, so it holds exactly the line's revisions up to
-/// it. It knows it again for the head after, when it fast-forwards from
-/// `head` itself. That is the alternating writers' case: each takes the
-/// other's head, which built on its own, and commits.
-///
-/// What it records is a fact about a fixed head, so it never goes stale:
-/// a line that moved on since simply finds that its parent is not `head`,
-/// and reads the region instead. It is replica-local and never synced.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct OwnInHead {
-    /// The adopted head this is about.
-    pub(crate) head: Version,
-    /// The line's own latest revision that head has seen.
-    pub(crate) own: Version,
-    /// How many of the line's own origin's revisions that head holds.
-    pub(crate) count: u64,
-}
-
-impl OwnInHead {
-    /// What a line knows of its own origin in `adopted`, which it
-    /// fast-forwarded to from `from`, its head until then: `from`'s own
-    /// count when `from` is of the line's `origin` and carries it, or what
-    /// `known` says of `from`, carried forward. `None` when neither says.
-    pub(crate) fn adopted(
-        adopted: &Revision,
-        from: &Revision,
-        origin: &Origin,
-        known: Option<OwnInHead>,
-    ) -> Option<OwnInHead> {
-        if from.origin() == *origin
-            && let Some(own) = from.own_watermark()
-        {
-            return Some(OwnInHead {
-                head: adopted.version(),
-                own: from.version(),
-                count: own.count,
-            });
-        }
-        known
-            .filter(|known| known.head == from.version() && known.own.origin == *origin)
-            .map(|known| OwnInHead {
-                head: adopted.version(),
-                ..known
-            })
-    }
-
-    /// The watermark of `origin` this says `head` holds, when this is
-    /// about `head` and that origin.
-    pub(crate) fn in_head(&self, head: &Version, origin: &Origin) -> Option<Watermark> {
-        (self.head == *head && self.own.origin == *origin).then_some(Watermark {
-            edition: self.own.edition,
-            count: self.count,
-        })
-    }
-}
-
 /// What a commit needs to know about the head it mints, `version`, built
 /// on `parent`: the count it signs, the region entries it writes, and its
 /// full context when that came at no read.
@@ -244,9 +178,15 @@ pub(crate) struct Successor {
 /// - on another origin's head (a takeover) it writes the two entries whose
 ///   chains change hands: the parent origin's exact watermark, which the
 ///   parent carries, and its own, one past what the parent holds of the
-///   commit's origin. `own`, what the line recorded of that when it
-///   adopted the parent ([`OwnInHead`]), answers at no read; without it,
-///   one point read of that entry of the parent's region does.
+///   commit's origin, which one point read of that entry of the parent's
+///   region answers.
+///
+/// The point read is the only source of that count. The line cannot know
+/// it from its own history: a head it adopts can hold revisions of its
+/// origin its own head does not, once the line has been reset to an
+/// earlier head, so no record kept on the line is exact for every head it
+/// later takes over. The read is one root-to-leaf path of the region,
+/// a subset of what materializing the parent's context reads.
 ///
 /// A region head minted before heads carried their count takes the first
 /// path: its count is only in its region.
@@ -256,7 +196,6 @@ pub(crate) async fn successor<S, H>(
     contexts: &ContextCache,
     store: &S,
     cache: &ArtifactNodeCache,
-    own: Option<Watermark>,
     history: impl FnOnce() -> H,
 ) -> Result<Successor, DialogArtifactsError>
 where
@@ -284,14 +223,8 @@ where
                 context: None,
             });
         }
-        let held = match own {
-            Some(own) => Some(own),
-            None => {
-                let tree =
-                    Index::from_hash_with_cache(NodeHash::from(*parent.tree.hash()), cache.clone());
-                region_entry(&tree, &version.origin, store).await?
-            }
-        };
+        let tree = Index::from_hash_with_cache(NodeHash::from(*parent.tree.hash()), cache.clone());
+        let held = region_entry(&tree, &version.origin, store).await?;
         let ours = Watermark {
             edition: version.edition,
             count: held.map_or(0, |held| held.count).saturating_add(1),

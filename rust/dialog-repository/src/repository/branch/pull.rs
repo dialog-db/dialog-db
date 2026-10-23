@@ -18,7 +18,7 @@ use dialog_effects::memory::{Publish, Resolve};
 use futures_util::TryStreamExt as _;
 use futures_util::future::{Either, join_all};
 
-use super::context::{OwnInHead, full_context, head_observes, held, own_count, published_context};
+use super::context::{full_context, head_observes, held, own_count, published_context};
 use super::fetch::fetch_one;
 use super::migrate::aligned;
 use super::resolve::resolve;
@@ -27,8 +27,8 @@ use crate::ResolveEnv;
 use crate::repository::archive::networked::Reads;
 use crate::repository::archive::persist;
 use crate::{
-    Branch, BranchReference, Checkpoint, Index, NetworkedIndex, PublishError, PullError, Revision,
-    TreeReference, Upstream, UpstreamBranch,
+    Branch, Checkpoint, Index, NetworkedIndex, PublishError, PullError, Revision, TreeReference,
+    Upstream, UpstreamBranch,
 };
 
 /// Below this divergence mass (summed edition excess, roughly commits),
@@ -424,7 +424,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 merges: upstream_revision.clone(),
                 sync: upstream.with_tree(upstream_revision.tree.clone()),
                 base,
-                own: None,
             })));
         }
 
@@ -468,7 +467,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 merges: upstream_revision.clone(),
                 sync: upstream.with_tree(upstream_revision.tree.clone()),
                 base,
-                own: None,
             })));
         }
 
@@ -513,13 +511,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 .unwrap_or(false),
             };
             if seen {
-                // What the adopted head holds of our own origin, when our
-                // head until now says (see `OwnInHead`): a commit on the
-                // adopted head then signs its count without its region.
-                let own = match &local_revision {
-                    Some(local) => adopted_own(branch, &upstream_revision, local, env).await?,
-                    None => None,
-                };
                 return Ok(PreparedPull::Merged(Box::new(Merged {
                     branch,
                     head,
@@ -527,7 +518,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
-                    own,
                 })));
             }
         }
@@ -583,7 +573,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 merges: upstream_revision.clone(),
                 sync: upstream.with_tree(upstream_revision.tree.clone()),
                 base,
-                own: None,
             })));
         }
 
@@ -810,12 +799,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // mutual pulls quiesce.
                 if merged_tree == upstream_revision.tree {
                     contexts.insert(upstream_revision.version(), their_context.clone());
-                    // Their head has seen ours when its context says so,
-                    // and then it is a fast-forward for `OwnInHead`.
-                    let own = match their_context.observes(&local.version()) {
-                        true => adopted_own(branch, &upstream_revision, local, env).await?,
-                        false => None,
-                    };
                     return Ok(PreparedPull::Merged(Box::new(Merged {
                         branch,
                         head,
@@ -823,7 +806,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
-                        own,
                     })));
                 }
                 if merged_tree == local.tree {
@@ -834,7 +816,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
-                        own: None,
                     })));
                 }
 
@@ -897,7 +878,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
-                    own: None,
                 })));
             }
             // Reverse replay, for first contact when we are the smaller
@@ -994,12 +974,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // nothing to import.
                 if merged_tree == upstream_revision.tree {
                     contexts.insert(upstream_revision.version(), their_context.clone());
-                    // Their head has seen ours when its context says so,
-                    // and then it is a fast-forward for `OwnInHead`.
-                    let own = match their_context.observes(&local.version()) {
-                        true => adopted_own(branch, &upstream_revision, local, env).await?,
-                        false => None,
-                    };
                     return Ok(PreparedPull::Merged(Box::new(Merged {
                         branch,
                         head,
@@ -1007,7 +981,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
-                        own,
                     })));
                 }
                 if merged_tree == local.tree {
@@ -1018,7 +991,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
-                        own: None,
                     })));
                 }
 
@@ -1082,7 +1054,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
-                    own: None,
                 })));
             }
         }
@@ -1317,7 +1288,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             merges: upstream_revision.clone(),
             sync: upstream.with_tree(upstream_revision.tree),
             base,
-            own: None,
         })))
     }
 }
@@ -1410,9 +1380,6 @@ pub struct Merged<'a> {
     /// commit phase detect whether a concurrent write advanced this same
     /// entry in the meantime.
     base: Option<TreeReference>,
-    /// What a fast-forward's adopted head holds of this line's own origin,
-    /// when the head it moved from says, recorded once the head lands.
-    own: Option<OwnInHead>,
 }
 
 impl PreparedPull<'_> {
@@ -1539,7 +1506,6 @@ impl PreparedPull<'_> {
             new_revision,
             sync,
             base,
-            own,
             ..
         } = match self {
             PreparedPull::NoOp => return Ok(None),
@@ -1571,16 +1537,6 @@ impl PreparedPull<'_> {
             // another handle must still know it moved by this writer's
             // own doing (see `Commit::merge`).
             branch.writer().adopt(new_revision.version());
-            // A fact about a fixed head, so a write that lost a race to
-            // another is not retried: the next takeover reads the region.
-            if let Some(own) = own {
-                let known = BranchReference::from(branch).own_in_head();
-                known.resolve().perform(env).await?;
-                match known.checkpoint().publish(own, env).await {
-                    Ok(()) | Err(PublishError::VersionMismatch { .. }) => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
         }
 
         // Advance the pulled upstream's recorded sync base to the tree we
@@ -1621,30 +1577,6 @@ impl PreparedPull<'_> {
 
         Ok(Some(new_revision))
     }
-}
-
-/// What `adopted`, a head this line fast-forwards to from `from`, holds
-/// of the line's own origin, when `from` says: `from` is the line's own
-/// counted head, or the head the line recorded this of before.
-async fn adopted_own<Env>(
-    branch: &Branch,
-    adopted: &Revision,
-    from: &Revision,
-    env: &Env,
-) -> Result<Option<OwnInHead>, PullError>
-where
-    Env: Provider<Identify> + Provider<Resolve> + ConditionalSync,
-{
-    let authority = Identify.perform(env).await?;
-    let (_, origin) = branch.commit_identity(authority.profile(), &authority.did());
-    let known = if from.origin() == origin && from.own_watermark().is_some() {
-        None
-    } else {
-        let known = BranchReference::from(branch).own_in_head();
-        known.resolve().perform(env).await?;
-        known.content()
-    };
-    Ok(OwnInHead::adopted(adopted, from, &origin, known))
 }
 
 #[cfg(test)]

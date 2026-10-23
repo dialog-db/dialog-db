@@ -13,18 +13,21 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+use std::env;
+
 use anyhow::Result;
 
 use dialog_artifacts::history::{EDITION_CEILING, Edition, Origin, Watermark};
 use dialog_artifacts::{Artifact, DialogArtifactsError, Instruction, Value, context_entry};
 use dialog_capability::Subject;
 use dialog_effects::authority::Attest;
-use dialog_peer::helpers::{test_session_with_peer, unique_name};
+use dialog_effects::storage::Location;
+use dialog_peer::helpers::{open_peer, test_session_with_peer, test_storage, unique_name};
 use futures_util::stream;
 
 use super::super::context::{head_observes, region_agrees};
 use crate::helpers::Counting;
-use crate::{Branch, BranchReference, NetworkedIndex, PullError, RepositoryExt as _, Revision};
+use crate::{Branch, NetworkedIndex, PullError, RepositoryExt as _, Revision};
 use dialog_artifacts::history::ContextCache;
 use dialog_artifacts::history::context_of;
 use dialog_artifacts::tree::ArtifactNodeCache;
@@ -806,18 +809,58 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
     Ok(())
 }
 
+/// Check that `$branch`'s head signs its own origin's count as the
+/// ancestry walk counts it, and that its region reads as its context.
+macro_rules! assert_exact_count {
+    ($branch:expr, $env:expr, $what:expr) => {{
+        let head = $branch.revision().expect("the branch has a head");
+        let walked = context_of(&head.version(), &$branch.history($env))
+            .await
+            .map_err(|error| anyhow::anyhow!("{}: walking the ancestry: {error}", $what))?;
+        assert_eq!(
+            head.own_watermark().as_ref(),
+            walked.get(&head.origin()),
+            "{}: the signed count is the ancestry's",
+            $what
+        );
+        region_agrees($branch, $env, &$what).await?;
+    }};
+}
+
+/// A session of `$profile`'s peer under `$tag`: a writer with an origin of
+/// its own and a store of its own, so no memo it holds stands in for a
+/// region read.
+macro_rules! session {
+    ($profile:expr, $tag:expr) => {
+        $profile
+            .session($tag)
+            .space($profile.state())
+            .allow(Subject::any())
+            .await?
+    };
+}
+
+/// Open branch `$branch` of space `$name` through `$env`.
+macro_rules! line {
+    ($profile:expr, $name:expr, $env:expr, $branch:expr) => {
+        $profile
+            .space($name.clone())
+            .open()
+            .perform($env)
+            .await?
+            .branch($branch)
+            .open()
+            .perform($env)
+            .await?
+    };
+}
+
 /// Two writers alternating, each fast-forwarding to the other's head and
-/// committing on it: every commit after each writer's first is a takeover
-/// that signs its own count from what its line recorded when it adopted
-/// that head (the head built on the writer's own last commit), not from
-/// the head's region. What the line records is checked against the
-/// ancestry walk before every such commit, since a count it got wrong
-/// would be signed into the head. The commits read nothing; that both
-/// sessions share one store's node cache here is why the region's point
-/// read would cost nothing either, which the soak's separate replicas
-/// measure instead.
+/// committing on it: every commit after each writer's first is a takeover,
+/// and each signs the count the ancestry walk gives, read from the
+/// adopted head's region.
 #[dialog_common::test]
-async fn it_alternates_writers_on_what_their_lines_recorded() -> Result<()> {
+async fn it_alternates_writers_with_exact_counts() -> Result<()> {
     let (writer, profile) = test_session_with_peer().await;
     let name = unique_name("repo");
     let repo = profile.space(name.clone()).open().perform(&writer).await?;
@@ -826,74 +869,311 @@ async fn it_alternates_writers_on_what_their_lines_recorded() -> Result<()> {
     let last = passing_writers!(repo, &writer, Some(seed.clone()), 12);
     seed.pull().from(&last).perform(&writer).await?;
 
-    let session = |tag: &'static [u8]| {
-        let profile = profile.clone();
-        async move {
-            profile
-                .session(tag)
-                .space(profile.state())
-                .allow(Subject::any())
-                .await
-        }
-    };
-    let alice = Counting::new(session(b"alice").await?);
-    let bob = Counting::new(session(b"bob").await?);
-    let a = profile
-        .space(name.clone())
-        .open()
-        .perform(&alice)
-        .await?
-        .branch("alice")
-        .open()
-        .perform(&alice)
-        .await?;
-    let b = profile
-        .space(name.clone())
-        .open()
-        .perform(&bob)
-        .await?
-        .branch("bob")
-        .open()
-        .perform(&bob)
-        .await?;
+    let alice = session!(profile, b"alice");
+    let bob = session!(profile, b"bob");
+    let a = line!(profile, name, &alice, "alice");
+    let b = line!(profile, name, &bob, "bob");
     a.pull().from(&seed).perform(&alice).await?;
     commit!(a, &alice, "post:a0");
-    let mut origins = [a.revision().map(|head| head.origin()), None];
+    assert_exact_count!(&a, &alice, "the first takeover");
 
     for round in 1..=10 {
-        let (writer, env, from, slot) = match round % 2 {
-            1 => (&b, &bob, &a, 1),
-            _ => (&a, &alice, &b, 0),
+        let (writer, env, from) = match round % 2 {
+            1 => (&b, &bob, &a),
+            _ => (&a, &alice, &b),
         };
         writer.pull().from(from).perform(env).await?;
-        let adopted = writer.revision().expect("the writer adopted a head");
-        assert_eq!(Some(&adopted), from.revision().as_ref(), "a fast-forward");
-        if let Some(origin) = origins[slot] {
-            let known = BranchReference::from(writer).own_in_head();
-            known.resolve().perform(env).await?;
-            let recorded = known
-                .content()
-                .and_then(|known| known.in_head(&adopted.version(), &origin))
-                .expect("the line recorded its own count in the head it adopted");
-            let walked = context_of(&adopted.version(), &writer.history(env)).await?;
-            assert_eq!(
-                Some(&recorded),
-                walked.get(&origin),
-                "round {round}: the recorded count is the ancestry's"
-            );
-            env.reset();
-        }
+        assert_eq!(writer.revision(), from.revision(), "a fast-forward");
         commit!(writer, env, format!("post:{round}"));
-        if origins[slot].is_some() {
-            assert_eq!(
-                env.block_reads(),
-                0,
-                "round {round}: a takeover on a recorded head reads nothing: {:?}",
-                env.snapshot()
-            );
-        }
-        origins[slot] = writer.revision().map(|head| head.origin());
-        region_agrees(writer, env, "an alternating takeover").await?;
+        assert_exact_count!(writer, env, format!("round {round}"));
     }
+    Ok(())
+}
+
+/// A line reset to a head it adopted earlier, after committing on top of
+/// it, then fast-forwarded to a head that holds that later commit: the
+/// takeover counts every revision of the line's origin the new head holds,
+/// including the one the reset left behind. A count kept on the line from
+/// when it first adopted the earlier head would say one fewer.
+#[dialog_common::test]
+async fn it_counts_a_takeover_exactly_after_a_reset_to_an_adopted_head() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    profile.space(name.clone()).open().perform(&writer).await?;
+    let alice = session!(profile, b"alice");
+    let bob = session!(profile, b"bob");
+    let a = line!(profile, name, &alice, "a");
+    let b = line!(profile, name, &bob, "b");
+
+    commit!(a, &alice, "post:a1");
+    b.pull().from(&a).perform(&bob).await?;
+    commit!(b, &bob, "post:x");
+    let x = b.revision().expect("X");
+    a.pull().from(&b).perform(&alice).await?;
+    commit!(a, &alice, "post:a2");
+    b.pull().from(&a).perform(&bob).await?;
+    commit!(b, &bob, "post:u");
+    let u = b.revision().expect("U");
+
+    a.reset(x).perform(&alice).await?;
+    a.pull().from(&b).perform(&alice).await?;
+    assert_eq!(a.revision().as_ref(), Some(&u), "a fast-forward to U");
+    assert!(
+        a.contexts().cached(&u.version()).await.is_none(),
+        "no memo of U's context stands in for its region"
+    );
+    commit!(a, &alice, "post:a3");
+    assert_exact_count!(&a, &alice, "a takeover after a reset");
+    let head = a.revision().expect("the takeover");
+    assert_eq!(head.own_watermark().map(|own| own.count), Some(3));
+    Ok(())
+}
+
+/// A line reset to its own earlier head, then fast-forwarded to a head
+/// built on the commit the reset left behind: the takeover counts that
+/// commit too. The line's own head, its latest revision until the reset,
+/// says one fewer, so a count taken from the head the line moved from
+/// would understate. In one process this pull computes and remembers the
+/// adopted head's context, which the commit then uses;
+/// `it_counts_a_takeover_exactly_after_a_reset_and_a_restart` takes that
+/// memory away.
+#[dialog_common::test]
+async fn it_counts_a_takeover_exactly_after_a_reset_to_its_own_head() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    profile.space(name.clone()).open().perform(&writer).await?;
+    let alice = session!(profile, b"alice");
+    let bob = session!(profile, b"bob");
+    let a = line!(profile, name, &alice, "a");
+    let b = line!(profile, name, &bob, "b");
+
+    // a has pulled from b before, so its next pull from b has a sync
+    // base and fast-forwards without computing b's whole context.
+    commit!(b, &bob, "post:b0");
+    a.pull().from(&b).perform(&alice).await?;
+    commit!(a, &alice, "post:a1");
+    let l1 = a.revision().expect("L1");
+    commit!(a, &alice, "post:a2");
+    b.pull().from(&a).perform(&bob).await?;
+    commit!(b, &bob, "post:u");
+    let u = b.revision().expect("U");
+
+    a.reset(l1).perform(&alice).await?;
+    a.pull().from(&b).perform(&alice).await?;
+    assert_eq!(a.revision().as_ref(), Some(&u), "a fast-forward to U");
+    commit!(a, &alice, "post:a3");
+    assert_exact_count!(&a, &alice, "a takeover after a reset to our own head");
+    let head = a.revision().expect("the takeover");
+    assert_eq!(head.own_watermark().map(|own| own.count), Some(3));
+    Ok(())
+}
+
+/// The same rewind as above, with the replica restarted between the pull
+/// and the commit, so nothing remembered in memory from the pull (the
+/// adopted head's context the pull computed) stands in for the region: a
+/// count the line kept from the head it moved from would be all the
+/// commit had, and would understate.
+#[dialog_common::test]
+async fn it_counts_a_takeover_exactly_after_a_reset_and_a_restart() -> Result<()> {
+    let storage = test_storage().await;
+    let location = Location::profile(unique_name("restart"));
+    let profile = open_peer(storage.clone(), location.clone()).await?;
+    let name = unique_name("repo");
+    let writer = session!(profile, b"test");
+    profile.space(name.clone()).open().perform(&writer).await?;
+    let alice = session!(profile, b"alice");
+    let bob = session!(profile, b"bob");
+    let a = line!(profile, name, &alice, "a");
+    let b = line!(profile, name, &bob, "b");
+
+    commit!(b, &bob, "post:b0");
+    a.pull().from(&b).perform(&alice).await?;
+    commit!(a, &alice, "post:a1");
+    let l1 = a.revision().expect("L1");
+    commit!(a, &alice, "post:a2");
+    b.pull().from(&a).perform(&bob).await?;
+    commit!(b, &bob, "post:u");
+    let u = b.revision().expect("U");
+    a.reset(l1).perform(&alice).await?;
+    a.pull().from(&b).perform(&alice).await?;
+    assert_eq!(a.revision().as_ref(), Some(&u), "a's head is U");
+
+    let restarted = open_peer(storage, location).await?;
+    let alice = session!(restarted, b"alice");
+    let a = line!(restarted, name, &alice, "a");
+    assert_eq!(
+        a.revision().as_ref(),
+        Some(&u),
+        "the head survives the restart"
+    );
+    assert!(
+        a.contexts().cached(&u.version()).await.is_none(),
+        "a restarted replica remembers no context"
+    );
+    commit!(a, &alice, "post:a3");
+    assert_exact_count!(&a, &alice, "a takeover after a reset and a restart");
+    let head = a.revision().expect("the takeover");
+    assert_eq!(head.own_watermark().map(|own| own.count), Some(3));
+    Ok(())
+}
+
+/// A takeover after the line's head was moved without appending to it, by
+/// each way a head moves so on a line that has one: an amend, a reset to
+/// another line's older head, and a pull that merges (minting under the
+/// line's origin). Each head that results, and each takeover that follows,
+/// signs the walked count. Adoption by root moves only a line with no
+/// head; `it_takes_over_an_adopted_head_without_reading_its_region` covers
+/// it.
+#[dialog_common::test]
+async fn it_counts_a_takeover_exactly_after_every_head_move() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    profile.space(name.clone()).open().perform(&writer).await?;
+    let alice = session!(profile, b"alice");
+    let bob = session!(profile, b"bob");
+    let a = line!(profile, name, &alice, "a");
+    let b = line!(profile, name, &bob, "b");
+
+    commit!(b, &bob, "post:b0");
+    a.pull().from(&b).perform(&alice).await?;
+    let older = a.revision().expect("b's first head");
+
+    // An amend replaces the head with a revision of the same version.
+    let batch = a
+        .transaction()
+        .assert(note("t0")?)
+        .commit()
+        .perform(&alice)
+        .await?;
+    let batch = batch
+        .assert(note("t1")?)
+        .commit()
+        .amend()
+        .perform(&alice)
+        .await?;
+    batch.publish().perform(&alice).await?;
+    assert_exact_count!(&a, &alice, "an amended takeover");
+    b.pull().from(&a).perform(&bob).await?;
+    commit!(b, &bob, "post:b1");
+    a.pull().from(&b).perform(&alice).await?;
+    commit!(a, &alice, "post:after-amend");
+    assert_exact_count!(&a, &alice, "a takeover after an amend");
+
+    // A reset to b's older head, then a fast-forward to b's newest.
+    b.pull().from(&a).perform(&bob).await?;
+    commit!(b, &bob, "post:b2");
+    a.reset(older).perform(&alice).await?;
+    assert_exact_count!(&a, &alice, "a reset to an older head");
+    a.pull().from(&b).perform(&alice).await?;
+    assert_exact_count!(&a, &alice, "a pull after a reset");
+    commit!(a, &alice, "post:after-reset");
+    assert_exact_count!(&a, &alice, "a takeover after a reset to an older head");
+
+    // A pull that merges mints under a's origin; b takes that over, and a
+    // takes b's head back over.
+    commit!(a, &alice, "post:a-side");
+    commit!(b, &bob, "post:b-side");
+    a.pull().from(&b).perform(&alice).await?;
+    assert_exact_count!(&a, &alice, "a merge");
+    b.pull().from(&a).perform(&bob).await?;
+    commit!(b, &bob, "post:b4");
+    assert_exact_count!(&b, &bob, "b's takeover of a's merge");
+    a.pull().from(&b).perform(&alice).await?;
+    commit!(a, &alice, "post:after-merge");
+    assert_exact_count!(&a, &alice, "a takeover after a merge");
+    Ok(())
+}
+
+/// Random interleavings of commit, pull, merge, takeover and restart
+/// across three writers of one space: at every head a writer mints or
+/// adopts, the signed count is the walked count. A restart reopens the
+/// peer over the same storage, so commits after it have no context
+/// remembered from the pulls before it and take the region path. Resets
+/// are left to the deterministic tests above until #673: a pull after a
+/// reset can leave a head whose history is incomplete today, which no
+/// count can be checked against.
+#[dialog_common::test]
+async fn it_signs_walked_counts_under_random_interleavings() -> Result<()> {
+    let seeds: u64 = env::var("DIALOG_COUNT_INTERLEAVINGS")
+        .ok()
+        .and_then(|seeds| seeds.parse().ok())
+        .unwrap_or(6);
+    let steps = 32;
+    let (mut commits, mut takeovers, mut merges, mut restarts) = (0, 0, 0, 0);
+    for seed in 0..seeds {
+        let storage = test_storage().await;
+        let location = Location::profile(unique_name("mix"));
+        let mut profile = open_peer(storage.clone(), location.clone()).await?;
+        let name = unique_name("repo");
+        let writer = session!(profile, b"test");
+        profile.space(name.clone()).open().perform(&writer).await?;
+        let tags: [&'static [u8]; 3] = [b"one", b"two", b"three"];
+        let mut envs = [
+            session!(profile, tags[0]),
+            session!(profile, tags[1]),
+            session!(profile, tags[2]),
+        ];
+        let mut lines = [
+            line!(profile, name, &envs[0], "one"),
+            line!(profile, name, &envs[1], "two"),
+            line!(profile, name, &envs[2], "three"),
+        ];
+        let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut next = |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        for step in 0..steps {
+            let op = next(6);
+            if op == 5 {
+                profile = open_peer(storage.clone(), location.clone()).await?;
+                envs = [
+                    session!(profile, tags[0]),
+                    session!(profile, tags[1]),
+                    session!(profile, tags[2]),
+                ];
+                lines = [
+                    line!(profile, name, &envs[0], "one"),
+                    line!(profile, name, &envs[1], "two"),
+                    line!(profile, name, &envs[2], "three"),
+                ];
+                restarts += 1;
+                continue;
+            }
+            let at = next(3) as usize;
+            let (line, env) = (&lines[at], &envs[at]);
+            let what = format!("seed {seed} step {step} writer {at} op {op}");
+            if op < 2 {
+                let parent = line.revision();
+                commit!(line, env, format!("post:{seed}-{step}"));
+                let head = line.revision().expect("a commit leaves a head");
+                commits += 1;
+                if parent.is_some_and(|parent| parent.origin() != head.origin()) {
+                    takeovers += 1;
+                }
+                assert_exact_count!(line, env, what);
+            } else {
+                let from = &lines[(at + 1 + next(2) as usize) % 3];
+                let Some(theirs) = from.revision() else {
+                    continue;
+                };
+                let before = line.revision();
+                line.pull().from(from).perform(env).await?;
+                let after = line.revision().expect("a pull leaves a head");
+                // A head that is neither ours before nor theirs is a
+                // merge, minted under this writer's origin.
+                if Some(&after) != before.as_ref() && after != theirs {
+                    merges += 1;
+                }
+                assert_exact_count!(line, env, what);
+            }
+        }
+    }
+    eprintln!(
+        "{seeds} seeds: {commits} commits ({takeovers} takeovers), {merges} merges, {restarts} restarts"
+    );
+    assert!(takeovers > 0 && merges > 0 && restarts > 0);
     Ok(())
 }
