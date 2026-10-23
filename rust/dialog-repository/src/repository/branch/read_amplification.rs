@@ -29,8 +29,52 @@ use dialog_artifacts::history::{Context, context_of};
 use dialog_artifacts::{ArchiveDelta, Artifact, Instruction, Value};
 
 use crate::RepositoryExt as _;
-use crate::helpers::Counting;
+use crate::helpers::{Counting, prune_unreachable as prune};
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
+
+/// How many setup commits a fixture runs between prunes of its store.
+///
+/// The volatile store keeps every block ever written, and a setup step
+/// that commits rewrites the root (tens of kilobytes at depth), so a
+/// fixture of thousands of steps would hold gigabytes of roots nothing
+/// reaches: the harness's own garbage, not the product's memory. The
+/// fixtures drop what their open branches no longer reach every this many
+/// steps, so what the store holds at the end of setup is what a
+/// persistent store would hold.
+const PRUNE_EVERY: usize = 100;
+
+/// The most resident memory this process ever held, in bytes, where the
+/// platform tells (`VmHWM` on Linux); `None` elsewhere.
+fn resident_peak() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::fs::read_to_string;
+
+        read_to_string("/proc/self/status")
+            .ok()?
+            .lines()
+            .find(|line| line.starts_with("VmHWM:"))?
+            .split_whitespace()
+            .nth(1)?
+            .parse::<usize>()
+            .ok()
+            .map(|kb| kb * 1024)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Prints the resident peak, when the platform tells it.
+fn print_resident_peak() {
+    if let Some(bytes) = resident_peak() {
+        println!(
+            "| resident peak | {:.1} MB |",
+            bytes as f64 / (1024.0 * 1024.0)
+        );
+    }
+}
 
 fn assert_fact(entity: usize, value: &str) -> Instruction {
     Instruction::Assert(
@@ -132,6 +176,9 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
         main.commit(stream::iter(vec![assert_fact(i, "seed")]))
             .perform(&env)
             .await?;
+        if i % PRUNE_EVERY == PRUNE_EVERY - 1 {
+            prune(&env, &profile, &repo, &[&main]).await?;
+        }
     }
 
     // `feature` tracks main. The initial pull is the "fresh replica
@@ -239,6 +286,9 @@ async fn measure_triangle(depth: usize, samples: &mut Vec<Sample>) -> Result<()>
             .commit(stream::iter(vec![assert_fact(i + 1, "alice")]))
             .perform(&env)
             .await?;
+        if i % PRUNE_EVERY == PRUNE_EVERY - 1 {
+            prune(&env, &profile, &repo, &[&seed, &bob, &alice]).await?;
+        }
     }
 
     // We adopt the seed, sync Bob while he is small (tracking him), then
@@ -314,6 +364,9 @@ async fn measure_shape(depth: usize) -> Result<()> {
         main.commit(stream::iter(vec![assert_fact(i, "seed")]))
             .perform(&env)
             .await?;
+        if i % PRUNE_EVERY == PRUNE_EVERY - 1 {
+            prune(&env, &profile, &repo, &[&main]).await?;
+        }
     }
 
     let root = main.revision().expect("committed").tree;
@@ -383,6 +436,9 @@ async fn measure_write_paths(depth: usize, batches: usize) -> Result<()> {
         main.commit(stream::iter(vec![assert_fact(i, "seed")]))
             .perform(&env)
             .await?;
+        if i % PRUNE_EVERY == PRUNE_EVERY - 1 {
+            prune(&env, &profile, &repo, &[&main]).await?;
+        }
     }
 
     let root = main.revision().expect("committed").tree;
@@ -924,9 +980,6 @@ async fn write_path_comparison() -> Result<()> {
 #[dialog_common::test]
 #[ignore]
 async fn read_amplification_by_depth() -> Result<()> {
-    // The in-memory backend retains every block of every commit (content
-    // addressing never collects), so the deepest fixture holds gigabytes:
-    // depth 10_000 needs a machine with headroom or it dies by OOM kill.
     // `DIALOG_RA_MAX_DEPTH` caps the sweep (e.g. `=1000`); reads per
     // scenario are depth-independent by design, so the smaller depths
     // measure the same table.
@@ -952,6 +1005,7 @@ async fn read_amplification_by_depth() -> Result<()> {
     for sample in &samples {
         println!("{}", sample.row());
     }
+    print_resident_peak();
     Ok(())
 }
 
@@ -974,6 +1028,9 @@ async fn current_costs() -> Result<()> {
             main.commit(stream::iter(vec![assert_fact(i, "seed")]))
                 .perform(&env)
                 .await?;
+            if i % PRUNE_EVERY == PRUNE_EVERY - 1 {
+                prune(&env, &profile, &repo, &[&main]).await?;
+            }
         }
 
         let started = Instant::now();
@@ -1019,5 +1076,6 @@ async fn current_costs() -> Result<()> {
             commit_ms as f64 / 100.0
         );
     }
+    print_resident_peak();
     Ok(())
 }
