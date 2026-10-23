@@ -62,12 +62,23 @@
 //! key space, so each commit touches a different leaf: the widest shape
 //! `k` edits can take, and the one a space with many writers has. Every
 //! poll is checked to have taken the maintenance path, not a recompute.
+//!
+//! Speculation is ambient: an evaluation enqueues preload hints, and the
+//! next driven evaluation pops and runs them. The first poll's hints
+//! would otherwise run inside the first measured poll (on `mobile`,
+//! 299 blocks charged to a one-fact catch-up), so before the branch
+//! moves the client reads as an application does after joining, until
+//! nothing is pending: those reads drive the hints, in the setup. What a
+//! measured poll enqueues runs in the next measured phase, as it would
+//! on a replica.
 
 use anyhow::{Context as _, Result};
-use dialog_artifacts::{Artifact, Instruction, Pick, Value};
+use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Pick, Value};
+use dialog_capability::Provider;
 use dialog_query::{Query, Term};
 use dialog_remote_fs::simulation;
 use dialog_repository::Branch;
+use futures_util::StreamExt as _;
 
 use crate::join::Card;
 use crate::report::PhaseReport;
@@ -145,6 +156,23 @@ pub(crate) async fn phases(
         "the first poll should see every card, saw {}",
         first.asserted.len()
     );
+    // The application's reads after joining drive the first poll's
+    // hints, so the measured catch-ups start with nothing pending.
+    let queue = Provider::<dialog_artifacts::Speculation>::execute(operator, ()).await;
+    let mut reads = 0;
+    while queue.pending() > 0 && reads < 64 {
+        let rows = client
+            .claims()
+            .select(ArtifactSelector::new().the("db/name".parse()?))
+            .to_owned()
+            .perform(operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await;
+        anyhow::ensure!(rows.len() == 1, "the space name reads");
+        reads += 1;
+    }
+    anyhow::ensure!(queue.pending() == 0, "the first poll's hints should drain");
 
     let mut round = 0;
     for k in SINGLE_WRITER {
