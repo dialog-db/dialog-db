@@ -24,8 +24,9 @@ use futures_util::stream;
 
 use super::super::context::{head_observes, region_agrees};
 use crate::helpers::Counting;
-use crate::{Branch, NetworkedIndex, PullError, RepositoryExt as _, Revision};
+use crate::{Branch, BranchReference, NetworkedIndex, PullError, RepositoryExt as _, Revision};
 use dialog_artifacts::history::ContextCache;
+use dialog_artifacts::history::context_of;
 use dialog_artifacts::tree::ArtifactNodeCache;
 use dialog_search_tree::Cache;
 
@@ -802,5 +803,97 @@ async fn it_answers_observes_after_a_takeover_at_zero_reads() -> Result<()> {
         "a pull after the push reads nothing: {:?}",
         device.snapshot()
     );
+    Ok(())
+}
+
+/// Two writers alternating, each fast-forwarding to the other's head and
+/// committing on it: every commit after each writer's first is a takeover
+/// that signs its own count from what its line recorded when it adopted
+/// that head (the head built on the writer's own last commit), not from
+/// the head's region. What the line records is checked against the
+/// ancestry walk before every such commit, since a count it got wrong
+/// would be signed into the head. The commits read nothing; that both
+/// sessions share one store's node cache here is why the region's point
+/// read would cost nothing either, which the soak's separate replicas
+/// measure instead.
+#[dialog_common::test]
+async fn it_alternates_writers_on_what_their_lines_recorded() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    let repo = profile.space(name.clone()).open().perform(&writer).await?;
+    let seed = repo.branch("main").open().perform(&writer).await?;
+    commit!(seed, &writer, "post:seed");
+    let last = passing_writers!(repo, &writer, Some(seed.clone()), 12);
+    seed.pull().from(&last).perform(&writer).await?;
+
+    let session = |tag: &'static [u8]| {
+        let profile = profile.clone();
+        async move {
+            profile
+                .session(tag)
+                .space(profile.state())
+                .allow(Subject::any())
+                .await
+        }
+    };
+    let alice = Counting::new(session(b"alice").await?);
+    let bob = Counting::new(session(b"bob").await?);
+    let a = profile
+        .space(name.clone())
+        .open()
+        .perform(&alice)
+        .await?
+        .branch("alice")
+        .open()
+        .perform(&alice)
+        .await?;
+    let b = profile
+        .space(name.clone())
+        .open()
+        .perform(&bob)
+        .await?
+        .branch("bob")
+        .open()
+        .perform(&bob)
+        .await?;
+    a.pull().from(&seed).perform(&alice).await?;
+    commit!(a, &alice, "post:a0");
+    let mut origins = [a.revision().map(|head| head.origin()), None];
+
+    for round in 1..=10 {
+        let (writer, env, from, slot) = match round % 2 {
+            1 => (&b, &bob, &a, 1),
+            _ => (&a, &alice, &b, 0),
+        };
+        writer.pull().from(from).perform(env).await?;
+        let adopted = writer.revision().expect("the writer adopted a head");
+        assert_eq!(Some(&adopted), from.revision().as_ref(), "a fast-forward");
+        if let Some(origin) = origins[slot] {
+            let known = BranchReference::from(writer).own_in_head();
+            known.resolve().perform(env).await?;
+            let recorded = known
+                .content()
+                .and_then(|known| known.in_head(&adopted.version(), &origin))
+                .expect("the line recorded its own count in the head it adopted");
+            let walked = context_of(&adopted.version(), &writer.history(env)).await?;
+            assert_eq!(
+                Some(&recorded),
+                walked.get(&origin),
+                "round {round}: the recorded count is the ancestry's"
+            );
+            env.reset();
+        }
+        commit!(writer, env, format!("post:{round}"));
+        if origins[slot].is_some() {
+            assert_eq!(
+                env.block_reads(),
+                0,
+                "round {round}: a takeover on a recorded head reads nothing: {:?}",
+                env.snapshot()
+            );
+        }
+        origins[slot] = writer.revision().map(|head| head.origin());
+        region_agrees(writer, env, "an alternating takeover").await?;
+    }
     Ok(())
 }

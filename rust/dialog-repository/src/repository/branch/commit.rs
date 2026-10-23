@@ -4,8 +4,8 @@ use super::transaction::induction_ignores;
 use crate::repository::archive::persist;
 use crate::repository::source::SourceRef;
 use crate::{
-    Branch, CommitError, Index, NetworkedIndex, PublishError, RemoteSite, RepositoryMemoryExt as _,
-    Revision, Snapshot, TreeReference, origin_of,
+    Branch, BranchReference, CommitError, Index, NetworkedIndex, PublishError, RemoteSite,
+    RepositoryMemoryExt as _, Revision, Snapshot, TreeReference, origin_of,
 };
 use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::history::{
@@ -791,6 +791,21 @@ where
         // taken only when it is free (the memo holds it, or the parent
         // carries it); a commit never reads the parent's region whole to
         // learn the two entries a takeover changes (see `successor`).
+        // On another origin's head, what the line recorded when it adopted
+        // that head says how many of our own revisions it holds (see
+        // `OwnInHead`); a local cell, read only for a takeover.
+        let own = match (&source, base_revision.as_ref()) {
+            (SourceRef::Branch(branch), Some(base))
+                if base.region && base.origin() != origin && base.own_watermark().is_some() =>
+            {
+                let known = BranchReference::from(*branch).own_in_head();
+                known.resolve().perform(env).await?;
+                known
+                    .content()
+                    .and_then(|known| known.in_head(&base.version(), &origin))
+            }
+            _ => None,
+        };
         let Successor {
             count,
             region,
@@ -801,6 +816,7 @@ where
             &source.contexts(),
             &store,
             &source.node_cache(),
+            own,
             || {
                 let base = base_revision
                     .as_ref()

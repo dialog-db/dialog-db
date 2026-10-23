@@ -1,5 +1,6 @@
 use dialog_capability::{Did, Subject};
 
+use super::context::OwnInHead;
 use crate::{Branch, Cell, LoadBranch, OpenBranch, Revision, Tracking};
 use dialog_effects::memory::prelude::SpaceScope;
 
@@ -74,6 +75,14 @@ impl BranchReference {
     /// `(watermark, head]` as its own head advances.
     pub fn induction(&self) -> Cell<Revision> {
         self.cell("induction")
+    }
+
+    /// The cell recording how many of this line's own origin's revisions
+    /// one head it adopted holds (see [`OwnInHead`]). Replica-local, like
+    /// the induction watermark: it lives in the local store and never
+    /// replicates.
+    pub(crate) fn own_in_head(&self) -> Cell<OwnInHead> {
+        self.cell("own")
     }
 
     /// Create a typed cell within this branch's space.
