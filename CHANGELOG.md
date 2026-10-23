@@ -14,6 +14,47 @@ says how to cut a release.
 
 ## Unreleased
 
+### A chain canonicalized at a link that changes nothing is canonical
+
+[#PRNUM](https://github.com/dialog-db/dialog-db/pull/PRNUM)
+
+A staged chain's amend that asked to canonicalize but wrote nothing (a
+retract of a fact the chain never held, say) returned the tip unchanged,
+buffers included. The chain's last link is where a chain canonicalizes,
+so a chain whose last link changed nothing was published buffered, and
+named a root that depends on where its earlier links flushed. An amend
+asked to canonicalize now canonicalizes its tip's tree whether or not
+the link changed anything, and reports the tip unchanged only when that
+tree was already canonical.
+
+What this changes for you:
+
+- Two replicas that stage the same facts on the same head and
+  canonicalize their chains name the same root, whatever each chain's
+  last link held. Before, a fast-forward between them could find
+  divergence where there was none, and a merge then did work that
+  found nothing.
+- `TransactionCommit::amend` with `canonicalize` on a link that changes
+  nothing now returns a batch whose tree is canonical; it reported the
+  buffered tip before. A commit that is not an amend keeps its rule: a
+  batch that changes nothing mints nothing and canonicalizes nothing,
+  unless `allow_empty` asks for a revision.
+- Nothing stored or synced changes shape.
+
+Why: the canonicalize request was checked after the no-op check, which
+returned before the seal. The amend path is the one place a commit
+rewrites a revision's tree in place, so it is the one place the request
+has a tree to act on when the link itself wrote nothing.
+
+#### Compatibility and migration
+
+- Nothing a replica stores or syncs is rewritten. A head an older release
+  published from such a chain names its buffered tree and stays valid;
+  it reads, pulls and merges as before. To bring it to the canonical
+  form, publish a canonicalizing commit on it (`allow_empty` with
+  `canonicalize` when there is nothing else to commit). Nothing an
+  embedder has to run.
+
 ### A persisted node's bytes can be attributed to what they carry
 
 [#634](https://github.com/dialog-db/dialog-db/pull/634), for
