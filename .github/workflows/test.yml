@@ -12,8 +12,10 @@ on:
 name: 'Test'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Each commit on main gets its own group, so every merge runs to the end
+  # and keeps its artifacts. Other refs cancel a run a newer push replaces.
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   lint_nix:
