@@ -14,7 +14,7 @@ says how to cut a release.
 
 ## Unreleased
 
-### A published root carries at most half a node's worth of buffered ops
+### A root published on a shared history carries at most half a node's worth of buffered ops
 
 [#640](https://github.com/dialog-db/dialog-db/pull/640), for
 [#632](https://github.com/dialog-db/dialog-db/issues/632)
@@ -28,23 +28,32 @@ link buffer one level when the root's buffered weight exceeds half the
 node size target (`max_segment / 2`, 32 KiB by default), so a published
 root holds its links and at most that much buffer. The children buffer
 what they receive under the ordinary per-node cap; nothing is
-canonicalized.
+canonicalized. The flush applies to a history more than one origin wrote:
+a replica that commits is an origin in the head's causal context, and a
+branch with a single origin has no replica adopting it mid-stream, so its
+writer keeps the cheaper commit.
 
 What this changes for you:
 
-- A commit that takes the root past 32 KiB of buffered weight writes the
-  children it flushes into as well as the root: one flush of about 13
-  blocks every 13 one-fact commits, where before it was every 15. The
-  bytes a run of commits writes drop by a quarter, since the root is most
-  of what every commit writes and it is smaller on average. On the perf
-  matrix, `commit-rows` goes from 112 blocks and 3.69 MB to 133 blocks and
-  2.64 MB per 100 commits, `commit-hot-key` from 119 and 3.88 MB to 143 and
-  2.94 MB, with instructions within 2% either way.
-- The first query of a replica that adopted a head by root reads a root of
-  at most 32 KiB of buffer plus links: a mean of 17 kB instead of 45 over
-  the fill-and-flush cycle, with the same number of blocks.
-- `HitchhikerTree::with_publish_threshold` sets the threshold for a tree;
-  `usize::MAX` disables the flush.
+- On a branch more than one origin wrote, a commit that takes the root
+  past 32 KiB of buffered weight writes the children it flushes into as
+  well as the root: one flush of about 13 blocks every 13 one-fact
+  commits, where before it was every 15. The bytes a run of commits writes
+  drop by a quarter, since the root is most of what every commit writes
+  and it is smaller on average: 133 blocks and 2.64 MB per 100 one-fact
+  commits instead of 112 blocks and 3.69 MB, with instructions within 2%
+  either way.
+- On a branch with a single origin nothing changes: `commit-rows` and
+  `commit-hot-key` on the perf matrix keep their blocks, bytes and
+  instructions.
+- The first query of a replica that adopted, by root, a head of a shared
+  history reads a root of at most 32 KiB of buffer plus links: a mean of
+  17 kB instead of 45 over the fill-and-flush cycle, with the same number
+  of blocks. A replica that only reads a single writer's branch, and so is
+  not an origin of it, still reads that writer's unflushed root.
+- `HitchhikerTree::with_publish_flush` turns the flush on or off for a
+  tree, `with_publish_threshold` sets its threshold, and
+  `BufferedBatch::with_publish_flush` sets it for one commit.
 - Nothing stored is rewritten and no format changes: a flushed root is the
   canonical index of its links, the same bytes a fully flushed node has,
   and an older release reads what this one writes. Two replicas that

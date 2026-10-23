@@ -512,6 +512,17 @@ impl BufferedBatch {
         self.changed
     }
 
+    /// Whether the seal flushes the root's buffer before publishing a root
+    /// whose buffer weighs more than half the node size target (see
+    /// [`HitchhikerTree::with_publish_flush`]). On by default; a commit
+    /// path that knows no replica adopts the branch mid-stream (a branch
+    /// with a single origin) turns it off and keeps the single writer's
+    /// commits at their cheapest.
+    pub fn with_publish_flush(mut self, enabled: bool) -> Self {
+        self.tree = self.tree.with_publish_flush(enabled);
+        self
+    }
+
     /// The target tree's format [`Manifest`], captured at
     /// [`apply`](Self::apply) time.
     ///

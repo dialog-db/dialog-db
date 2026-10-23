@@ -388,6 +388,15 @@ where
         self
     }
 
+    /// Turns the publish flush on (the threshold derived from the tree's
+    /// manifest) or off for this tree. A live spine kept between commits
+    /// keeps the setting, so a caller deciding per commit sets it each
+    /// time.
+    pub fn with_publish_flush(mut self, enabled: bool) -> Self {
+        self.publish_threshold = if enabled { None } else { Some(usize::MAX) };
+        self
+    }
+
     /// Sets the [`FlushPolicy`] selecting how far an overflowing buffer cascades.
     pub fn with_flush_policy(mut self, policy: FlushPolicy) -> Self {
         self.policy = policy;
@@ -2008,6 +2017,44 @@ mod tests {
             oracle.root(),
             "the publish-flushed tree canonicalizes to the sequential root"
         );
+        Ok(())
+    }
+
+    /// With the publish flush turned off, a settle past the threshold sheds
+    /// nothing: the root keeps its buffer up to the per-node cap, as before
+    /// the flush existed.
+    #[dialog_common::test]
+    async fn it_keeps_the_root_buffer_when_the_publish_flush_is_off() -> Result<()> {
+        let mut storage = MemoryBlocks::new();
+        let keys: Vec<u32> = (0..1200).collect();
+        let base = sequential(&keys, &mut storage).await?;
+        let manifest = base.manifest(&storage).await?;
+        let threshold = publish_threshold(&manifest);
+
+        let mut live = TestHitchhiker::open(&base).with_publish_flush(false);
+        let mut over = 0usize;
+        let mut next = 4_000_000u32;
+        for _ in 0..20 {
+            let batch: Vec<u32> = (next..next + 40).collect();
+            next += 40;
+            let mut tree = std::mem::replace(&mut live, TestHitchhiker::empty(Manifest::default()))
+                .with_op_buf_size(100_000)
+                .with_publish_flush(false);
+            for key in batch {
+                tree = tree
+                    .insert(key.to_le_bytes(), key.to_le_bytes().to_vec(), &storage)
+                    .await?;
+            }
+            let before = tree.root_weight()?;
+            tree = tree.settle(&storage).await?;
+            let after = tree.root_weight()?;
+            assert_eq!(after, before, "a settle sheds nothing with the flush off");
+            if after > threshold {
+                over += 1;
+            }
+            live = tree;
+        }
+        assert!(over >= 5, "the root stayed over the threshold {over} times");
         Ok(())
     }
 

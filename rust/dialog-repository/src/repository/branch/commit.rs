@@ -733,7 +733,10 @@ where
                     "there is no revision to amend".to_string(),
                 ));
             };
-            let batch = batch.record(&store, self.entries).await?;
+            let batch = batch
+                .record(&store, self.entries)
+                .await?
+                .with_publish_flush(shared_history(&context));
             tree = batch.seal(&store, &mut delta, self.canonicalize).await?;
             persist(
                 &source.archive().index(),
@@ -854,11 +857,16 @@ where
         // batch as the revision record, so one seal covers data, record,
         // and entries together.
         let batch = batch.record(&store, self.entries).await?;
-        let batch = batch.record(&store, entries).await?;
+        let batch = batch
+            .record(&store, entries)
+            .await?
+            .with_publish_flush(shared_history(&context));
 
         // ONE seal covers the data writes and the record entries, into the
         // batch delta (flushing buffers to the leaves first when the caller
-        // asked to canonicalize).
+        // asked to canonicalize). The root's own buffer is flushed before
+        // it is published only on a history more than one origin wrote
+        // (`shared_history`).
         tree = batch.seal(&store, &mut delta, self.canonicalize).await?;
 
         // Persist the tree's pending nodes before referencing the root in
@@ -892,6 +900,20 @@ where
     }
 }
 
+/// Whether the history `context` describes was written by more than one
+/// origin: the condition under which a commit flushes its root's buffer
+/// before publishing it.
+///
+/// A published root's buffer is what the first query of a replica that
+/// adopted the head by root pays for, and a replica that commits is an
+/// origin in the context. A branch with a single origin has no such
+/// replica in its history, so its writer keeps the cheaper commit (no
+/// flush until a node's own cap fires). A replica that only reads the
+/// branch is not an origin, and pays the unflushed root on that branch.
+fn shared_history(context: &Context) -> bool {
+    context.len() > 1
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -915,6 +937,92 @@ mod tests {
     /// rebuild fell back to max parts), widening the scan to every entity
     /// sorting after the new one — here the first-committed `alice`, whose
     /// fact was deleted as a "superseded prior".
+    /// The buffered weight of the root frame `branch`'s head names, metered
+    /// as the publish flush meters it.
+    async fn root_buffer_weight<Env>(branch: &crate::Branch, env: &Env) -> Result<usize>
+    where
+        Env: crate::ResolveEnv,
+    {
+        use dialog_search_tree::{LoadBlock, PersistentNode};
+        let head = branch.revision().expect("the branch has a head");
+        let store = crate::NetworkedIndex::new(env, branch.archive().index(), None);
+        let buffer = LoadBlock::new(dialog_common::Blake3Hash::from(*head.tree.hash()))
+            .perform(&store)
+            .await?
+            .expect("the root is stored");
+        let node: PersistentNode<
+            dialog_artifacts::Key,
+            dialog_artifacts::State<dialog_artifacts::Datum>,
+        > = PersistentNode::try_from(buffer)?;
+        let manifest = node.manifest()?;
+        Ok(node.attribution(&manifest)?.weight)
+    }
+
+    fn bench_fact(entity: usize) -> Instruction {
+        Instruction::Assert(
+            Artifact {
+                the: "bench/field".parse().unwrap(),
+                of: format!("user:{entity}").parse().unwrap(),
+                is: Value::String("value".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )
+    }
+
+    /// A branch with a single origin publishes its root with whatever its
+    /// writer buffered, up to the node cap: no replica adopts it
+    /// mid-stream, so its commits stay at their cheapest. A branch two
+    /// origins wrote flushes the root's buffer before publishing it once
+    /// it weighs more than half the node target, so the root a replica
+    /// adopting the head reads never carries more than that.
+    #[dialog_common::test]
+    async fn it_flushes_a_published_root_only_on_a_shared_history() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let threshold = dialog_search_tree::Manifest::default().max_segment as usize / 2;
+
+        let alone = repo.branch("alone").open().perform(&operator).await?;
+        let mut heaviest = 0usize;
+        for at in 0..40 {
+            alone
+                .commit(stream::iter(vec![bench_fact(at)]))
+                .perform(&operator)
+                .await?;
+            heaviest = heaviest.max(root_buffer_weight(&alone, &operator).await?);
+        }
+        assert!(
+            heaviest > threshold,
+            "a single origin's root buffer passes the publish threshold ({heaviest} <= {threshold})"
+        );
+
+        let first = repo.branch("first").open().perform(&operator).await?;
+        first
+            .commit(stream::iter(vec![bench_fact(1_000)]))
+            .perform(&operator)
+            .await?;
+        let second = repo.branch("second").open().perform(&operator).await?;
+        second.pull().from(&first).perform(&operator).await?;
+        let mut crossed = false;
+        for at in 0..40 {
+            let before = root_buffer_weight(&second, &operator).await?;
+            second
+                .commit(stream::iter(vec![bench_fact(2_000 + at)]))
+                .perform(&operator)
+                .await?;
+            let after = root_buffer_weight(&second, &operator).await?;
+            assert!(
+                after <= threshold,
+                "commit {at}: a shared history publishes a root at or under the threshold ({after} > {threshold})"
+            );
+            if before + 1_000 > threshold {
+                crossed = true;
+            }
+        }
+        assert!(crossed, "the commits reached the threshold at least once");
+        Ok(())
+    }
+
     #[dialog_common::test]
     async fn it_keeps_both_facts_across_two_commits() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
