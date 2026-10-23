@@ -150,7 +150,7 @@ jobs:
           # body file among them) on a dry run.
           write() {
             if [ "$DRY_RUN" = "true" ]; then
-              echo "would run: gh $*"
+              echo "would run: gh$(printf ' %q' "$@")"
               for arg in "$@"; do
                 if [ -f "$arg" ]; then sed 's/^/    /' "$arg"; fi
               done
@@ -163,9 +163,13 @@ jobs:
           # first panic or error line after the arm's `soak arm:` banner,
           # 40 lines of it, or the log's last 40 lines when none matches.
           first_errors() {
-            gh api "repos/$GH_REPO/actions/jobs/$1/logs" \
+            gh api --allow-escape-sequences "repos/$GH_REPO/actions/jobs/$1/logs" \
               | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z ?//; s/\x1b\[[0-9;]*[A-Za-z]//g' \
               > log.txt || true
+            if [ ! -s log.txt ]; then
+              echo "(the job log could not be fetched; see the run)"
+              return
+            fi
             banner=$(grep -n -m1 '^soak arm: ' log.txt | cut -d: -f1 || true)
             start=$(awk -v from="${banner:-1}" \
               'NR >= from && /panicked|^error|error\[|error:|FAILED|^Error/ { print NR; exit }' log.txt)
