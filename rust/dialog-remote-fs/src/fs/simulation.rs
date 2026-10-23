@@ -29,6 +29,11 @@
 //!   last-mile link, while their latencies overlap). Unconfigured, nothing
 //!   sleeps and the transport behaves exactly as before.
 //!
+//! - **Lockstep** ([`lockstep`]): with no shape configured, every request
+//!   waits one tick of `tokio`'s clock before it is served. Under the
+//!   paused clock that orders requests by round, not by the order a thread
+//!   pool hands file operations back in (see [`lockstep`]).
+//!
 //! Shaping can be set programmatically ([`configure`]) or through the
 //! `DIALOG_FS_NETWORK` environment variable (read once, at first use), e.g.:
 //!
@@ -309,16 +314,28 @@ pub fn get_ledger() -> GetLedger {
 /// greatest depth of any request completed so far) and the chain is the
 /// greatest depth assigned. A request dropped before it completed keeps
 /// its depth but never raises the completed mark.
+///
+/// In [lockstep](lockstep) a request's depth is instead the round it was
+/// issued in: the number of distinct instants requests were issued at, up
+/// to its own. Every request issued at an earlier instant was served a
+/// tick later, so by this one, and it is the depth the rule above gives a
+/// request issued after them all. It does not depend on the order the
+/// completions of one instant were processed in, which the rule above
+/// does when branches of different depths complete together.
 struct Chain {
     /// The greatest depth of any completed request.
     completed: u64,
     /// The greatest depth assigned to any request.
     longest: u64,
+    /// In lockstep, the instant the latest round was issued at, as time
+    /// since the first.
+    round: Option<std::time::Duration>,
 }
 
 static CHAIN: std::sync::Mutex<Chain> = std::sync::Mutex::new(Chain {
     completed: 0,
     longest: 0,
+    round: None,
 });
 
 /// The longest chain of dependent requests since the last [`reset_tally`]
@@ -361,7 +378,7 @@ struct MeteredSource {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl BlobSource for MeteredSource {
     async fn next(&mut self) -> Result<Option<Vec<u8>>, BlobError> {
-        let chunk = self.inner.next().await?;
+        let chunk = serve(self.inner.next()).await?;
         if let Some(chunk) = &chunk {
             BYTES[self.bucket as usize].fetch_add(chunk.len() as u64, Ordering::Relaxed);
             shaping::transfer(chunk.len()).await;
@@ -383,14 +400,14 @@ struct MeteredSink {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl BlobSink for MeteredSink {
     async fn write_all(&mut self, bytes: &[u8]) -> Result<(), BlobError> {
-        self.inner.write_all(bytes).await?;
+        serve(self.inner.write_all(bytes)).await?;
         BYTES[self.bucket as usize].fetch_add(bytes.len() as u64, Ordering::Relaxed);
         shaping::transfer(bytes.len()).await;
         Ok(())
     }
 
     async fn finish(self: Box<Self>) -> Result<dialog_common::Blake3Hash, BlobError> {
-        self.inner.finish().await
+        serve(self.inner.finish()).await
     }
 }
 
@@ -435,6 +452,7 @@ pub fn reset_tally() {
     let mut chain = CHAIN.lock().expect("chain lock poisoned");
     chain.completed = 0;
     chain.longest = 0;
+    chain.round = None;
 }
 
 /// An in-flight simulated request: [`begin`] has taken a connection and
@@ -473,9 +491,17 @@ impl InFlight {
 /// the dependency.
 pub(crate) async fn begin(bucket: Traffic) -> InFlight {
     COUNTS[bucket as usize].fetch_add(1, Ordering::Relaxed);
+    let round = shaping::round();
     let depth = {
         let mut chain = CHAIN.lock().expect("chain lock poisoned");
-        let depth = chain.completed + 1;
+        let depth = match round {
+            Some(at) if chain.round == Some(at) => chain.longest,
+            Some(at) => {
+                chain.round = Some(at);
+                chain.longest + 1
+            }
+            None => chain.completed + 1,
+        };
         chain.longest = chain.longest.max(depth);
         depth
     };
@@ -489,12 +515,24 @@ pub(crate) async fn begin(bucket: Traffic) -> InFlight {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use shaping::{NetworkShape, configure};
+pub use shaping::{NetworkShape, configure, lockstep};
+
+/// Serve a request's file operation, between [`begin`] and
+/// [`InFlight::complete`]: in [lockstep](lockstep), within the round it was
+/// served in.
+pub(crate) async fn serve<F>(work: F) -> F::Output
+where
+    F: std::future::Future + dialog_common::ConditionalSend,
+    F::Output: dialog_common::ConditionalSend,
+{
+    shaping::serve(work).await
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 mod shaping {
     //! The native-only half: the link model and its delays.
 
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, OnceLock, RwLock};
     use std::time::Duration;
 
@@ -638,6 +676,81 @@ mod shaping {
     /// When the shared link next frees up, for bandwidth queuing.
     static LINK_FREE_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
+    /// Whether unshaped requests wait a [`TICK`] (see [`lockstep`]).
+    static LOCKSTEP: AtomicBool = AtomicBool::new(false);
+
+    /// The wait [`lockstep`] puts before an unshaped request: the timer's
+    /// resolution, so each round advances the clock by one millisecond.
+    const TICK: Duration = Duration::from_millis(1);
+
+    /// Turn lockstep on or off: while on and no shape is configured,
+    /// every request waits one tick of `tokio`'s clock before it is served.
+    ///
+    /// An unshaped request is otherwise served as soon as its file
+    /// operation returns, and those run on `tokio`'s blocking pool, so
+    /// which of two requests issued together completes first, and whether
+    /// work polled alongside them issues its own request before or after
+    /// that, is up to thread timing. The [chain](super::longest_chain)
+    /// reads that order, and so moves from run to run. Under the paused
+    /// clock, time advances only once every task is idle and no blocking
+    /// operation is running, so with lockstep every request issued in one
+    /// instant is served in the next, together: a request's depth is the
+    /// round it was issued in, the same in every run of the same schedule.
+    /// Modeled time then counts one millisecond per round.
+    pub fn lockstep(enabled: bool) {
+        LOCKSTEP.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Serve a request's file operation: in lockstep with no shape
+    /// configured, to completion on a thread of its own while the
+    /// runtime's thread waits for it; otherwise as any future is.
+    ///
+    /// The filesystem's operations run on a blocking pool and hand their
+    /// results back from its threads. On the client's runtime that is a
+    /// race against the paused clock: the runtime holds the clock while a
+    /// blocking task runs, but how its wakeups and that hold interleave
+    /// with the runtime's own parking is thread timing, so run to run a
+    /// response lands in the round it was served in or the next, and work
+    /// polled alongside it in one or the other. Run on a runtime of its
+    /// own, on another thread, while the client's runtime blocks, the
+    /// operation finishes inside the instant its request was served in,
+    /// and the client's runtime never sees a blocking task at all.
+    ///
+    /// The filesystem provider takes no lock and awaits nothing of the
+    /// client's runtime, so blocking that runtime on it cannot deadlock.
+    pub(super) async fn serve<F>(work: F) -> F::Output
+    where
+        F: std::future::Future + dialog_common::ConditionalSend,
+        F::Output: dialog_common::ConditionalSend,
+    {
+        if !LOCKSTEP.load(Ordering::Relaxed) || active().is_some() {
+            return work.await;
+        }
+        static FILES: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        let files = FILES.get_or_init(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("a runtime for lockstep file operations builds")
+        });
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| files.block_on(work))
+                .join()
+                .expect("a lockstep file operation does not panic")
+        })
+    }
+
+    /// In lockstep, the instant a request issued now is issued at, as time
+    /// since the first one asked: its round (see `Chain`).
+    pub(super) fn round() -> Option<Duration> {
+        static FIRST: OnceLock<Instant> = OnceLock::new();
+        if !LOCKSTEP.load(Ordering::Relaxed) || active().is_some() {
+            return None;
+        }
+        let now = Instant::now();
+        Some(now.duration_since(*FIRST.get_or_init(|| now)))
+    }
+
     /// Set (or, with `None`, clear) the active link model, overriding the
     /// `DIALOG_FS_NETWORK` environment default. Takes effect for every
     /// subsequent [`Fs`](crate::Fs) invocation in this process.
@@ -667,6 +780,9 @@ mod shaping {
     /// delays: authorization, then round-trip latency.
     pub(super) async fn request() -> Slot {
         let Some(shape) = active() else {
+            if LOCKSTEP.load(Ordering::Relaxed) {
+                tokio::time::sleep(TICK).await;
+            }
             return Slot(None);
         };
         let slot = match shape.connections {
@@ -720,6 +836,18 @@ mod shaping {
         Slot
     }
 
+    pub(super) fn round() -> Option<std::time::Duration> {
+        None
+    }
+
+    pub(super) async fn serve<F>(work: F) -> F::Output
+    where
+        F: std::future::Future + dialog_common::ConditionalSend,
+        F::Output: dialog_common::ConditionalSend,
+    {
+        work.await
+    }
+
     pub(super) async fn transfer(_bytes: usize) {}
 }
 
@@ -727,10 +855,19 @@ mod shaping {
 mod tests {
     use super::shaping::NetworkShape;
     use super::{
-        Traffic, begin, configure, longest_chain, meter_reader, meter_writer, reset_tally, tally,
+        Traffic, begin, configure, lockstep, longest_chain, meter_reader, meter_writer,
+        reset_tally, tally,
     };
     use dialog_effects::blob::{BlobError, BlobReader, BlobSink, BlobSource, BlobWriter};
     use std::time::Duration;
+
+    /// The shape, lockstep and tally are process-wide, and the test
+    /// runner runs tests on threads of one process: every test here holds
+    /// this while it changes or reads them.
+    async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
+        static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        SERIAL.lock().await
+    }
 
     /// One request, issued and awaited to completion with no payload.
     async fn request(bucket: Traffic) {
@@ -743,6 +880,7 @@ mod tests {
     /// chain is unchanged, since the four were issued together.
     #[tokio::test(start_paused = true)]
     async fn it_caps_connections() {
+        let _serial = serial().await;
         let shape = NetworkShape {
             latency: Duration::from_millis(10),
             auth_latency: Duration::ZERO,
@@ -777,6 +915,7 @@ mod tests {
     /// its request count.
     #[tokio::test]
     async fn it_counts_dependent_requests_as_a_chain() {
+        let _serial = serial().await;
         reset_tally();
         let start = longest_chain();
 
@@ -797,6 +936,65 @@ mod tests {
             longest_chain() - wave,
             2,
             "a request issued after the wave completed depends on it"
+        );
+    }
+
+    /// In lockstep, a request issued alongside another is one round with
+    /// it even when the other is served before it is issued: here the
+    /// sibling first waits on the blocking pool, as a file operation does,
+    /// for far longer than the first request takes. Without lockstep the
+    /// first request would complete in the meantime and the sibling would
+    /// count as depending on it.
+    #[tokio::test(start_paused = true)]
+    async fn it_counts_requests_issued_together_as_one_round_in_lockstep() {
+        let _serial = serial().await;
+        configure(None);
+        lockstep(true);
+        let before = longest_chain();
+        let first = request(Traffic::ArchiveGet);
+        let sibling = async {
+            tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_millis(50)))
+                .await
+                .expect("the blocking work completes");
+            request(Traffic::ArchiveGet).await;
+        };
+        let started = tokio::time::Instant::now();
+        futures_util::future::join(first, sibling).await;
+        lockstep(false);
+        assert_eq!(
+            longest_chain() - before,
+            1,
+            "issued together, served together"
+        );
+        assert_eq!(started.elapsed(), Duration::from_millis(1), "one round");
+    }
+
+    /// In lockstep a request's depth is the round it was issued in, so a
+    /// shallow branch and a deep one that are served in the same round
+    /// give the requests they issue next the same depth, whichever
+    /// completion is processed first.
+    #[tokio::test(start_paused = true)]
+    async fn it_counts_rounds_in_lockstep_whatever_order_a_round_completes_in() {
+        let _serial = serial().await;
+        configure(None);
+        lockstep(true);
+        let before = longest_chain();
+        let deep = async {
+            for _ in 0..3 {
+                request(Traffic::ArchiveGet).await;
+            }
+        };
+        let shallow = async {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            request(Traffic::ArchiveGet).await;
+            request(Traffic::ArchiveGet).await;
+        };
+        futures_util::future::join(deep, shallow).await;
+        lockstep(false);
+        assert_eq!(
+            longest_chain() - before,
+            4,
+            "requests went out at four instants: 0, 1, 2 and 3 ms"
         );
     }
 
@@ -832,6 +1030,7 @@ mod tests {
     /// the bytes.
     #[tokio::test]
     async fn it_meters_blob_bytes_as_they_stream() {
+        let _serial = serial().await;
         let before = tally();
         let reader: BlobReader = Box::new(Chunks(vec![vec![1; 100], vec![2; 50]]));
         let slot = begin(Traffic::BlobRead).await.complete(0).await;
