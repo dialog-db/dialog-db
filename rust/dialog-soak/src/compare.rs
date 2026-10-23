@@ -9,8 +9,8 @@
 //!
 //! The gate therefore holds the `none` report tight (threshold, slack 2: a
 //! new round trip on `pull`/`probe`/`claim`/`requery` is a protocol
-//! regression; the join's `claim` and `seeded` take a measured wider
-//! request slack until identities are deterministic, see
+//! regression; the join's `seeded` takes a measured wider request slack
+//! until identities are deterministic, see
 //! `UNSHAPED_REQUEST_SLACK`) and the shaped reports loose (2.5x threshold
 //! on requests, 2x on bytes and modeled time, over lazy-join and download
 //! totals). Costs
@@ -84,20 +84,22 @@ fn regressed(base: u64, new: u64, slack: u64, threshold_pct: f64) -> bool {
 }
 
 /// Per-phase request slack on the unshaped profile, where the default of 2
-/// is narrower than what randomized identities alone move (#648). Each
-/// run mints its profile, space and session keys at random; they reach the
-/// tree through the revision records, history and context regions, so
-/// they move leaf seams, and the seeded space sits at a tree-depth
-/// boundary. On the deeper side `claim` re-uploads the held nodes under
-/// the path its commit rewrites (#648's over-upload), and `seeded`'s
-/// reverse replay reads whichever leaves the records region shares with
-/// the seed. Each value is the measured spread over 100 runs at the
-/// default fixture (max minus median, plus 1): `claim` 5 to 10, median 5;
-/// `seeded` 59 to 69, median 63. Only requests take the override: the
-/// exact chain, duplicate and blob gates stay at 2 on every phase. This is
-/// a stopgap: deterministic identities in the harness (#652, item 4)
-/// remove the variance, and these entries go with it.
-const UNSHAPED_REQUEST_SLACK: &[(&str, &str, u64)] = &[("join", "claim", 6), ("join", "seeded", 7)];
+/// is narrower than what randomized identities alone move. Each run mints
+/// its profile, space and session keys at random; they reach the tree
+/// through the revision records, history and context regions, so they move
+/// leaf seams, and the seeded space sits at a tree-depth boundary.
+/// `seeded`'s reverse replay reads whichever leaves the records region
+/// shares with the seed: 59 to 69 over 100 runs at the default fixture,
+/// median 63, so the slack is the max minus the median, plus 1. Only
+/// requests take the override: the exact chain, duplicate and blob gates
+/// stay at 2 on every phase. This is a stopgap: deterministic identities in
+/// the harness (#652, item 4) remove the variance, and the entry goes with
+/// it.
+///
+/// `claim` took an override too (#661) while its deeper-tree runs
+/// re-uploaded held nodes (#648). The difference no longer reports those as
+/// novel (#662), and its spread is 5 to 6, inside the default.
+const UNSHAPED_REQUEST_SLACK: &[(&str, &str, u64)] = &[("join", "seeded", 7)];
 
 /// The request slack for `phase` of `scenario`: the unshaped override when
 /// one is listed, else `default`.
@@ -345,49 +347,67 @@ mod tests {
         );
     }
 
-    /// The join's `claim` takes its measured request spread on the
+    /// The join's `seeded` takes its measured request spread on the
     /// unshaped profile, and only its requests: the measured worst case
     /// passes, one past the override fails, a longer chain there still
-    /// regresses at the default slack, and a phase without an override
-    /// keeps the default.
+    /// regresses at the default slack, and `claim`, whose override went
+    /// with #648's over-upload, keeps the default like any phase.
     #[test]
     fn it_widens_only_listed_request_slack() {
         // Requests grow, the chain holds at the baseline's. A render phase
         // sizes the lazy-join total as a real report's, so the total
         // absorbs the growth the override allows.
-        let render = || phase("render", 600, 1000, 0);
+        let render = || phase("render", 6000, 1000, 0);
         let grown = |name: &str, base: u64, requests: u64| {
             let mut grown = phase(name, requests, 1000, 0);
             grown.round_trips = Some(base);
             report("none", vec![grown, render()])
         };
-        let base = report("none", vec![phase("claim", 5, 1000, 0), render()]);
+        // `seeded`'s chain is about 17 where its requests are about 63.
+        let base = {
+            let mut seeded = phase("seeded", 63, 1000, 0);
+            seeded.round_trips = Some(17);
+            report("none", vec![seeded, render()])
+        };
         assert!(
-            compare_reports("join-none.json", &base, &grown("claim", 5, 10), 10.0).is_empty(),
-            "claim's measured 10 passes"
+            compare_reports("join-none.json", &base, &grown("seeded", 17, 69), 10.0).is_empty(),
+            "seeded's measured 69 passes"
         );
 
-        let found = compare_reports("join-none.json", &base, &grown("claim", 5, 12), 10.0);
+        let found = compare_reports("join-none.json", &base, &grown("seeded", 17, 71), 10.0);
         assert!(
             found
                 .iter()
-                .any(|line| line.contains("claim: requests 5 -> 12")),
+                .any(|line| line.contains("seeded: requests 63 -> 71")),
             "{found:?}"
         );
 
-        let mut chained = grown("claim", 5, 5);
-        chained.phases[0].round_trips = Some(7);
+        let mut chained = grown("seeded", 17, 63);
+        chained.phases[0].round_trips = Some(19);
         assert!(
             compare_reports("join-none.json", &base, &chained, 10.0).is_empty(),
-            "the chain on claim keeps the default slack of 2"
+            "the chain on seeded keeps the default slack of 2"
         );
-        chained.phases[0].round_trips = Some(8);
+        chained.phases[0].round_trips = Some(20);
         let found = compare_reports("join-none.json", &base, &chained, 10.0);
         assert!(
             found
                 .iter()
-                .any(|line| line.contains("claim: round trips 5 -> 8")),
+                .any(|line| line.contains("seeded: round trips 17 -> 20")),
             "{found:?}"
+        );
+
+        let base = report("none", vec![phase("claim", 5, 1000, 0), render()]);
+        assert!(
+            compare_reports("join-none.json", &base, &grown("claim", 5, 7), 10.0).is_empty(),
+            "claim's measured 6 is inside the default slack"
+        );
+        let found = compare_reports("join-none.json", &base, &grown("claim", 5, 8), 10.0);
+        assert!(
+            found
+                .iter()
+                .any(|line| line.contains("claim: requests 5 -> 8")),
+            "claim has no override any more: {found:?}"
         );
 
         let base = report("none", vec![phase("probe", 2, 1000, 0), render()]);
