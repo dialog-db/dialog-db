@@ -25,7 +25,8 @@ use std::time::Instant;
 use anyhow::Result;
 use futures_util::stream;
 
-use dialog_artifacts::history::{Context, context_of};
+use dialog_artifacts::history::{Context, TreeHistory, context_of, novelty};
+use dialog_artifacts::tree::ArtifactTree;
 use dialog_artifacts::{ArchiveDelta, Artifact, Instruction, Value};
 
 use crate::RepositoryExt as _;
@@ -101,6 +102,10 @@ struct Sample {
     scenario: String,
     block_reads: u64,
     bytes_read: usize,
+    /// Spilled values fetched by reference (revision records among them),
+    /// and their bytes: blobs, which the block columns do not count.
+    blob_reads: usize,
+    blob_bytes: usize,
     effects: u64,
     millis: u128,
 }
@@ -108,8 +113,15 @@ struct Sample {
 impl Sample {
     fn row(&self) -> String {
         format!(
-            "| {:>6} | {:<34} | {:>11} | {:>10} | {:>7} | {:>8} |",
-            self.depth, self.scenario, self.block_reads, self.bytes_read, self.effects, self.millis
+            "| {:>6} | {:<40} | {:>11} | {:>10} | {:>10} | {:>10} | {:>7} | {:>8} |",
+            self.depth,
+            self.scenario,
+            self.block_reads,
+            self.bytes_read,
+            self.blob_reads,
+            self.blob_bytes,
+            self.effects,
+            self.millis
         )
     }
 }
@@ -157,6 +169,7 @@ macro_rules! measured {
         let scenario = String::from($name);
         $env.reset();
         let bytes_before = $tally.read_bytes();
+        let blobs_before = ($tally.blob_reads(), $tally.blob_read_bytes());
         let started = Instant::now();
         let outcome = $op;
         $samples.push(Sample {
@@ -164,6 +177,8 @@ macro_rules! measured {
             scenario,
             block_reads: $env.block_reads(),
             bytes_read: $tally.read_bytes() - bytes_before,
+            blob_reads: $tally.blob_reads() - blobs_before.0,
+            blob_bytes: $tally.blob_read_bytes() - blobs_before.1,
             effects: $env.snapshot().values().sum(),
             millis: started.elapsed().as_millis(),
         });
@@ -174,11 +189,8 @@ macro_rules! measured {
 async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let (env, tally) = counting(operator);
-    let repo = profile
-        .space(unique_name("bench"))
-        .open()
-        .perform(&env)
-        .await?;
+    let name = unique_name("bench");
+    let repo = profile.space(name.clone()).open().perform(&env).await?;
 
     // `main` accumulates `depth` commits: the ancestry every later
     // pull's context derivation walks.
@@ -258,6 +270,52 @@ async fn measure_depth(depth: usize, samples: &mut Vec<Sample>) -> Result<()> {
         depth,
         "context_of alone",
         context_of(&head.version(), &history).await?
+    );
+
+    // The walks over every record of the history, from a session of its
+    // own that remembers nothing: the context memo's first fill
+    // (`context_of`) and lineage verification against a replica holding
+    // none of it (`novelty`). Each reads the N records of the head's
+    // ancestry: `depth` seed commits, the fast-forward, the two sides of
+    // the merge and the merge itself.
+    let records = depth + 4;
+    let device = profile
+        .session(b"cold")
+        .space(profile.state())
+        .allow(dialog_capability::Subject::any())
+        .await?;
+    let (device, cold_tally) = counting(device);
+    let local = profile.space(name.clone()).open().perform(&device).await?;
+    let cold = local.branch("feature").open().perform(&device).await?;
+    let cold_history = cold.history(&device);
+    measured!(
+        samples,
+        device,
+        cold_tally,
+        depth,
+        format!("memo first fill, cold ({records} records)"),
+        context_of(&head.version(), &cold_history).await?
+    );
+    let device = profile
+        .session(b"cold-novelty")
+        .space(profile.state())
+        .allow(dialog_capability::Subject::any())
+        .await?;
+    let (device, cold_tally) = counting(device);
+    let local = profile.space(name.clone()).open().perform(&device).await?;
+    let cold = local.branch("feature").open().perform(&device).await?;
+    let cold_history = cold.history(&device);
+    let nothing = TreeHistory::new(
+        ArtifactTree::empty(),
+        crate::NetworkedIndex::new(&device, cold.archive().index(), None),
+    );
+    measured!(
+        samples,
+        device,
+        cold_tally,
+        depth,
+        format!("lineage verification, cold ({records} records)"),
+        novelty(&head.version(), &cold_history, &nothing).await?
     );
 
     Ok(())
@@ -808,7 +866,9 @@ async fn bump<Env: crate::ResolveEnv>(branch: &crate::Branch, at: usize, env: &E
 /// The block reads of every pull shape, at `origins` one-commit origins
 /// in the history, each pull run from a session of its own that
 /// remembers nothing, as a device that faults blocks in on demand would.
-async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64, usize)>> {
+async fn measure_pull_shapes(
+    origins: usize,
+) -> Result<Vec<(&'static str, u64, usize, usize, usize)>> {
     let (operator, profile) = test_session_with_peer().await;
     let name = unique_name("shapes");
     let repo = profile
@@ -881,8 +941,14 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64, u
             let branch = local.branch(label).open().perform(&device).await?;
             device.reset();
             let bytes_before = tally.read_bytes();
+            let blobs_before = (tally.blob_reads(), tally.blob_read_bytes());
             branch.pull().perform(&device).await?;
-            anyhow::Ok((device.block_reads(), tally.read_bytes() - bytes_before))
+            anyhow::Ok((
+                device.block_reads(),
+                tally.read_bytes() - bytes_before,
+                tally.blob_reads() - blobs_before.0,
+                tally.blob_read_bytes() - blobs_before.1,
+            ))
         }
     };
     // A small branch apart from main's history, which each measuring
@@ -897,14 +963,14 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64, u
     let mut rows = Vec::new();
 
     follower("no-op").await?;
-    let (reads, bytes) = measure("no-op").await?;
-    rows.push(("no-op", reads, bytes));
+    let (reads, bytes, blobs, blob_bytes) = measure("no-op").await?;
+    rows.push(("no-op", reads, bytes, blobs, blob_bytes));
 
     let held = follower("nothing-new").await?;
     bump(&held, next(), &operator).await?;
     main.pull().from(&held).perform(&operator).await?;
-    let (reads, bytes) = measure("nothing-new").await?;
-    rows.push(("nothing-new", reads, bytes));
+    let (reads, bytes, blobs, blob_bytes) = measure("nothing-new").await?;
+    rows.push(("nothing-new", reads, bytes, blobs, blob_bytes));
 
     // Main takes its head back, so the followers hold a head of main's
     // own origin and main's next commits extend that chain.
@@ -912,13 +978,13 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64, u
     follower("ff-same-1").await?;
     follower("ff-same-k").await?;
     bump(&main, next(), &operator).await?;
-    let (reads, bytes) = measure("ff-same-1").await?;
-    rows.push(("ff same origin, 1 ahead", reads, bytes));
+    let (reads, bytes, blobs, blob_bytes) = measure("ff-same-1").await?;
+    rows.push(("ff same origin, 1 ahead", reads, bytes, blobs, blob_bytes));
     for _ in 0..9 {
         bump(&main, next(), &operator).await?;
     }
-    let (reads, bytes) = measure("ff-same-k").await?;
-    rows.push(("ff same origin, 10 ahead", reads, bytes));
+    let (reads, bytes, blobs, blob_bytes) = measure("ff-same-k").await?;
+    rows.push(("ff same origin, 10 ahead", reads, bytes, blobs, blob_bytes));
 
     follower("ff-other-1").await?;
     follower("ff-other-k").await?;
@@ -926,14 +992,14 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64, u
     third.pull().from(&main).perform(&operator).await?;
     bump(&third, next(), &operator).await?;
     main.pull().from(&third).perform(&operator).await?;
-    let (reads, bytes) = measure("ff-other-1").await?;
-    rows.push(("ff other origin, 1 ahead", reads, bytes));
+    let (reads, bytes, blobs, blob_bytes) = measure("ff-other-1").await?;
+    rows.push(("ff other origin, 1 ahead", reads, bytes, blobs, blob_bytes));
     for _ in 0..9 {
         bump(&third, next(), &operator).await?;
     }
     main.pull().from(&third).perform(&operator).await?;
-    let (reads, bytes) = measure("ff-other-k").await?;
-    rows.push(("ff other origin, 10 ahead", reads, bytes));
+    let (reads, bytes, blobs, blob_bytes) = measure("ff-other-k").await?;
+    rows.push(("ff other origin, 10 ahead", reads, bytes, blobs, blob_bytes));
 
     let screened = follower("screened").await?;
     let replayed = follower("replay").await?;
@@ -946,15 +1012,15 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64, u
         bump(&grafted, next(), &operator).await?;
     }
     bump(&main, next(), &operator).await?;
-    let (reads, bytes) = measure("screened").await?;
-    rows.push(("screened merge", reads, bytes));
+    let (reads, bytes, blobs, blob_bytes) = measure("screened").await?;
+    rows.push(("screened merge", reads, bytes, blobs, blob_bytes));
     for _ in 0..(super::pull::SMALL_DIVERGENCE as usize + 2) {
         bump(&main, next(), &operator).await?;
     }
-    let (reads, bytes) = measure("replay").await?;
-    rows.push(("replay", reads, bytes));
-    let (reads, bytes) = measure("graft").await?;
-    rows.push(("graft", reads, bytes));
+    let (reads, bytes, blobs, blob_bytes) = measure("replay").await?;
+    rows.push(("replay", reads, bytes, blobs, blob_bytes));
+    let (reads, bytes, blobs, blob_bytes) = measure("graft").await?;
+    rows.push(("graft", reads, bytes, blobs, blob_bytes));
 
     // Rival merges: two replicas pull each other at once, each minting a
     // merge, and the next pull settles on the greater.
@@ -967,8 +1033,8 @@ async fn measure_pull_shapes(origins: usize) -> Result<Vec<(&'static str, u64, u
     into_a.commit(&operator).await?;
     into_b.commit(&operator).await?;
     a.set_upstream(&b).perform(&operator).await?;
-    let (reads, bytes) = measure("rival-a").await?;
-    rows.push(("rival settle", reads, bytes));
+    let (reads, bytes, blobs, blob_bytes) = measure("rival-a").await?;
+    rows.push(("rival settle", reads, bytes, blobs, blob_bytes));
     Ok(rows)
 }
 
@@ -985,8 +1051,10 @@ async fn pull_shapes_by_origins() -> Result<()> {
         .into_iter()
         .filter(|n| *n <= cap)
     {
-        for (shape, reads, bytes) in measure_pull_shapes(origins).await? {
-            println!("| {origins:>7} | {shape:<26} | {reads:>6} | {bytes:>10} |");
+        for (shape, reads, bytes, blobs, blob_bytes) in measure_pull_shapes(origins).await? {
+            println!(
+                "| {origins:>7} | {shape:<26} | {reads:>6} | {bytes:>10} | {blobs:>6} | {blob_bytes:>10} |"
+            );
         }
     }
     Ok(())
@@ -1031,10 +1099,10 @@ async fn read_amplification_by_depth() -> Result<()> {
     measure_shape(*depths.last().expect("at least one depth")).await?;
 
     println!(
-        "| depth  | scenario                           | block reads | bytes read | effects | wall ms  |"
+        "| depth  | scenario                                 | block reads | bytes read | blob reads | blob bytes | effects | wall ms  |"
     );
     println!(
-        "|--------|------------------------------------|-------------|------------|---------|----------|"
+        "|--------|------------------------------------------|-------------|------------|------------|------------|---------|----------|"
     );
     for sample in &samples {
         println!("{}", sample.row());
