@@ -58,6 +58,15 @@ impl<S> Loader<S> {
     fn lookup(&self, key: &String) -> Option<Did> {
         self.mounts.get(key)
     }
+
+    /// The provider mounted for the space `did`, if any.
+    #[cfg(any(test, feature = "helpers"))]
+    pub(super) fn space(&self, did: &Did) -> Option<S>
+    where
+        S: Clone,
+    {
+        self.spaces.get(did)
+    }
 }
 
 fn location_key(location: &Location) -> String {
