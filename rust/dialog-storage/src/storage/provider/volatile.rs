@@ -121,6 +121,35 @@ impl Volatile {
         Self::default()
     }
 
+    /// Keep only the blocks of `catalog` under `subject` whose base58
+    /// digest `keep` accepts, and answer with how many blocks and bytes
+    /// went. A test harness's aid: content addressing never collects, so
+    /// a harness that rewrites a root thousands of times would otherwise
+    /// measure its own garbage. Dropping a block something still reads
+    /// surfaces as a missing block on that read, never as wrong data.
+    #[cfg(any(test, feature = "helpers"))]
+    pub fn retain_blocks(
+        &self,
+        subject: &Did,
+        catalog: &str,
+        mut keep: impl FnMut(&str) -> bool,
+    ) -> (usize, usize) {
+        let mut sessions = self.sessions.write();
+        let Some(session) = sessions.get_mut(subject) else {
+            return (0, 0);
+        };
+        let (mut blocks, mut bytes) = (0, 0);
+        session.archive.retain(|(of, digest), block| {
+            if of != catalog || keep(digest) {
+                return true;
+            }
+            blocks += 1;
+            bytes += block.len();
+            false
+        });
+        (blocks, bytes)
+    }
+
     /// Returns a scoped key by prepending the mount prefix.
     fn scoped_key(&self, key: &str) -> String {
         if self.mount.is_empty() {
