@@ -8,6 +8,9 @@
 //! the signer is the fixed-seed test system. Two runs of one scenario
 //! move the same blocks.
 
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
 use anyhow::Result;
 use dialog_artifacts::{Artifact, Changes, Entity, Instruction, Pick, Relation, Value};
 use dialog_capability::Subject;
@@ -32,6 +35,9 @@ pub type Operator = Metered<Peer<VolatileSpace, Session>, Probe>;
 pub struct Probe {
     tally: Tally,
     log: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>,
+    /// The length of the first block read since the last mark: the root,
+    /// for a phase that starts by faulting a tree in.
+    first_read: std::sync::Arc<std::sync::Mutex<Option<usize>>>,
 }
 
 impl Probe {
@@ -44,6 +50,7 @@ impl Probe {
         Self {
             tally: Tally::default(),
             log,
+            first_read: Default::default(),
         }
     }
 
@@ -62,9 +69,40 @@ impl Probe {
 
 impl Env {
     /// Note `label` in the block log, so the blocks before and after a
-    /// phase can be told apart.
+    /// phase can be told apart, and start watching for the phase's first
+    /// read.
     pub fn mark(&self, label: &str) {
-        self.operator.meter().record("mark", label.as_bytes());
+        let probe = self.operator.meter();
+        probe.record("mark", label.as_bytes());
+        *probe.first_read.lock().expect("the first read") = None;
+    }
+
+    /// The length of the first block read since the last mark, if any
+    /// was: the root frame, for a phase that begins by faulting a tree in.
+    pub fn first_read(&self) -> Option<usize> {
+        *self
+            .operator
+            .meter()
+            .first_read
+            .lock()
+            .expect("the first read")
+    }
+
+    /// Add `value` under `name` to the phase's counters, for a measure the
+    /// tally does not take (gated like any counter: bytes within the byte
+    /// allowance when the name ends in `.bytes`).
+    pub fn count(&self, name: &str, value: u64) {
+        *self
+            .extra
+            .lock()
+            .expect("the extra counters")
+            .entry(name.to_string())
+            .or_insert(0) += value;
+    }
+
+    /// The counters scenarios added with [`count`](Self::count).
+    pub fn extra(&self) -> BTreeMap<String, u64> {
+        self.extra.lock().expect("the extra counters").clone()
     }
 }
 
@@ -77,6 +115,10 @@ impl Meter for Probe {
     fn read(&self, block: &[u8]) {
         self.tally.read(block);
         self.record("get", block);
+        self.first_read
+            .lock()
+            .expect("the first read")
+            .get_or_insert(block.len());
     }
 }
 
@@ -84,7 +126,7 @@ impl Meter for Probe {
 /// records its access there (a fresh account key, its encrypted secret
 /// and a delegation, random by design), and a scenario's commits must
 /// land in the same tree on every run for its block counts to repeat.
-const SCENARIO_BRANCH: &str = "scenario";
+pub const SCENARIO_BRANCH: &str = "scenario";
 
 /// A repository with its scenario branch open, and the operator it is
 /// driven through.
@@ -94,6 +136,11 @@ pub struct Env {
     /// The branch every scenario works on.
     pub branch: Branch,
     repository: Repository,
+    /// The peer the operator is a session of, for opening another
+    /// session on the same storage.
+    profile: Peer<VolatileSpace>,
+    /// Counters scenarios add beside the tally's.
+    extra: Arc<Mutex<BTreeMap<String, u64>>>,
 }
 
 impl Env {
@@ -118,7 +165,48 @@ impl Env {
             operator,
             branch,
             repository,
+            profile,
+            extra: Default::default(),
         })
+    }
+
+    /// Open another branch of the repository, `name`, through the
+    /// operator: a writer of its own in a history of many.
+    pub async fn branch(&self, name: &str) -> Result<Branch> {
+        Ok(self
+            .repository
+            .branch(name)
+            .open()
+            .perform(&self.operator)
+            .await?)
+    }
+
+    /// A replica that adopted `upstream` by root and remembers nothing: a
+    /// fresh session on the same storage, metered by the same probe, with
+    /// branch `name` opened in it and pulled from `upstream`, and the
+    /// repository's caches let go of once it has. A session reads through
+    /// the caches its peer holds, so without the release the nodes the
+    /// setup wrote would answer its reads; after it, its first read
+    /// faults the tree in from the root, as a device that holds nothing
+    /// of the tree does.
+    pub async fn adopter(&self, name: &str, upstream: &str) -> Result<(Operator, Branch)> {
+        let session = self
+            .profile
+            .session(name.as_bytes())
+            .space(self.profile.state())
+            .allow(Subject::any())
+            .await?;
+        let operator = Metered::new(session, self.operator.meter().clone());
+        let repository = self.profile.space("perf").open().perform(&operator).await?;
+        let upstream = repository
+            .branch(upstream)
+            .open()
+            .perform(&operator)
+            .await?;
+        let branch = repository.branch(name).open().perform(&operator).await?;
+        branch.pull().from(&upstream).perform(&operator).await?;
+        self.profile.caches().release(&repository.did());
+        Ok((operator, branch))
     }
 
     /// The branch's head, for telling whether two runs minted the same

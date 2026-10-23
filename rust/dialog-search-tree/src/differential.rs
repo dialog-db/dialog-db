@@ -1194,10 +1194,10 @@ fn pending_ops<Key, Value>(node: &SparseTreeNode<Key, Value>) -> &[NoveltyEntry<
 ///
 /// Ops accumulate oldest first: a link's own buffer is appended before the
 /// ops inherited from its ancestors (deeper means older, since a flush only
-/// moves ops toward the leaves), and within one buffer a key holds one op,
-/// the newest (an arrival replaces its predecessor at enqueue), except in a
-/// frame an older build persisted, which may hold several ops for a key
-/// with the newest last. The **last** op for a key is therefore the most
+/// moves ops toward the leaves), and within one buffer the newest op for a
+/// key is last (a persisted buffer holds one op per key, the merge before
+/// each persist having collapsed the rest; a frame an older build
+/// persisted may hold several, newest last). The **last** op for a key is therefore the most
 /// recent across every depth and wins. This matches how a point read resolves
 /// a key and how a flush replays ops, so all three agree.
 fn winning_ops<Value>(collected: &[NoveltyEntry<Value>]) -> Vec<(Vec<u8>, NoveltyOp<Value>)>
