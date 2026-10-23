@@ -39,6 +39,20 @@ fn materialize_winner(winner: ArtifactView) -> Result<Option<Winner>, DialogArti
     }
 }
 
+/// The `(attribute, entity)` lookup [`challenge`] verifies `candidate`
+/// against: every stored value of the candidate's attribute on its
+/// entity, among which the winner is elected.
+fn challenged(
+    source: &Term<Record>,
+    candidate: &Match,
+) -> Result<ArtifactSelector<Constrained>, EvaluationError> {
+    let claim = candidate.prove(source)?;
+    let attribute = ArtifactsRelation::try_from(Value::from(claim.the().clone()))?;
+    Ok(ArtifactSelector::new()
+        .the(attribute)
+        .of(claim.of().clone()))
+}
+
 /// Winner verification.
 ///
 /// When the entity is unknown, results from the base scan (VAE or AEV) are
@@ -60,8 +74,6 @@ where
         // term (e.g. an unconstrained entity) never stores a binding,
         // so term lookups cannot recover the fact.
         let claim = candidate.prove(selector.source())?;
-        let attribute = ArtifactsRelation::try_from(Value::from(claim.the().clone()))?;
-        let entity = claim.of().clone();
         let value = claim.is().clone();
         let cause_term = selector.cause();
         let cause = if cause_term.is_blank() {
@@ -70,9 +82,9 @@ where
             Some(Cause::try_from(candidate.lookup(&Term::from(cause_term))?.content()?)?)
         };
 
-        let challengers = Provider::<Select<'_>>::execute(env, ArtifactSelector::new()
-            .the(attribute)
-            .of(entity)).await?;
+        let challengers =
+            Provider::<Select<'_>>::execute(env, challenged(selector.source(), &candidate)?)
+                .await?;
 
         let mut winner: Option<ArtifactView> = None;
         for await each in challengers {
@@ -218,7 +230,7 @@ impl AttributeQueryOnly {
         // a cold replica replicates them concurrently instead of paying
         // one round trip per row (see `super::pipelined`). The hint
         // mirrors the sliding-window path's blanked scan exactly; the
-        // challenge path's secondary lookups are not hinted.
+        // challenge path pipelines its secondary lookups itself, below.
         let hinted = selector.clone();
         let selection = Box::pin(pipelined(selection, env, move |base| {
             if hinted.absent_blocked(base) {
@@ -346,6 +358,19 @@ impl AttributeQueryOnly {
                 } else {
                     // Secondary lookup path (Box::pin to avoid stack overflow).
                     let candidates = Box::pin(resolved.evaluate(env, base.clone().seed()));
+                    // Pipeline the challenges as the probes are: each
+                    // candidate's `(attribute, entity)` lookup is offered
+                    // as a hint while an earlier candidate's is awaited.
+                    // Without it a value-pinned scan admits one
+                    // candidate's run per round trip: the scan's leaves
+                    // arrive ahead, but every challenge lands in an
+                    // entity leaf nobody has asked for yet, and a later
+                    // premise probing the same entities only ever hints
+                    // into the leaf the challenge is already fetching.
+                    let source = selector.source().clone();
+                    let candidates = Box::pin(pipelined(candidates, env, move |candidate| {
+                        challenged(&source, candidate).ok()
+                    }));
                     for await candidate in candidates {
                         let candidate = candidate?;
                         let verified = Box::pin(challenge(env, selector.clone(), candidate));

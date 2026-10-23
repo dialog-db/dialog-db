@@ -114,6 +114,14 @@ impl<'a, Changes> Commit<'a, Changes> {
     /// - at a checkpoint two replicas are expected to agree on bit for bit;
     /// - before a long quiet period, so the stored form is the compact one.
     ///
+    /// A commit that mints nothing canonicalizes nothing: a batch that
+    /// changes no fact keeps the head as it is, buffers included, unless
+    /// [`allow_empty`](Self::allow_empty) asks for a revision. An
+    /// [`amend`](TransactionCommit::amend) is the exception, since it
+    /// replaces its tip's tree in place: a chain canonicalized at its
+    /// last link reaches the canonical tree whether or not that link
+    /// changed anything.
+    ///
     /// ```no_run
     /// # use dialog_repository::Branch;
     /// # use dialog_artifacts::Instruction;
@@ -722,10 +730,23 @@ where
         // only by edition (unless `allow_empty` asks for one). Only a
         // line with no revision at all still publishes, to establish
         // its genesis.
+        //
+        // An amend asked to canonicalize is the exception: it replaces
+        // its tip's tree in place, and that tree may still be buffered by
+        // the links before it, so the request is carried out on the tip
+        // even when this link wrote nothing. Dropping it with the no-op
+        // left a chain canonicalized at its last link buffered whenever
+        // that link changed nothing, so two replicas holding the same
+        // facts named different roots.
+        let canonicalizes_tip = self.canonicalize && self.amend.is_some();
         if !changed
             && !self.allow_empty
+            && !canonicalizes_tip
             && let Some(base) = base_revision
         {
+            // The batch wrote nothing, so its spine still persists as the
+            // base's root: hand it back for the next commit to append to.
+            batch.release();
             return Ok(Outcome::Unchanged(base));
         }
 
@@ -742,6 +763,11 @@ where
             };
             let batch = batch.record(&store, self.entries).await?;
             tree = batch.seal(&store, &mut delta, self.canonicalize).await?;
+            // A no-op link that canonicalized a tip already in canonical
+            // form moved nothing: the tip stands, and nothing is written.
+            if !changed && *tree.root().as_bytes() == *revision.tree.hash() {
+                return Ok(Outcome::Unchanged(revision));
+            }
             persist(
                 &source.archive().index(),
                 &source.node_cache(),

@@ -1368,6 +1368,93 @@ mod tests {
         Ok(())
     }
 
+    /// A chain canonicalized only at its last link reaches the canonical
+    /// tree even when that link changes nothing: the canonicalize rides the
+    /// amend, which replaces the tip's tree in place, so it is never dropped
+    /// with the no-op.
+    #[dialog_common::test]
+    async fn it_canonicalizes_an_amend_that_changes_nothing() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // The same two links on the same head: the chains mint one
+        // version, and differ only in when they canonicalized. The second
+        // link retracts a fact the chain never held, so it changes nothing.
+        let (seed, absent) = (note("seed")?, note("absent")?);
+        let every_link = branch
+            .transaction()
+            .assert(seed.clone())
+            .commit()
+            .canonicalize()
+            .perform(&operator)
+            .await?
+            .retract(absent.clone())
+            .commit()
+            .amend()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+        let last_link = branch
+            .transaction()
+            .assert(seed)
+            .commit()
+            .perform(&operator)
+            .await?
+            .retract(absent)
+            .commit()
+            .amend()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(every_link.version(), last_link.version());
+        assert_eq!(
+            every_link.revision().tree,
+            last_link.revision().tree,
+            "a chain canonicalized at its last link reaches the canonical tree \
+             whether or not that link changed anything"
+        );
+        Ok(())
+    }
+
+    /// An amend that changes nothing leaves the line's live spine held, keyed
+    /// by the tip's root, so the next link appends to it instead of opening
+    /// the tip's root frame from bytes again.
+    #[dialog_common::test]
+    async fn it_keeps_the_spine_across_an_amend_that_changes_nothing() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let staged = branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let root = dialog_common::Blake3Hash::from(*staged.revision().tree.hash());
+        assert_eq!(branch.spine().root(), Some(root.clone()));
+
+        let amended = staged
+            .retract(note("absent")?)
+            .commit()
+            .amend()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            dialog_common::Blake3Hash::from(*amended.revision().tree.hash()),
+            root,
+            "an amend that changes nothing keeps the tip"
+        );
+        assert_eq!(
+            branch.spine().root(),
+            Some(root),
+            "the spine is held for the next link"
+        );
+        Ok(())
+    }
+
     /// A batch with nothing staged sits on the published head, which is
     /// never amended: its amend commits a new revision instead.
     #[dialog_common::test]
