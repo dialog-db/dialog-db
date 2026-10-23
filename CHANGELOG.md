@@ -14,6 +14,91 @@ says how to cut a release.
 
 ## Unreleased
 
+### A transaction's writes to a cell under `last` commit as they would one by one
+
+[#647](https://github.com/dialog-db/dialog-db/pull/647)
+
+A transaction that wrote one cell under `all` and under a choosing pick
+(`last`, `max`, `min`, `top`) could commit something other than what the
+same writes committed one per transaction leave. The commit squashes a
+cell's writes value by value: a repeated assertion of a value is
+dropped, and an assertion a later retraction of its value cancels is
+dropped. Neither holds once a choosing write stands between them, since
+it succeeds whichever claim its pick elects at its place in the order,
+and that may be the value an earlier write of the transaction asserted.
+Two shapes lost a fact:
+
+- Assert a value under `all`, write the cell under `last`, assert the
+  value again: the commit dropped the repeat, and the `last` write
+  retired the value. The value was missing.
+- Assert a value under `all`, write the cell under `last`, retract the
+  value: the commit dropped the assertion against the retraction, so
+  the `last` write succeeded the claim the line held instead. That
+  claim was missing.
+
+A cell holding a choosing write is now committed as written, every
+write in order, and the tree settles it as it settles one commit per
+write. A cell with no choosing write is squashed as before.
+
+What this changes for you:
+
+- A transaction of either shape commits what the same writes committed
+  one by one leave: a read after the commit returns the value asserted
+  again, or the line's claim, beside the `last` value.
+- A transaction that asserts and then retracts a value in a cell it
+  also writes under a choosing pick now leaves a retraction record for
+  that value in the history, where it left none. The facts are the
+  same.
+- No API moves.
+
+Why: the squash reasons about one value at a time, which is exact only
+while writes of different values commute. A choosing write is the one
+write that does not commute with the others, so a cell holding one has
+to reach the tree in the order it was written.
+
+### A chain canonicalized at a link that changes nothing is canonical
+
+[#649](https://github.com/dialog-db/dialog-db/pull/649)
+
+A staged chain canonicalizes at its last link. When that link was an
+amend that changed nothing (a retract of a fact the chain never held, a
+re-assert of a value that stands), the commit returned the tip as it
+was, before the seal that flushes the buffers, so the canonicalize was
+dropped and the chain kept whatever buffered form its earlier links
+left. An amend asked to canonicalize now canonicalizes its tip whether
+or not the link changed anything, and reports the tip unchanged only
+when it was already canonical.
+
+What this changes for you:
+
+- Two replicas holding the same facts no longer disagree on the root
+  because one chain ended in a no-op amend. Before, each named a root
+  that depended on where its earlier links flushed, so a sync saw
+  divergence where there was none and a merge did work that found
+  nothing.
+- `TransactionCommit::amend` with `canonicalize` on a link that changes
+  nothing returns a batch whose tree is canonical; it returned the
+  buffered tip before. A commit that is not an amend keeps its rule: a
+  batch that changes nothing mints nothing and canonicalizes nothing,
+  unless `allow_empty` asks for a revision.
+- A commit that changes nothing hands its live spine back to the line,
+  so the next commit appends to it instead of opening the root frame
+  from bytes again. The bytes written are the same either way.
+  `BufferedBatch::release` and `SpineSlot::root` are new.
+
+Why: the canonicalize request was checked after the no-op return. An
+amend is the one commit that rewrites a revision's tree in place, so it
+has a tree to canonicalize even when the link itself wrote nothing.
+
+#### Compatibility and migration
+
+- Nothing a replica stores or syncs changes shape, and nothing is
+  rewritten. A head an older release published from such a chain names
+  a buffered tree; it stays valid, reads, pulls and merges as before,
+  and converges on the canonical root at its next canonicalizing commit
+  that mints a revision (one that changes a fact, or one with
+  `allow_empty`). Nothing an embedder has to run.
+
 ### A branch's live spine is held only while a handle of it is open
 
 [#637](https://github.com/dialog-db/dialog-db/pull/637)
@@ -486,6 +571,26 @@ Why: numbers are one band and a rule compiles against types; what the body can b
 
 #### Compatibility and migration
 
+- Nothing stored or synced changes shape, and nothing is rewritten on
+  upgrade. A fact can be missing at rest from any replica that wrote it
+  under 0.2.0 or 0.3.0 in one transaction of either shape above: the
+  write never reached the tree, and the history holds no record of it,
+  so it cannot be found or repaired from the data. Asserting the value
+  again in a new transaction restores it.
+- An embedder that logs what each transaction wrote, in order, can find
+  the transactions of 0.2.0 or 0.3.0 the squash bug may have affected.
+  Group each transaction's writes by cell, entity and attribute, a
+  concept statement's fields each their own cell. A cell is at risk when
+  it holds an `all` assertion of a value, then a write under `last`,
+  `max`, `min` or `top`, then another assertion of that value or its
+  retraction. A cell whose relation a rule derives, or that the session
+  overlay held, was settled correctly; counting it only over-reports. To
+  see what a flagged cell should hold, replay its writes one per commit
+  on a scratch branch and compare. One difference is not the bug: when a
+  choosing write lands on a cell holding two claims of its own
+  transaction, the two stand equal and the greater value is elected, so
+  one transaction and one commit per write can end differently, before this
+  release and after it.
 - Nothing a replica stores or syncs is rewritten. A stored rule that no longer compiles under the head check (one that wrote a possibly negative integer into a `natural:` field, or a float into an `integer:` field) is held inert by `Branch::commit`, as any rule that fails to hydrate is: it stops firing and does not fail commits. Re-evaluate such a rule with a guard or a rounding formula, or widen the field, to have it fire again.
 
 ### A number binds a typed rule variable as the variable's type reads it
