@@ -215,6 +215,7 @@ async fn it_joins_concurrent_gets_within_a_vault_only() -> Result<()> {
         latency: std::time::Duration::from_millis(5),
         auth_latency: std::time::Duration::ZERO,
         bandwidth: None,
+        connections: None,
     }));
 
     // Same vault, same digest, concurrently: one wire request, shared.

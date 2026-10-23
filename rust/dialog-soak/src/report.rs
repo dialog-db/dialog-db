@@ -99,6 +99,10 @@ pub struct Report {
     /// Modeled shared-link bandwidth in megabits per second (0 =
     /// unlimited).
     pub bandwidth_mbps: f64,
+    /// Connections the modeled client may hold open at once; `None` is
+    /// unlimited.
+    #[serde(default)]
+    pub connections: Option<usize>,
     /// Branching parameter `n` the seeded tree was built with (expected
     /// fanout is `2^n`).
     pub fanout_n: u8,
@@ -123,10 +127,18 @@ impl Report {
     pub fn table(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
+        let connections = self
+            .connections
+            .map_or_else(|| "unlimited".to_string(), |cap| cap.to_string());
         let _ = writeln!(
             out,
-            "scenario={} network={} (latency {}ms, auth {}ms, bandwidth {} Mbps)",
-            self.scenario, self.network, self.latency_ms, self.auth_ms, self.bandwidth_mbps
+            "scenario={} network={} (latency {}ms, auth {}ms, bandwidth {} Mbps, connections {})",
+            self.scenario,
+            self.network,
+            self.latency_ms,
+            self.auth_ms,
+            self.bandwidth_mbps,
+            connections
         );
         let _ = writeln!(
             out,

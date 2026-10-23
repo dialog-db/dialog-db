@@ -30,10 +30,11 @@ and repeatable.
   client).
 - The `Fs` transport meters every remote effect (`dialog_remote_fs::simulation`)
   and, when a `NetworkShape` is configured, delays each one by its modeled
-  cost: per-request **auth latency** (the per-object access-service redeem),
-  **round-trip latency** (overlapping across concurrent requests), and
-  serialization on a **shared bandwidth-limited link** (concurrent payloads
-  queue, as on a real last-mile link).
+  cost: a **connection**, when the shape caps how many a client holds open
+  at once; per-request **auth latency** (the per-object access-service
+  redeem); **round-trip latency** (overlapping across concurrent requests);
+  and serialization on a **shared bandwidth-limited link** (concurrent
+  payloads queue, as on a real last-mile link).
 - The whole run executes under tokio's **paused test clock**: modeled delays
   complete instantly while virtual time advances by exactly the modeled
   amount. A run over a 300 ms link finishes in real seconds and reports
@@ -78,7 +79,10 @@ Every scenario seeds the same space (`--entities`, `--commits`,
 `--members`) before its measured phases.
 
 Network presets: `none` (counts only), `localhost`, `broadband`, `mobile`
-(a 4G-ish link: 80 ms RTT, 120 ms redeem, 20 Mbit/s), `intercontinental`.
+(a 4G-ish link: 80 ms RTT, 120 ms redeem, 20 Mbit/s), `browser` (the
+same link with six connections per host, what a browser allows over
+HTTP/1.1 and what tonk's replicas get), `intercontinental`. A custom link
+takes `--connections` too; `DIALOG_FS_NETWORK` takes `connections=6`.
 
 The JSON report goes to stdout, a human-readable table to stderr.
 
@@ -152,6 +156,10 @@ what each stands for. Things to watch:
 - Bandwidth is modeled as one shared FIFO link; parallel streams do not
   get extra capacity. Real links are somewhere between this and
   per-stream capacity.
+- Without a connection cap the client opens as many requests as it
+  issues, which a fetch window of 64 does and a browser cannot: the
+  `browser` preset is the one to read for a browser replica, and the gap
+  between it and `mobile` is what the window cannot buy there.
 - Blob bytes are metered as they stream through the returned reader or
   writer, and charged to the shared link like a block's payload. The
   join scenario carries no blobs (its values fit inline), so its blob
