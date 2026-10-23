@@ -69,10 +69,24 @@ jobs:
         with:
           name: tonk-ops
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+      # CARGO_HOME must live on the /nix volume, not under $HOME.
+      # nothing-but-nix keeps purging the runner in the background
+      # after its step returns, and at its default hatchet protocol
+      # (cleave) the last thing it deletes is $HOME/.cargo, cargo's
+      # default home. The matrix jobs never notice: they build through
+      # `nix build`, which vendors crates in the store. This job runs
+      # cargo directly and reaches the registry about a minute in, so
+      # the two raced: cargo extracted crates into ~/.cargo/registry
+      # while rmz was deleting them (#638).
       - name: 'Run the perf gate'
         shell: bash
         run: |
-          nix develop --accept-flake-config --command perf:gate
+          sudo mkdir -p /nix/cargo
+          sudo chown "$(id -u):$(id -g)" /nix/cargo
+          nix develop \
+            --accept-flake-config \
+            --set-env-var CARGO_HOME /nix/cargo \
+            --command perf:gate
       - name: 'Upload the sweep'
         if: always()
         uses: actions/upload-artifact@v4
