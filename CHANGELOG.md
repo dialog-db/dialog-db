@@ -49,6 +49,49 @@ correct and reads fewer blocks. It also made the value-pinned premise the
 driver, and that premise's checks were the one per-row read in the
 nested-loop join that nothing read ahead.
 
+### A chain canonicalized at a link that changes nothing is canonical
+
+[#649](https://github.com/dialog-db/dialog-db/pull/649)
+
+A staged chain canonicalizes at its last link. When that link was an
+amend that changed nothing (a retract of a fact the chain never held, a
+re-assert of a value that stands), the commit returned the tip as it
+was, before the seal that flushes the buffers, so the canonicalize was
+dropped and the chain kept whatever buffered form its earlier links
+left. An amend asked to canonicalize now canonicalizes its tip whether
+or not the link changed anything, and reports the tip unchanged only
+when it was already canonical.
+
+What this changes for you:
+
+- Two replicas holding the same facts no longer disagree on the root
+  because one chain ended in a no-op amend. Before, each named a root
+  that depended on where its earlier links flushed, so a sync saw
+  divergence where there was none and a merge did work that found
+  nothing.
+- `TransactionCommit::amend` with `canonicalize` on a link that changes
+  nothing returns a batch whose tree is canonical; it returned the
+  buffered tip before. A commit that is not an amend keeps its rule: a
+  batch that changes nothing mints nothing and canonicalizes nothing,
+  unless `allow_empty` asks for a revision.
+- A commit that changes nothing hands its live spine back to the line,
+  so the next commit appends to it instead of opening the root frame
+  from bytes again. The bytes written are the same either way.
+  `BufferedBatch::release` and `SpineSlot::root` are new.
+
+Why: the canonicalize request was checked after the no-op return. An
+amend is the one commit that rewrites a revision's tree in place, so it
+has a tree to canonicalize even when the link itself wrote nothing.
+
+#### Compatibility and migration
+
+- Nothing a replica stores or syncs changes shape, and nothing is
+  rewritten. A head an older release published from such a chain names
+  a buffered tree; it stays valid, reads, pulls and merges as before,
+  and converges on the canonical root at its next canonicalizing commit
+  that mints a revision (one that changes a fact, or one with
+  `allow_empty`). Nothing an embedder has to run.
+
 ### A branch's live spine is held only while a handle of it is open
 
 [#637](https://github.com/dialog-db/dialog-db/pull/637)
