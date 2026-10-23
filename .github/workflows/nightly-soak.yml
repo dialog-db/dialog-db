@@ -82,6 +82,9 @@ jobs:
         with:
           name: tonk-ops
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          # Only main writes the cache: an upload must not fail a PR's
+          # checks, and an unmerged branch must not write what main reads.
+          skipPush: ${{ github.ref != 'refs/heads/main' }}
       # Knobs exported here are inherited by the menu command inside
       # `nix develop`; without an override the command's own defaults apply.
       #

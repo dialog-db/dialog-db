@@ -406,9 +406,18 @@ impl Staged {
 /// line. A write repeating the cell's standing change for its value is
 /// dropped. A retraction followed by an assertion of the same value
 /// keeps both: the commit retracts the line's claim and asserts afresh.
-/// An assertion under a choosing pick is kept as written, for the
-/// transactor or the tree to settle.
+///
+/// A cell holding an assertion under a choosing pick is kept as
+/// written, every write in order, for the transactor or the tree to
+/// settle. The rules above reason about one value at a time, which is
+/// exact only while the writes of different values commute; a
+/// choosing write succeeds whichever claim its pick elects at its
+/// place in the order, and that may be a value an earlier write of the
+/// cell asserted, so no write of the cell is dropped by value alone.
 pub(crate) fn squash(cell: Vec<Change>, held: &dyn Fn(&Value) -> bool) -> Vec<Change> {
+    if cell.iter().any(Change::elects) {
+        return cell;
+    }
     let mut out: Vec<Change> = Vec::with_capacity(cell.len());
     for change in cell {
         let last = out
@@ -689,12 +698,12 @@ mod tests {
         assert_eq!(
             squash(
                 vec![
-                    Change::Assert(a(), dialog_artifacts::Pick::Last),
-                    Change::Assert(a(), dialog_artifacts::Pick::Last)
+                    Change::Assert(a(), dialog_artifacts::Pick::All),
+                    Change::Assert(a(), dialog_artifacts::Pick::All)
                 ],
                 &unknown
             ),
-            vec![Change::Assert(a(), dialog_artifacts::Pick::Last)]
+            vec![Change::Assert(a(), dialog_artifacts::Pick::All)]
         );
         // Retract then assert keeps both: the commit retracts the
         // line's claim and asserts afresh.
@@ -765,6 +774,42 @@ mod tests {
                 &unknown
             ),
             vec![Change::Assert(a(), Pick::Last), Change::Retract(a())]
+        );
+        // A cell with a choosing write is kept as written: the choosing
+        // write may succeed what an earlier write asserted, so a repeat
+        // after it asserts afresh and a retraction after it does not
+        // cancel what it succeeded.
+        for cell in [
+            vec![
+                Change::Assert(a(), Pick::All),
+                Change::Assert(b(), Pick::Last),
+                Change::Assert(a(), Pick::All),
+            ],
+            vec![
+                Change::Assert(a(), Pick::Last),
+                Change::Assert(b(), Pick::All),
+                Change::Assert(a(), Pick::Last),
+            ],
+            vec![
+                Change::Assert(a(), Pick::All),
+                Change::Assert(b(), Pick::Last),
+                Change::Retract(a()),
+            ],
+        ] {
+            assert_eq!(squash(cell.clone(), &unknown), cell);
+        }
+        // A write repeated after a retraction of another value is one
+        // write: nothing between changes what the first stands for.
+        assert_eq!(
+            squash(
+                vec![
+                    Change::Assert(a(), Pick::All),
+                    Change::Retract(b()),
+                    Change::Assert(a(), Pick::All)
+                ],
+                &unknown
+            ),
+            vec![Change::Assert(a(), Pick::All), Change::Retract(b())]
         );
     }
 
