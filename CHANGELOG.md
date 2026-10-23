@@ -87,7 +87,11 @@ refuses a region that does not bring it to the count the head signed. A
 commit on a head of its own origin therefore writes nothing to the
 region and reads nothing of it. A commit on another origin's head writes
 two entries: that origin's exact watermark, which the head carries, and
-its own, from one point read of the region; it never reads the region
+its own, one past what the head holds of its origin. The line knows that
+count without the region when it fast-forwarded to the head from its own
+last commit, which is how two writers taking turns meet each other's
+heads, and records it in a replica-local cell when it does; otherwise one
+point read of the region answers. A commit never reads the region
 whole. A merge writes its own entry and every entry its two sides hold
 differently. A pull answers whether our head has seen the upstream's
 from our head's record when the record names it as a parent or skip
@@ -942,6 +946,12 @@ thread multiplies whatever it holds by the size of the thread pool.
   nothing is rewritten, and a reader derives its count from its region.
   A commit on such a head of another origin reads the head's region for
   the count, as those builds did, and the head it mints carries one.
+- A branch gains a replica-local cell, `own`, recording how many of the
+  line's own revisions one head it fast-forwarded to holds. It is never
+  synced, and nothing synced changes for it. An older build never reads
+  it, and its commits on another origin's head read the region as
+  before. A line whose cell names a head other than its parent, or that
+  has none, reads the region as before.
 - `UcanAddress` encodes an optional `socket`, left out when absent, so an address without one keeps its bytes. An older replica reads an address that names a socket and drops the socket, reaching the peer over requests.
 - Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
 - The socket carries text `ping` and `pong` messages beside its frames. A service's socket must answer `ping` with `pong`, or a client closes the connection every `Liveness::deadline`; no released service has a socket, so none predates this.
