@@ -20,17 +20,24 @@
 //! way (`DIALOG_RA_MAX_ORIGINS` caps its sweep).
 
 use std::env;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Result;
 use futures_util::stream;
 
 use dialog_artifacts::history::{Context, context_of};
-use dialog_artifacts::{ArchiveDelta, Artifact, Instruction, Value};
+use dialog_artifacts::{
+    ATTRIBUTE_KEY_TAG, ArchiveDelta, Artifact, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum,
+    ENTITY_KEY_TAG, HISTORY_KEY_TAG, Instruction, Key, State, VALUE_KEY_TAG, Value,
+};
+use dialog_capability::Provider;
+use dialog_common::{Blake3Hash, ConditionalSync};
+use dialog_search_tree::{FrameAttribution, LoadBlock, Manifest, PersistentNode};
 
 use crate::RepositoryExt as _;
 use crate::helpers::{Counting, prune_unreachable as prune};
-use dialog_peer::helpers::{test_session_with_peer, unique_name};
+use dialog_peer::helpers::{Meter, Metered, Tally, test_session_with_peer, unique_name};
 
 /// How many setup commits a fixture runs between prunes of its store.
 ///
@@ -1083,4 +1090,398 @@ async fn current_costs() -> Result<()> {
     }
     print_resident_peak();
     Ok(())
+}
+
+/// The node type the artifact tree persists, read back for attribution.
+type ArtifactNode = PersistentNode<Key, State<Datum>>;
+
+/// Records the length and hash of every archive block the operator moves,
+/// beneath every cache, so a block a commit wrote or a query read can be
+/// fetched again by hash and attributed.
+#[derive(Clone, Default)]
+struct Recorder {
+    tally: Tally,
+    puts: Arc<Mutex<Vec<(usize, Blake3Hash)>>>,
+    gets: Arc<Mutex<Vec<(usize, Blake3Hash)>>>,
+}
+
+impl Recorder {
+    fn puts(&self) -> Vec<(usize, Blake3Hash)> {
+        self.puts.lock().expect("the put log").clone()
+    }
+
+    fn gets(&self) -> Vec<(usize, Blake3Hash)> {
+        self.gets.lock().expect("the get log").clone()
+    }
+
+    fn clear(&self) {
+        self.puts.lock().expect("the put log").clear();
+        self.gets.lock().expect("the get log").clear();
+    }
+}
+
+impl Meter for Recorder {
+    fn wrote(&self, block: &[u8]) {
+        self.tally.wrote(block);
+        self.puts
+            .lock()
+            .expect("the put log")
+            .push((block.len(), Blake3Hash::hash(block)));
+    }
+
+    fn read(&self, block: &[u8]) {
+        self.tally.read(block);
+        self.gets
+            .lock()
+            .expect("the get log")
+            .push((block.len(), Blake3Hash::hash(block)));
+    }
+}
+
+/// The node stored under `hash`, read through `store`, with its bytes
+/// attributed; `None` when the block is not a tree node.
+async fn attribute_block<Env>(store: &Env, hash: &Blake3Hash) -> Result<Option<FrameAttribution>>
+where
+    Env: Provider<LoadBlock> + ConditionalSync,
+{
+    let Some(buffer) = LoadBlock::new(hash.clone()).perform(store).await? else {
+        anyhow::bail!("block {hash} is not in the archive");
+    };
+    let Ok(node) = ArtifactNode::try_from(buffer) else {
+        return Ok(None);
+    };
+    let manifest = node.manifest()?;
+    Ok(Some(node.attribution(&manifest)?))
+}
+
+/// Prints one frame's attribution as a table: bytes per component beside
+/// the weight the pacing metered for the same entries.
+fn print_attribution(label: &str, frame: &FrameAttribution, manifest: &Manifest) {
+    let kind = if frame.children > 0 {
+        "index"
+    } else {
+        "segment"
+    };
+    println!();
+    println!(
+        "{label}: {kind}, {} bytes, {} children, {} entries",
+        frame.total, frame.children, frame.entries
+    );
+    println!("| component | bytes | weight metered |");
+    println!("|-----------|------:|---------------:|");
+    println!("| prelude (layout, kind, manifest) | {} | |", frame.prelude);
+    if frame.children > 0 {
+        println!(
+            "| link hashes ({} x 32) | {} | {} |",
+            frame.children,
+            frame.hashes,
+            frame.children * (32 + manifest.link_overhead())
+        );
+        println!(
+            "| separators (prefix, suffixes, ends) | {} | counted with links |",
+            frame.separators
+        );
+        println!("| scales | {} | |", frame.scales);
+    }
+    println!(
+        "| entry keys (columnar) | {} | {} (raw bytes) |",
+        frame.keys, frame.raw_keys
+    );
+    println!(
+        "| entry values (rkyv) | {} | {} (payload weight) |",
+        frame.values, frame.value_weight
+    );
+    if frame.children > 0 {
+        println!("| op polarity | {} | |", frame.polarity);
+    }
+    println!(
+        "| per-entry overhead | | {} ({} x {}) |",
+        frame.entries * manifest.entry_overhead(),
+        frame.entries,
+        manifest.entry_overhead()
+    );
+    println!(
+        "| structure (rkyv headers, pointers, padding) | {} | |",
+        frame.structure
+    );
+    println!(
+        "| entries in all | {} | {} |",
+        frame.entry_bytes(),
+        frame.weight
+    );
+    println!("| total | {} | |", frame.total);
+    if frame.entries > 0 {
+        println!(
+            "per entry: {:.1} bytes serialized against {:.1} weight ({:.2} bytes per weight unit)",
+            frame.entry_bytes() as f64 / frame.entries as f64,
+            frame.weight as f64 / frame.entries as f64,
+            frame.entry_bytes() as f64 / frame.weight as f64
+        );
+        println!();
+        println!(
+            "| key layout (region) | entries | raw key bytes | value bytes (rkyv) | value weight |"
+        );
+        println!(
+            "|---------------------|--------:|--------------:|-------------------:|-------------:|"
+        );
+        for (layout, share) in &frame.layouts {
+            let region = match *layout {
+                ENTITY_KEY_TAG => "entity index",
+                ATTRIBUTE_KEY_TAG => "attribute index",
+                VALUE_KEY_TAG => "value index",
+                HISTORY_KEY_TAG => "history",
+                COVERAGE_KEY_TAG => "coverage",
+                BLOB_KEY_TAG => "blob index",
+                _ => "other",
+            };
+            println!(
+                "| {layout} ({region}) | {} | {} | {} | {} |",
+                share.entries, share.raw_keys, share.values, share.value_weight
+            );
+        }
+    }
+}
+
+/// The root frame of a replica's first query, attributed: the history
+/// carries 100 facts and then `origins` one-commit origins, each a writer
+/// adopting the previous one's head; a fresh session adopts the head by
+/// root and runs one point query. Prints the attribution of every block
+/// the query read, the root first.
+async fn attribute_first_query(origins: usize) -> Result<()> {
+    use dialog_query::attribute::Relation;
+    use dialog_query::query::Output as _;
+    use dialog_query::{AttributeQuery, Claim, Term, the};
+
+    let (operator, profile) = test_session_with_peer().await;
+    let name = unique_name("first-query");
+    let repo = profile
+        .space(name.clone())
+        .open()
+        .perform(&operator)
+        .await?;
+    let main = repo.branch("main").open().perform(&operator).await?;
+    main.commit(stream::iter((0..100).map(|i| assert_fact(i, "seed"))))
+        .perform(&operator)
+        .await?;
+    let mut previous = main.clone();
+    for i in 0..origins {
+        let writer = repo
+            .branch(format!("writer-{i}"))
+            .open()
+            .perform(&operator)
+            .await?;
+        writer.pull().from(&previous).perform(&operator).await?;
+        writer
+            .commit(stream::iter(vec![assert_fact(100 + i, "origin")]))
+            .perform(&operator)
+            .await?;
+        previous = writer;
+    }
+    main.pull().from(&previous).perform(&operator).await?;
+
+    let reader = profile
+        .session(b"reader")
+        .space(profile.state())
+        .allow(dialog_capability::Subject::any())
+        .await?;
+    let recorder = Recorder::default();
+    let reader = Metered::new(reader, recorder.clone());
+    let local = profile.space(name).open().perform(&reader).await?;
+    let upstream = local.branch("main").open().perform(&reader).await?;
+    let adopter = local.branch("adopter").open().perform(&reader).await?;
+    adopter.pull().from(&upstream).perform(&reader).await?;
+    let head = adopter.revision().expect("the adopter took main's head");
+
+    recorder.clear();
+    let rows: Vec<Claim> = adopter
+        .query()
+        .select(AttributeQuery::from(
+            Term::<Relation>::from(the!("bench/field"))
+                .of(Term::<dialog_artifacts::Entity>::from(
+                    "user:7".parse::<dialog_artifacts::Entity>()?,
+                ))
+                .is(Term::<String>::var("is")),
+        ))
+        .perform(&reader)
+        .try_vec()
+        .await?;
+    assert_eq!(rows.len(), 1, "the point query finds its fact");
+    let reads = recorder.gets();
+    println!(
+        "first query at {origins} origins: {} blocks, {} bytes read",
+        reads.len(),
+        reads.iter().map(|(len, _)| len).sum::<usize>()
+    );
+    assert_eq!(
+        reads.first().map(|(_, hash)| hash),
+        Some(&Blake3Hash::from(*head.tree.hash())),
+        "the first block the query reads is the root"
+    );
+
+    let store = crate::NetworkedIndex::new(&reader, adopter.archive().index(), None);
+    for (at, (len, hash)) in reads.iter().enumerate() {
+        match attribute_block(&store, hash).await? {
+            Some(frame) => {
+                let node = LoadBlock::new(hash.clone())
+                    .perform(&store)
+                    .await?
+                    .expect("just read");
+                let manifest = ArtifactNode::try_from(node)?.manifest()?;
+                let label = if at == 0 {
+                    format!("root ({len} bytes)")
+                } else {
+                    format!("block {at} read ({len} bytes)")
+                };
+                print_attribution(&label, &frame, &manifest);
+            }
+            None => println!("block {at} read: {len} bytes, not a tree node"),
+        }
+    }
+    Ok(())
+}
+
+/// Attributes the root a replica's first query reads, at
+/// `DIALOG_RA_ORIGINS` origins (1 000 by default). `#[ignore]`d: a
+/// measurement.
+#[dialog_common::test]
+#[ignore]
+async fn first_query_root_attribution() -> Result<()> {
+    let origins: usize = env::var("DIALOG_RA_ORIGINS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1_000);
+    attribute_first_query(origins).await
+}
+
+/// The crowd shape: `origins` one-commit origins, each a writer adopting
+/// the previous one's head, then a branch that adopts the last head and
+/// makes 100 one-fact commits. Prints, per commit, the root's size, its
+/// buffered ops and their weight, and the blocks the commit wrote; then
+/// attributes the root at the start, the largest root, and the largest
+/// block any commit wrote.
+async fn attribute_crowd(origins: usize) -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let recorder = Recorder::default();
+    let env = Metered::new(operator, recorder.clone());
+    let name = unique_name("crowd");
+    let repo = profile.space(name.clone()).open().perform(&env).await?;
+
+    let mut previous: Option<crate::Branch> = None;
+    for i in 0..origins {
+        let writer = repo
+            .branch(format!("writer-{i}"))
+            .open()
+            .perform(&env)
+            .await?;
+        if let Some(previous) = &previous {
+            writer.pull().from(previous).perform(&env).await?;
+        }
+        writer
+            .commit(stream::iter(vec![assert_fact(i, "origin")]))
+            .perform(&env)
+            .await?;
+        previous = Some(writer);
+    }
+    let last = previous.expect("at least one origin");
+
+    let main = repo.branch("main").open().perform(&env).await?;
+    main.pull().from(&last).perform(&env).await?;
+    main.commit(stream::iter(vec![assert_fact(origins, "main")]))
+        .perform(&env)
+        .await?;
+
+    let store = crate::NetworkedIndex::new(&env, main.archive().index(), None);
+    let root_of =
+        |branch: &crate::Branch| Blake3Hash::from(*branch.revision().expect("a head").tree.hash());
+    let manifest = {
+        let hash = root_of(&main);
+        let node = LoadBlock::new(hash)
+            .perform(&store)
+            .await?
+            .expect("the root is stored");
+        ArtifactNode::try_from(node)?.manifest()?
+    };
+
+    let start = attribute_block(&store, &root_of(&main))
+        .await?
+        .expect("the root is a tree node");
+    let mut largest_root = (0usize, start.clone());
+    let mut largest_block: Option<(usize, usize, Blake3Hash)> = None;
+
+    const COMMITS: usize = 100;
+    println!("crowd at {origins} origins: {COMMITS} one-fact commits atop the last writer's head");
+    println!(
+        "| commit | root bytes | root ops | root op weight | blocks written | bytes written | largest block |"
+    );
+    println!(
+        "|-------:|-----------:|---------:|---------------:|---------------:|--------------:|--------------:|"
+    );
+    for i in 0..COMMITS {
+        recorder.clear();
+        main.commit(stream::iter(vec![assert_fact(origins + 1 + i, "measure")]))
+            .perform(&env)
+            .await?;
+        let puts = recorder.puts();
+        let root = attribute_block(&store, &root_of(&main))
+            .await?
+            .expect("the root is a tree node");
+        let biggest = puts.iter().max_by_key(|(len, _)| *len);
+        println!(
+            "| {:>6} | {:>10} | {:>8} | {:>14} | {:>14} | {:>13} | {:>13} |",
+            i + 1,
+            root.total,
+            root.entries,
+            root.weight,
+            puts.len(),
+            puts.iter().map(|(len, _)| len).sum::<usize>(),
+            biggest.map(|(len, _)| *len).unwrap_or(0)
+        );
+        if root.total > largest_root.1.total {
+            largest_root = (i + 1, root);
+        }
+        if let Some((len, hash)) = biggest
+            && largest_block
+                .as_ref()
+                .is_none_or(|(_, largest, _)| len > largest)
+        {
+            largest_block = Some((i + 1, *len, hash.clone()));
+        }
+    }
+
+    print_attribution(
+        "root at the start (after the first commit atop the crowd)",
+        &start,
+        &manifest,
+    );
+    print_attribution(
+        &format!("largest root (after commit {})", largest_root.0),
+        &largest_root.1,
+        &manifest,
+    );
+    if let Some((commit, len, hash)) = largest_block {
+        match attribute_block(&store, &hash).await? {
+            Some(frame) => print_attribution(
+                &format!("largest block written (commit {commit}, {len} bytes)"),
+                &frame,
+                &manifest,
+            ),
+            None => {
+                println!("largest block written (commit {commit}): {len} bytes, not a tree node")
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Attributes the crowd shape's roots and flush blocks, at
+/// `DIALOG_RA_ORIGINS` origins (1 000 by default). `#[ignore]`d: a
+/// measurement.
+#[dialog_common::test]
+#[ignore]
+async fn crowd_root_attribution() -> Result<()> {
+    let origins: usize = env::var("DIALOG_RA_ORIGINS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1_000);
+    attribute_crowd(origins).await
 }

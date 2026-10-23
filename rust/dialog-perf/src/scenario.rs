@@ -15,6 +15,7 @@ use crate::env::{Env, assert_all, concept, entity, fact, text};
 mod commit;
 mod number;
 mod read;
+mod replica;
 mod rule;
 mod subscribe;
 mod transaction;
@@ -109,6 +110,13 @@ pub fn catalog() -> Vec<Spec> {
             // varying bytes are found.
             volatile: true,
             prepare: |size| Box::pin(transaction::reads(size)),
+        },
+        Spec {
+            name: "first-query",
+            size: 200,
+            about: "one point read on a replica that adopted, by root, a head `size` one-commit origins deep: the first query of a device that faults blocks in",
+            volatile: false,
+            prepare: |size| Box::pin(replica::first_query(size)),
         },
         Spec {
             name: "read-point",
