@@ -35,7 +35,7 @@
 //! defaults to [`DEFAULT_WINDOW`] and the application sets it per site
 //! from what it knows about the route.
 
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap};
 use std::future::Future;
 use std::hash::Hash;
 use std::pin::Pin;
@@ -140,8 +140,11 @@ struct State<Site, K, V> {
 struct Lane<K> {
     window: usize,
     /// Keys holding a slot: their shared future has been let through and
-    /// has not completed or been abandoned.
-    admitted: HashSet<K>,
+    /// has not completed or been abandoned. Each with its arrival
+    /// sequence, the order a waiter co-drives them in: a set's own order
+    /// is keyed at random per process, and would decide from run to run
+    /// which read a waiter polls first.
+    admitted: HashMap<K, u64>,
     /// Keys waiting for a slot, with what the heap entry must match to
     /// still be current.
     waiting: HashMap<K, Waiting>,
@@ -193,7 +196,7 @@ where
     fn new(window: usize) -> Self {
         Self {
             window,
-            admitted: HashSet::new(),
+            admitted: HashMap::new(),
             waiting: HashMap::new(),
             order: BinaryHeap::new(),
             tally: Tally::default(),
@@ -217,7 +220,7 @@ where
                 .waiting
                 .remove(&entry.key)
                 .expect("checked to be waiting above");
-            self.admitted.insert(entry.key);
+            self.admitted.insert(entry.key, entry.sequence);
             if let Some(waker) = waiting.waker {
                 waker.wake();
             }
@@ -466,7 +469,7 @@ where
                 let lane = lanes
                     .entry(this.site.clone())
                     .or_insert_with(|| Lane::new(*default_window));
-                if !lane.admitted.contains(&this.key) {
+                if !lane.admitted.contains_key(&this.key) {
                     match lane.waiting.get_mut(&this.key) {
                         Some(waiting) => waiting.waker = Some(context.waker().clone()),
                         None => {
@@ -489,14 +492,20 @@ where
                     }
                     lane.admit_ready();
                 }
-                if lane.admitted.contains(&this.key) {
+                if lane.admitted.contains_key(&this.key) {
                     this.phase = Phase::Admitted;
                     return Poll::Ready(this.slot());
                 }
-                lane.admitted
+                let mut admitted: Vec<(u64, Stored<V>)> = lane
+                    .admitted
                     .iter()
-                    .filter_map(|key| inflight.get(key).and_then(|weak| weak.upgrade()))
-                    .collect()
+                    .filter_map(|(key, arrived)| {
+                        let work = inflight.get(key).and_then(|weak| weak.upgrade())?;
+                        Some((*arrived, work))
+                    })
+                    .collect();
+                admitted.sort_by_key(|(arrived, _)| *arrived);
+                admitted.into_iter().map(|(_, work)| work).collect()
                 // The lock drops here, before any other future is polled
                 // and before the collected handles can drop.
             };
@@ -548,7 +557,7 @@ where
             return;
         };
         lane.waiting.remove(&self.key);
-        if lane.admitted.remove(&self.key) {
+        if lane.admitted.remove(&self.key).is_some() {
             lane.admit_ready();
         }
     }
@@ -740,6 +749,40 @@ mod tests {
 
         b.open();
         assert_eq!(poll_once(&mut demand), Poll::Ready(2));
+    }
+
+    /// A waiter co-drives the admitted work in the order it was admitted,
+    /// the same in every process: which read it polls first decides
+    /// whether a read that lands frees its slot to the next waiting key
+    /// in the same round or the next.
+    #[dialog_common::test]
+    async fn it_co_drives_admitted_work_in_admission_order() {
+        let scheduler = Scheduled::new(16);
+        let polled = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut holders: Vec<_> = (0..16u8)
+            .map(|key| {
+                let polled = polled.clone();
+                Box::pin(scheduler.join("site", key, Priority::Demand, move || {
+                    std::future::poll_fn(move |_| {
+                        polled.lock().expect("unpoisoned").push(key);
+                        Poll::<u8>::Pending
+                    })
+                }))
+            })
+            .collect();
+        for holder in &mut holders {
+            assert!(poll_once(holder).is_pending());
+        }
+        polled.lock().expect("unpoisoned").clear();
+
+        let mut waiter = Box::pin(scheduler.join("site", 99, Priority::Demand, || {
+            std::future::pending::<u8>()
+        }));
+        assert!(poll_once(&mut waiter).is_pending());
+        assert_eq!(
+            *polled.lock().expect("unpoisoned"),
+            (0..16u8).collect::<Vec<_>>()
+        );
     }
 
     /// A waiter drives the lane's admitted work: a holder whose own
