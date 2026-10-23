@@ -19,7 +19,9 @@
 //! # use dialog_capability::{Fork, Provider};
 //! # use dialog_effects::archive::{Get, Import, Put};
 //! # use dialog_effects::authority::{Attest, Identify};
-//! # use dialog_effects::blob::{//! #     BlobError, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite, //! #};
+//! # use dialog_effects::blob::{
+//! #     BlobError, ByteRange, Import as BlobImport, Read as BlobRead, Write as BlobWrite,
+//! # };
 //! # use dialog_effects::memory::{Publish, Resolve};
 //! # use dialog_repository::{Blob, Branch, CommitError, RemoteSite};
 //! # async fn example<Env>(
@@ -40,7 +42,7 @@
 //! #         + Provider<BlobRead>
 //! #         + Provider<BlobWrite>
 //! #         + Provider<BlobImport>
-//! #         + Provider<crate::Hydrate>
+//! #         + Provider<dialog_repository::Hydrate>
 //! #         + Provider<Fork<RemoteSite, Resolve>>
 //! #         + Provider<Fork<RemoteSite, BlobRead>>
 //! #         + dialog_common::ConditionalSync
@@ -66,6 +68,7 @@
 //! # }
 //! ```
 
+use crate::repository::archive::networked::Reads;
 use crate::repository::branch::asset::recorded_size;
 use crate::repository::remote::Step;
 use crate::repository::source::SourceRef;
@@ -231,13 +234,13 @@ fn blob_hash(entity: &Entity) -> Result<Blake3Hash, BlobError> {
 pub(crate) async fn index_store<'s, 'e, Env>(
     source: impl Into<SourceRef<'s>>,
     env: &'e Env,
-) -> NetworkedIndex<'e, Env>
+) -> NetworkedIndex<'e, dyn Reads>
 where
-    Env: Provider<Resolve> + ConditionalSync + 'static,
+    Env: Reads + 'static,
 {
     let source = source.into();
     let remote = source.fallback();
-    NetworkedIndex::new(env, source.archive().index(), remote)
+    NetworkedIndex::erased(env, source.archive().index(), remote)
 }
 
 /// The size of the content the line's current tree vouches for under `hash`,
@@ -468,7 +471,10 @@ where
         // size, and replacing a fact with the value it holds is a no-op.
         Box::pin(
             branch
-                .commit(stream::iter(vec![Instruction::Replace(asset.fact()?)]))
+                .commit(stream::iter(vec![Instruction::Assert(
+                    asset.fact()?,
+                    dialog_artifacts::Pick::Last,
+                )]))
                 .machinery()
                 .perform(env),
         )

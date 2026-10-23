@@ -44,42 +44,68 @@ Those URIs are long, so this guide writes short ones such as `item:1` instead. A
 
 An entity carries no data of its own. It exists only as long as some fact mentions it.
 
-## Attributes
+## Relations and attributes
 
-An attribute says what a fact is about the entity. It is written as a domain and a name, separated by a slash, like `demo.grocery/name`:
+The middle part of a fact says what the fact is about the entity. What a fact stores there is a name, like `demo.grocery/name`, and that name is called a **relation**: the set of all the facts that share it. It is written as a domain and a name, separated by a slash:
 
-- **The domain** says whose vocabulary the attribute belongs to. It is written in reverse domain notation, like the domain authority of an [AT Protocol NSID](https://atproto.com/specs/nsid): `demo.grocery` stands for `grocery.demo`. Two apps that both say `name` do not collide, because their domains differ. A domain is lowercase letters, digits, hyphens and dots.
+- **The domain** says whose vocabulary the relation belongs to. It is written in reverse domain notation, like the domain authority of an [AT Protocol NSID](https://atproto.com/specs/nsid): `demo.grocery` stands for `grocery.demo`. Two apps that both say `name` do not collide, because their domains differ. A domain is lowercase letters, digits, hyphens and dots.
 - **The name** is lowercase kebab-case: letters, digits and hyphens, starting with a letter, like `name` or `picked-up-at`.
 
-The whole attribute is at most 64 bytes. This guide uses the domain `demo.grocery`.
+The whole relation is at most 64 bytes. This guide uses the domain `demo.grocery`.
 
-An app declares every attribute it uses, and the declaration says more than the name:
+A relation is a name and nothing more. It does not say what type its values have, or how many of them an entity has. An app says that when it declares an **attribute**, which is a relation together with how to read it:
 
 - a **description**, for people reading the data;
-- the **value type**, such as String or Boolean;
-- a **cardinality**: whether an entity has one value for the attribute, or many.
+- the **value type**, such as `text:` or `boolean:`;
+- a **pick**: which of an entity's facts in the relation a read returns.
 
-A grocery item has one name and one done flag, and any number of tags.
+The pick an attribute gets unless it says otherwise is `last`, the newest fact, so the attribute reads one value. The pick `all` reads every fact, so the attribute reads many. A grocery item has one name and one done flag, and any number of tags: the name and the done flag are read under `last`, the tags under `all`. The other picks, `max`, `min` and `top`, also read one value: the greatest, the least, or the best ranked of a list.
 
-Attributes in the `dialog.` domains belong to Dialog itself, which stores some of its own bookkeeping as facts. Apps cannot write there, except for rules and concepts (see [Queries](./queries.md)), which live under `dialog.rule/` and `dialog.concept/`.
+Two apps can declare different attributes over the same relation, one reading a quantity as a whole number and another as it is. The facts do not change. Most of this guide can say attribute for both, since the grocery list reads each relation one way. The indexes in the next chapter do too: the relation's place in a key is called the attribute, which is where EAV, AEV and VAE get their A.
+
+Domains that start with `dialog.` are reserved. An app must not assert or retract facts in them, and Dialog rejects a transaction that tries. They are reserved so that Dialog can keep its own things in the same tree as an app's data, as facts, with no risk that the two collide: rules and concepts, the record of each commit, stored assets, and other bookkeeping the later chapters describe.
+
+> ℹ️ If you are building something that Dialog itself might adopt one day, do not put it in a `dialog.` domain. Put your own name in front, as in `myorg.dialog.`, so the relation reads `myorg.dialog.presence/cursor`. The facts are yours and cannot collide with anything Dialog adds later, and the name still shows where the idea is meant to end up.
 
 ## Values
 
-A value is one of nine types. Each type has a number, and that number is written into every key that holds the value (see [Keys](./keys.md)):
+A value is one of seven types. Each type has a number, and that number is written into every key that holds the value (see [Keys](./keys.md)):
 
 | Type byte | Type | Example |
 |---|---|---|
-| `00` | Bytes | raw binary data |
-| `01` | Entity | `item:2`, to point at another thing |
-| `02` | Boolean | `false` |
-| `03` | String | `"Oat milk"` |
-| `04` | Unsigned integer | 128-bit, `2` |
-| `05` | Signed integer | 128-bit, `-3` |
-| `06` | Float | 64-bit, `1.5` |
-| `07` | Record | opaque structured bytes |
-| `08` | Symbol | an attribute name used as a value |
+| `00` | `bytes:` | raw binary data |
+| `01` | `entity:` | `item:2`, to point at another thing |
+| `02` | `boolean:` | `false` |
+| `03` | `text:` | `"Oat milk"` |
+| `07` | `record:` | opaque structured bytes |
+| `08` | `symbol:` | a relation name used as a value |
+| `09` | `number:` | `2`, `-3`, `1.5` |
 
-An Entity value is how facts link things together. If Bob adds `the demo.grocery/store of item:2 is store:corner-shop`, the item now points at a store, and the store can have facts of its own.
+The types are themselves identified by entities. `text:` is a URI like `item:1`, one that happens to have nothing after its scheme, and it names the type everywhere a type is written down: in an attribute's declaration, in a rule, and in the hash that gives an attribute its identity. So a type is something facts can be about, like anything else.
+
+An entity value is how facts link things together. If Bob adds `the demo.grocery/store of item:2 is store:corner-shop`, the item now points at a store, and the store can have facts of its own.
+
+### Numbers
+
+Numbers in Dialog have one universal representation, and it can hold a number of any precision. There is no stored integer `2` next to a stored float `2.0`. There is the number two, and `2`, `2.0` and `+2` are three ways of writing it. NaN is not a number, and Dialog refuses it wherever a value comes in.
+
+Types like `integer:` and `float:` are not kinds of stored number. They are how an attribute chooses to interpret the numbers in its relation:
+
+| Type | How it interprets a number |
+|---|---|
+| `number:` | as it is |
+| `integer:` | as a whole number |
+| `natural:` | as a whole number that is not negative |
+| `float:` | as the nearest 64-bit float |
+| `natural:8` to `natural:128`, `integer:8` to `integer:128`, `float:32`, `float:64` | the same, fitted to a width |
+
+A type has a range, and a number outside it does not fit the attribute's definition. For that attribute the number does not exist, even though it exists in the relation and another attribute over the same relation may read it. Through `natural:8`, a stored `300` or `-1` is simply not there.
+
+A number inside the range is viewed at the precision of the type. A relation holding `4.3` is observed as `4` by an attribute that reads it as `integer:`, and as `4.3` by one that reads it as `float:`. A fraction is always rounded down, so `-4.3` is observed as `-5`.
+
+> ℹ️ Writes go through the same lens. Under the pick `last`, asserting `4` through an `integer:` attribute does nothing when the value observed through that attribute is already `4`, so a stored `4.3` stays `4.3`. Asserting `5` replaces the `4.3` with `5`.
+
+Dialog works this way so that apps using different lenses on the same relation can share it. An app with lower precision does not destroy detail that an app with higher precision cares about, because writing back what it read changes nothing. And the app with lower precision still observes the data at the level of precision it is able to handle, instead of failing on a number it did not expect.
 
 ## Saying things: assert and retract
 
@@ -88,7 +114,7 @@ An app never edits a fact in place. Facts cannot change. Instead, an app asserts
 - **Assert** says *"this is true."* It adds the fact.
 - **Retract** says *"this is no longer true."* It removes the fact.
 
-What an assertion does to the facts already there depends on the attribute's cardinality. If the attribute has many values, the new fact joins the others. If it has one value, the new fact supersedes the old one: asserting that the eggs are done removes the fact that they were not.
+What an assertion does to the facts already there depends on the attribute's pick. Under `all`, the new fact joins the others. Under any other pick, the new fact supersedes one fact: the one a read under that pick would have returned. Asserting that the eggs are done removes the fact that they were not.
 
 Here is item 2 changing under two assertions and a retraction. Each panel shows the item's facts after the change above it:
 
@@ -122,9 +148,9 @@ Here is item 2 changing under two assertions and a retraction. Each panel shows 
 </svg>
 </figure>
 
-The stored facts carry no cardinality of their own. It comes from the attribute's declaration, and Dialog applies it twice: when an assertion is written, and again when a query reads the attribute (see [Queries](./queries.md)).
+The stored facts carry no pick of their own. It comes from the attribute's declaration, and Dialog applies it twice: when an assertion is written, and again when a query reads the attribute (see [Queries](./queries.md)). A write follows the read. Whatever a reader of the attribute would have seen is what the assertion supersedes, and nothing else. If two devices had each given the eggs a done flag without seeing the other's, a read elects one of the two, and the next assertion supersedes that one. The other stays stored. A read under `last` never notices it, and a read under `all` can still find it.
 
-Retracting a fact that is not there does nothing. Asserting a fact that is already there does not make a second copy: two writers asserting the same entity, attribute and value share one stored fact.
+Retracting a fact that is not there does nothing. Asserting a value that a read already returns writes nothing at all. Asserting a fact that is already there does not make a second copy: two writers asserting the same entity, attribute and value share one stored fact.
 
 ## Nothing is ever null
 

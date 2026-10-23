@@ -13,6 +13,10 @@
 //! - a directory on the local filesystem is the `did:key` of the
 //!   Ed25519 key seeded by the Blake3 hash of its file URI, one for one
 //!   directory however its path is spelled.
+//!
+//! A peer reached over iroh is the exception: it does have a key, its
+//! endpoint id, so its DID is that key's `did:key` and nothing is
+//! derived.
 
 use dialog_capability::{Provider, Subject};
 use dialog_common::{Blake3Hash, ConditionalSync};
@@ -28,8 +32,13 @@ use thiserror::Error;
 use url::Url;
 
 use crate::schema::DidExt as _;
-use crate::{AddAddressError, ConnectError, ConnectedBranch, ConnectedReplica, SiteAddress};
+use crate::{
+    AddAddressError, ConnectError, ConnectedBranch, ConnectedReplica, DiscoverContactError,
+    SiteAddress,
+};
 use dialog_artifacts::Entity;
+use dialog_did_web::Discover;
+use dialog_remote_ucan::UcanAddress;
 
 pub mod contacts;
 
@@ -157,6 +166,111 @@ impl ContactReference {
     /// Connect to the peer, to reach the repositories it holds.
     pub fn connect(self) -> ContactConnection {
         ContactConnection { contact: self }
+    }
+
+    /// Learn where the peer is reached from the services its DID's
+    /// document names, and record it: a peer is named by its DID, and
+    /// its addresses are what the DID resolves to.
+    pub fn discover(self) -> DiscoverContact {
+        DiscoverContact {
+            contact: self,
+            name: None,
+        }
+    }
+}
+
+/// Command to learn where a contact is reached and record it. Created by
+/// [`ContactReference::discover`].
+pub struct DiscoverContact {
+    contact: ContactReference,
+    name: Option<String>,
+}
+
+impl DiscoverContact {
+    /// Also give the peer this name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Discover the peer's DID, record the access service its document
+    /// names as the address it is reached at, with the name if one was
+    /// given, and answer the peer's entity. Another address recorded at the
+    /// same endpoint is taken back, so discovering again follows the
+    /// document: a socket it stops naming is no longer dialed.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Entity, DiscoverContactError>
+    where
+        Env: PeersEnv + Provider<Discover> + Provider<peer_fx::RemoveAddress>,
+    {
+        let peer = match &self.contact.by {
+            By::Entity(entity) => entity.clone(),
+            By::Name(name) => find(
+                &host(env).await.map_err(AddAddressError::from)?,
+                name.clone(),
+                env,
+            )
+            .await
+            .map_err(AddAddressError::from)?,
+        };
+        let did: Did = peer
+            .to_string()
+            .parse()
+            .map_err(|_| DiscoverContactError::NotADid {
+                peer: peer.to_string(),
+            })?;
+        let services = Discover::new(did.clone())
+            .perform(env)
+            .await
+            .map_err(|source| DiscoverContactError::Discover {
+                did: did.to_string(),
+                source,
+            })?;
+        let address = UcanAddress::from_services(&services).ok_or_else(|| {
+            DiscoverContactError::NoAccessService {
+                did: did.to_string(),
+            }
+        })?;
+        let discovered = SiteAddress::Ucan(address.clone());
+        let add = contact(peer).add_address(discovered.clone());
+        let add = match self.name {
+            Some(name) => add.name(name),
+            None => add,
+        };
+        let peer = add.perform(env).await?;
+
+        // The document says where the peer is reached now. Another address
+        // recorded at the same endpoint is what was known of the service
+        // before (a socket it no longer announces, or none where it now
+        // announces one), so it is taken back: the peer is not tried where
+        // the document no longer says it is. Addresses at other services
+        // are the host's to keep.
+        let host = host(env).await.map_err(AddAddressError::from)?;
+        let connection = host
+            .clone()
+            .reader()
+            .peers()
+            .connect(peer.clone())
+            .perform(env)
+            .await
+            .map_err(AddAddressError::from)?;
+        for recorded in connection.addresses() {
+            let Ok(site) = site_address(recorded) else {
+                continue;
+            };
+            let SiteAddress::Ucan(ucan) = &site else {
+                continue;
+            };
+            if ucan.endpoint() == address.endpoint() && site != discovered {
+                host.clone()
+                    .writer()
+                    .peers()
+                    .remove_address(peer.clone(), recorded.clone())
+                    .perform(env)
+                    .await
+                    .map_err(AddAddressError::from)?;
+            }
+        }
+        Ok(peer)
     }
 }
 
@@ -374,6 +488,10 @@ pub(crate) fn peer_did(address: &SiteAddress) -> Result<Did, PeerError> {
             web(&endpoint, [])
         }
         SiteAddress::Fs(address) => Ok(key(address.location())),
+        // An iroh peer is its key: the endpoint id is the peer's own
+        // Ed25519 public key, so the address already carries the DID
+        // and its routes are only hints for reaching it.
+        SiteAddress::Iroh(address) => Ok(address.did()),
     }
 }
 
@@ -523,6 +641,7 @@ mod tests {
     use dialog_effects::storage::{Directory, Location};
     use dialog_peer::Peer as LocalPeer;
     use dialog_peer::helpers::test_session_with_peer;
+    use dialog_peer_iroh::site::IrohAddress;
     use dialog_query::{Output as _, Query, Term};
     use dialog_remote_fs::FsAddress;
     use dialog_remote_s3::Address;
@@ -687,6 +806,20 @@ mod tests {
             peer_did(&fs(Directory::Current, "backup"))?,
             peer_did(&fs(Directory::Temp, "backup"))?
         );
+        Ok(())
+    }
+
+    /// A peer reached over iroh is named by its own key, not by anything
+    /// derived from where it is: the address carries the `did:key`, and
+    /// it survives the encoding a contact records it in.
+    #[dialog_common::test]
+    async fn it_names_an_iroh_peer_by_its_key() -> anyhow::Result<()> {
+        let (_, peer) = test_session_with_peer().await;
+        let did = peer.did();
+        let address = SiteAddress::from(IrohAddress::parse_did(did.as_ref())?);
+
+        assert_eq!(peer_did(&address)?, did);
+        assert_eq!(site_address(&peer_address(&address)?)?, address);
         Ok(())
     }
 

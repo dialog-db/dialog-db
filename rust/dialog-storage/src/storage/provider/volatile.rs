@@ -24,6 +24,7 @@
 //! let digest = Blake3Hash::hash(b"hello");
 //!
 //! let effect = Subject::from(did!("key:z6Mk..."))
+//!     .reader()
 //!     .archive()
 //!     .catalog("index")
 //!     .get(digest);
@@ -40,6 +41,7 @@ mod credential;
 mod memory;
 
 use dialog_capability::Did;
+use dialog_common::{Held, Holds};
 use dialog_credentials::credential::CredentialExport;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -89,6 +91,21 @@ pub struct Volatile {
     sessions: Arc<RwLock<HashMap<Did, Session>>>,
 }
 
+/// A storage provider keeps data, not handles: code running directly
+/// against it is handed nothing it held before. A branch opened on it
+/// starts with fresh caches every time; an environment built over it (a
+/// peer) is what keeps them.
+///
+/// Holding nothing also keeps the provider `Sync` on wasm, where a held
+/// handle need not be: it is placed in statics.
+impl Holds for Volatile {
+    fn held(&self, _key: &str) -> Option<Held> {
+        None
+    }
+
+    fn hold(&self, _key: String, _handle: Held) {}
+}
+
 impl Default for Volatile {
     fn default() -> Self {
         Self {
@@ -102,6 +119,35 @@ impl Volatile {
     /// Creates a new volatile provider with no prefix.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Keep only the blocks of `catalog` under `subject` whose base58
+    /// digest `keep` accepts, and answer with how many blocks and bytes
+    /// went. A test harness's aid: content addressing never collects, so
+    /// a harness that rewrites a root thousands of times would otherwise
+    /// measure its own garbage. Dropping a block something still reads
+    /// surfaces as a missing block on that read, never as wrong data.
+    #[cfg(any(test, feature = "helpers"))]
+    pub fn retain_blocks(
+        &self,
+        subject: &Did,
+        catalog: &str,
+        mut keep: impl FnMut(&str) -> bool,
+    ) -> (usize, usize) {
+        let mut sessions = self.sessions.write();
+        let Some(session) = sessions.get_mut(subject) else {
+            return (0, 0);
+        };
+        let (mut blocks, mut bytes) = (0, 0);
+        session.archive.retain(|(of, digest), block| {
+            if of != catalog || keep(digest) {
+                return true;
+            }
+            blocks += 1;
+            bytes += block.len();
+            false
+        });
+        (blocks, bytes)
     }
 
     /// Returns a scoped key by prepending the mount prefix.

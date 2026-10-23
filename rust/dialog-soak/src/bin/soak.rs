@@ -1,3 +1,6 @@
+// The CLI is native-only. On wasm the crate below is empty, so it has no
+// `main` to require.
+#![cfg_attr(target_arch = "wasm32", no_main)]
 #![cfg(not(target_arch = "wasm32"))]
 
 //! # dialog-soak
@@ -46,8 +49,9 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct RunArgs {
-    /// Network preset: none, localhost, broadband, mobile, intercontinental,
-    /// or custom (with --latency-ms/--auth-ms/--bandwidth-mbps).
+    /// Network preset: none, localhost, broadband, mobile, browser,
+    /// intercontinental, or custom (with --latency-ms/--auth-ms/
+    /// --bandwidth-mbps/--connections).
     #[arg(long, default_value = "broadband")]
     network: String,
 
@@ -64,6 +68,11 @@ struct RunArgs {
     /// (custom network).
     #[arg(long, default_value_t = 100.0)]
     bandwidth_mbps: f64,
+
+    /// Connections the client may hold open at once; unlimited when
+    /// absent (custom network). A browser allows six per host.
+    #[arg(long)]
+    connections: Option<usize>,
 
     /// Entities to seed (6 facts each).
     #[arg(long, default_value_t = 4000)]
@@ -116,6 +125,7 @@ struct SweepArgs {
         "localhost".to_string(),
         "broadband".to_string(),
         "mobile".to_string(),
+        "browser".to_string(),
         "intercontinental".to_string(),
     ])]
     networks: Vec<String>,
@@ -141,27 +151,37 @@ struct CompareArgs {
 
 /// A named preset link model.
 fn preset(name: &str, run: &RunArgs) -> Result<(Option<NetworkShape>, String)> {
-    let shape = |latency_ms: f64, auth_ms: f64, bandwidth_mbps: f64| {
+    let shape = |latency_ms: f64, auth_ms: f64, bandwidth_mbps: f64, connections: Option<usize>| {
         Some(NetworkShape {
             latency: Duration::from_secs_f64(latency_ms / 1000.0),
             auth_latency: Duration::from_secs_f64(auth_ms / 1000.0),
             bandwidth: (bandwidth_mbps > 0.0).then(|| (bandwidth_mbps * 1_000_000.0 / 8.0) as u64),
+            connections,
         })
     };
     let network = match name {
         // Counts only: no delays, so virtual times read as pure compute.
         "none" => None,
         // A same-host or LAN service: sub-millisecond everything.
-        "localhost" => shape(0.4, 0.4, 1000.0),
+        "localhost" => shape(0.4, 0.4, 1000.0, None),
         // Home broadband to a nearby region, warm HTTPS connections.
-        "broadband" => shape(30.0, 50.0, 100.0),
+        "broadband" => shape(30.0, 50.0, 100.0, None),
         // A phone on 4G: the latency budget tonk's field reports describe.
-        "mobile" => shape(80.0, 120.0, 20.0),
+        "mobile" => shape(80.0, 120.0, 20.0, None),
+        // The same phone, in a browser: six connections per host over
+        // HTTP/1.1, which is what tonk's replicas get. The gap between this
+        // and `mobile` is what the fetch scheduler's window cannot buy.
+        "browser" => shape(80.0, 120.0, 20.0, Some(6)),
         // Cross-ocean or degraded link.
-        "intercontinental" => shape(250.0, 250.0, 50.0),
-        "custom" => shape(run.latency_ms, run.auth_ms, run.bandwidth_mbps),
+        "intercontinental" => shape(250.0, 250.0, 50.0, None),
+        "custom" => shape(
+            run.latency_ms,
+            run.auth_ms,
+            run.bandwidth_mbps,
+            run.connections,
+        ),
         other => anyhow::bail!(
-            "unknown network {other:?} (use none, localhost, broadband, mobile, \
+            "unknown network {other:?} (use none, localhost, broadband, mobile, browser, \
              intercontinental, or custom)"
         ),
     };

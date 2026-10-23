@@ -85,6 +85,7 @@ mod tests {
             tree: TreeReference::from([7u8; 32]),
             edition: Edition::GENESIS,
             context: None,
+            region: false,
             signature: Vec::new(),
         };
         branch.reset(revision.clone()).perform(&provider).await?;

@@ -464,8 +464,10 @@ session overlay is replaced by a real memory-backed store,
   `selector_range` applies unchanged and rows stream in exactly the
   order a tree scan produces them. The query scope's k-way merge
   interleaves the store with tree scans with no special case.
-- Writes have the tree's semantics: idempotent assert, cardinality-one
-  replace that supersedes the cell, exact retract. A retract of a fact
+- Writes have the tree's semantics: idempotent assert, an assert under a
+  pick that elects succeeding what a read of the cell elects (on 0.3.0;
+  the proposal had a cardinality-one replace that superseded the cell),
+  exact retract. A retract of a fact
   the store does not hold is a tombstone that hides it in the layers
   beneath, so session shadowing of committed facts still works and
   the store's own facts are never shadowed by it.
@@ -669,6 +671,60 @@ site that the tab's own stamp subscription follows, in place of the
 `navigate` client message. Per-tab layers above the state layer and
 the inspector over the registry are not built; the note's per-tab
 decision (topology, not induction) stands.
+
+## The port to 0.3.0
+
+The proposal was built on `main` before 0.2.0. It is ported onto 0.3.0,
+in the forms of that release, with no fallback to the older ones:
+
+- An attribute is a `Relation`, and a write carries its pick. What the
+  proposal wrote as `Replace` is an `Assert` under `Pick::Last`, and the
+  routing of a stack carries the pick of each instruction to the layer it
+  lands in. `Changes::cancel`, public API that nothing in the crate calls,
+  drops an assert under any pick.
+- A commit settles the successions of its picks first, then induces, and
+  then routes by placement: the snapshot commit and `mint_link` run 0.3.0's
+  settlement before `settle`.
+- A standalone ephemeral layer is read where a session overlay is: its rows
+  stand at the edition past every line's head, and its tombstones join the
+  lines'. Rules are looked up by index and key, as 0.3.0 does, in each
+  standalone layer too.
+- 0.3.0 keys an assembled rule set by the revision of each session overlay
+  instead of bypassing the cache when an overlay holds rules. A standalone
+  ephemeral layer joins that key by its revision.
+- A stack transaction holds its writes as 0.3.0's ordered `Staged` log, as a
+  branch transaction does. Its commit refuses a NaN before anything changes,
+  then settles the successions of its picks over the stack, then resolves
+  the placements, induces, routes by placement, and stages the layers bottom
+  to top. The row of a standalone ephemeral layer is a candidate that a read
+  elects, as a row of a session overlay is, but no claim, so no write to a
+  tree succeeds it. A write that lands in an ephemeral layer or a session
+  store keeps its pick, and that store elects among its own rows of the
+  cell. A query of the transaction, whether it
+  selects or subscribes, reads the pending writes as staged layers, so a
+  pending write under a pick that elects reads as it will commit.
+- A batch that a stack stages on a pinned head, and each commit that extends
+  its chain, keeps the overlay retractions that 0.3.0 gives every batch.
+- The induction watermark of the bottom moves only with a commit that
+  publishes. A stack commit that writes nothing to the bottom moves it to
+  the head that it induced over once the commit publishes, so the rules do
+  not fire again on the same lag at every later commit.
+- A placement, a default scope, and each field of a link are written under
+  `Pick::Last`, and read as the claim that `last` elects of the cell. Two
+  replicas that each declare one leave both claims in the cell when they
+  merge, and every replica takes the same one.
+- A commit that rewires the stack applies its link edits to a detached copy
+  of the shape, and installs it only when the layers stage. A commit that
+  fails before then leaves the shape as it was, and one that fails while
+  the layers stage puts it back. The proposal dropped the chains staged on
+  the old shape; a commit that rewires a stack with staged commits is now
+  refused (`StackError::Staged`) instead.
+- A commit that fails partway through staging drops every staged chain, so
+  that no chain that holds part of it publishes. A chain cannot be cut back
+  to the commits before it, so the earlier commits that were staged and not
+  published go too, and the caller runs them again; the error of the commit
+  is the only report of it. A write that routes to a snapshot is refused
+  before any layer stages.
 
 ## Order of work
 

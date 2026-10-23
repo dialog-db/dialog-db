@@ -112,7 +112,7 @@ DialogDB's architecture consists of several key components, each with a specific
 
 ### 1. Probabilistic B-Trees for Deterministic Data Layout
 
-DialogDB employs Probabilistic B-Trees (Prolly Trees) for a deterministic, content-addressed tree structure:
+DialogDB employs Probabilistic B-Trees (probabilistic search trees) for a deterministic, content-addressed tree structure:
 
 ```mermaid
 flowchart TD
@@ -446,7 +446,7 @@ DialogDB builds on ideas from several important projects in the database field:
 
 - Datalog querying and fact-based modeling from [Datomic](https://docs.datomic.com/datomic-overview.html)
 - Deterministic synchronization from [Merkle-CRDTs](https://research.protocol.ai/publications/merkle-crdts-merkle-dags-meet-crdts/psaras2020.pdf)
-- Content-addressed data structures from [Prolly Trees](https://docs.canvas.xyz/blog/2023-05-04-merklizing-the-key-value-store.html)
+- Content-addressed probabilistic search trees from [Merklizing the key/value store](https://docs.canvas.xyz/blog/2023-05-04-merklizing-the-key-value-store.html)
 - Causal consistency models from [RhizomeDB](https://github.com/RhizomeDB/spec)
 - Local-first principles from [Ink & Switch](https://inkandswitch.com/essay/local-first)
 

@@ -123,7 +123,10 @@ async fn it_pushes_to_s3_remote(s3: S3Address) -> Result<()> {
         cause: None,
     };
     branch
-        .commit(stream::iter(vec![Instruction::Assert(artifact)]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            artifact,
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -145,7 +148,10 @@ async fn it_fetches_from_s3_remote(s3: S3Address) -> Result<()> {
         cause: None,
     };
     branch
-        .commit(stream::iter(vec![Instruction::Assert(artifact)]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            artifact,
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -175,7 +181,10 @@ async fn it_push_and_pull_roundtrip(s3: S3Address) -> Result<()> {
         cause: None,
     };
     branch
-        .commit(stream::iter(vec![Instruction::Assert(artifact)]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            artifact,
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -244,12 +253,15 @@ async fn it_fails_over_to_an_address_that_answers(s3: S3Address) -> Result<()> {
         .await?;
 
     branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:1".parse()?,
-            is: Value::String("Alice".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:1".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
     let pushed = branch.push().perform(&operator).await?;
@@ -339,12 +351,15 @@ async fn it_ships_blobs_and_spilled_values_concurrently_on_push(s3: S3Address) -
     let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
     let facts: Vec<_> = (0..SPILLED)
         .map(|i| {
-            Instruction::Assert(Artifact {
-                the: "doc/body".parse().expect("valid attribute"),
-                of: format!("doc:{i}").parse().expect("valid entity"),
-                is: Value::String(format!("{i:04}{}", "x".repeat(inline_n))),
-                cause: None,
-            })
+            Instruction::Assert(
+                Artifact {
+                    the: "doc/body".parse().expect("valid attribute"),
+                    of: format!("doc:{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("{i:04}{}", "x".repeat(inline_n))),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )
         })
         .collect();
     branch
@@ -563,7 +578,12 @@ async fn it_ships_an_imported_asset_on_push_and_hydrates_on_read(s3: S3Address) 
     let attachment = "doc/attachment".parse()?;
     let document: Entity = "doc:1".parse()?;
     let mut facts = Changes::new();
-    facts.associate_unique(attachment, document.clone(), Value::Entity(content.clone()));
+    facts.associate(
+        attachment,
+        document.clone(),
+        Value::Entity(content.clone()),
+        dialog_artifacts::Pick::Last,
+    );
     branch_a
         .transaction()
         .assert(asset.clone())
@@ -634,10 +654,11 @@ async fn it_ships_an_imported_asset_on_push_and_hydrates_on_read(s3: S3Address) 
     // so re-asserting it with a fact pointing at it commits, while a
     // misstated size and bytes this line never recorded are refused.
     let mut pointer = Changes::new();
-    pointer.associate_unique(
+    pointer.associate(
         "doc/cover".parse()?,
         "doc:2".parse::<Entity>()?,
         Value::Entity(content.clone()),
+        dialog_artifacts::Pick::Last,
     );
     branch_b
         .transaction()
@@ -741,7 +762,12 @@ async fn it_ships_a_spill_of_a_retracted_assets_bytes(s3: S3Address) -> Result<(
     let body = "doc/body".parse()?;
     let document: Entity = "doc:spilled".parse()?;
     let mut spilled = Changes::new();
-    spilled.associate_unique(body, document.clone(), Value::Bytes(payload.clone()));
+    spilled.associate(
+        body,
+        document.clone(),
+        Value::Bytes(payload.clone()),
+        dialog_artifacts::Pick::Last,
+    );
 
     branch_a
         .transaction()
@@ -1262,7 +1288,10 @@ async fn it_ships_spilled_values_on_push_and_hydrates_on_read(s3: S3Address) -> 
         cause: None,
     };
     branch_a
-        .commit(stream::iter(vec![Instruction::Assert(artifact)]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            artifact,
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator_a)
         .await?;
 
@@ -1427,7 +1456,10 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
         .perform(&operator_a)
         .await?;
     branch_a
-        .commit(stream::iter(vec![Instruction::Assert(artifact.clone())]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            artifact.clone(),
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator_a)
         .await?;
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
@@ -1511,7 +1543,7 @@ async fn it_pushes_a_retraction_of_a_pulled_spilled_fact(s3: S3Address) -> Resul
 #[cfg(not(feature = "web-integration-tests"))]
 #[dialog_common::test]
 async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Result<()> {
-    use dialog_query::attribute::The;
+    use dialog_query::attribute::Relation;
     use dialog_query::{AttributeQuery, Term, the};
 
     let inline_n = dialog_search_tree::Manifest::default().inline_n as usize;
@@ -1582,7 +1614,7 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
         .await?;
 
     let query = AttributeQuery::from(
-        Term::<The>::from(the!("doc/body"))
+        Term::<Relation>::from(the!("doc/body"))
             .of(Term::<dialog_artifacts::Entity>::var("e"))
             .is(Term::<String>::var("v")),
     );
@@ -1595,12 +1627,15 @@ async fn it_polls_subscriptions_over_pulled_spilled_facts(s3: S3Address) -> Resu
 
     // --- Site A publishes a spilled fact; B pulls and polls. ---
     branch_a
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "doc/body".parse()?,
-            of: "doc:1".parse()?,
-            is: Value::String(body.clone()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "doc/body".parse()?,
+                of: "doc:1".parse()?,
+                is: Value::String(body.clone()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator_a)
         .await?;
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
@@ -1633,7 +1668,10 @@ async fn it_pull_returns_none_when_no_changes(s3: S3Address) -> Result<()> {
         cause: None,
     };
     branch
-        .commit(stream::iter(vec![Instruction::Assert(artifact)]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            artifact,
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -1664,7 +1702,10 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
         cause: None,
     };
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(artifact)]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            artifact,
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -1721,12 +1762,15 @@ async fn it_reads_what_a_one_off_pull_brought(s3: S3Address) -> Result<()> {
     let (alice_repo, alice_branch) =
         setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:alice".parse()?,
-            is: Value::String("Alice".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
     alice_branch.push().perform(&operator).await?;
@@ -1771,12 +1815,15 @@ async fn it_merges_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<()> 
     let (alice_repo, alice_branch) =
         setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:alice".parse()?,
-            is: Value::String("Alice".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
     alice_branch.push().perform(&operator).await?;
@@ -1795,21 +1842,27 @@ async fn it_merges_over_a_tree_adopted_from_a_peer(s3: S3Address) -> Result<()> 
     // Two writers on the adopted tree: the session and its peer.
     let second = bob_repo.branch("main").open().perform(&profile).await?;
     first
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:bob".parse()?,
-            is: Value::String("Bob".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:bob".parse()?,
+                is: Value::String("Bob".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
     second
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:carol".parse()?,
-            is: Value::String("Carol".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:carol".parse()?,
+                is: Value::String("Carol".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .merge()
         .perform(&profile)
         .await?;
@@ -1853,7 +1906,10 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
         cause: None,
     };
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(fact.clone())]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            fact.clone(),
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
     alice_branch.push().perform(&operator).await?;
@@ -1881,7 +1937,10 @@ async fn it_keeps_a_retraction_through_a_concurrent_pull(s3: S3Address) -> Resul
         cause: None,
     };
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(unrelated)]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            unrelated,
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
     alice_branch.push().perform(&operator).await?;
@@ -1969,12 +2028,15 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
     for batch in 0..4 {
         let facts: Vec<_> = (0..75)
             .map(|i| {
-                Instruction::Assert(Artifact {
-                    the: "user/name".parse().expect("valid attribute"),
-                    of: format!("user:{batch}-{i}").parse().expect("valid entity"),
-                    is: Value::String(format!("resident-{batch}-{i}")),
-                    cause: None,
-                })
+                Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse().expect("valid attribute"),
+                        of: format!("user:{batch}-{i}").parse().expect("valid entity"),
+                        is: Value::String(format!("resident-{batch}-{i}")),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
+                )
             })
             .collect();
         alice_branch
@@ -2012,12 +2074,15 @@ async fn it_pushes_novelty_after_adopting_the_upstream_head_by_reference(
 
     // B's own novelty, then the push every device's sync drain performs.
     bob_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:bob".parse()?,
-            is: Value::String("Bob".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:bob".parse()?,
+                is: Value::String("Bob".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&env)
         .await?;
 
@@ -2057,21 +2122,27 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
     for batch in 0..4 {
         let mut facts: Vec<_> = (0..75)
             .map(|i| {
-                Instruction::Assert(Artifact {
-                    the: "user/name".parse().expect("valid attribute"),
-                    of: format!("user:{batch}-{i}").parse().expect("valid entity"),
-                    is: Value::String(format!("resident-{batch}-{i}")),
-                    cause: None,
-                })
+                Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse().expect("valid attribute"),
+                        of: format!("user:{batch}-{i}").parse().expect("valid entity"),
+                        is: Value::String(format!("resident-{batch}-{i}")),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
+                )
             })
             .collect();
         if batch == 0 {
-            facts.push(Instruction::Assert(Artifact {
-                the: "doc/body".parse()?,
-                of: "doc:big".parse()?,
-                is: Value::String(big.clone()),
-                cause: None,
-            }));
+            facts.push(Instruction::Assert(
+                Artifact {
+                    the: "doc/body".parse()?,
+                    of: "doc:big".parse()?,
+                    is: Value::String(big.clone()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ));
         }
         alice_branch
             .commit(stream::iter(facts))
@@ -2192,12 +2263,15 @@ async fn it_bridges_foreign_bulk_to_a_second_remote(s3: S3Address) -> Result<()>
     // Steady state: one local commit, pushed against the advanced base —
     // the ordinary novelty path, no bridging left to do.
     bridge_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:bridge".parse()?,
-            is: Value::String("Bridge".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:bridge".parse()?,
+                is: Value::String("Bridge".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
     let again = bridge_branch
@@ -2255,6 +2329,10 @@ impl<P: dialog_common::Holds> dialog_common::Holds for AbortOnRemoteBlobImport<P
     fn hold(&self, key: String, handle: dialog_common::Held) {
         self.inner.hold(key, handle)
     }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> dialog_common::Held) -> dialog_common::Held {
+        self.inner.held_or(key, make)
+    }
 }
 
 #[cfg(not(feature = "web-integration-tests"))]
@@ -2292,6 +2370,7 @@ where
     ) -> Result<BlobWriter, BlobError> {
         Err(BlobError::Rejected(Rejection::Unavailable {
             reason: "rigged abort: this push dies at its first remote blob import".into(),
+            retry_after: None,
         }))
     }
 }
@@ -2467,12 +2546,15 @@ async fn it_leaves_an_aborted_push_closure_complete(s3: S3Address) -> Result<()>
 
     let facts: Vec<_> = (0..60)
         .map(|i| {
-            Instruction::Assert(Artifact {
-                the: "user/name".parse().expect("valid attribute"),
-                of: format!("user:{i}").parse().expect("valid entity"),
-                is: Value::String(format!("resident-{i}")),
-                cause: None,
-            })
+            Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse().expect("valid attribute"),
+                    of: format!("user:{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("resident-{i}")),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )
         })
         .collect();
     branch
@@ -2529,12 +2611,15 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
     for batch in 0..3 {
         let facts: Vec<_> = (0..60)
             .map(|i| {
-                Instruction::Assert(Artifact {
-                    the: "user/name".parse().expect("valid attribute"),
-                    of: format!("user:{batch}-{i}").parse().expect("valid entity"),
-                    is: Value::String(format!("resident-{batch}-{i}")),
-                    cause: None,
-                })
+                Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse().expect("valid attribute"),
+                        of: format!("user:{batch}-{i}").parse().expect("valid entity"),
+                        is: Value::String(format!("resident-{batch}-{i}")),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
+                )
             })
             .collect();
         alice_branch
@@ -2586,12 +2671,15 @@ async fn it_leaves_an_aborted_bridge_push_closure_complete(s3: S3Address) -> Res
         .await?
         .expect("head adopted from A");
     bridge_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:bridge".parse()?,
-            is: Value::String("Bridge".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:bridge".parse()?,
+                is: Value::String("Bridge".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -2640,12 +2728,15 @@ async fn it_forwards_content_adopted_through_a_local_upstream(s3: S3Address) -> 
     for batch in 0..3 {
         let facts: Vec<_> = (0..60)
             .map(|i| {
-                Instruction::Assert(Artifact {
-                    the: "user/name".parse().expect("valid attribute"),
-                    of: format!("user:{batch}-{i}").parse().expect("valid entity"),
-                    is: Value::String(format!("resident-{batch}-{i}")),
-                    cause: None,
-                })
+                Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse().expect("valid attribute"),
+                        of: format!("user:{batch}-{i}").parse().expect("valid entity"),
+                        is: Value::String(format!("resident-{batch}-{i}")),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
+                )
             })
             .collect();
         alice_branch
@@ -2766,12 +2857,15 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
         setup_repo_with_s3_remote(&operator, &profile, &s3, "conv-alice").await?;
 
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:alice".parse()?,
-            is: Value::String("Alice".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -2798,12 +2892,15 @@ async fn it_two_party_convergence(s3: S3Address) -> Result<()> {
 
     // Bob commits his own artifact
     bob_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:bob".parse()?,
-            is: Value::String("Bob".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:bob".parse()?,
+                is: Value::String("Bob".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -3299,12 +3396,15 @@ async fn it_authorizes_via_migrated_credentials(ucan: UcanS3Address) -> Result<(
         .perform(&alice_operator)
         .await?;
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:alice".parse()?,
-            is: Value::String("Alice".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&alice_operator)
         .await?;
     alice_branch.push().perform(&alice_operator).await?;
@@ -3467,12 +3567,15 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
 
     // Alice commits and pushes initial data
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:alice".parse()?,
-            is: Value::String("Alice".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&alice_operator)
         .await?;
 
@@ -3539,12 +3642,15 @@ async fn it_collaborates_via_ucan_delegation(ucan: UcanS3Address) -> Result<()> 
 
     // Bob commits his own change
     bob_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:bob".parse()?,
-            is: Value::String("Bob".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:bob".parse()?,
+                is: Value::String("Bob".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&bob_operator)
         .await?;
 
@@ -3614,12 +3720,15 @@ async fn it_pushes_and_pulls_via_ucan(ucan: UcanS3Address) -> Result<()> {
 
     // Commit and push via UCAN
     branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:ucan-test".parse()?,
-            is: Value::String("UCAN User".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:ucan-test".parse()?,
+                is: Value::String("UCAN User".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -3659,12 +3768,15 @@ async fn it_replicates_on_demand_and_caches_locally(s3: S3Address) -> Result<()>
         setup_repo_with_s3_remote(&operator, &profile, &s3, "replicate-alice").await?;
 
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:alice".parse()?,
-            is: Value::String("Alice".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
     alice_branch.push().perform(&operator).await?;
@@ -3788,12 +3900,15 @@ async fn it_delegates_and_pushes_to_s3(s3: S3Address) -> Result<()> {
 
     // Commit and push
     branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:delegated".parse()?,
-            is: Value::String("Delegated Push".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:delegated".parse()?,
+                is: Value::String("Delegated Push".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -3854,12 +3969,15 @@ async fn it_delegates_pushes_and_pulls_via_s3(s3: S3Address) -> Result<()> {
         .await?;
 
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:alice".parse()?,
-            is: Value::String("Alice Delegated".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice".parse()?,
+                is: Value::String("Alice Delegated".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&alice_operator)
         .await?;
 
@@ -3957,12 +4075,15 @@ async fn it_downloads_missing_content_when_the_reach_asks_for_it(s3: S3Address) 
     let (repo_a, branch_a) =
         setup_repo_with_s3_remote(&operator_a, &profile_a, &s3, "reach-a").await?;
 
-    let facts = vec![Instruction::Assert(Artifact {
-        the: "document/body".parse()?,
-        of: "document:one".parse()?,
-        is: Value::String("downloaded on demand".repeat(64)),
-        cause: None,
-    })];
+    let facts = vec![Instruction::Assert(
+        Artifact {
+            the: "document/body".parse()?,
+            of: "document:one".parse()?,
+            is: Value::String("downloaded on demand".repeat(64)),
+            cause: None,
+        },
+        dialog_artifacts::Pick::All,
+    )];
     branch_a
         .commit(stream::iter(facts))
         .perform(&operator_a)
@@ -4144,7 +4265,10 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
         cause: None,
     };
     branch_a
-        .commit(stream::iter(vec![Instruction::Assert(retracted.clone())]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            retracted.clone(),
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator_a)
         .await?;
     assert!(branch_a.push().perform(&operator_a).await?.is_some());
@@ -4182,12 +4306,15 @@ async fn it_downloads_spilled_values_a_pull_never_shipped(s3: S3Address) -> Resu
         .await?;
     branch_b.pull().perform(&operator_b).await?;
     branch_b
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "note/text".parse()?,
-            of: "note:local".parse()?,
-            is: Value::String("site B novelty".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "note/text".parse()?,
+                of: "note:local".parse()?,
+                is: Value::String("site B novelty".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator_b)
         .await?;
 
@@ -4462,15 +4589,18 @@ async fn it_downloads_only_the_operational_regions(s3: S3Address) -> Result<()> 
     for round in 0..24 {
         let facts: Vec<_> = (0..120)
             .map(|i| {
-                Instruction::Assert(Artifact {
-                    the: "user/name".parse().expect("valid attribute"),
-                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
-                    // Wide enough that the fixture fills real leaves: a
-                    // tree of a few 64KiB segments has no structure to
-                    // prune, and the whole point is the pruning.
-                    is: Value::String(format!("resident-{round}-{i}").repeat(24)),
-                    cause: None,
-                })
+                Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse().expect("valid attribute"),
+                        of: format!("user:{round}-{i}").parse().expect("valid entity"),
+                        // Wide enough that the fixture fills real leaves: a
+                        // tree of a few 64KiB segments has no structure to
+                        // prune, and the whole point is the pruning.
+                        is: Value::String(format!("resident-{round}-{i}").repeat(24)),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
+                )
             })
             .collect();
         alice.commit(stream::iter(facts)).perform(&operator).await?;
@@ -4584,12 +4714,15 @@ async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
     for round in 0..6 {
         let facts: Vec<_> = (0..120)
             .map(|i| {
-                Instruction::Assert(Artifact {
-                    the: "user/name".parse().expect("valid attribute"),
-                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
-                    is: Value::String(format!("resident-{round}-{i}").repeat(24)),
-                    cause: None,
-                })
+                Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse().expect("valid attribute"),
+                        of: format!("user:{round}-{i}").parse().expect("valid entity"),
+                        is: Value::String(format!("resident-{round}-{i}").repeat(24)),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
+                )
             })
             .collect();
         source
@@ -4629,12 +4762,15 @@ async fn it_downloads_one_block_at_a_time(s3: S3Address) -> Result<()> {
     // shape, where a profile has local state before joining a space.
     let local: Vec<_> = (0..80)
         .map(|i| {
-            Instruction::Assert(Artifact {
-                the: "post/title".parse().expect("valid attribute"),
-                of: format!("post:{i}").parse().expect("valid entity"),
-                is: Value::String(format!("ours-{i}").repeat(24)),
-                cause: None,
-            })
+            Instruction::Assert(
+                Artifact {
+                    the: "post/title".parse().expect("valid attribute"),
+                    of: format!("post:{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("ours-{i}").repeat(24)),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )
         })
         .collect();
     replica
@@ -4719,12 +4855,15 @@ async fn it_downloads_one_block_at_a_time_over_ucan(ucan: UcanS3Address) -> Resu
     for round in 0..6 {
         let facts: Vec<_> = (0..120)
             .map(|i| {
-                Instruction::Assert(Artifact {
-                    the: "user/name".parse().expect("valid attribute"),
-                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
-                    is: Value::String(format!("resident-{round}-{i}").repeat(24)),
-                    cause: None,
-                })
+                Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse().expect("valid attribute"),
+                        of: format!("user:{round}-{i}").parse().expect("valid entity"),
+                        is: Value::String(format!("resident-{round}-{i}").repeat(24)),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
+                )
             })
             .collect();
         source
@@ -4832,12 +4971,15 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
     for round in 0..4 {
         let facts: Vec<_> = (0..120)
             .map(|i| {
-                Instruction::Assert(Artifact {
-                    the: "user/name".parse().expect("valid attribute"),
-                    of: format!("user:{round}-{i}").parse().expect("valid entity"),
-                    is: Value::String(format!("resident-{round}-{i}").repeat(24)),
-                    cause: None,
-                })
+                Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse().expect("valid attribute"),
+                        of: format!("user:{round}-{i}").parse().expect("valid entity"),
+                        is: Value::String(format!("resident-{round}-{i}").repeat(24)),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
+                )
             })
             .collect();
         source
@@ -4890,12 +5032,15 @@ async fn it_downloads_serially_while_pushing_concurrently(ucan: UcanS3Address) -
     // local state before joining a space.
     let local: Vec<_> = (0..80)
         .map(|i| {
-            Instruction::Assert(Artifact {
-                the: "post/title".parse().expect("valid attribute"),
-                of: format!("post:{i}").parse().expect("valid entity"),
-                is: Value::String(format!("ours-{i}").repeat(24)),
-                cause: None,
-            })
+            Instruction::Assert(
+                Artifact {
+                    the: "post/title".parse().expect("valid attribute"),
+                    of: format!("post:{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("ours-{i}").repeat(24)),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )
         })
         .collect();
     replica
@@ -5111,12 +5256,15 @@ async fn it_downloads_delegation_blobs_concurrently(ucan: UcanS3Address) -> Resu
     // walks a tree of mixed content rather than one uniform region.
     let rows: Vec<_> = (0..160)
         .map(|i| {
-            Instruction::Assert(Artifact {
-                the: "device/link".parse().expect("valid attribute"),
-                of: format!("device:{i}").parse().expect("valid entity"),
-                is: Value::String(format!("device-{i}").repeat(24)),
-                cause: None,
-            })
+            Instruction::Assert(
+                Artifact {
+                    the: "device/link".parse().expect("valid attribute"),
+                    of: format!("device:{i}").parse().expect("valid entity"),
+                    is: Value::String(format!("device-{i}").repeat(24)),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )
         })
         .collect();
     source.commit(stream::iter(rows)).perform(&operator).await?;
@@ -5309,12 +5457,15 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
         let facts: Vec<_> = chunk
             .iter()
             .map(|i| {
-                Instruction::Assert(Artifact {
-                    the: "user/name".parse().expect("valid attribute"),
-                    of: format!("user:{i}").parse().expect("valid entity"),
-                    is: Value::String(format!("resident-{i:04}").repeat(16)),
-                    cause: None,
-                })
+                Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse().expect("valid attribute"),
+                        of: format!("user:{i}").parse().expect("valid entity"),
+                        is: Value::String(format!("resident-{i:04}").repeat(16)),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
+                )
             })
             .collect();
         main_a
@@ -5342,9 +5493,9 @@ async fn it_integrates_a_first_contact_unscreened(s3: S3Address) -> Result<()> {
         };
         const OWN_FACTS: usize = 16;
         branch
-            .commit(stream::iter(
-                (0..OWN_FACTS).map(|i| Instruction::Assert(facts(i))),
-            ))
+            .commit(stream::iter((0..OWN_FACTS).map(|i| {
+                Instruction::Assert(facts(i), dialog_artifacts::Pick::All)
+            })))
             .perform(&operator)
             .await?;
         if covering {
@@ -5665,12 +5816,15 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
     let (alice_repo, alice_branch) =
         setup_repo_with_s3_remote(&operator, &profile, &s3, "stale-alice").await?;
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:alice".parse()?,
-            is: Value::String("Alice".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
     alice_branch.push().perform(&operator).await?;
@@ -5694,12 +5848,15 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
     // Alice advances upstream behind Bob's back. Bob's cache now names
     // a revision that is no longer the remote's head.
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:alice-again".parse()?,
-            is: Value::String("Alice again".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice-again".parse()?,
+                is: Value::String("Alice again".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
     alice_branch.push().perform(&operator).await?;
@@ -5712,12 +5869,15 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
 
     // Bob commits on his stale base and pushes.
     bob_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:bob".parse()?,
-            is: Value::String("Bob".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:bob".parse()?,
+                is: Value::String("Bob".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
     let refused = bob_branch.push().perform(&operator).await;
@@ -5751,6 +5911,93 @@ async fn it_refuses_a_push_whose_cached_upstream_went_stale(s3: S3Address) -> Re
     Ok(())
 }
 
+/// A publish the remote took, whose local record another handle of the
+/// branch wrote first, does not say the remote holds that record.
+///
+/// The record is the edition the cache cell holds, not the remote's head:
+/// a push that took it for what the remote holds would decode the record
+/// as a revision and rebase onto it. So the refusal says nothing of what
+/// the cell holds, as before a store said, and the remote keeps what was
+/// published.
+#[dialog_common::test]
+async fn it_does_not_take_a_refused_record_for_the_remote_head(s3: S3Address) -> Result<()> {
+    use dialog_common::Blake3Hash;
+    use dialog_effects::memory::{Current, Version};
+
+    let (operator, profile) = test_session_with_peer().await;
+    let (repo, branch) =
+        setup_repo_with_s3_remote(&operator, &profile, &s3, "record-conflict").await?;
+    branch
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
+        .perform(&operator)
+        .await?;
+    branch.push().perform(&operator).await?;
+
+    let origin = connect("origin", s3_site_address(&s3), repo.did(), &operator).await?;
+    let publishing = origin.branch("main").open().perform(&operator).await?;
+    publishing.fetch().perform(&operator).await?;
+    let other = origin.branch("main").open().perform(&operator).await?;
+    other.fetch().perform(&operator).await?;
+    let recorded = other
+        .cache()
+        .content()
+        .context("the push recorded where the remote stands")?;
+    other
+        .cache()
+        .publish(crate::RemoteEdition {
+            content: recorded.content,
+            version: Version::from(Blake3Hash::hash(b"recorded through another handle")),
+        })
+        .perform(&operator)
+        .await?;
+
+    branch
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice-again".parse()?,
+                is: Value::String("Alice again".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
+        .perform(&operator)
+        .await?;
+    let next = branch.revision().context("the branch has a revision")?;
+    let refused = publishing.publish(next.clone()).perform(&operator).await;
+
+    assert!(
+        matches!(
+            refused,
+            Err(crate::PublishRemoteBranchError::Publish(
+                crate::PublishError::VersionMismatch {
+                    current: Current::Unknown,
+                    ..
+                }
+            ))
+        ),
+        "the refused record is not reported as the remote's head, got: {refused:?}"
+    );
+
+    let observed = origin.branch("main").open().perform(&operator).await?;
+    observed.fetch().perform(&operator).await?;
+    assert_eq!(
+        observed.revision().map(|revision| revision.tree),
+        Some(next.tree),
+        "the remote keeps what was published"
+    );
+
+    Ok(())
+}
+
 /// The same stale-base race, but with the caller declaring it already
 /// knows where upstream stands.
 ///
@@ -5768,12 +6015,15 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
     let (alice_repo, alice_branch) =
         setup_repo_with_s3_remote(&operator, &profile, &s3, "assumed-alice").await?;
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:alice".parse()?,
-            is: Value::String("Alice".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
     alice_branch.push().perform(&operator).await?;
@@ -5793,12 +6043,15 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
     bob_branch.pull().perform(&operator).await?;
 
     alice_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:alice-again".parse()?,
-            is: Value::String("Alice again".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:alice-again".parse()?,
+                is: Value::String("Alice again".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
     alice_branch.push().perform(&operator).await?;
@@ -5810,12 +6063,15 @@ async fn it_refuses_an_assumed_push_whose_upstream_moved(s3: S3Address) -> Resul
         .expect("alice's upstream records what she published");
 
     bob_branch
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:bob".parse()?,
-            is: Value::String("Bob".into()),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:bob".parse()?,
+                is: Value::String("Bob".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
     let refused = bob_branch
@@ -5871,12 +6127,15 @@ async fn it_hydrates_a_spill_a_legacy_remote_holds_as_a_block(s3: S3Address) -> 
     let value = Value::String("legacy".repeat(1024));
     let spilled = NodeHash::from(value.to_reference());
     branch_a
-        .commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "doc/body".parse()?,
-            of: "doc:1".parse()?,
-            is: value.clone(),
-            cause: None,
-        })]))
+        .commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "doc/body".parse()?,
+                of: "doc:1".parse()?,
+                is: value.clone(),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator_a)
         .await?;
     let revision = branch_a.revision().expect("site A has a revision");

@@ -23,8 +23,9 @@ use futures_util::Stream;
 
 use crate::key::varkey::{ValueRef, parse_key_ref};
 use crate::{
-    ASSET_SIZE, BLOB_KEY_TAG, BlobKey, BlobRecord, COVERAGE_KEY_TAG, Datum, DialogArtifactsError,
-    ENTITY_KEY_TAG, Entity, Key, State, Value, ValueDataType, decode_value, tree::ArtifactTree,
+    ASSET_SIZE, BLOB_KEY_TAG, BlobKey, BlobRecord, CONTEXT_KEY_TAG, COVERAGE_KEY_TAG, Datum,
+    DialogArtifactsError, ENTITY_KEY_TAG, Entity, Key, State, Value, ValueDataType, decode_value,
+    tree::ArtifactTree,
 };
 
 /// One content-addressed block a push must ship to the remote before
@@ -113,7 +114,10 @@ pub fn shipment_ref(
     // carries the whole-value hash purely as an identity marker, so it
     // names a "spilled" hash even for values that were stored inline and
     // have no block at all (see `key::history::coverage_key`).
-    if removed || tag == COVERAGE_KEY_TAG {
+    //
+    // The context region references nothing either: its keys name origins
+    // and its values are watermarks.
+    if removed || tag == COVERAGE_KEY_TAG || tag == CONTEXT_KEY_TAG {
         return Ok(None);
     }
     if !matches!(value, State::Added(_)) {
@@ -134,15 +138,21 @@ pub fn shipment_ref(
 fn asset_ref(key: &Key) -> Option<ShipmentRef> {
     let parts = parse_key_ref(key.as_ref())?;
     if parts.attribute.as_ref() != ASSET_SIZE.as_bytes()
-        || parts.value_type != ValueDataType::UnsignedInt
+        || !matches!(
+            parts.value_type,
+            ValueDataType::UnsignedInt | ValueDataType::Number
+        )
     {
         return None;
     }
     let ValueRef::Inline(payload) = parts.value else {
         return None;
     };
-    let (Value::UnsignedInt(size), _) = decode_value(ValueDataType::UnsignedInt, payload)? else {
-        return None;
+    // The number band reads a whole number as an integer.
+    let size = match decode_value(parts.value_type, payload)?.0 {
+        Value::UnsignedInt(size) => size,
+        Value::SignedInt(size) => u128::try_from(size).ok()?,
+        _ => return None,
     };
     let entity: Entity = from_utf8(&parts.entity).ok()?.parse().ok()?;
     Some(ShipmentRef::BlobAdded {
@@ -252,12 +262,15 @@ mod tests {
             .apply(
                 &store,
                 &mut delta,
-                stream::iter(vec![Instruction::Assert(Artifact {
-                    the: "doc/body".parse().unwrap(),
-                    of: "doc:1".parse().unwrap(),
-                    is: value.clone(),
-                    cause: None,
-                })]),
+                stream::iter(vec![Instruction::Assert(
+                    Artifact {
+                        the: "doc/body".parse().unwrap(),
+                        of: "doc:1".parse().unwrap(),
+                        is: value.clone(),
+                        cause: None,
+                    },
+                    crate::Pick::All,
+                )]),
             )
             .await?;
         delta.flush_into(&store);
@@ -295,7 +308,10 @@ mod tests {
         base.apply(
             &store,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(artifact.clone())]),
+            stream::iter(vec![Instruction::Assert(
+                artifact.clone(),
+                crate::Pick::All,
+            )]),
         )
         .await?;
         delta.flush_into(&store);
@@ -357,7 +373,10 @@ mod tests {
                 &store,
                 &mut delta,
                 Some(Version::new(Origin::from([1u8; 32]), Edition::new(0))),
-                stream::iter(vec![Instruction::Assert(artifact.clone())]),
+                stream::iter(vec![Instruction::Assert(
+                    artifact.clone(),
+                    crate::Pick::All,
+                )]),
             )
             .await?;
         delta.flush_into(&store);
@@ -411,7 +430,10 @@ mod tests {
                 &store,
                 &mut delta,
                 Some(Version::new(Origin::from([2u8; 32]), Edition::new(0))),
-                stream::iter(vec![Instruction::Assert(artifact.clone())]),
+                stream::iter(vec![Instruction::Assert(
+                    artifact.clone(),
+                    crate::Pick::All,
+                )]),
             )
             .await?;
         delta.flush_into(&store);
@@ -445,12 +467,15 @@ mod tests {
             .apply(
                 &store,
                 &mut delta,
-                stream::iter(vec![Instruction::Assert(Artifact {
-                    the: "user/name".parse().unwrap(),
-                    of: "user:1".parse().unwrap(),
-                    is: Value::String("Alice".to_string()),
-                    cause: None,
-                })]),
+                stream::iter(vec![Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse().unwrap(),
+                        of: "user:1".parse().unwrap(),
+                        is: Value::String("Alice".to_string()),
+                        cause: None,
+                    },
+                    crate::Pick::All,
+                )]),
             )
             .await?;
         delta.flush_into(&store);

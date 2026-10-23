@@ -41,10 +41,10 @@ Each copy is called an index. The first byte of the key, the tag, says which ind
 | `01` | AEV | attribute, entity, value | everything with an attribute |
 | `02` | VAE | value, attribute, entity | things that have a value |
 | `03` | History | version, entity, attribute, value | the log of changes |
-| `04` | Blob | hash | stored blobs |
+| `04` | Asset | hash | assets, in trees written before assets were recorded as facts |
 | `05` | Coverage | version, entity, attribute, value hash | what a change removed |
 
-The first three hold the facts themselves. The last three are Dialog's own bookkeeping, and later chapters come back to them.
+The first three hold the facts themselves. The last three are Dialog's own bookkeeping, and later chapters come back to them. Nothing is added under tag `04` any more. A stored asset is recorded by an ordinary fact instead (see [Blocks and Storage](./storage.md)), and the entries older trees hold there are still read.
 
 ## A key, byte by byte
 
@@ -170,9 +170,9 @@ Here is the EAV key for *the grocery name of item 1 is "Oat milk"*:
 
 The key starts with the tag, `00`. Then each part follows, written so that comparing the raw bytes gives the same answer as comparing the parts themselves:
 
-- **Strings** (the entity URI, the attribute, and string values) are written as their UTF-8 bytes followed by a `00` terminator. Any `00` inside the string is written as `00 FF`, so the terminator is never ambiguous.
-- **The type byte** of the value comes right before the value. It is the value's type number from the [Facts](./facts.md) chapter; `03` is String.
-- **Numbers** are fixed width and big-endian, so bigger numbers sort later. Unsigned integers take 16 bytes. Signed integers take 16 bytes with the sign bit flipped, so negative numbers sort before positive ones. Floats take 8 bytes: a non-negative float has its sign bit flipped, a negative one has every bit flipped, so they sort numerically.
+- **Strings** (the entity URI, the attribute, and text values) are written as their UTF-8 bytes followed by a `00` terminator. Any `00` inside the string is written as `00 FF`, so the terminator is never ambiguous.
+- **The type byte** of the value comes right before the value. It is the value's type number from the [Facts](./facts.md) chapter; `03` is text.
+- **Numbers** all carry the type byte `09`, and are written as decimals, in the key encoding [SQLite4](https://sqlite.org/src4/doc/trunk/www/key_encoding.wiki) designed. The first byte says the number's sign and how big it is. The digits follow, two decimal digits to a byte, and the last byte is marked, so a number ends itself and needs no terminator. A negative number has every byte after the first inverted. Bigger numbers sort later, whether they are whole or not, and a number has exactly one encoding: the quantity `2` is the two bytes `18 04`, and so are `2.0` and `+2`.
 - **Booleans** are one byte, `00` for false and `01` for true.
 
 The terminator is what makes prefixes sort first. `item:1` ends with `00`, and `item:10` continues with `30` (the character `0`) at the same position. Since `00` is smaller, every key for `item:1` comes before every key for `item:10`, just as the strings would. Nothing about item 1 ever lands in the middle of item 10.
@@ -457,7 +457,7 @@ Put Alice's keys in byte order and each index turns into a set of neat runs. Par
 </svg>
 </figure>
 
-Every fact about `item:2` is one contiguous run in EAV. Every `demo.grocery/done` is one run in AEV. In VAE the type byte comes right after the tag, so every Boolean sorts before every string: Boolean is type `02` and String is type `03`. Among the strings, `"Eggs"` and `"Oat milk"` come before `"breakfast"`, because uppercase letters have smaller byte values than lowercase ones.
+Every fact about `item:2` is one contiguous run in EAV. Every `demo.grocery/done` is one run in AEV. In VAE the type byte comes right after the tag, so every Boolean sorts before every string: Boolean is type `02` and text is type `03`. Among the strings, `"Eggs"` and `"Oat milk"` come before `"breakfast"`, because uppercase letters have smaller byte values than lowercase ones.
 
 A query is mostly a matter of picking the index whose runs match the question, then reading one run.
 
@@ -471,10 +471,10 @@ That entry has a small payload next to its key. The payload holds no part of the
 
 ## Big values spill
 
-A key holding a whole photo would make a terrible key. So a value whose encoded form is longer than 4,096 bytes spills. The value's place in the key keeps only the encoding of its first 64 bytes, and the key ends with a `01` byte and the 32-byte BLAKE3 hash of the whole value. In EAV and AEV that tail comes right after the value; in VAE it comes after the entity, the key's last part. The value itself is stored on its own, as a block named by that hash:
+A key holding a whole photo would make a terrible key. So every tree sets a limit on how long a value in a key may be, and a value whose encoded form is longer than that limit spills. The value's place in the key keeps only the encoding of a short prefix of it, and the key ends with a `01` byte and the 32-byte BLAKE3 hash of the whole value. In EAV and AEV that tail comes right after the value; in VAE it comes after the entity, the key's last part. The value itself is stored on its own, in the asset store, named by that hash:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 740 190" width="740" height="190" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A spilled value: the key keeps a 64-byte prefix and the whole value's hash; the value is its own block">
+<svg class="dg" viewBox="0 0 740 190" width="740" height="190" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A spilled value: the key keeps a prefix and the whole value's hash; the value is stored on its own">
 <defs><marker id="spill-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <text class="title" x="10" y="18">EAV key of a spilled value</text>
 <rect class="shade" x="10" y="34" width="26" height="30"/>
@@ -486,13 +486,13 @@ A key holding a whole photo would make a terrible key. So a value whose encoded 
 <rect class="shade" x="302" y="34" width="26" height="30"/>
 <text x="315" y="54" text-anchor="middle">03</text>
 <rect class="value" x="330" y="34" width="180" height="30"/>
-<text class="value" x="420" y="54" text-anchor="middle">first 64 bytes, 00</text>
+<text class="value" x="420" y="54" text-anchor="middle">its prefix, 00</text>
 <rect class="shade" x="512" y="34" width="26" height="30"/>
 <text x="525" y="54" text-anchor="middle">01</text>
 <rect class="hash" x="540" y="34" width="180" height="30"/>
 <text class="hash" x="630" y="54" text-anchor="middle">blake3(value)</text>
 <path class="wire" d="M330,70 v4 H510 v-4"/>
-<text class="label small" x="420" y="88" text-anchor="middle">sorts by its first 64 bytes</text>
+<text class="label small" x="420" y="88" text-anchor="middle">sorts by its prefix</text>
 <path class="wire" d="M512,70 v4 H538 v-4"/>
 <text class="label small" x="525" y="88" text-anchor="middle">spilled</text>
 <path class="wire" d="M540,70 v4 H720 v-4"/>
@@ -500,16 +500,22 @@ A key holding a whole photo would make a terrible key. So a value whose encoded 
 <path class="wire" d="M630,96 V140 H530" marker-end="url(#spill-arrow)"/>
 <rect class="value" x="310" y="120" width="216" height="40"/>
 <text class="value" x="418" y="138" text-anchor="middle">the whole value</text>
-<text class="small muted" x="418" y="153" text-anchor="middle">its own block, found by its hash</text>
+<text class="small muted" x="418" y="153" text-anchor="middle">stored on its own, found by its hash</text>
 </svg>
 </figure>
 
-The prefix keeps a spilled value sorting by its first 64 bytes, so a range scan over strings still finds it in about the right neighborhood. The hash keeps two different long values from sharing a key. A reader tells the two shapes apart by what is left after the key's last part: nothing for an inline value, exactly 33 bytes for a spilled one.
+The prefix keeps a spilled value sorting by how it starts, so a range scan over strings still finds it in about the right neighborhood. The hash keeps two different long values from sharing a key. A reader tells the two shapes apart by what is left after the key's last part: nothing for an inline value, exactly 33 bytes for a spilled one.
 
-The two numbers, 4,096 and 64, are not fixed forever. They belong to the tree's format, which every node carries, written out only where it differs from these defaults, as the [Nodes](./nodes.md) chapter shows. A reader that guessed them wrong would build different keys and miss facts, so they are among the few settings a reader must understand.
+The limit and the length of the prefix are not constants of Dialog. They are settings of the tree, and every node carries them in its header, as the [Nodes](./nodes.md) chapter shows. Unless a tree says otherwise, the limit is 4,096 bytes and the prefix is the value's first 64 bytes. A reader that guessed them wrong would build different keys and miss facts, so they are among the few settings a reader must understand.
 
 <div class="aside">
 
-**Implementations.** Keys are built by `build_key` in [`dialog-artifacts/src/key/varkey.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/key/varkey.rs). The string and number encodings are in [`artifacts/ordkey.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/ordkey.rs) and [`artifacts/ordvalue.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/ordvalue.rs). Spilling is decided by `EncodedValue::new` in [`key.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/key.rs).
+**Before 0.3.** Releases before version 0.3.0 kept natural numbers, integers and floats in three separate bands of the index, each under its own type byte, so `2` and `2.0` were different keys. A tree written that way can still be read, but not added to: a commit on it fails with `NeedsMigration`, and `Branch::migrate` rewrites the branch into the layout this chapter describes.
+
+</div>
+
+<div class="aside">
+
+**Implementations.** Keys are built by `build_key` in [`dialog-artifacts/src/key/varkey.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/key/varkey.rs). The string encoding is in [`artifacts/ordkey.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/ordkey.rs) and [`artifacts/ordvalue.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/artifacts/ordvalue.rs), and the number encoding is the [`dialog-number`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-number) crate. Spilling is decided by `EncodedValue::new` in [`key.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/key.rs).
 
 </div>

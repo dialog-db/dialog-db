@@ -2,7 +2,7 @@
 
 mod credential_store;
 mod loader;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod native;
 mod router;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -26,7 +26,7 @@ use crate::provider::{Space, Volatile};
 use crate::resource::Pool;
 
 pub use credential_store::CredentialStore;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use native::NativeSpace;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub use web::{WebOpfsSpace, WebSpace};
@@ -296,6 +296,14 @@ impl Storage<VolatileSpace> {
     /// Create a volatile (in-memory) environment for testing.
     pub fn volatile() -> Self {
         Self::new()
+    }
+
+    /// The archive provider of the space `did`, if it is mounted here: the
+    /// blocks only, so a test harness can reach what the space retains
+    /// (see [`Volatile::retain_blocks`]). No credential is handed over.
+    #[cfg(any(test, feature = "helpers"))]
+    pub fn volatile_archive(&self, did: &Did) -> Option<Volatile> {
+        self.loader.space(did).map(|space| space.archive)
     }
 }
 

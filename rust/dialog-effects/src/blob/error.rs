@@ -5,11 +5,19 @@ use std::error::Error;
 use thiserror::Error as ThisError;
 
 use crate::Rejection;
-use dialog_capability::access::AuthorizeError;
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_capability::{DialogCapabilityPerformError, StorageError};
 
 /// Errors that can occur during blob operations.
-#[derive(Debug, ThisError)]
+///
+/// Serializable for the same reason [`ArchiveError`] is: a blob store
+/// can be on the other side of a network, and a caller that only got
+/// the rendering of a failure cannot tell a digest mismatch -- where
+/// retrying sends the same wrong bytes -- from a backend that was
+/// briefly down.
+///
+/// [`ArchiveError`]: crate::archive::ArchiveError
+#[derive(Debug, ThisError, serde::Serialize, serde::Deserialize)]
 pub enum BlobError {
     /// The blob was not found.
     #[error("Blob not found: {0}")]
@@ -50,6 +58,15 @@ pub enum BlobError {
     /// The storage backend failed.
     #[error("Storage error: {0}")]
     Storage(String),
+}
+
+impl AuthorizationFailure for BlobError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 impl From<StorageError> for BlobError {

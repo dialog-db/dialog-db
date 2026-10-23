@@ -14,11 +14,21 @@
 //!
 //! Args: `<size> <iterations>` (defaults: 1000 size, 200 iterations).
 
+#![cfg_attr(target_arch = "wasm32", allow(unused))]
+
+#[cfg(not(target_arch = "wasm32"))]
 #[path = "../src/helpers.rs"]
 #[allow(dead_code, unused_imports)]
 mod helpers;
+#[cfg(not(target_arch = "wasm32"))]
 use helpers::BenchEnv;
 
+/// The profiler drives a native tokio runtime; there is nothing to
+/// profile this way on wasm.
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let mut args = std::env::args().skip(1);
     let size: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(1_000);

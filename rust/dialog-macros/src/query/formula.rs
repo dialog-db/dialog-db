@@ -99,6 +99,49 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
         None
     };
+    // A field typed `N::Signed`, for a scheme parameter `N`, is the
+    // scheme's *signed image*: its cell is bounded by the signed
+    // numeric types and labeled with the parameter, flagged signed, so
+    // inference types it as the scheme's instantiation read as a
+    // number that may be negative, without sharing the scheme's type
+    // variable.
+    let signed_image_of = |ty: &syn::Type| -> Option<syn::Ident> {
+        if let syn::Type::Path(tp) = ty
+            && tp.qself.is_none()
+            && tp.path.segments.len() == 2
+            && tp.path.segments[1].ident == "Signed"
+            && tp.path.segments[0].arguments.is_none()
+            && tp.path.segments[1].arguments.is_none()
+        {
+            let ident = &tp.path.segments[0].ident;
+            if scheme_params.contains(ident) {
+                return Some(ident.clone());
+            }
+        }
+        None
+    };
+
+    // `#[formula(cached)]` asks the engine to keep this formula's outputs:
+    // the same inputs are computed once for as long as the environment's
+    // formula cache remembers them.
+    let mut cached = false;
+    for attribute in input
+        .attrs
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("formula"))
+    {
+        let parsed = attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("cached") {
+                cached = true;
+                Ok(())
+            } else {
+                Err(meta.error("unknown formula option; expected `cached`"))
+            }
+        });
+        if let Err(error) = parsed {
+            return error.to_compile_error().into();
+        }
+    }
 
     // Extract fields from the struct
     let fields = match &input.data {
@@ -218,8 +261,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
             // A scheme field's cell carries the bound of its type
             // parameter and the parameter name as the scheme label;
             // a concrete field's cell carries its singleton kind.
-            let (data_type, scheme) = match scheme_param_of(ty) {
-                Some(param) => {
+            let (data_type, scheme) = match (scheme_param_of(ty), signed_image_of(ty)) {
+                (Some(param), _) => {
                     let label =
                         syn::LitStr::new(&param.to_string(), proc_macro2::Span::call_site());
                     (
@@ -231,7 +274,19 @@ pub fn derive(input: TokenStream) -> TokenStream {
                         Some(quote! { .scheme(#label) }),
                     )
                 }
-                None => (type_to_value_data_type(ty), None),
+                (None, Some(param)) => {
+                    let label =
+                        syn::LitStr::new(&param.to_string(), proc_macro2::Span::call_site());
+                    (
+                        quote! {
+                            Some(dialog_query::type_system::Type::from(
+                                dialog_query::type_system::Primitive::SIGNED_NUMERIC,
+                            ))
+                        },
+                        Some(quote! { .signed_of(#label) }),
+                    )
+                }
+                (None, None) => (type_to_value_data_type(ty), None),
             };
 
             if *is_output {
@@ -328,6 +383,31 @@ pub fn derive(input: TokenStream) -> TokenStream {
         dialog_query::FormulaQuery: ::std::convert::From<#query_name #ty_generics>
     ));
 
+    // The cached resolve: the input values are read once, keyed with the
+    // formula, and the outputs computed only when the cache does not hold
+    // them. Without `#[formula(cached)]` the trait's default runs instead.
+    let input_count = input_field_names.len();
+    let resolve_with = if cached {
+        quote! {
+            fn resolve_with(
+                bindings: &mut dialog_query::Bindings,
+                cache: &dialog_query::formula::FormulaCache,
+            ) -> ::std::result::Result<::std::vec::Vec<dialog_query::Match>, dialog_query::EvaluationError> {
+                let inputs: [dialog_query::Value; #input_count] =
+                    [#(bindings.resolve(#input_field_name_lits)?),*];
+                let outputs = cache.outputs::<Self>(&inputs, || {
+                    let [#(#input_field_names),*] = inputs.clone();
+                    ::std::result::Result::Ok(#struct_name::compute(#input_name {
+                        #(#input_field_names: #input_field_names.try_into()?),*
+                    }))
+                })?;
+                dialog_query::formula::emit(bindings, &outputs)
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
             /// Input structure for #struct_name formula
             ///
@@ -364,13 +444,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 fn evaluate<'__a, __Env, __M: dialog_query::Selection + '__a>(
                     self,
                     selection: __M,
-                    _env: &'__a __Env,
+                    env: &'__a __Env,
                 ) -> impl dialog_query::Selection + '__a
                 where
                     __Env: dialog_query::Scope<'__a>,
                 {
                     let formula: dialog_query::FormulaQuery = self.into();
-                    formula.evaluate(selection)
+                    formula.evaluate(selection, env)
                 }
 
                 fn realize(&self, source: dialog_query::Match) -> std::result::Result<Self::Conclusion, dialog_query::EvaluationError> {
@@ -456,6 +536,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 fn compute(input: Self::Input) -> ::std::vec::Vec<Self> {
                     #struct_name::compute(input)
                 }
+
+                #resolve_with
 
                 fn write(&self, bindings: &mut dialog_query::Bindings) -> ::std::result::Result<(), dialog_query::EvaluationError> {
                     #(#write_statements)*

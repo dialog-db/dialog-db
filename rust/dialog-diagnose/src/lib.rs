@@ -5,14 +5,15 @@
 //!
 //! A Terminal User Interface (TUI) for debugging and inspecting Dialog databases.
 //! This crate provides interactive tools to explore database contents, view facts,
-//! and navigate the prolly tree structure that underpins Dialog DB.
+//! and navigate the probabilistic search tree structure that underpins Dialog DB.
 //!
 //! ## Features
 //!
 //! - **Facts Viewer**: Browse and inspect database facts in a table format
-//! - **Tree Explorer**: Navigate the prolly tree structure with expandable nodes
+//! - **Tree Explorer**: Navigate the probabilistic search tree structure with expandable nodes
 //! - **Interactive Navigation**: Keyboard-driven interface for efficient exploration
 //! - **CSV Import**: Load data from CSV files for analysis
+//! - **Context Readout**: Profile the causal context a branch head publishes
 //!
 //! ## Usage
 //!
@@ -28,6 +29,14 @@
 //! cargo run --bin diagnose -- --tree <csv_file>
 //! ```
 //!
+//! Or, to profile the causal context of a branch head (the dag-cbor
+//! `revision` cell of a branch, as a filesystem replica stores it under
+//! `memory/<space>/branch/<name>/revision`):
+//!
+//! ```bash
+//! cargo run --bin diagnose -- --head <revision_file>
+//! ```
+//!
 //! ## Key Bindings
 //!
 //! - `q` - Quit the application
@@ -38,6 +47,9 @@
 
 mod cli;
 pub use cli::*;
+
+mod context;
+pub use context::*;
 
 mod source;
 pub use source::*;

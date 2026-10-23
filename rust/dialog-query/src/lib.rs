@@ -46,6 +46,11 @@ pub mod formula;
 /// dialog-query, so it can only ever be a dev-dependency here).
 #[cfg(test)]
 pub mod helpers;
+
+pub mod identity;
+/// The identities an earlier release gave attributes and concepts,
+/// for migrating what it stored under them.
+pub mod migration;
 /// Negation support for excluding matching results.
 pub mod negation;
 /// Left-join projection realizing optional (`maybe`) concept fields.
@@ -61,6 +66,8 @@ pub mod premise;
 
 /// Query trait and store abstractions for polymorphic querying.
 pub mod query;
+/// Sharing one evaluation of a rule body among its heads.
+pub mod recall;
 /// The group-by fold behind the `reduce` clause on deductive rules.
 pub mod reduce;
 /// Resolver premises resolved by idempotent effects.
@@ -87,6 +94,11 @@ pub mod term;
 
 mod memo;
 
+/// Numbers through the query engine: lenses, constants, typed writes,
+/// derived rows and encodings, pinned as tests.
+#[cfg(test)]
+mod number_tests;
+
 mod sort_order;
 pub use sort_order::*;
 
@@ -103,7 +115,7 @@ pub use attribute::query::{AttributeQuery, DynamicAttributeQuery};
 pub use attribute::*;
 pub use claim::Claim;
 pub use concept::descriptor::{ConceptConclusion, ConceptDescriptor, ConceptFieldDescriptor};
-pub use concept::query::{ConceptQuery, ConceptRules};
+pub use concept::query::{ConceptQuery, ConceptRules, Installed};
 pub use concept::{Concept, ConceptField, Conclusion, ConformingField};
 pub use constraint::Constraint;
 pub use descriptor::Descriptor;
@@ -122,6 +134,8 @@ pub use reduce::{Aggregator, Reduce, ReduceEntry, ReduceSpec};
 pub use resolver::*;
 pub use rule::*;
 pub use schema::*;
+// The pick a field reads under, from the artifacts crate.
+pub use dialog_artifacts::Pick;
 pub use scope::*;
 pub use selection::*;
 pub use session::*;

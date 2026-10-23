@@ -4,21 +4,22 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+use crate::repository::branch::context::head_context;
 use anyhow::Result;
 use dialog_artifacts::history::{History as _, Version};
 use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Instruction, Value};
 use dialog_capability::{Fork, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_peer::helpers::test_session_with_peer;
-use dialog_query::attribute::The;
+use dialog_query::attribute::Relation;
 use dialog_query::query::Output;
 use dialog_query::{Query, Term, the};
 use dialog_storage::provider::storage::VolatileSpace;
-use futures_util::{StreamExt as _, stream};
+use futures_util::StreamExt as _;
 
 use crate::helpers::test_repo;
 use crate::repository::source::SourceRef;
@@ -100,12 +101,13 @@ where
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Holds
         + ConditionalSync
         + 'static,
 {
     let mut rows: Vec<String> = layer
         .select(dialog_query::AttributeQuery::from(
-            Term::<The>::from(the!("user/name"))
+            Term::<Relation>::from(the!("user/name"))
                 .of(Term::<Entity>::var("e"))
                 .is(Term::<String>::var("v")),
         ))
@@ -324,10 +326,7 @@ async fn it_keeps_one_origin_across_consecutive_transactions() -> Result<()> {
         vec![second.version(), first.version(), base.version()]
     );
     // And the head's context carries both origins' watermarks.
-    let context = second
-        .context
-        .clone()
-        .expect("a minted head carries its context");
+    let context = head_context(&snapshot, &operator).await?;
     assert!(context.observes(&base.version()));
     assert!(context.observes(&second.version()));
     Ok(())
@@ -405,12 +404,6 @@ async fn it_keeps_the_revision_for_a_noop() -> Result<()> {
         .await?;
     assert_eq!(unchanged, base, "retracting an absent fact mints nothing");
 
-    let unchanged = snapshot
-        .commit(stream::iter(Vec::<Instruction>::new()))
-        .perform(&operator)
-        .await?;
-    assert_eq!(unchanged, base);
-
     // `allow_empty` mints anyway: the lineage advances, and the
     // revision's own records still land in the tree.
     let empty = snapshot
@@ -482,7 +475,7 @@ async fn it_surfaces_pending_changes_in_the_transaction_query() -> Result<()> {
         let mut rows: Vec<String> = transaction
             .query()
             .select(dialog_query::AttributeQuery::from(
-                Term::<The>::from(the!("user/name"))
+                Term::<Relation>::from(the!("user/name"))
                     .of(Term::<Entity>::var("e"))
                     .is(Term::<String>::var("v")),
             ))
@@ -554,14 +547,20 @@ async fn it_rejects_writes_to_the_reserved_namespace() -> Result<()> {
         cause: None,
     };
     let result = snapshot
-        .commit(stream::iter(vec![Instruction::Assert(forged)]))
+        .transaction()
+        .integrate(
+            [Instruction::Assert(forged, dialog_artifacts::Pick::All)]
+                .into_iter()
+                .collect(),
+        )
+        .commit()
         .perform(&operator)
         .await;
     assert!(
         matches!(
             result,
             Err(CommitError::Artifact(
-                dialog_artifacts::DialogArtifactsError::ReservedAttribute(_)
+                dialog_artifacts::DialogArtifactsError::ReservedRelation(_)
             ))
         ),
         "writes to the reserved namespace must be refused: {result:?}"
@@ -612,18 +611,18 @@ async fn it_induces_on_commit() -> Result<()> {
     let increment: InductiveRule = serde_json::from_value(serde_json::json!({
         "description": "Increment a counter on an increment command",
         "assert!": {
-            "with": { "count": { "the": "counter/count", "as": "UnsignedInteger" } }
+            "with": { "count": { "the": "counter/count", "as": "natural:" } }
         },
         "when": [
             {
                 "assert": {
-                    "with": { "counter": { "the": "cmd.increment/counter", "as": "Entity" } }
+                    "with": { "counter": { "the": "cmd.increment/counter", "as": "entity:" } }
                 },
                 "where": { "counter": { "?": { "name": "this" } } }
             },
             {
                 "assert": {
-                    "with": { "count": { "the": "counter/count", "as": "UnsignedInteger" } }
+                    "with": { "count": { "the": "counter/count", "as": "natural:" } }
                 },
                 "where": {
                     "this": { "?": { "name": "this" } },
@@ -716,9 +715,9 @@ async fn it_resolves_rules_pending_in_the_transaction() -> Result<()> {
     let (operator, _, _, _, snapshot) = staged().await?;
     let rule = {
         let json = serde_json::json!({
-            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                "assert": { "with": { "name": { "the": "org/person-name", "as": "text:" } } },
                 "where": {
                     "this": { "?": { "name": "this" } },
                     "name": { "?": { "name": "name" } }
@@ -843,9 +842,16 @@ async fn it_commits_through_a_cold_handle() -> Result<()> {
     let (operator, _, repo, _, snapshot) = staged().await?;
     let cold = repo.snapshot(snapshot.revision());
     let minted = cold
-        .commit(stream::iter(vec![Instruction::Assert(fact(
-            "user:bob", "Bob",
-        ))]))
+        .transaction()
+        .integrate(
+            [Instruction::Assert(
+                fact("user:bob", "Bob"),
+                dialog_artifacts::Pick::All,
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .commit()
         .canonicalize()
         .perform(&operator)
         .await?;

@@ -21,11 +21,11 @@ extern crate self as dialog_common;
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => {{
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
         {
             web_sys::console::log_1(&format!($($arg)*).into());
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         {
             println!($($arg)*);
         }
@@ -36,6 +36,8 @@ mod sync;
 pub use sync::*;
 
 pub mod as_bytes;
+
+pub mod random;
 
 pub mod time;
 
@@ -56,7 +58,7 @@ mod impossible;
 pub use impossible::*;
 
 mod holds;
-pub use holds::{Held, Holdings, Holds};
+pub use holds::{Held, Holdings, Holds, held_key};
 
 pub mod flight;
 pub use flight::{Flight, WeakFlight};

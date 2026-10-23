@@ -5,6 +5,9 @@ use dialog_varsig::eddsa::Ed25519Signature;
 // Platform-specific implementations
 pub mod native;
 
+// A key held outside this process, on every target.
+pub mod external;
+
 // WebCrypto is only available in web browsers (wasm32 + unknown OS)
 // Not available in WASI or other WASM environments
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -133,10 +136,14 @@ impl Eq for Ed25519VerifyingKey {}
 /// This enum abstracts over different Ed25519 signing implementations:
 /// - `Native`: Uses `ed25519_dalek::SigningKey` for native platforms
 /// - `WebCrypto`: Uses the browser's `WebCrypto` API (web WASM only)
+/// - `External`: A key held outside this process, which signs on request
 #[derive(Debug, Clone)]
 pub enum Ed25519SigningKey {
     /// Native signing key using `ed25519_dalek`.
     Native(native::SigningKey),
+
+    /// A key held outside this process. See [`external`].
+    External(external::SigningKey),
 
     /// WebCrypto signing key (web WASM only).
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -149,6 +156,7 @@ impl Ed25519SigningKey {
     pub fn verifying_key(&self) -> Ed25519VerifyingKey {
         match self {
             Self::Native(key) => Ed25519VerifyingKey::Native(key.verifying_key()),
+            Self::External(key) => Ed25519VerifyingKey::Native(key.verifying_key()),
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             Self::WebCrypto(key) => Ed25519VerifyingKey::WebCrypto(key.verifying_key()),
         }
@@ -173,7 +181,7 @@ impl Ed25519SigningKey {
         #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         {
             let mut seed = [0u8; 32];
-            getrandom::getrandom(&mut seed).map_err(Ed25519KeyError::Rng)?;
+            dialog_common::random::fill(&mut seed).map_err(Ed25519KeyError::Rng)?;
             Ok(Self::Native(ed25519_dalek::SigningKey::from_bytes(&seed)))
         }
     }
@@ -192,6 +200,7 @@ impl Ed25519SigningKey {
     pub async fn export(&self) -> Result<KeyExport, Ed25519KeyError> {
         match self {
             Self::Native(key) => Ok(KeyExport::Extractable(key.to_bytes().to_vec())),
+            Self::External(_) => Err(Ed25519KeyError::External),
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             Self::WebCrypto(key) => Ok(key.export().await?),
         }
@@ -232,6 +241,12 @@ impl Ed25519SigningKey {
     }
 }
 
+impl From<external::SigningKey> for Ed25519SigningKey {
+    fn from(key: external::SigningKey) -> Self {
+        Self::External(key)
+    }
+}
+
 impl From<ed25519_dalek::SigningKey> for Ed25519SigningKey {
     fn from(key: ed25519_dalek::SigningKey) -> Self {
         Self::Native(key)
@@ -263,6 +278,7 @@ impl Ed25519SigningKey {
             Self::Native(key) => Ok(X25519SecretKey::Native(native::AgreementSecretKey::from(
                 key.to_scalar_bytes(),
             ))),
+            Self::External(_) => Err(Ed25519KeyError::AgreementKeyUnavailable),
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             Self::WebCrypto(key) => key
                 .agreement_key()
@@ -285,6 +301,7 @@ impl Ed25519SigningKey {
                 let sig = key.try_sign(msg)?;
                 Ok(Ed25519Signature::from(sig))
             }
+            Self::External(key) => key.sign_bytes(msg).await,
             #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
             Self::WebCrypto(key) => key.sign_bytes(msg).await,
         }
@@ -443,7 +460,7 @@ impl X25519SecretKey {
     #[allow(clippy::unused_async)] // async is needed on WASM
     pub(crate) async fn ephemeral() -> Result<Self, Ed25519KeyError> {
         let mut secret = [0u8; 32];
-        getrandom::getrandom(&mut secret)
+        dialog_common::random::fill(&mut secret)
             .map_err(|e| Ed25519KeyError::RandomSource(e.to_string()))?;
 
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]

@@ -48,7 +48,7 @@ use dialog_search_tree::{
 use futures_util::Stream;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::ops::RangeInclusive;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::history::{RecordEntries, Version};
 use crate::tree::{ArtifactNodeCache, ArtifactTree, Stamp, WriteScope, write_instructions};
@@ -261,6 +261,9 @@ pub struct BufferedBatch {
     manifest: Manifest,
     changed: bool,
     slot: Option<SpineSlot>,
+    /// The root the batch opened over: the key its spine goes back into
+    /// the slot under when the batch is [released](Self::release).
+    base: NodeHash,
     /// The values this batch spilled, staged until [`seal`](Self::seal)
     /// hands them to the caller's delta with the batch's nodes.
     staged: ArchiveDelta,
@@ -283,20 +286,51 @@ pub struct BufferedBatch {
 /// in `dialog-search-tree` and `it_commits_identically_when_the_spine_is_reused`
 /// here), and dropping the slot at any point only costs the next commit a
 /// fresh open.
+///
+/// Clones share one slot. The slot lives as long as a clone does; whoever
+/// keeps a registry of slots without keeping them alive holds a
+/// [`WeakSpineSlot`] instead, so a spine goes with the last handle that
+/// could commit through it.
 #[derive(Clone, Default)]
 pub struct SpineSlot {
     #[allow(clippy::type_complexity)]
     slot: Arc<Mutex<Option<(NodeHash, BufferedArtifactTree)>>>,
 }
 
+/// A [`SpineSlot`] held without keeping it alive: upgrades to the slot
+/// while some clone of it lives, and to nothing once the last clone went,
+/// its spine with it.
+#[derive(Clone, Default)]
+pub struct WeakSpineSlot {
+    #[allow(clippy::type_complexity)]
+    slot: Weak<Mutex<Option<(NodeHash, BufferedArtifactTree)>>>,
+}
+
+impl Debug for WeakSpineSlot {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("WeakSpineSlot")
+            .field("alive", &(self.slot.strong_count() > 0))
+            .finish()
+    }
+}
+
+impl WeakSpineSlot {
+    /// A handle on no slot: upgrades to nothing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The slot, while a clone of it lives.
+    pub fn upgrade(&self) -> Option<SpineSlot> {
+        self.slot.upgrade().map(|slot| SpineSlot { slot })
+    }
+}
+
 impl Debug for SpineSlot {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        let root = self
-            .slot
-            .lock()
-            .ok()
-            .and_then(|slot| slot.as_ref().map(|(root, _)| root.clone()));
-        f.debug_struct("SpineSlot").field("root", &root).finish()
+        f.debug_struct("SpineSlot")
+            .field("root", &self.root())
+            .finish()
     }
 }
 
@@ -304,6 +338,24 @@ impl SpineSlot {
     /// An empty slot.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A handle on this slot that does not keep it alive.
+    pub fn downgrade(&self) -> WeakSpineSlot {
+        WeakSpineSlot {
+            slot: Arc::downgrade(&self.slot),
+        }
+    }
+
+    /// Whether `other` is a clone of this slot: a commit through one is
+    /// the next commit's spine through the other.
+    pub fn shares(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.slot, &other.slot)
+    }
+
+    /// Whether a spine is held now.
+    pub fn is_held(&self) -> bool {
+        self.slot.lock().expect("spine slot lock").is_some()
     }
 
     /// Takes the held spine if it was persisted as `root`; a mismatch drops
@@ -319,6 +371,14 @@ impl SpineSlot {
     /// Stores `tree` as the live spine for `root`.
     fn put(&self, root: NodeHash, tree: BufferedArtifactTree) {
         *self.slot.lock().expect("spine slot lock") = Some((root, tree));
+    }
+
+    /// The root the held spine was persisted as, if the slot holds one.
+    pub fn root(&self) -> Option<NodeHash> {
+        self.slot
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|(root, _)| root.clone()))
     }
 }
 
@@ -459,6 +519,7 @@ impl BufferedBatch {
             manifest,
             changed,
             slot,
+            base: tree.root().clone(),
             staged,
         })
     }
@@ -500,6 +561,22 @@ impl BufferedBatch {
             changed: self.changed || changed,
             ..self
         })
+    }
+
+    /// Drops a batch that changed nothing without sealing it, handing its
+    /// spine back to the slot it came from.
+    ///
+    /// A batch that changed nothing left the spine as it found it, so the
+    /// spine still persists as the root the batch opened over, and the
+    /// caller's next commit can append to it instead of opening the root
+    /// frame from bytes again. A batch that did change something is simply
+    /// dropped: its spine no longer persists as that root.
+    pub fn release(self) {
+        if !self.changed
+            && let Some(slot) = self.slot
+        {
+            slot.put(self.base, self.tree);
+        }
     }
 
     /// Whether the applied instructions changed the indexes at all.
@@ -697,21 +774,27 @@ mod tests {
     }
 
     fn assert_of(entity: &str, value: &str) -> Instruction {
-        Instruction::Assert(Artifact {
-            the: "test/field".parse().unwrap(),
-            of: entity.parse().unwrap(),
-            is: Value::String(value.to_string()),
-            cause: None,
-        })
+        Instruction::Assert(
+            Artifact {
+                the: "test/field".parse().unwrap(),
+                of: entity.parse().unwrap(),
+                is: Value::String(value.to_string()),
+                cause: None,
+            },
+            crate::Pick::All,
+        )
     }
 
     fn replace_of(entity: &str, value: &str) -> Instruction {
-        Instruction::Replace(Artifact {
-            the: "test/field".parse().unwrap(),
-            of: entity.parse().unwrap(),
-            is: Value::String(value.to_string()),
-            cause: None,
-        })
+        Instruction::Assert(
+            Artifact {
+                the: "test/field".parse().unwrap(),
+                of: entity.parse().unwrap(),
+                is: Value::String(value.to_string()),
+                cause: None,
+            },
+            crate::Pick::Last,
+        )
     }
 
     fn retract_of(entity: &str, value: &str) -> Instruction {
@@ -721,6 +804,102 @@ mod tests {
             is: Value::String(value.to_string()),
             cause: None,
         })
+    }
+
+    /// A batch that changed nothing hands its spine back when released, keyed
+    /// by the root it opened over, and the next commit appends to it with
+    /// the bytes a fresh open would write. A batch that changed something
+    /// hands nothing back.
+    #[dialog_common::test]
+    async fn it_hands_the_spine_back_when_a_batch_changed_nothing() -> Result<()> {
+        use super::{SpineSlot, apply_buffered_reusing};
+
+        let store = store();
+        let version = |edition| Version::new(Origin::from([7u8; 32]), Edition::new(edition));
+        let slot = SpineSlot::new();
+        let mut tree = ArtifactTree::empty();
+        let mut delta = ArchiveDelta::zero();
+        apply_buffered_reusing(
+            &slot,
+            &mut tree,
+            &store,
+            &mut delta,
+            Some(version(1)),
+            stream::iter(vec![assert_of("user:alice", "resident")]),
+            false,
+        )
+        .await?;
+        delta.flush_into(&store);
+        assert_eq!(
+            slot.root().as_ref(),
+            Some(tree.root()),
+            "the seal holds the spine"
+        );
+
+        let noop = BufferedBatch::apply_reusing(
+            &slot,
+            &tree,
+            &store,
+            Some(version(2)),
+            stream::iter(vec![retract_of("user:bob", "absent")]),
+            WriteScope::Application,
+        )
+        .await?;
+        assert!(!noop.changed());
+        assert_eq!(slot.root(), None, "the batch took the spine");
+        noop.release();
+        assert_eq!(
+            slot.root().as_ref(),
+            Some(tree.root()),
+            "a batch that changed nothing hands the spine back"
+        );
+
+        let mut reused = tree.clone();
+        let mut delta = ArchiveDelta::zero();
+        apply_buffered_reusing(
+            &slot,
+            &mut reused,
+            &store,
+            &mut delta,
+            Some(version(2)),
+            stream::iter(vec![assert_of("user:carol", "resident")]),
+            false,
+        )
+        .await?;
+        let mut fresh = tree.clone();
+        apply_buffered(
+            &mut fresh,
+            &store,
+            &mut ArchiveDelta::zero(),
+            Some(version(2)),
+            stream::iter(vec![assert_of("user:carol", "resident")]),
+            false,
+        )
+        .await?;
+        assert_eq!(
+            reused.root(),
+            fresh.root(),
+            "the handed-back spine writes what a fresh open writes"
+        );
+        delta.flush_into(&store);
+
+        let changed = BufferedBatch::apply_reusing(
+            &slot,
+            &reused,
+            &store,
+            Some(version(3)),
+            stream::iter(vec![assert_of("user:dave", "resident")]),
+            WriteScope::Application,
+        )
+        .await?;
+        assert!(changed.changed());
+        changed.release();
+        assert_eq!(
+            slot.root(),
+            None,
+            "a batch that changed something hands nothing back"
+        );
+        Ok(())
     }
 
     /// Many sequential buffered commits must retain every fact.
@@ -1107,7 +1286,7 @@ mod tests {
             .then_apply(
                 &store,
                 Stamp::Amend(asset_version()),
-                stream::iter(vec![Instruction::Assert(asset.fact()?)]),
+                stream::iter(vec![Instruction::Assert(asset.fact()?, crate::Pick::All)]),
                 WriteScope::Machinery,
             )
             .await?;
@@ -1138,13 +1317,13 @@ mod tests {
             &ArtifactTree::empty(),
             &store,
             Some(asset_version()),
-            stream::iter(vec![Instruction::Assert(asset.fact()?)]),
+            stream::iter(vec![Instruction::Assert(asset.fact()?, crate::Pick::All)]),
             WriteScope::Application,
         )
         .await;
         assert!(matches!(
             refused,
-            Err(DialogArtifactsError::ReservedAttribute(_))
+            Err(DialogArtifactsError::ReservedRelation(_))
         ));
         Ok(())
     }

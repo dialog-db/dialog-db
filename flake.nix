@@ -86,6 +86,7 @@
           rustToolchain
           wasm-bindgen-cli
           wbg-pool
+          wasmCcEnv
           ;
 
         developmentBuildInputs =
@@ -102,6 +103,9 @@
               # invokes it once per test against a single shared browser.
               wbg-pool
             ]
+            # The cost matrix (rust/dialog-perf) counts each scenario's
+            # instructions under callgrind; valgrind has no darwin build.
+            ++ lib.optionals stdenv.isLinux [ valgrind ]
           );
 
         developmentEnvVars =
@@ -118,6 +122,11 @@
             # is trusted, so disable the sandbox for the pooled browser.
             "WBG_POOL_NO_SANDBOX" = "1";
           }
+          # A `cargo build --target wasm32` run in this shell compiles the
+          # same C as the wasm derivations do, so it needs the same
+          # compiler. See `wasmCcEnv` in nix/rust.nix for why the stdenv
+          # one will not do.
+          // wasmCcEnv
           // lib.optionalAttrs stdenv.isDarwin {
             "WASM_BINDGEN_TEST_WEBDRIVER_JSON" = webdriverConfig;
           };
@@ -184,6 +193,22 @@
             command = ''
               export DIALOG_PROGRAM_OPS="''${DIALOG_PROGRAM_OPS:-2000}"
               cargo test -p dialog-search-tree --release --test program
+            '';
+          };
+
+          "perf:gate" = {
+            description = "Engine cost matrix (rust/dialog-perf) under callgrind, gated against perf/baseline";
+            command = ''
+              cargo run -p dialog-perf --release -- sweep --out-dir target/perf-current
+              cargo run -p dialog-perf --release -- compare perf/baseline target/perf-current
+            '';
+          };
+
+          "soak:gate" = {
+            description = "Join cost on the unshaped none profile (rust/dialog-soak), gated against soak/baseline";
+            command = ''
+              cargo run -p dialog-soak --release -- sweep --out-dir target/soak-current --networks none
+              cargo run -p dialog-soak --release -- compare soak/baseline target/soak-current
             '';
           };
 

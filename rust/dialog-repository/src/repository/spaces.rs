@@ -188,6 +188,32 @@ pub async fn locate<Env: RegistryEnv>(
         .collect()
 }
 
+/// Every repository `peer` keeps in `state`, under each name it knows it
+/// by.
+pub async fn kept_by<Env: RegistryEnv>(
+    state: &Branch,
+    peer: &Did,
+    env: &Env,
+) -> Result<Vec<(Did, String)>, SpaceError> {
+    let rows: Vec<Space> = Box::pin(
+        state
+            .query()
+            .select(Query::<Space> {
+                this: Term::var("this"),
+                peer: peer.this().into(),
+                repository: Term::var("repository"),
+                name: Term::var("name"),
+                address: Term::var("address"),
+            })
+            .perform(env)
+            .try_vec(),
+    )
+    .await?;
+    rows.into_iter()
+        .map(|row| Ok((subject(&row.repository.0)?, row.name.0)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_arch = "wasm32")]

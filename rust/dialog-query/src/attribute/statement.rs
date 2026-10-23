@@ -1,9 +1,9 @@
 use crate::artifact::{Entity, Value};
-use crate::attribute::The;
+use crate::attribute::Relation;
 use crate::attribute::expression::dynamic::DynamicAttributeExpression;
 use crate::schema::Cardinality;
 use crate::statement::Statement;
-use dialog_artifacts::Update;
+use dialog_artifacts::{Pick, Update};
 
 /// A type-erased, attribute statement.
 ///
@@ -14,18 +14,23 @@ use dialog_artifacts::Update;
 /// can convert into this type via `.into()`, enabling heterogeneous
 /// collections (e.g. `Vec<AttributeStatement>`) for concept instances
 /// that contain attributes of different types.
-pub type AttributeStatement = DynamicAttributeExpression<The, Entity, Value>;
+pub type AttributeStatement = DynamicAttributeExpression<Relation, Entity, Value>;
 
 impl Statement for AttributeStatement {
     fn assert(self, update: &mut impl Update) {
         let the = self.the;
         let value = self.is;
-        match self.cardinality {
-            Some(Cardinality::One) => {
-                update.associate_unique(the.into(), self.of, value);
+        match (self.pick, self.cardinality) {
+            (Some(policy), _) => {
+                update.associate(the.into(), self.of, value, policy);
             }
-            _ => {
-                update.associate(the.into(), self.of, value);
+            // A cardinality-one write with no pick spelled is a
+            // `last` write.
+            (None, Some(Cardinality::One)) => {
+                update.associate(the.into(), self.of, value, Pick::Last);
+            }
+            (None, _) => {
+                update.associate(the.into(), self.of, value, dialog_artifacts::Pick::All);
             }
         }
     }

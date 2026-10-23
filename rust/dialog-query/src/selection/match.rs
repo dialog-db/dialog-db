@@ -133,6 +133,8 @@ pub struct Match {
     // https://github.com/dialog-db/dialog-db/pull/221 claims can be stored
     // directly as Value::Record in bindings, eliminating this separate list.
     claims: Vec<(Arc<str>, Arc<Claim>)>,
+    /// The standing of the fact that bound each cited variable.
+    standings: Vec<(Arc<str>, Standing)>,
     /// The bindings and claims this row extends, shared with every other
     /// row extending the same ones.
     frame: Option<Arc<Frame>>,
@@ -151,8 +153,17 @@ pub struct Match {
 struct Frame {
     bindings: Vec<(Arc<str>, Binding)>,
     claims: Vec<(Arc<str>, Arc<Claim>)>,
+    standings: Vec<(Arc<str>, Standing)>,
     parent: Option<Arc<Frame>>,
 }
+
+/// What a row brings to a cardinality-one election: the standing of
+/// the fact it cites, as [`ArtifactView::elect`] compares it and as a
+/// succession orders stored claims. A row derived by a rule stands as
+/// the fact that bound its value does.
+///
+/// [`ArtifactView::elect`]: dialog_artifacts::ArtifactView::elect
+pub use dialog_artifacts::Standing;
 
 /// Binding order is premise-evaluation order, an artifact of the plan;
 /// two rows are the same result when they bind the same names to the
@@ -200,12 +211,13 @@ impl Match {
     /// so clones of it (every row a premise extends it into) share them
     /// instead of each copying them.
     pub fn share(&mut self) {
-        if self.bindings.is_empty() && self.claims.is_empty() {
+        if self.bindings.is_empty() && self.claims.is_empty() && self.standings.is_empty() {
             return;
         }
         let frame = Frame {
             bindings: mem::take(&mut self.bindings),
             claims: mem::take(&mut self.claims),
+            standings: mem::take(&mut self.standings),
             parent: self.frame.take(),
         };
         self.frame = Some(Arc::new(frame));
@@ -214,6 +226,24 @@ impl Match {
     /// The frames this row extends, innermost first.
     fn frames(&self) -> impl Iterator<Item = &Frame> {
         iter::successors(self.frame.as_deref(), |frame| frame.parent.as_deref())
+    }
+
+    /// Every claim this row cites, its own first, then its frames'
+    /// innermost first; a name cited twice along the ancestry appears
+    /// twice, the first occurrence being the one the row sees.
+    fn claims(&self) -> impl Iterator<Item = &(Arc<str>, Arc<Claim>)> {
+        self.claims
+            .iter()
+            .chain(self.frames().flat_map(|frame| frame.claims.iter()))
+    }
+
+    /// Every standing this row cites, its own first, then its frames'
+    /// innermost first. A name the row and a frame both cite is cited
+    /// once as the row sees it: the first occurrence.
+    fn standings(&self) -> impl Iterator<Item = &(Arc<str>, Standing)> {
+        self.standings
+            .iter()
+            .chain(self.frames().flat_map(|frame| frame.standings.iter()))
     }
 
     /// Every binding of this row, its own and its frames'. A name is
@@ -239,6 +269,74 @@ impl Match {
             }
         }
         claims
+    }
+
+    /// The row's standing: the newest among the facts it cites. A row
+    /// derived by a rule stands as recent as the latest fact its body
+    /// consumed, which is how it competes in an attribute's election
+    /// against stored rows. `None` for a row citing nothing.
+    pub fn standing(&self) -> Option<Standing> {
+        self.standings()
+            .map(|(_, standing)| standing)
+            .max()
+            .cloned()
+    }
+
+    /// Adopt every standing `other` cites for a variable this row cites
+    /// none for. Nothing is collected: each of `other`'s entries is
+    /// checked against this row as it stands, so the first entry for a
+    /// name wins, as it does when `other` is read.
+    fn adopt_standings(&mut self, other: &Match) {
+        for (name, standing) in other.standings() {
+            if self.standing_entry(name).is_none() {
+                self.standings.push((name.clone(), standing.clone()));
+            }
+        }
+    }
+
+    /// The standing cited for `variable`, as this row sees it.
+    fn standing_entry(&self, variable: &str) -> Option<&Standing> {
+        self.standings()
+            .find(|(name, _)| **name == *variable)
+            .map(|(_, standing)| standing)
+    }
+
+    /// Adopt every claim and standing `other` cites that this row does
+    /// not: a result leaving a nested scope keeps the facts it was
+    /// derived from, so the row it merges into stands as they do.
+    pub(crate) fn adopt_citations(&mut self, other: &Match) {
+        for (name, claim) in other.claims() {
+            if self.find_claim(name).is_none() {
+                self.claims.push((name.clone(), claim.clone()));
+            }
+        }
+        self.adopt_standings(other);
+    }
+
+    /// Record the standing of the fact cited for `term`.
+    pub(crate) fn cite_standing(&mut self, term: &Term<Record>, standing: Standing) {
+        if let Term::Variable {
+            name: Some(name), ..
+        } = term
+        {
+            self.cite_variable_standing(name, standing);
+        }
+    }
+
+    /// Record that `variable` was bound from a fact of `standing`, so
+    /// a value derived from it stands as that fact does.
+    pub(crate) fn cite_variable_standing(&mut self, variable: &Arc<str>, standing: Standing) {
+        match self.standings.iter_mut().find(|(held, _)| held == variable) {
+            Some((_, slot)) => *slot = standing,
+            None => self.standings.push((variable.clone(), standing)),
+        }
+    }
+
+    /// The standing of the fact that bound `variable`, when a scan did:
+    /// what a value derived from it stands as. `None` when nothing
+    /// cited a fact for it, as for a value a formula computed.
+    pub fn standing_of(&self, variable: &str) -> Option<Standing> {
+        self.standing_entry(variable).cloned()
     }
 
     /// The binding for `name` along this row's ancestry.
@@ -340,11 +438,12 @@ impl Match {
                 Some(_) => return None,
             }
         }
-        for (name, claim) in other.all_claims() {
+        for (name, claim) in other.claims() {
             if self.find_claim(name).is_none() {
                 self.claims.push((name.clone(), claim.clone()));
             }
         }
+        self.adopt_standings(other);
         if self.caller.is_none() {
             self.caller = other.caller.clone();
         }
@@ -414,26 +513,44 @@ impl Match {
         value: Value,
     ) -> Result<(), EvaluationError> {
         let key = name.as_ref();
-        // Contract check: a typed variable only accepts values
-        // inhabiting its kind. Scans filter mismatched facts
-        // before reaching here, so a failure at this point is
-        // a contract violation (e.g. an untyped construction
-        // path feeding a value the rule's types exclude), not
-        // a data-dependent non-match.
-        if let Some(kind) = kind
-            && !kind.admits(&value)
-        {
-            return Err(EvaluationError::KindMismatch {
-                variable: key.to_string(),
-                kind: kind.to_string(),
-                value: format!("{value:?}"),
-                value_type: format!("{:?}", value.data_type()),
-            });
-        }
+        // A typed variable reads the value through its kind, as a scan
+        // reads a stored fact (`Type::view`): a natural 40 binds an
+        // integer variable as the integer 40, whatever path brought it
+        // here (a scan, a formula result, a commit's seed row). Only a
+        // value the kind does not read at all (a string into a number,
+        // a negative into a natural) is a mismatch, and callers that
+        // filter rows treat it as a non-match.
+        //
+        // A value that already inhabits a primitive kind is what its
+        // view reads, so it binds as it is: that is every row a scan
+        // yields, and the clone the view's failure message needs is
+        // paid only by a value the kind has to read through the band.
+        let value = match kind {
+            Some(kind) if matches!(kind, Kind::Primitive(_)) && kind.admits(&value) => value,
+            Some(kind) => {
+                kind.view(value.clone())
+                    .ok_or_else(|| EvaluationError::KindMismatch {
+                        variable: key.to_string(),
+                        kind: kind.to_string(),
+                        value: format!("{value:?}"),
+                        value_type: format!("{:?}", value.data_type()),
+                    })?
+            }
+            None => value,
+        };
         if let Some(existing) = self.find(key) {
             match existing {
+                // Two numbers agree when either reads as the other through
+                // the lens of the other's type (see `Value::reads_as`),
+                // whichever was bound first: a variable bound to the
+                // integer 4 takes the stored 4, 4.0 and 4.3, as a scan for
+                // the constant 4 admits them, and one bound to the stored
+                // 4.3 takes the constant 4. The first binding is kept.
                 Binding::Present(existing_value) => {
-                    if *existing_value != value {
+                    if *existing_value != value
+                        && !value.reads_as(existing_value)
+                        && !existing_value.reads_as(&value)
+                    {
                         Err(EvaluationError::Assignment {
                             reason: format!(
                                 "Can not set {:?} to {:?} because it is already set to {:?}.",
@@ -570,6 +687,37 @@ mod tests {
 
         row.bind(&typed, Value::String("Alice".into()))
             .expect("a String value inhabits the kind");
+    }
+
+    /// A typed number variable binds a number of another type as its
+    /// view reads it, the way a scan reads a stored fact: the natural 40
+    /// is the integer 40 to an integer variable, and the integer 3 is
+    /// the natural 3 to a natural one. A number the view does not read
+    /// (a negative into a natural) is a mismatch.
+    #[dialog_common::test]
+    fn bind_reads_a_number_through_the_terms_kind() {
+        let mut row = Match::new();
+        let integer: Term<Any> = Term::<i128>::var("n").into();
+        row.bind(&integer, Value::UnsignedInt(40))
+            .expect("an integer variable reads a natural");
+        assert_eq!(row.find("n"), Some(&Binding::Present(Value::SignedInt(40))));
+
+        let mut row = Match::new();
+        let natural: Term<Any> = Term::<u128>::var("n").into();
+        row.bind(&natural, Value::SignedInt(3))
+            .expect("a natural variable reads a non-negative integer");
+        assert_eq!(
+            row.find("n"),
+            Some(&Binding::Present(Value::UnsignedInt(3)))
+        );
+
+        let mut row = Match::new();
+        let err = row.bind(&natural, Value::SignedInt(-3));
+        assert!(
+            matches!(err, Err(EvaluationError::KindMismatch { .. })),
+            "a natural variable does not read -3, got {err:?}"
+        );
+        assert_eq!(row.find("n"), None, "a refused value leaves nothing bound");
     }
 
     #[dialog_common::test]

@@ -174,6 +174,7 @@ where
             ),
             cause: None,
             cardinality: Some(descriptor.cardinality()),
+            pick: Some(descriptor.pick().clone()),
         };
         buf.push(expr);
     }
@@ -251,6 +252,7 @@ where
                 ),
                 cause: None,
                 cardinality: Some(descriptor.cardinality()),
+                pick: Some(descriptor.pick().clone()),
             };
             buf.push(expr);
         }
@@ -391,7 +393,7 @@ mod tests {
     use super::*;
     use crate::AttributeStatement;
     use crate::Query;
-    use crate::artifact::{ArtifactSelector, ArtifactsAttribute, Value};
+    use crate::artifact::{ArtifactSelector, ArtifactsRelation, Value};
     use crate::query::Output;
 
     use crate::Concept;
@@ -804,8 +806,8 @@ mod tests {
             .await?;
 
         // Verify Alice exists
-        let name_attr: ArtifactsAttribute = "person/name".parse()?;
-        let age_attr: ArtifactsAttribute = "person/age".parse()?;
+        let name_attr: ArtifactsRelation = "person/name".parse()?;
+        let age_attr: ArtifactsRelation = "person/age".parse()?;
 
         let name_facts: Vec<_> = branch
             .claims()
@@ -1406,84 +1408,6 @@ mod tests {
         pub handle: contact::Handle,
     }
 
-    #[dialog_common::test]
-    async fn it_evaluates_ordered_variants_first_to_conform() -> Result<()> {
-        use crate::attribute::{AttributeDescriptor, The};
-        use crate::rule::deductive::DeductiveRule;
-        use crate::{Cardinality, ConceptDescriptor};
-
-        let (operator, profile) = test_session_with_peer().await;
-        let repo = test_repo(&operator, &profile).await;
-        let branch = repo.branch("main").open().perform(&operator).await?;
-
-        let variant = |the: The| {
-            ConceptDescriptor::try_from(vec![(
-                "handle",
-                AttributeDescriptor::new(the, "", Cardinality::One, Some(ValueType::String)),
-            )])
-            .unwrap()
-        };
-        let email = variant(the!("user/email"));
-        let phone = variant(the!("user/phone"));
-
-        let rules = DeductiveRule::variants(Contact::descriptor().clone(), vec![email, phone])
-            .expect("variants compile");
-
-        let mut registry = RuleRegistry::new();
-        for rule in rules {
-            registry.register(rule).expect("rule registers");
-        }
-
-        let alice = Entity::new()?; // email AND phone: email wins
-        let bob = Entity::new()?; // phone only: phone row
-
-        branch
-            .transaction()
-            .assert(
-                the!("user/email")
-                    .of(alice.clone())
-                    .is("alice@mail".to_string()),
-            )
-            .assert(
-                the!("user/phone")
-                    .of(alice.clone())
-                    .is("555-0100".to_string()),
-            )
-            .assert(
-                the!("user/phone")
-                    .of(bob.clone())
-                    .is("555-0199".to_string()),
-            )
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-
-        let source = TestEnv::new(&branch, &operator, registry);
-        let mut contacts: Vec<Contact> = Query::<Contact>::default()
-            .perform(&source)
-            .try_collect()
-            .await?;
-        contacts.sort_by(|a, b| a.handle.value().cmp(b.handle.value()));
-
-        assert_eq!(
-            contacts,
-            vec![
-                Contact {
-                    this: bob,
-                    handle: contact::Handle("555-0199".into()),
-                },
-                Contact {
-                    this: alice,
-                    handle: contact::Handle("alice@mail".into()),
-                },
-            ],
-            "the first conforming variant wins; later variants fill the rest"
-        );
-
-        Ok(())
-    }
-
     // Tests migrated from tests/concept_query_shortcut_test.rs
     mod shortcut_employee {
         use crate::Attribute;
@@ -1935,5 +1859,191 @@ mod tests {
         assert!(ref_attr.is_some(), "Should have 'ref' key in descriptor");
         // The attribute descriptor's name is still "reference" (no attribute rename)
         assert_eq!(ref_attr.unwrap().1.name(), Some("reference"));
+    }
+
+    /// An attribute declared `as: number:` holds numbers of every type: a
+    /// natural, an integer and a float each write and read back, and text
+    /// does not resolve against it.
+    #[dialog_common::test]
+    async fn it_holds_every_number_type_under_number() -> Result<()> {
+        use crate::attribute::query::all::AttributeQueryAll;
+        use crate::type_system::Type as Kind;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let attribute: crate::AttributeDescriptor =
+            serde_json::from_value(serde_json::json!({ "the": "item/size", "as": "number:" }))?;
+        let written = [
+            Value::UnsignedInt(3),
+            Value::SignedInt(-2),
+            Value::Float(2.5),
+        ];
+        for value in &written {
+            assert!(
+                attribute.resolve(value.clone()).is_ok(),
+                "{value:?} resolves"
+            );
+        }
+        assert!(attribute.resolve(Value::String("3".into())).is_err());
+
+        branch
+            .transaction()
+            .assert(the!("item/size").of(Entity::new()?).is(3u64))
+            .assert(the!("item/size").of(Entity::new()?).is(-2i64))
+            .assert(the!("item/size").of(Entity::new()?).is(2.5f64))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let number = Kind::from(dialog_artifacts::ValueDataType::Number);
+        let query = AttributeQueryAll::new(
+            Term::from(the!("item/size")),
+            Term::<Entity>::var("item"),
+            Term::var("size").with_kind(number),
+            Term::var("cause"),
+        );
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let rows = query.perform(&source).try_vec().await?;
+        // Compared by value: a tree keying numbers in one band does not
+        // record which type wrote a number, so it reads the natural 3 back
+        // as the integer 3.
+        let number = |value: &Value| match value {
+            Value::UnsignedInt(value) => *value as f64,
+            Value::SignedInt(value) => *value as f64,
+            Value::Float(value) => *value,
+            other => panic!("{other:?} is not a number"),
+        };
+        let mut read: Vec<f64> = rows.iter().map(|row| number(row.is())).collect();
+        read.sort_by(f64::total_cmp);
+        assert_eq!(read, vec![-2.0, 2.5, 3.0]);
+        Ok(())
+    }
+
+    /// An attribute declared `as: u8:` takes only the numbers a `u8` holds,
+    /// and a `natural:8` read filters what is out of its range, whatever wrote it.
+    #[dialog_common::test]
+    async fn it_reads_and_writes_through_a_rust_numeric_view() -> Result<()> {
+        use crate::attribute::query::all::AttributeQueryAll;
+        use crate::type_system::Type as Kind;
+
+        let attribute: crate::AttributeDescriptor =
+            serde_json::from_value(serde_json::json!({ "the": "item/level", "as": "natural:8" }))?;
+        assert!(attribute.resolve(Value::UnsignedInt(255)).is_ok());
+        assert!(attribute.resolve(Value::UnsignedInt(256)).is_err());
+        assert!(attribute.resolve(Value::Float(2.5)).is_err());
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(the!("item/level").of(Entity::new()?).is(7u64))
+            .assert(the!("item/level").of(Entity::new()?).is(300u64))
+            .assert(the!("item/level").of(Entity::new()?).is(-1i64))
+            .assert(the!("item/level").of(Entity::new()?).is(9.75f64))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let byte = Kind::from(dialog_artifacts::ValueDataType::U8);
+        let query = AttributeQueryAll::new(
+            Term::from(the!("item/level")),
+            Term::<Entity>::var("item"),
+            Term::var("level").with_kind(byte),
+            Term::var("cause"),
+        );
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let mut read: Vec<Value> = query
+            .perform(&source)
+            .try_vec()
+            .await?
+            .iter()
+            .map(|row| row.is().clone())
+            .collect();
+        read.sort_by_key(|value| format!("{value:?}"));
+        assert_eq!(read, vec![Value::UnsignedInt(7), Value::UnsignedInt(9)]);
+        Ok(())
+    }
+
+    /// A derived attribute over a fixed-width Rust number declares its
+    /// sized type, so the concept reads stored numbers through that
+    /// view: 9.75 reads as 9, and 300 and -1, which `u8` cannot hold,
+    /// are not rows of the concept.
+    #[dialog_common::test]
+    async fn it_reads_a_derived_fixed_width_field_through_its_view() -> Result<()> {
+        mod item {
+            use crate::Attribute;
+
+            /// Label of the item.
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Label(pub String);
+
+            /// Level of the item.
+            #[derive(Attribute, Clone, PartialEq)]
+            pub struct Level(pub u8);
+        }
+
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct Item {
+            this: Entity,
+            label: item::Label,
+            level: item::Level,
+        }
+
+        assert_eq!(
+            <item::Level as Descriptor<AttributeDescriptor>>::descriptor().content_type(),
+            Some(ValueType::U8)
+        );
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let [seven, wide, negative, fraction] = [
+            Entity::new()?,
+            Entity::new()?,
+            Entity::new()?,
+            Entity::new()?,
+        ];
+        let transaction = branch
+            .transaction()
+            .assert(the!("item/label").of(seven.clone()).is("seven".to_string()))
+            .assert(the!("item/level").of(seven).is(7u64))
+            .assert(the!("item/label").of(wide.clone()).is("wide".to_string()))
+            .assert(the!("item/level").of(wide).is(300u64))
+            .assert(
+                the!("item/label")
+                    .of(negative.clone())
+                    .is("negative".to_string()),
+            )
+            .assert(the!("item/level").of(negative).is(-1i64))
+            .assert(
+                the!("item/label")
+                    .of(fraction.clone())
+                    .is("fraction".to_string()),
+            )
+            .assert(the!("item/level").of(fraction).is(9.75f64));
+        transaction.commit().publish().perform(&operator).await?;
+
+        let query = Query::<Item> {
+            this: Term::var("item"),
+            label: Term::var("label"),
+            level: Term::var("level"),
+        };
+        let source = TestEnv::new(&branch, &operator, RuleRegistry::new());
+        let results: Vec<Item> = query.perform(&source).try_collect().await?;
+        let mut read: Vec<(String, u8)> = results
+            .iter()
+            .map(|item| (item.label.0.clone(), item.level.0))
+            .collect();
+        read.sort();
+        assert_eq!(
+            read,
+            vec![("fraction".to_string(), 9), ("seven".to_string(), 7)]
+        );
+        Ok(())
     }
 }

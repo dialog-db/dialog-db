@@ -42,7 +42,7 @@ use crate::{Constraint, Negation, Premise, Proposition, try_stream};
 const STARTS_WITH_COST: usize = 1;
 
 /// The longest lexical form a symbol can have, in bytes. Mirrors
-/// `dialog_artifacts::ATTRIBUTE_LENGTH`, which is crate-private;
+/// `dialog_artifacts::RELATION_LENGTH`, which is crate-private;
 /// pinned against the real validator by test.
 const SYMBOL_LEXICAL_LIMIT: usize = 64;
 
@@ -249,13 +249,13 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
-    use crate::artifact::{ArtifactsAttribute, Entity};
+    use crate::artifact::{ArtifactsRelation, Entity};
     use crate::rule::TypeEnv;
     use crate::selection::Match;
     use futures_util::TryStreamExt;
 
     fn symbol(name: &str) -> Value {
-        Value::Symbol(ArtifactsAttribute::try_from(name.to_string()).expect("valid attribute"))
+        Value::Symbol(ArtifactsRelation::try_from(name.to_string()).expect("valid attribute"))
     }
 
     async fn matches(predicate: StartsWith, value: Value) -> Result<usize, EvaluationError> {
@@ -405,11 +405,11 @@ mod tests {
     fn it_mirrors_the_attribute_length_limit() {
         let longest = format!("ns/{}", "a".repeat(SYMBOL_LEXICAL_LIMIT - 3));
         assert!(
-            ArtifactsAttribute::try_from(longest.clone()).is_ok(),
+            ArtifactsRelation::try_from(longest.clone()).is_ok(),
             "a symbol of exactly the limit is valid"
         );
         assert!(
-            ArtifactsAttribute::try_from(format!("{longest}a")).is_err(),
+            ArtifactsRelation::try_from(format!("{longest}a")).is_err(),
             "one byte past the limit is rejected"
         );
     }
@@ -474,5 +474,22 @@ mod tests {
             TypeEnv::infer(&premises).is_err(),
             "Entity and String|Symbol have an empty meet"
         );
+    }
+
+    /// Re-spelling the constraint over new parameters renames a
+    /// variable prefix along with the subject: a prefix bound elsewhere
+    /// in a body follows the body's renaming.
+    #[dialog_common::test]
+    fn it_takes_its_prefix_from_the_parameters() {
+        let constraint =
+            Constraint::StartsWith(StartsWith::new(Term::var("x"), Term::<String>::var("p")));
+        let mut terms = Parameters::new();
+        terms.insert("of".to_string(), Term::<Any>::var("y"));
+        terms.insert("prefix".to_string(), Term::<Any>::var("q"));
+        let Constraint::StartsWith(renamed) = constraint.with_parameters(&terms) else {
+            panic!("a starts-with stays a starts-with");
+        };
+        assert_eq!(renamed.of, Term::<Any>::var("y"));
+        assert_eq!(renamed.prefix, Term::<String>::var("q"));
     }
 }

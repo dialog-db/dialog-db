@@ -60,7 +60,8 @@ pub(crate) async fn line_manifest<Env>(
     env: &Env,
 ) -> Result<Manifest, DialogArtifactsError>
 where
-    Env: Provider<Get>
+    Env: ?Sized
+        + Provider<Get>
         + Provider<Put>
         + Provider<Resolve>
         + Provider<crate::Hydrate>
@@ -126,7 +127,7 @@ impl Select<'_> {
         // query, but a read that misses fails with the load failure as
         // its cause instead of a bare not-found.
         let remote = self.source.fallback();
-        let store = NetworkedIndex::new(env, self.catalog(), remote);
+        let store = NetworkedIndex::erased(env, self.catalog(), remote);
         self.execute(store).await
     }
 
@@ -231,7 +232,7 @@ impl Select<'_> {
             + 'static,
     {
         let remote = self.source.fallback();
-        let store = NetworkedIndex::new(env, self.catalog(), remote);
+        let store = NetworkedIndex::erased(env, self.catalog(), remote);
         self.estimate(store).await
     }
 
@@ -311,7 +312,7 @@ impl SelectOwned<'_> {
         // The same remote fallback as `Select::perform`; see the comment
         // there.
         let remote = self.0.source.fallback();
-        let store = NetworkedIndex::new(env, self.catalog(), remote);
+        let store = NetworkedIndex::erased(env, self.catalog(), remote);
         self.execute(store).await
     }
 
@@ -331,5 +332,7 @@ impl SelectOwned<'_> {
     }
 }
 
+#[cfg(test)]
+mod number_tests;
 #[cfg(test)]
 mod tests;

@@ -9,7 +9,7 @@ Two questions drive the design. When Bob's change reaches Alice, how does her re
 Every commit is written by someone, on some branch, of some replica. Dialog names each of these with a hash of the level above:
 
 <figure class="dg">
-<svg class="dg" viewBox="0 0 848 210" width="848" height="210" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="repository and peer hash to a replica; replica and name to a branch; branch and session key to an origin">
+<svg class="dg" viewBox="0 0 848 210" width="848" height="210" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="repository and peer hash to a replica; replica and name to a branch; branch and signing key to an origin">
 <defs><marker id="l-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z"/></marker></defs>
 <rect class="shade" x="10" y="10" width="160" height="40"/>
 <text class="label" x="90.0" y="27" text-anchor="middle">repository</text>
@@ -35,7 +35,7 @@ Every commit is written by someone, on some branch, of some replica. Dialog name
 <text class="label" x="564.0" y="117" text-anchor="middle">branch</text>
 <text class="small muted" x="564.0" y="132" text-anchor="middle">main, on Alice's</text>
 <rect class="alice" x="504" y="160" width="120" height="40"/>
-<text class="label" x="564.0" y="177" text-anchor="middle">session key</text>
+<text class="label" x="564.0" y="177" text-anchor="middle">signing key</text>
 <text class="small muted" x="564.0" y="192" text-anchor="middle">did:key:zS…</text>
 <path class="wire" d="M624,120 H640 V162"/><path class="wire" d="M624,180 H640 V178"/>
 <rect class="hash solid" x="646" y="157" width="60" height="26"/>
@@ -49,7 +49,7 @@ Every commit is written by someone, on some branch, of some replica. Dialog name
 
 - A **replica** is one peer's copy of a repository: the hash of the repository's DID and the peer's DID.
 - A **branch** is a named line of work in a replica, like `main`: the hash of the replica and the name.
-- An **origin** is one writer on one branch: the hash of the branch and the key that signs the commits.
+- An **origin** is one writer on one branch: the hash of the branch and the key that signs the commits. That is the peer's own key when the peer writes as itself, and a session's key when it writes through a session (see [Identity and Capabilities](./identity.md)).
 
 An origin writes one commit at a time, in order, never two at once. Everything below depends on that.
 
@@ -91,7 +91,7 @@ Editions give a rough sense of order that every replica agrees on without a cloc
 
 ## What a commit writes
 
-Bob's commit asserts `done true` on `item:2`. The done flag has one value, so the assertion supersedes `done false`. Every entry the commit writes carries its version, `(oB, 2)`. Here is all of it:
+Bob's commit asserts `done true` on `item:2`. The done flag is read under `last`, so the assertion supersedes the fact such a read returns, `done false`. Every entry the commit writes carries its version, `(oB, 2)`. Here is all of it:
 
 <figure class="dg">
 <svg class="dg" viewBox="0 0 680 184" width="680" height="184" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="One commit writes fact keys, a history record, a coverage record and a revision record">
@@ -120,7 +120,7 @@ Bob's commit asserts `done true` on `item:2`. The done flag has one value, so th
 </svg>
 </figure>
 
-**The fact keys.** The new fact goes into EAV, AEV and VAE, as in the [Keys](./keys.md) chapter. Its payload records the version that wrote it. The old fact, `done false`, is removed from all three.
+**The fact keys.** The new fact goes into EAV, AEV and VAE, as in the [Keys](./keys.md) chapter. Its payload records the version that wrote it. The old fact, `done false`, is removed from all three. Had the item held a second done flag that a read did not return, that one would have stayed (see [Facts](./facts.md#saying-things-assert-and-retract)).
 
 **A history record.** Under tag `03`, the commit writes one record for each fact it changed. The record's key starts with the origin and then the edition, so each writer's records sit together, in edition order. Its payload lists the versions this change supersedes. Bob's record says *"at (oB, 2), item 2's done became true, superseding what (oA, 1) wrote."* A retraction writes a record too, marked as a retraction.
 
@@ -132,13 +132,13 @@ The fact indexes answer *what is true now*. The history region answers *what hap
 
 ## The head
 
-The commit then seals the tree, writes the new blocks (see [Blocks and Storage](./storage.md)), and moves the branch's **head**. The head is a small signed record in a cell named `branch/main/revision`. It holds:
+The commit then seals the tree and writes the new blocks (see [Blocks and Storage](./storage.md)). At that point the commit is staged: it exists, but no reader of the branch sees it yet. Publishing it moves the branch's **head**. The head is a small signed record in a cell named `branch/main/revision`. It holds:
 
 - the branch,
 - the issuer, the key that signed it,
 - the tree root,
 - the edition,
-- a watermark, described below,
+- a marker saying its watermark, described below, is in its tree,
 - the signature over all of the above.
 
 These are the bytes the signature covers:
@@ -168,12 +168,12 @@ These are the bytes the signature covers:
 <rect class="shade" x="540" y="10" width="100" height="30"/>
 <text class="small" x="590.0" y="30" text-anchor="middle">context</text>
 <path class="wire" d="M541,46 v4 H639 v-4"/>
-<text class="label small muted" x="590.0" y="66" text-anchor="middle">optional</text>
+<text class="label small muted" x="590.0" y="66" text-anchor="middle">1-byte marker</text>
 <text class="label small muted" x="321.0" y="92" text-anchor="middle">the issuer signs these bytes; the signature travels with the head</text>
 </svg>
 </figure>
 
-The head is updated with compare-and-swap. Bob's replica says *"move the head from the revision I built on to this new one."* If another commit moved it first, the swap fails with a version mismatch and nothing is lost: Bob's blocks are stored, and the app can rebuild on the new head. A commit made with `merge()` does that by itself: it merges with the winner and tries again.
+The head is updated with compare-and-swap. Bob's replica says *"move the head from the revision I built on to this new one."* If another commit moved it first, the swap fails with a version mismatch and nothing is lost: Bob's blocks are stored, and the app runs its change again on the new head.
 
 ## The watermark
 
@@ -186,16 +186,20 @@ The watermark says, for every origin, how far into that origin's commits this he
 
 Because an origin writes one commit at a time, "everything up to edition 3" is an exact description of what the head has seen from `oA`. So the question *"has this head seen version v?"* is one lookup: v is seen when its edition is at most the watermark's edition for its origin.
 
+A watermark has one row per origin that ever wrote into the history, and rows are never removed: a device that commits once and is never seen again keeps its row. So the watermark is not carried on the head at all. It is written into the tree itself, in a small region of its own with one entry per origin, and the head only says that it is there.
+
+The region skips one row: the head's own. That row says where the current writer's run of commits began, and a reader brings it up to date from the head, because each commit in a run adds exactly one edition and one commit. So a writer committing on top of its own head writes nothing to the region. A commit on another writer's head writes two rows, the other writer's (its run has ended) and its own, and a merge writes the rows its two sides disagree on.
+
 That one question answers both questions from the start of the chapter. When a change arrives that the receiver has already seen, it can be skipped. And when a fact arrives from another replica that the receiver has seen *and* no longer holds, the receiver knows it was removed on purpose, not missing, and does not bring it back. Deleted facts need no tombstone in the fact indexes. The [Sync](./sync.md) chapter shows this in action.
 
 <div class="aside">
 
-**Implementations.** Versions, editions, origins and watermarks are in [`dialog-capability/src/history`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-capability/src/history). The head is `Revision` in [`dialog-capability/src/identity/revision.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-capability/src/identity/revision.rs). History and revision records are in [`dialog-artifacts/src/history`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-artifacts/src/history). The commit itself is [`dialog-repository/src/repository/branch/commit.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/commit.rs). The design is written up in [`notes/version-control.md`](https://github.com/dialog-db/dialog-db/blob/main/notes/version-control.md).
+**Implementations.** Versions, editions, origins and watermarks are in [`dialog-capability/src/history`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-capability/src/history). The head is `Revision` in [`dialog-capability/src/identity/revision.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-capability/src/identity/revision.rs). History and revision records are in [`dialog-artifacts/src/history`](https://github.com/dialog-db/dialog-db/tree/main/rust/dialog-artifacts/src/history). The layout of history and coverage keys is in [`dialog-artifacts/src/key/history.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/key/history.rs). The watermark region is in [`dialog-artifacts/src/key/context.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/key/context.rs) and [`dialog-artifacts/src/history/region.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-artifacts/src/history/region.rs). The commit itself is [`dialog-repository/src/repository/branch/commit.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/commit.rs). The design is written up in [`notes/version-control.md`](https://github.com/dialog-db/dialog-db/blob/main/notes/version-control.md).
 
 </div>
 
 <div class="aside">
 
-**Transactions.** An app can also stage several commits and publish them with a single swap of the head, so other readers see all of them or none. That is `Transaction` in [`branch/transaction.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/transaction.rs), with the staging and the single swap in [`transaction/batch.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/transaction/batch.rs).
+**Transactions.** Every write goes through a transaction. An app opens one on a branch, asserts and retracts facts in it, commits it, and publishes the commit. A transaction can be queried before it is committed, and it answers as the committed result would: a fact that one of its own writes superseded is already gone. An app can also stage several commits one after another, or amend the one it just staged, and publish them all with a single swap of the head, so other readers see all of them or none. That is `Transaction` in [`branch/transaction.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/transaction.rs), with the staging and the single swap in [`transaction/batch.rs`](https://github.com/dialog-db/dialog-db/blob/main/rust/dialog-repository/src/repository/branch/transaction/batch.rs).
 
 </div>

@@ -1,11 +1,13 @@
-use dialog_artifacts::history::RevisionRecord;
+use dialog_artifacts::history::{
+    Record as HistoryRecord, RevisionRecord, TreeHistory, Version, novelty,
+};
 use std::collections::BTreeSet;
 use std::mem;
 use std::sync::{Arc, Mutex};
 
 use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::FromKey as _;
-use dialog_artifacts::history::Context;
+use dialog_artifacts::history::{Context, History as _, region_writes};
 use dialog_artifacts::merge;
 use dialog_artifacts::tree::ArtifactTreeExt as _;
 use dialog_capability::Provider;
@@ -13,11 +15,16 @@ use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::ConditionalSync;
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::memory::{Publish, Resolve};
+use futures_util::TryStreamExt as _;
 use futures_util::future::{Either, join_all};
 
+use super::context::{full_context, head_observes, held, published_context};
 use super::fetch::fetch_one;
+use super::migrate::aligned;
 use super::resolve::resolve;
+use crate::RemoteFallback;
 use crate::ResolveEnv;
+use crate::repository::archive::networked::Reads;
 use crate::repository::archive::persist;
 use crate::{
     Branch, Checkpoint, Index, NetworkedIndex, PublishError, PullError, Revision, TreeReference,
@@ -34,11 +41,16 @@ pub(crate) const SMALL_DIVERGENCE: u64 = 8;
 pub struct Pull<'a> {
     branch: &'a Branch,
     from: Option<Upstream>,
+    confirm_upstream: bool,
 }
 
 impl<'a> Pull<'a> {
     fn new(branch: &'a Branch) -> Self {
-        Self { branch, from: None }
+        Self {
+            branch,
+            from: None,
+            confirm_upstream: true,
+        }
     }
 
     /// The branch this pull targets.
@@ -61,6 +73,23 @@ impl<'a> Pull<'a> {
     /// target an upstream: that is [`Branch::pull_from`]'s to record.
     pub fn from(mut self, source: impl Into<UpstreamBranch>) -> Self {
         self.from = Some(Upstream::from(source.into()));
+        self
+    }
+
+    /// Pull without first asking a remote upstream where it stands:
+    /// merge the head last known for it instead.
+    ///
+    /// A pull reads each remote upstream's head, a round trip. A caller
+    /// that learns of heads as they move (a subscription delivering them,
+    /// recorded through [`ConnectedBranch::observe`](crate::ConnectedBranch::observe))
+    /// already holds the answer, and the head it recorded is never older
+    /// than one it recorded before. A local upstream is read as always,
+    /// since reading it costs no round trip.
+    ///
+    /// Nothing is risked but staleness: the head merged is one the remote
+    /// had, and a newer one is merged by a later pull.
+    pub fn assuming_upstream(mut self) -> Self {
+        self.confirm_upstream = false;
         self
     }
 }
@@ -87,17 +116,7 @@ impl<'a> Pull<'a> {
     /// # use dialog_repository::{Branch, PullError};
     /// # async fn example<Env>(branch: &Branch, env: &Env) -> Result<(), PullError>
     /// # where
-    /// #     Env: dialog_capability::Provider<dialog_effects::archive::Get>
-    /// #         + dialog_capability::Provider<dialog_effects::archive::Put>
-    /// #         + dialog_capability::Provider<dialog_effects::archive::Import>
-    /// #         + dialog_capability::Provider<dialog_effects::memory::Resolve>
-    /// #         + dialog_capability::Provider<dialog_effects::memory::Publish>
-    /// #         + dialog_capability::Provider<dialog_effects::authority::Identify>
-    /// #         + dialog_capability::Provider<dialog_effects::authority::Attest>
-    /// #         + dialog_capability::Provider<dialog_capability::Fork<dialog_repository::RemoteSite, dialog_effects::archive::Get>>
-    /// #         + dialog_capability::Provider<dialog_capability::Fork<dialog_repository::RemoteSite, dialog_effects::memory::Resolve>>
-    /// #         + dialog_common::ConditionalSync
-    /// #         + 'static,
+    /// #     Env: dialog_repository::ResolveEnv,
     /// # {
     /// let prepared = branch.pull().prepare(env).await?; // fetch + rebase, no cell writes
     /// let revision = prepared.commit(env).await?;       // advance the cells
@@ -110,11 +129,19 @@ impl<'a> Pull<'a> {
     {
         if self.from.is_some() {
             let upstream = self.upstream(env).await?;
-            let prepared = Box::pin(prepare_upstream(self.branch, upstream.clone(), env)).await?;
-            return land(self.branch, upstream, prepared, false, env).await;
+            let confirm = self.confirm_upstream;
+            let prepared = Box::pin(prepare_upstream(
+                self.branch,
+                upstream.clone(),
+                confirm,
+                env,
+            ))
+            .await?;
+            return land(self.branch, upstream, prepared, false, confirm, env).await;
         }
 
         let branch = self.branch;
+        let confirm = self.confirm_upstream;
         resolve(branch, env).await?;
         let upstreams: Vec<Upstream> = branch.pulls().iter().cloned().collect();
         if upstreams.is_empty() {
@@ -133,12 +160,11 @@ impl<'a> Pull<'a> {
         // whose merge cannot land does not keep the others from landing,
         // nor hide what landed before it: the pull lands what it can and
         // reports the rest, with the head the landed ones left.
-        let prepared = join_all(
-            upstreams
-                .iter()
-                .map(|upstream| Box::pin(prepare_upstream(branch, upstream.clone(), env))),
-        )
-        .await;
+        let prepared =
+            join_all(upstreams.iter().map(|upstream| {
+                Box::pin(prepare_upstream(branch, upstream.clone(), confirm, env))
+            }))
+            .await;
         let total = upstreams.len();
         let mut unreached = Vec::new();
         // Like a single pull, answer the merged head, or `None` when no
@@ -153,7 +179,7 @@ impl<'a> Pull<'a> {
                 }
             };
             let target = upstream.target();
-            match land(branch, upstream, prepared, landed.is_some(), env).await {
+            match land(branch, upstream, prepared, landed.is_some(), confirm, env).await {
                 Ok(Some(revision)) => landed = Some(revision),
                 Ok(None) => {}
                 Err(error) => unreached.push((target, error)),
@@ -184,7 +210,13 @@ impl<'a> Pull<'a> {
     {
         let branch = self.branch;
         let upstream = self.upstream(env).await?;
-        Box::pin(prepare_upstream(branch, upstream, env)).await
+        Box::pin(prepare_upstream(
+            branch,
+            upstream,
+            self.confirm_upstream,
+            env,
+        ))
+        .await
     }
 
     /// The upstream this pull takes from: the one given, or else the
@@ -239,6 +271,7 @@ async fn land<'a, Env: ResolveEnv>(
     upstream: Upstream,
     prepared: PreparedPull<'a>,
     moved: bool,
+    confirm_upstream: bool,
     env: &Env,
 ) -> Result<Option<Revision>, PullError> {
     let writer = branch.writer();
@@ -246,10 +279,15 @@ async fn land<'a, Env: ResolveEnv>(
     match prepared.advance(env).await {
         Err(PullError::Publish(PublishError::VersionMismatch { .. })) if moved => {
             let tree = branch.tracked().tree(&upstream.target());
-            Box::pin(prepare_upstream(branch, upstream.with_tree(tree), env))
-                .await?
-                .advance(env)
-                .await
+            Box::pin(prepare_upstream(
+                branch,
+                upstream.with_tree(tree),
+                confirm_upstream,
+                env,
+            ))
+            .await?
+            .advance(env)
+            .await
         }
         result => result,
     }
@@ -257,16 +295,20 @@ async fn land<'a, Env: ResolveEnv>(
 
 /// Phase one for one upstream: fetch it, rebase local changes onto it,
 /// and persist the merged tree's blocks, without writing any cell.
+///
+/// Unless `confirm_upstream`, a remote upstream is not asked for its head:
+/// the one last known for it is merged (see [`Pull::assuming_upstream`]).
 pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
     branch: &'a Branch,
     upstream: Upstream,
+    confirm_upstream: bool,
     env: &Env,
 ) -> Result<PreparedPull<'a>, PullError> {
     {
         // Resolve the upstream's current revision and, when the
         // upstream is at a peer, keep it so the merge can fall back to
         // the peer's archive for blocks that aren't local.
-        let upstream_revision = fetch_one(branch, &upstream, env).await?;
+        let upstream_revision = fetch_one(branch, &upstream, confirm_upstream, env).await?;
         let remote = upstream.fallback();
 
         // Upstream has never received a revision yet — nothing to
@@ -312,7 +354,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // when the upstream is remote, falls back to the remote
         // archive for blocks that haven't been replicated. With
         // `remote: None` it degrades to a plain local index.
-        let store = NetworkedIndex::new(env, branch.archive().index(), remote);
+        let store = NetworkedIndex::erased(env, branch.archive().index(), remote);
 
         // The three trees: last-sync base, the upstream revision we're
         // merging in, and the local tree the merge integrates onto — an
@@ -325,9 +367,16 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             }
             None => Index::empty_with_cache(branch.node_cache()),
         };
+        // The trees as the revisions name them. An arm that reads them
+        // aligns them first (`migrate::aligned`): a tree a release before
+        // the band laid out, an old client's head or the sync base it
+        // left, is rewritten so the diffs compare like with like. The arms
+        // that adopt or keep a head by root read nothing, and adopt a head
+        // as it is: a head laid out the earlier way is migrated by the
+        // next write or read that opens it.
         let base_tree = index_at(base.as_ref());
         let upstream_tree = index_at(Some(&upstream_revision.tree));
-        let mut merged = index_at(local_tree.as_ref());
+        let local_index = index_at(local_tree.as_ref());
 
         // The receiver's causal context: the per-origin watermark of the
         // local head's ancestry. This is the merge's memory of every
@@ -336,27 +385,141 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // but the cache no longer holds (deleted facts carry no
         // tombstone; see `notes/version-control.md`).
         //
-        // Answered from the branch memo, or from the watermark the head
-        // itself published (heads carry their context under the head
-        // signature), or — only for lineages minted before heads carried
-        // contexts — by the O(ancestry) walk, once.
+        // Answered from the branch memo, or from the context region of the
+        // local head's tree (local blocks, read once per head), or from the
+        // head itself when it predates the region, or — only for lineages
+        // minted before heads carried contexts — by the O(ancestry) walk,
+        // once. Resolved only once a gate needs it: the two gates below
+        // decide a follower's pull from the heads alone.
         let contexts = branch.contexts();
-        let local_context = match &local_revision {
-            Some(revision) => match contexts.cached(&revision.version()).await {
-                Some(context) => context,
-                None => match &revision.context {
-                    Some(context) => {
-                        contexts.insert(revision.version(), context.clone());
-                        context.clone()
-                    }
-                    None => {
-                        let history = branch.history(env);
-                        contexts.context_of(&revision.version(), &history).await?
-                    }
-                },
-            },
-            None => Context::new(),
+        let local_context = || async {
+            match &local_revision {
+                Some(revision) => {
+                    let history = branch.history(env);
+                    full_context(revision, &contexts, &store, &branch.node_cache(), &history).await
+                }
+                None => Ok(Arc::new(Context::new())),
+            }
         };
+
+        // A replica with no head and no sync base adopts an upstream that
+        // publishes a context by root: nothing it holds can contradict
+        // anything, which is the fast-forward gate below with an empty
+        // side. That needs nothing of the upstream's context, so none of
+        // it is read here; it is remembered when the head carries it
+        // inline, and the first commit on top reads the rest.
+        if local_revision.is_none()
+            && base.is_none()
+            && (upstream_revision.region || upstream_revision.context.is_some())
+        {
+            if let Some(context) = upstream_revision.inline_context() {
+                contexts.insert(upstream_revision.version(), Arc::new(context.clone()));
+            }
+            return Ok(PreparedPull::Merged(Box::new(Merged {
+                branch,
+                head,
+                new_revision: upstream_revision.clone(),
+                merges: upstream_revision.clone(),
+                sync: upstream.with_tree(upstream_revision.tree.clone()),
+                base,
+            })));
+        }
+
+        // Nothing new: we have seen the upstream's head. A head's context
+        // holds its own version and is closed under ancestry, so having
+        // seen the head is having seen everything it has seen, and every
+        // claim live there is live or covered here already: the merge
+        // would change nothing. Keep the head and advance only the sync
+        // base, so future diffs start from the upstream's current tree.
+        // Decided from our own context and the head's version, at zero
+        // reads, whatever shape the upstream's head is.
+        // Two heads of one origin answer it from their editions alone, since
+        // an origin's revisions form one chain; across origins it is one
+        // entry of our own context (`head_observes`): the memo, or one point
+        // read of our own tree's region.
+        let seen = match &local_revision {
+            None => false,
+            Some(current) => match head_observes(
+                current,
+                &upstream_revision.version(),
+                &contexts,
+                &store,
+                &branch.node_cache(),
+            )
+            .await?
+            {
+                Some(seen) => seen,
+                None => local_context()
+                    .await?
+                    .observes(&upstream_revision.version()),
+            },
+        };
+        if let Some(current) = &local_revision
+            && seen
+        {
+            return Ok(PreparedPull::Merged(Box::new(Merged {
+                branch,
+                head,
+                new_revision: current.clone(),
+                merges: upstream_revision.clone(),
+                sync: upstream.with_tree(upstream_revision.tree.clone()),
+                base,
+            })));
+        }
+
+        // The upstream's full context, resolved at most once and only by the
+        // paths that need it: the memo, the head's inline context, or its
+        // tree's context region (its root and the region's few leaves, read
+        // through the store that serves its blocks). `None` for a head
+        // minted before heads carried a context, for which the paths that
+        // compare contexts are skipped.
+        let upstream_context = || async {
+            published_context(&upstream_revision, &contexts, &store, &branch.node_cache()).await
+        };
+
+        // Fast-forward adoption: we have no novelty of our own (our tree is
+        // exactly the sync base) and the upstream has seen our head, so
+        // everything we have. Nothing we know could contradict what
+        // survived its screen, so its tree is adopted by root: no diff, no
+        // import. Blocks hydrate lazily on demand like any partially
+        // replicated region — this is what keeps pull cost independent of
+        // upstream churn in regions we never touch, and what makes adopting
+        // a deep history free.
+        //
+        // Whether the upstream has seen our head is one entry of its
+        // context. When the two heads share an origin (a replica following
+        // an upstream it fast-forwarded from before), that origin's
+        // revisions form one chain, so an upstream head at or above ours
+        // has seen ours: zero reads. Otherwise the entry is one point read of
+        // the upstream's region, its root and the path to one leaf, however
+        // many origins it holds (`head_observes`).
+        if base.as_ref().map(|base| base.hash()) == local_tree.as_ref().map(|tree| tree.hash()) {
+            let seen = match &local_revision {
+                None => true,
+                Some(local) => head_observes(
+                    &upstream_revision,
+                    &local.version(),
+                    &contexts,
+                    &store,
+                    &branch.node_cache(),
+                )
+                .await?
+                .unwrap_or(false),
+            };
+            if seen {
+                return Ok(PreparedPull::Merged(Box::new(Merged {
+                    branch,
+                    head,
+                    new_revision: upstream_revision.clone(),
+                    merges: upstream_revision.clone(),
+                    sync: upstream.with_tree(upstream_revision.tree.clone()),
+                    base,
+                })));
+            }
+        }
+
+        let upstream_context = upstream_context().await?;
+        let local_context = local_context().await?;
 
         // Replicas that have never observed one another (no origin in
         // common, see `merge::unacquainted`) integrate each other's
@@ -365,55 +528,54 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // tree once per covering record, the first of them a root-to-
         // leaf descent, before the integrate can begin. This is the
         // shape of a device joining an account it was seeded apart
-        // from. Decided from the two watermarks at zero reads; an
-        // upstream that published no watermark is screened as before.
-        let unacquainted = upstream_revision
-            .context
-            .as_ref()
+        // from. Decided from the two watermarks; an upstream that
+        // published no watermark is screened as before.
+        let unacquainted = upstream_context
+            .as_deref()
             .is_some_and(|theirs| merge::unacquainted(&local_context, theirs));
 
-        // The upstream published its watermark with its head: two frugal
-        // paths can short-circuit the tree merge entirely, both gated on
-        // comparing the two contexts (O(#origins), no reads).
-        if let Some(theirs) = &upstream_revision.context {
-            // Nothing new: everything the upstream has seen, we have
-            // seen. Every claim live there is live or covered here
-            // already, so the merge would change nothing. Keep the head
-            // and advance only the sync base, so future diffs start
-            // from the upstream's current tree.
-            if local_context.includes(theirs) {
-                if let Some(current) = &local_revision {
-                    return Ok(PreparedPull::Merged(Box::new(Merged {
-                        branch,
-                        head,
-                        new_revision: current.clone(),
-                        sync: upstream.with_tree(upstream_revision.tree.clone()),
-                        base,
-                    })));
-                }
-            }
-            // Fast-forward adoption: we have no novelty of our own (our
-            // tree is exactly the sync base) and the upstream has seen
-            // everything we have. Nothing we know could contradict what
-            // survived its screen, so its tree is adopted by root: no
-            // diff, no block reads, no import. Blocks hydrate lazily on
-            // demand like any partially replicated region — this is what
-            // keeps pull cost independent of upstream churn in regions
-            // we never touch, and what makes adopting a deep history
-            // free.
-            else if base.as_ref().map(|base| base.hash())
-                == local_tree.as_ref().map(|tree| tree.hash())
-                && theirs.includes(&local_context)
-            {
-                contexts.insert(upstream_revision.version(), theirs.clone());
-                return Ok(PreparedPull::Merged(Box::new(Merged {
-                    branch,
-                    head,
-                    new_revision: upstream_revision.clone(),
-                    sync: upstream.with_tree(upstream_revision.tree.clone()),
-                    base,
-                })));
-            }
+        // Rival merges: two replicas that pulled each other at the same
+        // moment each minted a merge of the same history. The two hold
+        // the same data and differ only by their own revision records, so
+        // a merge of them matches neither tree, and minting it would hand
+        // the other side a new rival, round after round. Settle on the
+        // greater version instead, which both sides choose alike: the
+        // greater side keeps its head and advances only the sync base; the
+        // lesser adopts the greater head by its root, as a fast-forward
+        // does. The lesser merge holds no claim of its own, so dropping it
+        // loses nothing, and its version is never minted again: the next
+        // revision of its origin sits above the adopted head's edition.
+        // Neither rival has seen the other, so this cannot be one of the
+        // two gates above.
+        if let Some(local) = &local_revision
+            && let Some(theirs) = &upstream_context
+            && rival_merges(
+                branch,
+                &store,
+                (local, &local_context),
+                (&upstream_revision, theirs),
+            )
+            .await?
+        {
+            let new_revision = if upstream_revision.version() > local.version() {
+                upstream_revision.clone()
+            } else {
+                local.clone()
+            };
+            return Ok(PreparedPull::Merged(Box::new(Merged {
+                branch,
+                head,
+                new_revision,
+                merges: upstream_revision.clone(),
+                sync: upstream.with_tree(upstream_revision.tree.clone()),
+                base,
+            })));
+        }
+
+        // The upstream published its watermark: the merge paths below that
+        // pick a direction or a strategy compare the two contexts.
+        if let Some(their_context) = &upstream_context {
+            let theirs: &Context = their_context;
             // The graft merge, for tracked pulls where at least one
             // side's delta is substantial: partition the key space by
             // each side's node-level divergence from the sync base,
@@ -430,7 +592,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             // threshold the direct paths (replay ours or screen theirs,
             // whichever side is smaller) are strictly cheaper; the
             // graft's economics need bulk on both sides.
-            else if let Some(local) = &local_revision
+            if let Some(local) = &local_revision
                 && let Some(base_sync) = &base
                 && local_context
                     .divergence(theirs)
@@ -438,18 +600,12 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     > SMALL_DIVERGENCE
             {
                 let tree_store = store.clone();
-                let base_tree = Index::from_hash_with_cache(
-                    NodeHash::from(*base_sync.hash()),
-                    branch.node_cache(),
-                );
-                let local_tree = Index::from_hash_with_cache(
-                    NodeHash::from(*local.tree.hash()),
-                    branch.node_cache(),
-                );
-                let upstream_tree = Index::from_hash_with_cache(
-                    NodeHash::from(*upstream_revision.tree.hash()),
-                    branch.node_cache(),
-                );
+                // The three trees, aligned: a side a release before the
+                // band laid out meets the others rewritten.
+                let _ = base_sync;
+                let base_tree = aligned(branch, base_tree.clone(), &store, env).await?;
+                let local_tree = aligned(branch, local_index.clone(), &store, env).await?;
+                let upstream_tree = aligned(branch, upstream_tree.clone(), &store, env).await?;
 
                 // Node-level divergence spans of each side against the
                 // base: conservative supersets read from the pruned diff
@@ -478,11 +634,15 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     .divergent_bounds(),
                 );
                 let pieces = merge::partition_spans(&ours_spans, &theirs_spans);
-                let contested: Vec<_> = pieces
-                    .iter()
-                    .filter(|(_, source)| *source == merge::SpanSource::Contested)
-                    .map(|(span, _)| span.clone())
-                    .collect();
+                // The context region is never integrated entry by entry: the
+                // merge revision minted below writes its full context there.
+                let contested = merge::without_context(
+                    pieces
+                        .iter()
+                        .filter(|(_, source)| *source == merge::SpanSource::Contested)
+                        .map(|(span, _)| span.clone())
+                        .collect(),
+                );
 
                 // Stitch: each unilaterally-changed span adopts the
                 // changed side's subtree; unchanged space is identical
@@ -521,7 +681,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // exactly the novel ones.
                 if !contested.is_empty() {
                     let (changed_side, screen_context) = if ours_smaller {
-                        (&local_tree, theirs.clone())
+                        (&local_tree, their_context.clone())
                     } else {
                         (&upstream_tree, local_context.clone())
                     };
@@ -634,11 +794,12 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // Head selection mirrors the other merge paths, so
                 // mutual pulls quiesce.
                 if merged_tree == upstream_revision.tree {
-                    contexts.insert(upstream_revision.version(), theirs.clone());
+                    contexts.insert(upstream_revision.version(), their_context.clone());
                     return Ok(PreparedPull::Merged(Box::new(Merged {
                         branch,
                         head,
                         new_revision: upstream_revision.clone(),
+                        merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
                     })));
@@ -648,6 +809,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: local.clone(),
+                        merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
                     })));
@@ -675,23 +837,41 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // inline-vs-spill threshold, so read it off the tree rather
                 // than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
-                merged
-                    .record(&store, &mut delta, record.entries(&manifest)?)
-                    .await?;
-                revision.tree = TreeReference::from(*merged.root().as_bytes());
-                let mut context = local_context.clone();
+                // The merged head's context is the union of both sides' plus
+                // its own version. The stitched tree's
+                // context region is pieced from both sides' regions, so the
+                // entries either side may hold differently are written.
+                let mut context = Context::clone(&local_context);
                 context.merge(theirs);
                 context.record(revision.version());
-                revision.context = Some(context.clone());
+                let mut entries = record.entries(&manifest)?;
+                entries.entries.extend(region_writes(
+                    revision.version(),
+                    &context,
+                    &[
+                        held(local, &local_context),
+                        held(&upstream_revision, theirs),
+                    ],
+                ));
+                merged.record(&store, &mut delta, entries).await?;
+                revision.tree = TreeReference::from(*merged.root().as_bytes());
+                revision.publish_region();
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
 
-                persist(&branch.archive().index(), &mut delta, env).await?;
+                persist(
+                    &branch.archive().index(),
+                    &branch.node_cache(),
+                    &mut delta,
+                    env,
+                )
+                .await?;
 
                 return Ok(PreparedPull::Merged(Box::new(Merged {
                     branch,
                     head,
                     new_revision: revision,
+                    merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
                 })));
@@ -734,19 +914,12 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 && local_context.divergence(theirs) <= theirs.divergence(&local_context)
             {
                 let tree_store = store.clone();
-                let base_tree = index_at(base.as_ref());
-                let local_tree = Index::from_hash_with_cache(
-                    NodeHash::from(*local.tree.hash()),
-                    branch.node_cache(),
-                );
-                let mut merged = Index::from_hash_with_cache(
-                    NodeHash::from(*upstream_revision.tree.hash()),
-                    branch.node_cache(),
-                );
-                let upstream_snapshot = Index::from_hash_with_cache(
-                    NodeHash::from(*upstream_revision.tree.hash()),
-                    branch.node_cache(),
-                );
+                // The trees, aligned, their tree the substrate.
+                let base_tree = aligned(branch, base_tree.clone(), &store, env).await?;
+                let local_tree = aligned(branch, local_index.clone(), &store, env).await?;
+                let upstream_tree = aligned(branch, upstream_tree.clone(), &store, env).await?;
+                let mut merged = upstream_tree.clone();
+                let upstream_snapshot = upstream_tree.clone();
 
                 let history_scope = merge::history_scope();
                 let data_scope = merge::data_scope();
@@ -777,7 +950,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 let screened_data = if unacquainted {
                     Either::Left(data_changes)
                 } else {
-                    Either::Right(merge::screen_data(data_changes, theirs.clone()))
+                    Either::Right(merge::screen_data(data_changes, their_context.clone()))
                 };
                 let screened = futures_util::StreamExt::chain(screened_history, screened_data);
 
@@ -796,11 +969,12 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // arms the integrate produced no new nodes, so there is
                 // nothing to import.
                 if merged_tree == upstream_revision.tree {
-                    contexts.insert(upstream_revision.version(), theirs.clone());
+                    contexts.insert(upstream_revision.version(), their_context.clone());
                     return Ok(PreparedPull::Merged(Box::new(Merged {
                         branch,
                         head,
                         new_revision: upstream_revision.clone(),
+                        merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
                     })));
@@ -810,6 +984,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: local.clone(),
+                        merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
                     })));
@@ -841,23 +1016,38 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 // inline-vs-spill threshold, so read it off the tree rather
                 // than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
-                merged
-                    .record(&store, &mut delta, record.entries(&manifest)?)
-                    .await?;
-                revision.tree = TreeReference::from(*merged.root().as_bytes());
-                let mut context = local_context.clone();
+                // The merged head's context is the union of both sides' plus
+                // its own version. The merged tree started as
+                // theirs, so its context region is theirs, and the entries it
+                // holds differently are written.
+                let mut context = Context::clone(&local_context);
                 context.merge(theirs);
                 context.record(revision.version());
-                revision.context = Some(context.clone());
+                let mut entries = record.entries(&manifest)?;
+                entries.entries.extend(region_writes(
+                    revision.version(),
+                    &context,
+                    &[held(&upstream_revision, theirs)],
+                ));
+                merged.record(&store, &mut delta, entries).await?;
+                revision.tree = TreeReference::from(*merged.root().as_bytes());
+                revision.publish_region();
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
 
-                persist(&branch.archive().index(), &mut delta, env).await?;
+                persist(
+                    &branch.archive().index(),
+                    &branch.node_cache(),
+                    &mut delta,
+                    env,
+                )
+                .await?;
 
                 return Ok(PreparedPull::Merged(Box::new(Merged {
                     branch,
                     head,
                     new_revision: revision,
+                    merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
                 })));
@@ -875,7 +1065,16 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // base and upstream actually differ within its region.
         let tree_store = store.clone();
         let screen_store = store.clone();
-        let local_snapshot = index_at(local_tree.as_ref());
+        // The trees, aligned. An upstream head laid out the earlier way is
+        // not adopted here: the head minted below descends from it over
+        // its rewrite, so this replica's head is one it writes into.
+        let base_tree = aligned(branch, base_tree, &store, env).await?;
+        let upstream_tree = aligned(branch, upstream_tree, &store, env).await?;
+        let local_index = aligned(branch, local_index, &store, env).await?;
+        let upstream_rewritten =
+            upstream_tree.root() != &NodeHash::from(*upstream_revision.tree.hash());
+        let mut merged = local_index.clone();
+        let local_snapshot = local_index.clone();
 
         // History changes are screened + emitted first, data changes
         // second; chaining them into one stream integrated in a single
@@ -944,8 +1143,11 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // The records in the delta are exactly the upstream-ancestry
         // revisions we may have lacked, so this equals the ancestry walk
         // without paying it.
+        // The local context as it stood: the merged tree started as ours, so
+        // its context region is what this held.
+        let local_full = Arc::clone(&local_context);
         let merged_context = {
-            let mut context = local_context;
+            let mut context = Arc::unwrap_or_clone(local_context);
             let observed = mem::take(
                 &mut *observed
                     .lock()
@@ -964,8 +1166,10 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             // record would have made the roots differ.
             _ if merged_tree == upstream_revision.tree => upstream_revision.clone(),
             // Branch has no prior revision; adopt the upstream
-            // revision directly (its identity still applies).
-            None => upstream_revision.clone(),
+            // revision directly (its identity still applies). Not when
+            // its tree was rewritten under the band: the head minted
+            // below descends from it over the rewrite.
+            None if !upstream_rewritten => upstream_revision.clone(),
             // The upstream had nothing we lack (its novelty was already
             // in our ancestry, or was screened out as covered): the
             // local head stands. No revision is minted — only the sync
@@ -980,45 +1184,63 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             // both parents — are recorded on top, so conflict detection
             // keeps working across the sync boundary. The placeholder tree
             // root is replaced once those records are in the tree.
-            Some(local) => {
+            local => {
                 let authority = Identify.perform(env).await?;
                 let branch_entity =
                     crate::branch_of(branch.of(), authority.profile(), branch.name());
                 // Mint at the merged tree as it stands; the root is
                 // finalized once the merge's own record is in the tree.
-                let mut revision = local.merge(
-                    &upstream_revision,
-                    merged_tree.clone(),
-                    branch_entity.clone(),
-                    authority.did(),
-                );
+                let (mut revision, parents) = match &local {
+                    Some(local) => (
+                        local.merge(
+                            &upstream_revision,
+                            merged_tree.clone(),
+                            branch_entity.clone(),
+                            authority.did(),
+                        ),
+                        vec![local.version(), upstream_revision.version()],
+                    ),
+                    // No head of our own, and an upstream head laid out
+                    // the earlier way: the head minted over its rewrite
+                    // descends from it alone.
+                    None => (
+                        upstream_revision.advance(
+                            merged_tree.clone(),
+                            branch_entity.clone(),
+                            authority.did(),
+                        ),
+                        vec![upstream_revision.version()],
+                    ),
+                };
                 // A merge records no skip table: a skip chain must never
                 // cross a revision with more than one parent, or leaping
                 // it would lose the ancestry entering through the other
                 // parent (see `dialog_artifacts::history::skip`). Sign the
                 // record before it enters the tree, and the head once the
                 // merged root is final — same order as `Commit`.
-                let mut record = RevisionRecord::create(
-                    &revision,
-                    authority.profile(),
-                    vec![local.version(), upstream_revision.version()],
-                    Vec::new(),
-                );
+                let mut record =
+                    RevisionRecord::create(&revision, authority.profile(), parents, Vec::new());
                 record.signature = Attest::new(record.payload()?).perform(env).await?;
                 // The record's key carries its value through the tree's own
                 // inline-vs-spill threshold, so read it off the tree rather
                 // than assuming the default.
                 let manifest = merged.format_manifest(store.clone(), &delta).await?;
-                merged
-                    .record(&store, &mut delta, record.entries(&manifest)?)
-                    .await?;
-                revision.tree = TreeReference::from(*merged.root().as_bytes());
                 // The minted head publishes its watermark: the merged
-                // context plus its own version, signed with the rest of
-                // the head so peers can adopt it without walking.
+                // context plus its own version, its active set signed with
+                // the rest of the head and the whole of it in the tree's
+                // context region, so peers can adopt it without walking.
+                // The merged tree started as ours (or as the empty tree,
+                // with no head of our own), so its region is what ours held.
                 let mut context = merged_context.clone();
                 context.record(revision.version());
-                revision.context = Some(context);
+                let started = local.as_ref().and_then(|local| held(local, &local_full));
+                let mut entries = record.entries(&manifest)?;
+                entries
+                    .entries
+                    .extend(region_writes(revision.version(), &context, &[started]));
+                merged.record(&store, &mut delta, entries).await?;
+                revision.tree = TreeReference::from(*merged.root().as_bytes());
+                revision.publish_region();
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
                 revision
@@ -1047,16 +1269,60 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // reference-counted (nothing is copied on the way in) and
         // providers with native batching persist it in a single round
         // trip.
-        persist(&branch.archive().index(), &mut delta, env).await?;
+        persist(
+            &branch.archive().index(),
+            &branch.node_cache(),
+            &mut delta,
+            env,
+        )
+        .await?;
 
         Ok(PreparedPull::Merged(Box::new(Merged {
             branch,
             head,
             new_revision,
+            merges: upstream_revision.clone(),
             sync: upstream.with_tree(upstream_revision.tree),
             base,
         })))
     }
+}
+
+/// Whether the local head and the upstream head are rival merges of one
+/// history: each is the one revision the other side has not seen, and
+/// both are merges. Their parents then summarize the same ancestry, so
+/// the two hold the same data.
+///
+/// The contexts decide most pulls at no reads; only a pair that passes
+/// them reads the two revision records, to tell a merge from a commit of
+/// its own claims, which two concurrent commits on a shared base would be.
+async fn rival_merges(
+    branch: &Branch,
+    store: &NetworkedIndex<'_, dyn Reads>,
+    (local, ours): (&Revision, &Context),
+    (upstream, theirs): (&Revision, &Context),
+) -> Result<bool, PullError> {
+    let (local_version, upstream_version) = (local.version(), upstream.version());
+    let one_apart = ours.divergence(theirs) == 1
+        && theirs.divergence(ours) == 1
+        && !theirs.observes(&local_version)
+        && !ours.observes(&upstream_version);
+    if !one_apart {
+        return Ok(false);
+    }
+    for (revision, version) in [(local, local_version), (upstream, upstream_version)] {
+        let record = TreeHistory::from_root_with_cache(
+            revision.tree.hash(),
+            store.clone(),
+            branch.node_cache(),
+        )
+        .revision_record(&version)
+        .await?;
+        if record.is_none_or(|record| record.parents.len() <= 1) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// A rebased pull awaiting its cell advance — the output of
@@ -1076,6 +1342,18 @@ pub enum PreparedPull<'a> {
     Merged(Box<Merged<'a>>),
 }
 
+/// One revision a pull brings in, as [`PreparedPull::novelty`] lists it.
+#[derive(Debug, Clone)]
+pub struct NewRevision {
+    /// The revision's version.
+    pub version: Version,
+    /// What the revision states about itself: its issuer, the authority it
+    /// names, and its parents. Verified against its version and signature.
+    pub record: RevisionRecord,
+    /// The claims the revision made, each an assertion or a retraction.
+    pub claims: Vec<HistoryRecord>,
+}
+
 /// The payload of a [`PreparedPull::Merged`] — a rebased merge ready to land.
 pub struct Merged<'a> {
     /// The branch whose cells the commit advances.
@@ -1086,6 +1364,10 @@ pub struct Merged<'a> {
     head: Checkpoint<Revision>,
     /// The merged revision to publish as the new head.
     new_revision: Revision,
+    /// The upstream revision this merge brings in: the head the prepare
+    /// fetched and verified, and the only one the commit adopts, however
+    /// far the upstream has moved since.
+    merges: Revision,
     /// The upstream entry just pulled from, its sync base already advanced
     /// to the tree merged in — the tracking state to upsert.
     sync: Upstream,
@@ -1105,6 +1387,85 @@ impl PreparedPull<'_> {
             PreparedPull::NoOp => None,
             PreparedPull::Merged(merged) => Some(&merged.new_revision),
         }
+    }
+
+    /// The upstream revision this pull merges, if any: the head the prepare
+    /// fetched and verified.
+    ///
+    /// The commit adopts this revision and no other. An upstream that moved
+    /// after the prepare is not followed: a caller that checks the
+    /// revisions up to this head (see [`novelty`](Self::novelty)) commits
+    /// exactly what it checked, and pulls again for the newer head.
+    pub fn upstream(&self) -> Option<&Revision> {
+        match self {
+            PreparedPull::NoOp => None,
+            PreparedPull::Merged(merged) => Some(&merged.merges),
+        }
+    }
+
+    /// The revisions this pull brings into the branch, ancestors first, each
+    /// with its record — its issuer, its authority, its parents — and the
+    /// claims it made: the upstream revisions from [`upstream`](Self::upstream)
+    /// back to what the branch already holds.
+    ///
+    /// For a caller that decides, before it [`commit`](Self::commit)s,
+    /// whether each new revision may enter the branch — checking the
+    /// authority each one names, say. The branch's own history decides what
+    /// is new: a revision the branch records needs no second look. A
+    /// revision of the upstream's history whose record is not present — a
+    /// head whose history the peer does not serve — fails the walk with
+    /// [`IncompleteHistory`](dialog_artifacts::DialogArtifactsError::IncompleteHistory),
+    /// where a history walk of [`log`](dialog_artifacts::history::log)
+    /// would skip it. Each record is verified as it is read, so a forged
+    /// one fails too.
+    ///
+    /// Reads that miss locally fall back to the upstream's peer, as the
+    /// prepare's own reads do. A no-op pull brings nothing, and neither
+    /// does one whose commit keeps the branch's head and advances only the
+    /// sync base: what the upstream holds then enters no history the
+    /// branch reads.
+    pub async fn novelty<Env>(&self, env: &Env) -> Result<Vec<NewRevision>, PullError>
+    where
+        Env: ResolveEnv,
+    {
+        let merged = match self {
+            PreparedPull::NoOp => return Ok(Vec::new()),
+            PreparedPull::Merged(merged) => merged,
+        };
+        let branch = merged.branch;
+        if branch.revision().map(|head| head.version()) == Some(merged.new_revision.version()) {
+            return Ok(Vec::new());
+        }
+        let upstream = TreeHistory::from_root_with_cache(
+            merged.merges.tree.hash(),
+            NetworkedIndex::new(env, branch.archive().index(), merged.sync.fallback()),
+            branch.node_cache(),
+        )
+        .with_record_cache(branch.records());
+        // What the branch holds is local, so its history reads nothing from
+        // the network.
+        let local = NetworkedIndex::new(env, branch.archive().index(), RemoteFallback::None);
+        let known = match branch.revision() {
+            Some(head) => {
+                TreeHistory::from_root_with_cache(head.tree.hash(), local, branch.node_cache())
+            }
+            None => TreeHistory::empty_with_cache(local, branch.node_cache()),
+        };
+        let novel = novelty(&merged.merges.version(), &upstream, &known).await?;
+        let mut revisions = Vec::with_capacity(novel.len());
+        for (version, record) in novel {
+            let claims = upstream
+                .select(version)
+                .map_ok(|(_, record)| record)
+                .try_collect()
+                .await?;
+            revisions.push(NewRevision {
+                version,
+                record,
+                claims,
+            });
+        }
+        Ok(revisions)
     }
 
     /// Phase two: advance the branch cells — the head to the merged revision
@@ -1141,6 +1502,7 @@ impl PreparedPull<'_> {
             new_revision,
             sync,
             base,
+            ..
         } = match self {
             PreparedPull::NoOp => return Ok(None),
             PreparedPull::Merged(merged) => *merged,
@@ -1219,6 +1581,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use super::PreparedPull;
     use crate::helpers::test_repo;
     use anyhow::Result;
     use dialog_peer::helpers::test_session_with_peer;
@@ -1232,12 +1595,15 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:seed".parse()?,
-            is: Value::String("Seed".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:seed".parse()?,
+                is: Value::String("Seed".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -1255,12 +1621,15 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:main".parse()?,
-            is: Value::String("Main data".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: Value::String("Main data".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
         let main_revision = main.revision().expect("main should have a revision");
@@ -1290,22 +1659,28 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:main".parse()?,
-            is: Value::String("Main data".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: Value::String("Main data".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
         let dev = repo.branch("dev").open().perform(&operator).await?;
-        dev.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/email".parse()?,
-            of: "user:dev".parse()?,
-            is: Value::String("dev@test.com".to_string()),
-            cause: None,
-        })]))
+        dev.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/email".parse()?,
+                of: "user:dev".parse()?,
+                is: Value::String("dev@test.com".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -1368,12 +1743,15 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:main".parse()?,
-            is: Value::String("Main data".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: Value::String("Main data".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
         let main_revision = main.revision().expect("main should have a revision");
@@ -1381,12 +1759,15 @@ mod tests {
         let feature = repo.branch("feature").open().perform(&operator).await?;
         feature.set_upstream(&main).perform(&operator).await?;
         feature
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/email".parse()?,
-                of: "user:feature".parse()?,
-                is: Value::String("feature@test.com".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/email".parse()?,
+                    of: "user:feature".parse()?,
+                    is: Value::String("feature@test.com".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -1428,12 +1809,15 @@ mod tests {
 
         // Upstream `main` has a change to pull in.
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:main".parse()?,
-            is: Value::String("Main data".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: Value::String("Main data".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -1447,12 +1831,15 @@ mod tests {
         // A local commit lands through the *other* handle, advancing the
         // feature head in storage. `feature_pull`'s cache is now stale.
         feature_commit
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/email".parse()?,
-                of: "user:feature".parse()?,
-                is: Value::String("feature@test.com".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/email".parse()?,
+                    of: "user:feature".parse()?,
+                    is: Value::String("feature@test.com".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -1518,12 +1905,15 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:main".parse()?,
-            is: Value::String("Main data".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: Value::String("Main data".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
         let main_revision = main.revision().expect("main should have a revision");
@@ -1552,6 +1942,82 @@ mod tests {
         Ok(())
     }
 
+    /// A prepared pull names the upstream head it merges, lists each
+    /// revision that head brings in — what the branch lacks, ancestors
+    /// first, with its issuer, its authority, and its claims — and its
+    /// commit adopts that head and no newer one, however far the upstream
+    /// moves meanwhile.
+    #[dialog_common::test]
+    async fn it_prepares_a_pull_of_one_named_head_and_lists_its_novelty() -> Result<()> {
+        use dialog_effects::authority::{Identify, OperatorExt as _};
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let assert = |entity: &str, name: &str| -> Result<Vec<Instruction>> {
+            Ok(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: entity.parse()?,
+                    is: Value::String(name.to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )])
+        };
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(assert("user:seed", "Seed")?))
+            .perform(&operator)
+            .await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature.pull().perform(&operator).await?;
+
+        main.commit(stream::iter(assert("user:two", "Two")?))
+            .perform(&operator)
+            .await?;
+        main.commit(stream::iter(assert("user:three", "Three")?))
+            .perform(&operator)
+            .await?;
+        let checked = main.revision().expect("main has a head");
+
+        let prepared = feature.pull().prepare(&operator).await?;
+
+        assert_eq!(prepared.upstream(), Some(&checked));
+        let novelty = prepared.novelty(&operator).await?;
+        assert_eq!(novelty.len(), 2, "the two commits the feature lacks");
+        assert_eq!(novelty[1].version, checked.version());
+        let identity = Identify.perform(&operator).await?;
+        for (revision, name) in novelty.iter().zip(["Two", "Three"]) {
+            assert_eq!(revision.record.issuer, operator.did().to_string());
+            assert_eq!(revision.record.authority, identity.profile().to_string());
+            assert!(
+                revision.claims.iter().any(|record| record.is_assertion()
+                    && record.claim().is == Value::String(name.to_string())),
+                "{name}: {:?}",
+                revision.claims
+            );
+        }
+
+        // The upstream moves on after the prepare: the commit still adopts
+        // the head that was checked.
+        main.commit(stream::iter(assert("user:four", "Four")?))
+            .perform(&operator)
+            .await?;
+        prepared.commit(&operator).await?;
+        assert_eq!(
+            feature.revision().expect("the feature has a head").tree,
+            checked.tree
+        );
+        assert_ne!(main.revision().expect("main has a head").tree, checked.tree);
+        // A no-op pull names nothing and brings nothing.
+        let noop = PreparedPull::NoOp;
+        assert!(noop.upstream().is_none());
+        assert!(noop.novelty(&operator).await?.is_empty());
+
+        Ok(())
+    }
+
     /// A no-op pull (upstream hasn't moved) prepares to `NoOp` and commits to
     /// `Ok(None)` without touching the cells.
     #[dialog_common::test]
@@ -1560,12 +2026,15 @@ mod tests {
         let repo = test_repo(&operator, &profile).await;
 
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:main".parse()?,
-            is: Value::String("Main data".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: Value::String("Main data".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -1624,12 +2093,15 @@ mod tests {
         for (name, value) in [("main", "Main data"), ("dev", "Dev data")] {
             let source = repo.branch(name).open().perform(&operator).await?;
             source
-                .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                    the: "user/name".parse()?,
-                    of: format!("user:{name}").parse()?,
-                    is: Value::String(value.to_string()),
-                    cause: None,
-                })]))
+                .commit(stream::iter(vec![Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse()?,
+                        of: format!("user:{name}").parse()?,
+                        is: Value::String(value.to_string()),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
+                )]))
                 .perform(&operator)
                 .await?;
             sources.push(source);
@@ -1678,12 +2150,15 @@ mod tests {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:main".parse()?,
-            is: Value::String("Main data".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:main".parse()?,
+                is: Value::String("Main data".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -1732,12 +2207,15 @@ mod tests {
         for name in ["main", "dev"] {
             let upstream = repo.branch(name).open().perform(&operator).await?;
             upstream
-                .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                    the: "user/name".parse()?,
-                    of: format!("user:{name}").parse()?,
-                    is: Value::String(name.to_string()),
-                    cause: None,
-                })]))
+                .commit(stream::iter(vec![Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse()?,
+                        of: format!("user:{name}").parse()?,
+                        is: Value::String(name.to_string()),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
+                )]))
                 .perform(&operator)
                 .await?;
             feature.pull_from(&upstream).perform(&operator).await?;
@@ -1770,8 +2248,12 @@ mod tests {
 }
 
 #[cfg(test)]
+mod context_tests;
+
+#[cfg(test)]
 mod history_tests {
-    use super::SMALL_DIVERGENCE;
+    use super::super::context::{head_context, region_agrees};
+    use super::{PreparedPull, SMALL_DIVERGENCE};
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -1837,12 +2319,15 @@ mod history_tests {
     }
 
     fn assert_one(the: &str, of: &str, value: &str) -> Instruction {
-        Instruction::Assert(Artifact {
-            the: the.parse().unwrap(),
-            of: of.parse().unwrap(),
-            is: Value::String(value.to_string()),
-            cause: None,
-        })
+        Instruction::Assert(
+            Artifact {
+                the: the.parse().unwrap(),
+                of: of.parse().unwrap(),
+                is: Value::String(value.to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )
     }
 
     /// Convergence: the same fact asserted concurrently on two branches
@@ -1900,6 +2385,157 @@ mod history_tests {
         Ok(())
     }
 
+    /// A pull from an upstream that moved, but only to what the branch has
+    /// seen already, keeps the branch's head and advances the sync base: it
+    /// brings nothing into the branch, so it names nothing new.
+    #[dialog_common::test]
+    async fn it_names_nothing_new_from_a_pull_that_keeps_its_head() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let a = repo.branch("a").open().perform(&operator).await?;
+        let b = repo.branch("b").open().perform(&operator).await?;
+
+        a.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Sword",
+        )]))
+        .perform(&operator)
+        .await?;
+        b.pull().from(&a).perform(&operator).await?;
+        a.pull().from(&b).perform(&operator).await?;
+        a.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Mace",
+        )]))
+        .perform(&operator)
+        .await?;
+        b.pull().from(&a).perform(&operator).await?;
+
+        let head = a.revision().map(|revision| revision.version());
+        let seen = a.pull().from(&b).prepare(&operator).await?;
+        assert!(
+            matches!(&seen, PreparedPull::Merged(merged) if Some(merged.new_revision.version()) == head),
+            "the pull keeps the branch's head"
+        );
+        assert!(
+            seen.novelty(&operator).await?.is_empty(),
+            "a pull that keeps its head brings nothing new"
+        );
+        Ok(())
+    }
+
+    /// Convergence when two replicas pull each other at the same moment:
+    /// each prepares its pull before the other's lands, so each mints a
+    /// merge of the same two heads. The two merges hold the same data but
+    /// differ by their own revision records, so a merge of them matches
+    /// neither tree. Unless the pull settles the two rivals on one head,
+    /// every round of simultaneous pulls mints two new merges, forever.
+    ///
+    /// A prepared pull names only what its commit brings into the branch:
+    /// the greater side of the settle keeps its head and brings nothing, and
+    /// the lesser side brings exactly the rival merge it adopts.
+    #[dialog_common::test]
+    async fn it_quiesces_after_simultaneous_mutual_pulls() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+
+        let a = repo.branch("a").open().perform(&operator).await?;
+        let b = repo.branch("b").open().perform(&operator).await?;
+
+        a.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Sword",
+        )]))
+        .perform(&operator)
+        .await?;
+        b.pull().from(&a).perform(&operator).await?;
+        a.pull().from(&b).perform(&operator).await?;
+
+        a.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Mace",
+        )]))
+        .perform(&operator)
+        .await?;
+
+        b.commit(stream::iter(vec![assert_one(
+            "item/name",
+            "item:sword",
+            "Spear",
+        )]))
+        .perform(&operator)
+        .await?;
+
+        // Both prepare before either commits, so each mints a merge of the
+        // same two heads: two rival merges.
+        let into_a = a.pull().from(&b).prepare(&operator).await?;
+        let into_b = b.pull().from(&a).prepare(&operator).await?;
+        into_a.commit(&operator).await?;
+        into_b.commit(&operator).await?;
+
+        // The settle round: the greater merge's side keeps its head and the
+        // lesser side adopts the greater merge.
+        let (a_head, b_head) = (
+            a.revision().expect("a merged").version(),
+            b.revision().expect("b merged").version(),
+        );
+        assert_ne!(a_head, b_head, "the two sides hold rival merges");
+        let into_a = a.pull().from(&b).prepare(&operator).await?;
+        let into_b = b.pull().from(&a).prepare(&operator).await?;
+        let (greater, lesser, greater_head) = if a_head > b_head {
+            (&into_a, &into_b, a_head)
+        } else {
+            (&into_b, &into_a, b_head)
+        };
+        assert!(
+            greater.novelty(&operator).await?.is_empty(),
+            "the side that keeps its head brings nothing new"
+        );
+        let adopted = lesser.novelty(&operator).await?;
+        assert_eq!(
+            adopted
+                .iter()
+                .map(|revision| revision.version)
+                .collect::<Vec<_>>(),
+            vec![greater_head],
+            "the side that adopts the greater merge brings exactly that merge"
+        );
+        into_a.commit(&operator).await?;
+        into_b.commit(&operator).await?;
+
+        let mut quiesced = false;
+        for _ in 0..4 {
+            // Both prepare before either commits: the two pulls run at once.
+            let into_a = a.pull().from(&b).prepare(&operator).await?;
+            let into_b = b.pull().from(&a).prepare(&operator).await?;
+            let pulled_a = into_a.commit(&operator).await?;
+            let pulled_b = into_b.commit(&operator).await?;
+            if pulled_a.is_none() && pulled_b.is_none() {
+                quiesced = true;
+                break;
+            }
+        }
+        assert!(
+            quiesced,
+            "simultaneous mutual pulls must reach a fixed point"
+        );
+        // The settle adopts one side's head by root, and the region holds
+        // that head's context.
+        region_agrees(&a, &operator, "a after the rival settle").await?;
+        region_agrees(&b, &operator, "b after the rival settle").await?;
+        assert_eq!(
+            a.revision().map(|r| r.tree),
+            b.revision().map(|r| r.tree),
+            "both replicas converge on the same tree"
+        );
+        Ok(())
+    }
+
     /// The observable consequence of the contested-slot union
     /// (`Value::fuse` on `State<Datum>`): a retraction minted AFTER two
     /// branches merged their concurrent identical asserts covers BOTH
@@ -1925,7 +2561,7 @@ mod history_tests {
     /// where the peer's claim stays put unless a record retires it.
     #[dialog_common::test]
     async fn it_retracts_across_peers_holding_either_contended_claim() -> Result<()> {
-        use dialog_query::attribute::The;
+        use dialog_query::attribute::Relation;
         use dialog_query::query::Output as _;
         use dialog_query::{AttributeQuery, Claim, Term, the};
 
@@ -1962,7 +2598,7 @@ mod history_tests {
                 let rows: Vec<Claim> = branch
                     .query()
                     .select(AttributeQuery::from(
-                        Term::<The>::from(the!("post/title"))
+                        Term::<Relation>::from(the!("post/title"))
                             .of(Term::<dialog_artifacts::Entity>::var("of"))
                             .is(Term::<String>::var("is")),
                     ))
@@ -2058,7 +2694,7 @@ mod history_tests {
     /// direction.
     #[dialog_common::test]
     async fn it_does_not_resurrect_a_deleted_fact_on_pull() -> Result<()> {
-        use dialog_query::attribute::The;
+        use dialog_query::attribute::Relation;
         use dialog_query::query::Output as _;
         use dialog_query::{AttributeQuery, Claim, Term, the};
 
@@ -2093,7 +2729,7 @@ mod history_tests {
                 let rows: Vec<Claim> = branch
                     .query()
                     .select(AttributeQuery::from(
-                        Term::<The>::from(the!("post/title"))
+                        Term::<Relation>::from(the!("post/title"))
                             .of(Term::<dialog_artifacts::Entity>::var("of"))
                             .is(Term::<String>::var("is")),
                     ))
@@ -2191,12 +2827,15 @@ mod history_tests {
         // Feature replaces the title: its record's cause lists the version
         // of main's claim, because the pulled data is version-tagged.
         feature
-            .commit(stream::iter(vec![Instruction::Replace(Artifact {
-                the: "post/title".parse()?,
-                of: "post:1".parse()?,
-                is: Value::String("Hi".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "post/title".parse()?,
+                    of: "post:1".parse()?,
+                    is: Value::String("Hi".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::Last,
+            )]))
             .perform(&operator)
             .await?;
         let replacement = feature.revision().expect("feature has a revision");
@@ -2356,12 +2995,15 @@ mod history_tests {
         feature.set_upstream(&main).perform(&operator).await?;
         feature.pull().perform(&operator).await?;
         feature
-            .commit(stream::iter(vec![Instruction::Replace(Artifact {
-                the: "post/title".parse()?,
-                of: "post:1".parse()?,
-                is: Value::String("Hi".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "post/title".parse()?,
+                    of: "post:1".parse()?,
+                    is: Value::String("Hi".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::Last,
+            )]))
             .perform(&operator)
             .await?;
         let ours = feature.revision().expect("feature has a revision");
@@ -2508,6 +3150,7 @@ mod history_tests {
             tree: TreeReference::from([9u8; 32]),
             edition: Edition::GENESIS,
             context: None,
+            region: false,
             signature: Vec::new(),
         };
         evil.reset(forged).perform(&operator).await?;
@@ -2561,12 +3204,15 @@ mod history_tests {
 
         // Both sides replace it, without seeing each other.
         let replace = |value: &str| -> Result<Instruction> {
-            Ok(Instruction::Replace(Artifact {
-                the: "post/title".parse()?,
-                of: "post:1".parse()?,
-                is: Value::String(value.to_string()),
-                cause: None,
-            }))
+            Ok(Instruction::Assert(
+                Artifact {
+                    the: "post/title".parse()?,
+                    of: "post:1".parse()?,
+                    is: Value::String(value.to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::Last,
+            ))
         };
         main.commit(stream::iter(vec![replace("MainSide")?]))
             .perform(&operator)
@@ -2731,12 +3377,15 @@ mod history_tests {
             }
         };
         let label = |value: &str| {
-            Instruction::Assert(Artifact {
-                the: "task/label".parse().unwrap(),
-                of: "task:7".parse().unwrap(),
-                is: Value::String(value.to_string()),
-                cause: None,
-            })
+            Instruction::Assert(
+                Artifact {
+                    the: "task/label".parse().unwrap(),
+                    of: "task:7".parse().unwrap(),
+                    is: Value::String(value.to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )
         };
 
         // Bob labels the task; everyone syncs it.
@@ -2844,9 +3493,12 @@ mod history_tests {
 
         // Bob labels the task; Alice and Mallory sync it.
         let bob = repo.branch("bob").open().perform(&operator).await?;
-        bob.commit(stream::iter(vec![Instruction::Assert(urgent())]))
-            .perform(&operator)
-            .await?;
+        bob.commit(stream::iter(vec![Instruction::Assert(
+            urgent(),
+            dialog_artifacts::Pick::All,
+        )]))
+        .perform(&operator)
+        .await?;
         for name in ["alice", "mallory"] {
             let b = repo.branch(name).open().perform(&operator).await?;
             b.set_upstream(&bob).perform(&operator).await?;
@@ -2859,7 +3511,10 @@ mod history_tests {
         // Alice pulls it (the same-value contest collapses the two
         // versions into one entry), THEN retracts having observed both.
         mallory
-            .commit(stream::iter(vec![Instruction::Assert(urgent())]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                urgent(),
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
         alice.pull().from(&mallory).perform(&operator).await?;
@@ -3012,12 +3667,15 @@ mod history_tests {
         // supersedes names the version of feature's claim.
         let main = repo.branch("main").open().perform(&operator).await?;
         main.pull().from(&feature).perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Replace(Artifact {
-            the: "user/name".parse()?,
-            of: "user:1".parse()?,
-            is: Value::String("Bob".to_string()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:1".parse()?,
+                is: Value::String("Bob".to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::Last,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -3064,7 +3722,7 @@ mod history_tests {
     /// an over-watermark drops live claims).
     #[dialog_common::test]
     async fn it_maintains_the_context_memo_incrementally() -> Result<()> {
-        use dialog_artifacts::history::context_of;
+        use dialog_artifacts::history::{Context, context_of};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -3095,6 +3753,7 @@ mod history_tests {
                     .cached(&head.version())
                     .await
                     .expect("the memo is primed");
+                let memo = Context::clone(&memo);
                 let history = branch.history(operator);
                 let walked = context_of(&head.version(), &history).await?;
                 anyhow::Ok((memo, walked))
@@ -3132,13 +3791,19 @@ mod history_tests {
         Ok(())
     }
 
-    /// Every published head carries its causal context under the head
-    /// signature: it must equal the ancestry walk exactly, and tampering
-    /// with it must fail verification like tampering with any other
-    /// field.
+    /// Every published head keeps its causal context in its tree's region,
+    /// covered by the head signature through the tree root: read from the
+    /// region (not the memo), with the head's own entry derived from the
+    /// head, it equals the ancestry walk exactly. The signed shape marker
+    /// is covered like any other field: stripping it, or claiming an
+    /// inline context beside it, fails verification.
     #[dialog_common::test]
     async fn it_publishes_the_watermark_with_the_head() -> Result<()> {
-        use dialog_artifacts::history::{Edition, Origin, Version, context_of};
+        use crate::{Index, NetworkedIndex};
+        use dialog_artifacts::history::{
+            Edition, HistoryError, Origin, Version, context_in, context_of,
+        };
+        use dialog_common::Blake3Hash;
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
@@ -3155,36 +3820,42 @@ mod history_tests {
         }
 
         let head = main.revision().expect("main has a head");
-        let published = head
-            .context
-            .clone()
-            .expect("a freshly minted head publishes its context");
+        assert!(
+            head.context.is_none() && head.region,
+            "a freshly minted head keeps its context in its tree's region"
+        );
+        let store = NetworkedIndex::new(&operator, main.archive().index(), None);
+        let tree =
+            Index::from_hash_with_cache(Blake3Hash::from(*head.tree.hash()), main.node_cache());
+        let published = head.context_from_region(context_in(&tree, &store).await?)?;
         let history = main.history(&operator);
         let walked = context_of(&head.version(), &history).await?;
         assert_eq!(
             published, walked,
-            "the published watermark must equal the ancestry walk"
+            "the region's watermark must equal the ancestry walk"
         );
 
         head.verify().expect("the untouched head verifies");
 
-        // Inflating the watermark (claiming observation of a revision
-        // that is not in the ancestry) must break the signature.
-        let mut tampered = head.clone();
+        // Claiming an inline context beside the region is refused.
+        let mut inflated = head.clone();
         let mut context = published.clone();
         context.record(Version::new(Origin::from([9u8; 32]), Edition::new(9)));
-        tampered.context = Some(context);
+        inflated.context = Some(context);
         assert!(
-            tampered.verify().is_err(),
-            "a tampered watermark must fail head verification"
+            matches!(
+                inflated.verify(),
+                Err(HistoryError::InvalidSignature(_) | HistoryError::InvalidReference(_))
+            ),
+            "an inline context beside the region must fail head verification"
         );
 
-        // Stripping it entirely must break the signature too.
+        // Stripping the marker breaks the signature.
         let mut stripped = head.clone();
-        stripped.context = None;
+        stripped.region = false;
         assert!(
-            stripped.verify().is_err(),
-            "a stripped watermark must fail head verification"
+            matches!(stripped.verify(), Err(HistoryError::InvalidSignature(_))),
+            "a stripped region marker must fail head verification"
         );
 
         Ok(())
@@ -3416,16 +4087,8 @@ mod history_tests {
         // skip both refuse), and our divergence mass exceeds the
         // author's, so the screened direction fires — their delta onto
         // our tree, R1 rejecting the stale copy.
-        let ours = replica
-            .revision()
-            .expect("replica adopted a head")
-            .context
-            .expect("the head publishes its watermark");
-        let theirs = author
-            .revision()
-            .expect("author has a head")
-            .context
-            .expect("the head publishes its watermark");
+        let ours = (*head_context(&replica, &operator).await?).clone();
+        let theirs = (*head_context(&author, &operator).await?).clone();
         assert!(
             !ours.includes(&theirs) && !theirs.includes(&ours),
             "fixture: both sides carry novelty"
@@ -3623,16 +4286,8 @@ mod history_tests {
         // Routing witness: neither side includes the other, both sit
         // under the graft threshold, and our divergence mass is the
         // smaller, so the replay direction fires.
-        let ours = f
-            .revision()
-            .expect("f has a head")
-            .context
-            .expect("the head publishes its watermark");
-        let theirs = m
-            .revision()
-            .expect("m has a head")
-            .context
-            .expect("the head publishes its watermark");
+        let ours = (*head_context(&f, &operator).await?).clone();
+        let theirs = (*head_context(&m, &operator).await?).clone();
         assert!(
             !ours.includes(&theirs) && !theirs.includes(&ours),
             "fixture: both sides carry novelty"
@@ -3882,7 +4537,7 @@ mod history_tests {
             // Every branch performs one pseudo-random write.
             for branch in branches {
                 let of: dialog_artifacts::Entity = entity(next(4)).parse()?;
-                let the: dialog_artifacts::Attribute = "bench/field".parse()?;
+                let the: dialog_artifacts::Relation = "bench/field".parse()?;
                 let is = value(next(3));
                 let artifact = Artifact {
                     the,
@@ -3891,8 +4546,8 @@ mod history_tests {
                     cause: None,
                 };
                 let instruction = match next(3) {
-                    0 => Instruction::Assert(artifact),
-                    1 => Instruction::Replace(artifact),
+                    0 => Instruction::Assert(artifact, dialog_artifacts::Pick::All),
+                    1 => Instruction::Assert(artifact, dialog_artifacts::Pick::Last),
                     _ => Instruction::Retract(artifact),
                 };
                 // A retract of an absent fact is a no-op commit; both
@@ -4032,16 +4687,8 @@ mod history_tests {
 
         // Pin the routing, not just the cost: the divergence-mass gate
         // must actually select the graft for this fixture.
-        let ours = us
-            .revision()
-            .expect("we have a head")
-            .context
-            .expect("our head publishes its watermark");
-        let theirs = bob
-            .revision()
-            .expect("bob has a head")
-            .context
-            .expect("bob's head publishes its watermark");
+        let ours = (*head_context(&us, &env).await?).clone();
+        let theirs = (*head_context(&bob, &env).await?).clone();
         assert!(
             ours.divergence(&theirs).min(theirs.divergence(&ours)) > SMALL_DIVERGENCE,
             "fixture must route to the graft: ours-beyond {} theirs-beyond {}",
@@ -4060,7 +4707,7 @@ mod history_tests {
 
         // Everything is present afterwards.
         let count = |the: &str| {
-            let the: dialog_artifacts::Attribute = the.parse().unwrap();
+            let the: dialog_artifacts::Relation = the.parse().unwrap();
             let us = us.clone();
             let env = &env;
             async move {
@@ -4160,16 +4807,8 @@ mod history_tests {
         .await?;
 
         // The fixture must route to the graft, not a small-delta path.
-        let ours = us
-            .revision()
-            .expect("we have a head")
-            .context
-            .expect("our head publishes its watermark");
-        let theirs = bob
-            .revision()
-            .expect("bob has a head")
-            .context
-            .expect("bob's head publishes its watermark");
+        let ours = (*head_context(&us, &operator).await?).clone();
+        let theirs = (*head_context(&bob, &operator).await?).clone();
         assert!(
             ours.divergence(&theirs).min(theirs.divergence(&ours)) > SMALL_DIVERGENCE,
             "fixture must route to the graft: ours-beyond {} theirs-beyond {}",
@@ -4200,7 +4839,7 @@ mod history_tests {
 
         // Both sides' churn crossed the merge intact.
         let count = |the: &str| {
-            let the: dialog_artifacts::Attribute = the.parse().unwrap();
+            let the: dialog_artifacts::Relation = the.parse().unwrap();
             let us = us.clone();
             let operator = &operator;
             async move {

@@ -13,7 +13,7 @@
 //! caller that knows the tree's manifest.
 
 use crate::{
-    Value, ValueDataType,
+    NUMBER_BAND, Value, ValueDataType,
     artifacts::ordkey::{
         decode_bool, decode_bytes, decode_f64, decode_i128, decode_u128, encode_bool, encode_bytes,
         encode_f64, encode_i128, encode_u128,
@@ -37,6 +37,31 @@ pub fn encode_value(value: &Value, out: &mut Vec<u8>) {
     }
 }
 
+/// Encodes a [`Value`] as a key under a tree's `value_encoding`: in the
+/// [`Number`](ValueDataType::Number) band a number is its dialog-number
+/// encoding, and everything else is [`encode_value`]'s.
+pub fn encode_key_value(value: &Value, value_encoding: u32, out: &mut Vec<u8>) {
+    match value {
+        Value::UnsignedInt(number) if value_encoding == NUMBER_BAND => {
+            dialog_number::encode_u128(*number, out)
+        }
+        Value::SignedInt(number) if value_encoding == NUMBER_BAND => {
+            dialog_number::encode_i128(*number, out)
+        }
+        Value::Float(number) if value_encoding == NUMBER_BAND => {
+            dialog_number::encode_f64(*number, out)
+        }
+        value => encode_value(value, out),
+    }
+}
+
+/// [`encode_key_value`], as an owned byte vector.
+pub fn encode_key_value_owned(value: &Value, value_encoding: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_key_value(value, value_encoding, &mut out);
+    out
+}
+
 /// The order-preserving encoding of a [`Value`], as an owned byte vector.
 pub fn encode_value_owned(value: &Value) -> Vec<u8> {
     let mut out = Vec::new();
@@ -49,6 +74,21 @@ pub fn encode_value_owned(value: &Value) -> Vec<u8> {
 /// bytes, or `None` on malformed input.
 pub fn decode_value(value_type: ValueDataType, bytes: &[u8]) -> Option<(Value, &[u8])> {
     Some(match value_type {
+        // The one number band: dialog-number's encoding of any number.
+        ValueDataType::Number => return decode_number(bytes),
+        // A sized number type's value is encoded as its storage type.
+        view @ (ValueDataType::U8
+        | ValueDataType::U16
+        | ValueDataType::U32
+        | ValueDataType::U64
+        | ValueDataType::U128
+        | ValueDataType::I8
+        | ValueDataType::I16
+        | ValueDataType::I32
+        | ValueDataType::I64
+        | ValueDataType::I128
+        | ValueDataType::F32
+        | ValueDataType::F64) => return decode_value(view.storage(), bytes),
         ValueDataType::UnsignedInt => {
             let (number, rest) = decode_u128(bytes)?;
             (Value::UnsignedInt(number), rest)
@@ -88,6 +128,25 @@ pub fn decode_value(value_type: ValueDataType, bytes: &[u8]) -> Option<(Value, &
             (Value::Symbol(attribute), rest)
         }
     })
+}
+
+/// Decodes a number in the [`Number`](ValueDataType::Number) band. The band
+/// does not record which type wrote a number, so one reads back as the
+/// narrowest type that holds it: a whole number as a natural when it is
+/// not negative and as an integer when it is, and any other as a float.
+/// `3`, `3.0` and the natural `3` are one value in the band, as they are
+/// in identity, and a typed read views the value as the type it declares.
+fn decode_number(bytes: &[u8]) -> Option<(Value, &[u8])> {
+    let (scalar, read) = dialog_number::read_scalar(bytes).ok()?;
+    let value = match scalar {
+        dialog_number::Scalar::Integer(integer) => match u128::try_from(integer) {
+            Ok(natural) => Value::UnsignedInt(natural),
+            Err(_) => Value::SignedInt(integer),
+        },
+        dialog_number::Scalar::Natural(natural) => Value::UnsignedInt(natural),
+        dialog_number::Scalar::Float(float) => Value::Float(float),
+    };
+    Some((value, &bytes[read..]))
 }
 
 #[cfg(test)]

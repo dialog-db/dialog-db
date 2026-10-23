@@ -113,7 +113,7 @@ impl Timestamp {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 impl Timestamp {
     /// Lift a [`js_sys::Date`] into a Rust [`Timestamp`]
     pub fn from_date(date_time: js_sys::Date) -> Result<Timestamp, OutOfRangeError> {

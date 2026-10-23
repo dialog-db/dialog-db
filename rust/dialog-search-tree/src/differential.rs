@@ -38,7 +38,7 @@ use rkyv::{
 
 use crate::{
     DialogSearchTreeError, Distribution, Entry, Key, Link, LoadBlock, NodeBody, NoveltyEntry,
-    NoveltyOp, PersistentNode, PersistentTree, Value, into_owned, resolve_pending,
+    NoveltyOp, PersistentNode, PersistentTree, Separator, Value, into_owned, resolve_pending,
 };
 
 /// How many frontier blocks a comparison pass fetches concurrently in the
@@ -393,14 +393,14 @@ where
         match slot {
             SparseTreeNode::Ref(link) if link.node == *node.hash() => {
                 *slot = SparseTreeNode::Loaded {
-                    lower_bound: link.separator.clone(),
+                    lower_bound: link.separator.to_vec(),
                     pending: Vec::new(),
                     node,
                 };
             }
             SparseTreeNode::Pending { link, pending } if link.node == *node.hash() => {
                 *slot = SparseTreeNode::Loaded {
-                    lower_bound: link.separator.clone(),
+                    lower_bound: link.separator.to_vec(),
                     pending: core::mem::take(pending),
                     node,
                 };
@@ -454,7 +454,7 @@ where
                 seen: HashSet::from([root.clone()]),
                 missing,
                 unresolved: vec![Link {
-                    separator: Vec::new(),
+                    separator: Separator::default(),
                     node: root.clone(),
                     // Advisory only, and unknowable for an unread root.
                     scale: crate::Scale::MAX,
@@ -751,6 +751,20 @@ where
             return Ok(false);
         }
 
+        // A buffer can hold several ops for one key, newest last, and every
+        // reader resolves the key to its newest op (the reduction in
+        // [`winning_ops`]). The comparison below is therefore between
+        // winners: an op that lost to a newer one on its own side is not what
+        // that side holds, so it must neither cancel the other side's winner
+        // nor surface as a change of its own.
+        let winners = |ops: &[NoveltyEntry<Value>]| {
+            winning_ops(ops)
+                .into_iter()
+                .map(|(key, op)| NoveltyEntry { key, op })
+                .collect::<Vec<_>>()
+        };
+        let (ours_ops, theirs_ops) = (winners(&ours_ops), winners(&theirs_ops));
+
         // Ops both sides hold are not changes; keep only what each side adds
         // that the other lacks.
         let retain = |mine: &[NoveltyEntry<Value>], other: &[NoveltyEntry<Value>]| {
@@ -961,7 +975,7 @@ where
                     }
                     resolved.sort_by(|(left, _), (right, _)| left.cmp(right));
                     for (key, value) in resolved {
-                        yield Entry { key: Key::try_from_bytes(&key)?, value };
+                        yield Entry::new(Key::try_from_bytes(&key)?, value);
                     }
                     continue;
                 }
@@ -981,7 +995,7 @@ where
                             None if self.missing == MissingBlocks::Boundary => {
                                 for (key, op) in winning_ops(&pending) {
                                     if let NoveltyOp::Assert(value) = op {
-                                        yield Entry { key: Key::try_from_bytes(&key)?, value };
+                                        yield Entry::new(Key::try_from_bytes(&key)?, value);
                                     }
                                 }
                                 continue;
@@ -1014,7 +1028,7 @@ where
                     let Some(node) = node else {
                         for (key, op) in winning_ops(&inherited) {
                             if let NoveltyOp::Assert(value) = op {
-                                yield Entry { key: Key::try_from_bytes(&key)?, value };
+                                yield Entry::new(Key::try_from_bytes(&key)?, value);
                             }
                         }
                         continue;
@@ -1122,10 +1136,7 @@ where
                                     }
                                     let (buffered_key, op) = buffered.next().expect("peeked");
                                     if let NoveltyOp::Assert(value) = op {
-                                        yield Entry {
-                                            key: Key::try_from_bytes(&buffered_key)?,
-                                            value,
-                                        };
+                                        yield Entry::new(Key::try_from_bytes(&buffered_key)?, value);
                                     }
                                 }
 
@@ -1137,29 +1148,18 @@ where
                                 ) {
                                     let (buffered_key, op) = buffered.next().expect("peeked");
                                     if let NoveltyOp::Assert(value) = op {
-                                        yield Entry {
-                                            key: Key::try_from_bytes(&buffered_key)?,
-                                            value,
-                                        };
+                                        yield Entry::new(Key::try_from_bytes(&buffered_key)?, value);
                                     }
                                     continue;
                                 }
 
-                                yield Entry {
-                                    // `key` borrows the decoder's reused buffer;
-                                    // this owns the single copy.
-                                    key: Key::try_from_bytes(key)?,
-                                    value: into_owned(segment.value_at(at)?)?,
-                                };
+                                yield Entry::new(Key::try_from_bytes(key)?, into_owned(segment.value_at(at)?)?);
                             }
 
                             // Buffered inserts past the last stored entry.
                             for (buffered_key, op) in buffered {
                                 if let NoveltyOp::Assert(value) = op {
-                                    yield Entry {
-                                        key: Key::try_from_bytes(&buffered_key)?,
-                                        value,
-                                    };
+                                    yield Entry::new(Key::try_from_bytes(&buffered_key)?, value);
                                 }
                             }
                         }
@@ -1195,8 +1195,9 @@ fn pending_ops<Key, Value>(node: &SparseTreeNode<Key, Value>) -> &[NoveltyEntry<
 /// Ops accumulate oldest first: a link's own buffer is appended before the
 /// ops inherited from its ancestors (deeper means older, since a flush only
 /// moves ops toward the leaves), and within one buffer the newest op for a
-/// key is last (writes append, then a *stable* sort by key preserves arrival
-/// order within the key). The **last** op for a key is therefore the most
+/// key is last (a persisted buffer holds one op per key, the merge before
+/// each persist having collapsed the rest; a frame an older build
+/// persisted may hold several, newest last). The **last** op for a key is therefore the most
 /// recent across every depth and wins. This matches how a point read resolves
 /// a key and how a flush replays ops, so all three agree.
 fn winning_ops<Value>(collected: &[NoveltyEntry<Value>]) -> Vec<(Vec<u8>, NoveltyOp<Value>)>
@@ -1849,7 +1850,10 @@ mod tests {
     use crate::helpers::{
         JournaledBlocks, TestStorage, Traversable as _, TraversalOrder, TreeNodes as _,
     };
-    use crate::{Buffer, Delta, Entry, LoadBlock, Manifest, PersistentTree, tree_spec};
+    use crate::{
+        Buffer, Delta, Entry, Link, LoadBlock, Manifest, NoveltyEntry, NoveltyOp,
+        PersistentNodeBody, PersistentTree, Scale, tree_spec,
+    };
     use crate::{MemoryBlocks, Traversable as _, Visit};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -2269,10 +2273,20 @@ mod tests {
                 let is_insert = !next().is_multiple_of(3);
                 let key = next() % 400;
                 let value = vec![(next() % 251) as u8];
-                if next().is_multiple_of(2) {
-                    source_ops.push((is_insert, key, value));
+                let side = if next().is_multiple_of(2) {
+                    &mut source_ops
                 } else {
-                    target_ops.push((is_insert, key, value));
+                    &mut target_ops
+                };
+                side.push((is_insert, key, value));
+                // Every fourth op is followed by a second op on the same key
+                // on the same side, so each side's buffers hold several ops
+                // for some keys, newest last. What a side holds at such a key
+                // is its newest op alone, and the differential must compare
+                // that, never an op it has already superseded.
+                if next().is_multiple_of(4) {
+                    let value = vec![(next() % 251) as u8];
+                    side.push((!next().is_multiple_of(3), key, value));
                 }
             }
 
@@ -3278,7 +3292,7 @@ mod tests {
     async fn it_returns_no_nodes_for_identical_trees() -> Result<()> {
         // When trees are identical, no nodes are novel (all are shared).
         // Identical roots are recognized by hash alone: the tree holds its
-        // root lazily, so not even the roots are read (the prolly tree's
+        // root lazily, so not even the roots are read (the probabilistic search tree's
         // eager root load marked these as reads; the search tree improves
         // on that with a zero-read fast path).
         let backend = MemoryBlocks::new();
@@ -4023,10 +4037,7 @@ mod tests {
         let mut storage = CountingBackend::new();
         let mut tree = build([(1, vec![10])], &mut storage).await?;
 
-        let changes = vec![Change::Add(Entry {
-            key: key(2),
-            value: vec![20],
-        })];
+        let changes = vec![Change::Add(Entry::new(key(2), vec![20]))];
 
         let mut delta = Delta::zero();
         tree = tree
@@ -4051,10 +4062,7 @@ mod tests {
         let root = tree.root().clone();
 
         // Add same entry - should be no-op
-        let changes = vec![Change::Add(Entry {
-            key: key(1),
-            value: vec![10],
-        })];
+        let changes = vec![Change::Add(Entry::new(key(1), vec![10]))];
 
         let mut delta = Delta::zero();
         tree = tree
@@ -4085,10 +4093,7 @@ mod tests {
         let new_value = vec![20u8];
         let existing_value = vec![10u8];
 
-        let changes = vec![Change::Add(Entry {
-            key: key(1),
-            value: new_value.clone(),
-        })];
+        let changes = vec![Change::Add(Entry::new(key(1), new_value.clone()))];
 
         let mut delta = Delta::zero();
         tree = tree
@@ -4116,10 +4121,7 @@ mod tests {
         let mut storage = CountingBackend::new();
         let mut tree = build([(1, vec![10]), (2, vec![20])], &mut storage).await?;
 
-        let changes = vec![Change::Remove(Entry {
-            key: key(1),
-            value: vec![10],
-        })];
+        let changes = vec![Change::Remove(Entry::new(key(1), vec![10]))];
 
         let mut delta = Delta::zero();
         tree = tree
@@ -4143,10 +4145,7 @@ mod tests {
         let mut tree = build([(1, vec![10])], &mut storage).await?;
 
         // Remove non-existent entry - should be no-op
-        let changes = vec![Change::Remove(Entry {
-            key: key(2),
-            value: vec![20],
-        })];
+        let changes = vec![Change::Remove(Entry::new(key(2), vec![20]))];
 
         let mut delta = Delta::zero();
         tree = tree
@@ -4170,10 +4169,8 @@ mod tests {
         let mut tree = build([(1, vec![10])], &mut storage).await?;
 
         // Try to remove with wrong value - should be no-op (concurrent update)
-        let changes = vec![Change::Remove(Entry {
-            key: key(1),
-            value: vec![20], // Wrong value
-        })];
+        // Wrong value
+        let changes = vec![Change::Remove(Entry::new(key(1), vec![20]))];
 
         let mut delta = Delta::zero();
         tree = tree
@@ -5488,6 +5485,144 @@ mod tests {
                 "{label}: novel nodes must materialize the target"
             );
         }
+        Ok(())
+    }
+
+    /// A root index node over one shared leaf, carrying `novelty` in its
+    /// buffer, stored and sealed as a tree.
+    ///
+    /// The leaf's separator is `bkey(100)`, non-empty, so an assert of a key
+    /// below it is provably an insert and two such roots settle against each
+    /// other without reading the leaf. Building the frame directly, rather
+    /// than through a hitchhiker edit, pins the stored shape itself: a buffer
+    /// holding several ops for one key, newest last, as a frame persisted by
+    /// an older build can.
+    async fn root_over_shared_leaf(
+        novelty: Vec<NoveltyEntry<Vec<u8>>>,
+        storage: &CountingBackend,
+    ) -> Result<TestTree> {
+        let manifest = Manifest::default();
+        let leaf = PersistentNodeBody::segment_from_entries(
+            vec![
+                Entry::new(bkey(100), vec![100]),
+                Entry::new(bkey(200), vec![200]),
+            ],
+            manifest.clone(),
+        )?;
+        let leaf = Buffer::from(leaf.as_bytes()?);
+        let link = Link {
+            separator: bkey(100).to_vec().into(),
+            node: leaf.blake3_hash().clone(),
+            scale: Scale::EMPTY,
+        };
+        storage.store(leaf);
+
+        let root = PersistentNodeBody::index_from_links::<[u8; 4]>(vec![link], novelty, manifest)?;
+        let root = Buffer::from(root.as_bytes()?);
+        let hash = root.blake3_hash().clone();
+        storage.store(root);
+        Ok(TestTree::from_hash(hash))
+    }
+
+    fn assert_op(key: [u8; 4], value: Vec<u8>) -> NoveltyEntry<Vec<u8>> {
+        NoveltyEntry {
+            key: key.to_vec(),
+            op: NoveltyOp::Assert(value),
+        }
+    }
+
+    /// Splits a change list into its adds and its removes, each as
+    /// `(key, value)` pairs in stream order.
+    #[allow(clippy::type_complexity)]
+    fn split_changes(
+        changes: Vec<Change<[u8; 4], Vec<u8>>>,
+    ) -> (Vec<([u8; 4], Vec<u8>)>, Vec<([u8; 4], Vec<u8>)>) {
+        let mut adds = Vec::new();
+        let mut removes = Vec::new();
+        for change in changes {
+            match change {
+                Change::Add(entry) => adds.push((entry.key, entry.value)),
+                Change::Remove(entry) => removes.push((entry.key, entry.value)),
+            }
+        }
+        (adds, removes)
+    }
+
+    /// Two roots over the same leaf, differing only in their buffers, where
+    /// one buffer holds two asserts of one key. Every reader resolves the key
+    /// to the newest op, so the settled difference must compare the newest op
+    /// on each side: ours resolves `k` to `v2`, theirs to `v1`, and the
+    /// differential reports exactly that exchange in both directions.
+    ///
+    /// Before the fix, the settle path subtracted theirs' `v1` from ours'
+    /// `[v1, v2]` op for op, leaving theirs with nothing at `k`: the diff
+    /// said theirs held no value there.
+    #[dialog_common::test]
+    async fn it_settles_the_newest_op_against_the_other_sides_newest_op() -> Result<()> {
+        let storage = CountingBackend::new();
+        let k = bkey(50);
+        let ours =
+            root_over_shared_leaf(vec![assert_op(k, vec![1]), assert_op(k, vec![2])], &storage)
+                .await?;
+        let theirs = root_over_shared_leaf(vec![assert_op(k, vec![1])], &storage).await?;
+
+        storage.reset();
+        let (adds, removes) = split_changes(collect_changes(&ours, &theirs, &storage).await?);
+        assert_eq!(
+            storage.reads(),
+            2,
+            "the roots settle against each other; the shared leaf is never read"
+        );
+        assert_eq!(
+            removes,
+            vec![(k, vec![2])],
+            "ours resolves k to its newest op, v2"
+        );
+        assert_eq!(
+            adds,
+            vec![(k, vec![1])],
+            "theirs holds v1 at k, not nothing: its only op is not cancelled by a losing op of ours"
+        );
+
+        let (adds, removes) = split_changes(collect_changes(&theirs, &ours, &storage).await?);
+        assert_eq!(removes, vec![(k, vec![1])], "theirs resolves k to v1");
+        assert_eq!(adds, vec![(k, vec![2])], "ours resolves k to v2");
+        Ok(())
+    }
+
+    /// The complement: when the other side holds exactly the op ours resolves
+    /// to, both sides read the same value at `k` and there is no change to
+    /// report, even though ours also holds an older, losing op for the key.
+    ///
+    /// Before the fix, the settle path subtracted theirs' `v2` from ours'
+    /// `[v1, v2]` and kept `v1`: a spurious change at a key both sides
+    /// resolve identically.
+    #[dialog_common::test]
+    async fn it_does_not_report_a_losing_op_the_other_side_never_held() -> Result<()> {
+        let storage = CountingBackend::new();
+        let k = bkey(50);
+        let ours =
+            root_over_shared_leaf(vec![assert_op(k, vec![1]), assert_op(k, vec![2])], &storage)
+                .await?;
+        let theirs = root_over_shared_leaf(vec![assert_op(k, vec![2])], &storage).await?;
+
+        storage.reset();
+        let changes = collect_changes(&ours, &theirs, &storage).await?;
+        assert_eq!(
+            storage.reads(),
+            2,
+            "the roots settle against each other; the shared leaf is never read"
+        );
+        assert!(
+            changes.is_empty(),
+            "both sides resolve k to v2, so nothing changes; a losing op of ours is not a change, got {changes:?}"
+        );
+
+        let changes = collect_changes(&theirs, &ours, &storage).await?;
+        assert!(
+            changes.is_empty(),
+            "both sides resolve k to v2 in the other direction too, got {changes:?}"
+        );
         Ok(())
     }
 }

@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 base64 = { workspace = true }
+dialog-common = { workspace = true }
 flate2 = { workspace = true }
 futures = { workspace = true }
 getrandom = { workspace = true }

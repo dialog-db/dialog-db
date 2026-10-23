@@ -1,4 +1,4 @@
-use dialog_capability::access::AuthorizeError;
+use dialog_capability::access::{AuthorizationFailure, AuthorizeError};
 use dialog_capability::identity::IdentityError;
 use dialog_effects::Rejection;
 use dialog_effects::archive::ArchiveError;
@@ -17,7 +17,7 @@ pub enum DialogArtifactsError {
     #[error("Storage operation failed: {0}")]
     Storage(String),
 
-    /// An error occurred in prolly tree-related code
+    /// An error occurred in probabilistic search tree-related code
     #[error("Tree operation failed: {0}")]
     Tree(String),
 
@@ -56,12 +56,12 @@ pub enum DialogArtifactsError {
 
     /// Raw bytes could not be interpreted as an attribute
     #[error("Invalid attribute: {0}")]
-    InvalidAttribute(String),
+    InvalidRelation(String),
 
     /// The attribute belongs to the reserved `dialog.` namespace, which
     /// only version-control machinery may write
     #[error("Reserved attribute (the dialog. namespace is reserved): {0}")]
-    ReservedAttribute(String),
+    ReservedRelation(String),
 
     /// A batch that changes assets was handed to a target that holds facts
     /// only, such as an ephemeral line or the replica registry. Assets are
@@ -100,6 +100,15 @@ pub enum DialogArtifactsError {
     /// version have not been replicated yet
     #[error("Incomplete history: missing claims for version {0}")]
     IncompleteHistory(String),
+}
+
+impl AuthorizationFailure for DialogArtifactsError {
+    fn authorization_failure(&self) -> Option<&AuthorizeError> {
+        match self {
+            Self::Authorization(reason) => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 impl From<DialogStorageError> for DialogArtifactsError {
@@ -196,6 +205,8 @@ mod tests {
             subject: dialog_capability::did!(
                 "did:key:z6MkrCD1csqtgdj8sRHYRPGLYcMFXAoDhkgvHNq2FML2xqCX"
             ),
+            certificate: None,
+            revocation: None,
         }
     }
 

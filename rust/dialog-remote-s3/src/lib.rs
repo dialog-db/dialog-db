@@ -31,6 +31,7 @@
 //! );
 //!
 //! let capability = Subject::from(subject)
+//!     .reader()
 //!     .archive()
 //!     .catalog("blobs")
 //!     .get([0u8; 32]);

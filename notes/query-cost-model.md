@@ -2,7 +2,7 @@
 
 ## Problem
 
-A datalog query decomposes into premises, each resolved by a range scan over a prolly tree index. The tree is sparsely replicated on demand. Every node traversal during a scan may incur a network roundtrip. The order in which premises execute determines which variables are bound when subsequent premises run, which determines how tight their scans are. A good ordering can be the difference between a handful of point lookups and a full index walk. The query planner needs a cost model to estimate the expense of each premise given currently bound variables, so it can choose an execution order that minimizes total traversal.
+A datalog query decomposes into premises, each resolved by a range scan over a probabilistic search tree index. The tree is sparsely replicated on demand. Every node traversal during a scan may incur a network roundtrip. The order in which premises execute determines which variables are bound when subsequent premises run, which determines how tight their scans are. A good ordering can be the difference between a handful of point lookups and a full index walk. The query planner needs a cost model to estimate the expense of each premise given currently bound variables, so it can choose an execution order that minimizes total traversal.
 
 ## Index Structure
 

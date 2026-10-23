@@ -9,12 +9,14 @@
 
 use std::fmt;
 
+use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Capability, Constraint, Effect, Fork, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::Rejection;
 use dialog_effects::archive::{self, ArchiveError};
 use dialog_effects::blob::{self, BlobError};
 use dialog_effects::memory::{self, MemoryError};
+use dialog_ucan::clock;
 
 use super::repository::Unreachable;
 use crate::{ConnectedReplica, RemoteSite};
@@ -75,15 +77,79 @@ where
     Env: Provider<Fork<RemoteSite, E>> + ConditionalSync,
     T: ConditionalSend,
     E: Resend<Error>,
-    Error: ConditionalSend,
+    Error: Skewed + ConditionalSend,
 {
+    /// Perform `input` at the peer. One refused because the peer's clock
+    /// is far from this one is performed once more, with an invocation
+    /// stamped by the peer's clock: the refusal says what it read, and the
+    /// peer refused before doing anything, so sending it again is safe
+    /// whatever it does.
     async fn execute(&self, input: Capability<E>) -> Result<T, Error> {
-        self.replica
-            .reach_unless(E::resend, |address| {
+        let subject = input.subject().clone();
+        let attempt = || {
+            self.replica.reach_unless(E::resend, |address| {
                 let input = input.clone();
                 async move { input.fork(address.site()).perform(self.env).await }
             })
-            .await
+        };
+        match attempt().await {
+            Err(error) => match error.stale() {
+                Some(at) => {
+                    clock::correct(&subject, at);
+                    attempt().await
+                }
+                None => Err(error),
+            },
+            done => done,
+        }
+    }
+}
+
+/// When an effect was refused because the peer judged its invocation
+/// issued too long ago, what the peer's clock read: the invocation was
+/// fresh here, so the two clocks differ by about that much.
+pub trait Skewed {
+    /// What the peer's clock read, when this refused a fresh invocation
+    /// as stale.
+    fn stale(&self) -> Option<u64>;
+}
+
+fn stale(refusal: &AuthorizeError) -> Option<u64> {
+    match refusal {
+        // An invocation that did say when it was issued: one that did not
+        // was refused for not saying, which no clock corrects.
+        AuthorizeError::Stale {
+            issued_at: Some(_),
+            at,
+        } => Some(*at),
+        _ => None,
+    }
+}
+
+impl Skewed for MemoryError {
+    fn stale(&self) -> Option<u64> {
+        match self {
+            MemoryError::Authorization(refusal) => stale(refusal),
+            _ => None,
+        }
+    }
+}
+
+impl Skewed for ArchiveError {
+    fn stale(&self) -> Option<u64> {
+        match self {
+            ArchiveError::Authorization(refusal) => stale(refusal),
+            _ => None,
+        }
+    }
+}
+
+impl Skewed for BlobError {
+    fn stale(&self) -> Option<u64> {
+        match self {
+            BlobError::Authorization(refusal) => stale(refusal),
+            _ => None,
+        }
     }
 }
 
@@ -120,6 +186,15 @@ impl Resend<BlobError> for blob::Read {
 impl Resend<MemoryError> for memory::Resolve {
     fn resend(error: &MemoryError) -> bool {
         error.unreachable()
+    }
+}
+
+/// A watch is a read: one an address could not carry out, or does not
+/// carry out at all, may be tried at the peer's next address, which may
+/// follow the cell where the first could not.
+impl Resend<MemoryError> for memory::Watch {
+    fn resend(error: &MemoryError) -> bool {
+        error.unreachable() || matches!(error, MemoryError::Rejected(Rejection::Unsupported { .. }))
     }
 }
 
@@ -174,6 +249,28 @@ mod tests {
             .build()
             .unwrap()
             .into()
+    }
+
+    /// A replica reached at addresses its embedder keeps is the replica of
+    /// that peer, at those addresses, and records no contact of the host.
+    #[dialog_common::test]
+    fn it_reaches_a_replica_at_addresses_its_embedder_keeps() {
+        use crate::schema::DidExt as _;
+
+        let subject = did!("key:z6MkkZfZmshVFcBYo9RS6ZyUstxYdjjStQaFaL2TSTVdsiJh");
+        let peer = did!("key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK");
+        let addresses = vec![site("https://a.example")];
+
+        let replica = ConnectedReplica::reached_at(
+            Subject::from(subject.clone()),
+            &peer,
+            addresses.clone(),
+            subject.clone(),
+        );
+
+        assert_eq!(replica.did(), subject);
+        assert_eq!(replica.peer(), &peer.this());
+        assert_eq!(replica.addresses(), addresses.as_slice());
     }
 
     /// A publish is a conditional write: one that failed on the wire may

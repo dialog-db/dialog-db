@@ -42,10 +42,9 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, Buffer, Cache, Delta, DialogSearchTreeError, Distribution, Entry, Geometric, Key,
-    LoadBlock, Manifest, Node, NodeBody, NodeCache, NoveltyEntry, NoveltyOp, PersistentNode,
-    PersistentTree, TransientNode, TransientRootParts, TransientSegment, TransientTree, Value,
-    link_bounds,
+    Accessor, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Geometric, Key, LoadBlock,
+    Manifest, Node, NodeBody, NodeCache, NoveltyEntry, NoveltyOp, PersistentNode, PersistentTree,
+    TransientNode, TransientRootParts, TransientSegment, TransientTree, Value, link_bounds,
 };
 
 /// The per-node op-count cap a buffered tree flushes at: the tree's expected
@@ -298,7 +297,7 @@ where
     pub fn empty(manifest: Manifest) -> Self {
         Self {
             root: HitchhikerRoot::Empty,
-            cache: Cache::new(),
+            cache: NodeCache::new(),
             op_buf_size: env_op_buf_size(),
             op_buf_bytes: env_op_buf_bytes(),
             policy: FlushPolicy::default(),
@@ -866,7 +865,7 @@ where
                         stored = futures_util::StreamExt::next(&mut base).await.transpose()?;
                     }
                     if let NoveltyOp::Assert(value) = op.op {
-                        yield Entry { key: Key::try_from_bytes(&op.key)?, value };
+                        yield Entry::new(Key::try_from_bytes(&op.key)?, value);
                     }
                 } else {
                     match stored.take() {
@@ -975,7 +974,7 @@ where
             // manifest it was opened under.
             HitchhikerRoot::Loaded(node) => {
                 let manifest = Self::format(&self.manifest)?;
-                let node = node.persist(delta, &manifest)?;
+                let node = node.persist(delta, &manifest, &self.cache)?;
                 // Seed the shared node cache with the frame just produced:
                 // the very next read of this root (a manifest lookup, a
                 // query descent) otherwise misses, re-fetches the bytes
@@ -1011,7 +1010,7 @@ where
             HitchhikerRoot::Unloaded(hash) => Ok(hash.clone()),
             HitchhikerRoot::Loaded(node) => {
                 let manifest = Self::format(&self.manifest)?;
-                let node = node.persist_mut(delta, &manifest)?;
+                let node = node.persist_mut(delta, &manifest, &self.cache)?;
                 // Same cache seeding as `persist`: the frame this commit
                 // just produced is what the next read resolves the root to.
                 self.cache.insert(node.hash().clone(), node.clone());
@@ -1365,7 +1364,7 @@ fn collect_stored_plan<Key, Value, R>(
         TransientNode::Segment(segment) => {
             for entry in segment.entries() {
                 if bounds.contains(&entry.key) {
-                    plan.push(StoredStep::Entry(entry.clone()));
+                    plan.push(StoredStep::Entry(Entry::clone(entry)));
                 }
             }
         }
@@ -1538,8 +1537,8 @@ mod tests {
         DistributionSimulator, SpecKey, TestStorage as SpecStorage, encode_key, test_storage,
     };
     use crate::{
-        Accessor, Buffer, Cache, Change, Delta, Manifest, Node, NodeBody, NoveltyEntry, NoveltyOp,
-        PersistentNode, PersistentTree, TransientNode, TransientTree, tree_spec,
+        Accessor, Buffer, Change, Delta, Manifest, Node, NodeBody, NodeCache, NoveltyEntry,
+        NoveltyOp, PersistentNode, PersistentTree, TransientNode, TransientTree, tree_spec,
     };
 
     /// The three flush policies, so an oracle can assert behavior is identical
@@ -1623,7 +1622,7 @@ mod tests {
         let keys: Vec<u32> = (0..2000).collect();
         let tree = sequential(&keys, &mut storage).await?;
         let root_hashes: Vec<Blake3Hash> = {
-            let accessor = crate::Accessor::new(crate::Cache::new(), &storage);
+            let accessor = crate::Accessor::new(NodeCache::new(), &storage);
             let node: crate::PersistentNode<[u8; 4], Vec<u8>> =
                 accessor.get_node(tree.root()).await?;
             let index = node.as_index()?;
@@ -1703,7 +1702,7 @@ mod tests {
             let live_root = live.persist_mut(&mut delta)?;
             flush(&mut delta, &mut storage).await?;
 
-            let oracle_tree: TestTree = PersistentTree::seal(oracle_root, Cache::new());
+            let oracle_tree: TestTree = PersistentTree::seal(oracle_root, NodeCache::new());
             let mut oracle = TestHitchhiker::open(&oracle_tree).with_op_buf_size(8);
             for &k in &batch_keys {
                 oracle = oracle
@@ -1723,12 +1722,61 @@ mod tests {
         // The two paths must also agree on the canonical form.
         let mut delta = Delta::zero();
         let live_canonical = live.canonicalize(&storage, &mut delta).await?;
-        let oracle_tree: TestTree = PersistentTree::seal(oracle_root, Cache::new());
+        let oracle_tree: TestTree = PersistentTree::seal(oracle_root, NodeCache::new());
         let mut delta = Delta::zero();
         let oracle_canonical = TestHitchhiker::open(&oracle_tree)
             .canonicalize(&storage, &mut delta)
             .await?;
         assert_eq!(live_canonical.root(), oracle_canonical.root());
+        Ok(())
+    }
+
+    /// A key written on every commit (an application's own bookkeeping
+    /// entry, say) must not grow the root frame: each commit's op for the
+    /// key replaces the one the root buffers, so the frame the commit
+    /// rewrites carries one op for the key however many commits have
+    /// written it. Before the collapse the root held every commit's op and
+    /// grew by one per commit until a cascade.
+    #[dialog_common::test]
+    async fn it_keeps_the_root_frame_flat_under_a_hot_key() -> Result<()> {
+        let mut storage = MemoryBlocks::new();
+
+        // A canonical base wide enough for an index root, so the root
+        // buffers the hot key instead of deferring it to a leaf edit.
+        let keys: Vec<u32> = (0..1200).collect();
+        let base = sequential(&keys, &mut storage).await?;
+        let mut live = TestHitchhiker::open(&base);
+
+        let hot = u32::MAX.to_le_bytes();
+        let mut root_bytes = Vec::new();
+        for commit in 0..100u32 {
+            // Same-sized values, so a flat frame is the only flat outcome.
+            live = live
+                .insert(hot, commit.to_le_bytes().to_vec(), &storage)
+                .await?;
+            let mut delta = Delta::zero();
+            let root = live.persist_mut(&mut delta)?;
+            let frame = delta.get(&root).expect("the persist wrote the root");
+            root_bytes.push(frame.as_ref().len());
+            flush(&mut delta, &mut storage).await?;
+        }
+        for at in [0usize, 9, 49, 99] {
+            println!(
+                "hot-key commit {:>3}: root frame {} bytes",
+                at + 1,
+                root_bytes[at]
+            );
+        }
+
+        assert!(
+            root_bytes.iter().all(|&bytes| bytes == root_bytes[0]),
+            "the root frame must not grow with commits to one key: {root_bytes:?}"
+        );
+        assert_eq!(
+            live.get(&hot, &storage).await?,
+            Some(99u32.to_le_bytes().to_vec()),
+            "the last commit's value stands"
+        );
         Ok(())
     }
 
@@ -1835,7 +1883,7 @@ mod tests {
         // node carries it and the buffered path below runs under it.
         let mut delta = Delta::zero();
         let mut seed =
-            TransientTree::<VarKey, Vec<u8>>::empty_with_manifest(Cache::new(), manifest);
+            TransientTree::<VarKey, Vec<u8>>::empty_with_manifest(NodeCache::new(), manifest);
         let mut rng = Rng::new(11);
         for _ in 0..96 {
             let (key, value) = small_frame_op(&mut rng);
@@ -1850,7 +1898,7 @@ mod tests {
         // the buffered form, flush, reopen. The small op buffer makes the
         // cascade (the flush into reshaping children) routine rather than
         // rare.
-        let cache = Cache::new();
+        let cache = NodeCache::new();
         let mut root = base.root().clone();
         for _ in 0..1500 {
             let tree: VarPersistent = PersistentTree::seal(root.clone(), cache.clone());
@@ -3378,8 +3426,10 @@ mod tests {
         };
         let mut storage = MemoryBlocks::new();
 
-        let mut edit =
-            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
+        let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
+            NodeCache::new(),
+            custom.clone(),
+        );
         for k in 0..50u32 {
             edit = edit
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3416,8 +3466,10 @@ mod tests {
         };
         let mut storage = MemoryBlocks::new();
 
-        let mut edit =
-            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
+        let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
+            NodeCache::new(),
+            custom.clone(),
+        );
         for k in 0..40u32 {
             edit = edit
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3438,7 +3490,7 @@ mod tests {
         flush(&mut delta, &mut storage).await?;
 
         let mut oracle =
-            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom);
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(NodeCache::new(), custom);
         for k in 0..80u32 {
             oracle = oracle
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3489,7 +3541,7 @@ mod tests {
         flush(&mut delta, &mut storage).await?;
 
         let mut oracle =
-            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom);
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(NodeCache::new(), custom);
         for k in 100..150u32 {
             oracle = oracle
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3521,8 +3573,10 @@ mod tests {
         };
         let mut storage = MemoryBlocks::new();
 
-        let mut edit =
-            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
+        let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
+            NodeCache::new(),
+            custom.clone(),
+        );
         for k in 0..30u32 {
             edit = edit
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3544,7 +3598,7 @@ mod tests {
             emptied.stored_root().is_some(),
             "an emptied tree must keep a stored root node"
         );
-        let node: PersistentNode<[u8; 4], Vec<u8>> = Accessor::new(Cache::new(), &storage)
+        let node: PersistentNode<[u8; 4], Vec<u8>> = Accessor::new(NodeCache::new(), &storage)
             .get_node(emptied.root())
             .await?;
         assert!(node.is_empty()?, "the empty root is a zero-entry node");
@@ -3567,8 +3621,9 @@ mod tests {
         // Pure function of (empty set, manifest): persisting an empty tree
         // from scratch under the same manifest yields the same root.
         let mut delta = Delta::zero();
-        let scratch = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom)
-            .persist(&mut delta)?;
+        let scratch =
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(NodeCache::new(), custom)
+                .persist(&mut delta)?;
         flush(&mut delta, &mut storage).await?;
         assert_eq!(
             emptied.root(),
@@ -3589,7 +3644,7 @@ mod tests {
         // default manifest's empty node, the pure function of (empty set,
         // Manifest::default()).
         let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
-            Cache::new(),
+            NodeCache::new(),
             Manifest::default(),
         );
         for k in 0..10u32 {
@@ -3637,8 +3692,10 @@ mod tests {
         let mut storage = MemoryBlocks::new();
 
         // Build under the custom format, then empty.
-        let mut edit =
-            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom.clone());
+        let mut edit = TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(
+            NodeCache::new(),
+            custom.clone(),
+        );
         for k in 0..40u32 {
             edit = edit
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3658,7 +3715,7 @@ mod tests {
         // The oracle: the second-life entries written directly under the
         // custom format by a replica that never emptied anything.
         let mut oracle =
-            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(Cache::new(), custom);
+            TransientTree::<[u8; 4], Vec<u8>>::empty_with_manifest(NodeCache::new(), custom);
         for k in 100..160u32 {
             oracle = oracle
                 .insert(k.to_be_bytes(), k.to_be_bytes().to_vec(), &storage)
@@ -3813,7 +3870,7 @@ mod tests {
         let batch: Vec<u32> = vec![700, 701];
         let mut roots = Vec::new();
         for fresh in [false, true] {
-            let sealed: TestTree = PersistentTree::seal(root.clone(), Cache::new());
+            let sealed: TestTree = PersistentTree::seal(root.clone(), NodeCache::new());
             let mut tree = HitchhikerTree::open(&sealed)
                 .with_op_buf_size(100_000)
                 .with_op_buf_bytes(usize::MAX);

@@ -58,7 +58,8 @@ fn check_size(url: &str, len: Option<u64>) -> Result<(), ResolveError> {
     }
 }
 
-/// Fetches the bytes of an `https` URL.
+/// Fetches the bytes of a DID document: over `https`, or `http` for a
+/// loopback host.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 pub trait Fetch: ConditionalSync {

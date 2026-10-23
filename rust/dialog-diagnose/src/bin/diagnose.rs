@@ -1,17 +1,23 @@
+// The CLI is native-only. On wasm the crate below is empty, so it has no
+// `main` to require.
+#![cfg_attr(target_arch = "wasm32", no_main)]
 #![cfg(not(target_arch = "wasm32"))]
 
 //! # Dialog Diagnose Binary
 //!
 //! A command-line tool that provides a TUI for exploring Dialog databases.
 //! This binary creates an interactive terminal interface for browsing database
-//! facts and navigating the prolly tree structure.
+//! facts and navigating the probabilistic search tree structure.
 
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
+use dialog_capability::identity::Revision;
 use dialog_csv::CsvImporter;
-use dialog_diagnose::{DiagnoseApp, DiagnoseCli, DiagnoseState, DiagnoseTab, Promise, TreeNode};
+use dialog_diagnose::{
+    ContextProfile, DiagnoseApp, DiagnoseCli, DiagnoseState, DiagnoseTab, Promise, TreeNode,
+};
 use futures_util::StreamExt as _;
 use ratatui::{
     DefaultTerminal,
@@ -28,7 +34,23 @@ use ratatui::{
 #[tokio::main]
 pub async fn main() -> Result<()> {
     let cli = DiagnoseCli::parse();
-    let csv_path = std::env::current_dir()?.join(cli.csv);
+    if let Some(head) = cli.head {
+        let bytes = tokio::fs::read(&head).await?;
+        let revision: Revision = serde_ipld_dagcbor::from_slice(&bytes)?;
+        match ContextProfile::of(&revision) {
+            Some(profile) => println!("{profile}"),
+            None if revision.region => println!(
+                "the head's causal context is in its tree's context region; \
+                 profile it with ContextProfile::from_region and the region's entries"
+            ),
+            None => println!("the head publishes no causal context"),
+        }
+        return Ok(());
+    }
+    let Some(csv) = cli.csv else {
+        anyhow::bail!("a CSV file to explore is required");
+    };
+    let csv_path = std::env::current_dir()?.join(csv);
 
     println!("CSV PATH: {}", csv_path.display());
     println!("{}", tokio::fs::try_exists(&csv_path).await?);

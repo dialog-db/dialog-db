@@ -4,9 +4,13 @@ use std::future::poll_fn;
 use std::sync::Arc;
 use std::task::Poll;
 
-use dialog_capability::{Command, Provider};
-use dialog_common::{ConditionalSend, ConditionalSync};
+use dialog_capability::{Command, Provider, Subject};
+use dialog_common::{Blake3Hash, Buffer, ConditionalSend, ConditionalSync};
+use dialog_effects::archive::Get;
+use dialog_effects::archive::prelude::ArchiveScope;
+use dialog_search_tree::{NodeBody, PersistentNode};
 use parking_lot::Mutex;
+use std::collections::HashSet;
 
 // Operator-dependent helpers (test_session, unique_name, ...) live in
 // `dialog_peer::helpers`: the operator sits above this crate, so tests
@@ -67,9 +71,17 @@ pub async fn flaky_session_with_peer() -> (Peer<FlakySpace, Session>, Peer<Flaky
 }
 
 #[cfg(test)]
+use crate::registry::RegistryEnv;
+#[cfg(test)]
+use crate::{Branch, RepositoryMemoryExt as _};
+#[cfg(test)]
 use crate::{ConnectedReplica, PeersEnv, Repository, SiteAddress, contact, peer_did};
 #[cfg(test)]
+use base58::ToBase58 as _;
+#[cfg(test)]
 use dialog_credentials::Credential;
+#[cfg(test)]
+use dialog_effects::archive::prelude::DEFAULT_CATALOG;
 #[cfg(test)]
 use dialog_effects::blob::{Import as BlobImport, Read as BlobRead};
 #[cfg(test)]
@@ -79,9 +91,13 @@ use dialog_storage::Flaky;
 #[cfg(test)]
 use dialog_storage::provider::storage::Storage;
 #[cfg(test)]
+use dialog_storage::provider::storage::VolatileSpace;
+#[cfg(test)]
 use dialog_storage::provider::{Space, Volatile};
 #[cfg(test)]
 use dialog_varsig::Did;
+#[cfg(test)]
+use std::iter::once;
 
 /// Make the peer reached at `address` a contact named `name`, and connect
 /// to its replica of the repository `subject`: what tests once did by
@@ -183,12 +199,15 @@ where
     for round in 0..(6 * scale) {
         let rows: Vec<_> = (0..150)
             .map(|i| {
-                Instruction::Assert(Artifact {
-                    the: "device/link".parse().expect("valid attribute"),
-                    of: format!("device:{round}-{i}").parse().expect("valid entity"),
-                    is: Value::String(format!("device-{round}-{i}").repeat(24)),
-                    cause: None,
-                })
+                Instruction::Assert(
+                    Artifact {
+                        the: "device/link".parse().expect("valid attribute"),
+                        of: format!("device:{round}-{i}").parse().expect("valid entity"),
+                        is: Value::String(format!("device-{round}-{i}").repeat(24)),
+                        cause: None,
+                    },
+                    dialog_artifacts::Pick::All,
+                )
             })
             .collect();
         branch.commit(stream::iter(rows)).perform(env).await?;
@@ -200,7 +219,7 @@ where
 #[cfg(test)]
 use dialog_capability::Fork;
 #[cfg(test)]
-use dialog_effects::archive::{Get, Import, Put};
+use dialog_effects::archive::{Import, Put};
 #[cfg(test)]
 use dialog_effects::authority::{Attest, Identify};
 #[cfg(test)]
@@ -240,6 +259,10 @@ impl<P: dialog_common::Holds> dialog_common::Holds for Counting<P> {
 
     fn hold(&self, key: String, handle: dialog_common::Held) {
         self.inner.hold(key, handle)
+    }
+
+    fn held_or(&self, key: &str, make: &dyn Fn() -> dialog_common::Held) -> dialog_common::Held {
+        self.inner.held_or(key, make)
     }
 }
 
@@ -405,5 +428,207 @@ where
         gauge.lock().current -= 1;
 
         output
+    }
+}
+
+/// The tree nodes of `subject`'s index that `roots` reach, by digest: each
+/// root, and every node an index node among them links to, down to the
+/// leaves. A root the archive does not hold is counted and not descended.
+///
+/// For a test harness over a volatile store, which keeps every block ever
+/// written: the nodes of every root a setup step rewrote are garbage, and a
+/// harness that measures memory must drop them to measure the product (see
+/// `Volatile::retain_blocks`). Spilled values live in the blob store and are
+/// not blocks of this catalog, so they are not in the answer.
+pub async fn reachable_blocks<Env>(
+    env: &Env,
+    subject: &dialog_varsig::Did,
+    roots: impl IntoIterator<Item = Blake3Hash>,
+) -> anyhow::Result<HashSet<Blake3Hash>>
+where
+    Env: Provider<Get> + ConditionalSync,
+{
+    use dialog_artifacts::{Datum, Key, State};
+
+    let catalog = ArchiveScope::new(Subject::from(subject.clone())).index();
+    let mut reachable = HashSet::new();
+    let mut frontier: Vec<Blake3Hash> = roots.into_iter().collect();
+    while let Some(hash) = frontier.pop() {
+        if !reachable.insert(hash.clone()) {
+            continue;
+        }
+        let Some(bytes) = catalog.clone().get(hash).perform(env).await? else {
+            continue;
+        };
+        let node = PersistentNode::<Key, State<Datum>>::try_from(Buffer::from(bytes))?;
+        if let NodeBody::Index(index) = node.body() {
+            for link in index.links()? {
+                if !reachable.contains(&link.node) {
+                    frontier.push(link.node);
+                }
+            }
+        }
+    }
+    Ok(reachable)
+}
+
+/// Drop every block of `repository`'s index that nothing live reaches: the
+/// heads of `branches` and of the registry, and the trees each of them last
+/// synced an upstream at (what a later merge reads as its base). For a
+/// harness over a volatile store, between setup steps; see
+/// [`reachable_blocks`].
+#[cfg(test)]
+pub(crate) async fn prune_unreachable<Env: RegistryEnv>(
+    env: &Env,
+    profile: &Peer<VolatileSpace>,
+    repository: &Repository<Credential>,
+    branches: &[&Branch],
+) -> anyhow::Result<()> {
+    let did = repository.did();
+    let subject = repository.subject();
+    let registry = subject.registry().open().perform(env).await?;
+    let mut roots = Vec::new();
+    for branch in branches.iter().copied().chain(once(&registry)) {
+        if let Some(revision) = branch.revision() {
+            roots.push(Blake3Hash::from(*revision.tree.hash()));
+        }
+        let tracking = subject.branch(branch.name()).tracking();
+        tracking.resolve().perform(env).await?;
+        for synced in tracking.content().unwrap_or_default().synced {
+            roots.push(Blake3Hash::from(*synced.tree.hash()));
+        }
+    }
+    let keep = reachable_blocks(env, &did, roots).await?;
+    let keep: HashSet<String> = keep
+        .into_iter()
+        .map(|hash| hash.as_bytes().as_slice().to_base58())
+        .collect();
+    if let Some(archive) = profile.storage().volatile_archive(&did) {
+        archive.retain_blocks(&did, DEFAULT_CATALOG, |digest| keep.contains(digest));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod prune_tests {
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    use anyhow::Result;
+    use dialog_artifacts::{Artifact, DialogArtifactsError, Exporter, Instruction, Pick, Value};
+    use dialog_capability::Subject;
+    use dialog_effects::archive::prelude::DEFAULT_CATALOG;
+    use dialog_peer::helpers::{test_session_with_peer, unique_name};
+    use futures_util::stream;
+    use parking_lot::Mutex;
+    use std::sync::Arc;
+
+    use super::{prune_unreachable, reachable_blocks};
+    use crate::{Branch, RepositoryExt as _, RepositoryMemoryExt as _};
+    use dialog_common::Blake3Hash;
+
+    /// An exporter that counts the facts it is handed, leaving the
+    /// machinery's own (revision records, the branch's registration) out.
+    #[derive(Clone, Default)]
+    struct Count(Arc<Mutex<usize>>);
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Exporter for Count {
+        async fn write(&mut self, artifact: &Artifact) -> Result<(), DialogArtifactsError> {
+            if artifact.the.to_string() == "prune/field" {
+                *self.0.lock() += 1;
+            }
+            Ok(())
+        }
+
+        async fn close(&mut self) -> Result<(), DialogArtifactsError> {
+            Ok(())
+        }
+    }
+
+    fn assert_fact(entity: usize) -> Instruction {
+        Instruction::Assert(
+            Artifact {
+                the: "prune/field".parse().expect("a relation"),
+                of: format!("user:{entity}").parse().expect("an entity"),
+                is: Value::String("x".into()),
+                cause: None,
+            },
+            Pick::All,
+        )
+    }
+
+    /// After commits pruned as the harness prunes them, the store holds
+    /// the reachable nodes alone, and a session that remembers nothing
+    /// (its caches cold, so every node comes from the store) reads every
+    /// fact back and opens the registry.
+    #[dialog_common::test]
+    async fn it_prunes_only_what_nothing_reaches() -> Result<()> {
+        const COMMITS: usize = 250;
+        let (operator, profile) = test_session_with_peer().await;
+        let name = unique_name("prune");
+        let repo = profile
+            .space(name.clone())
+            .open()
+            .perform(&operator)
+            .await?;
+        let main = repo.branch("main").open().perform(&operator).await?;
+        for i in 0..COMMITS {
+            main.commit(stream::iter(vec![assert_fact(i)]))
+                .perform(&operator)
+                .await?;
+            if i % 100 == 99 {
+                prune_unreachable(&operator, &profile, &repo, &[&main]).await?;
+            }
+        }
+        prune_unreachable(&operator, &profile, &repo, &[&main]).await?;
+
+        let did = repo.did();
+        let registry = repo.subject().registry().open().perform(&operator).await?;
+        let roots = [&main, &registry]
+            .into_iter()
+            .filter_map(Branch::revision)
+            .map(|revision| Blake3Hash::from(*revision.tree.hash()));
+        let reachable = reachable_blocks(&operator, &did, roots).await?;
+        let mut held = 0;
+        profile
+            .storage()
+            .volatile_archive(&did)
+            .expect("the space is mounted")
+            .retain_blocks(&did, DEFAULT_CATALOG, |_| {
+                held += 1;
+                true
+            });
+        assert_eq!(
+            held,
+            reachable.len(),
+            "the store holds the reachable nodes alone"
+        );
+        assert!(
+            reachable.len() > 1,
+            "more than a root was kept: {}",
+            reachable.len()
+        );
+
+        let device = profile
+            .session(b"device")
+            .space(profile.state())
+            .allow(Subject::any())
+            .await?;
+        let local = profile.space(name).open().perform(&device).await?;
+        let cold = local.branch("main").open().perform(&device).await?;
+        let count = Count::default();
+        cold.export(count.clone()).perform(&device).await?;
+        assert_eq!(
+            *count.0.lock(),
+            COMMITS,
+            "every fact reads back from the store"
+        );
+        let feature = local.branch("feature").open().perform(&device).await?;
+        feature.set_upstream(&cold).perform(&device).await?;
+        feature.pull().perform(&device).await?;
+        assert_eq!(feature.revision(), cold.revision());
+        Ok(())
     }
 }

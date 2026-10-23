@@ -4,7 +4,7 @@ use crate::Signer;
 use dialog_capability::Issuer;
 use dialog_varsig::{Did, Principal};
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use super::constants::{
     KEY_SIZE, PRIVATE_TAG, PRIVATE_TAG_SIZE, PUBLIC_KEY_OFFSET, PUBLIC_TAG, PUBLIC_TAG_SIZE,
     SIGNER_EXPORT_SIZE,
@@ -113,7 +113,7 @@ impl Issuer for SignerCredential {
     type Signature = crate::Signature;
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 impl SignerCredential {
     /// Export to multicodec-tagged bytes for native storage.
     ///
@@ -185,7 +185,10 @@ impl SignerCredential {
     }
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "es256"))]
+#[cfg(all(
+    not(all(target_arch = "wasm32", target_os = "unknown")),
+    feature = "es256"
+))]
 mod es256_native {
     use super::CredentialExportError;
     use crate::Es256Signer;
@@ -338,7 +341,10 @@ mod tests {
         );
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "es256"))]
+    #[cfg(all(
+        not(all(target_arch = "wasm32", target_os = "unknown")),
+        feature = "es256"
+    ))]
     #[dialog_common::test]
     async fn it_roundtrips_es256_export_import() {
         use crate::Es256Signer;
@@ -353,7 +359,7 @@ mod tests {
         assert_eq!(imported.0.algorithm(), crate::AlgorithmTag::Es256);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     mod native {
         use super::*;
         use crate::credential::constants::{
@@ -420,7 +426,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     mod web {
         use super::*;
         use crate::credential::export::SignerCredentialExport;

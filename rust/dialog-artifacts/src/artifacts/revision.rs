@@ -8,7 +8,7 @@ use super::Blake3Hash;
 /// A [`IndexRoot`] represents the root of [`Artifacts`] for a given set of data.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct IndexRoot {
-    /// The hash of the prolly tree index root for this revision
+    /// The hash of the probabilistic search tree index root for this revision
     index: Blake3Hash,
 }
 

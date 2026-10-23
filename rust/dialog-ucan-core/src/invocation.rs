@@ -103,6 +103,12 @@ impl<S: Signature> Invocation<S> {
         self.payload().expiration
     }
 
+    /// Getter for the `issued_at` field.
+    #[must_use]
+    pub const fn issued_at(&self) -> Option<Timestamp> {
+        self.payload().issued_at
+    }
+
     /// Getter for the `meta` field. Returns an empty map when meta is absent.
     #[must_use]
     pub fn meta(&self) -> &BTreeMap<String, Ipld> {
@@ -232,7 +238,10 @@ impl<S: Signature> Invocation<S> {
                 {
                     Ok(None) => Ok(()),
                     Ok(Some(found)) => Err(VerifyError::<K, S, T, St, _, _>::Invalid(
-                        Invalid::Revoked { cid, found },
+                        Invalid::Revoked {
+                            cid,
+                            found: Box::new(found),
+                        },
                     )),
                     // The question went unanswered. A caller willing to
                     // proceed without the answer says so by wrapping the
@@ -997,7 +1006,10 @@ pub enum Invalid<
         /// The revoked delegation.
         cid: Cid,
         /// The revocation that matched: its document and its issuer.
-        found: RevocationMatch,
+        ///
+        /// Boxed so a revocation does not make every verification result
+        /// carry two CIDs inline.
+        found: Box<RevocationMatch>,
     },
 }
 
@@ -1065,6 +1077,7 @@ mod tests {
         ops::{Bound, RangeBounds},
         rc::Rc,
         str::FromStr,
+        sync::{Arc, Mutex as StdMutex},
     };
     use testresult::TestResult;
 
@@ -2339,6 +2352,36 @@ mod tests {
 
     #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), tokio::test)]
     #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
+    async fn it_gives_the_time_an_invocation_was_issued_at() -> TestResult {
+        let subject = test_signer(11).await;
+        let invoker = test_signer(12).await;
+        let issued = Timestamp::now();
+
+        let stamped = InvocationBuilder::new()
+            .issuer(invoker.clone())
+            .audience(&subject)
+            .subject(&subject)
+            .command(vec!["test".to_string()])
+            .proofs(vec![])
+            .issued_at(issued)
+            .try_build()
+            .await?;
+        let unstamped = InvocationBuilder::new()
+            .issuer(invoker.clone())
+            .audience(&subject)
+            .subject(&subject)
+            .command(vec!["test".to_string()])
+            .proofs(vec![])
+            .try_build()
+            .await?;
+
+        assert_eq!(stamped.issued_at(), Some(issued));
+        assert_eq!(unstamped.issued_at(), None);
+        Ok(())
+    }
+
+    #[cfg_attr(not(all(target_arch = "wasm32", target_os = "unknown")), tokio::test)]
+    #[cfg_attr(all(target_arch = "wasm32", target_os = "unknown"), wasm_bindgen_test)]
     async fn chain_check_narrows_time_range_across_chain() -> TestResult {
         // Two-hop chain where each delegation has different time bounds.
         // The result should be the intersection: [later nbf, earlier exp].
@@ -2571,8 +2614,12 @@ mod tests {
     }
 
     /// Records the candidate revoker sets it was queried with.
+    ///
+    /// Shared rather than cell-shared: a checker's query future is
+    /// `ConditionalSend`, so a test double has to be as movable as the
+    /// real ones it stands in for.
     #[derive(Debug, Clone, Default)]
-    struct RecordingRevocations(Rc<RefCell<Vec<Vec<Did>>>>);
+    struct RecordingRevocations(Arc<StdMutex<Vec<Vec<Did>>>>);
 
     impl RevocationChecker for RecordingRevocations {
         type Error = Unreachable;
@@ -2581,7 +2628,10 @@ mod tests {
             &self,
             selector: RevocationSelector<'_>,
         ) -> Result<Option<RevocationMatch>, Self::Error> {
-            RefCell::borrow_mut(&self.0).push(selector.by.to_vec());
+            self.0
+                .lock()
+                .expect("not poisoned")
+                .push(selector.by.to_vec());
             Ok(None)
         }
     }
@@ -2600,6 +2650,7 @@ mod tests {
             Ok(Some(RevocationMatch {
                 revocation: selector.delegation,
                 principal: self.0.clone(),
+                proof: None,
             }))
         }
     }
@@ -2702,7 +2753,7 @@ mod tests {
         invocation: &Invocation<Ed25519Signature>,
         store: &DelegationStore,
     ) -> TestResult<Vec<Vec<Did>>> {
-        let seen = Rc::new(RefCell::new(Vec::new()));
+        let seen = Arc::new(StdMutex::new(Vec::new()));
         let environment: Environment<
             DelegationStore,
             DidKeyResolver,
@@ -2719,7 +2770,7 @@ mod tests {
             .await
             .map_err(|e| e.to_string())?;
 
-        let mut recorded = RefCell::borrow(&seen).clone();
+        let mut recorded = seen.lock().expect("not poisoned").clone();
         // Queries complete concurrently, so order by chain position: each
         // link's prefix is strictly longer than the one before it.
         recorded.sort_by_key(Vec::len);

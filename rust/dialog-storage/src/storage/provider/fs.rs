@@ -44,7 +44,9 @@ mod credential;
 // On the web we still need to READ a directory's identity (its
 // `credential/key/self` DID) to authorize against it — only the public key is
 // needed, so this works without a WebCrypto import. A DID-only `Load<Credential>`.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+// WASI uses it too, so the FS remote's subject check compiles there; it never
+// runs, since no `FileSystem` opens on WASI.
+#[cfg(target_arch = "wasm32")]
 mod credential_web;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -52,6 +54,10 @@ mod native;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod web;
+
+// A WASI component has no file system: see `wasi`.
+#[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
+mod wasi;
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub use web::FileSystemDirectoryHandleExt;
@@ -69,7 +75,7 @@ use url::Url;
 pub type FileReader =
     std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Vec<u8>, FileSystemError>> + Send>>;
 /// A streamed byte source over a file, yielding owned chunks.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[cfg(target_arch = "wasm32")]
 pub type FileReader =
     std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Vec<u8>, FileSystemError>>>>;
 
@@ -168,11 +174,14 @@ impl TryFrom<&str> for FileSystemHandle {
 }
 
 /// The active I/O backend for the current target. `native` is backed by
-/// [`tokio::fs`]; `web` by the File System Access API. Both expose the same
+/// [`tokio::fs`]; `web` by the File System Access API; `wasi` refuses, as a
+/// WASI component has no file system. Each exposes the same
 /// free functions taking a [`FileSystemHandle`], plus a `LockGuard` type and
 /// `lock` function for CAS critical sections.
 #[cfg(not(target_arch = "wasm32"))]
 use native as backend;
+#[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
+use wasi as backend;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 use web as backend;
 

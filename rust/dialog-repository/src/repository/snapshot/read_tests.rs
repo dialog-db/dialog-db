@@ -18,7 +18,7 @@ use crate::helpers::test_repo;
 use crate::repository::source::SourceRef;
 use crate::schema::DidExt as _;
 use dialog_capability::{Fork, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
@@ -103,6 +103,7 @@ where
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Holds
         + ConditionalSync
         + 'static,
 {
@@ -128,6 +129,7 @@ where
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Holds
         + ConditionalSync
         + 'static,
 {
@@ -491,9 +493,9 @@ async fn it_resolves_committed_rules() -> Result<()> {
     // employee(this, name) :- person-name(this, name)
     let rule = {
         let json = serde_json::json!({
-            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "Text" } } },
+            "deduce": { "with": { "name": { "the": "org/employee-name", "as": "text:" } } },
             "when": [{
-                "assert": { "with": { "name": { "the": "org/person-name", "as": "Text" } } },
+                "assert": { "with": { "name": { "the": "org/person-name", "as": "text:" } } },
                 "where": {
                     "this": { "?": { "name": "this" } },
                     "name": { "?": { "name": "name" } }

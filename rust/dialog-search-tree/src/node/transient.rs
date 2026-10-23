@@ -11,9 +11,10 @@ use rkyv::{
 use std::ops::Bound;
 
 use crate::{
-    ArchivedIndex, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Key, Link, Manifest,
-    Node, NodeBody, NoveltyBuffer, NoveltyEntry, NoveltyOp, PersistentNode, PersistentNodeBody,
-    Rank, Value, distribution::cap, into_owned, resolve_pending,
+    ArchivedIndex, Buffer, Delta, DialogSearchTreeError, Distribution, Entry, Hashed, Key,
+    LazyHash, Link, Manifest, Node, NodeBody, NodeCache, NoveltyBuffer, NoveltyEntry, NoveltyOp,
+    PersistentNode, PersistentNodeBody, Rank, SegmentEntry, Separator, Value, distribution::cap,
+    into_owned, resolve_pending,
 };
 
 /// The rank threshold for grouping entries into leaf segments (level 0). Every
@@ -86,6 +87,18 @@ enum LinkNovelty<Value> {
     /// that keeps `run` entries first on ties reproduces exactly the order
     /// a single always-sorted buffer would hold.
     ///
+    /// Nothing reads an older op for a key once a newer one is buffered
+    /// at the same link, so the merge keeps only the newest op for each
+    /// key (see [`merge_runs`], and [`collapse_run`] for a run decoded from
+    /// a stored frame): after any merge (a full tail, a persist, a lift, a
+    /// take) the run holds one op per key. Between merges a key
+    /// written again holds its older op in the run and its newer ops in
+    /// the tail; every reader takes the newest, and the op and weight
+    /// totals over-count by at most the tail until the next merge corrects
+    /// them. The arrival itself probes nothing: a per-op search for the
+    /// key's earlier op cost a bulk commit, whose run grows to the whole
+    /// batch before any flush, more than the collapse saved it.
+    ///
     /// The split exists because enqueue inserts ops ONE AT A TIME (the
     /// per-op cascade timing is deliberate — batching moved where flushes
     /// fire and measured slower): insertion into one flat sorted vec walked
@@ -120,37 +133,105 @@ enum LinkNovelty<Value> {
 /// passes over the buffer.
 const NOVELTY_TAIL_LIMIT: usize = 128;
 
-/// Stably merges two sorted runs into one flat sorted list, keeping `run`
-/// entries before `tail` entries for equal keys — `tail` ops are newer, and
-/// the newest op for a key must sort last.
+/// What a merge collapsed: the ops a newer op for the same key superseded,
+/// by count and raw weight (see [`novelty_entry_weight`]). The totals that
+/// counted those ops when they arrived subtract this to stay exact.
+#[derive(Debug, Default)]
+struct Shed {
+    /// Superseded ops dropped.
+    ops: usize,
+    /// Their raw weight.
+    weight: usize,
+}
+
+impl Shed {
+    /// Records `entry` as superseded.
+    fn drop<Value>(&mut self, entry: &NoveltyEntry<Value>)
+    where
+        Value: self::Value,
+    {
+        self.ops += 1;
+        self.weight += novelty_entry_weight(entry);
+    }
+}
+
+/// Stably merges two sorted runs into one flat sorted list holding ONE op
+/// per key, the newest. `run` entries sort before `tail` entries for equal
+/// keys (`tail` ops are newer), so within a key's span the newest op is
+/// the last, and that is the one kept; every op it supersedes is counted
+/// into `shed`. A later op for a key fully supersedes an earlier one under
+/// sequential application (an assert over a retract nets to the assert, a
+/// retract over an assert to the retract, an assert over an assert to the
+/// newer value), and every reader and the flush already resolve a key to
+/// its newest op, so the superseded op had no reader left and only grew
+/// the frame on every persist.
+///
+/// Only a tail entry can duplicate the entry before it: the run holds one
+/// op per key (see [`collapse_run`] for a run decoded from a stored frame),
+/// and a run entry following a tail entry has a strictly greater key,
+/// since equal keys take the run's entries first. So the key compare is
+/// paid once per TAIL entry, at most the tail limit per merge, not once
+/// per run entry; a bulk commit's run grows to the whole batch. An empty
+/// tail returns `run` untouched.
 fn merge_runs<Value>(
     run: Vec<NoveltyEntry<Value>>,
     tail: Vec<NoveltyEntry<Value>>,
-) -> Vec<NoveltyEntry<Value>> {
+    shed: &mut Shed,
+) -> Vec<NoveltyEntry<Value>>
+where
+    Value: self::Value,
+{
     if tail.is_empty() {
         return run;
     }
-    if run.is_empty() {
-        return tail;
-    }
-    let mut merged = Vec::with_capacity(run.len() + tail.len());
+    let mut merged: Vec<NoveltyEntry<Value>> = Vec::with_capacity(run.len() + tail.len());
     let mut left = run.into_iter().peekable();
     let mut right = tail.into_iter().peekable();
     loop {
-        match (left.peek(), right.peek()) {
-            (Some(a), Some(b)) => {
-                if a.key <= b.key {
-                    merged.push(left.next().expect("peeked"));
-                } else {
-                    merged.push(right.next().expect("peeked"));
-                }
-            }
-            (Some(_), None) => merged.push(left.next().expect("peeked")),
-            (None, Some(_)) => merged.push(right.next().expect("peeked")),
+        let from_tail = match (left.peek(), right.peek()) {
+            (Some(a), Some(b)) => a.key > b.key,
+            (Some(_), None) => false,
+            (None, Some(_)) => true,
             (None, None) => break,
+        };
+        if from_tail {
+            let entry = right.next().expect("peeked");
+            match merged.last_mut() {
+                Some(last) if last.key == entry.key => {
+                    shed.drop(last);
+                    *last = entry;
+                }
+                _ => merged.push(entry),
+            }
+        } else {
+            merged.push(left.next().expect("peeked"));
         }
     }
     merged
+}
+
+/// Collapses a sorted run decoded from a stored frame to one op per key,
+/// the last of each key's span, counting the rest into `shed`. A frame
+/// this build persisted already holds one op per key, so the pass finds
+/// nothing and costs one adjacent key compare per entry, paid once at the
+/// decode it follows; a frame an older build persisted may hold a key's
+/// whole write history, which collapses here instead of riding every
+/// persist until the next flush.
+fn collapse_run<Value>(run: &mut Vec<NoveltyEntry<Value>>, shed: &mut Shed)
+where
+    Value: self::Value,
+{
+    let mut kept = 0usize;
+    for at in 0..run.len() {
+        if kept > 0 && run[kept - 1].key == run[at].key {
+            shed.drop(&run[kept - 1]);
+            run.swap(kept - 1, at);
+        } else {
+            run.swap(kept, at);
+            kept += 1;
+        }
+    }
+    run.truncate(kept);
 }
 
 /// Appends the winning op per key within `[start, end]` across two sorted
@@ -256,13 +337,14 @@ where
     }
 
     /// Merges an open link's tail into its run, so `run` is the one flat
-    /// sorted op list and `tail` is empty. A no-op for every other state
+    /// sorted op list with one op per key and `tail` is empty, counting
+    /// what the merge collapsed into `shed`. A no-op for every other state
     /// (sealed and cached entries are already flat and sorted).
-    fn consolidate(&mut self) {
+    fn consolidate(&mut self, shed: &mut Shed) {
         if let LinkNovelty::Open { run, tail } = self
             && !tail.is_empty()
         {
-            let merged = merge_runs(std::mem::take(run), std::mem::take(tail));
+            let merged = merge_runs(std::mem::take(run), std::mem::take(tail), shed);
             *run = merged;
         }
     }
@@ -272,14 +354,19 @@ where
     /// open link's tail. The encoding (sealed or cached) is discarded: from
     /// here on this link's buffer is re-encoded at persist, which is exactly
     /// the invalidation the cache needs.
-    fn lift<K>(&mut self) -> Result<&mut Vec<NoveltyEntry<Value>>, DialogSearchTreeError>
+    fn lift<K>(
+        &mut self,
+        shed: &mut Shed,
+    ) -> Result<&mut Vec<NoveltyEntry<Value>>, DialogSearchTreeError>
     where
         K: self::Key,
     {
         match self {
             LinkNovelty::Sealed(buffer) => {
+                let mut run = buffer.entries::<K>()?;
+                collapse_run(&mut run, shed);
                 *self = LinkNovelty::Open {
-                    run: buffer.entries::<K>()?,
+                    run,
                     tail: Vec::new(),
                 };
             }
@@ -289,7 +376,7 @@ where
                     tail: Vec::new(),
                 };
             }
-            LinkNovelty::Open { .. } => self.consolidate(),
+            LinkNovelty::Open { .. } => self.consolidate(shed),
         }
         match self {
             LinkNovelty::Open { run, .. } => Ok(run),
@@ -297,20 +384,28 @@ where
         }
     }
 
-    /// Inserts one arriving op, preserving every reader's invariants without
-    /// touching the settled run: the op binary-inserts into the bounded
-    /// sorted tail (after any equal keys, so chronological order within a
-    /// key holds), and a full tail merges into the run first. This is the
-    /// enqueue path's insertion — O(tail limit) per op instead of a re-sort
-    /// of the whole accumulated buffer.
-    fn insert<K>(&mut self, entry: NoveltyEntry<Value>) -> Result<(), DialogSearchTreeError>
+    /// Inserts one arriving op, preserving every reader's invariants
+    /// without touching the settled run: the op binary-inserts into the
+    /// bounded sorted tail (after any equal keys, so chronological order
+    /// within a key holds), and a full tail merges into the run first,
+    /// collapsing each key to its newest op and counting the rest into
+    /// `shed`. This is the enqueue path's insertion — O(tail limit) per op
+    /// instead of a re-sort of the whole accumulated buffer, and no search
+    /// of the run for the key's earlier op: the merge finds it for free.
+    fn insert<K>(
+        &mut self,
+        entry: NoveltyEntry<Value>,
+        shed: &mut Shed,
+    ) -> Result<(), DialogSearchTreeError>
     where
         K: self::Key,
     {
         match self {
             LinkNovelty::Sealed(buffer) => {
+                let mut run = buffer.entries::<K>()?;
+                collapse_run(&mut run, shed);
                 *self = LinkNovelty::Open {
-                    run: buffer.entries::<K>()?,
+                    run,
                     tail: vec![entry],
                 };
             }
@@ -322,7 +417,7 @@ where
             }
             LinkNovelty::Open { run, tail } => {
                 if tail.len() >= NOVELTY_TAIL_LIMIT {
-                    let merged = merge_runs(std::mem::take(run), std::mem::take(tail));
+                    let merged = merge_runs(std::mem::take(run), std::mem::take(tail), shed);
                     *run = merged;
                 }
                 let at = tail.partition_point(|held| held.key <= entry.key);
@@ -332,14 +427,22 @@ where
         Ok(())
     }
 
-    /// Takes this link's ops as one flat sorted list, leaving it empty.
-    fn take<K>(&mut self) -> Result<Vec<NoveltyEntry<Value>>, DialogSearchTreeError>
+    /// Takes this link's ops as one flat sorted list with one op per key,
+    /// leaving it empty and counting what the merge collapsed into `shed`.
+    fn take<K>(
+        &mut self,
+        shed: &mut Shed,
+    ) -> Result<Vec<NoveltyEntry<Value>>, DialogSearchTreeError>
     where
         K: self::Key,
     {
         match std::mem::replace(self, LinkNovelty::empty()) {
-            LinkNovelty::Sealed(buffer) => buffer.entries::<K>(),
-            LinkNovelty::Open { run, tail } => Ok(merge_runs(run, tail)),
+            LinkNovelty::Sealed(buffer) => {
+                let mut run = buffer.entries::<K>()?;
+                collapse_run(&mut run, shed);
+                Ok(run)
+            }
+            LinkNovelty::Open { run, tail } => Ok(merge_runs(run, tail, shed)),
             LinkNovelty::Cached { entries, .. } => Ok(entries),
         }
     }
@@ -368,8 +471,10 @@ where
 /// missing tail entry is an empty buffer.
 ///
 /// Within one buffer the entries are sorted by key and the newest op for a
-/// key is last; across links the concatenation in child order is the flat
-/// sorted op list, since links partition the key space in order.
+/// key is last, and after any merge (a persist, a take, a lift, a full
+/// tail) each key holds exactly that op; across links the concatenation in
+/// child order is the flat sorted op list, since links partition the key
+/// space in order.
 #[derive(Debug)]
 pub struct Novelty<Value> {
     /// One buffer per child link, positionally aligned with the node's
@@ -377,14 +482,17 @@ pub struct Novelty<Value> {
     /// buffers are empty).
     links: Vec<LinkNovelty<Value>>,
     /// Total buffered ops across every link, so capacity triggers read a
-    /// number instead of scanning.
+    /// number instead of scanning. Counts every arrival until a merge
+    /// collapses a key's older ops, so between merges a key written again
+    /// is over-counted by at most the tail limit; a merge corrects it.
     total: usize,
     /// Total buffered raw weight across every link (key bytes + value
     /// payload weight per op; the per-op overhead is added from the
     /// manifest when read, see [`weight`](Self::weight)), for the
     /// byte-capped flush trigger. `None` until first asked for (a spine
     /// opened from stored buffers computes it lazily by streaming the
-    /// sealed columns); once computed, every mutator keeps it exact.
+    /// sealed columns); once computed, every mutator keeps it exact up to
+    /// the same between-merges over-count as `total`.
     weight: Option<usize>,
 }
 
@@ -441,6 +549,15 @@ where
         self.links.iter().map(LinkNovelty::len).max().unwrap_or(0)
     }
 
+    /// Subtracts what merges collapsed from the totals that counted those
+    /// ops when they arrived.
+    fn absorb(&mut self, shed: Shed) {
+        self.total -= shed.ops;
+        if let Some(weight) = self.weight.as_mut() {
+            *weight -= shed.weight;
+        }
+    }
+
     /// How many links still carry their sealed stored encoding.
     #[cfg(test)]
     pub(crate) fn sealed_links(&self) -> usize {
@@ -459,9 +576,11 @@ where
     where
         K: self::Key,
     {
+        let mut shed = Shed::default();
         for link in &mut self.links {
-            link.lift::<K>()?;
+            link.lift::<K>(&mut shed)?;
         }
+        self.absorb(shed);
         Ok(())
     }
 
@@ -480,8 +599,8 @@ where
     /// clamping into link 0. Each op inserts into its link's bounded sorted
     /// tail in arrival order (see [`LinkNovelty::insert`]), so for equal
     /// keys existing ops stay before incoming ones and the newest op for a
-    /// key stays last — the same order the old whole-buffer stable re-sort
-    /// produced, without its O(buffer) cost per op.
+    /// key stays last; a merge the insert triggers collapses each key to
+    /// that op, and the totals are corrected by what it collapsed.
     pub(crate) fn route<K>(
         &mut self,
         bounds: &[&[u8]],
@@ -493,14 +612,16 @@ where
         if incoming.is_empty() {
             return Ok(());
         }
+        let mut shed = Shed::default();
         for entry in incoming {
             let at = bounds.partition_point(|separator| *separator <= entry.key.as_slice());
             self.total += 1;
             if let Some(weight) = self.weight.as_mut() {
                 *weight += novelty_entry_weight(&entry);
             }
-            self.link_mut(at).insert::<K>(entry)?;
+            self.link_mut(at).insert::<K>(entry, &mut shed)?;
         }
+        self.absorb(shed);
         Ok(())
     }
 
@@ -607,11 +728,12 @@ where
         match self.links.get_mut(at) {
             None => Ok(Vec::new()),
             Some(link) => {
-                let taken = link.take::<K>()?;
-                self.total -= taken.len();
-                if let Some(weight) = self.weight.as_mut() {
-                    *weight -= taken.iter().map(novelty_entry_weight).sum::<usize>();
+                let mut shed = Shed::default();
+                let taken = link.take::<K>(&mut shed)?;
+                for entry in &taken {
+                    shed.drop(entry);
                 }
+                self.absorb(shed);
                 Ok(taken)
             }
         }
@@ -626,8 +748,9 @@ where
         K: self::Key,
     {
         let mut out = Vec::with_capacity(self.total);
+        let mut shed = Shed::default();
         for link in &mut self.links {
-            out.extend(link.take::<K>()?);
+            out.extend(link.take::<K>(&mut shed)?);
         }
         self.links.clear();
         self.total = 0;
@@ -667,20 +790,16 @@ where
         if !present {
             return Ok(());
         }
-        let entries = link.lift::<K>()?;
-        let before = entries.len();
-        let mut removed_weight = 0usize;
+        let mut shed = Shed::default();
+        let entries = link.lift::<K>(&mut shed)?;
         entries.retain(|entry| {
             let keep = entry.key.as_slice() != key;
             if !keep {
-                removed_weight += novelty_entry_weight(entry);
+                shed.drop(entry);
             }
             keep
         });
-        self.total -= before - entries.len();
-        if let Some(weight) = self.weight.as_mut() {
-            *weight -= removed_weight;
-        }
+        self.absorb(shed);
         Ok(())
     }
 
@@ -711,9 +830,10 @@ where
         // The first/last probes and the partition splits below need each
         // touched link as one flat sorted list; folding a pending tail in
         // here is once-per-boundary-move, off every hot path.
+        let mut shed = Shed::default();
         for touched in [at - 1, at] {
             if let Some(link) = self.links.get_mut(touched) {
-                link.consolidate();
+                link.consolidate(&mut shed);
             }
         }
 
@@ -730,15 +850,16 @@ where
             },
         };
         if strays_below {
-            let entries = self.links[at].lift::<K>()?;
+            let entries = self.links[at].lift::<K>(&mut shed)?;
             let split = entries.partition_point(|entry| entry.key.as_slice() < bound);
             let moved: Vec<NoveltyEntry<Value>> = entries.drain(..split).collect();
-            let left = self.link_mut(at - 1).lift::<K>()?;
+            let left = self.link_mut(at - 1).lift::<K>(&mut shed)?;
             left.extend(moved);
             debug_assert!(
                 left.windows(2).all(|pair| pair[0].key <= pair[1].key),
                 "re-homed ops must keep the left buffer sorted"
             );
+            self.absorb(shed);
             return Ok(());
         }
 
@@ -759,16 +880,17 @@ where
             }
         };
         if strays_above {
-            let entries = self.links[at - 1].lift::<K>()?;
+            let entries = self.links[at - 1].lift::<K>(&mut shed)?;
             let split = entries.partition_point(|entry| entry.key.as_slice() < bound);
             let moved: Vec<NoveltyEntry<Value>> = entries.drain(split..).collect();
-            let right = self.link_mut(at).lift::<K>()?;
+            let right = self.link_mut(at).lift::<K>(&mut shed)?;
             right.splice(0..0, moved);
             debug_assert!(
                 right.windows(2).all(|pair| pair[0].key <= pair[1].key),
                 "re-homed ops must keep the right buffer sorted"
             );
         }
+        self.absorb(shed);
         Ok(())
     }
 
@@ -879,7 +1001,9 @@ where
             }
             let buffer = match link {
                 LinkNovelty::Open { run, tail } => {
-                    let entries = merge_runs(run, tail);
+                    // The set is consumed, so what the merge collapses needs
+                    // no accounting.
+                    let entries = merge_runs(run, tail, &mut Shed::default());
                     if entries.is_empty() {
                         continue;
                     }
@@ -941,6 +1065,7 @@ where
         >,
     {
         let mut buffers = Vec::new();
+        let mut shed = Shed::default();
         for (at, link) in self.links.iter_mut().enumerate() {
             if at >= links.len() {
                 if link.len() == 0 {
@@ -952,10 +1077,12 @@ where
             }
             let buffer = match link {
                 LinkNovelty::Open { run, tail } => {
-                    // Encoding needs the one flat sorted list; fold the tail
-                    // in first (once per persist, not per op).
+                    // Encoding needs the one flat sorted list with one op
+                    // per key; fold the tail in first (once per persist,
+                    // not per op).
                     if !tail.is_empty() {
-                        let merged = merge_runs(std::mem::take(run), std::mem::take(tail));
+                        let merged =
+                            merge_runs(std::mem::take(run), std::mem::take(tail), &mut shed);
                         *run = merged;
                     }
                     if run.is_empty() {
@@ -1016,6 +1143,7 @@ where
             debug_assert_grouped::<K, Value>(&buffer, at, links)?;
             buffers.push(buffer);
         }
+        self.absorb(shed);
         Ok(buffers)
     }
 }
@@ -1127,12 +1255,12 @@ pub struct TransientSegment<Key, Value> {
     /// The key-value entries stored in this segment. Private so every
     /// mutation flows through a method that keeps the cached total weight
     /// exact; readers borrow through [`TransientSegment::entries`].
-    entries: Vec<Entry<Key, Value>>,
+    entries: Vec<SegmentEntry<Key, Value>>,
     /// The separator at this segment's left edge: the shortest byte string
     /// above everything left of the seam and at or below this segment's
     /// first key. Empty for the tree's global leftmost segment. This is the
     /// ground truth every index level above derives its separators from.
-    pub separator: Vec<u8>,
+    pub separator: Separator,
     /// Cached sum of the entries' raw weights ([`Entry::raw_weight`]; the
     /// per-entry overhead is added from the manifest when read), `None` until
     /// first queried or after a wholesale mutation invalidated it. The edit
@@ -1146,16 +1274,16 @@ pub struct TransientSegment<Key, Value> {
 
 impl<Key, Value> TransientSegment<Key, Value> {
     /// Builds a segment from its entries and left-edge separator.
-    pub fn new(entries: Vec<Entry<Key, Value>>, separator: Vec<u8>) -> Self {
+    pub fn new(entries: Vec<SegmentEntry<Key, Value>>, separator: impl Into<Separator>) -> Self {
         Self {
             entries,
-            separator,
+            separator: separator.into(),
             weight: None,
         }
     }
 
     /// The key-value entries stored in this segment.
-    pub fn entries(&self) -> &[Entry<Key, Value>] {
+    pub fn entries(&self) -> &[SegmentEntry<Key, Value>] {
         &self.entries
     }
 
@@ -1163,23 +1291,23 @@ impl<Key, Value> TransientSegment<Key, Value> {
     /// Invalidates the cached total weight; the targeted edit methods
     /// ([`upsert`](Self::upsert), [`delete`](Self::delete)) maintain it
     /// incrementally instead and should be preferred on hot paths.
-    pub fn entries_mut(&mut self) -> &mut Vec<Entry<Key, Value>> {
+    pub fn entries_mut(&mut self) -> &mut Vec<SegmentEntry<Key, Value>> {
         self.weight = None;
         &mut self.entries
     }
 
     /// Consumes the segment, returning its entries.
-    pub fn into_entries(self) -> Vec<Entry<Key, Value>> {
+    pub fn into_entries(self) -> Vec<SegmentEntry<Key, Value>> {
         self.entries
     }
 
     /// Consumes the segment, returning its entries and separator.
-    pub fn into_parts(self) -> (Vec<Entry<Key, Value>>, Vec<u8>) {
+    pub fn into_parts(self) -> (Vec<SegmentEntry<Key, Value>>, Separator) {
         (self.entries, self.separator)
     }
 
     /// Takes the entries out of the segment, leaving it empty.
-    pub fn take_entries(&mut self) -> Vec<Entry<Key, Value>> {
+    pub fn take_entries(&mut self) -> Vec<SegmentEntry<Key, Value>> {
         self.weight = None;
         std::mem::take(&mut self.entries)
     }
@@ -1200,7 +1328,7 @@ where
         let raw = match self.weight {
             Some(weight) => weight,
             None => {
-                let weight = self.entries.iter().map(Entry::raw_weight).sum();
+                let weight = self.entries.iter().map(|entry| entry.raw_weight()).sum();
                 self.weight = Some(weight);
                 weight
             }
@@ -1210,14 +1338,17 @@ where
 
     /// Inserts or replaces the entry for `entry.key`, keeping the cached
     /// total weight exact: a replacement adjusts by the weight delta, an
-    /// insert adds the entry's weight.
-    pub fn upsert(&mut self, entry: Entry<Key, Value>) {
+    /// insert adds the entry's weight. An inserted entry brings the hash of
+    /// its key along, if it was asked for already; a replacement keeps the
+    /// hash the stored key has.
+    pub fn upsert(&mut self, entry: impl Into<SegmentEntry<Key, Value>>) {
+        let entry = entry.into();
         match self.entries.binary_search_by(|e| e.key.cmp(&entry.key)) {
             Ok(at) => {
                 if let Some(weight) = self.weight.as_mut() {
                     *weight = *weight + entry.raw_weight() - self.entries[at].raw_weight();
                 }
-                self.entries[at].value = entry.value;
+                self.entries[at].set_value(entry.into_entry().value);
             }
             Err(at) => {
                 if let Some(weight) = self.weight.as_mut() {
@@ -1253,13 +1384,19 @@ impl<Key, Value> TransientNode<Key, Value> {
     /// pending op move it would reshape the tree as a side effect of
     /// buffering.
     pub fn separator(&self) -> Result<&[u8], DialogSearchTreeError> {
+        Ok(self.edge()?.as_slice())
+    }
+
+    /// The separator at this node's left edge as it is held, with the hash
+    /// it keeps (see [`Node::edge`]).
+    pub fn edge(&self) -> Result<&Separator, DialogSearchTreeError> {
         match self {
-            TransientNode::Segment(segment) => Ok(segment.separator.as_slice()),
+            TransientNode::Segment(segment) => Ok(&segment.separator),
             TransientNode::Index(index) => index
                 .children
                 .first()
                 .ok_or_else(|| DialogSearchTreeError::Node("Index was unexpectedly empty".into()))?
-                .separator(),
+                .edge(),
         }
     }
 }
@@ -1354,10 +1491,17 @@ where
         node: &PersistentNode<Key, Value>,
     ) -> Result<TransientIndex<Key, Value>, DialogSearchTreeError> {
         let index = node.as_index()?;
+        // Every link keeps its separator's hash in the stored index's own
+        // cells, as an opened leaf's entries do theirs.
+        let hashes = node.hashes();
         let children = index
             .links()?
             .into_iter()
-            .map(Node::Persistent)
+            .enumerate()
+            .map(|(at, mut link)| {
+                link.separator = link.separator.stored(&hashes, at);
+                Node::Persistent(link)
+            })
             .collect::<Vec<Node<Key, Value>>>();
         // Carry the node's novelty across to the transient form so a flush or
         // canonicalize can act on it. The stored form is already grouped per
@@ -1391,18 +1535,23 @@ where
     /// separator is derived from its first child.
     pub fn open(
         node: &PersistentNode<Key, Value>,
-        separator: Vec<u8>,
+        separator: impl Into<Separator>,
     ) -> Result<Self, DialogSearchTreeError> {
         match node.body() {
             NodeBody::Index(_) => Ok(TransientNode::Index(TransientNode::open_index(node)?)),
             NodeBody::Segment(segment) => {
                 let mut entries = Vec::with_capacity(segment.len());
                 let mut keys = segment.keys::<Key>()?;
+                // Every entry keeps its key's hash in the stored leaf's own
+                // cells, so what one opening of this leaf computes the next
+                // finds, for as long as the node is held.
+                let hashes = node.hashes();
                 while let Some((at, key)) = keys.next_key()? {
-                    entries.push(Entry {
-                        key: Key::try_from_bytes(key)?,
-                        value: into_owned(segment.value_at(at)?)?,
-                    });
+                    entries.push(SegmentEntry::opened(
+                        Key::try_from_bytes(key)?,
+                        into_owned(segment.value_at(at)?)?,
+                        LazyHash::stored(&hashes, at),
+                    ));
                 }
                 Ok(TransientNode::Segment(TransientSegment::new(
                     entries, separator,
@@ -1435,10 +1584,16 @@ where
     /// freshly encoded with the segment codec. This makes no shape decisions:
     /// the children, novelty, and entries are encoded exactly as the edits
     /// left them.
+    ///
+    /// Every node sealed is kept in `cache` with the hashes its entries (or
+    /// links) already had: it is the node the next edit of this tree opens,
+    /// and a node read back from storage instead would be checked again and
+    /// would hash every key again before it could be regrouped.
     pub fn persist(
         self,
         delta: &mut Delta<Blake3Hash, Buffer>,
         manifest: &Manifest,
+        cache: &NodeCache<Key, Value>,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
         // Measurement-only (uncommitted, env-gated): classify the node being
         // sealed so a duplicate store downstream can be attributed to a kind.
@@ -1451,17 +1606,30 @@ where
         } else {
             None
         };
-        let body = match self {
+        let (body, hashes) = match self {
             TransientNode::Segment(segment) => {
-                PersistentNodeBody::segment_from_entries(segment.entries, manifest.clone())?
+                let hashes = segment
+                    .entries
+                    .iter()
+                    .map(SegmentEntry::known_hash)
+                    .collect();
+                let body =
+                    PersistentNodeBody::segment_from_entries(segment.entries, manifest.clone())?;
+                (body, hashes)
             }
             TransientNode::Index(TransientIndex { children, novelty }) => {
                 let links = children
                     .into_iter()
-                    .map(|child| child.into_link(delta, manifest))
+                    .map(|child| child.into_link(delta, manifest, cache))
                     .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
+                let hashes = links
+                    .iter()
+                    .map(|link| link.separator.known_hash())
+                    .collect();
                 let buffers = novelty.into_buffers::<Key>(&links)?;
-                PersistentNodeBody::index_from_buffers(links, buffers, manifest.clone())?
+                let body =
+                    PersistentNodeBody::index_from_buffers(links, buffers, manifest.clone())?;
+                (body, hashes)
             }
         };
 
@@ -1471,6 +1639,7 @@ where
             dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);
         }
         delta.add(node.hash().clone(), node.buffer().clone());
+        Self::keep(cache, &node, hashes);
         Ok(node)
     }
 
@@ -1490,6 +1659,7 @@ where
         &mut self,
         delta: &mut Delta<Blake3Hash, Buffer>,
         manifest: &Manifest,
+        cache: &NodeCache<Key, Value>,
     ) -> Result<PersistentNode<Key, Value>, DialogSearchTreeError> {
         let audit_kind = if dialog_storage::dup_audit::enabled() {
             Some(match &self {
@@ -1500,11 +1670,21 @@ where
         } else {
             None
         };
-        let body = match self {
-            TransientNode::Segment(segment) => PersistentNodeBody::segment_from_entries(
-                segment.entries().to_vec(),
-                manifest.clone(),
-            )?,
+        let (body, hashes) = match self {
+            TransientNode::Segment(segment) => {
+                let hashes = segment
+                    .entries()
+                    .iter()
+                    .map(SegmentEntry::known_hash)
+                    .collect();
+                let entries: Vec<Entry<Key, Value>> = segment
+                    .entries()
+                    .iter()
+                    .map(|entry| Entry::clone(entry))
+                    .collect();
+                let body = PersistentNodeBody::segment_from_entries(entries, manifest.clone())?;
+                (body, hashes)
+            }
             TransientNode::Index(TransientIndex { children, novelty }) => {
                 // Collapse any live (cascade-touched) child back to its
                 // persisted link; an untouched persistent child passes
@@ -1518,7 +1698,7 @@ where
                                 Vec::new(),
                             ))),
                         );
-                        *child = Node::Persistent(lifted.into_link(delta, manifest)?);
+                        *child = Node::Persistent(lifted.into_link(delta, manifest, cache)?);
                     }
                 }
                 let links = children
@@ -1530,8 +1710,14 @@ where
                         )),
                     })
                     .collect::<Result<Vec<Link>, DialogSearchTreeError>>()?;
+                let hashes = links
+                    .iter()
+                    .map(|link| link.separator.known_hash())
+                    .collect();
                 let buffers = novelty.persist_buffers::<Key>(&links)?;
-                PersistentNodeBody::index_from_buffers(links, buffers, manifest.clone())?
+                let body =
+                    PersistentNodeBody::index_from_buffers(links, buffers, manifest.clone())?;
+                (body, hashes)
             }
         };
 
@@ -1541,7 +1727,23 @@ where
             dialog_storage::dup_audit::note_seal(node.hash().as_bytes(), kind);
         }
         delta.add(node.hash().clone(), node.buffer().clone());
+        Self::keep(cache, &node, hashes);
         Ok(node)
+    }
+
+    /// Keeps a node just sealed in `cache`, with the hashes already computed
+    /// for what it was sealed from (see [`PersistentNode::adopt_hashes`]). A
+    /// node the cache already holds under this hash is the same bytes with
+    /// whatever it has derived since, so it stays.
+    fn keep(
+        cache: &NodeCache<Key, Value>,
+        node: &PersistentNode<Key, Value>,
+        hashes: Vec<Option<Blake3Hash>>,
+    ) {
+        if cache.get_cached(node.hash()).is_none() {
+            node.adopt_hashes(hashes);
+            cache.insert(node.hash().clone(), node.clone());
+        }
     }
 }
 
@@ -1645,7 +1847,7 @@ where
     // see the whole frame structure before any child moves.
     let mut cut_before = vec![false; children.len()];
     for (at, child) in children.iter().enumerate() {
-        cut_before[at] = at > 0 && D::seam_rank(child.separator()?, manifest) > threshold;
+        cut_before[at] = at > 0 && D::seam_rank(child.edge()?.hashed(), manifest) > threshold;
     }
 
     // The index-level frame ceiling: under byte pacing, a frame (the run of
@@ -1667,9 +1869,9 @@ where
         for child in &children {
             weights.push(cap::link_weight(child.separator()?, manifest));
         }
-        let mut separators: Vec<&[u8]> = Vec::with_capacity(children.len());
+        let mut separators: Vec<Hashed<'_>> = Vec::with_capacity(children.len());
         for child in &children {
-            separators.push(child.separator()?);
+            separators.push(child.edge()?.hashed());
         }
         let mut start = 0usize;
         for end in 0..children.len() {
@@ -1790,7 +1992,7 @@ pub(crate) struct PieceOrigin {
 }
 
 pub(crate) fn regroup_entries<Key, Value, D>(
-    entries: Vec<Entry<Key, Value>>,
+    entries: Vec<SegmentEntry<Key, Value>>,
     floor: Vec<u8>,
     manifest: &Manifest,
 ) -> Vec<Node<Key, Value>>
@@ -1816,13 +2018,12 @@ where
 /// per-entry [`Entry::weight`] values when `manifest.max_segment` is
 /// non-zero, and may be empty otherwise (the entry-counted coin reads no
 /// weights).
-pub(crate) fn cut_plan<Key, D>(
-    keys: &[&Key],
+pub(crate) fn cut_plan<D>(
+    keys: &[Hashed<'_>],
     weights: &[usize],
     manifest: &Manifest,
 ) -> (Vec<bool>, Vec<bool>)
 where
-    Key: self::Key,
     D: Distribution,
 {
     let count = keys.len();
@@ -1830,8 +2031,8 @@ where
     let mut cut_after = vec![false; count];
     let mut bank = 0usize;
     for at in 0..count.saturating_sub(1) {
-        let key = keys[at].as_ref();
-        vetoed[at] = D::vetoes(key, keys[at + 1].as_ref(), manifest);
+        let key = keys[at];
+        vetoed[at] = D::vetoes(key.bytes(), keys[at + 1].bytes(), manifest);
         if vetoed[at] {
             // The coin is skipped entirely for vetoed seams: the veto
             // overrides whatever it would say, and the weight moves into
@@ -1924,7 +2125,7 @@ where
 /// separator — is emitted as its original persistent link instead of a
 /// fresh transient segment. See [`PieceOrigin`].
 pub(crate) fn regroup_entries_reusing<Key, Value, D>(
-    entries: Vec<Entry<Key, Value>>,
+    entries: Vec<SegmentEntry<Key, Value>>,
     floor: Vec<u8>,
     manifest: &Manifest,
     origins: &[PieceOrigin],
@@ -1935,7 +2136,7 @@ where
     D: Distribution,
 {
     let mut groups: Vec<Node<Key, Value>> = vec![];
-    let mut pending: Vec<Entry<Key, Value>> = vec![];
+    let mut pending: Vec<SegmentEntry<Key, Value>> = vec![];
     // The last key of the previously sealed group; None while sealing the
     // first group, whose separator comes from the floor instead.
     let mut previous_last: Option<Key> = None;
@@ -1962,8 +2163,9 @@ where
     } else {
         entries.iter().map(|entry| entry.weight(manifest)).collect()
     };
-    let key_refs: Vec<&Key> = entries.iter().map(|entry| &entry.key).collect();
-    let (cut_after, forced_start) = cut_plan::<Key, D>(&key_refs, &weights, manifest);
+    let keys: Vec<Hashed<'_>> = entries.iter().map(SegmentEntry::hashed).collect();
+    let (cut_after, forced_start) = cut_plan::<D>(&keys, &weights, manifest);
+    drop(keys);
 
     let origin_for = |start: usize, end: usize| -> Option<&Link> {
         origins
@@ -2027,7 +2229,7 @@ where
 /// seeds the sealed segment's weight cache.
 #[allow(clippy::too_many_arguments)]
 fn seal<Key, Value, D>(
-    pending: &mut Vec<Entry<Key, Value>>,
+    pending: &mut Vec<SegmentEntry<Key, Value>>,
     previous_last: &mut Option<Key>,
     groups: &mut Vec<Node<Key, Value>>,
     floor: &[u8],
@@ -2068,6 +2270,7 @@ fn seal<Key, Value, D>(
         }
         Some(previous) => D::separator(previous.as_ref(), first.as_ref()),
     };
+    let separator = Separator::from(separator);
     *previous_last = Some(last);
     // A group that reproduces an untouched origin piece byte-for-byte —
     // same entries (the exact-range match) and same separator — passes the
@@ -2083,7 +2286,10 @@ fn seal<Key, Value, D>(
     if let Some(weight) = weight {
         debug_assert_eq!(
             weight,
-            entries.iter().map(Entry::raw_weight).sum::<usize>(),
+            entries
+                .iter()
+                .map(|entry| entry.raw_weight())
+                .sum::<usize>(),
             "a sealed group's cached weight must equal the sum of its entry raw weights"
         );
     }
@@ -2105,7 +2311,7 @@ mod tests {
     use dialog_common::Blake3Hash;
 
     use super::{BOTTOM_RANK, regroup_entries};
-    use crate::{Entry, Geometric, Manifest, Rank, distribution};
+    use crate::{Entry, Geometric, Manifest, Rank, SegmentEntry, distribution};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -2119,17 +2325,14 @@ mod tests {
     }
 
     /// One regrouped leaf segment's worth of entries.
-    type Segment = Vec<Entry<[u8; 4], Vec<u8>>>;
+    type Segment = Vec<SegmentEntry<[u8; 4], Vec<u8>>>;
 
     /// Regroups `keys` (as little-endian `[u8; 4]` entries) into leaf segments
     /// with the geometric distribution, returning each segment's entries.
     fn segments_of(keys: &[u32]) -> Result<Vec<Segment>> {
-        let entries: Vec<Entry<[u8; 4], Vec<u8>>> = keys
+        let entries: Vec<SegmentEntry<[u8; 4], Vec<u8>>> = keys
             .iter()
-            .map(|&i| Entry {
-                key: i.to_le_bytes(),
-                value: vec![i as u8],
-            })
+            .map(|&i| Entry::new(i.to_le_bytes(), vec![i as u8]).into())
             .collect();
 
         // Byte pacing off: this pins the pure geometric coin's segment cuts,
@@ -2249,47 +2452,281 @@ mod tests {
 }
 
 #[cfg(test)]
+mod kept_hash_tests {
+    #![allow(unexpected_cfgs)]
+
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use dialog_common::Blake3Hash;
+
+    use super::{Novelty, TransientIndex, TransientNode, TransientSegment};
+    use crate::distribution::summary::PieceSummary;
+    use crate::{
+        Delta, Entry, Geometric, Hashed, Manifest, Node, NodeCache, PersistentNode, SegmentEntry,
+    };
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+
+    type Leaf = PersistentNode<[u8; 4], Vec<u8>>;
+
+    fn entries_of(keys: std::ops::Range<u32>) -> Vec<SegmentEntry<[u8; 4], Vec<u8>>> {
+        keys.map(|key| Entry::new(key.to_be_bytes(), key.to_be_bytes().to_vec()).into())
+            .collect()
+    }
+
+    fn seal(
+        entries: Vec<SegmentEntry<[u8; 4], Vec<u8>>>,
+        cache: &NodeCache<[u8; 4], Vec<u8>>,
+    ) -> Result<Leaf> {
+        Ok(
+            TransientNode::Segment(TransientSegment::new(entries, Vec::new())).persist(
+                &mut Delta::zero(),
+                &Manifest::default(),
+                cache,
+            )?,
+        )
+    }
+
+    fn open(leaf: &Leaf) -> Result<TransientSegment<[u8; 4], Vec<u8>>> {
+        match TransientNode::open(leaf, Vec::new())? {
+            TransientNode::Segment(segment) => Ok(segment),
+            TransientNode::Index(_) => anyhow::bail!("a leaf opened as an index"),
+        }
+    }
+
+    /// A stored leaf keeps the hashes of its keys: what one opening
+    /// computes the next opening of the same node already has, and a key
+    /// nobody asked about stays unhashed.
+    #[dialog_common::test]
+    fn it_keeps_a_stored_leafs_key_hashes_between_openings() -> Result<()> {
+        let leaf = seal(entries_of(0..8), &NodeCache::new())?;
+
+        let first = open(&leaf)?;
+        assert!(
+            first
+                .entries()
+                .iter()
+                .all(|entry| entry.known_hash().is_none()),
+            "nothing is hashed before it is asked for"
+        );
+        let hash = first.entries()[3].key_hash();
+        assert_eq!(hash, Blake3Hash::hash(&3u32.to_be_bytes()));
+        drop(first);
+
+        let second = open(&leaf)?;
+        assert_eq!(second.entries()[3].known_hash(), Some(hash));
+        assert_eq!(second.entries()[2].known_hash(), None);
+        Ok(())
+    }
+
+    /// A leaf sealed from entries whose keys were ranked opens with those
+    /// hashes in place: the node that replaces a regrouped leaf does not
+    /// start over.
+    #[dialog_common::test]
+    fn it_seals_a_leaf_with_the_hashes_its_entries_had() -> Result<()> {
+        let entries = entries_of(0..8);
+        let ranked = entries[5].key_hash();
+
+        let opened = open(&seal(entries, &NodeCache::new())?)?;
+
+        assert_eq!(opened.entries()[5].known_hash(), Some(ranked));
+        assert_eq!(opened.entries()[4].known_hash(), None);
+        Ok(())
+    }
+
+    /// An edit whose key was ranked before it landed brings the hash into
+    /// the leaf, and on into the node the leaf is sealed as. An update of a
+    /// stored key keeps the hash the stored key had.
+    #[dialog_common::test]
+    fn it_keeps_the_hashes_edits_bring_into_a_leaf() -> Result<()> {
+        let cache = NodeCache::new();
+        let mut segment = open(&seal(entries_of(0..8), &cache)?)?;
+        let stored = segment.entries()[2].key_hash();
+
+        let incoming = SegmentEntry::from(Entry::new(9u32.to_be_bytes(), vec![9]));
+        let ranked = incoming.key_hash();
+        segment.upsert(incoming);
+        segment.upsert(Entry::new(2u32.to_be_bytes(), vec![2]));
+
+        assert_eq!(segment.entries()[8].known_hash(), Some(ranked.clone()));
+        assert_eq!(segment.entries()[2].known_hash(), Some(stored.clone()));
+        assert_eq!(segment.entries()[2].value, vec![2]);
+
+        let sealed = TransientNode::Segment(segment).persist(
+            &mut Delta::zero(),
+            &Manifest::default(),
+            &cache,
+        )?;
+        let reopened = open(&sealed)?;
+        assert_eq!(reopened.entries()[8].known_hash(), Some(ranked));
+        assert_eq!(reopened.entries()[2].known_hash(), Some(stored));
+        assert_eq!(reopened.entries()[3].known_hash(), None);
+        Ok(())
+    }
+
+    /// An entry a read yields is its key and its value: the hash cell stays
+    /// with the segment, so moving an entry along a scan moves nothing else.
+    #[dialog_common::test]
+    fn it_carries_nothing_but_the_key_and_value_in_an_entry() {
+        type Key = [u8; 4];
+        type Value = Vec<u8>;
+
+        assert_eq!(
+            std::mem::size_of::<Entry<Key, Value>>(),
+            std::mem::size_of::<(Key, Value)>()
+        );
+    }
+
+    /// An index keeps its separators' hashes the same way: sealed with the
+    /// ones its links had, and handing them to whoever opens it.
+    #[dialog_common::test]
+    fn it_seals_an_index_with_the_hashes_its_separators_had() -> Result<()> {
+        let cache = NodeCache::new();
+        let left = seal(entries_of(0..4), &cache)?.to_link(Vec::new());
+        let right = seal(entries_of(4..8), &cache)?.to_link(4u32.to_be_bytes().to_vec());
+        let ranked = right.separator.hashed().hash();
+
+        let index = TransientNode::Index(TransientIndex {
+            children: vec![Node::Persistent(left), Node::Persistent(right)],
+            novelty: Novelty::new(),
+        })
+        .persist(&mut Delta::zero(), &Manifest::default(), &cache)?;
+        let opened = TransientNode::open_index(&index)?;
+
+        assert_eq!(opened.children[1].edge()?.known_hash(), Some(ranked));
+        assert_eq!(opened.children[0].edge()?.known_hash(), None);
+        Ok(())
+    }
+
+    /// Every node a persist seals is kept in the cache it was given, so the
+    /// next edit opens the node that carries the hashes rather than reading
+    /// its bytes back from storage.
+    #[dialog_common::test]
+    fn it_keeps_every_node_it_seals_in_the_cache() -> Result<()> {
+        let cache = NodeCache::new();
+        let left = seal(entries_of(0..4), &cache)?;
+        let right = seal(entries_of(4..8), &cache)?;
+        let index = TransientNode::<[u8; 4], Vec<u8>>::Index(TransientIndex {
+            children: vec![
+                Node::Persistent(left.to_link(Vec::new())),
+                Node::Persistent(right.to_link(4u32.to_be_bytes().to_vec())),
+            ],
+            novelty: Novelty::new(),
+        })
+        .persist(&mut Delta::zero(), &Manifest::default(), &cache)?;
+
+        for node in [&left, &right, &index] {
+            assert!(
+                cache.get_cached(node.hash()).is_some(),
+                "a sealed node must be in the cache"
+            );
+        }
+        Ok(())
+    }
+
+    /// Sealing bytes the cache already holds leaves the held node in place:
+    /// it is the same node, and it has whatever it derived since.
+    #[dialog_common::test]
+    fn it_keeps_the_node_already_held_when_the_same_bytes_are_sealed_again() -> Result<()> {
+        let cache = NodeCache::new();
+        let held = seal(entries_of(0..8), &cache)?;
+        let hash = open(&held)?.entries()[1].key_hash();
+
+        let again = seal(entries_of(0..8), &cache)?;
+        assert_eq!(again.hash(), held.hash());
+
+        let cached = cache.get_cached(held.hash()).expect("the node is held");
+        assert_eq!(open(&cached)?.entries()[1].known_hash(), Some(hash));
+        Ok(())
+    }
+
+    /// A piece's summary stays with its node, and is read back only under
+    /// the manifest knobs it was built with.
+    #[dialog_common::test]
+    fn it_keeps_a_piece_summary_under_the_knobs_it_was_built_with() -> Result<()> {
+        let manifest = Manifest::default();
+        let leaf = seal(entries_of(0..8), &NodeCache::new())?;
+        assert!(leaf.summary(&manifest).is_none());
+
+        let segment = open(&leaf)?;
+        let keys: Vec<Hashed<'_>> = segment.entries().iter().map(SegmentEntry::hashed).collect();
+        let weights: Vec<usize> = segment
+            .entries()
+            .iter()
+            .map(|entry| entry.weight(&manifest))
+            .collect();
+        let kept = leaf.summarize(
+            &manifest,
+            PieceSummary::build::<Geometric>(&keys, &weights, &manifest),
+        );
+
+        let found = leaf.summary(&manifest).expect("the summary is kept");
+        assert!(Arc::ptr_eq(&found, &kept));
+
+        let other = Manifest {
+            max_separator: manifest.max_separator + 1,
+            ..manifest.clone()
+        };
+        assert!(
+            leaf.summary(&other).is_none(),
+            "a summary built under other knobs must not be read"
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod novelty_model_tests {
     #![allow(unexpected_cfgs)]
 
     use std::collections::BTreeMap;
 
-    use super::{LinkNovelty, NOVELTY_TAIL_LIMIT, Novelty};
-    use crate::{NoveltyEntry, NoveltyOp};
+    use super::{LinkNovelty, NOVELTY_TAIL_LIMIT, Novelty, Shed, novelty_entry_weight};
+    use crate::{Manifest, NoveltyBuffer, NoveltyEntry, NoveltyOp};
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     type Val = Vec<u8>;
 
-    /// A reference model of one link's buffer: the chronological op log per
-    /// key. Everything the two-run structure must answer derives from it.
+    /// A reference model of one link's buffer: the newest op per key, which
+    /// is all a buffer keeps once merged. Everything the two-run structure
+    /// must answer derives from it: a read resolves a key to its newest op,
+    /// a flush folds last-wins per key, and after any merge the buffer
+    /// holds exactly one op per key.
     #[derive(Default)]
     struct Model {
-        by_key: BTreeMap<Vec<u8>, Vec<NoveltyOp<Val>>>,
-        total: usize,
+        by_key: BTreeMap<Vec<u8>, NoveltyOp<Val>>,
+        /// Ops written, merged or not: the ceiling the buffer's totals
+        /// may reach between merges.
+        arrived: usize,
     }
 
     impl Model {
         fn push(&mut self, key: Vec<u8>, op: NoveltyOp<Val>) {
-            self.by_key.entry(key).or_default().push(op);
-            self.total += 1;
+            self.by_key.insert(key, op);
+            self.arrived += 1;
+        }
+
+        /// The number of ops a merged buffer holds: one per key written.
+        fn total(&self) -> usize {
+            self.by_key.len()
         }
 
         fn newest(&self, key: &[u8]) -> Option<&NoveltyOp<Val>> {
-            self.by_key.get(key).and_then(|ops| ops.last())
+            self.by_key.get(key)
         }
 
-        /// The flat sorted op list the buffer must produce: ascending keys,
-        /// chronological order within a key (newest last).
+        /// The flat sorted op list a merged buffer must produce: ascending
+        /// keys, one op per key, the newest.
         fn flat(&self) -> Vec<NoveltyEntry<Val>> {
             self.by_key
                 .iter()
-                .flat_map(|(key, ops)| {
-                    ops.iter().map(|op| NoveltyEntry {
-                        key: key.clone(),
-                        op: op.clone(),
-                    })
+                .map(|(key, op)| NoveltyEntry {
+                    key: key.clone(),
+                    op: op.clone(),
                 })
                 .collect()
         }
@@ -2298,11 +2735,19 @@ mod novelty_model_tests {
         fn winners(&self, start: &[u8], end: &[u8]) -> Vec<NoveltyEntry<Val>> {
             self.by_key
                 .range(start.to_vec()..=end.to_vec())
-                .map(|(key, ops)| NoveltyEntry {
+                .map(|(key, op)| NoveltyEntry {
                     key: key.clone(),
-                    op: ops.last().expect("non-empty log").clone(),
+                    op: op.clone(),
                 })
                 .collect()
+        }
+
+        /// The merged buffer's weight under `manifest`, recounted from what
+        /// it holds; the buffer's own figure is kept incrementally and
+        /// corrected at every merge, so after a merge it must agree.
+        fn weight(&self, manifest: &Manifest) -> usize {
+            self.flat().iter().map(novelty_entry_weight).sum::<usize>()
+                + self.total() * manifest.entry_overhead()
         }
     }
 
@@ -2313,11 +2758,21 @@ mod novelty_model_tests {
         (*state >> 32) as u32
     }
 
+    fn entry(key: &[u8], op: NoveltyOp<Val>) -> NoveltyEntry<Val> {
+        NoveltyEntry {
+            key: key.to_vec(),
+            op,
+        }
+    }
+
     /// Single-op routing (the enqueue hot path) against the model, sweeping
     /// seeds and op counts sized to cross the tail limit repeatedly, with a
-    /// small key pool so equal-key chains span run/tail boundaries.
+    /// small key pool so every key is rewritten many times, in the tail and
+    /// in the run. Reads must agree with the model at every phase; the
+    /// totals and the drained list must agree once merged.
     #[dialog_common::test]
     async fn it_matches_the_model_through_single_op_routing() {
+        let manifest = Manifest::default();
         for seed in 0..8u64 {
             let mut rng = 0x9E3779B97F4A7C15u64 ^ seed;
             let mut novelty: Novelty<Val> = Novelty::new();
@@ -2348,10 +2803,17 @@ mod novelty_model_tests {
                         "seed {seed}, op {at}: resolve disagrees with the model"
                     );
                 }
+                // Between merges the totals may over-count, never under,
+                // and by no more than the tail can hold.
+                assert!(
+                    novelty.len() >= model.total()
+                        && novelty.len() <= model.total() + NOVELTY_TAIL_LIMIT,
+                    "seed {seed}, op {at}: op count {} outside [{}, {}]",
+                    novelty.len(),
+                    model.total(),
+                    model.total() + NOVELTY_TAIL_LIMIT
+                );
             }
-
-            assert_eq!(novelty.len(), model.total, "seed {seed}: op count");
-            assert_eq!(novelty.peak(), model.total, "seed {seed}: single-link peak");
 
             // Range winners while the tail is (very likely) non-empty.
             for _ in 0..8 {
@@ -2375,8 +2837,26 @@ mod novelty_model_tests {
                 );
             }
 
+            // One merge makes the totals exact.
+            novelty.lift_all::<[u8; 4]>().expect("lift_all");
+            assert_eq!(
+                novelty.len(),
+                model.total(),
+                "seed {seed}: op count after a merge"
+            );
+            assert_eq!(
+                novelty.peak(),
+                model.total(),
+                "seed {seed}: single-link peak after a merge"
+            );
+            assert_eq!(
+                novelty.weight::<[u8; 4]>(&manifest).expect("weight"),
+                model.weight(&manifest),
+                "seed {seed}: weight after a merge"
+            );
+
             // The drained flat list is the stored order: ascending keys,
-            // newest op for a key last. `NoveltyBuffer::from_entries` is a
+            // the newest op for each. `NoveltyBuffer::from_entries` is a
             // pure function of this list, so equality here IS sealed-bytes
             // equality with a buffer built any other way.
             assert_eq!(
@@ -2412,7 +2892,8 @@ mod novelty_model_tests {
                     .expect("route");
             }
 
-            let expected_peak = models.iter().map(|model| model.total).max().unwrap_or(0);
+            novelty.lift_all::<[u8; 4]>().expect("lift_all");
+            let expected_peak = models.iter().map(Model::total).max().unwrap_or(0);
             assert_eq!(novelty.peak(), expected_peak, "seed {seed}: peak");
             for (slot, model) in models.iter().enumerate() {
                 assert_eq!(
@@ -2427,14 +2908,14 @@ mod novelty_model_tests {
 
     /// The tail-limit boundary exactly: inserting precisely at, below, and
     /// above the limit keeps every reader consistent (the consolidation
-    /// fires between the limit-th and limit+1-th insert).
+    /// fires between the limit-th and limit+1-th insert), with one shared
+    /// key so every entry is one equal-key chain, the hardest shape for
+    /// "newest wins" across a consolidation that collapses the chain.
     #[dialog_common::test]
     async fn it_consolidates_exactly_at_the_tail_limit() {
         for extra in [0usize, 1, 2] {
             let mut novelty: Novelty<Val> = Novelty::new();
             let mut model = Model::default();
-            // One shared key so every entry is one equal-key chain — the
-            // hardest shape for "newest last" across a consolidation.
             let key = 7u32.to_be_bytes().to_vec();
             for at in 0..(NOVELTY_TAIL_LIMIT + extra) {
                 let op = NoveltyOp::Assert(vec![at as u8, (at >> 8) as u8]);
@@ -2454,58 +2935,256 @@ mod novelty_model_tests {
                     "extra {extra}, op {at}: newest op must win across the limit"
                 );
             }
+            // Past the limit the chain has been through one merge: one op
+            // stands in the run and only the overflow sits in the tail.
+            if extra > 0 {
+                assert_eq!(
+                    novelty.len(),
+                    1 + extra,
+                    "extra {extra}: the merge collapsed the chain"
+                );
+            }
             assert_eq!(
                 novelty.take_all::<[u8; 4]>().expect("take_all"),
                 model.flat(),
-                "extra {extra}: chronological order within the key must survive"
+                "extra {extra}: the newest op is the one that survives"
             );
         }
     }
 
-    /// `remove_key` drops every op for the key from BOTH runs and keeps the
-    /// accounting exact, without disturbing other keys.
+    /// `remove_key` drops the key's op from whichever run holds it and keeps
+    /// the accounting exact, without disturbing other keys.
     #[dialog_common::test]
     async fn it_removes_keys_across_both_runs() {
+        let manifest = Manifest::default();
         let mut novelty: Novelty<Val> = Novelty::new();
         let mut model = Model::default();
-        // Interleave two keys so, after the limit crossing, the victim key
-        // holds ops in the run AND the tail.
-        let victim = 3u32.to_be_bytes().to_vec();
-        let keeper = 5u32.to_be_bytes().to_vec();
-        for at in 0..(NOVELTY_TAIL_LIMIT + NOVELTY_TAIL_LIMIT / 2) {
-            let key = if at.is_multiple_of(2) {
-                &victim
-            } else {
-                &keeper
-            };
+        // Enough fresh keys after the settled key to push it into the run
+        // through a consolidation, then a late key that stays in the tail.
+        let settled = 3u32.to_be_bytes().to_vec();
+        let late = 5u32.to_be_bytes().to_vec();
+        let mut keys = vec![settled.clone()];
+        keys.extend((100..100 + NOVELTY_TAIL_LIMIT as u32).map(|at| at.to_be_bytes().to_vec()));
+        keys.push(late.clone());
+        for (at, key) in keys.into_iter().enumerate() {
             let op = NoveltyOp::Assert(vec![at as u8]);
             model.push(key.clone(), op.clone());
             novelty
-                .route::<[u8; 4]>(
-                    &[],
-                    vec![NoveltyEntry {
-                        key: key.clone(),
-                        op,
-                    }],
-                )
+                .route::<[u8; 4]>(&[], vec![NoveltyEntry { key, op }])
                 .expect("route");
         }
-        novelty
-            .remove_key::<[u8; 4]>(0, &victim)
-            .expect("remove_key");
-        let dropped = model.by_key.remove(&victim).expect("victim present");
-        model.total -= dropped.len();
+        match &novelty.links[0] {
+            LinkNovelty::Open { run, tail } => {
+                assert!(run.iter().any(|entry| entry.key == settled));
+                assert!(tail.iter().any(|entry| entry.key == late));
+            }
+            other => panic!("routing leaves the link open, not {other:?}"),
+        }
 
-        assert_eq!(novelty.len(), model.total, "count after removal");
-        assert_eq!(
-            novelty.resolve::<[u8; 4]>(0, &victim).expect("resolve"),
-            None,
-            "removed key must not resolve"
-        );
+        for victim in [settled, late] {
+            novelty
+                .remove_key::<[u8; 4]>(0, &victim)
+                .expect("remove_key");
+            model.by_key.remove(&victim).expect("victim present");
+
+            assert_eq!(novelty.len(), model.total(), "count after removal");
+            assert_eq!(
+                novelty.weight::<[u8; 4]>(&manifest).expect("weight"),
+                model.weight(&manifest),
+                "weight after removal"
+            );
+            assert_eq!(
+                novelty.resolve::<[u8; 4]>(0, &victim).expect("resolve"),
+                None,
+                "removed key must not resolve"
+            );
+        }
         assert_eq!(
             novelty.take_all::<[u8; 4]>().expect("take_all"),
             model.flat(),
             "surviving ops must be untouched and ordered"
+        );
+    }
+
+    /// A key written on every commit resolves to its newest op at every
+    /// step (an assert over a retract nets to the assert, a retract over an
+    /// assert to the retract), the op and weight totals over-count it by at
+    /// most the tail between merges, one merge makes them exact at one op,
+    /// and the drain yields that op alone.
+    #[dialog_common::test]
+    async fn it_collapses_a_hot_key_to_its_newest_op() {
+        let manifest = Manifest::default();
+        let mut novelty: Novelty<Val> = Novelty::new();
+        let hot = 7u32.to_be_bytes();
+        let mut newest = None;
+        let mut heaviest = 0usize;
+        for at in 0..(NOVELTY_TAIL_LIMIT * 3) {
+            let op = if at.is_multiple_of(3) {
+                NoveltyOp::Retract
+            } else {
+                NoveltyOp::Assert(vec![at as u8, (at >> 8) as u8])
+            };
+            newest = Some(op.clone());
+            heaviest = heaviest.max(novelty_entry_weight(&entry(&hot, op.clone())));
+            novelty
+                .route::<[u8; 4]>(&[], vec![entry(&hot, op)])
+                .expect("route");
+            assert_eq!(
+                novelty.resolve::<[u8; 4]>(0, &hot).expect("resolve"),
+                newest.clone(),
+                "op {at}: the newest op wins"
+            );
+            assert!(
+                (1..=1 + NOVELTY_TAIL_LIMIT).contains(&novelty.len()),
+                "op {at}: {} ops counted for one key, more than one merged op plus a tail",
+                novelty.len()
+            );
+            let standing = entry(&hot, newest.clone().expect("written"));
+            let exact = novelty_entry_weight(&standing) + manifest.entry_overhead();
+            let weight = novelty.weight::<[u8; 4]>(&manifest).expect("weight");
+            assert!(
+                weight >= exact
+                    && weight
+                        <= exact + NOVELTY_TAIL_LIMIT * (heaviest + manifest.entry_overhead()),
+                "op {at}: weight {weight} over-counts the standing op by more than a tail"
+            );
+        }
+
+        novelty.lift_all::<[u8; 4]>().expect("lift_all");
+        let standing = entry(&hot, newest.clone().expect("written"));
+        assert_eq!(novelty.len(), 1, "one merge leaves one op for the key");
+        assert_eq!(
+            novelty.weight::<[u8; 4]>(&manifest).expect("weight"),
+            novelty_entry_weight(&standing) + manifest.entry_overhead(),
+            "one merge makes the weight exact"
+        );
+        assert_eq!(
+            novelty.take_all::<[u8; 4]>().expect("take_all"),
+            vec![standing],
+            "the drain yields the one standing op"
+        );
+    }
+
+    /// The collapse reaches a key wherever the link holds it: in a sealed
+    /// buffer opened from a stored frame, in the cached entries a persist
+    /// left behind, and in an open run. In every state the arrival wins
+    /// the read at once and the next merge leaves one op for the key with
+    /// exact totals.
+    #[dialog_common::test]
+    async fn it_collapses_into_every_link_state() {
+        let manifest = Manifest::default();
+        let hot = 7u32.to_be_bytes();
+        let cold = 9u32.to_be_bytes();
+        let stored = vec![
+            entry(&hot, NoveltyOp::Assert(vec![1])),
+            entry(&cold, NoveltyOp::Assert(vec![2])),
+        ];
+        let buffer = NoveltyBuffer::from_entries::<[u8; 4]>(0, stored.clone()).expect("encode");
+
+        let sealed = LinkNovelty::Sealed(buffer.clone());
+        let cached = LinkNovelty::Cached {
+            entries: stored.clone(),
+            buffer,
+        };
+        let open = LinkNovelty::Open {
+            run: stored.clone(),
+            tail: Vec::new(),
+        };
+        for link in [sealed, cached, open] {
+            let state = format!("{link:?}");
+            let mut novelty: Novelty<Val> = Novelty {
+                links: vec![link],
+                total: stored.len(),
+                weight: None,
+            };
+            let before = novelty.weight::<[u8; 4]>(&manifest).expect("weight");
+
+            let arrival = entry(&hot, NoveltyOp::Assert(vec![3, 3, 3]));
+            novelty
+                .route::<[u8; 4]>(&[], vec![arrival.clone()])
+                .expect("route");
+
+            assert_eq!(
+                novelty.resolve::<[u8; 4]>(0, &hot).expect("resolve"),
+                Some(arrival.op.clone()),
+                "{state}: the arrival wins"
+            );
+            assert_eq!(
+                novelty.len(),
+                3,
+                "{state}: until a merge the arrival counts beside the standing op"
+            );
+
+            novelty.lift_all::<[u8; 4]>().expect("lift_all");
+            assert_eq!(novelty.len(), 2, "{state}: the merge collapsed the key");
+            assert_eq!(
+                novelty.weight::<[u8; 4]>(&manifest).expect("weight"),
+                before - novelty_entry_weight(&stored[0]) + novelty_entry_weight(&arrival),
+                "{state}: the weight swaps the superseded op for the arrival"
+            );
+            assert_eq!(
+                novelty.take_all::<[u8; 4]>().expect("take_all"),
+                vec![arrival.clone(), stored[1].clone()],
+                "{state}: the drain holds the arrival in the standing op's place"
+            );
+        }
+    }
+
+    /// A frame persisted before the collapse may hold several ops for one
+    /// key, oldest first. Opened, it reads exactly as it always did (the
+    /// last op wins), an arrival for the key wins over all of them, and
+    /// the first merge collapses the whole chain to the arrival with exact
+    /// totals.
+    #[dialog_common::test]
+    async fn it_keeps_reading_a_frame_holding_several_ops_per_key() {
+        let manifest = Manifest::default();
+        let hot = 7u32.to_be_bytes();
+        let stored = vec![
+            entry(&hot, NoveltyOp::Assert(vec![1])),
+            entry(&hot, NoveltyOp::Retract),
+            entry(&hot, NoveltyOp::Assert(vec![2])),
+        ];
+        let buffer = NoveltyBuffer::from_entries::<[u8; 4]>(0, stored.clone()).expect("encode");
+        let mut novelty: Novelty<Val> = Novelty {
+            links: vec![LinkNovelty::Sealed(buffer)],
+            total: stored.len(),
+            weight: None,
+        };
+        assert_eq!(
+            novelty.resolve::<[u8; 4]>(0, &hot).expect("resolve"),
+            Some(NoveltyOp::Assert(vec![2])),
+            "the sealed frame resolves to its last op for the key"
+        );
+        let mut winners = Vec::new();
+        novelty
+            .collect_winners_in_range::<[u8; 4]>(
+                std::ops::Bound::Unbounded,
+                std::ops::Bound::Unbounded,
+                &mut winners,
+            )
+            .expect("winners");
+        assert_eq!(winners, vec![stored[2].clone()]);
+
+        let arrival = entry(&hot, NoveltyOp::Retract);
+        novelty
+            .route::<[u8; 4]>(&[], vec![arrival.clone()])
+            .expect("route");
+        assert_eq!(
+            novelty.resolve::<[u8; 4]>(0, &hot).expect("resolve"),
+            Some(NoveltyOp::Retract),
+            "the arrival wins over every stored op"
+        );
+
+        novelty.lift_all::<[u8; 4]>().expect("lift_all");
+        assert_eq!(novelty.len(), 1, "the merge collapsed the stored chain too");
+        assert_eq!(
+            novelty.weight::<[u8; 4]>(&manifest).expect("weight"),
+            novelty_entry_weight(&arrival) + manifest.entry_overhead(),
+        );
+        assert_eq!(
+            novelty.take_all::<[u8; 4]>().expect("take_all"),
+            vec![arrival],
+            "the drain yields the arrival alone"
         );
     }
 
@@ -2514,16 +3193,21 @@ mod novelty_model_tests {
     #[dialog_common::test]
     async fn it_consolidates_idempotently() {
         let mut link: LinkNovelty<Val> = LinkNovelty::empty();
+        let mut shed = Shed::default();
         for at in 0..5u8 {
-            link.insert::<[u8; 4]>(NoveltyEntry {
-                key: vec![at],
-                op: NoveltyOp::Assert(vec![at]),
-            })
+            link.insert::<[u8; 4]>(
+                NoveltyEntry {
+                    key: vec![at],
+                    op: NoveltyOp::Assert(vec![at]),
+                },
+                &mut shed,
+            )
             .expect("insert");
         }
-        link.consolidate();
-        link.consolidate();
-        let drained = link.take::<[u8; 4]>().expect("take");
+        link.consolidate(&mut shed);
+        link.consolidate(&mut shed);
+        assert_eq!(shed.ops, 0, "distinct keys collapse nothing");
+        let drained = link.take::<[u8; 4]>(&mut shed).expect("take");
         assert_eq!(drained.len(), 5);
         assert!(
             drained.windows(2).all(|pair| pair[0].key <= pair[1].key),

@@ -5,9 +5,10 @@
 //! carries, exactly as the archive providers do. All blob I/O — ranged reads
 //! and digest-verified single-part imports — lives in `dialog_storage`.
 //!
-//! The transfer meter counts each open as one request; the bytes that then
-//! move through the returned reader/writer are outside the invocation and are
-//! not metered here.
+//! The transfer meter counts each open as one request, and the bytes that
+//! then move through the returned reader or writer are metered (and shaped)
+//! chunk by chunk, on the connection the open took, so a blob costs what a
+//! real remote charges for it: one request, then its bytes on the link.
 
 use dialog_capability::{ForkInvocation, Provider};
 use dialog_effects::blob::{BlobError, BlobReader, BlobWriter, Import, Read};
@@ -22,8 +23,8 @@ impl Provider<ForkInvocation<Fs, Read>> for Fs {
         let flight = simulation::begin(Traffic::BlobRead).await;
         let result =
             Provider::<Read>::execute(input.authorization.filesystem(), input.capability).await;
-        flight.complete(0).await;
-        result
+        let slot = flight.complete(0).await;
+        result.map(|reader| simulation::meter_reader(reader, Traffic::BlobRead, slot))
     }
 }
 
@@ -34,7 +35,7 @@ impl Provider<ForkInvocation<Fs, Import>> for Fs {
         let flight = simulation::begin(Traffic::BlobImport).await;
         let result =
             Provider::<Import>::execute(input.authorization.filesystem(), input.capability).await;
-        flight.complete(0).await;
-        result
+        let slot = flight.complete(0).await;
+        result.map(|writer| simulation::meter_writer(writer, Traffic::BlobImport, slot))
     }
 }

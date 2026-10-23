@@ -2,8 +2,8 @@
 //!
 //! Everything here works on `Stream<Item = Result<ArtifactView, _>>` —
 //! [`ArtifactStream`]s — and is agnostic to where the streams came
-//! from (a branch's tree scan, a [`Changes`] overlay, anything else
-//! that implements `Provider<Select>`). Rows travel as borrowed-access
+//! from (a branch's tree scan, an [`Ephemeral`](crate::Ephemeral)
+//! overlay, anything else that implements `Provider<Select>`). Rows travel as borrowed-access
 //! [`ArtifactView`]s; nothing in this layer materializes an owned
 //! `Artifact`, and merge order comes from each row's
 //! [`sort_key`](ArtifactView::sort_key) — derived straight from a scanned
@@ -19,10 +19,9 @@
 //!   single physical tree" order via [`sort_key`](dialog_artifacts::sort_key)
 //!   and dedupes identical `(the, of, is, cause)` artifacts within
 //!   each `(the, of)` run.
-//! - [`tombstones_from`] lifts retract instructions out of a
-//!   [`Changes`] overlay, and [`Hidden`] + [`filter_hidden`] apply them,
-//!   with a transaction's staged retracts and the cells its replaces
-//!   claimed, to a source stream as a filter — the mechanism that lets a
+//! - [`Hidden`] + [`filter_hidden`] apply the tombstones an overlay
+//!   holds, with a transaction's staged retracts, to a source stream as
+//!   a filter — the mechanism that lets a
 //!   [`Transaction::retract`](crate::repository::branch::Transaction::retract)
 //!   suppress facts in the underlying branch view.
 
@@ -30,23 +29,19 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
-use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactStream, ArtifactView, Cause, Changes, SortKey, sort_key,
-};
+use dialog_artifacts::{ArtifactSelector, ArtifactStream, ArtifactView, Cause, SortKey, sort_key};
 use dialog_search_tree::Manifest;
 use futures_util::{StreamExt, stream};
 
-use crate::Cells;
-
 /// Merge sorted artifact streams into one stream whose order matches
-/// what a single physical prolly tree containing every input would
+/// what a single physical probabilistic search tree containing every input would
 /// produce, deduplicating identical claims that appear in more than one
 /// source.
 ///
 /// Each input is assumed sorted by [`sort_key`] under `manifest` — true
 /// of scans of trees written under `manifest` by construction (the
-/// prolly tree stores entries in that order), and of in-memory overlays
-/// read with that manifest ([`Changes::select`], `Ephemeral::select`),
+/// probabilistic search tree stores entries in that order), and of in-memory overlays
+/// read with that manifest (`Ephemeral::select`, `Staged::select`),
 /// which sort their materialized rows by it. Implemented as a streaming k-way
 /// merge over per-stream head slots, each holding the front row and its
 /// sort key.
@@ -204,36 +199,12 @@ impl MergeKeys {
     }
 }
 
-/// Extract a tombstone set from a [`Changes`] overlay — one
-/// [`SortKey`] per retracted artifact.
-///
-/// Asserts and Replaces are ignored; only Retracts contribute. Used
-/// at query time to filter matching source facts out of branch
-/// streams before they reach the merge.
-pub(crate) fn tombstones_from(changes: &Changes, manifest: &Manifest) -> HashSet<SortKey> {
-    let mut tombstones = HashSet::new();
-    for (entity, attribute, change) in changes.iter() {
-        if let dialog_artifacts::Change::Retract(value) = change {
-            let artifact = Artifact {
-                the: attribute.clone(),
-                of: entity.clone(),
-                is: value.clone(),
-                cause: None,
-            };
-            tombstones.insert(sort_key(&artifact, manifest));
-        }
-    }
-    tombstones
-}
-
 /// What a query's upper layers hide in the streams beneath them: exact
-/// facts (tombstones, by sort key) and whole `(attribute, entity)`
-/// cells (claimed by a replace). Holds each layer's sets as shared,
-/// rather than one merged copy, so building it never copies a set.
+/// facts, by sort key. Holds each layer's set as shared, rather than
+/// one merged copy, so building it never copies a set.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Hidden {
     facts: Vec<Arc<HashSet<SortKey>>>,
-    cells: Vec<Arc<Cells>>,
 }
 
 impl Hidden {
@@ -245,60 +216,23 @@ impl Hidden {
         self
     }
 
-    /// Also hide every fact in `cells`.
-    pub(crate) fn cells(mut self, cells: Arc<Cells>) -> Self {
-        if !cells.is_empty() {
-            self.cells.push(cells);
-        }
-        self
-    }
-
     /// Whether nothing is hidden.
     pub(crate) fn is_empty(&self) -> bool {
-        self.facts.is_empty() && self.cells.is_empty()
+        self.facts.is_empty()
     }
 
-    /// What of this can hide a row `selector` matches: cells of another
-    /// attribute cannot, so a scan that no replace touched is not
-    /// filtered for cells at all.
-    pub(crate) fn within(&self, selector: &ArtifactSelector<Constrained>) -> Self {
-        let Some(attribute) = selector.attribute() else {
-            return self.clone();
-        };
-        let the = attribute.as_str().as_bytes();
-        Self {
-            facts: self.facts.clone(),
-            cells: self
-                .cells
-                .iter()
-                .filter(|cells| cells.contains_key(the))
-                .cloned()
-                .collect(),
-        }
+    /// What of this can hide a row `selector` matches: every hidden
+    /// fact, since a tombstone is keyed by the whole fact.
+    pub(crate) fn within(&self, _selector: &ArtifactSelector<Constrained>) -> Self {
+        self.clone()
     }
 
-    /// Whether `view` is hidden. A claimed cell is checked on the row's
-    /// attribute and entity bytes as stored; the sort key is derived
-    /// only when an exact fact could match it.
+    /// Whether `view` is hidden: its sort key names a hidden fact.
     fn hides(
         &self,
         view: &ArtifactView,
         manifest: &Manifest,
     ) -> Result<bool, dialog_artifacts::DialogArtifactsError> {
-        if !self.cells.is_empty() {
-            let the = view.the_bytes()?;
-            let mut claimed = self
-                .cells
-                .iter()
-                .filter_map(|cells| cells.get(the.as_ref()))
-                .peekable();
-            if claimed.peek().is_some() {
-                let of = view.of_bytes()?;
-                if claimed.any(|entities| entities.contains(of.as_ref())) {
-                    return Ok(true);
-                }
-            }
-        }
         if self.facts.is_empty() {
             return Ok(false);
         }
@@ -309,7 +243,7 @@ impl Hidden {
 
 /// Wrap an artifact stream in a filter that drops any item `hidden`
 /// hides, its sort key taken under `manifest` (which the hidden facts
-/// must be keyed under too; cells key the same under every format).
+/// must be keyed under too).
 /// No-op when nothing is hidden.
 pub(crate) fn filter_hidden<'a>(
     inner: ArtifactStream<'a>,
@@ -353,10 +287,13 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::*;
+    use crate::Ephemeral;
     use dialog_artifacts::ArchiveDelta;
     use dialog_artifacts::tree::ArtifactTree;
-    use dialog_artifacts::{DialogArtifactsError, Entity, Instruction, Update as _, Value};
-    use dialog_search_tree::{Cache, MemoryBlocks};
+    use dialog_artifacts::{
+        Artifact, Changes, DialogArtifactsError, Entity, Instruction, Update as _, Value,
+    };
+    use dialog_search_tree::{MemoryBlocks, NodeCache};
 
     fn artifact(of: &str, the: &str, is: &str) -> Artifact {
         Artifact {
@@ -423,7 +360,7 @@ mod tests {
     }
 
     #[dialog_common::test]
-    fn it_extracts_tombstones_from_retracts_only() -> anyhow::Result<()> {
+    fn it_holds_tombstones_for_retracts_only() -> anyhow::Result<()> {
         let mut changes = Changes::new();
         let alice: Entity = "id:alice".parse()?;
         let bob: Entity = "id:bob".parse()?;
@@ -431,6 +368,7 @@ mod tests {
             "test/name".parse()?,
             alice.clone(),
             Value::String("Alice".into()),
+            dialog_artifacts::Pick::All,
         );
         changes.dissociate(
             "test/name".parse()?,
@@ -438,7 +376,7 @@ mod tests {
             Value::String("Bob".into()),
         );
 
-        let tombstones = tombstones_from(&changes, &Manifest::default());
+        let tombstones = Ephemeral::holding(changes).tombstones(&Manifest::default());
         assert_eq!(tombstones.len(), 1, "only the retract contributes");
         // The lone tombstone matches the retracted artifact.
         let retracted = artifact("id:bob", "test/name", "Bob");
@@ -463,28 +401,6 @@ mod tests {
         Ok(())
     }
 
-    #[dialog_common::test]
-    async fn it_filters_every_value_of_a_claimed_cell() -> anyhow::Result<()> {
-        let keep = artifact("id:a", "test/name", "Keep");
-        let first = artifact("id:b", "test/name", "One");
-        let second = artifact("id:b", "test/name", "Two");
-        let other = artifact("id:b", "test/age", "Kept");
-        let mut cells = Cells::new();
-        cells
-            .entry(b"test/name".to_vec())
-            .or_default()
-            .insert(b"id:b".to_vec());
-
-        let filtered = filter_hidden(
-            stream_of(vec![keep.clone(), first, second, other.clone()]),
-            Hidden::default().cells(Arc::new(cells)),
-            Manifest::default(),
-        );
-        let items = collect(filtered).await?;
-        assert_eq!(items, vec![keep, other]);
-        Ok(())
-    }
-
     /// A tree holding `facts`, written under `manifest`, and its store.
     async fn tree_under(
         manifest: Manifest,
@@ -494,11 +410,15 @@ mod tests {
 
         let store = MemoryBlocks::new();
         let mut delta = ArchiveDelta::zero();
-        let mut tree = ArtifactTree::empty_with_manifest(manifest, Cache::new());
+        let mut tree = ArtifactTree::empty_with_manifest(manifest, NodeCache::new());
         tree.apply(
             &store,
             &mut delta,
-            stream::iter(facts.into_iter().map(Instruction::Assert)),
+            stream::iter(
+                facts
+                    .into_iter()
+                    .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All)),
+            ),
         )
         .await?;
         delta.flush_into(&store);
@@ -563,7 +483,7 @@ mod tests {
                     .clone()
                     .scan(spilling_store.clone(), spill_cache(), selector()),
             ),
-            Hidden::default().facts(Arc::new(tombstones_from(&changes, &small))),
+            Hidden::default().facts(Ephemeral::holding(changes).tombstones(&small)),
             small,
         );
         assert!(

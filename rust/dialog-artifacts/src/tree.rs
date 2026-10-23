@@ -42,18 +42,20 @@ use crate::history::{Cause as HistoryCause, Claim, Record, RecordEntries, Versio
 use crate::key::value_payload as build_value_payload;
 use crate::{
     ATTRIBUTE_KEY_TAG, ArchiveDelta, ArchiveReader, Artifact, ArtifactSelector, ArtifactView,
-    ArtifactWriter, AttributeKey, AttributeKeyPart, Datum, DeltaOverlay, DialogArtifactsError,
-    ENTITY_KEY_TAG, EntityKey, EntityKeyPart, Instruction, Key, KeyView, KeyViewConstruct,
-    KeyViewMut, LoadBlob, SelectorMatch, State, VALUE_KEY_TAG, Value, ValueDataType, ValueKey,
-    decode_value_parts, encode_bytes, encode_value_owned,
-    key::varkey::{self, KeyRef, ValuePayload, ValueRef, parse_key_ref},
+    ArtifactWriter, AttributeKey, AttributeKeyPart, Cause, Datum, DeltaOverlay,
+    DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, EntityKeyPart, Instruction, Key, KeyView,
+    KeyViewConstruct, KeyViewMut, LoadBlob, Pick, SelectorMatch, Standing, State, VALUE_KEY_TAG,
+    Value, ValueDataType, ValueKey, decode_value_parts, encode_bytes, encode_value_owned,
+    key::varkey::{self, KeyLayout, KeyRef, ValuePayload, ValueRef, parse_key_layout},
     key::{EncodedValue, artifact_index_keys, artifact_index_keys_with, reproject_index_keys},
-    match_selector_and_key_ref,
+    make_reference, match_selector_and_key_ref,
     selector::Constrained,
     value_predicates_admit,
 };
+use crate::{NUMBER_BAND, encode_key_value_owned};
 
 pub mod distribution;
+pub mod rekey;
 
 /// The concrete search-tree type the artifact indexes use.
 ///
@@ -341,6 +343,9 @@ fn prefix_upper(prefix: &[u8]) -> Vec<u8> {
 ///   BELOW the full bound bytes.
 /// - A zero float widens across the `-0.0`/`+0.0` encoding cluster.
 fn value_lower_edge(value: &Value, manifest: &Manifest) -> Vec<u8> {
+    if value.data_type().band(manifest.value_encoding) == ValueDataType::Number {
+        return encode_key_value_owned(value, manifest.value_encoding);
+    }
     if let Value::Float(float) = value
         && *float == 0.0
     {
@@ -452,7 +457,7 @@ fn apply_prefix_bounds<K: KeyViewMut>(
         let band = selector
             .value_lower()
             .or(selector.value_upper())
-            .map(|bound| bound.value.data_type())
+            .map(|bound| bound.value.data_type().band(manifest.value_encoding))
             .unwrap_or_else(ValueDataType::min);
         let lo = match selector.value_lower() {
             Some(bound) => value_lower_edge(&bound.value, manifest),
@@ -460,6 +465,9 @@ fn apply_prefix_bounds<K: KeyViewMut>(
         };
         let hi = match selector.value_upper() {
             Some(bound) => match &bound.value {
+                _ if band == ValueDataType::Number => {
+                    encode_key_value_owned(&bound.upper_edge(), manifest.value_encoding)
+                }
                 Value::Float(float) if *float == 0.0 => encode_value_owned(&Value::Float(0.0)),
                 value => encode_value_owned(value),
             },
@@ -477,6 +485,10 @@ fn apply_prefix_bounds<K: KeyViewMut>(
 /// bound key still parses (an empty payload would let the following key
 /// component slide into the value position and corrupt the range edge).
 fn value_band_min(value_type: ValueDataType) -> Vec<u8> {
+    // The number band's lowest number is NaN.
+    if value_type == ValueDataType::Number {
+        return encode_key_value_owned(&Value::Float(f64::NAN), NUMBER_BAND);
+    }
     match numeric_width(value_type) {
         0 => vec![0x00],
         width => vec![0x00; width],
@@ -491,6 +503,10 @@ fn value_band_min(value_type: ValueDataType) -> Vec<u8> {
 /// band. Used only as a raw range edge; it deliberately does not parse (it
 /// is the last field set on the bound).
 fn value_band_max(value_type: ValueDataType, manifest: &Manifest) -> Vec<u8> {
+    // The number band's highest number is positive infinity.
+    if value_type == ValueDataType::Number {
+        return encode_key_value_owned(&Value::Float(f64::INFINITY), NUMBER_BAND);
+    }
     match numeric_width(value_type) {
         0 => vec![0xFF; manifest.inline_n as usize + 2],
         width => vec![0xFF; width],
@@ -526,11 +542,11 @@ pub trait ArtifactTreeExt {
     /// same key writes that a branch commit or `Artifacts::commit`
     /// would.
     ///
-    /// Each instruction touches all three EAV/AEV/VAE indexes;
-    /// `Replace` additionally scans the `(entity, attribute)` range to
-    /// supersede any different-valued priors (and skips inserting when
-    /// a same-valued prior is already in place — that's the
-    /// cardinality-one no-op).
+    /// Each instruction touches all three EAV/AEV/VAE indexes; an
+    /// assertion under a choosing pick additionally scans the
+    /// `(entity, attribute)` range to elect the prior it succeeds (and
+    /// skips inserting when a same-valued prior is already in place,
+    /// the no-op of writing a standing value).
     ///
     /// The batch's new nodes are written into `delta`, the caller-owned
     /// accumulator. Callers own everything else: building the change stream,
@@ -575,7 +591,7 @@ pub trait ArtifactTreeExt {
         &self,
         store: S,
         of: &crate::Entity,
-        the: &crate::Attribute,
+        the: &crate::Relation,
     ) -> Result<Vec<Datum>, DialogArtifactsError>
     where
         S: ArchiveReader + Clone;
@@ -586,7 +602,7 @@ pub trait ArtifactTreeExt {
         &self,
         store: S,
         of: &crate::Entity,
-        the: &crate::Attribute,
+        the: &crate::Relation,
     ) -> Result<Vec<Artifact>, DialogArtifactsError>
     where
         S: ArchiveReader + Clone;
@@ -752,7 +768,7 @@ impl ArtifactTreeExt for ArtifactTree {
         &self,
         store: S,
         of: &crate::Entity,
-        the: &crate::Attribute,
+        the: &crate::Relation,
     ) -> Result<Vec<Datum>, DialogArtifactsError>
     where
         S: ArchiveReader + Clone,
@@ -785,7 +801,7 @@ impl ArtifactTreeExt for ArtifactTree {
         &self,
         store: S,
         of: &crate::Entity,
-        the: &crate::Attribute,
+        the: &crate::Relation,
     ) -> Result<Vec<Artifact>, DialogArtifactsError>
     where
         S: ArchiveReader + Clone,
@@ -878,6 +894,7 @@ impl ArtifactTreeExt for ArtifactTree {
         // The range must be built under the manifest the facts were written
         // with, the same requirement `scan` has.
         let manifest = tree.manifest(&storage).await?;
+        let selector = selector.for_manifest(&manifest);
         let range = selector_range(&selector, &manifest);
         // `range_scale` intersects half-open `[lower, upper)`; the selector's
         // range is inclusive, so the upper bound is the successor of the last
@@ -908,6 +925,7 @@ impl ArtifactTreeExt for ArtifactTree {
             // boundary-sized value encodes differently here than in the tree
             // and the scan silently misses it.
             let manifest = tree.manifest(&storage).await?;
+            let selector = selector.for_manifest(&manifest);
             let range = selector_range(&selector, &manifest);
 
             let stream = tree.stream_range_handles(range, &storage);
@@ -925,18 +943,19 @@ impl ArtifactTreeExt for ArtifactTree {
                 // A key that does not parse is corruption; dropping it
                 // silently would make the corrupt entry vanish from results
                 // with no signal.
-                let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
+                let layout = parse_key_layout(raw.key.as_ref()).ok_or_else(|| {
                     DialogArtifactsError::InvalidKey(
                         "scanned entry's key does not parse".to_string(),
                     )
                 })?;
+                let parts = layout.view(raw.key.as_ref());
                 let verdict = match_selector_and_key_ref(&selector, &parts, &manifest);
                 if verdict == SelectorMatch::Excluded || !matches!(raw.value, State::Added(_)) {
                     return Ok(Staged::Skip);
                 }
                 if let ValueRef::Spilled { hash, .. } = &parts.value {
                     let hash = hash.to_vec();
-                    return Ok(Staged::Spilled { raw, verdict, hash });
+                    return Ok(Staged::Spilled { raw, layout, verdict, hash });
                 }
                 // A NeedsValue verdict means some value predicate's answer
                 // lies beyond what the key decides; re-check semantically
@@ -950,7 +969,7 @@ impl ArtifactTreeExt for ArtifactTree {
                 let State::Added(datum) = raw.value else {
                     unreachable!("Added state checked above")
                 };
-                Ok(Staged::Ready(ArtifactView::new(raw.key, datum, None)))
+                Ok(Staged::Ready(ArtifactView::new(raw.key, layout, datum, None)))
             });
             // Stage two: the spilled rows' block fetches, SPILL_LOOKAHEAD in
             // flight, in row order.
@@ -960,8 +979,8 @@ impl ArtifactTreeExt for ArtifactTree {
                     let cache = &cache;
                     let selector = &selector;
                     async move {
-                        let (raw, verdict, hash) = match staged? {
-                            Staged::Spilled { raw, verdict, hash } => (raw, verdict, hash),
+                        let (raw, layout, verdict, hash) = match staged? {
+                            Staged::Spilled { raw, layout, verdict, hash } => (raw, layout, verdict, hash),
                             finished => return Ok(staged_ready(finished)),
                         };
                         let spilled = fetch_spilled_reference(raw_store, cache, &hash).await?;
@@ -969,11 +988,7 @@ impl ArtifactTreeExt for ArtifactTree {
                         // view anyway), so the value predicates can be
                         // answered past the in-key prefix.
                         if verdict == SelectorMatch::NeedsValue {
-                            let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
-                                DialogArtifactsError::InvalidKey(
-                                    "scanned entry's key does not parse".to_string(),
-                                )
-                            })?;
+                            let parts = layout.view(raw.key.as_ref());
                             if !value_predicates_admit(
                                 selector,
                                 &decode_value_parts(&parts, Some(spilled.clone()))?,
@@ -986,6 +1001,7 @@ impl ArtifactTreeExt for ArtifactTree {
                         };
                         Ok::<_, DialogArtifactsError>(Some(ArtifactView::new(
                             raw.key,
+                            layout,
                             datum,
                             Some(spilled),
                         )))
@@ -1018,20 +1034,21 @@ impl ArtifactTreeExt for ArtifactTree {
             // Both the scan range and the per-entry match must be built under
             // the manifest the stored facts were WRITTEN with — see `scan`.
             let manifest = tree.manifest(&storage).await?;
+            let selector = selector.for_manifest(&manifest);
             let range = selector_range(&selector, &manifest);
 
             let stream = tree.stream_range_handles(range, &storage);
-            // The two stages of `scan`, reconstructing whole facts: an
-            // inline-valued row is parsed once and materialized here; a
-            // spilled row is parsed again once its block has landed, which
-            // it pays a round trip for anyway.
+            // The two stages of `scan`, reconstructing whole facts: every
+            // row is parsed once, and a spilled row is materialized from
+            // that parse once its block has landed.
             let staged = stream.map(|item| -> Result<Staged<_, Artifact>, DialogArtifactsError> {
                 let raw = item?;
-                let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
+                let layout = parse_key_layout(raw.key.as_ref()).ok_or_else(|| {
                     DialogArtifactsError::InvalidKey(
                         "scanned entry's key does not parse".to_string(),
                     )
                 })?;
+                let parts = layout.view(raw.key.as_ref());
                 let verdict = match_selector_and_key_ref(&selector, &parts, &manifest);
                 if verdict == SelectorMatch::Excluded {
                     return Ok(Staged::Skip);
@@ -1041,7 +1058,7 @@ impl ArtifactTreeExt for ArtifactTree {
                 };
                 if let ValueRef::Spilled { hash, .. } = &parts.value {
                     let hash = hash.to_vec();
-                    return Ok(Staged::Spilled { raw, verdict, hash });
+                    return Ok(Staged::Spilled { raw, layout, verdict, hash });
                 }
                 Ok(match reconstruct(&selector, &parts, datum, None, verdict)? {
                     Some(artifact) => Staged::Ready(artifact),
@@ -1054,16 +1071,12 @@ impl ArtifactTreeExt for ArtifactTree {
                     let cache = &cache;
                     let selector = &selector;
                     async move {
-                        let (raw, verdict, hash) = match staged? {
-                            Staged::Spilled { raw, verdict, hash } => (raw, verdict, hash),
+                        let (raw, layout, verdict, hash) = match staged? {
+                            Staged::Spilled { raw, layout, verdict, hash } => (raw, layout, verdict, hash),
                             finished => return Ok(staged_ready(finished)),
                         };
                         let spilled = fetch_spilled_reference(raw_store, cache, &hash).await?;
-                        let parts = parse_key_ref(raw.key.as_ref()).ok_or_else(|| {
-                            DialogArtifactsError::InvalidKey(
-                                "scanned entry's key does not parse".to_string(),
-                            )
-                        })?;
+                        let parts = layout.view(raw.key.as_ref());
                         let State::Added(datum) = &raw.value else {
                             unreachable!("Added state checked above")
                         };
@@ -1094,6 +1107,7 @@ enum Staged<Raw, Ready> {
     Ready(Ready),
     Spilled {
         raw: Raw,
+        layout: KeyLayout,
         verdict: SelectorMatch,
         hash: Vec<u8>,
     },
@@ -1183,9 +1197,12 @@ pub fn selector_range(
             selector
                 .attribute()
                 .map(|attribute| AttributeKeyPart::from(attribute).raw().to_vec()),
-            selector
-                .value()
-                .map(|value| (value.data_type(), build_value_payload(value, manifest))),
+            selector.value().map(|value| {
+                (
+                    value.data_type().band(manifest.value_encoding),
+                    build_value_payload(value, manifest),
+                )
+            }),
         );
         Key::from(varkey::build_key(&parts))
     };
@@ -1314,9 +1331,9 @@ fn fold_record(earlier: &[Version], later: Record) -> Record {
 /// The supersession scans go through [`ArtifactWriter::scan`] and
 /// [`ArtifactWriter::read`], which see the batch's own pending writes on both
 /// targets. On the buffered target that means the node buffers are merged into
-/// the scan: a `Replace` blind to a buffered prior would leave it live at a
-/// cardinality-one slot, and a `Retract` blind to one would cite nothing and so
-/// cover nothing at merge time.
+/// the scan: an election blind to a buffered prior would leave it live where
+/// the pick would have retired it, and a `Retract` blind to one would cite
+/// nothing and so cover nothing at merge time.
 ///
 /// `storage` loads the tree's nodes and spilled values; a value above the
 /// manifest's inline threshold lives as a content-addressed blob, and its key
@@ -1379,7 +1396,7 @@ where
         // records), written through [`ArtifactTreeExt::record`] or a
         // [`WriteScope::Machinery`] stream. At the library level such
         // facts therefore cannot be corrupted through the ordinary
-        // write path. Three prefixes are carved out of the application
+        // write path. Four prefixes are carved out of the application
         // gate: `dialog.rule/*` (rule storage), `dialog.concept/*`
         // (concept markers), `dialog.attribute/*` (attribute placement
         // declarations), and `dialog.link/*` (stack links), whose
@@ -1390,9 +1407,7 @@ where
         // and a link is a content-addressed record of a head the
         // writer observed.
         if scope == WriteScope::Application {
-            let (Instruction::Assert(artifact)
-            | Instruction::Replace(artifact)
-            | Instruction::Retract(artifact)) = &instruction;
+            let (Instruction::Assert(artifact, _) | Instruction::Retract(artifact)) = &instruction;
             let the = artifact.the.as_str();
             if the.starts_with("dialog.")
                 && !the.starts_with("dialog.rule/")
@@ -1400,20 +1415,20 @@ where
                 && !the.starts_with("dialog.attribute/")
                 && !the.starts_with("dialog.link/")
             {
-                return Err(DialogArtifactsError::ReservedAttribute(
+                return Err(DialogArtifactsError::ReservedRelation(
                     artifact.the.to_string(),
                 ));
             }
         }
         match instruction {
-            Instruction::Assert(artifact) => {
+            Instruction::Assert(artifact, Pick::All) => {
                 changed = true;
                 // ONE value encode per instruction: the payload feeds all
                 // three index keys, and a spilling value's block bytes and
                 // reference come from the same pass.
                 let encoded = EncodedValue::new(&artifact.is, manifest);
                 let (entity_key, attribute_key, value_key) =
-                    artifact_index_keys_with(&artifact, encoded.payload);
+                    artifact_index_keys_with(&artifact, encoded.value_type, encoded.payload);
 
                 // Persist a spilling value's bytes as a content-addressed
                 // block before recording the fact; the key holds only the
@@ -1469,22 +1484,18 @@ where
                     )
                     .await?;
             }
-            Instruction::Replace(artifact) => {
+            Instruction::Assert(artifact, policy) => {
                 let entity_key = EntityKey::from_artifact(&artifact, manifest);
 
-                // Scan priors at this (entity, attribute) against the
-                // in-flight write target, so writes from earlier instructions
-                // in this batch are visible (on the buffered target that means
-                // the node buffers are merged into the scan). Same-valued
-                // priors already represent the desired state; only
-                // different-valued ones need superseding. The value lives in
-                // the key now, so each candidate's claim is reconstructed from
-                // its key rather than read out of the payload. The scan borrows
-                // `transient` immutably, so collect into owned vectors in a
-                // scope that ends before the subsequent mutating reassignments.
-                let mut superseded_keys: Vec<Key> = Vec::new();
-                let mut superseded_versions: Vec<Version> = Vec::new();
-                let mut found_same_value = false;
+                // Scan the cell's claims against the in-flight write target,
+                // so writes from earlier instructions in this batch are
+                // candidates too. Each prior is kept with its
+                // key, its versions and its standing: the deepest version it
+                // carries and its cause, which is how a read orders it.
+                let mut priors: Vec<(Key, Vec<Version>, Value, Standing)> = Vec::new();
+                // The prior holding the written value, when the cell holds
+                // it: one more candidate the election may return.
+                let mut held: Option<usize> = None;
                 {
                     let search_start = <EntityKey<Key> as KeyViewConstruct>::min()
                         .set_entity(entity_key.entity())
@@ -1499,95 +1510,124 @@ where
                     while let Some(candidate) = search_stream.next().await {
                         let candidate = candidate?;
                         if let State::Added(current_element) = &candidate.value {
-                            // A prior with a spilled value carries only a
-                            // reference in its key; fetch the block so the
-                            // value comparison below sees the real value.
                             let spilled = fetch_spilled(storage, &candidate.key).await?;
                             let current = Artifact::from_key_datum_with_value(
                                 &candidate.key,
                                 current_element,
                                 spilled,
                             )?;
-                            // Supersession is scoped to this exact
-                            // (entity, attribute). The range should already
-                            // guarantee that, but deleting is destructive
-                            // and unconditional across all three indexes,
-                            // so verify rather than trust the bounds: a
-                            // range-construction bug once widened this
-                            // scan to unrelated entities and erased their
-                            // facts.
                             if current.of != artifact.of || current.the != artifact.the {
                                 continue;
                             }
-                            if current.is == artifact.is {
-                                found_same_value = true;
-                            } else {
-                                // The superseded claims' versions feed the
-                                // replacement record's cause, so a reader
-                                // can order the two without reading values.
-                                // ALL of the entry's claims: same-value
-                                // asserts collapse into one datum, and a
-                                // replacement its author issued having
-                                // observed the fact supersedes every claim
-                                // standing behind it.
-                                superseded_versions.extend(current_element.versions());
-                                superseded_keys.push(candidate.key);
+                            // The cell holds the written value when a
+                            // reader of the value's type observes it: an
+                            // integer 4 asserted over a stored 4.3 is what
+                            // the cell already reads as.
+                            if current.is.reads_as(&artifact.is) {
+                                held = Some(priors.len());
                             }
+                            let versions: Vec<Version> =
+                                current_element.versions().copied().collect();
+                            let standing = Standing {
+                                version: versions
+                                    .iter()
+                                    .map(|version| {
+                                        (version.edition, make_reference(version.key_bytes()))
+                                    })
+                                    .max(),
+                                cause: current.cause.clone().unwrap_or(Cause([0; 32])),
+                            };
+                            priors.push((candidate.key, versions, current.is, standing));
                         }
                     }
                 }
 
-                // Cardinality-one no-op: the identical claim already
-                // stands, at its original version, and there is nothing
-                // to supersede. Nothing changes in the indexes and no
-                // history is recorded — a fresh record would fork the
-                // claim's lineage away from the version the standing
-                // datum carries.
-                if found_same_value && superseded_keys.is_empty() {
+                // The elected claim is the one a read under the pick
+                // returns over these priors, the written value's own claim
+                // among them when the cell holds it.
+                let elected = policy.elect(
+                    priors
+                        .iter()
+                        .map(|(_, _, value, standing)| (value, Some(standing))),
+                );
+                // A read returns the written value already: nothing to
+                // succeed, and a fresh record would fork the claim's
+                // lineage away from the version the standing datum carries.
+                if held.is_some() && elected == held {
                     continue;
                 }
                 changed = true;
+                // The written value's claim, when the cell holds one the
+                // read does not return: the write folds the commit's
+                // version into it, as an assertion of a value that stands
+                // does, so it stands past the claim it succeeds.
+                let held_versions: Vec<Version> = held
+                    .map(|index| priors[index].1.clone())
+                    .unwrap_or_default();
 
-                for key in superseded_keys {
+                // The elected claim is retracted outright, as a retraction
+                // is, and its versions become the new claim's cause, as a
+                // replacement's superseded versions do.
+                let mut superseded_versions: Vec<Version> = Vec::new();
+                if let Some(index) = elected {
+                    let (key, versions, elected_value, _) = priors.swap_remove(index);
+                    // A claim this batch asserted carries the batch's own
+                    // version, and its assertion record is buffered under
+                    // that version. Succeeding it within the batch
+                    // withdraws it, as a retraction would: the record fold
+                    // nets the two, so the history never shows a claim no
+                    // index held.
+                    if let Some(version) = &version
+                        && versions.contains(version)
+                    {
+                        let withdrawn: Vec<Version> = versions
+                            .iter()
+                            .filter(|withdrawn| *withdrawn != version)
+                            .copied()
+                            .collect();
+                        let record = Record::Retract(Claim {
+                            the: artifact.the.clone(),
+                            of: artifact.of.clone(),
+                            is: elected_value,
+                            cause: HistoryCause::new(withdrawn),
+                        });
+                        buffer_record(&mut history_records, record, version);
+                    }
+                    superseded_versions = versions;
                     let (entity_key, attribute_key, value_key) = reproject_index_keys(&key)?;
-
                     transient = transient.erase(&entity_key, storage).await?;
                     transient = transient.erase(&value_key, storage).await?;
                     transient = transient.erase(&attribute_key, storage).await?;
                 }
 
-                // A version-tagged replacement records its history: its
-                // cause lists the versions of the claims it superseded —
-                // exactly the data removed from the indexes above. The
-                // record is written even when the insert below is skipped
-                // because a same-valued prior survives; the supersession
-                // of the different-valued claims still happened and must
-                // be attributable.
+                // A record must not claim itself as its cause: a claim this
+                // batch asserted earlier carries this batch's own version.
                 if let Some(version) = &version {
+                    let superseded: Vec<Version> = superseded_versions
+                        .into_iter()
+                        .filter(|superseded| superseded != version)
+                        .collect();
                     let record = Record::Assert(Claim {
                         the: artifact.the.clone(),
                         of: artifact.of.clone(),
                         is: artifact.is.clone(),
-                        cause: HistoryCause::new(superseded_versions),
+                        cause: HistoryCause::new(superseded),
                     });
                     buffer_record(&mut history_records, record, version);
                 }
 
-                if found_same_value {
-                    continue;
-                }
-
-                // ONE value encode per instruction, exactly as in `Assert`.
+                // The assertion itself, as `Assert` writes one, folding in
+                // the versions of the written value's own claim when the
+                // cell held it.
                 let encoded = EncodedValue::new(&artifact.is, manifest);
                 let (entity_key, attribute_key, value_key) =
-                    artifact_index_keys_with(&artifact, encoded.payload);
-
-                // Persist a spilling value's bytes as a content-addressed
-                // block before recording the fact.
+                    artifact_index_keys_with(&artifact, encoded.value_type, encoded.payload);
                 stage_spilled_value(staged, encoded.spill);
-
                 let mut datum = Datum::for_artifact(&artifact);
                 datum.version = version;
+                if version.is_some() {
+                    datum.absorb_versions(held_versions.iter());
+                }
                 let added = State::Added(datum);
                 transient = transient
                     .write_all(
@@ -1736,7 +1776,12 @@ mod spill_cache_tests {
         tree.apply(
             &store,
             &mut delta,
-            stream::iter(facts.iter().cloned().map(Instruction::Assert)),
+            stream::iter(
+                facts
+                    .iter()
+                    .cloned()
+                    .map(|artifact| Instruction::Assert(artifact, crate::Pick::All)),
+            ),
         )
         .await?;
         store.flush(&mut delta);
@@ -1821,7 +1866,10 @@ mod spill_cache_tests {
         tree.apply(
             &store,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(artifact.clone())]),
+            stream::iter(vec![Instruction::Assert(
+                artifact.clone(),
+                crate::Pick::All,
+            )]),
         )
         .await
         .unwrap();
@@ -1883,7 +1931,10 @@ mod spill_cache_tests {
         tree.apply(
             &store,
             &mut delta,
-            stream::iter(vec![Instruction::Assert(artifact.clone())]),
+            stream::iter(vec![Instruction::Assert(
+                artifact.clone(),
+                crate::Pick::All,
+            )]),
         )
         .await?;
         let key = EntityKey::from_artifact(&artifact, &dialog_search_tree::Manifest::default())
@@ -1947,6 +1998,12 @@ mod range_tests {
 }
 
 #[cfg(test)]
+mod number_band_tests;
+
+#[cfg(test)]
+mod number_semantics_tests;
+
+#[cfg(test)]
 mod selector_range_tests {
     #![allow(unexpected_cfgs)]
     // The dialog_common::test macro requires async test fns; this pure
@@ -1960,8 +2017,8 @@ mod selector_range_tests {
     use super::{apply_prefix_bounds, selector_range};
     use crate::selector::Constrained;
     use crate::{
-        ArtifactSelector, Attribute, AttributeKey, Entity, EntityKey, Key, KeyViewConstruct,
-        KeyViewMut as _, Value, ValueKey,
+        ArtifactSelector, AttributeKey, Entity, EntityKey, Key, KeyViewConstruct, KeyViewMut as _,
+        Relation, Value, ValueKey,
     };
     use dialog_search_tree::Manifest;
 
@@ -2021,8 +2078,8 @@ mod selector_range_tests {
             .expect("valid entity")
     }
 
-    fn attribute() -> Attribute {
-        Attribute::from_str("person/name").expect("valid attribute")
+    fn attribute() -> Relation {
+        Relation::from_str("person/name").expect("valid attribute")
     }
 
     /// Values chosen to straddle every encoding decision the bound
@@ -2142,12 +2199,15 @@ mod corrupt_row_tests {
         let valid: Vec<Instruction> = ["user:alice", "user:bob", "user:carol"]
             .into_iter()
             .map(|of| {
-                Instruction::Assert(Artifact {
-                    the: "user/name".parse().expect("attribute"),
-                    of: of.parse().expect("entity"),
-                    is: Value::String(of.to_string()),
-                    cause: None,
-                })
+                Instruction::Assert(
+                    Artifact {
+                        the: "user/name".parse().expect("attribute"),
+                        of: of.parse().expect("entity"),
+                        is: Value::String(of.to_string()),
+                        cause: None,
+                    },
+                    crate::Pick::All,
+                )
             })
             .collect();
         tree.apply(&store, &mut delta, stream::iter(valid)).await?;

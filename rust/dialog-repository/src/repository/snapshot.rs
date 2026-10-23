@@ -334,7 +334,7 @@ impl Snapshot {
         if head.revision != *base {
             return Err(PublishError::VersionMismatch {
                 expected: Some(memory::Version::from(base.tree.hash())),
-                actual: Some(memory::Version::from(head.revision.tree.hash())),
+                current: memory::Current::Unknown,
             });
         }
         head.revision = next;
@@ -565,6 +565,9 @@ pub struct SnapshotExport {
     /// The key regions to walk, or `None` for the whole tree. See
     /// [`SnapshotExport::within`].
     scope: Option<Vec<RangeInclusive<Vec<u8>>>>,
+    /// Whether the export carries the bytes of the assets that the tree
+    /// records. See [`SnapshotExport::without_assets`].
+    assets: bool,
 }
 
 impl Snapshot {
@@ -574,6 +577,7 @@ impl Snapshot {
             snapshot: self,
             reach: Reach::Complete,
             scope: None,
+            assets: true,
         }
     }
 }
@@ -624,6 +628,18 @@ impl SnapshotExport {
         self
     }
 
+    /// Leave the bytes of each asset that the revision records where they
+    /// are, and export the tree and its spilled values alone.
+    ///
+    /// A replica that adopts a head this way holds each fact of the head,
+    /// such as `dialog.asset/size`, and none of the bytes it names. Those
+    /// come on the first read of the asset, as a pull leaves them, so a
+    /// member pays for a file that they never open with its facts alone.
+    pub fn without_assets(mut self) -> Self {
+        self.assets = false;
+        self
+    }
+
     /// How far this export will reach.
     pub fn reach(&self) -> &Reach {
         &self.reach
@@ -666,12 +682,13 @@ impl SnapshotExport {
         let sparse = matches!(self.reach, Reach::Sparse);
         let root = NodeHash::from(*self.snapshot.revision().tree.hash());
         let scope = self.scope.clone();
+        let assets = self.assets;
 
         try_stream! {
             // With an upstream a read-miss falls through to the remote and
             // is cached; without one the index is exactly what this store
             // holds.
-            let index = NetworkedIndex::new(env, catalog, upstream);
+            let index = NetworkedIndex::erased(env, catalog, upstream);
             let storage = index.clone();
             let tree = Index::from_hash(root);
 
@@ -741,7 +758,7 @@ impl SnapshotExport {
                         Some(ShipmentRef::SpilledValue(reference)) => {
                             spills.insert(reference);
                         }
-                        Some(ShipmentRef::BlobAdded { hash, .. }) => {
+                        Some(ShipmentRef::BlobAdded { hash, .. }) if assets => {
                             let hash = NodeHash::from(hash);
                             if blob_seen.insert(hash.clone()) {
                                 blobs.push(hash);
@@ -1128,17 +1145,20 @@ mod tests {
 
         let mut facts: Vec<Instruction> = generate_data(20)?
             .into_iter()
-            .map(Instruction::Assert)
+            .map(|artifact| Instruction::Assert(artifact, dialog_artifacts::Pick::All))
             .collect();
         let large = Value::String(
             "spilled".repeat(dialog_search_tree::Manifest::default().inline_n as usize + 1),
         );
-        facts.push(Instruction::Assert(Artifact {
-            the: "document/body".parse()?,
-            of: "document:large".parse()?,
-            is: large,
-            cause: None,
-        }));
+        facts.push(Instruction::Assert(
+            Artifact {
+                the: "document/body".parse()?,
+                of: "document:large".parse()?,
+                is: large,
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        ));
         branch.commit(stream::iter(facts)).perform(&env).await?;
 
         let blob_bytes = b"snapshot blob".repeat(512);
@@ -1195,6 +1215,31 @@ mod tests {
         assert!(
             blocks.iter().all(Block::is_intact),
             "every exported block hashes to the address it declares"
+        );
+        Ok(())
+    }
+
+    /// An export without assets carries the tree and the spilled value, and
+    /// no byte of the asset that the revision records.
+    #[dialog_common::test]
+    async fn it_exports_no_byte_of_an_asset_without_assets() -> Result<()> {
+        let stage = stage().await?;
+
+        let (blocks, blobs) = drain(
+            stage
+                .repository
+                .snapshot(stage.revision.clone())
+                .export()
+                .without_assets()
+                .perform(&stage.env),
+        )
+        .await?;
+
+        assert!(!blocks.is_empty(), "the block channel carried the tree");
+        assert_eq!(blobs.len(), 1, "the blob channel carried the spilled value");
+        assert!(
+            blobs.iter().all(|(_, bytes)| *bytes != stage.blob_bytes),
+            "the asset stays where it is"
         );
         Ok(())
     }

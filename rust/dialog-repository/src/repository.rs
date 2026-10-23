@@ -22,6 +22,9 @@ pub use archive::*;
 pub(crate) mod branch;
 pub use branch::*;
 
+mod caches;
+pub use caches::HeldCaches;
+
 mod create;
 pub use create::*;
 
@@ -319,12 +322,15 @@ mod tests {
         // A branch only materializes once it has a commit — open + no commits
         // leaves no revision for load to find.
         let main = repo.branch("main").open().perform(&operator).await?;
-        main.commit(stream::iter(vec![Instruction::Assert(Artifact {
-            the: "user/name".parse()?,
-            of: "user:1".parse()?,
-            is: Value::String("Alice".into()),
-            cause: None,
-        })]))
+        main.commit(stream::iter(vec![Instruction::Assert(
+            Artifact {
+                the: "user/name".parse()?,
+                of: "user:1".parse()?,
+                is: Value::String("Alice".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -347,7 +353,10 @@ mod tests {
             cause: None,
         };
         let _hash = branch
-            .commit(stream::iter(vec![Instruction::Assert(artifact)]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                artifact,
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -453,24 +462,33 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let artifacts = vec![
-            Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:1".parse()?,
-                is: Value::String("Alice".into()),
-                cause: None,
-            }),
-            Instruction::Assert(Artifact {
-                the: "user/email".parse()?,
-                of: "user:1".parse()?,
-                is: Value::String("alice@example.com".into()),
-                cause: None,
-            }),
-            Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:2".parse()?,
-                is: Value::String("Bob".into()),
-                cause: None,
-            }),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:1".parse()?,
+                    is: Value::String("Alice".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/email".parse()?,
+                    of: "user:1".parse()?,
+                    is: Value::String("alice@example.com".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:2".parse()?,
+                    is: Value::String("Bob".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ),
         ];
 
         branch
@@ -511,24 +529,33 @@ mod tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let artifacts = vec![
-            Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:alice".parse()?,
-                is: Value::String("Alice".into()),
-                cause: None,
-            }),
-            Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:bob".parse()?,
-                is: Value::String("Bob".into()),
-                cause: None,
-            }),
-            Instruction::Assert(Artifact {
-                the: "user/email".parse()?,
-                of: "user:alice".parse()?,
-                is: Value::String("alice@example.com".into()),
-                cause: None,
-            }),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:alice".parse()?,
+                    is: Value::String("Alice".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:bob".parse()?,
+                    is: Value::String("Bob".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ),
+            Instruction::Assert(
+                Artifact {
+                    the: "user/email".parse()?,
+                    of: "user:alice".parse()?,
+                    is: Value::String("alice@example.com".into()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ),
         ];
 
         branch
@@ -590,7 +617,10 @@ mod tests {
         };
 
         branch
-            .commit(stream::iter(vec![Instruction::Assert(artifact.clone())]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                artifact.clone(),
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -928,7 +958,7 @@ mod tests {
             // (entity, attribute) inside a single transaction must keep
             // both — cardinality-many accumulates, it does not collapse.
             #[derive(dialog_query::Attribute, Clone, PartialEq, Eq, PartialOrd, Ord)]
-            #[cardinality(many)]
+            #[pick(all)]
             #[domain("app.meta")]
             pub struct Tag(pub String);
 
@@ -1061,6 +1091,7 @@ mod tests {
     mod query_session {
 
         use super::query_engine::{Employee, employee};
+        use crate::Ephemeral;
         use crate::helpers::test_repo;
         use dialog_peer::helpers::test_session_with_peer;
         use dialog_query::query::Output;
@@ -1086,9 +1117,8 @@ mod tests {
         #[dialog_common::test]
         async fn it_exposes_overlaid_concept_facts_via_with() -> anyhow::Result<()> {
             // `branch.with(stmt)` folds a Statement (here a BranchMeta
-            // concept instance) into the session's overlay changes.
-            // The fact surfaces via `Provider<Select> for Changes`,
-            // alongside the branch's stored facts.
+            // concept instance) into the query's overlay, where the fact
+            // surfaces alongside the branch's stored facts.
             let (operator, profile) = test_session_with_peer().await;
             let repo = test_repo(&operator, &profile).await;
             let branch = repo.branch("main").open().perform(&operator).await?;
@@ -2022,23 +2052,23 @@ mod tests {
         }
 
         #[dialog_common::test]
-        async fn it_orders_changes_consistently_with_branch_scans_in_every_mode()
+        async fn it_orders_an_overlay_consistently_with_branch_scans_in_every_mode()
         -> anyhow::Result<()> {
-            // Load-bearing invariant for `merge_grouped`: `Provider<Select>
-            // for Changes` must yield artifacts in the same order the tree
-            // would for the same selector. If it doesn't, cross-source
-            // unions interleave incorrectly within a `(the, of)` group.
+            // Load-bearing invariant for `merge_grouped`: an overlay
+            // ([`Ephemeral::select`]) must yield artifacts in the same
+            // order the tree would for the same selector. If it doesn't,
+            // cross-source unions interleave incorrectly within a
+            // `(the, of)` group.
             //
             // For each scan mode we commit the same facts to a real
-            // branch and stage them in a Changes overlay, then compare
-            // the ordered `sort_key` sequence. `Cause` differs (real
-            // commit vs `None`) so we don't compare full artifacts.
+            // branch and hold them in an overlay, then compare the
+            // ordered `sort_key` sequence. `Cause` differs (real commit
+            // vs `None`) so we don't compare full artifacts.
             use dialog_artifacts::selector::Constrained;
             use dialog_artifacts::{
-                ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, Select, SortKey,
-                Update as _, Value,
+                ArtifactSelector, ArtifactStream, Changes, DialogArtifactsError, SortKey,
+                Update as _, Value, sort_key,
             };
-            use dialog_capability::Provider;
             use futures_util::StreamExt as _;
 
             let (operator, profile) = test_session_with_peer().await;
@@ -2048,8 +2078,8 @@ mod tests {
             let alice: Entity = "id:alice".parse()?;
             let bob: Entity = "id:bob".parse()?;
             let charlie: Entity = "id:charlie".parse()?;
-            let name_attr = "test/name".parse::<dialog_artifacts::Attribute>()?;
-            let role_attr = "test/role".parse::<dialog_artifacts::Attribute>()?;
+            let name_attr = "test/name".parse::<dialog_artifacts::Relation>()?;
+            let role_attr = "test/role".parse::<dialog_artifacts::Relation>()?;
 
             // Mix of:
             //   - same entity, multiple attrs
@@ -2063,7 +2093,7 @@ mod tests {
             //     (alice, role). If `sort_key` mistakenly ordered VAE
             //     output by entity it would flip these two, and this
             //     test would catch it.
-            let facts: Vec<(Entity, dialog_artifacts::Attribute, Value)> = vec![
+            let facts: Vec<(Entity, dialog_artifacts::Relation, Value)> = vec![
                 (
                     alice.clone(),
                     name_attr.clone(),
@@ -2105,10 +2135,10 @@ mod tests {
             ];
 
             // Build a single Changes batch with all facts, then drive
-            // both the branch commit and the overlay query from clones.
+            // both the branch commit and the overlay from clones.
             let mut changes = Changes::new();
             for (e, a, v) in &facts {
-                changes.associate(a.clone(), e.clone(), v.clone());
+                changes.associate(a.clone(), e.clone(), v.clone(), dialog_artifacts::Pick::All);
             }
 
             // Commit a clone to the branch (Changes itself is a Statement now).
@@ -2120,9 +2150,10 @@ mod tests {
                 .perform(&operator)
                 .await?;
             let branch = repo.branch("main").load().perform(&operator).await?;
+            let overlay = Ephemeral::holding(changes);
 
             // Compare per scan mode: collect sort_keys from a raw
-            // branch scan and from the Changes overlay; they must
+            // branch scan and from the overlay; they must
             // match exactly. (Full Artifact equality would fail
             // because cause is None on the overlay and Some on the
             // committed branch entry.)
@@ -2157,15 +2188,18 @@ mod tests {
             for (label, sel) in scan_modes {
                 // Raw branch scan — bypass the QuerySession overlay so
                 // we see tree-order output without auto-metadata noise.
-                // The branch's prolly tree is the order ground truth.
+                // The branch's search tree is the order ground truth.
                 let select = branch.claims().select(sel.clone());
                 let store = crate::NetworkedIndex::new(&operator, select.catalog(), None);
                 let branch_stream: ArtifactStream<'_> = Box::pin(select.execute(store).await?);
                 let branch_order = keys_from_stream(branch_stream).await?;
 
-                // Changes overlay scan via Provider<Select>.
-                let changes_stream = Provider::<Select<'_>>::execute(&changes, sel.clone()).await?;
-                let changes_order = keys_from_stream(changes_stream).await?;
+                let manifest = dialog_search_tree::Manifest::default();
+                let changes_order: Vec<SortKey> = overlay
+                    .select(sel, &manifest)
+                    .iter()
+                    .map(|artifact| sort_key(artifact, &manifest))
+                    .collect();
 
                 assert!(
                     branch_order.len() >= 2,
@@ -2173,7 +2207,7 @@ mod tests {
                 );
                 assert_eq!(
                     branch_order, changes_order,
-                    "{label}: Changes-as-source order must match branch-tree scan order"
+                    "{label}: overlay order must match branch-tree scan order"
                 );
             }
 

@@ -1,4 +1,6 @@
+use super::context::{full_context, held};
 use super::merge::merge_with_winner;
+use super::transaction::induction_ignores;
 use crate::repository::archive::persist;
 use crate::repository::source::SourceRef;
 use crate::{
@@ -7,10 +9,10 @@ use crate::{
 };
 use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::history::{
-    Context, Edition, Origin, RevisionRecord, TreeHistory, Version, context_of, extend_skips,
+    Context, Edition, Origin, RevisionRecord, TreeHistory, Version, extend_skips, region_writes,
 };
 use dialog_artifacts::tree::{Stamp, WriteScope};
-use dialog_artifacts::{Datum, DialogArtifactsError, Entity, Instruction, Key, State};
+use dialog_artifacts::{Datum, DialogArtifactsError, Entity, Instruction, Key, NUMBER_BAND, State};
 use dialog_capability::{Did, Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
 use dialog_common::{ConditionalSend, ConditionalSync};
@@ -18,13 +20,15 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt};
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Read as BlobRead;
-use dialog_effects::memory::{Publish, Resolve};
-use futures_util::{Stream, stream};
+use dialog_effects::memory::{Current, Publish, Resolve};
+use futures_util::{Stream, StreamExt as _, stream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Command that commits a stream of changes (assert/retract) to a branch
 /// or a snapshot.
 ///
-/// Created by [`Branch::commit`] or [`Snapshot::commit`]. Execute with
+/// Created by [`Branch::commit`]. Execute with
 /// `.perform(&env)`.
 pub struct Commit<'a, Changes> {
     source: SourceRef<'a>,
@@ -35,6 +39,7 @@ pub struct Commit<'a, Changes> {
     entries: Vec<(Key, State<Datum>)>,
     merge: bool,
     machinery: Vec<Instruction>,
+    rebuild: Option<Index>,
 }
 
 impl<'a, Changes> Commit<'a, Changes> {
@@ -48,7 +53,18 @@ impl<'a, Changes> Commit<'a, Changes> {
             entries: Vec::new(),
             merge: false,
             machinery: Vec::new(),
+            rebuild: None,
         }
+    }
+
+    /// Build on `tree` in place of the base revision's own: the revision
+    /// minted names it, with the batch's changes and its record applied.
+    /// For a rewrite of the base's tree under another format (see
+    /// [`Branch::rekey_storage`]), whose nodes the caller has persisted.
+    /// The tree is written as it is, whatever format it carries.
+    pub(crate) fn rebuilding(mut self, tree: Index) -> Self {
+        self.rebuild = Some(tree);
+        self
     }
 
     /// Permit reserved `dialog.*` attributes in the change stream.
@@ -98,6 +114,14 @@ impl<'a, Changes> Commit<'a, Changes> {
     /// - at a checkpoint two replicas are expected to agree on bit for bit;
     /// - before a long quiet period, so the stored form is the compact one.
     ///
+    /// A commit that mints nothing canonicalizes nothing: a batch that
+    /// changes no fact keeps the head as it is, buffers included, unless
+    /// [`allow_empty`](Self::allow_empty) asks for a revision. An
+    /// [`amend`](TransactionCommit::amend) is the exception, since it
+    /// replaces its tip's tree in place: a chain canonicalized at its
+    /// last link reaches the canonical tree whether or not that link
+    /// changed anything.
+    ///
     /// ```no_run
     /// # use dialog_repository::Branch;
     /// # use dialog_artifacts::Instruction;
@@ -106,7 +130,7 @@ impl<'a, Changes> Commit<'a, Changes> {
     /// # -> anyhow::Result<()>
     /// # where Env: dialog_capability::Provider<dialog_effects::memory::Resolve> {
     /// # let _ = (branch, env, changes);
-    /// // branch.commit(stream::iter(changes)).canonicalize().perform(env).await?;
+    /// // branch.transaction().integrate(changes).commit().canonicalize().publish().perform(env).await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -150,18 +174,27 @@ impl<'a, Changes> Commit<'a, Changes> {
     }
 }
 
-impl Branch {
-    /// Commit a stream of changes to this branch.
-    pub fn commit<Changes>(&self, changes: Changes) -> Commit<'_, Changes> {
-        Commit::new(self, changes)
-    }
+/// Whether induction would see this instruction's fact; see
+/// [`induction_ignores`].
+fn induces(instruction: &Instruction) -> bool {
+    let (Instruction::Assert(artifact, _) | Instruction::Retract(artifact)) = instruction;
+    !induction_ignores(&artifact.the.to_string())
 }
 
-impl Snapshot {
-    /// Commit a stream of changes to this snapshot: the same [`Commit`]
-    /// a branch runs. The minted revision is persisted and the snapshot
-    /// advances to it; no branch head moves. Mirrors [`Branch::commit`].
-    pub fn commit<Changes>(&self, changes: Changes) -> Commit<'_, Changes> {
+impl Branch {
+    /// Commit a stream of instructions to this branch as the machinery
+    /// does: no induction runs and no succession is settled against
+    /// derived candidates. A write goes through
+    /// [`transaction`](Self::transaction), which is the one path that
+    /// reads the line as the commit will leave it.
+    ///
+    /// A commit of reserved records alone (`dialog.*`, bar rules and
+    /// concepts) carries the induction watermark to its head when the
+    /// watermark stood at the head it built on: induction drops those
+    /// records, so the commit is an inducing instant with an empty
+    /// delta. Any other fact leaves the watermark where it is, and the
+    /// next inducing instant catches up over the lag.
+    pub(crate) fn commit<Changes>(&self, changes: Changes) -> Commit<'_, Changes> {
         Commit::new(self, changes)
     }
 }
@@ -177,7 +210,6 @@ where
     /// adopt the new [`Revision`] with the updated logical clock: a
     /// branch publishes it to its revision cell, a snapshot advances its
     /// own head.
-    #[tracing::instrument(skip_all, name = "commit")]
     pub async fn perform<Env>(self, env: &Env) -> Result<Revision, CommitError>
     where
         Env: Provider<BlobImport>
@@ -259,17 +291,33 @@ where
         let base_revision = branch.revision();
         let base_version = branch.revision.edition().map(|edition| edition.version);
         let merging = self.merge.then(|| base_revision.clone());
+        let built_on = base_revision.clone();
+
+        // Whether any fact of this commit is one induction would see.
+        // A commit of reserved records alone is an inducing instant with
+        // an empty delta, and carries the watermark below; the stream is
+        // consumed by the mint, so it is watched as it passes.
+        let inducible = Arc::new(AtomicBool::new(self.machinery.iter().any(induces)));
+        let changes = {
+            let inducible = Arc::clone(&inducible);
+            self.changes.inspect(move |instruction| {
+                if induces(instruction) {
+                    inducible.store(true, Ordering::Relaxed);
+                }
+            })
+        };
 
         let minted = Mint {
             source: SourceRef::from(branch),
             base: base_revision,
-            changes: self.changes,
+            changes,
             entries: self.entries,
             machinery: self.machinery,
             scope: self.scope,
             allow_empty: self.allow_empty,
             canonicalize: self.canonicalize,
             amend: None,
+            rebuild: self.rebuild,
         }
         .perform(env, |profile, issuer| {
             branch.commit_identity(profile, issuer)
@@ -295,7 +343,7 @@ where
                 if actual != base_version {
                     return Err(PublishError::VersionMismatch {
                         expected: base_version,
-                        actual,
+                        current: Current::Unknown,
                     }
                     .into());
                 }
@@ -322,6 +370,26 @@ where
         let version = revision.version();
         branch.records().insert(version, record);
         branch.contexts().insert(version, context);
+
+        // No induction ran, and none was owed: every fact here is a
+        // reserved record the lag drops. The commit is then an inducing
+        // instant with an empty delta, and the watermark follows it when
+        // it stood at the head this built on. A lag left by an earlier
+        // pull or raw commit stays for the next inducing instant, which
+        // catches up over this commit's records and drops them. Without
+        // this, the next transaction would diff this commit against the
+        // watermark to drop its records, reading the tree around a
+        // buffered write on a replica that may by then be offline, or
+        // without the grant the records retracted.
+        if !inducible.load(Ordering::Relaxed) {
+            let watermark = branch.induction_cell();
+            watermark.resolve().perform(env).await?;
+            if let (Some(standing), Some(built_on)) = (watermark.content(), built_on)
+                && standing == built_on
+            {
+                watermark.publish(revision.clone()).perform(env).await?;
+            }
+        }
 
         Ok(revision)
     }
@@ -367,6 +435,7 @@ where
             allow_empty: self.allow_empty,
             canonicalize: self.canonicalize,
             amend: None,
+            rebuild: self.rebuild,
         }
         .perform(env, |_, issuer| {
             (lineage.clone(), origin_of(&lineage, issuer))
@@ -407,7 +476,7 @@ pub(crate) struct Minted {
     /// Its signed in-tree record, for the verified-record memo.
     pub(crate) record: RevisionRecord,
     /// Its causal context, for the context memo.
-    pub(crate) context: Context,
+    pub(crate) context: Arc<Context>,
 }
 
 /// How a [`Mint`] came out.
@@ -453,6 +522,9 @@ pub(crate) struct Mint<'a, Changes> {
     /// is a staged revision nobody has seen, and this is what it recorded.
     /// See [`TransactionCommit::amend`](crate::TransactionCommit::amend).
     pub(crate) amend: Option<Amended>,
+    /// The tree to build on in place of the base revision's. See
+    /// [`Commit::rebuilding`].
+    pub(crate) rebuild: Option<Index>,
 }
 
 /// What a staged revision recorded about itself, for a [`Mint`] amending
@@ -462,7 +534,7 @@ pub(crate) struct Amended {
     /// The revision's signed in-tree record.
     pub(crate) record: RevisionRecord,
     /// The revision's causal context.
-    pub(crate) context: Context,
+    pub(crate) context: Arc<Context>,
 }
 
 impl<Changes> Mint<'_, Changes>
@@ -473,6 +545,7 @@ where
     /// revision is minted under, given the profile and issuer the
     /// environment identifies as — a branch's content-derived branch
     /// entity, a snapshot's own lineage.
+    #[tracing::instrument(skip_all, name = "commit")]
     pub(crate) async fn perform<Env>(
         self,
         env: &Env,
@@ -506,7 +579,7 @@ where
         // — with its cause — on the first read that needed it, while a
         // commit every block of which is local proceeds untouched.
         let remote = source.fallback();
-        let store = NetworkedIndex::new(env, source.archive().index(), remote);
+        let store = NetworkedIndex::erased(env, source.archive().index(), remote);
 
         // Discover who we are up front: the revision is attributed to the
         // profile / operator, and the commit's `Version` — the identifier
@@ -553,11 +626,31 @@ where
         // commits and queries already fetched (and blocks the persist below
         // seeds), instead of re-fetching everything into a cache that dies
         // with this commit.
-        let mut tree = match base_revision.as_ref() {
-            Some(base) => {
-                Index::from_hash_with_cache(NodeHash::from(*base.tree.hash()), source.node_cache())
+        let mut tree = match (self.rebuild, base_revision.as_ref()) {
+            (Some(rebuilt), _) => rebuilt,
+            (None, Some(base)) => {
+                let tree = Index::from_hash_with_cache(
+                    NodeHash::from(*base.tree.hash()),
+                    source.node_cache(),
+                );
+                // A tree written the way an earlier release laid values out
+                // is read, never extended: it is rewritten first (see
+                // `Branch::migrate_storage`), and every write after that
+                // builds on the rewrite. A rewrite is the one commit that
+                // builds on a tree of its own.
+                let manifest = tree
+                    .manifest(&store)
+                    .await
+                    .map_err(DialogArtifactsError::from)?;
+                if manifest.value_encoding != NUMBER_BAND {
+                    return Err(CommitError::NeedsMigration(format!(
+                        "its tree keys values under encoding {}, and this release writes {NUMBER_BAND}",
+                        manifest.value_encoding
+                    )));
+                }
+                tree
             }
-            None => Index::empty_with_cache(source.node_cache()),
+            (None, None) => Index::empty_with_cache(source.node_cache()),
         };
 
         // Drain the change stream into the tree. EAV/AEV/VAE writes,
@@ -632,10 +725,23 @@ where
         // only by edition (unless `allow_empty` asks for one). Only a
         // line with no revision at all still publishes, to establish
         // its genesis.
+        //
+        // An amend asked to canonicalize is the exception: it replaces
+        // its tip's tree in place, and that tree may still be buffered by
+        // the links before it, so the request is carried out on the tip
+        // even when this link wrote nothing. Dropping it with the no-op
+        // left a chain canonicalized at its last link buffered whenever
+        // that link changed nothing, so two replicas holding the same
+        // facts named different roots.
+        let canonicalizes_tip = self.canonicalize && self.amend.is_some();
         if !changed
             && !self.allow_empty
+            && !canonicalizes_tip
             && let Some(base) = base_revision
         {
+            // The batch wrote nothing, so its spine still persists as the
+            // base's root: hand it back for the next commit to append to.
+            batch.release();
             return Ok(Outcome::Unchanged(base));
         }
 
@@ -652,7 +758,18 @@ where
             };
             let batch = batch.record(&store, self.entries).await?;
             tree = batch.seal(&store, &mut delta, self.canonicalize).await?;
-            persist(&source.archive().index(), &mut delta, env).await?;
+            // A no-op link that canonicalized a tip already in canonical
+            // form moved nothing: the tip stands, and nothing is written.
+            if !changed && *tree.root().as_bytes() == *revision.tree.hash() {
+                return Ok(Outcome::Unchanged(revision));
+            }
+            persist(
+                &source.archive().index(),
+                &source.node_cache(),
+                &mut delta,
+                env,
+            )
+            .await?;
             revision.tree = TreeReference::from(*tree.root().as_bytes());
             revision.signature = Attest::new(revision.payload()).perform(env).await?;
             return Ok(Outcome::Minted(Box::new(Minted {
@@ -687,35 +804,45 @@ where
         };
 
         // The new head's causal context: the parent's plus this commit's
-        // own version. Sourced from the parent head's published context,
-        // the line's memo, or (once, for lineages minted before heads
-        // carried contexts) the ancestry walk — so every head published
-        // from here on carries its watermark for peers to read.
+        // own version. The parent's comes from the line's memo, from the
+        // parent's tree's context region, from the parent head itself (a
+        // head minted before the region carries its whole context), or
+        // once, for lineages minted before heads carried contexts, from
+        // the ancestry walk.
+        //
+        // The successor is the one copy of the map a commit pays for: the
+        // parent's context is shared with the memo, and the new one is
+        // shared with the head's memo entry once it is published. What the
+        // commit writes is the region entries the reader would not derive
+        // (`region_writes`): none on a head of its own origin, two on
+        // another origin's head, and the whole map once, atop a parent
+        // minted before the region existed. The head itself carries none.
         let contexts = source.contexts();
-        let base_context = base_revision.as_ref().and_then(|base| base.context.clone());
-        let context = {
-            let mut context = match (base_revision.as_ref(), base_context) {
-                (None, _) => Context::new(),
-                (Some(_), Some(context)) => context,
-                (Some(base), None) => {
-                    let parent = base.version();
-                    match contexts.cached(&parent).await {
-                        Some(context) => context,
-                        None => {
-                            let history = TreeHistory::from_root_with_cache(
-                                base.tree.hash(),
-                                store.clone(),
-                                source.node_cache(),
-                            )
-                            .with_record_cache(source.records());
-                            context_of(&parent, &history).await?
-                        }
-                    }
-                }
-            };
-            context.record(version);
-            context
+        let parent_context = match base_revision.as_ref() {
+            None => None,
+            Some(base) => {
+                let history = TreeHistory::from_root_with_cache(
+                    base.tree.hash(),
+                    store.clone(),
+                    source.node_cache(),
+                )
+                .with_record_cache(source.records());
+                Some(full_context(base, &contexts, &store, &source.node_cache(), &history).await?)
+            }
         };
+        let context = {
+            let mut context = parent_context.as_deref().cloned().unwrap_or_default();
+            context.record(version);
+            Arc::new(context)
+        };
+        let region = region_writes(
+            version,
+            &context,
+            &[base_revision
+                .as_ref()
+                .zip(parent_context.as_deref())
+                .and_then(|(base, parent)| held(base, parent))],
+        );
 
         // The revision's tree root is set after the seal below (its own
         // record must enter the tree before the root is final); until then
@@ -748,7 +875,9 @@ where
         // The entries are appended to the batch's still open buffered tree:
         // they ride the same buffered write as the data, so the record costs
         // a buffer append instead of a second canonical spine-to-leaf edit.
-        let entries = record.entries(batch.manifest())?;
+        let mut entries = record.entries(batch.manifest())?;
+        // The context region's changed entries ride with the record.
+        entries.entries.extend(region);
         // The caller's machinery entries (blob-index tombstones) ride the same
         // batch as the revision record, so one seal covers data, record,
         // and entries together.
@@ -766,10 +895,16 @@ where
         // reference-counted, so nothing is copied on the way in, and
         // providers with native batching persist it in a single round trip
         // (one IndexedDB transaction).
-        persist(&source.archive().index(), &mut delta, env).await?;
+        persist(
+            &source.archive().index(),
+            &source.node_cache(),
+            &mut delta,
+            env,
+        )
+        .await?;
 
         revision.tree = TreeReference::from(*tree.root().as_bytes());
-        revision.context = Some(context.clone());
+        revision.publish_region();
         // Sign the head last: only now are the tree root and context
         // final, and the head signature is what binds them to the issuer
         // (the in-tree record cannot contain the root of the tree it
@@ -819,22 +954,28 @@ mod tests {
         let bob = "did:key:z6MkDiL3ZaJ4V7VSdQruLenZLA4RNbu6cErR5m8K5Wj99wTF";
 
         branch
-            .commit(stream::iter(vec![Instruction::Replace(Artifact {
-                the: "person/name".parse()?,
-                of: alice.parse()?,
-                is: Value::String("Alice".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "person/name".parse()?,
+                    of: alice.parse()?,
+                    is: Value::String("Alice".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::Last,
+            )]))
             .perform(&operator)
             .await?;
 
         branch
-            .commit(stream::iter(vec![Instruction::Replace(Artifact {
-                the: "person/name".parse()?,
-                of: bob.parse()?,
-                is: Value::String("Bob".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "person/name".parse()?,
+                    of: bob.parse()?,
+                    is: Value::String("Bob".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::Last,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -865,7 +1006,10 @@ mod tests {
             cause: None,
         };
 
-        let instructions = stream::iter(vec![Instruction::Assert(artifact.clone())]);
+        let instructions = stream::iter(vec![Instruction::Assert(
+            artifact.clone(),
+            dialog_artifacts::Pick::All,
+        )]);
 
         let revision = branch.commit(instructions).perform(&operator).await?;
         // The commit wrote data, so its tree is not the derived empty tree.
@@ -919,24 +1063,30 @@ mod tests {
         // A commits first, advancing the head in storage. B's cache is now
         // stale.
         writer_a
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:a".parse()?,
-                is: Value::String("Alice".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:a".parse()?,
+                    is: Value::String("Alice".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
 
         // B commits from its stale snapshot — must fail loudly, not silently
         // drop A's commit.
         let raced = writer_b
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:b".parse()?,
-                is: Value::String("Bob".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:b".parse()?,
+                    is: Value::String("Bob".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await;
         assert!(
@@ -952,12 +1102,15 @@ mod tests {
         // Recovery: refresh B's view of the head, then re-commit.
         writer_b.refresh(&operator).await?;
         writer_b
-            .commit(stream::iter(vec![Instruction::Assert(Artifact {
-                the: "user/name".parse()?,
-                of: "user:b".parse()?,
-                is: Value::String("Bob".to_string()),
-                cause: None,
-            })]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:b".parse()?,
+                    is: Value::String("Bob".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -1017,18 +1170,20 @@ mod history_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let first = branch
-            .commit(stream::iter(vec![Instruction::Assert(title(
-                "post:1", "Hej",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hej"),
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
 
         // Refresh so the next commit builds on the published head.
         branch.refresh(&operator).await?;
         let second = branch
-            .commit(stream::iter(vec![Instruction::Replace(title(
-                "post:1", "Hi",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hi"),
+                dialog_artifacts::Pick::Last,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -1085,9 +1240,10 @@ mod history_tests {
         // first-parent steps back, from the third revision to the first.
         branch.refresh(&operator).await?;
         let third = branch
-            .commit(stream::iter(vec![Instruction::Replace(title(
-                "post:1", "Hello",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hello"),
+                dialog_artifacts::Pick::Last,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1112,9 +1268,10 @@ mod history_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let revision = branch
-            .commit(stream::iter(vec![Instruction::Assert(title(
-                "post:1", "Hej",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hej"),
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
 
@@ -1159,8 +1316,8 @@ mod history_tests {
             cause: None,
         };
         for instruction in [
-            Instruction::Assert(forged.clone()),
-            Instruction::Replace(forged.clone()),
+            Instruction::Assert(forged.clone(), dialog_artifacts::Pick::All),
+            Instruction::Assert(forged.clone(), dialog_artifacts::Pick::Last),
             Instruction::Retract(forged),
         ] {
             let result = branch
@@ -1171,7 +1328,7 @@ mod history_tests {
                 matches!(
                     result,
                     Err(crate::CommitError::Artifact(
-                        DialogArtifactsError::ReservedAttribute(_)
+                        DialogArtifactsError::ReservedRelation(_)
                     ))
                 ),
                 "writes to the reserved namespace must be refused: {result:?}"
@@ -1191,9 +1348,10 @@ mod history_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let first = branch
-            .commit(stream::iter(vec![Instruction::Assert(title(
-                "post:1", "Hej",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hej"),
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1240,9 +1398,10 @@ mod history_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let first = branch
-            .commit(stream::iter(vec![Instruction::Assert(title(
-                "post:1", "Hej",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hej"),
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
         branch.refresh(&operator).await?;
@@ -1280,9 +1439,10 @@ mod history_tests {
         let repo = test_repo(&operator, &profile).await;
 
         let seed = repo.branch("main").open().perform(&operator).await?;
-        seed.commit(stream::iter(vec![Instruction::Assert(title(
-            "post:1", "Hej",
-        ))]))
+        seed.commit(stream::iter(vec![Instruction::Assert(
+            title("post:1", "Hej"),
+            dialog_artifacts::Pick::All,
+        )]))
         .perform(&operator)
         .await?;
 
@@ -1302,9 +1462,10 @@ mod history_tests {
         // where the write looks like a cardinality-one no-op. It must not
         // report success while leaving the title retracted at the head.
         let raced = reasserter
-            .commit(stream::iter(vec![Instruction::Replace(title(
-                "post:1", "Hej",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hej"),
+                dialog_artifacts::Pick::Last,
+            )]))
             .perform(&operator)
             .await;
 
@@ -1343,9 +1504,10 @@ mod history_tests {
         let branch = repo.branch("main").open().perform(&operator).await?;
 
         let revision = branch
-            .commit(stream::iter(vec![Instruction::Assert(title(
-                "post:1", "Hej",
-            ))]))
+            .commit(stream::iter(vec![Instruction::Assert(
+                title("post:1", "Hej"),
+                dialog_artifacts::Pick::All,
+            )]))
             .perform(&operator)
             .await?;
 

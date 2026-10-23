@@ -116,7 +116,28 @@ let
     }
   );
 
-  wasmAttributes = commonAttributes // {
+  # The C toolchain for wasm32, which is not the stdenv one.
+  #
+  # `ring` compiles C, and it is in the wasm graph — iroh brings quinn,
+  # which brings rustls, which brings ring — so a wasm build here has C to
+  # compile for a target the stdenv compiler cannot serve. On Linux that
+  # compiler is gcc, which has no wasm backend at all; on Darwin it is a
+  # nix-wrapped clang, and the wrapper injects hardening flags
+  # (`-fzero-call-used-regs=used-gpr`) that clang rejects for a wasm
+  # target. Nix says so itself when it happens, and suggests exactly this:
+  # use an un-wrapped compiler.
+  #
+  # Scoped to the target, so nothing native changes: cc-rs reads the
+  # `_wasm32_unknown_unknown` suffix and every other target keeps the
+  # stdenv compiler and its hardening. `llvm-ar` rather than the stdenv
+  # `ar` for the same reason — wasm object files are not what a host `ar`
+  # expects.
+  wasmCcEnv = {
+    CC_wasm32_unknown_unknown = "${pkgs.llvmPackages.clang-unwrapped}/bin/clang";
+    AR_wasm32_unknown_unknown = "${pkgs.llvmPackages.llvm}/bin/llvm-ar";
+  };
+
+  wasmAttributes = commonAttributes // wasmCcEnv // {
     CARGO_BUILD_TARGET = "wasm32-unknown-unknown";
   };
 
@@ -128,6 +149,36 @@ let
     // {
       pname = "dialog-db-workspace-wasm-deps";
       cargoExtraArgs = "--workspace --exclude wbg-pool";
+    }
+  );
+
+  # The crates a Wasm component links, built for WASI. No test runs on a
+  # WASI target, so this is what keeps them building there: a change that
+  # takes every `wasm32` build to be a browser breaks it.
+  wasiCrates = builtins.concatStringsSep " " (
+    map (crate: "-p ${crate}") [
+      "dialog-common"
+      "dialog-ucan-core"
+      "dialog-credentials"
+      "dialog-capability"
+      "dialog-storage"
+      "dialog-remote-ucan"
+      "dialog-repository"
+      "dialog-query"
+      "dialog-peer"
+    ]
+  );
+
+  wasiAttributes = commonAttributes // {
+    CARGO_BUILD_TARGET = "wasm32-wasip2";
+  };
+
+  wasiArtifacts = craneLib.buildDepsOnly (
+    wasiAttributes
+    // {
+      pname = "dialog-db-workspace-wasi-deps";
+      cargoExtraArgs = "--locked ${wasiCrates}";
+      cargoCheckExtraArgs = "";
     }
   );
 
@@ -238,6 +289,30 @@ let
       }
     );
 
+    # nextest runs no doctests, so a broken example would otherwise only
+    # surface when someone happens to run `cargo test --doc`.
+    doctest = craneLib.cargoDocTest (
+      commonAttributes
+      // {
+        pname = "dialog-db-cargo-doctest-check";
+        cargoArtifacts = nativeArtifacts;
+        cargoTestExtraArgs = "--workspace --all-features";
+        # The doctests run in the check phase, which the shared attributes
+        # turn off.
+        doCheck = true;
+      }
+    );
+
+    wasi = craneLib.mkCargoDerivation (
+      wasiAttributes
+      // {
+        pname = "dialog-db-wasi-check";
+        cargoArtifacts = wasiArtifacts;
+        buildPhaseCargoCommand = "cargo check --release --locked ${wasiCrates}";
+        doInstallCargoArtifacts = false;
+      }
+    );
+
     rustfmt = craneLib.cargoFmt {
       src = rustSource;
       pname = "dialog-db-cargo-fmt-check";
@@ -265,5 +340,6 @@ in
     cargoChecks
     wasm-bindgen-cli
     wbg-pool
+    wasmCcEnv
     ;
 }

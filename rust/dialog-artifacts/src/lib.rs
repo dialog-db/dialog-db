@@ -23,7 +23,7 @@
 //! use std::str::FromStr;
 //! use dialog_artifacts::tree::{ArtifactTree, ArtifactTreeExt, spill_cache};
 //! use dialog_artifacts::{
-//!     ArchiveDelta, Artifact, ArtifactSelector, Attribute, Entity, Instruction, Value,
+//!     ArchiveDelta, Artifact, ArtifactSelector, Entity, Instruction, Relation, Value,
 //! };
 //! use dialog_search_tree::MemoryBlocks;
 //! use futures_util::{StreamExt, stream};
@@ -37,18 +37,18 @@
 //! // Assert an artifact: the new nodes (and any spilled value) are staged
 //! // in the delta, then written out.
 //! let artifact = Artifact {
-//!     the: Attribute::from_str("profile/name")?,
+//!     the: Relation::from_str("profile/name")?,
 //!     of: Entity::new()?,
 //!     is: Value::String("Foo Bar".into()),
 //!     cause: None,
 //! };
 //! index
-//!     .apply(&blocks, &mut delta, stream::iter(vec![Instruction::Assert(artifact)]))
+//!     .apply(&blocks, &mut delta, stream::iter(vec![Instruction::Assert(artifact, dialog_artifacts::Pick::All)]))
 //!     .await?;
 //! delta.flush_into(&blocks);
 //!
 //! // Query the index
-//! let selector = ArtifactSelector::new().the(Attribute::from_str("profile/name")?);
+//! let selector = ArtifactSelector::new().the(Relation::from_str("profile/name")?);
 //! let results = index
 //!     .scan(blocks.clone(), spill_cache(), selector)
 //!     .filter_map(|view| async move { view.ok() })
@@ -65,6 +65,8 @@ mod artifacts;
 pub use artifacts::*;
 
 pub mod history;
+
+pub mod identity;
 
 mod reference;
 pub use reference::*;
@@ -98,7 +100,7 @@ pub use constants::*;
 mod key;
 pub use key::*;
 
-/// Shared tree-ops on the artifact prolly tree.
+/// Shared tree-ops on the artifact search tree.
 mod buffered;
 pub use buffered::*;
 

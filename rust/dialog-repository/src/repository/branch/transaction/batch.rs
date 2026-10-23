@@ -19,29 +19,38 @@
 //! re-run the transaction against the fresh head, minting fresh
 //! versions; nothing staged is ever rewritten.
 
-use super::{Transaction, TransactionCommit, carry_footprint, settle, touches_rules};
+use super::succession;
+use super::{
+    Transaction, TransactionCommit, carry_footprint, settle, touches_rule_facts, touches_rules,
+};
+use crate::Ephemeral;
+use crate::placement::Placements;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::branch::session::Composite;
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
     Branch, Cell, Checkpoint, CommitError, PublishError, QueryLayer, RemoteSite, Revision,
-    SelectQuery, Snapshot, SnapshotClaims, TransactionQuery, origin_of,
+    SelectQuery, Snapshot, SnapshotClaims, Staged, TransactionQuery, origin_of,
 };
 use dialog_artifacts::history::{CausalityCache, Context, ContextCache, RevisionRecord, Version};
 use dialog_artifacts::tree::WriteScope;
-use dialog_artifacts::{AssetChange, Changes, Entity, Statement};
+use dialog_artifacts::{
+    Artifact, ArtifactSelector, AssetChange, Change, Changes, Entity, Relation, Statement,
+    Update as _,
+};
 use dialog_capability::history::Origin;
 use dialog_capability::{Did, Fork, Provider};
-use dialog_common::ConditionalSync;
+use dialog_common::{ConditionalSync, Holds};
 use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::blob::Import as BlobImport;
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::blob::Size as BlobSize;
-use dialog_effects::memory::{Publish, Resolve, Version as MemoryVersion};
+use dialog_effects::memory::{Current, Publish, Resolve, Version as MemoryVersion};
 use dialog_query::query::Application;
 use dialog_search_tree::Cache;
+use std::sync::Arc;
 
 /// A staged chain of commits on a branch: minted, persisted, invisible.
 ///
@@ -91,7 +100,7 @@ pub struct TransactionBatch {
     /// verified-record memo once the head has actually advanced.
     chain: Vec<(Version, RevisionRecord)>,
     /// The chain tip's causal context, for the branch's context memo.
-    context: Option<Context>,
+    context: Option<Arc<Context>>,
     /// The branch's shared memos, seeded at publish.
     records: Cache<Version, RevisionRecord>,
     contexts: ContextCache,
@@ -99,6 +108,54 @@ pub struct TransactionBatch {
     /// links, across every round of every link. See
     /// [`induced`](Self::induced).
     induced: Changes,
+    /// The branch's session overlay, and the facts the staged links
+    /// retract that only it holds: retracted from it once the publish
+    /// lands, so what a transaction read is what its publish leaves.
+    overlay: Ephemeral,
+    overlay_retractions: Vec<Artifact>,
+}
+
+/// The facts `changes` retracts that `overlay` holds. A transaction's
+/// read hides such a fact, and the commit's retraction of it lands
+/// nothing in the tree, which never held it: the publish retracts it
+/// from the overlay, so the session's row does not come back.
+fn overlay_retractions<'a>(
+    changes: impl IntoIterator<Item = (&'a Relation, &'a Entity, &'a Change)>,
+    overlay: &Ephemeral,
+) -> Vec<Artifact> {
+    let mut retracted = Vec::new();
+    for (the, of, change) in changes {
+        let Change::Retract(value) = change else {
+            continue;
+        };
+        let selector = ArtifactSelector::new()
+            .the(the.clone())
+            .of(of.clone())
+            .is(value.clone());
+        if !overlay.scan(&selector).is_empty() {
+            retracted.push(Artifact {
+                the: the.clone(),
+                of: of.clone(),
+                is: value.clone(),
+                cause: None,
+            });
+        }
+    }
+    retracted
+}
+
+/// Retract `facts` from the session overlay, once the publish that
+/// retracted them landed.
+fn retract_from_overlay(overlay: &Ephemeral, facts: Vec<Artifact>) -> Result<(), CommitError> {
+    if facts.is_empty() {
+        return Ok(());
+    }
+    let mut changes = Changes::new();
+    for fact in facts {
+        changes.dissociate(fact.the, fact.of, fact.is);
+    }
+    overlay.apply(changes)?;
+    Ok(())
 }
 
 impl TransactionBatch {
@@ -219,6 +276,8 @@ impl BatchPublish {
             records,
             contexts,
             induced: _,
+            overlay,
+            overlay_retractions,
         } = self.batch;
         let tip = snapshot.revision();
 
@@ -234,17 +293,22 @@ impl BatchPublish {
             if actual != base_version {
                 return Err(PublishError::VersionMismatch {
                     expected: base_version,
-                    actual,
+                    current: Current::Unknown,
                 }
                 .into());
             }
-            if induction.content().as_ref() != Some(&tip) {
-                induction.publish(tip.clone()).perform(env).await?;
-            }
+            advance_watermark(&induction, &tip, Some(tip.version()), env).await?;
+            retract_from_overlay(&overlay, overlay_retractions)?;
             return Ok(tip);
         }
 
+        // The head the chain built on, by the first parent of its first
+        // link: where the watermark stands when no other writer moved it.
+        let base = chain
+            .first()
+            .and_then(|(_, record)| record.parents.first().cloned());
         head.publish(tip.clone(), env).await?;
+        retract_from_overlay(&overlay, overlay_retractions)?;
 
         // Only now that the head has actually advanced do the staged
         // records and context enter the branch's shared memos: they are
@@ -259,11 +323,50 @@ impl BatchPublish {
 
         // Advance the induction watermark: every staged commit ran
         // commit-time induction, so the published head is fully induced.
-        if induction.content().as_ref() != Some(&tip) {
-            induction.publish(tip.clone()).perform(env).await?;
-        }
+        advance_watermark(&induction, &tip, base, env).await?;
 
         Ok(tip)
+    }
+}
+
+/// Advance the induction watermark `induction` to `tip`, the head this
+/// writer has just landed, built on the head whose version is `base`.
+///
+/// The watermark is local to a replica, but one replica can have more
+/// than one writer: two processes over one store, say. In the window
+/// after the head moved and before this write, another writer can land
+/// a commit on `tip` and advance the watermark itself. A lost CAS here
+/// must not fail a commit whose head has already landed. So the cell is
+/// read again, and moved to `tip` only while it still stands at `base`,
+/// or at no revision. Anywhere else, another writer moved it on, or left
+/// it behind, which the next inducing instant catches up over.
+async fn advance_watermark<Env>(
+    induction: &Cell<Revision>,
+    tip: &Revision,
+    base: Option<Version>,
+    env: &Env,
+) -> Result<(), CommitError>
+where
+    Env: Provider<Publish> + Provider<Resolve> + ConditionalSync,
+{
+    if induction.content().as_ref() == Some(tip) {
+        return Ok(());
+    }
+    match induction.publish(tip.clone()).perform(env).await {
+        Err(PublishError::VersionMismatch { .. }) => {}
+        other => return other.map_err(CommitError::from),
+    }
+    induction.resolve().perform(env).await?;
+    if induction.content().as_ref() == Some(tip) {
+        return Ok(());
+    }
+    let standing = induction.content().map(|revision| revision.version());
+    if standing.is_some() && standing != base {
+        return Ok(());
+    }
+    match induction.publish(tip.clone()).perform(env).await {
+        Err(PublishError::VersionMismatch { .. }) => Ok(()),
+        other => other.map_err(CommitError::from),
     }
 }
 
@@ -324,6 +427,7 @@ impl TransactionPublish<&Branch> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -351,6 +455,7 @@ impl TransactionPublish<TransactionBatch> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -391,6 +496,7 @@ impl TransactionCommit<&Branch> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -410,6 +516,14 @@ impl TransactionCommit<&Branch> {
         // it for the links that follow.
         let authority = Identify.perform(env).await?;
         let (line, _) = branch.commit_identity(authority.profile(), &authority.did());
+        let overlay = branch.overlay().clone();
+        let retractions = overlay_retractions(
+            self.changes
+                .log()
+                .iter()
+                .map(|(the, of, change)| (the, of, change)),
+            &overlay,
+        );
 
         let (outcome, induced) = Box::pin(mint_link(
             SourceRef::Branch(branch),
@@ -446,6 +560,8 @@ impl TransactionCommit<&Branch> {
                 records: branch.records(),
                 contexts: branch.contexts(),
                 induced,
+                overlay,
+                overlay_retractions: retractions,
             },
             Outcome::Minted(minted) => {
                 let Minted {
@@ -468,6 +584,8 @@ impl TransactionCommit<&Branch> {
                     records: branch.records(),
                     contexts: branch.contexts(),
                     induced,
+                    overlay,
+                    overlay_retractions: retractions,
                 }
             }
         })
@@ -493,6 +611,7 @@ impl TransactionCommit<TransactionBatch> {
             + Provider<dialog_artifacts::Preload>
             + Provider<dialog_artifacts::Speculation>
             + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
             + ConditionalSync
             + 'static,
     {
@@ -511,6 +630,13 @@ impl TransactionCommit<TransactionBatch> {
             _ => None,
         };
         let amending = amend.is_some();
+        let retractions = overlay_retractions(
+            self.changes
+                .log()
+                .iter()
+                .map(|(the, of, change)| (the, of, change)),
+            &batch.overlay,
+        );
 
         let (outcome, induced) = Box::pin(mint_link(
             SourceRef::Snapshot(&batch.snapshot),
@@ -525,6 +651,7 @@ impl TransactionCommit<TransactionBatch> {
         ))
         .await?;
         induced.assert(&mut batch.induced);
+        batch.overlay_retractions.extend(retractions);
 
         if let Outcome::Minted(minted) = outcome {
             let Minted {
@@ -556,6 +683,22 @@ impl TransactionCommit<TransactionBatch> {
     }
 }
 
+/// NaN is not a value: a commit that would write one is refused before
+/// anything lands, as deserialization and the rule compiler refuse it.
+pub(crate) fn refuse_nan<'a>(changes: impl Iterator<Item = &'a Change>) -> Result<(), CommitError> {
+    for change in changes {
+        if let Change::Assert(dialog_artifacts::Value::Float(float), _) = change
+            && float.is_nan()
+        {
+            return Err(dialog_artifacts::DialogArtifactsError::InvalidValue(
+                "NaN is not a value".into(),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// Mint one staged link: run commit-time induction over the batch, then
 /// [`Mint`] the settled changes on the line `line` names, carrying the
 /// trigger footprint forward. Nothing is published or adopted — the
@@ -566,7 +709,7 @@ async fn mint_link<Env>(
     source: SourceRef<'_>,
     base: Option<Revision>,
     line: impl FnOnce(&Did, &Did) -> (Entity, Origin),
-    changes: Changes,
+    changes: Staged,
     transients: Changes,
     allow_empty: bool,
     canonicalize: bool,
@@ -587,9 +730,21 @@ where
         + Provider<dialog_artifacts::Preload>
         + Provider<dialog_artifacts::Speculation>
         + Provider<Fork<RemoteSite, Resolve>>
+        + Holds
         + ConditionalSync
         + 'static,
 {
+    refuse_nan(changes.log().iter().map(|(_, _, change)| change))?;
+    let operator = Identify.perform(env).await?;
+    let stores = Placements::stores(source, &changes, env).await?;
+    let changes = Box::pin(succession::settle(
+        &Composite::of(source.to_source()),
+        QueryLayer::from(source).overlay(&operator),
+        &changes,
+        &stores,
+        env,
+    ))
+    .await?;
     let settled = settle(
         source,
         &Composite::of(source.to_source()),
@@ -651,6 +806,7 @@ where
         + 'static,
 {
     let touches = touches_rules(&changes);
+    let touches_rule_facts = touches_rule_facts(&changes);
     let previous = base.clone();
     let machinery = store_assets(source, assets, env).await?;
     let outcome = Mint {
@@ -663,13 +819,20 @@ where
         allow_empty,
         canonicalize,
         amend,
+        rebuild: None,
     }
     .perform(env, line)
     .await?;
-    if let Outcome::Minted(minted) = &outcome
-        && !touches
-    {
-        carry_footprint(&source.rule_cache(), previous.as_ref(), &minted.revision);
+    if let Outcome::Minted(minted) = &outcome {
+        if !touches {
+            carry_footprint(&source.rule_cache(), previous.as_ref(), &minted.revision);
+        }
+        if !touches_rule_facts {
+            source.rule_cache().carry_rules_root(
+                previous.as_ref().map(|revision| *revision.tree.hash()),
+                Some(*minted.revision.tree.hash()),
+            );
+        }
     }
     Ok(outcome)
 }
@@ -714,6 +877,11 @@ impl TransactionBatch {
         let pinned = base.clone();
         let mut changes = changes;
         let assets = changes.take_assets();
+        let overlay = branch.overlay().clone();
+        let retractions = overlay_retractions(
+            changes.iter().map(|(of, the, change)| (the, of, change)),
+            &overlay,
+        );
         let outcome = Box::pin(mint(
             SourceRef::Pinned(branch, pinned.as_ref()),
             base,
@@ -746,6 +914,8 @@ impl TransactionBatch {
                 records: branch.records(),
                 contexts: branch.contexts(),
                 induced: Changes::new(),
+                overlay,
+                overlay_retractions: retractions,
             },
             Outcome::Minted(minted) => {
                 let Minted {
@@ -768,6 +938,8 @@ impl TransactionBatch {
                     records: branch.records(),
                     contexts: branch.contexts(),
                     induced: Changes::new(),
+                    overlay,
+                    overlay_retractions: retractions,
                 }
             }
         })
@@ -801,6 +973,13 @@ impl TransactionBatch {
         let line = lineage.expect("a transaction batch's line is seeded at construction");
         let mut changes = changes;
         let assets = changes.take_assets();
+        // A link that retracts a fact only the session overlay holds
+        // takes it from the overlay once the chain publishes, as the
+        // first link of the chain does.
+        let retractions = overlay_retractions(
+            changes.iter().map(|(of, the, change)| (the, of, change)),
+            &self.overlay,
+        );
         let outcome = Box::pin(mint(
             SourceRef::Snapshot(&self.snapshot),
             Some(base.clone()),
@@ -832,6 +1011,9 @@ impl TransactionBatch {
             self.chain.push((version, record));
             self.context = Some(context);
         }
+        // Whether or not the tree changed: a retraction of a fact only
+        // the overlay holds changes no tree.
+        self.overlay_retractions.extend(retractions);
         Ok(self.snapshot.revision())
     }
 }
@@ -1045,6 +1227,167 @@ mod tests {
         Ok(())
     }
 
+    /// A batch publishes while another writer has left the watermark behind
+    /// its base: the head lands, and the watermark is not dragged forward
+    /// from where the other writer left it, since it stands neither at the
+    /// base nor at no revision. A watermark left behind is caught up at the
+    /// next inducing instant.
+    #[dialog_common::test]
+    async fn it_publishes_a_batch_past_a_watermark_left_behind() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let genesis = branch
+            .transaction()
+            .assert(note("genesis")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let batch = branch
+            .transaction()
+            .assert(note("staged")?)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let tip = batch.revision();
+
+        // Another writer moves the watermark back to `genesis`.
+        let other = repo.branch("main").induction();
+        other.resolve().perform(&operator).await?;
+        other.publish(genesis.clone()).perform(&operator).await?;
+
+        let head = batch.publish().perform(&operator).await?;
+        assert_eq!(head, tip);
+        assert_eq!(branch.revision(), Some(tip));
+
+        let watermark = repo.branch("main").induction();
+        watermark.resolve().perform(&operator).await?;
+        assert_eq!(watermark.content(), Some(genesis));
+        Ok(())
+    }
+
+    /// Two writers over one replica: the first lands `tip` on `seed`, and
+    /// before it advances the watermark, the second lands `tip2` on `tip`
+    /// and advances the watermark to `tip2`. The first writer's advance
+    /// loses its compare-and-set against a cell it last saw at `seed`; it
+    /// does not fail, and leaves the watermark at `tip2`, past its own
+    /// head.
+    #[dialog_common::test]
+    async fn it_leaves_a_watermark_another_writer_moved_past_the_tip() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let seed = branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        // The first writer's view of the watermark, read before the moves.
+        let stale = repo.branch("main").induction();
+        stale.resolve().perform(&operator).await?;
+        assert_eq!(stale.content(), Some(seed.clone()));
+
+        let tip = branch
+            .transaction()
+            .assert(note("tip")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        // The second writer, through a handle of its own, lands `tip2` on
+        // `tip` and advances the watermark to it.
+        let other = repo.branch("main").open().perform(&operator).await?;
+        let tip2 = other
+            .transaction()
+            .assert(note("tip2")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let standing = repo.branch("main").induction();
+        standing.resolve().perform(&operator).await?;
+        assert_eq!(
+            standing.content(),
+            Some(tip2.clone()),
+            "the other writer moved it on"
+        );
+
+        super::advance_watermark(&stale, &tip, Some(seed.version()), &operator).await?;
+
+        let watermark = repo.branch("main").induction();
+        watermark.resolve().perform(&operator).await?;
+        assert_eq!(watermark.content(), Some(tip2));
+        Ok(())
+    }
+
+    /// A writer whose view of the watermark is behind its head's base loses
+    /// its first compare-and-set to another writer that advanced the
+    /// watermark to that base. Read again, the cell stands at the base, so
+    /// the writer publishes again and lands the watermark at its tip.
+    #[dialog_common::test]
+    async fn it_advances_a_watermark_another_writer_left_at_the_base() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let seed = branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        // The writer's view of the watermark, read while it stood at `seed`.
+        let stale = repo.branch("main").induction();
+        stale.resolve().perform(&operator).await?;
+        assert_eq!(stale.content(), Some(seed));
+
+        // Another writer lands `base` and advances the watermark to it.
+        let base = branch
+            .transaction()
+            .assert(note("base")?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        // The writer's own head, built on `base`.
+        let tip = branch
+            .transaction()
+            .assert(note("tip")?)
+            .commit()
+            .perform(&operator)
+            .await?
+            .revision();
+
+        let standing = repo.branch("main").induction();
+        standing.resolve().perform(&operator).await?;
+        assert_eq!(
+            standing.content(),
+            Some(base.clone()),
+            "the other writer left it at the base"
+        );
+
+        super::advance_watermark(&stale, &tip, Some(base.version()), &operator).await?;
+
+        let watermark = repo.branch("main").induction();
+        watermark.resolve().perform(&operator).await?;
+        assert_eq!(watermark.content(), Some(tip));
+        Ok(())
+    }
+
     /// A virgin branch stages a genesis chain: nothing exists on the
     /// branch until the batch publishes its first-ever head.
     #[dialog_common::test]
@@ -1218,17 +1561,22 @@ mod tests {
     /// nothing.
     #[dialog_common::test]
     async fn it_folds_history_across_amends() -> Result<()> {
-        use dialog_artifacts::{Attribute, Changes, Update as _, Value};
+        use dialog_artifacts::{Changes, Relation, Update as _, Value};
 
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let branch = repo.branch("main").open().perform(&operator).await?;
 
-        let the: Attribute = "note/body".parse()?;
+        let the: Relation = "note/body".parse()?;
         let of = dialog_artifacts::Entity::new()?;
         let replace = |value: &str| {
             let mut changes = Changes::new();
-            changes.associate_unique(the.clone(), of.clone(), Value::String(value.into()));
+            changes.associate(
+                the.clone(),
+                of.clone(),
+                Value::String(value.into()),
+                dialog_artifacts::Pick::Last,
+            );
             changes
         };
         let retract = |value: &str| {
@@ -1273,6 +1621,93 @@ mod tests {
             whole.revision().tree,
             amended.revision().tree,
             "history folds across amends as it folds within a commit"
+        );
+        Ok(())
+    }
+
+    /// A chain canonicalized only at its last link reaches the canonical
+    /// tree even when that link changes nothing: the canonicalize rides the
+    /// amend, which replaces the tip's tree in place, so it is never dropped
+    /// with the no-op.
+    #[dialog_common::test]
+    async fn it_canonicalizes_an_amend_that_changes_nothing() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // The same two links on the same head: the chains mint one
+        // version, and differ only in when they canonicalized. The second
+        // link retracts a fact the chain never held, so it changes nothing.
+        let (seed, absent) = (note("seed")?, note("absent")?);
+        let every_link = branch
+            .transaction()
+            .assert(seed.clone())
+            .commit()
+            .canonicalize()
+            .perform(&operator)
+            .await?
+            .retract(absent.clone())
+            .commit()
+            .amend()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+        let last_link = branch
+            .transaction()
+            .assert(seed)
+            .commit()
+            .perform(&operator)
+            .await?
+            .retract(absent)
+            .commit()
+            .amend()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(every_link.version(), last_link.version());
+        assert_eq!(
+            every_link.revision().tree,
+            last_link.revision().tree,
+            "a chain canonicalized at its last link reaches the canonical tree \
+             whether or not that link changed anything"
+        );
+        Ok(())
+    }
+
+    /// An amend that changes nothing leaves the line's live spine held, keyed
+    /// by the tip's root, so the next link appends to it instead of opening
+    /// the tip's root frame from bytes again.
+    #[dialog_common::test]
+    async fn it_keeps_the_spine_across_an_amend_that_changes_nothing() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let staged = branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let root = dialog_common::Blake3Hash::from(*staged.revision().tree.hash());
+        assert_eq!(branch.spine().root(), Some(root.clone()));
+
+        let amended = staged
+            .retract(note("absent")?)
+            .commit()
+            .amend()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            dialog_common::Blake3Hash::from(*amended.revision().tree.hash()),
+            root,
+            "an amend that changes nothing keeps the tip"
+        );
+        assert_eq!(
+            branch.spine().root(),
+            Some(root),
+            "the spine is held for the next link"
         );
         Ok(())
     }

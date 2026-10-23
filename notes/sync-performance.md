@@ -3,7 +3,8 @@
 Status: audit record, 2026-09-01; updated 2026-09-09 (finding 4 added and
 resolved). Measurements from the `dialog-soak` harness (`rust/dialog-soak`;
 `soak sweep` / `soak compare` subcommands); baselines under
-`soak/baseline`; the nightly `soak:sync` arm gates regressions.
+`soak/baseline`; the nightly `soak:sync` arm gates regressions, and the
+pull-request `Replication gate` job runs the `none` profile per PR.
 
 ## Why this audit exists
 

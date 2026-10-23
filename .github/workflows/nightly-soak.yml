@@ -76,8 +76,16 @@ jobs:
         with:
           name: tonk-ops
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          # Only main writes the cache: an upload must not fail a PR's
+          # checks, and an unmerged branch must not write what main reads.
+          skipPush: ${{ github.ref != 'refs/heads/main' }}
       # Knobs exported here are inherited by the menu command inside
       # `nix develop`; without an override the command's own defaults apply.
+      #
+      # CARGO_HOME must live on the /nix volume, not under $HOME: the
+      # arms run cargo directly, and nothing-but-nix's background purge
+      # deletes $HOME/.cargo while cargo may be extracting into it. See
+      # the Perf gate in test.yml and #638.
       - name: 'Run soak arm'
         shell: bash
         run: |
@@ -88,6 +96,9 @@ jobs:
           else
             echo "soak arm: ${{ matrix.name }} (default knobs)"
           fi
+          sudo mkdir -p /nix/cargo
+          sudo chown "$(id -u):$(id -g)" /nix/cargo
           nix develop \
             --accept-flake-config \
+            --set-env-var CARGO_HOME /nix/cargo \
             --command ${{ matrix.command }}

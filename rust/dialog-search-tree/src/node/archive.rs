@@ -87,7 +87,7 @@ where
     /// The child at `at`, materialized as an owned [`Link`].
     pub fn link_at(&self, at: usize) -> Result<Link, DialogSearchTreeError> {
         Ok(Link {
-            separator: self.separator(at)?,
+            separator: self.separator(at)?.into(),
             node: self.hash_at(at)?.clone(),
             scale: self.scale_at(at)?,
         })
@@ -645,8 +645,8 @@ mod tests {
     use dialog_common::Blake3Hash;
 
     use crate::{
-        ColumnData, Entry, Link, MIXED_LAYOUT, Manifest, NoveltyBuffer, NoveltyEntry, NoveltyOp,
-        PersistentIndex, PersistentNode, PersistentNodeBody, PersistentSegment, Scale,
+        ColumnData, Entry, Link, MIXED_LAYOUT, Manifest, NUMBER_BAND, NoveltyBuffer, NoveltyEntry,
+        NoveltyOp, PersistentIndex, PersistentNode, PersistentNodeBody, PersistentSegment, Scale,
         TAGGED_LAYOUT,
     };
 
@@ -664,10 +664,7 @@ mod tests {
     fn segment_node(keys: &[[u8; 8]]) -> Result<TestNode> {
         let entries: Vec<Entry<[u8; 8], Vec<u8>>> = keys
             .iter()
-            .map(|&key| Entry {
-                key,
-                value: key.to_vec(),
-            })
+            .map(|&key| Entry::new(key, key.to_vec()))
             .collect();
         let body = PersistentNodeBody::segment_from_entries(entries, Manifest::default())?;
         Ok(PersistentNode::try_from(&body)?)
@@ -682,7 +679,7 @@ mod tests {
             .iter()
             .zip(scales)
             .map(|(separator, scale)| Link {
-                separator: separator.to_vec(),
+                separator: separator.to_vec().into(),
                 node: Blake3Hash::hash(separator),
                 scale: *scale,
             })
@@ -1058,10 +1055,7 @@ mod tests {
         // decode paths trust `count` and silently drop the second entry.
         let entries: Vec<Entry<[u8; 8], Vec<u8>>> = [key("a"), key("b")]
             .into_iter()
-            .map(|k| Entry {
-                key: k,
-                value: k.to_vec(),
-            })
+            .map(|k| Entry::new(k, k.to_vec()))
             .collect();
         let body = PersistentNodeBody::segment_from_entries(entries, Manifest::default())?;
         let Some(mut segment) = body.into_segment() else {
@@ -1144,10 +1138,7 @@ mod tests {
             }
         }
 
-        let entries = vec![Entry {
-            key: BadKey([1, 2, 3, 4]),
-            value: vec![0u8],
-        }];
+        let entries = vec![Entry::new(BadKey([1, 2, 3, 4]), vec![0u8])];
         assert!(PersistentSegment::from_entries(entries).is_err());
         Ok(())
     }
@@ -1184,10 +1175,7 @@ mod tests {
         };
         let entries: Vec<Entry<[u8; 8], Vec<u8>>> = [key("x")]
             .into_iter()
-            .map(|k| Entry {
-                key: k,
-                value: k.to_vec(),
-            })
+            .map(|k| Entry::new(k, k.to_vec()))
             .collect();
         let body = PersistentNodeBody::segment_from_entries(entries, manifest.clone())?;
         let node = TestNode::try_from(&body)?;
@@ -1197,28 +1185,47 @@ mod tests {
 
     /// A node is written in the tagged layout: version, kind, header length,
     /// the manifest's fields, zero padding to 16 bytes, then the body. The
-    /// default manifest writes no fields at all.
+    /// default manifest writes one field, the number band (`value_encoding`,
+    /// code `0x05`, value 1), which is what a build before the band trips
+    /// on; the table defaults write no fields at all.
     #[dialog_common::test]
     async fn it_writes_the_tagged_layout() -> Result<()> {
         let segment = segment_node(&[key("a")])?;
         assert_eq!(segment.layout_version(), TAGGED_LAYOUT);
         assert_eq!(
             &segment.buffer().as_ref()[..16],
-            &[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            &[
+                2,
+                0,
+                3,
+                0x05,
+                1,
+                NUMBER_BAND as u8,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+            ]
         );
 
         let index = index_node(&[b"", b"m"])?;
         assert_eq!(index.layout_version(), TAGGED_LAYOUT);
-        assert_eq!(&index.buffer().as_ref()[..3], &[2, 1, 0]);
+        assert_eq!(
+            &index.buffer().as_ref()[..6],
+            &[2, 1, 3, 0x05, 1, NUMBER_BAND as u8]
+        );
 
         let manifest = Manifest {
             fanout_n: 4,
             ..Manifest::decode(&[])?
         };
-        let entries = vec![Entry {
-            key: key("a"),
-            value: vec![1],
-        }];
+        let entries = vec![Entry::new(key("a"), vec![1])];
         let body = PersistentNodeBody::segment_from_entries(entries, manifest.clone())?;
         let node = TestNode::try_from(&body)?;
         assert_eq!(
@@ -1256,10 +1263,7 @@ mod tests {
             vec![(0x40, &[7u8][..])]
         );
 
-        let entries = vec![Entry {
-            key: key("b"),
-            value: vec![2],
-        }];
+        let entries = vec![Entry::new(key("b"), vec![2])];
         let rewritten = TestNode::try_from(&PersistentNodeBody::segment_from_entries(
             entries, manifest,
         )?)?;
@@ -1304,7 +1308,7 @@ mod tests {
         let links: Vec<Link> = separators
             .iter()
             .map(|separator| Link {
-                separator: separator.to_vec(),
+                separator: separator.to_vec().into(),
                 node: Blake3Hash::hash(separator),
                 scale: Scale::EMPTY,
             })
@@ -1503,7 +1507,7 @@ mod tests {
         // Both forms round-trip exactly through the archived node bytes.
         for novelty in [uniform, straddling] {
             let links = vec![Link {
-                separator: Vec::new(),
+                separator: Vec::new().into(),
                 node: Blake3Hash::hash(b"child"),
                 scale: Scale::EMPTY,
             }];
@@ -1528,12 +1532,12 @@ mod tests {
         let well_formed = |novelty: Vec<NoveltyBuffer<Vec<u8>>>| -> Result<TestNode> {
             let mut index = PersistentIndex::from_links(vec![
                 Link {
-                    separator: b"".to_vec(),
+                    separator: b"".to_vec().into(),
                     node: Blake3Hash::hash(b"left"),
                     scale: Scale::EMPTY,
                 },
                 Link {
-                    separator: b"g".to_vec(),
+                    separator: b"g".to_vec().into(),
                     node: Blake3Hash::hash(b"right"),
                     scale: Scale::EMPTY,
                 },

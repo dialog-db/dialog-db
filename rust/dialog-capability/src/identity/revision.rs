@@ -7,6 +7,7 @@
 //! `RevisionRecord` lives in `dialog-repository` as `RevisionExt`, because
 //! those types sit above this crate.
 
+use std::cmp::Ordering;
 use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 
 use base58::ToBase58;
@@ -15,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use crate::Did;
 
 use super::Entity;
-use crate::history::{Context, Edition, HistoryError, Origin, Version, verify_issuer_signature};
+use crate::history::{
+    Context, Edition, HistoryError, Origin, Version, Watermark, verify_issuer_signature,
+};
 
 /// The raw 32-byte Blake3 hash a [`TreeReference`] wraps. Kept as a
 /// bare array (not a wrapper type) so the wire form is a plain byte
@@ -111,19 +114,24 @@ pub struct Revision {
     /// revision record (`RevisionRecord::parents`), not on the head.
     pub edition: Edition,
 
-    /// The causal context (per-origin watermark) of this revision's
-    /// ancestry, itself included. Publishing it with the head is what
-    /// lets a peer read a replica's knowledge without walking its log:
-    /// pull seeds its context memo from it, skips upstreams whose
-    /// context is included in ours (nothing new), and adopts an
-    /// upstream's tree wholesale when its context includes ours and we
-    /// have no local novelty. Covered by the head signature (see
-    /// [`Revision::payload`]), so adopting it is as trustworthy as
-    /// adopting the head. `None` on heads minted before the field
-    /// existed; readers fall back to deriving the context by the
-    /// ancestry walk.
+    /// The whole causal context (per-origin watermark) of this revision's
+    /// ancestry, itself included, on a head minted before the context
+    /// moved into the tree. Heads minted since carry none, and say so with
+    /// [`region`](Revision::region); a head minted before heads carried a
+    /// context carries neither, and readers derive its context by the
+    /// ancestry walk. Covered by the head signature (see
+    /// [`Revision::payload`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<Context>,
+
+    /// Whether this head's causal context is in its tree's context region,
+    /// which is how every head minted since the region existed carries it.
+    /// The region holds every origin's watermark exactly except this
+    /// head's own, which [`Revision::context_from_region`] derives from the
+    /// head's edition. Covered by the head signature, so a head cannot be
+    /// read as one of the other two shapes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub region: bool,
 
     /// The issuer's Ed25519 signature over [`Revision::payload`], with the
     /// key the issuer DID names (`did:key`). This is what binds the tree
@@ -145,6 +153,7 @@ impl Revision {
             tree,
             edition: Edition::GENESIS,
             context: None,
+            region: false,
             signature: Vec::new(),
         }
     }
@@ -169,6 +178,7 @@ impl Revision {
             tree,
             edition: self.edition.successor(),
             context: None,
+            region: false,
             signature: Vec::new(),
         }
     }
@@ -195,8 +205,68 @@ impl Revision {
             tree,
             edition: self.edition.max(upstream.edition).successor(),
             context: None,
+            region: false,
             signature: Vec::new(),
         }
+    }
+
+    /// Mark this head as carrying its causal context in its tree's context
+    /// region, the shape every head is minted in. The caller writes the
+    /// region entries the head needs (see `history::region_writes` in
+    /// `dialog-artifacts`).
+    pub fn publish_region(&mut self) {
+        self.context = None;
+        self.region = true;
+    }
+
+    /// The head's whole causal context, when the head carries it inline:
+    /// a head minted before the context moved into the tree. `None` for a
+    /// head whose context is in its tree's region, and for one minted
+    /// before heads carried a context.
+    pub fn inline_context(&self) -> Option<&Context> {
+        match self.region {
+            true => None,
+            false => self.context.as_ref(),
+        }
+    }
+
+    /// This head's full causal context, from `region`, the entries its
+    /// tree's context region holds.
+    ///
+    /// The region holds every origin's watermark exactly except this
+    /// head's own. Along one origin's own chain of commits the edition and
+    /// the revision count each rise by one per commit, so the region keeps
+    /// the entry from where the chain began and the reader brings it up to
+    /// the head: `(head edition, count + head edition - stored edition)`.
+    /// A commit whose parent head has the same origin then writes nothing
+    /// to the region, and every head that breaks the chain (a merge, or a
+    /// commit on another origin's head) writes the entries it changes.
+    ///
+    /// A region without an entry for this head's origin, or with one above
+    /// the head's edition, is not one any head minted, and is refused; so
+    /// is a derived entry outside [`Watermark::check`]'s bounds.
+    pub fn context_from_region(&self, mut region: Context) -> Result<Context, HistoryError> {
+        let version = self.version();
+        let refuse = |why: String| Err(HistoryError::InvalidReference(why));
+        let Some(stored) = region.get(&version.origin).copied() else {
+            return refuse(format!(
+                "the context region of head {version} holds no entry for its own origin"
+            ));
+        };
+        let Some(run) = self.edition.value().checked_sub(stored.edition.value()) else {
+            return refuse(format!(
+                "the context region of head {version} holds its own origin at edition {}, \
+                 above the head",
+                stored.edition
+            ));
+        };
+        let derived = Watermark {
+            edition: self.edition,
+            count: stored.count.saturating_add(run),
+        };
+        derived.check()?;
+        region.set(version.origin, derived);
+        Ok(region)
     }
 
     /// The [`Origin`] of this revision: the branch-scoped identity of its
@@ -228,17 +298,24 @@ impl Revision {
     /// (length (8, big-endian) ++ UTF-8) for branch, issuer
     /// tree (32)
     /// edition (8, big-endian)
-    /// context, when present:
+    /// whole context inline (a head minted before the region):
     ///     0x01 ++ entry count (8, big-endian)
     ///          ++ entries (origin (32) ++ edition (8, big-endian)
     ///                      ++ revision count (8, big-endian), sorted)
+    /// context in the tree's region:
+    ///     0x02
     /// ```
     ///
-    /// A head without a context appends nothing after the edition (the
-    /// pre-context payload shape), and a head with one appends the `0x01`
-    /// marker plus the sorted watermark entries. The two shapes differ in
-    /// length for any fixed prefix, so the encoding stays injective: a
-    /// signature over one can never validate the other.
+    /// A head minted before heads carried a context appends nothing after
+    /// the edition, one carrying its whole context inline appends `0x01`
+    /// and its entries, and one whose context is in its tree's region
+    /// appends the lone `0x02`. The marker byte sits at the same offset in
+    /// the two shapes that have one, and the pre-context shape ends where
+    /// they begin, so the encoding stays injective: a signature over one
+    /// shape never validates another. A head claiming both a region and an
+    /// inline context is refused by [`Revision::verify`]; it signs as the
+    /// `0x02` marker followed by the entries, so the payload stays total
+    /// and injective.
     pub fn payload(&self) -> Vec<u8> {
         let mut bytes = HEAD_SIGNING_DOMAIN.to_vec();
         for field in [self.branch.as_str(), self.issuer.as_str()] {
@@ -247,13 +324,25 @@ impl Revision {
         }
         bytes.extend_from_slice(self.tree.hash());
         bytes.extend_from_slice(&self.edition.key_bytes());
-        if let Some(context) = &self.context {
-            bytes.push(0x01);
+        let entries = |bytes: &mut Vec<u8>, context: &Context| {
             bytes.extend_from_slice(&(context.len() as u64).to_be_bytes());
             for (origin, watermark) in context.iter() {
                 bytes.extend_from_slice(&origin.0);
                 bytes.extend_from_slice(&watermark.edition.key_bytes());
                 bytes.extend_from_slice(&watermark.count.to_be_bytes());
+            }
+        };
+        match (self.region, &self.context) {
+            (false, None) => {}
+            (false, Some(context)) => {
+                bytes.push(0x01);
+                entries(&mut bytes, context);
+            }
+            (true, context) => {
+                bytes.push(0x02);
+                if let Some(context) = context {
+                    entries(&mut bytes, context);
+                }
             }
         }
         bytes
@@ -292,23 +381,75 @@ impl Revision {
         ceiling(&self.edition, "head")?;
         if let Some(context) = &self.context {
             for (_, watermark) in context.iter() {
-                ceiling(&watermark.edition, "watermark")?;
-                // A count can never exceed the observed prefix's depth:
-                // an origin's chain has strictly increasing editions, so
-                // at most `edition + 1` revisions fit below the
-                // watermark. A hostile inflated count would misroute
-                // every peer's merge direction.
-                if watermark.count > watermark.edition.value().saturating_add(1) {
-                    return Err(HistoryError::InvalidReference(format!(
-                        "watermark count {} exceeds its edition {} — more revisions \
-                         than the chain can hold",
-                        watermark.count, watermark.edition
-                    )));
-                }
+                watermark.check()?;
             }
+        }
+        if self.region && self.context.is_some() {
+            return Err(HistoryError::InvalidReference(
+                "a head carries both an inline context and a context region".into(),
+            ));
         }
         Ok(())
     }
+
+    /// Where this head stands relative to `other`, another head of the
+    /// same branch.
+    ///
+    /// A branch's head moves only by a fast-forward publish, so every
+    /// head it takes was built on the one it replaced: each head's
+    /// context includes the one before, and its edition is higher.
+    /// Comparing contexts orders two heads without trusting whoever
+    /// delivered them, which is what lets a head observed out of order
+    /// be recognized as stale.
+    ///
+    /// [`Precedence::Concurrent`] means neither head built on the other:
+    /// the branch was reset, or recreated, or written by something other
+    /// than a fast-forward publish, and neither head says which is newer.
+    ///
+    /// Two heads that carry their whole contexts inline are compared by
+    /// them. Two heads of one origin are ordered exactly by edition, since
+    /// an origin's revisions form one chain. Any other pair, which includes
+    /// every pair where a head keeps its context in its tree's region, is
+    /// compared without reading a block of either tree, as the cell watcher
+    /// needs, and so is answered only as far as the heads alone allow: a
+    /// head at a higher edition may have built on the other, and is taken
+    /// to be [`After`](Precedence::After); one at or below the other's
+    /// edition cannot be known to be older, and is
+    /// [`Concurrent`](Precedence::Concurrent). [`Before`](Precedence::Before)
+    /// is never answered across origins without contexts, so a head a
+    /// branch was reset to is never mistaken for a stale one.
+    pub fn precedence(&self, other: &Revision) -> Precedence {
+        let same = self.tree == other.tree && self.version() == other.version();
+        if let (Some(ours), Some(theirs)) = (self.inline_context(), other.inline_context()) {
+            return match (ours.includes(theirs), theirs.includes(ours)) {
+                (true, true) if same => Precedence::Same,
+                (true, false) => Precedence::After,
+                (false, true) => Precedence::Before,
+                _ => Precedence::Concurrent,
+            };
+        }
+        let one_chain = self.origin() == other.origin();
+        match self.edition.cmp(&other.edition) {
+            Ordering::Greater => Precedence::After,
+            Ordering::Less if one_chain => Precedence::Before,
+            Ordering::Equal if same => Precedence::Same,
+            Ordering::Less | Ordering::Equal => Precedence::Concurrent,
+        }
+    }
+}
+
+/// Where one head of a branch stands relative to another, as
+/// [`Revision::precedence`] answers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Precedence {
+    /// The same head.
+    Same,
+    /// An earlier head: the other one built on it.
+    Before,
+    /// A later head: it built on the other one.
+    After,
+    /// Neither built on the other.
+    Concurrent,
 }
 
 /// The domain tag opening every head signing payload. Signing payload
@@ -319,12 +460,7 @@ impl Revision {
 /// from being a prefix of another.
 pub const HEAD_SIGNING_DOMAIN: &[u8] = b"dialog/head@1\n";
 
-/// The highest edition a verified head (or any watermark entry it
-/// publishes) may carry. Editions grow by one per commit or merge, so no
-/// legitimate chain approaches 2^62 sequential operations; anything at or
-/// above it is protocol corruption, refused at the trust boundary before
-/// the saturating successor arithmetic could ever be reached.
-pub const EDITION_CEILING: u64 = 1 << 62;
+pub use crate::history::EDITION_CEILING;
 
 #[cfg(test)]
 mod tests {
@@ -435,6 +571,268 @@ mod tests {
         assert!(
             head.verify().is_err(),
             "a hostile watermark entry must be refused despite the valid signature"
+        );
+    }
+
+    /// A head minted on `previous` by `issuer`, carrying the context a
+    /// commit publishes: everything `previous` saw, and itself.
+    fn successor(previous: &Revision, issuer: &ed25519_dalek::SigningKey, tree: u8) -> Revision {
+        let mut next = previous.advance(
+            TreeReference::from([tree; 32]),
+            previous.branch.clone(),
+            did_of(issuer),
+        );
+        let mut context = previous.context.clone().unwrap_or_default();
+        context.record(next.version());
+        next.context = Some(context);
+        next
+    }
+
+    fn genesis(issuer: &ed25519_dalek::SigningKey) -> Revision {
+        let mut head = Revision::new(
+            TreeReference::from([1u8; 32]),
+            "branch:opaque".parse::<Entity>().unwrap(),
+            did_of(issuer),
+        );
+        let mut context = Context::new();
+        context.record(head.version());
+        head.context = Some(context);
+        head
+    }
+
+    /// A head built on another is after it, that one is before it, and a
+    /// head is the same as itself, whichever issuer minted each step.
+    #[dialog_common::test]
+    fn it_orders_a_head_after_the_one_it_built_on() {
+        let first = genesis(&key(1));
+        let second = successor(&first, &key(2), 2);
+        let third = successor(&second, &key(1), 3);
+
+        assert_eq!(second.precedence(&first), Precedence::After);
+        assert_eq!(first.precedence(&second), Precedence::Before);
+        assert_eq!(third.precedence(&first), Precedence::After);
+        assert_eq!(first.precedence(&third), Precedence::Before);
+        assert_eq!(second.precedence(&second.clone()), Precedence::Same);
+    }
+
+    /// Two heads built on one head, neither on the other, are concurrent:
+    /// nothing either carries says which is newer.
+    #[dialog_common::test]
+    fn it_finds_heads_built_apart_concurrent() {
+        let base = genesis(&key(1));
+        let ours = successor(&base, &key(1), 2);
+        let theirs = successor(&base, &key(2), 3);
+
+        assert_eq!(ours.precedence(&theirs), Precedence::Concurrent);
+        assert_eq!(theirs.precedence(&ours), Precedence::Concurrent);
+    }
+
+    /// Heads minted before contexts were published are ordered by their
+    /// editions, and two different heads at one edition are concurrent.
+    #[dialog_common::test]
+    fn it_orders_heads_without_a_context_by_edition() {
+        let mut first = genesis(&key(1));
+        first.context = None;
+        let mut second = successor(&first, &key(1), 2);
+        second.context = None;
+        let mut other = successor(&first, &key(2), 3);
+        other.context = None;
+
+        assert_eq!(second.precedence(&first), Precedence::After);
+        assert_eq!(first.precedence(&second), Precedence::Before);
+        assert_eq!(first.precedence(&first.clone()), Precedence::Same);
+        assert_eq!(second.precedence(&other), Precedence::Concurrent);
+    }
+
+    /// A signed head at edition 1 000 whose context is in its tree's region.
+    fn regional(issuer: &ed25519_dalek::SigningKey) -> Revision {
+        signed_head(issuer, |head| {
+            head.edition = Edition::new(1_000);
+            head.publish_region();
+        })
+    }
+
+    /// A head whose context is in its tree's region verifies, survives the
+    /// dag-cbor wire byte for byte, and carries no watermark at all: its
+    /// size does not depend on how many origins its history holds.
+    #[test]
+    fn it_roundtrips_a_region_head_through_dagcbor() {
+        let head = regional(&key(1));
+        head.verify().expect("a region head verifies");
+        assert!(head.context.is_none() && head.region);
+
+        let bytes = serde_ipld_dagcbor::to_vec(&head).expect("head encodes");
+        let decoded: Revision = serde_ipld_dagcbor::from_slice(&bytes).expect("head decodes");
+        assert_eq!(decoded, head, "the wire round-trip is lossless");
+        decoded
+            .verify()
+            .expect("the decoded head still carries a valid signature");
+        assert!(
+            bytes.len() < 400 && head.payload().len() < 400,
+            "a head is a few hundred bytes: {} encoded, {} signed",
+            bytes.len(),
+            head.payload().len()
+        );
+    }
+
+    /// The three payload shapes (no context, the whole context inline, the
+    /// context in the region) sign apart: a signature over any one of them
+    /// never verifies the same head reshaped into another.
+    #[test]
+    fn it_signs_each_context_shape_apart() {
+        let mut inline = Context::new();
+        inline.record(Version::new(Origin::from([1u8; 32]), Edition::new(4)));
+        let shapes: [(&str, Option<Context>, bool); 3] = [
+            ("pre-context", None, false),
+            ("inline", Some(inline), false),
+            ("region", None, true),
+        ];
+        for (signed_as, context, region) in &shapes {
+            let head = signed_head(&key(1), |head| {
+                head.context = context.clone();
+                head.region = *region;
+            });
+            head.verify()
+                .unwrap_or_else(|error| panic!("the {signed_as} shape verifies: {error}"));
+            for (read_as, context, region) in &shapes {
+                if read_as == signed_as {
+                    continue;
+                }
+                let mut reshaped = head.clone();
+                reshaped.context = context.clone();
+                reshaped.region = *region;
+                assert!(
+                    matches!(reshaped.verify(), Err(HistoryError::InvalidSignature(_))),
+                    "a signature over the {signed_as} shape must not verify the {read_as} shape"
+                );
+            }
+        }
+    }
+
+    /// A head claiming both an inline context and a context region is
+    /// refused even when validly signed: no minter produces one, and a
+    /// reader could not tell which of the two to believe.
+    #[test]
+    fn it_refuses_a_head_with_both_an_inline_context_and_a_region() {
+        let head = signed_head(&key(1), |head| head.region = true);
+        assert!(head.context.is_some());
+        assert!(matches!(
+            head.verify(),
+            Err(HistoryError::InvalidReference(_))
+        ));
+    }
+
+    /// The region holds every origin exactly except the head's own, whose
+    /// entry is where the head's chain of commits began: the reader brings
+    /// it up to the head, one edition and one revision per commit, and
+    /// leaves every other entry as stored.
+    #[test]
+    fn it_derives_the_heads_own_entry_from_the_region() {
+        let head = regional(&key(1));
+        let own = head.origin();
+        let other = Origin::from([9u8; 32]);
+        let mut region = Context::new();
+        region.set(
+            own,
+            Watermark {
+                edition: Edition::new(990),
+                count: 40,
+            },
+        );
+        region.set(
+            other,
+            Watermark {
+                edition: Edition::new(500),
+                count: 3,
+            },
+        );
+
+        let context = head
+            .context_from_region(region.clone())
+            .expect("the region is one a head minted");
+        assert_eq!(
+            context.get(&own),
+            Some(&Watermark {
+                edition: Edition::new(1_000),
+                count: 50,
+            }),
+            "ten commits since the chain began"
+        );
+        assert_eq!(context.get(&other), region.get(&other));
+        assert_eq!(context.len(), 2);
+
+        // A chain that begins at the head itself derives nothing new.
+        let mut exact = region.clone();
+        exact.set(
+            own,
+            Watermark {
+                edition: Edition::new(1_000),
+                count: 50,
+            },
+        );
+        assert_eq!(head.context_from_region(exact.clone()).unwrap(), exact);
+    }
+
+    /// A region no head could have minted is refused, with nothing derived:
+    /// one without the head's own origin, one holding it above the head,
+    /// and one whose derived entry counts more revisions than its edition
+    /// leaves room for.
+    #[test]
+    fn it_refuses_a_region_no_head_minted() {
+        let head = regional(&key(1));
+        let own = head.origin();
+        let at = |edition: u64, count: u64| {
+            let mut region = Context::new();
+            region.set(
+                own,
+                Watermark {
+                    edition: Edition::new(edition),
+                    count,
+                },
+            );
+            region
+        };
+        let hostile = [
+            ("no entry for the head's origin", Context::new()),
+            ("its own origin above the head", at(1_001, 1)),
+            ("more revisions than editions", at(999, 1_001)),
+        ];
+        for (why, region) in hostile {
+            assert!(
+                matches!(
+                    head.context_from_region(region),
+                    Err(HistoryError::InvalidReference(_))
+                ),
+                "{why} must be refused"
+            );
+        }
+    }
+
+    /// Heads whose contexts are in their trees' regions are ordered without
+    /// reading either tree: exactly by edition along one origin's chain,
+    /// and across origins only as far as editions allow, so a head at or
+    /// below another origin's edition is concurrent with it, never older.
+    #[dialog_common::test]
+    fn it_orders_region_heads_by_edition() {
+        let mut first = genesis(&key(1));
+        first.publish_region();
+        let mut second = successor(&first, &key(1), 2);
+        second.publish_region();
+        let mut other = successor(&first, &key(2), 3);
+        other.publish_region();
+
+        assert_eq!(second.precedence(&first), Precedence::After);
+        assert_eq!(first.precedence(&second), Precedence::Before);
+        assert_eq!(second.precedence(&second.clone()), Precedence::Same);
+        assert_eq!(second.precedence(&other), Precedence::Concurrent);
+
+        let mut later = successor(&other, &key(2), 4);
+        later.publish_region();
+        assert_eq!(later.precedence(&first), Precedence::After);
+        assert_eq!(
+            first.precedence(&later),
+            Precedence::Concurrent,
+            "an earlier head of another origin may be one the branch was reset to"
         );
     }
 }

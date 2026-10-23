@@ -24,7 +24,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use dialog_artifacts::{Artifact, Changes, Entity, Update as _};
+use dialog_artifacts::{Artifact, Changes, Entity, Pick, Update as _};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
@@ -240,7 +240,7 @@ impl Channel {
                             }
                         }
                         for fact in instant.asserted {
-                            changes.associate(fact.the, fact.of, fact.is);
+                            changes.associate(fact.the, fact.of, fact.is, Pick::All);
                         }
                         self.layer.witness(changes)
                     } else {
@@ -361,7 +361,7 @@ impl Channel {
 #[cfg(test)]
 pub(crate) fn assert_all(changes: &mut Changes, facts: impl IntoIterator<Item = Artifact>) {
     for fact in facts {
-        changes.associate(fact.the, fact.of, fact.is);
+        changes.associate(fact.the, fact.of, fact.is, Pick::All);
     }
 }
 

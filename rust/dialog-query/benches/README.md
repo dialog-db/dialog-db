@@ -9,6 +9,7 @@ round-trip objective from raw CPU:
 | `query_join`   | `MemoryStorageBackend`        | block-read count for a 2-attribute concept join |
 | `query_memory` | `MemoryStorageBackend`        | in-memory wall-clock (CPU isolation)     |
 | `query_disk`   | `NativeTempSpace` (tempdir)   | on-disk wall-clock (real-world latency)  |
+| `query_rules`  | `MemoryStorageBackend`        | block-read count and wall-clock for concept queries answered by a deductive rule: the rule-free join beside it, the exact head, a subset of the head, and a point query |
 
 The `*_reads` benches `println!` the **read counts** (`reads` = total block
 fetches, `unique_reads` = distinct blocks) before timing. Read count is the

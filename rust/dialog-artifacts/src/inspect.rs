@@ -32,16 +32,16 @@
 
 #[cfg(doc)]
 use dialog_search_tree::LoadBlock;
-use dialog_search_tree::{Buffer, Distribution, Geometric, Manifest, PersistentNode, Rank};
+use dialog_search_tree::{Buffer, Distribution, Geometric, Hashed, Manifest, PersistentNode, Rank};
 use dialog_storage::Blake3Hash;
 use rkyv::deserialize;
 use rkyv::rancor::Error as RkyvError;
 
 use crate::key::varkey::{self, ValuePayload};
 use crate::{
-    ATTRIBUTE_KEY_TAG, AttributeKey, BLOB_KEY_TAG, BlobRecord, COVERAGE_KEY_TAG, Datum,
-    DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, HISTORY_KEY_TAG, Key, KeyView, State,
-    VALUE_KEY_TAG, Value, ValueKey, decode_value,
+    ATTRIBUTE_KEY_TAG, AttributeKey, BLOB_KEY_TAG, BlobRecord, CONTEXT_KEY_LENGTH, CONTEXT_KEY_TAG,
+    COVERAGE_KEY_TAG, Datum, DialogArtifactsError, ENTITY_KEY_TAG, EntityKey, HISTORY_KEY_TAG, Key,
+    KeyView, State, VALUE_KEY_TAG, Value, ValueKey, decode_value,
 };
 
 /// The raw content hash a [`LoadBlock`] resolves: the same 32 bytes a
@@ -240,7 +240,7 @@ pub fn inspect_spans(bytes: Vec<u8>) -> Result<Vec<SpanSummary>, DialogArtifacts
         let rank = if separator.is_empty() {
             0
         } else {
-            Geometric::seam_rank(&separator, &manifest)
+            Geometric::seam_rank(Hashed::from(&separator), &manifest)
         };
         spans.push(SpanSummary {
             at: at as u64,
@@ -272,7 +272,7 @@ pub fn inspect_keys(bytes: Vec<u8>) -> Result<Vec<KeySummary>, DialogArtifactsEr
     let mut cursor = segment.keys::<Key>()?;
     while let Some((_, key)) = cursor.next_key()? {
         let key = key.to_vec();
-        let rank = Geometric::rank(&key, &manifest);
+        let rank = Geometric::rank(Hashed::from(&key), &manifest);
         keys.push(KeySummary { key, rank });
     }
     Ok(keys)
@@ -431,6 +431,7 @@ fn tag_name(tag: u8) -> &'static str {
         HISTORY_KEY_TAG => "history",
         BLOB_KEY_TAG => "blob",
         COVERAGE_KEY_TAG => "coverage",
+        CONTEXT_KEY_TAG => "context",
         _ => "unknown",
     }
 }
@@ -543,6 +544,15 @@ pub fn key_components(bytes: &[u8]) -> Vec<KeyComponent> {
                 push_fields(&mut out, [0, 1, 2, 3], fact_fields(&EntityKey(&tail_key)));
             }
         }
+        // Context: tag ‖ origin, one watermark per origin.
+        CONTEXT_KEY_TAG if bytes.len() == CONTEXT_KEY_LENGTH => {
+            let origin = &bytes[1..];
+            out.push(KeyComponent::new(
+                "origin",
+                format!("origin:{}", hex(origin)),
+                origin.to_vec(),
+            ));
+        }
         // Blob: tag ‖ blob hash, one content-addressed reference.
         BLOB_KEY_TAG => {
             let hash = &bytes[1..];
@@ -620,12 +630,12 @@ mod tests {
 
         let links = vec![
             Link {
-                separator: Vec::new(),
+                separator: Vec::new().into(),
                 node: NodeHash::hash(b"left"),
                 scale: Scale::EMPTY,
             },
             Link {
-                separator: high.clone(),
+                separator: high.clone().into(),
                 node: NodeHash::hash(b"right"),
                 scale: Scale::EMPTY,
             },
@@ -708,10 +718,7 @@ mod tests {
             supersedes: Vec::new(),
             retraction: false,
         };
-        let entries = vec![Entry {
-            key,
-            value: State::Added(datum),
-        }];
+        let entries = vec![Entry::new(key, State::Added(datum))];
         let body = PersistentNodeBody::<State<Datum>>::segment_from_entries::<Key>(
             entries,
             Manifest::default(),

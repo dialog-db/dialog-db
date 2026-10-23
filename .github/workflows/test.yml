@@ -43,10 +43,108 @@ jobs:
         with:
           name: tonk-ops
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          # Only main writes the cache: an upload must not fail a PR's
+          # checks, and an unmerged branch must not write what main reads.
+          skipPush: ${{ github.ref != 'refs/heads/main' }}
       - name: 'Run lints'
         shell: bash
         run: |
           nix develop --accept-flake-config --command lint
+
+  # The engine's cost matrix (rust/dialog-perf): every scenario under
+  # callgrind, its instruction count and exact step counts gated against
+  # the baselines under perf/baseline. A regression here is a change in
+  # what the engine does for a workload, caught before it lands.
+  perf:
+    name: 'Perf gate'
+    needs: ['lint_nix']
+    runs-on: 'ubuntu-latest'
+    steps:
+      - uses: cisagov/action-disable-apparmor@v1
+      - uses: actions/checkout@v4
+      - uses: wimpysworld/nothing-but-nix@main
+        with:
+          root-safe-haven: '16384'
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - uses: cachix/cachix-action@v16
+        with:
+          name: tonk-ops
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          # Only main writes the cache: an upload must not fail a PR's
+          # checks, and an unmerged branch must not write what main reads.
+          skipPush: ${{ github.ref != 'refs/heads/main' }}
+      # CARGO_HOME must live on the /nix volume, not under $HOME.
+      # nothing-but-nix keeps purging the runner in the background
+      # after its step returns, and at its default hatchet protocol
+      # (cleave) the last thing it deletes is $HOME/.cargo, cargo's
+      # default home. The matrix jobs never notice: they build through
+      # `nix build`, which vendors crates in the store. This job runs
+      # cargo directly and reaches the registry about a minute in, so
+      # the two raced: cargo extracted crates into ~/.cargo/registry
+      # while rmz was deleting them (#638).
+      - name: 'Run the perf gate'
+        shell: bash
+        run: |
+          sudo mkdir -p /nix/cargo
+          sudo chown "$(id -u):$(id -g)" /nix/cargo
+          nix develop \
+            --accept-flake-config \
+            --set-env-var CARGO_HOME /nix/cargo \
+            --command perf:gate
+      - name: 'Upload the sweep'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 'perf-current'
+          path: 'target/perf-current'
+
+  # What a replica pays to join (rust/dialog-soak): the join scenario
+  # over the unshaped `none` network profile, whose request counts are
+  # deterministic protocol shape, gated against soak/baseline. The
+  # shaped profiles (broadband, mobile, ...) stay on the nightly sweep
+  # (nightly-soak.yml); see issue #642 for the gate this is the first
+  # step of.
+  soak_sync:
+    name: 'Replication gate'
+    needs: ['lint_nix']
+    runs-on: 'ubuntu-latest'
+    steps:
+      - uses: cisagov/action-disable-apparmor@v1
+      - uses: actions/checkout@v4
+      - uses: wimpysworld/nothing-but-nix@main
+        with:
+          root-safe-haven: '16384'
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - uses: cachix/cachix-action@v16
+        with:
+          name: tonk-ops
+          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          # Only main writes the cache: an upload must not fail a PR's
+          # checks, and an unmerged branch must not write what main reads.
+          skipPush: ${{ github.ref != 'refs/heads/main' }}
+      # CARGO_HOME must live on the /nix volume, not under $HOME, for the
+      # reason the Perf gate above gives: this job runs cargo directly,
+      # and nothing-but-nix's background purge deletes $HOME/.cargo
+      # while cargo may be extracting into it (#638).
+      - name: 'Run the replication gate'
+        shell: bash
+        run: |
+          sudo mkdir -p /nix/cargo
+          sudo chown "$(id -u):$(id -g)" /nix/cargo
+          nix develop \
+            --accept-flake-config \
+            --set-env-var CARGO_HOME /nix/cargo \
+            --command soak:gate
+      - name: 'Upload the sweep'
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 'soak-current'
+          path: 'target/soak-current'
 
   lints:
     name: 'Lints'
@@ -85,6 +183,9 @@ jobs:
         with:
           name: tonk-ops
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          # Only main writes the cache: an upload must not fail a PR's
+          # checks, and an unmerged branch must not write what main reads.
+          skipPush: ${{ github.ref != 'refs/heads/main' }}
       # TMPDIR must live on the large /nix volume, not the root
       # filesystem. nothing-but-nix leaves the root filesystem only
       # root-safe-haven (16GB) of free space, and the wasm build and

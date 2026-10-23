@@ -66,7 +66,8 @@ use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    ArtifactSelector, Attribute, Change, Changes, Entity, Instruction, Statement, Update, Value,
+    ArtifactSelector, ArtifactView, Change, Changes, DialogArtifactsError, Entity, Instruction,
+    Pick, Relation, Statement, Update, Value,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::ConditionalSync;
@@ -74,24 +75,24 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::blob::Read as BlobRead;
 use dialog_effects::memory::Resolve;
 use dialog_query::the;
-use futures_util::{StreamExt as _, TryStreamExt as _};
+use futures_util::TryStreamExt as _;
 use parking_lot::RwLock;
 
 use crate::repository::source::SourceRef;
 use crate::{CommitError, RemoteSite};
 
 /// The `dialog.attribute/scope` declaration attribute.
-pub(crate) fn scope_attr() -> Attribute {
+pub(crate) fn scope_attr() -> Relation {
     the!("dialog.attribute/scope").into()
 }
 
 /// The `dialog.attribute/default` declaration attribute.
-pub(crate) fn default_attr() -> Attribute {
+pub(crate) fn default_attr() -> Relation {
     the!("dialog.attribute/default").into()
 }
 
 /// The `dialog.attribute/transient` declaration attribute.
-pub(crate) fn transient_placement_attr() -> Attribute {
+pub(crate) fn transient_placement_attr() -> Relation {
     the!("dialog.attribute/transient").into()
 }
 
@@ -100,7 +101,7 @@ const ATTRIBUTE_SCHEME: &str = "attribute:";
 
 /// The entity that stands for an attribute in facts *about* the
 /// attribute: `attribute:<namespace>/<name>`.
-pub fn attribute_entity(attribute: &Attribute) -> Entity {
+pub fn attribute_entity(attribute: &Relation) -> Entity {
     format!("{ATTRIBUTE_SCHEME}{attribute}")
         .parse()
         .expect("an attribute name is a valid opaque URI path")
@@ -108,7 +109,7 @@ pub fn attribute_entity(attribute: &Attribute) -> Entity {
 
 /// The attribute an [`attribute_entity`] stands for, if the entity
 /// is one.
-fn entity_attribute(entity: &Entity) -> Option<Attribute> {
+fn entity_attribute(entity: &Entity) -> Option<Relation> {
     entity
         .to_string()
         .strip_prefix(ATTRIBUTE_SCHEME)?
@@ -136,24 +137,25 @@ fn entity_attribute(entity: &Entity) -> Option<Attribute> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placement {
     /// The attribute being placed.
-    pub attribute: Attribute,
+    pub attribute: Relation,
     /// The scope its facts live in.
     pub scope: Entity,
 }
 
 impl Placement {
     /// Declare that `attribute`'s facts live in `scope`.
-    pub fn new(attribute: Attribute, scope: Entity) -> Self {
+    pub fn new(attribute: Relation, scope: Entity) -> Self {
         Self { attribute, scope }
     }
 }
 
 impl Statement for Placement {
     fn assert(self, update: &mut impl Update) {
-        update.associate_unique(
+        update.associate(
             scope_attr(),
             attribute_entity(&self.attribute),
             Value::Entity(self.scope),
+            Pick::Last,
         );
     }
 
@@ -184,22 +186,23 @@ impl Statement for Placement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransientAttribute {
     /// The attribute declared transient.
-    pub attribute: Attribute,
+    pub attribute: Relation,
 }
 
 impl TransientAttribute {
     /// Declare that facts under `attribute` live one round.
-    pub fn new(attribute: Attribute) -> Self {
+    pub fn new(attribute: Relation) -> Self {
         Self { attribute }
     }
 }
 
 impl Statement for TransientAttribute {
     fn assert(self, update: &mut impl Update) {
-        update.associate_unique(
+        update.associate(
             transient_placement_attr(),
             attribute_entity(&self.attribute),
             Value::Boolean(true),
+            Pick::Last,
         );
     }
 
@@ -246,7 +249,12 @@ impl DefaultScope {
 
 impl Statement for DefaultScope {
     fn assert(self, update: &mut impl Update) {
-        update.associate_unique(default_attr(), self.repository, Value::Entity(self.scope));
+        update.associate(
+            default_attr(),
+            self.repository,
+            Value::Entity(self.scope),
+            Pick::Last,
+        );
     }
 
     fn retract(self, update: &mut impl Update) {
@@ -298,9 +306,9 @@ impl Bindings {
 /// footprint.
 #[derive(Debug, Default)]
 pub(crate) struct Declared {
-    attributes: HashMap<Attribute, Entity>,
+    attributes: HashMap<Relation, Entity>,
     default: Option<Entity>,
-    transient: HashSet<Attribute>,
+    transient: HashSet<Relation>,
 }
 
 /// A shared handle to the committed declarations at a head.
@@ -312,12 +320,12 @@ pub(crate) type CommittedPlacements = Arc<Declared>;
 #[derive(Debug, Default)]
 pub(crate) struct Placements {
     committed: CommittedPlacements,
-    declared: HashMap<Attribute, Entity>,
-    retracted: HashMap<Attribute, Entity>,
+    declared: HashMap<Relation, Entity>,
+    retracted: HashMap<Relation, Entity>,
     default: Option<Entity>,
     default_retracted: Option<Entity>,
-    transient: HashSet<Attribute>,
-    untransient: HashSet<Attribute>,
+    transient: HashSet<Relation>,
+    untransient: HashSet<Relation>,
 }
 
 /// Read a declaration value as a scope entity, or fail the commit.
@@ -389,16 +397,14 @@ impl Placements {
                 let Some(placed) = entity_attribute(entity) else {
                     continue;
                 };
-                let (Change::Assert(value) | Change::Replace(value) | Change::Retract(value)) =
-                    change;
+                let (Change::Assert(value, _) | Change::Retract(value)) = change;
                 let target = scope_value(placed.as_str(), value)?;
                 match change {
                     Change::Retract(_) => placements.retracted.insert(placed, target),
                     _ => placements.declared.insert(placed, target),
                 };
             } else if *the == default {
-                let (Change::Assert(value) | Change::Replace(value) | Change::Retract(value)) =
-                    change;
+                let (Change::Assert(value, _) | Change::Retract(value)) = change;
                 let target = scope_value("dialog.attribute/default", value)?;
                 match change {
                     Change::Retract(_) => placements.default_retracted = Some(target),
@@ -423,7 +429,7 @@ impl Placements {
     /// Whether facts under `attribute` live one round: declared
     /// transient, in this commit or at the head, and not undeclared in
     /// this commit.
-    pub(crate) fn is_transient(&self, attribute: &Attribute) -> bool {
+    pub(crate) fn is_transient(&self, attribute: &Relation) -> bool {
         if self.transient.contains(attribute) {
             return true;
         }
@@ -432,7 +438,7 @@ impl Placements {
 
     /// The scope `attribute`'s facts live in, or `None` for the tree
     /// when nothing names it.
-    pub(crate) fn scope_of(&self, attribute: &Attribute) -> Option<&Entity> {
+    pub(crate) fn scope_of(&self, attribute: &Relation) -> Option<&Entity> {
         if let Some(scope) = self.declared.get(attribute) {
             return Some(scope);
         }
@@ -446,6 +452,50 @@ impl Placements {
     /// for the tree and the ones for the session store. Declarations
     /// themselves are tree facts. An instruction bound for a scope the
     /// layer does not bind fails the whole batch.
+    /// Whether a write of `attribute` lands in the tree of the layer, as
+    /// [`partition`](Self::partition) sends it, and not in its session
+    /// store. A scope that `bindings` does not bind fails the partition;
+    /// until then it counts as the tree.
+    pub(crate) fn lands_in_tree(&self, attribute: &Relation, bindings: &Bindings) -> bool {
+        match self.scope_of(attribute) {
+            None => true,
+            Some(scope) if Some(scope) == self.default_scope() => true,
+            Some(scope) => bindings.target(scope) != Some(Target::Session),
+        }
+    }
+
+    /// The attributes that `staged` writes under a choosing pick, to the
+    /// session store of `source` rather than its tree: a settlement leaves
+    /// their writes as written, and the store elects among its own rows.
+    pub(crate) async fn stores<Env>(
+        source: SourceRef<'_>,
+        staged: &crate::Staged,
+        env: &Env,
+    ) -> Result<HashSet<Relation>, CommitError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Provider<crate::Hydrate>
+            + ConditionalSync
+            + 'static,
+    {
+        if !staged.has_successions() {
+            return Ok(HashSet::new());
+        }
+        let declared = Self::resolve(source, &staged.export(), env).await?;
+        Ok(staged
+            .log()
+            .iter()
+            .filter(|(the, _, change)| {
+                change.elects() && !declared.lands_in_tree(the, source.bindings())
+            })
+            .map(|(the, ..)| the.clone())
+            .collect())
+    }
+
     pub(crate) fn partition(
         &self,
         changes: Changes,
@@ -456,9 +506,7 @@ impl Placements {
         let default = self.default_scope();
         for instruction in changes.into_instructions() {
             let attribute = match &instruction {
-                Instruction::Assert(a) | Instruction::Replace(a) | Instruction::Retract(a) => {
-                    a.the.clone()
-                }
+                Instruction::Assert(a, _) | Instruction::Retract(a) => a.the.clone(),
             };
             let target = match self.scope_of(&attribute) {
                 None => Target::Tree,
@@ -478,8 +526,7 @@ impl Placements {
                 Target::Session => &mut session,
             };
             match instruction {
-                Instruction::Assert(a) => into.associate(a.the, a.of, a.is),
-                Instruction::Replace(a) => into.associate_unique(a.the, a.of, a.is),
+                Instruction::Assert(a, pick) => into.associate(a.the, a.of, a.is, pick),
                 Instruction::Retract(a) => into.dissociate(a.the, a.of, a.is),
             }
         }
@@ -563,7 +610,8 @@ where
 }
 
 /// Collect the artifacts a selector matches on the layer's committed
-/// tree.
+/// tree, one for each cell: the claim that `last` elects, which every
+/// declaration is written under.
 async fn committed<Env>(
     source: SourceRef<'_>,
     selector: ArtifactSelector<Constrained>,
@@ -583,11 +631,40 @@ where
         .perform(env)
         .await
         .map_err(|error| CommitError::Induction(format!("placement scan: {error}")))?;
-    stream
-        .map(|item| item.and_then(|view| view.to_owned()))
+    let views: Vec<ArtifactView> = stream
         .try_collect()
         .await
-        .map_err(|error| CommitError::Induction(format!("placement scan: {error}")))
+        .map_err(|error| CommitError::Induction(format!("placement scan: {error}")))?;
+    elected(views).map_err(|error| CommitError::Induction(format!("placement scan: {error}")))
+}
+
+/// Of the claims of each cell among `views`, the one that `last` elects:
+/// the one a read of the cell returns. A declaration is written under
+/// `last`, but two replicas can each declare one, and a merge keeps both
+/// claims in the cell. Every replica elects the same one. The cells keep
+/// the order they are first met in.
+pub(crate) fn elected(
+    views: Vec<ArtifactView>,
+) -> Result<Vec<dialog_artifacts::Artifact>, DialogArtifactsError> {
+    let mut cells: Vec<ArtifactView> = Vec::new();
+    let mut index: HashMap<(Vec<u8>, Vec<u8>), usize> = HashMap::new();
+    for view in views {
+        let cell = (
+            view.the_bytes()?.into_owned(),
+            view.of_bytes()?.into_owned(),
+        );
+        match index.get(&cell) {
+            Some(&at) => {
+                let incumbent = cells[at].clone();
+                cells[at] = incumbent.elect(view)?;
+            }
+            None => {
+                index.insert(cell, cells.len());
+                cells.push(view);
+            }
+        }
+    }
+    cells.iter().map(ArtifactView::to_owned).collect()
 }
 
 #[cfg(test)]
@@ -607,10 +684,11 @@ mod tests {
     use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
     use dialog_peer::helpers::test_session_with_peer;
-    use dialog_query::attribute::The;
+    use dialog_query::attribute::Relation;
     use dialog_query::query::Output as _;
     use dialog_query::types::Scalar;
     use dialog_query::{AttributeQuery, InductiveRule, Term};
+    use futures_util::StreamExt as _;
     use serde_json::json;
 
     fn session() -> Entity {
@@ -636,11 +714,12 @@ mod tests {
             + Provider<dialog_artifacts::Speculation>
             + Provider<dialog_artifacts::Preload>
             + Provider<crate::Hydrate>
+            + dialog_common::Holds
             + ConditionalSync
             + 'static,
     {
         let query = AttributeQuery::from(
-            Term::<The>::from(the.parse::<The>()?)
+            Term::<Relation>::from(the.parse::<Relation>()?)
                 .of(Term::<Entity>::from(of.clone()))
                 .is(Term::<V>::var("v")),
         );
@@ -676,7 +755,7 @@ mod tests {
 
     #[dialog_common::test]
     fn it_mints_an_entity_per_attribute() -> Result<()> {
-        let attribute: Attribute = "ui/selected".parse()?;
+        let attribute: dialog_artifacts::Relation = "ui/selected".parse()?;
         let entity = attribute_entity(&attribute);
         assert_eq!(entity.to_string(), "attribute:ui/selected");
         assert_eq!(entity_attribute(&entity), Some(attribute));
@@ -777,6 +856,102 @@ mod tests {
                 .await?
                 .is_empty()
         );
+        Ok(())
+    }
+
+    /// Two replicas that each declare a scope for one attribute leave
+    /// both claims in the cell when they merge. The placement in force is
+    /// the claim that `last` elects, the one a read of the cell returns,
+    /// whatever the order of the scan.
+    #[dialog_common::test]
+    async fn it_places_by_the_claim_that_last_elects_after_a_merge() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let doc: Entity = "doc:1".parse()?;
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.transaction()
+            .assert(
+                dialog_query::the!("doc/body")
+                    .of(doc)
+                    .is("Base".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature.pull().perform(&operator).await?;
+        for (branch, scope) in [(&main, "memory:main"), (&feature, "memory:feature")] {
+            branch
+                .transaction()
+                .assert(Placement::new("doc/title".parse()?, scope.parse()?))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        feature
+            .pull()
+            .perform(&operator)
+            .await?
+            .expect("the pull merges");
+
+        let source = SourceRef::from(&feature);
+        let views: Vec<ArtifactView> = crate::Select::from_source(source, declarations_selector())
+            .perform(&operator)
+            .await?
+            .try_collect()
+            .await?;
+        assert_eq!(views.len(), 2, "the merge keeps both claims");
+        let forward = views[0].clone().elect(views[1].clone())?.to_owned()?;
+        let backward = views[1].clone().elect(views[0].clone())?.to_owned()?;
+        assert_eq!(forward, backward, "every order elects one claim");
+        let Value::Entity(elected) = forward.is else {
+            panic!("a placement names a scope");
+        };
+        let placements = Placements::resolve(source, &Changes::new(), &operator).await?;
+        assert_eq!(placements.scope_of(&"doc/title".parse()?), Some(&elected));
+        Ok(())
+    }
+
+    /// A write under a choosing pick of an attribute placed on the session
+    /// store succeeds the row that the store holds of the cell, as a write
+    /// to the tree succeeds its claim.
+    #[dialog_common::test]
+    async fn it_succeeds_the_session_row_of_a_placed_cell() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
+        branch
+            .overlay()
+            .assert(Placement::new("org/salary".parse()?, session()))?;
+        let alice: Entity = "id:alice".parse()?;
+        for salary in [400u32, 300] {
+            branch
+                .transaction()
+                .assert(dialog_query::AttributeStatement {
+                    the: Relation::from("org/salary".parse::<dialog_artifacts::Relation>()?),
+                    of: alice.clone(),
+                    is: Value::UnsignedInt(salary.into()),
+                    cause: None,
+                    cardinality: Some(dialog_query::Cardinality::One),
+                    pick: Some(Pick::Last),
+                })
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            branch.refresh(&operator).await?;
+        }
+        let held: Vec<Value> = branch
+            .overlay()
+            .scan(&ArtifactSelector::new().the("org/salary".parse()?).of(alice))
+            .into_iter()
+            .map(|fact| fact.is)
+            .collect();
+        assert_eq!(held, vec![Value::UnsignedInt(300)]);
         Ok(())
     }
 
@@ -984,7 +1159,7 @@ mod tests {
         branch.refresh(&operator).await?;
 
         let navigations = AttributeQuery::from(
-            Term::<The>::from(dialog_query::the!("site/navigate"))
+            Term::<Relation>::from(dialog_query::the!("site/navigate"))
                 .of(Term::<Entity>::var("e"))
                 .is(Term::<String>::var("v")),
         );

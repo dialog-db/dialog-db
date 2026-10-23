@@ -6,7 +6,7 @@ use std::iter;
 
 use crate::Binding;
 use crate::Predicate;
-use crate::attribute::{AttributeDescriptor, Attribution, Relation};
+use crate::attribute::{AttributeDescriptor, Attribution, The};
 use crate::concept::query::ConceptQuery;
 use crate::concept::{Concept, Conclusion};
 use crate::error::TypeError;
@@ -24,12 +24,12 @@ use crate::{
 use dialog_artifacts::Update;
 
 use crate::concept::query::adornment::Adornment;
+use crate::identity::{self, CONCEPT, field};
 use crate::memo::Memo;
 use crate::planner::Conjunction;
 use crate::rule::DeductiveRule;
-use base58::ToBase58;
+use merkle_reference::{Reference, Type as ReferenceType};
 use serde::{Deserialize, Serialize};
-use serde_ipld_dagcbor::to_vec as to_cbor_vec;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Not;
 #[cfg(test)]
@@ -73,7 +73,7 @@ pub struct ConceptDescriptor {
     /// all ask for it on every query; the attributes never change once
     /// the descriptor is built, so neither does the identity.
     #[serde(skip)]
-    identity: Memo<Entity>,
+    identity: Memo<(Reference, Entity)>,
     /// The concept's implicit rule -- matching an entity that carries
     /// every required attribute -- analyzed on first use. It depends
     /// only on the attributes, and every query assembling rules for the
@@ -173,9 +173,9 @@ impl ConceptDescriptor {
     /// bind and a conclusion carries.
     fn field_operands(name: &str, field: &ConceptFieldDescriptor) -> Vec<String> {
         match field.the() {
-            Relation::Attribute(_) => vec![name.to_string()],
-            Relation::Collection { .. } => {
-                vec![name.to_string(), Relation::key_operand(name)]
+            The::Relation(_) => vec![name.to_string()],
+            The::Collection { .. } => {
+                vec![name.to_string(), The::key_operand(name)]
             }
         }
     }
@@ -192,6 +192,47 @@ impl ConceptDescriptor {
             .clone()
     }
 
+    /// The operand name an [attribute concept](Self::of_attribute)
+    /// binds its value under: the attribute triple's own `is` slot.
+    pub const VALUE: &'static str = "is";
+
+    /// The attribute concept over `field`: the concept whose only
+    /// attribute is the field's, named [`VALUE`](Self::VALUE).
+    ///
+    /// This is the relation a rule derives into and a concept selects
+    /// from. Its identity is the attribute's alone, so a user-declared
+    /// single-attribute concept over the same attribute is the same
+    /// node. Optionality and conformance are properties of a field's
+    /// place in a concept, not of the relation, so neither carries
+    /// over.
+    pub fn of_attribute(field: &ConceptFieldDescriptor) -> Self {
+        field.attribute_concept().clone()
+    }
+
+    /// [`of_attribute`](Self::of_attribute) computed afresh: what the
+    /// field memoises.
+    pub(crate) fn attribute_concept(field: &ConceptFieldDescriptor) -> Self {
+        descriptor_from_with(
+            NamedAttributes::try_from(vec![(
+                Self::VALUE.to_string(),
+                ConceptFieldDescriptor::required(field.descriptor().clone()),
+            )])
+            .expect("a single required attribute is a well-formed concept"),
+        )
+    }
+
+    /// The field of this concept when it is an attribute concept: a
+    /// single required, non-conforming attribute. Such a concept is
+    /// the relation of that attribute, whatever the field is named.
+    pub fn attribute_field(&self) -> Option<(&str, &ConceptFieldDescriptor)> {
+        let mut fields = self.with().iter();
+        let (name, field) = fields.next()?;
+        if fields.next().is_some() || field.is_optional() || field.conforms().is_some() {
+            return None;
+        }
+        Some((name, field))
+    }
+
     /// The keyed-collection fields of this concept.
     pub fn collections(&self) -> impl Iterator<Item = (&str, &ConceptFieldDescriptor)> {
         self.with()
@@ -204,73 +245,55 @@ impl ConceptDescriptor {
         Schema::from(self)
     }
 
-    /// Encode this concept as CBOR for hashing.
+    /// The concept's identity: its merkle reference under
+    /// [`CONCEPT`](crate::identity::CONCEPT).
     ///
-    /// Creates a CBOR-encoded map where:
-    /// - Keys are attribute URIs (`the:{hash}`) in sorted order.
-    /// - The value for a **required** attribute is an empty map `{}`.
-    /// - The value for an **optional** attribute is `{ "optional":
-    ///   true }`.
-    /// - The value for a **concept-typed** attribute carries the
-    ///   target's URI: `{ "conforms": "concept:{hash}" }`. The
-    ///   target participates by identity, not by embedding, so a
-    ///   conforming field adds one URI to the encoding rather than
-    ///   the target's whole attribute set.
-    ///
-    /// A concept with no optional or conforming attributes therefore
-    /// hashes exactly as it did before either existed (every value
-    /// is `{}`), so existing concept identities are preserved.
-    /// Marking an attribute optional or conforming changes its value
-    /// object, and thus the concept's identity.
-    pub fn to_cbor_bytes(&self) -> Vec<u8> {
-        /// Per-attribute hash value: `{}` for required,
-        /// `{ "optional": true }` for optional, `{ "conforms":
-        /// "concept:.." }` for concept-typed. Both keys are omitted
-        /// when absent, so a plain required attribute encodes as an
-        /// empty map, byte-identical to the earlier encodings.
-        #[derive(Serialize)]
-        struct AttributeIdentity {
-            #[serde(skip_serializing_if = "Not::not")]
-            optional: bool,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            conforms: Option<String>,
-        }
-
-        let mut attr_map: BTreeMap<String, AttributeIdentity> = BTreeMap::new();
-
-        for (_name, schema) in self.with().iter() {
-            let uri = schema.to_uri();
-            attr_map.insert(
-                uri,
-                AttributeIdentity {
-                    optional: schema.is_optional(),
-                    conforms: schema.conforms().map(|target| target.this().to_string()),
-                },
-            );
-        }
-
-        to_cbor_vec(&attr_map).expect("CBOR encoding should not fail")
+    /// It maps each attribute, by the attribute's
+    /// [reference](AttributeDescriptor::reference), to the field's options:
+    /// `optional` to `true` for an optional field, and `conforms` to the
+    /// reference of the concept a concept-typed field's value conforms to.
+    /// A required plain field's options are the empty map. Field names and
+    /// the description are not part of it, and the attributes and the target
+    /// concept enter by reference, so the concept is the same whether they
+    /// are embedded or linked.
+    pub fn reference(&self) -> Reference {
+        self.identity.get_or_init(|| self.identify()).0
     }
 
-    /// Compute blake3 hash of this concept.
-    ///
-    /// Returns a 32-byte blake3 hash of the CBOR-encoded concept.
-    pub fn hash(&self) -> blake3::Hash {
-        let cbor_bytes = self.to_cbor_bytes();
-        blake3::hash(&cbor_bytes)
+    fn identify(&self) -> (Reference, Entity) {
+        let entries = self.with().iter().map(|(_name, field)| {
+            let mut options = Vec::new();
+            if field.is_optional() {
+                options.push((field::OPTIONAL, field::TRUE));
+            }
+            if let Some(target) = field.conforms() {
+                options.push((field::CONFORMS, target.reference()));
+            }
+            (
+                field.descriptor().reference(),
+                ReferenceType::MAP.map(options),
+            )
+        });
+        let reference = CONCEPT.map(entries);
+        (reference, identity::entity("concept:", reference))
     }
 
-    /// Identityfier for this concept (as in type identifier and not instance
-    /// identifier)
+    /// This concept with no descriptions, its own or its attributes':
+    /// what identity sees.
+    pub(crate) fn without_descriptions(&self) -> Self {
+        let fields: Vec<(String, ConceptFieldDescriptor)> = self
+            .with()
+            .iter()
+            .map(|(name, field)| (name.to_string(), field.without_descriptions()))
+            .collect();
+        Self::try_from(fields).unwrap_or_else(|_| self.clone())
+    }
+
+    /// The concept's entity: `concept:` followed by its
+    /// [reference](Self::reference) in base58. It identifies the concept as a
+    /// type, not any of its instances.
     pub fn this(&self) -> Entity {
-        self.identity
-            .get_or_init(|| {
-                let encoded = self.hash().as_bytes().as_ref().to_base58();
-                format!("concept:{encoded}")
-                    .parse()
-                    .expect("valid entity URI")
-            })
-            .clone()
+        self.identity.get_or_init(|| self.identify()).1.clone()
     }
 
     /// The concept's implicit rule: an entity carrying every required
@@ -493,7 +516,7 @@ impl From<&ConceptDescriptor> for Schema {
         // from the domain.
         for (name, field) in predicate.collections() {
             schema.insert(
-                Relation::key_operand(name),
+                The::key_operand(name),
                 Field {
                     description: format!("The key of an entry of {name}"),
                     content_type: Some(Kind::from(Type::String)),
@@ -554,8 +577,17 @@ impl ConceptStatement {
 
 impl Statement for ConceptStatement {
     fn assert(self, update: &mut impl Update) {
+        // Each field is written under its own pick, as an attribute
+        // statement spelling that pick is: a `last` field's write
+        // succeeds the claim its cell holds, and is a no-op when the
+        // cell already reads as the written value.
         for attribution in self.with {
-            update.associate(attribution.the, self.this.clone(), attribution.is);
+            update.associate(
+                attribution.the,
+                self.this.clone(),
+                attribution.is,
+                attribution.pick,
+            );
         }
     }
     fn retract(self, update: &mut impl Update) {
@@ -724,11 +756,13 @@ impl From<ConceptQuery> for ConceptDescriptor {
 impl Application for ConceptQuery {
     type Conclusion = ConceptConclusion;
 
+    /// Evaluates the application, each constant conformed to the type its
+    /// field declares.
     fn evaluate<'a, Env, M: Selection + 'a>(self, selection: M, env: &'a Env) -> impl Selection + 'a
     where
         Env: crate::Scope<'a>,
     {
-        ConceptQuery::evaluate(self, selection, env)
+        self.evaluate_application(selection, env)
     }
 
     fn restrict(&self, entity: &Entity) -> Restriction<Self> {
@@ -832,10 +866,7 @@ impl Concept for ConceptDescriptor {
     type Term = ();
 
     fn this(&self) -> Entity {
-        let encoded = self.hash().as_bytes().as_ref().to_base58();
-        format!("concept:{encoded}")
-            .parse()
-            .expect("valid entity URI")
+        ConceptDescriptor::this(self)
     }
 }
 
@@ -913,16 +944,16 @@ mod tests {
             .expect("Should have name attribute");
         assert_eq!(name_attr["the"], "user/name");
         assert_eq!(name_attr["description"], "User's name");
-        assert_eq!(name_attr["cardinality"], "one");
-        assert_eq!(name_attr["as"], "Text");
+        assert!(name_attr.get("cardinality").is_none());
+        assert_eq!(name_attr["as"], "text:");
 
         let age_attr = with_obj["age"]
             .as_object()
             .expect("Should have age attribute");
         assert_eq!(age_attr["the"], "user/age");
         assert_eq!(age_attr["description"], "User's age");
-        assert_eq!(age_attr["cardinality"], "one");
-        assert_eq!(age_attr["as"], "UnsignedInteger");
+        assert!(age_attr.get("cardinality").is_none());
+        assert_eq!(age_attr["as"], "natural:");
     }
 
     #[dialog_common::test]
@@ -932,12 +963,12 @@ mod tests {
                 "email": {
                     "the": "person/email",
                     "description": "Person's email address",
-                    "as": "Text"
+                    "as": "text:"
                 },
                 "active": {
                     "the": "person/active",
                     "description": "Whether person is active",
-                    "as": "Boolean"
+                    "as": "boolean:"
                 }
             }
         }"#;
@@ -981,7 +1012,7 @@ mod tests {
                 "name": {
                     "the": "user/name",
                     "description": "User's name",
-                    "as": "Text"
+                    "as": "text:"
                 }
             }
         }"#;
@@ -1093,8 +1124,7 @@ mod tests {
     "id": {
       "the": "product/id",
       "description": "Product ID",
-      "cardinality": "one",
-      "as": "UnsignedInteger"
+      "as": "natural:"
     }
   }
 }"#;
@@ -1156,8 +1186,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            pred1.hash(),
-            pred2.hash(),
+            pred1.reference(),
+            pred2.reference(),
             "Concepts with same attributes but different field names should have same hash"
         );
 
@@ -1215,8 +1245,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            pred1.hash(),
-            pred2.hash(),
+            pred1.reference(),
+            pred2.reference(),
             "Concepts with same attributes in different order should have same hash"
         );
 
@@ -1252,8 +1282,8 @@ mod tests {
         .unwrap();
 
         assert_ne!(
-            pred1.hash(),
-            pred2.hash(),
+            pred1.reference(),
+            pred2.reference(),
             "Concepts with different attributes should have different hashes"
         );
 
@@ -1370,12 +1400,12 @@ mod tests {
                     "the": "diy.cook/quantity",
                     "description": "How much of this ingredient",
                     "cardinality": "one",
-                    "as": "UnsignedInteger"
+                    "as": "natural:"
                 },
                 "name": {
                     "the": "diy.cook/ingredient-name",
                     "description": "Name of the ingredient",
-                    "as": "Text"
+                    "as": "text:"
                 }
             }
         }"#;
@@ -1401,7 +1431,7 @@ mod tests {
         let with = reparsed["with"].as_object().expect("Should have 'with'");
         assert_eq!(with["quantity"]["the"], "diy.cook/quantity");
         assert_eq!(with["name"]["the"], "diy.cook/ingredient-name");
-        assert_eq!(with["name"]["as"], "Text");
+        assert_eq!(with["name"]["as"], "text:");
     }
 
     /// Validates that a minimal schema-conformant fixture (only required fields)
@@ -1445,7 +1475,7 @@ mod tests {
             "name": {
                 "the": "user/name",
                 "description": "User's name",
-                "as": "Text"
+                "as": "text:"
             }
         }"#;
 
@@ -1484,7 +1514,7 @@ mod tests {
             "with": {
                 "name": {
                     "description": "Missing the field",
-                    "as": "Text"
+                    "as": "text:"
                 }
             }
         }"#;
@@ -1515,7 +1545,7 @@ mod tests {
             "with": {
                 "name": {
                     "the": "invalid",
-                    "as": "Text"
+                    "as": "text:"
                 }
             }
         }"#;
@@ -1575,7 +1605,7 @@ mod tests {
     fn it_rejects_all_optional_concept_at_parse() {
         let json = r#"{
             "with": {
-                "bio": { "the": "user/bio", "as": "Text", "optional": true }
+                "bio": { "the": "user/bio", "as": "text:", "optional": true }
             }
         }"#;
 
@@ -1591,8 +1621,8 @@ mod tests {
     fn it_accepts_optional_field() {
         let json = r#"{
             "with": {
-                "name": { "the": "user/name", "as": "Text" },
-                "bio": { "the": "user/bio", "as": "Text", "optional": true }
+                "name": { "the": "user/name", "as": "text:" },
+                "bio": { "the": "user/bio", "as": "text:", "optional": true }
             }
         }"#;
 
@@ -1622,7 +1652,7 @@ mod tests {
     fn it_validates_optional_field_on_parse() {
         let json = r#"{
             "with": {
-                "name": { "the": "user/name", "as": "Text" },
+                "name": { "the": "user/name", "as": "text:" },
                 "bio": { "the": "invalid", "optional": true }
             }
         }"#;
@@ -1867,8 +1897,8 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(
-            required_array.hash(),
-            required_fields.hash(),
+            required_array.reference(),
+            required_fields.reference(),
             "required-only concept identity is independent of construction path"
         );
 
@@ -1885,8 +1915,8 @@ mod tests {
         ])
         .unwrap();
         assert_ne!(
-            required_array.hash(),
-            with_optional.hash(),
+            required_array.reference(),
+            with_optional.reference(),
             "marking a field optional must change the concept's hash"
         );
         assert_ne!(
@@ -1941,10 +1971,10 @@ mod tests {
 
         let optional = serde_json::json!({
             "with": {
-                "name": { "the": "person/name", "as": "Text" },
+                "name": { "the": "person/name", "as": "text:" },
                 "manager": {
                     "the": "person/manager",
-                    "as": "Entity",
+                    "as": "entity:",
                     "optional": true,
                     "conforms": target,
                 }
@@ -1957,10 +1987,10 @@ mod tests {
 
         let non_entity = serde_json::json!({
             "with": {
-                "name": { "the": "person/name", "as": "Text" },
+                "name": { "the": "person/name", "as": "text:" },
                 "manager": {
                     "the": "person/manager",
-                    "as": "Text",
+                    "as": "text:",
                     "conforms": target,
                 }
             }
@@ -2068,16 +2098,79 @@ mod tests {
 
         let a = conforming(badge_target());
         assert_ne!(
-            plain.hash(),
-            a.hash(),
+            plain.reference(),
+            a.reference(),
             "tagging a field with conformance changes the identity"
         );
 
         // The same target built independently hashes identically, so
         // the concept identity is a function of the target's URI.
         let b = conforming(badge_target());
-        assert_eq!(a.hash(), b.hash());
+        assert_eq!(a.reference(), b.reference());
         assert_eq!(a.this(), b.this());
+    }
+
+    /// A concept is referenced as a map from its attributes' references
+    /// to each field's options, so it depends on its attributes and its
+    /// conformance targets only through their references: the same
+    /// whether they are embedded or linked. Field names do not enter it.
+    #[dialog_common::test]
+    fn it_references_a_concept_through_its_parts_references() {
+        let bio =
+            AttributeDescriptor::new(the!("person/bio"), "", Cardinality::One, Some(Type::String));
+        let name = AttributeDescriptor::new(
+            the!("person/name"),
+            "",
+            Cardinality::One,
+            Some(Type::String),
+        );
+        let target = badge_target();
+        let concept = ConceptDescriptor::try_from(vec![
+            (
+                "name".to_string(),
+                ConceptFieldDescriptor::required(name.clone()),
+            ),
+            (
+                "bio".to_string(),
+                ConceptFieldDescriptor::optional(bio.clone()),
+            ),
+            (
+                "manager".to_string(),
+                ConceptFieldDescriptor::conforming(
+                    manager_attr(Some(Type::Entity)),
+                    target.clone(),
+                )
+                .unwrap(),
+            ),
+        ])
+        .unwrap();
+
+        let expected = CONCEPT.map([
+            (name.reference(), ReferenceType::MAP.map([])),
+            (
+                bio.reference(),
+                ReferenceType::MAP.map([(field::OPTIONAL, field::TRUE)]),
+            ),
+            (
+                manager_attr(Some(Type::Entity)).reference(),
+                ReferenceType::MAP.map([(field::CONFORMS, target.reference())]),
+            ),
+        ]);
+        assert_eq!(concept.reference(), expected);
+        assert_eq!(concept.this(), identity::entity("concept:", expected));
+
+        // Other field names, same concept.
+        let renamed = ConceptDescriptor::try_from(vec![(
+            "full_name".to_string(),
+            ConceptFieldDescriptor::required(name.clone()),
+        )])
+        .unwrap();
+        let original = ConceptDescriptor::try_from(vec![(
+            "name".to_string(),
+            ConceptFieldDescriptor::required(name),
+        )])
+        .unwrap();
+        assert_eq!(renamed.reference(), original.reference());
     }
 
     /// `From<&ConceptDescriptor> for Schema` lifts a typed

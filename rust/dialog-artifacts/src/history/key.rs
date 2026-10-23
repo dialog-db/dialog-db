@@ -1,18 +1,18 @@
 use core::fmt;
 
-use crate::{ATTRIBUTE_LENGTH, Attribute, ENTITY_LENGTH, Entity, HASH_SIZE};
+use crate::{ENTITY_LENGTH, Entity, HASH_SIZE, RELATION_LENGTH, Relation};
 use dialog_storage::Blake3Hash;
 
 use super::{Claim, EDITION_LENGTH, ORIGIN_LENGTH, Origin, VERSION_LENGTH, Version};
 
 /// The byte width of a [`HistoryKey`]
 pub const HISTORY_KEY_LENGTH: usize =
-    EDITION_LENGTH + ORIGIN_LENGTH + ENTITY_LENGTH + ATTRIBUTE_LENGTH + HASH_SIZE;
+    EDITION_LENGTH + ORIGIN_LENGTH + ENTITY_LENGTH + RELATION_LENGTH + HASH_SIZE;
 
 const ORIGIN_OFFSET: usize = EDITION_LENGTH;
 const ENTITY_OFFSET: usize = ORIGIN_OFFSET + ORIGIN_LENGTH;
 const ATTRIBUTE_OFFSET: usize = ENTITY_OFFSET + ENTITY_LENGTH;
-const VALUE_OFFSET: usize = ATTRIBUTE_OFFSET + ATTRIBUTE_LENGTH;
+const VALUE_OFFSET: usize = ATTRIBUTE_OFFSET + RELATION_LENGTH;
 
 /// Key of the unified history index shared by revisions and claims:
 ///
@@ -40,7 +40,7 @@ impl HistoryKey {
     pub fn from_parts(
         version: &Version,
         of: &Entity,
-        the: &Attribute,
+        the: &Relation,
         value_reference: &Blake3Hash,
     ) -> Self {
         let mut bytes = [0u8; HISTORY_KEY_LENGTH];
@@ -63,7 +63,7 @@ impl HistoryKey {
 
     /// The inclusive lower and upper bounds of the key range covering every
     /// claim on `(of, the)` recorded by the revision identified by `version`
-    pub fn claim_range(version: &Version, of: &Entity, the: &Attribute) -> (Self, Self) {
+    pub fn claim_range(version: &Version, of: &Entity, the: &Relation) -> (Self, Self) {
         let min = Self::from_parts(version, of, the, &[0u8; HASH_SIZE]);
         let max = Self::from_parts(version, of, the, &[0xFFu8; HASH_SIZE]);
         (min, max)

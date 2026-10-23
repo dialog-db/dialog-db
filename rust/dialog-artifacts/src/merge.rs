@@ -61,9 +61,9 @@ use crate::key::varkey::{ValueRef, parse_key, parse_key_ref};
 use crate::tree::ArtifactTree;
 use crate::tree::fetch_spilled;
 use crate::{
-    Attribute, AttributeKey, AttributeKeyPart, BLOB_KEY_TAG, COVERAGE_KEY_TAG, Datum,
+    AttributeKey, AttributeKeyPart, BLOB_KEY_TAG, CONTEXT_KEY_TAG, COVERAGE_KEY_TAG, Datum,
     ENTITY_KEY_TAG, Entity, EntityKey, EntityKeyPart, FromKey as _, HISTORY_KEY_TAG, Key,
-    KeyViewConstruct, KeyViewMut as _, State, VALUE_KEY_TAG, ValueKey,
+    KeyViewConstruct, KeyViewMut as _, Relation, State, VALUE_KEY_TAG, ValueKey,
 };
 
 /// The full key span of one region tag.
@@ -117,6 +117,45 @@ pub fn coverage_scope() -> [RangeInclusive<Key>; 1] {
     [tag_span(COVERAGE_KEY_TAG)]
 }
 
+/// The context region's key range: one watermark per origin the tree's
+/// head has observed (see [`context_key`](crate::context_key)).
+///
+/// No merge pass integrates it. Every head minted by a merge writes the
+/// region entries it changes directly
+/// ([`region_writes`](crate::history::region_writes)), so the screens
+/// never see a context entry, and a graft's contested spans leave it out
+/// ([`without_context`]).
+pub fn context_scope() -> [RangeInclusive<Key>; 1] {
+    [tag_span(CONTEXT_KEY_TAG)]
+}
+
+/// `spans` with the context region cut out of each, for a merge pass that
+/// integrates entries: the region is written whole by the head the merge
+/// mints, never merged entry by entry.
+pub fn without_context(spans: Vec<RangeInclusive<Key>>) -> Vec<RangeInclusive<Key>> {
+    let [region] = context_scope();
+    let (low, high) = (region.start().clone(), region.end().clone());
+    let mut kept = Vec::with_capacity(spans.len());
+    for span in spans {
+        let (start, end) = span.into_inner();
+        if end < low || start > high {
+            kept.push(start..=end);
+            continue;
+        }
+        if start < low
+            && let Some(below) = predecessor_of(&low)
+        {
+            kept.push(start.clone()..=below);
+        }
+        if end > high
+            && let Some(above) = key_successor(&high)
+        {
+            kept.push(above..=end);
+        }
+    }
+    kept
+}
+
 /// Convert conservative divergence bounds (as reported by
 /// [`TreeDifference::divergent_bounds`](dialog_search_tree::TreeDifference::divergent_bounds))
 /// into inclusive spans: an absent lower bound starts at the bottom of
@@ -167,7 +206,7 @@ pub fn coverage_range(key: &Key) -> Result<RangeInclusive<Key>, DialogSearchTree
             .map_err(|e| DialogSearchTreeError::Node(format!("entity is not UTF-8: {e}")))?,
     )
     .map_err(|e| decode(&e))?;
-    let the = Attribute::from_str(
+    let the = Relation::from_str(
         from_utf8(&parts.attribute)
             .map_err(|e| DialogSearchTreeError::Node(format!("attribute is not UTF-8: {e}")))?,
     )
@@ -293,15 +332,15 @@ where
                 attribute_key.into_key(),
                 value_key.into_key(),
             ] {
-                screened.push(Change::Remove(Entry {
-                    key: key.clone(),
-                    value: candidate.value.clone(),
-                }));
+                screened.push(Change::Remove(Entry::new(
+                    key.clone(),
+                    candidate.value.clone(),
+                )));
                 if let Some(surviving) = &surviving {
-                    screened.push(Change::Add(Entry {
+                    screened.push(Change::Add(Entry::new(
                         key,
-                        value: State::Added(surviving.clone()),
-                    }));
+                        State::Added(surviving.clone()),
+                    )));
                 }
             }
         }
@@ -336,10 +375,14 @@ pub fn unacquainted(ours: &Context, theirs: &Context) -> bool {
 /// by the receiver's causal context (R1); incoming guarded removes pass
 /// through (R2). Run — and integrate — after [`screen_history`]'s pass,
 /// so coverage has already retired what causality decided.
-pub fn screen_data<'a, C>(changes: C, context: Context) -> impl Differential<Key, State<Datum>> + 'a
+pub fn screen_data<'a, C>(
+    changes: C,
+    context: impl Into<Arc<Context>>,
+) -> impl Differential<Key, State<Datum>> + 'a
 where
     C: Differential<Key, State<Datum>> + 'a,
 {
+    let context: Arc<Context> = context.into();
     async_stream::try_stream! {
         futures_util::pin_mut!(changes);
         while let Some(change) = futures_util::StreamExt::next(&mut changes).await {
@@ -373,10 +416,7 @@ where
                         let Some(surviving) = datum.retire_covered(&observed) else {
                             continue;
                         };
-                        yield Change::Add(Entry {
-                            key: entry.key,
-                            value: State::Added(surviving),
-                        });
+                        yield Change::Add(Entry::new(entry.key, State::Added(surviving)));
                     }
                 },
                 // R2: guarded removes pass through; integrate applies
@@ -512,7 +552,7 @@ fn key_successor(key: &Key) -> Option<Key> {
         // successor here would hand `partition_spans` a cursor above the
         // top, closing a degenerate final piece whose start sorts above
         // its end — and a divergence span reaching the top is the common
-        // case, since the coverage region is the highest region.
+        // case, since the history-side regions sort highest.
         return None;
     }
     let filler_at = bytes.len().checked_sub(KEY_SPAN_FILLER);
@@ -668,6 +708,8 @@ fn predecessor_of(key: &Key) -> Option<Key> {
 #[cfg(test)]
 mod span_tests {
     use super::*;
+    use crate::context_key;
+    use crate::history::Origin;
 
     fn key(at: u8) -> Key {
         Key::from(vec![at])
@@ -679,6 +721,30 @@ mod span_tests {
 
     fn bottom() -> Key {
         bottom_key()
+    }
+
+    /// Cutting the context region out of a span leaves exactly the keys
+    /// on either side of it: a span inside the region vanishes, one
+    /// across it splits in two, and one beside it is untouched.
+    #[test]
+    fn it_cuts_the_context_region_out_of_spans() {
+        let [region] = context_scope();
+        let inside = context_key(&Origin::from([7u8; 32]));
+        assert!(region.contains(&inside));
+
+        assert!(without_context(vec![inside.clone()..=inside.clone()]).is_empty());
+        assert_eq!(
+            without_context(vec![key(0)..=key(4)]),
+            vec![key(0)..=key(4)],
+            "a span below the region is untouched"
+        );
+
+        let split = without_context(vec![bottom()..=top()]);
+        assert_eq!(split.len(), 2);
+        assert!(split.iter().all(|span| !span.contains(&inside)));
+        assert!(split[0].contains(&key(5)), "coverage keys stay in");
+        assert!(split[1].contains(&key(7)), "keys above the region stay in");
+        assert!(split[0].end() < region.start() && split[1].start() > region.end());
     }
 
     #[test]
@@ -803,7 +869,7 @@ mod screen_tests {
     use crate::ArchiveDelta;
     use crate::history::{Edition, Origin, Version};
     use crate::tree::ArtifactTreeExt as _;
-    use crate::{Artifact, Attribute, Entity, Instruction, Value};
+    use crate::{Artifact, Entity, Instruction, Relation, Value};
     use anyhow::Result;
     use dialog_search_tree::MemoryBlocks;
     use dialog_search_tree::helpers::ObservingBlocks;
@@ -839,7 +905,7 @@ mod screen_tests {
         // the observing backend the screen reads through.
         let observing = ObservingBlocks::new();
         let store = MemoryBlocks::new();
-        let the: Attribute = "task/label".parse()?;
+        let the: Relation = "task/label".parse()?;
         let writer = Version::new(Origin::from([1u8; 32]), Edition::new(0));
         let retractor = Version::new(Origin::from([2u8; 32]), Edition::new(1));
 
@@ -861,7 +927,12 @@ mod screen_tests {
                 &store,
                 &mut delta,
                 Some(writer),
-                stream::iter(facts.iter().cloned().map(Instruction::Assert)),
+                stream::iter(
+                    facts
+                        .iter()
+                        .cloned()
+                        .map(|artifact| Instruction::Assert(artifact, crate::Pick::All)),
+                ),
             )
             .await?;
         mirror(&mut delta, &store, &observing);

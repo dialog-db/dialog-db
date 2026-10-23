@@ -17,16 +17,16 @@ use rkyv::{
 };
 
 use crate::{
-    Accessor, Cache, DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key,
-    LoadBlock, Manifest, NodeCache, PersistentNode, Prefetch, SearchOptions, SearchResult,
-    TreeDifference, TreeWalker, Value, into_owned,
+    Accessor, DialogSearchTreeError, Differential, Distribution, Entry, Geometric, Key, LoadBlock,
+    Manifest, NodeCache, PersistentNode, Prefetch, SearchOptions, SearchResult, TreeDifference,
+    TreeWalker, Value, into_owned,
 };
 
 /// A node on a range estimate's edge path, with the range's bound on each
 /// side it cuts through (`None` where the range runs past the node's edge).
 type Cut<'a> = (Blake3Hash, Option<&'a [u8]>, Option<&'a [u8]>);
 
-/// A key-value store backed by a ranked prolly tree with content-addressed
+/// A key-value store backed by a ranked probabilistic search tree with content-addressed
 /// storage.
 ///
 /// The [`PersistentTree`] represents an immutable, persistent data structure
@@ -184,7 +184,7 @@ where
     /// lands on — but no store holds that node until a persist runs
     /// ([`stored_root`](Self::stored_root) is `None` until then).
     pub fn empty() -> Self {
-        Self::empty_with_manifest(Manifest::default(), Cache::new())
+        Self::empty_with_manifest(Manifest::default(), NodeCache::new())
     }
 
     /// Creates a new empty [`PersistentTree`] sharing an existing node
@@ -232,7 +232,7 @@ where
     /// The all-zero hash is read as the empty tree under the default
     /// [`Manifest`] (see [`LEGACY_EMPTY_ROOT`]).
     pub fn from_hash(root: Blake3Hash) -> Self {
-        Self::from_hash_with_cache(root, Cache::new())
+        Self::from_hash_with_cache(root, NodeCache::new())
     }
 
     /// Creates a [`PersistentTree`] from a known root hash, reusing an existing
@@ -558,14 +558,12 @@ where
         match &self.root {
             TreeRoot::Empty { manifest, .. } => Ok(manifest.clone()),
             TreeRoot::Node(hash) => {
-                if let Some(manifest) = manifest_memo::get(hash) {
-                    return Ok(manifest);
-                }
+                // The root is read through the tree's node cache, so a tree
+                // whose cache holds its root answers without a load or a
+                // check; the header itself is a handful of bytes to read.
                 let accessor = Accessor::new(self.node_cache.clone(), storage);
                 let node: PersistentNode<Key, Value> = accessor.get_node(hash).await?;
-                let manifest = node.manifest()?;
-                manifest_memo::insert(hash, manifest.clone());
-                Ok(manifest)
+                Ok(node.manifest()?)
             }
         }
     }
@@ -657,43 +655,6 @@ where
 {
     fn from(tree: &PersistentTree<Key, Value, D>) -> Self {
         tree.edit()
-    }
-}
-
-/// Root hash to manifest, remembered across trees and caches.
-///
-/// Reading a tree's manifest decodes its root node, which validates the whole
-/// node; a query session and every scan read it, so a small root that did not
-/// change was re-validated per query. A node's bytes are fixed by its hash and
-/// its header is the tree's manifest, so an entry can never go stale; only
-/// manifests that passed [`Manifest::check`] are remembered. Bounded by
-/// clearing when full: every entry is cheap to recover from the root.
-mod manifest_memo {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-
-    use dialog_common::Blake3Hash;
-
-    use crate::Manifest;
-
-    const CAPACITY: usize = 4096;
-
-    fn memo() -> &'static Mutex<HashMap<Blake3Hash, Manifest>> {
-        static MEMO: OnceLock<Mutex<HashMap<Blake3Hash, Manifest>>> = OnceLock::new();
-        MEMO.get_or_init(|| Mutex::new(HashMap::new()))
-    }
-
-    pub(super) fn get(root: &Blake3Hash) -> Option<Manifest> {
-        memo().lock().ok()?.get(root).cloned()
-    }
-
-    pub(super) fn insert(root: &Blake3Hash, manifest: Manifest) {
-        if let Ok(mut memo) = memo().lock() {
-            if memo.len() >= CAPACITY {
-                memo.clear();
-            }
-            memo.insert(root.clone(), manifest);
-        }
     }
 }
 
@@ -2596,7 +2557,7 @@ mod tests {
             }
         }
 
-        // A canonical prolly tree must produce the same structure — and
+        // A canonical probabilistic search tree must produce the same structure — and
         // therefore the same root hash — for the same set of entries,
         // regardless of insertion order.
         assert_eq!(

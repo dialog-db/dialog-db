@@ -39,6 +39,14 @@ pub struct Cell {
     /// type-parameter name (e.g. `"N"`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     scheme: Option<String>,
+    /// Whether this cell is the *signed* image of its scheme: its type
+    /// is the scheme's instantiation with the natural read as the
+    /// integer (`SignedInt` for `UnsignedInt` or `SignedInt`, `Float`
+    /// for `Float`), for a result that may be negative. The cell does
+    /// not share the scheme's type variable; `content_type` carries
+    /// [`Primitive::SIGNED_NUMERIC`](crate::type_system::Primitive::SIGNED_NUMERIC).
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    signed: bool,
 }
 
 impl Cell {
@@ -50,6 +58,7 @@ impl Cell {
             content_type,
             requirement: Requirement::Optional,
             scheme: None,
+            signed: false,
         }
     }
 
@@ -76,6 +85,21 @@ impl Cell {
     /// Returns the scheme label of this cell, if it is a scheme slot.
     pub fn scheme_label(&self) -> Option<&str> {
         self.scheme.as_deref()
+    }
+
+    /// Marks this cell as the signed image of the scheme `label`
+    /// names: its type follows the scheme's instantiation, read as a
+    /// number that may be negative (see the `signed` field).
+    pub fn signed_of(&mut self, label: &'static str) -> &mut Self {
+        self.scheme = Some(label.to_string());
+        self.signed = true;
+        self
+    }
+
+    /// Whether this cell is the signed image of its scheme rather
+    /// than a slot sharing the scheme's type variable.
+    pub fn is_signed(&self) -> bool {
+        self.signed
     }
 
     /// Marks this cell as required, returning `self` for chaining.
