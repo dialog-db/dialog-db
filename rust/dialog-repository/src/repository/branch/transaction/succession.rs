@@ -646,6 +646,7 @@ mod tests {
     use dialog_artifacts::{
         ArtifactSelector, Change, Entity, Pick, Relation as ArtifactsRelation, Value,
     };
+    use dialog_credentials::Credential;
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::Relation;
     use dialog_query::query::Output as _;
@@ -1595,56 +1596,224 @@ mod tests {
     /// A value asserted under `all`, succeeded by a `last` write of the
     /// cell and asserted again, all in one transaction, stands beside
     /// the `last` value when the transaction commits, as it does when
-    /// the three writes commit one by one. The commit squashes a cell's
-    /// writes, and a repeat of the first assertion is not one write
-    /// with it once the `last` write between them has succeeded it.
+    /// the writes commit one by one: the three writes the artifact fuzz
+    /// reduced to, and the four it first failed on.
     #[dialog_common::test]
     async fn it_keeps_a_value_asserted_again_after_a_last_write_succeeded_it() -> Result<()> {
         let (operator, profile) = test_session_with_peer().await;
         let repo = test_repo(&operator, &profile).await;
         let alice = Entity::new()?;
-        let last = |value: u32| AttributeStatement {
-            pick: Some(Pick::Last),
-            ..salary(&alice, value)
-        };
-        let all = |value: u32| AttributeStatement {
-            pick: None,
-            cardinality: Some(Cardinality::Many),
-            ..salary(&alice, value)
-        };
-
-        let one = repo.branch("one").open().perform(&operator).await?;
-        one.transaction()
-            .assert(all(100))
-            .assert(last(200))
-            .assert(all(100))
-            .commit()
-            .publish()
-            .perform(&operator)
+        let programs = [
+            vec![Write::All(100), Write::Last(200), Write::All(100)],
+            vec![
+                Write::All(100),
+                Write::Last(200),
+                Write::Last(300),
+                Write::All(100),
+            ],
+        ];
+        for (at, program) in programs.iter().enumerate() {
+            let (one, each) = commit_both_ways(
+                &repo,
+                &operator,
+                &alice,
+                &format!("reassert-{at}"),
+                &[],
+                program,
+            )
             .await?;
-
-        let three = repo.branch("three").open().perform(&operator).await?;
-        for statement in [all(100), last(200), all(100)] {
-            three
-                .transaction()
-                .assert(statement)
-                .commit()
-                .publish()
-                .perform(&operator)
-                .await?;
+            assert_eq!(
+                one, each,
+                "{program:?}: one transaction against one commit per write"
+            );
+            assert!(
+                one.contains(&100),
+                "{program:?}: the value asserted again stands"
+            );
         }
+        Ok(())
+    }
 
+    /// A retraction of a value asserted earlier in the transaction does
+    /// not cancel that assertion when a `last` write between the two
+    /// succeeded it: the `last` write succeeds the value the transaction
+    /// asserted, as committed one by one, and the line's claim stands.
+    #[dialog_common::test]
+    async fn it_succeeds_a_value_the_transaction_retracts_afterwards() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let alice = Entity::new()?;
+        let (one, each) = commit_both_ways(
+            &repo,
+            &operator,
+            &alice,
+            "retract-after-succession",
+            &[Write::Last(50)],
+            &[Write::All(100), Write::Last(200), Write::Retract(100)],
+        )
+        .await?;
         assert_eq!(
-            stored(&three, &operator, &alice).await?,
-            vec![100, 200],
-            "committed one by one, the last write succeeds 100 and the repeat asserts it again"
+            each,
+            vec![50, 200],
+            "one commit per write keeps the line's claim"
         );
         assert_eq!(
-            stored(&one, &operator, &alice).await?,
-            vec![100, 200],
-            "committed as one transaction, the cell holds the same claims"
+            one, each,
+            "one transaction leaves what one commit per write leaves"
         );
         Ok(())
+    }
+
+    /// Random programs of `all` and `last` writes and retractions over
+    /// one cell, split into a line committed one write per commit and a
+    /// transaction: the transaction committed at once leaves the claims
+    /// it leaves committed one write per commit. A `last` write is drawn
+    /// only while the transaction holds at most one live claim of the
+    /// cell: two claims one commit wrote stand equal, and which of them
+    /// the write succeeds is the one thing a commit leaves open.
+    #[dialog_common::test]
+    async fn it_commits_a_cells_writes_at_once_as_one_by_one() -> Result<()> {
+        const CASES: u64 = 2000;
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let alice = Entity::new()?;
+        for case in 0..CASES {
+            let mut rng = 0x9E37_79B9_7F4A_7C15u64 ^ case;
+            let mut next = move |bound: u32| {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                ((rng >> 32) as u32) % bound
+            };
+            let length = 2 + next(6) as usize;
+            let split = next(length as u32 + 1) as usize;
+            // The live claims, each with whether the transaction wrote it.
+            let mut live: Vec<(u32, bool)> = Vec::new();
+            let mut program = Vec::with_capacity(length);
+            for at in 0..length {
+                let staged = at >= split;
+                let value = 100 * (1 + next(3));
+                let staged_live = live.iter().filter(|(_, mine)| *mine).count();
+                let write = match next(3) {
+                    0 if !staged || staged_live <= 1 => {
+                        // The newest live claim is the one it succeeds.
+                        live.pop();
+                        live.retain(|(held, _)| *held != value);
+                        live.push((value, staged));
+                        Write::Last(value)
+                    }
+                    2 => {
+                        live.retain(|(held, _)| *held != value);
+                        Write::Retract(value)
+                    }
+                    _ => {
+                        live.retain(|(held, _)| *held != value);
+                        live.push((value, staged));
+                        Write::All(value)
+                    }
+                };
+                program.push(write);
+            }
+            let (line, transaction) = program.split_at(split);
+            let (one, each) = commit_both_ways(
+                &repo,
+                &operator,
+                &alice,
+                &format!("case-{case}"),
+                line,
+                transaction,
+            )
+            .await?;
+            assert_eq!(
+                one, each,
+                "case {case}: line {line:?}, transaction {transaction:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// One write of `org/salary`.
+    #[derive(Clone, Copy, Debug)]
+    enum Write {
+        All(u32),
+        Last(u32),
+        Retract(u32),
+    }
+
+    /// Commits `line` one write per commit on two fresh branches named
+    /// after `name`, then `transaction` as one transaction on the first
+    /// and one write per commit on the second, and returns each branch's
+    /// `org/salary` claims of `of`.
+    async fn commit_both_ways(
+        repo: &crate::Repository<Credential>,
+        operator: &dialog_peer::Peer<VolatileSpace, dialog_peer::Session>,
+        of: &Entity,
+        name: &str,
+        line: &[Write],
+        transaction: &[Write],
+    ) -> Result<(Vec<u128>, Vec<u128>)> {
+        let statement = |write: Write| {
+            let (value, pick) = match write {
+                Write::All(value) | Write::Retract(value) => (value, None),
+                Write::Last(value) => (value, Some(Pick::Last)),
+            };
+            AttributeStatement {
+                cardinality: pick.is_none().then_some(Cardinality::Many),
+                pick,
+                ..salary(of, value)
+            }
+        };
+        fn write<'a>(
+            transaction: crate::Transaction<&'a Branch>,
+            statement: AttributeStatement,
+            write: Write,
+        ) -> crate::Transaction<&'a Branch> {
+            match write {
+                Write::Retract(_) => transaction.retract(statement),
+                _ => transaction.assert(statement),
+            }
+        }
+        let one = repo
+            .branch(format!("{name}-one"))
+            .open()
+            .perform(operator)
+            .await?;
+        let each = repo
+            .branch(format!("{name}-each"))
+            .open()
+            .perform(operator)
+            .await?;
+        for branch in [&one, &each] {
+            for &step in line {
+                write(branch.transaction(), statement(step), step)
+                    .commit()
+                    .publish()
+                    .perform(operator)
+                    .await?;
+            }
+        }
+        if !transaction.is_empty() {
+            transaction
+                .iter()
+                .fold(one.transaction(), |staged, &step| {
+                    write(staged, statement(step), step)
+                })
+                .commit()
+                .publish()
+                .perform(operator)
+                .await?;
+        }
+        for &step in transaction {
+            write(each.transaction(), statement(step), step)
+                .commit()
+                .publish()
+                .perform(operator)
+                .await?;
+        }
+        Ok((
+            stored(&one, operator, of).await?,
+            stored(&each, operator, of).await?,
+        ))
     }
 
     /// A write observes the writes before it in its transaction and
