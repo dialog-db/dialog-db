@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A difference prunes a subtree both sides route the same buffered ops to
 
-[#662](https://github.com/dialog-db/dialog-db/issues/662)
+[#669](https://github.com/dialog-db/dialog-db/pull/669), fixing [#662](https://github.com/dialog-db/dialog-db/issues/662) and [#648](https://github.com/dialog-db/dialog-db/issues/648)
 
 Comparing two trees prunes a subtree both sides hold by the same hash
 only when nothing a buffer above it routes down could differ. Before
@@ -51,6 +51,48 @@ to it, so when both match nothing beneath can differ. The argument is
 in `SparseTree::prune`'s documentation, and a property test checks it
 against a materialized difference over random trees with divergent
 flush histories.
+
+### A transaction's writes to a cell under `last` commit as they would one by one
+
+[#647](https://github.com/dialog-db/dialog-db/pull/647)
+
+A transaction that wrote one cell under `all` and under a choosing pick
+(`last`, `max`, `min`, `top`) could commit something other than what the
+same writes committed one per transaction leave. The commit squashes a
+cell's writes value by value: a repeated assertion of a value is
+dropped, and an assertion a later retraction of its value cancels is
+dropped. Neither holds once a choosing write stands between them, since
+it succeeds whichever claim its pick elects at its place in the order,
+and that may be the value an earlier write of the transaction asserted.
+Two shapes lost a fact:
+
+- Assert a value under `all`, write the cell under `last`, assert the
+  value again: the commit dropped the repeat, and the `last` write
+  retired the value. The value was missing.
+- Assert a value under `all`, write the cell under `last`, retract the
+  value: the commit dropped the assertion against the retraction, so
+  the `last` write succeeded the claim the line held instead. That
+  claim was missing.
+
+A cell holding a choosing write is now committed as written, every
+write in order, and the tree settles it as it settles one commit per
+write. A cell with no choosing write is squashed as before.
+
+What this changes for you:
+
+- A transaction of either shape commits what the same writes committed
+  one by one leave: a read after the commit returns the value asserted
+  again, or the line's claim, beside the `last` value.
+- A transaction that asserts and then retracts a value in a cell it
+  also writes under a choosing pick now leaves a retraction record for
+  that value in the history, where it left none. The facts are the
+  same.
+- No API moves.
+
+Why: the squash reasons about one value at a time, which is exact only
+while writes of different values commute. A choosing write is the one
+write that does not commute with the others, so a cell holding one has
+to reach the tree in the order it was written.
 
 ### A chain canonicalized at a link that changes nothing is canonical
 
@@ -567,6 +609,12 @@ Why: numbers are one band and a rule compiles against types; what the body can b
 
 #### Compatibility and migration
 
+- Nothing stored or synced changes shape, and nothing is rewritten on
+  upgrade. A fact can be missing at rest from any replica that wrote it
+  under 0.2.0 or 0.3.0 in one transaction of either shape above: the
+  write never reached the tree, and the history holds no record of it,
+  so it cannot be found or repaired from the data. Asserting the value
+  again in a new transaction restores it.
 - Nothing a replica stores or syncs is rewritten. A stored rule that no longer compiles under the head check (one that wrote a possibly negative integer into a `natural:` field, or a float into an `integer:` field) is held inert by `Branch::commit`, as any rule that fails to hydrate is: it stops firing and does not fail commits. Re-evaluate such a rule with a guard or a rounding formula, or widen the field, to have it fire again.
 
 ### A number binds a typed rule variable as the variable's type reads it
