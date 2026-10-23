@@ -23,8 +23,9 @@ use futures_util::Stream;
 
 use crate::key::varkey::{ValueRef, parse_key_ref};
 use crate::{
-    ASSET_SIZE, BLOB_KEY_TAG, BlobKey, BlobRecord, COVERAGE_KEY_TAG, Datum, DialogArtifactsError,
-    ENTITY_KEY_TAG, Entity, Key, State, Value, ValueDataType, decode_value, tree::ArtifactTree,
+    ASSET_SIZE, BLOB_KEY_TAG, BlobKey, BlobRecord, CONTEXT_KEY_TAG, COVERAGE_KEY_TAG, Datum,
+    DialogArtifactsError, ENTITY_KEY_TAG, Entity, Key, State, Value, ValueDataType, decode_value,
+    tree::ArtifactTree,
 };
 
 /// One content-addressed block a push must ship to the remote before
@@ -113,7 +114,10 @@ pub fn shipment_ref(
     // carries the whole-value hash purely as an identity marker, so it
     // names a "spilled" hash even for values that were stored inline and
     // have no block at all (see `key::history::coverage_key`).
-    if removed || tag == COVERAGE_KEY_TAG {
+    //
+    // The context region references nothing either: its keys name origins
+    // and its values are watermarks.
+    if removed || tag == COVERAGE_KEY_TAG || tag == CONTEXT_KEY_TAG {
         return Ok(None);
     }
     if !matches!(value, State::Added(_)) {

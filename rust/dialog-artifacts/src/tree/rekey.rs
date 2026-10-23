@@ -24,8 +24,8 @@ use crate::key::varkey::{ValuePayload, build_key, parse_key};
 use crate::merge::full_scope;
 use crate::tree::{ArtifactNodeCache, ArtifactTree, ArtifactTreeExt as _};
 use crate::{
-    ArchiveDelta, ArchiveReader, BLOB_KEY_TAG, DialogArtifactsError, Key, ValueDataType,
-    encode_key_value_owned,
+    ArchiveDelta, ArchiveReader, BLOB_KEY_TAG, CONTEXT_KEY_TAG, DialogArtifactsError, Key,
+    ValueDataType, encode_key_value_owned,
 };
 
 /// How many entries one edit batch of the rewrite inserts.
@@ -34,10 +34,12 @@ const BATCH: usize = 4096;
 /// `key`, as the same key reads under `value_encoding`: a number in its
 /// value slot is decoded from the band the key carries and encoded in the
 /// band the target keys it in; every other value slot is as it was. A
-/// blob-index key names a blob by its hash and has no value slot, so it
-/// is as it was.
+/// blob-index key names a blob by its hash, and a context-region key an
+/// origin; neither has a value slot, so both are as they were.
 pub fn rekey(key: &[u8], value_encoding: u32) -> Result<Key, DialogArtifactsError> {
-    if key.first() == Some(&BLOB_KEY_TAG) {
+    // Neither the blob index nor the context region has a value slot: a
+    // blob key names a blob by its hash, a context key names an origin.
+    if matches!(key.first(), Some(&BLOB_KEY_TAG) | Some(&CONTEXT_KEY_TAG)) {
         return Ok(Key::from(key.to_vec()));
     }
     let mut parts = parse_key(key).ok_or_else(|| {
