@@ -38,6 +38,17 @@ pub fn fill(bytes: &mut [u8]) -> Result<(), getrandom::Error> {
 /// # Errors
 ///
 /// If the random source of the system fails.
+#[cfg_attr(
+    not(feature = "helpers"),
+    doc = r#"
+Without the `helpers` feature there is nothing to seed this with: the
+seeding API does not exist, and this does not compile.
+
+```compile_fail
+let _seeded = dialog_common::helpers::entropy::seed(7);
+```
+"#
+)]
 pub fn identifier(bytes: &mut [u8]) -> Result<(), getrandom::Error> {
     #[cfg(feature = "helpers")]
     if crate::helpers::entropy::draw(bytes) {
