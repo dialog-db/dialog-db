@@ -1592,6 +1592,61 @@ mod tests {
         Ok(())
     }
 
+    /// A value asserted under `all`, succeeded by a `last` write of the
+    /// cell and asserted again, all in one transaction, stands beside
+    /// the `last` value when the transaction commits, as it does when
+    /// the three writes commit one by one. The commit squashes a cell's
+    /// writes, and a repeat of the first assertion is not one write
+    /// with it once the `last` write between them has succeeded it.
+    #[dialog_common::test]
+    async fn it_keeps_a_value_asserted_again_after_a_last_write_succeeded_it() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let alice = Entity::new()?;
+        let last = |value: u32| AttributeStatement {
+            pick: Some(Pick::Last),
+            ..salary(&alice, value)
+        };
+        let all = |value: u32| AttributeStatement {
+            pick: None,
+            cardinality: Some(Cardinality::Many),
+            ..salary(&alice, value)
+        };
+
+        let one = repo.branch("one").open().perform(&operator).await?;
+        one.transaction()
+            .assert(all(100))
+            .assert(last(200))
+            .assert(all(100))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let three = repo.branch("three").open().perform(&operator).await?;
+        for statement in [all(100), last(200), all(100)] {
+            three
+                .transaction()
+                .assert(statement)
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+
+        assert_eq!(
+            stored(&three, &operator, &alice).await?,
+            vec![100, 200],
+            "committed one by one, the last write succeeds 100 and the repeat asserts it again"
+        );
+        assert_eq!(
+            stored(&one, &operator, &alice).await?,
+            vec![100, 200],
+            "committed as one transaction, the cell holds the same claims"
+        );
+        Ok(())
+    }
+
     /// A write observes the writes before it in its transaction and
     /// none after: `all` written after `last` stands beside it, and
     /// `max` written after `all` succeeds the staged claim it elects,

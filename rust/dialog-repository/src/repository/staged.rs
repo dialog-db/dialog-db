@@ -404,18 +404,30 @@ impl Staged {
 /// retraction stays when `held` says the line holds the value, and is
 /// dropped too when it does not, as the value then never reached the
 /// line. A write repeating the cell's standing change for its value is
-/// dropped. A retraction followed by an assertion of the same value
-/// keeps both: the commit retracts the line's claim and asserts afresh.
-/// An assertion under a choosing pick is kept as written, for the
-/// transactor or the tree to settle.
+/// dropped, unless a write between the two may have changed what the
+/// first stands for: an assertion under a choosing pick is kept as
+/// written, for the transactor or the tree to settle, and the claim it
+/// succeeds may be the earlier write's, so an assertion repeated after
+/// one is kept to assert the value afresh; and a repeated choosing
+/// write elects over the writes before it, so it is dropped only when
+/// nothing of the cell came between. A retraction followed by an
+/// assertion of the same value keeps both: the commit retracts the
+/// line's claim and asserts afresh.
 pub(crate) fn squash(cell: Vec<Change>, held: &dyn Fn(&Value) -> bool) -> Vec<Change> {
     let mut out: Vec<Change> = Vec::with_capacity(cell.len());
     for change in cell {
         let last = out
             .iter()
             .rposition(|prior| prior.value() == change.value());
+        let between = last.map(|at| &out[at + 1..]).unwrap_or_default();
         match (&change, last.map(|at| &out[at])) {
-            (Change::Assert(_, policy), Some(Change::Assert(_, prior))) if policy == prior => {}
+            (Change::Assert(_, policy), Some(Change::Assert(_, prior)))
+                if policy == prior
+                    && if policy.elects() {
+                        between.is_empty()
+                    } else {
+                        !between.iter().any(Change::elects)
+                    } => {}
             (Change::Retract(_), Some(Change::Retract(_))) => {}
             (Change::Retract(value), Some(Change::Assert(_, Pick::All))) => {
                 out.remove(last.expect("a prior write"));
@@ -765,6 +777,54 @@ mod tests {
                 &unknown
             ),
             vec![Change::Assert(a(), Pick::Last), Change::Retract(a())]
+        );
+        // A write repeated after a choosing write of the cell is kept:
+        // the choosing write may succeed the first, and the repeat then
+        // asserts the value afresh.
+        assert_eq!(
+            squash(
+                vec![
+                    Change::Assert(a(), Pick::All),
+                    Change::Assert(b(), Pick::Last),
+                    Change::Assert(a(), Pick::All)
+                ],
+                &unknown
+            ),
+            vec![
+                Change::Assert(a(), Pick::All),
+                Change::Assert(b(), Pick::Last),
+                Change::Assert(a(), Pick::All)
+            ]
+        );
+        // A choosing write repeated after another write of the cell is
+        // kept: it elects over the write between.
+        assert_eq!(
+            squash(
+                vec![
+                    Change::Assert(a(), Pick::Last),
+                    Change::Assert(b(), Pick::All),
+                    Change::Assert(a(), Pick::Last)
+                ],
+                &unknown
+            ),
+            vec![
+                Change::Assert(a(), Pick::Last),
+                Change::Assert(b(), Pick::All),
+                Change::Assert(a(), Pick::Last)
+            ]
+        );
+        // A write repeated after a retraction of another value is one
+        // write: nothing between changes what the first stands for.
+        assert_eq!(
+            squash(
+                vec![
+                    Change::Assert(a(), Pick::All),
+                    Change::Retract(b()),
+                    Change::Assert(a(), Pick::All)
+                ],
+                &unknown
+            ),
+            vec![Change::Assert(a(), Pick::All), Change::Retract(b())]
         );
     }
 

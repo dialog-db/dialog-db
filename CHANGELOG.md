@@ -14,6 +14,37 @@ says how to cut a release.
 
 ## Unreleased
 
+### A value asserted again after a `last` write of its cell commits with it
+
+[#PRNUM](https://github.com/dialog-db/dialog-db/pull/PRNUM)
+
+A transaction that asserted a value under `all`, wrote the same cell
+under `last`, which succeeds that value, and then asserted the value
+again committed without the second assertion. The commit squashes a
+cell's writes, and the squash took the repeat for one write with the
+first, as if nothing between the two could have changed what the first
+stood for. The tree then applied the first assertion and the `last`
+write that retired it, and the value was gone. The same three writes
+committed one transaction each left it standing. The squash now keeps
+an assertion repeated after a write under a choosing pick (`last`,
+`max`, `min`, `top`) of its cell, and a repeated choosing write after
+any write of its cell, so the tree settles them in the order they were
+written.
+
+What this changes for you:
+
+- A transaction of that shape commits the repeated value: a read after
+  the commit returns it beside the `last` value, as it did when the
+  writes committed one by one. The nightly artifact fuzz, which caught
+  this, passes at its full width again.
+- No API moves.
+
+Why: a repeated write is one write only while nothing between the two
+can change what the first stands for. A write under a choosing pick is
+kept as written for the tree to settle, and the claim it succeeds may
+be exactly the earlier write's, so the repeat has to reach the tree to
+assert the value afresh.
+
 ### A persisted node's bytes can be attributed to what they carry
 
 [#634](https://github.com/dialog-db/dialog-db/pull/634), for
@@ -451,6 +482,15 @@ Why: numbers are one band and a rule compiles against types; what the body can b
 
 #### Compatibility and migration
 
+- Nothing stored or synced changes shape. A branch written by 0.2.0 or
+  0.3.0 that committed a transaction of the shape above holds the
+  `last` value and not the repeated one: the fact is missing from the
+  tree at rest, not hidden at read, and its history records the first
+  assertion and the succession that retired it, with no trace of the
+  repeat, so the loss cannot be told from a transaction that never
+  repeated the write. Nothing is rewritten on upgrade. An application
+  that knows the value asserts it again in a new transaction, which
+  restores it.
 - Nothing a replica stores or syncs is rewritten. A stored rule that no longer compiles under the head check (one that wrote a possibly negative integer into a `natural:` field, or a float into an `integer:` field) is held inert by `Branch::commit`, as any rule that fails to hydrate is: it stops firing and does not fail commits. Re-evaluate such a rule with a guard or a rounding formula, or widen the field, to have it fire again.
 
 ### A number binds a typed rule variable as the variable's type reads it
