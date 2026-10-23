@@ -23,7 +23,9 @@ on:
       - 'rust/dialog-remote-s3/**'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.provider || 'auto' }}
+  # Each commit on main gets its own group, so every merge runs to the end
+  # and keeps its artifacts. Other refs cancel a run a newer push replaces.
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}-${{ github.event.inputs.provider || 'auto' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
