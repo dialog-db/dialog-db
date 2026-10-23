@@ -14,6 +14,149 @@ says how to cut a release.
 
 ## Unreleased
 
+### A transaction's writes to a cell under `last` commit as they would one by one
+
+[#647](https://github.com/dialog-db/dialog-db/pull/647)
+
+A transaction that wrote one cell under `all` and under a choosing pick
+(`last`, `max`, `min`, `top`) could commit something other than what the
+same writes committed one per transaction leave. The commit squashes a
+cell's writes value by value: a repeated assertion of a value is
+dropped, and an assertion a later retraction of its value cancels is
+dropped. Neither holds once a choosing write stands between them, since
+it succeeds whichever claim its pick elects at its place in the order,
+and that may be the value an earlier write of the transaction asserted.
+Two shapes lost a fact:
+
+- Assert a value under `all`, write the cell under `last`, assert the
+  value again: the commit dropped the repeat, and the `last` write
+  retired the value. The value was missing.
+- Assert a value under `all`, write the cell under `last`, retract the
+  value: the commit dropped the assertion against the retraction, so
+  the `last` write succeeded the claim the line held instead. That
+  claim was missing.
+
+A cell holding a choosing write is now committed as written, every
+write in order, and the tree settles it as it settles one commit per
+write. A cell with no choosing write is squashed as before.
+
+What this changes for you:
+
+- A transaction of either shape commits what the same writes committed
+  one by one leave: a read after the commit returns the value asserted
+  again, or the line's claim, beside the `last` value.
+- A transaction that asserts and then retracts a value in a cell it
+  also writes under a choosing pick now leaves a retraction record for
+  that value in the history, where it left none. The facts are the
+  same.
+- No API moves.
+
+Why: the squash reasons about one value at a time, which is exact only
+while writes of different values commute. A choosing write is the one
+write that does not commute with the others, so a cell holding one has
+to reach the tree in the order it was written.
+
+### A chain canonicalized at a link that changes nothing is canonical
+
+[#649](https://github.com/dialog-db/dialog-db/pull/649)
+
+A staged chain canonicalizes at its last link. When that link was an
+amend that changed nothing (a retract of a fact the chain never held, a
+re-assert of a value that stands), the commit returned the tip as it
+was, before the seal that flushes the buffers, so the canonicalize was
+dropped and the chain kept whatever buffered form its earlier links
+left. An amend asked to canonicalize now canonicalizes its tip whether
+or not the link changed anything, and reports the tip unchanged only
+when it was already canonical.
+
+What this changes for you:
+
+- Two replicas holding the same facts no longer disagree on the root
+  because one chain ended in a no-op amend. Before, each named a root
+  that depended on where its earlier links flushed, so a sync saw
+  divergence where there was none and a merge did work that found
+  nothing.
+- `TransactionCommit::amend` with `canonicalize` on a link that changes
+  nothing returns a batch whose tree is canonical; it returned the
+  buffered tip before. A commit that is not an amend keeps its rule: a
+  batch that changes nothing mints nothing and canonicalizes nothing,
+  unless `allow_empty` asks for a revision.
+- A commit that changes nothing hands its live spine back to the line,
+  so the next commit appends to it instead of opening the root frame
+  from bytes again. The bytes written are the same either way.
+  `BufferedBatch::release` and `SpineSlot::root` are new.
+
+Why: the canonicalize request was checked after the no-op return. An
+amend is the one commit that rewrites a revision's tree in place, so it
+has a tree to canonicalize even when the link itself wrote nothing.
+
+#### Compatibility and migration
+
+- Nothing a replica stores or syncs changes shape, and nothing is
+  rewritten. A head an older release published from such a chain names
+  a buffered tree; it stays valid, reads, pulls and merges as before,
+  and converges on the canonical root at its next canonicalizing commit
+  that mints a revision (one that changes a fact, or one with
+  `allow_empty`). Nothing an embedder has to run.
+
+### A branch's live spine is held only while a handle of it is open
+
+[#637](https://github.com/dialog-db/dialog-db/pull/637)
+
+The environment's caches kept, per repository and branch name, the live
+buffered spine a commit leaves for the next commit on that branch, for the
+life of the environment. A repository visited by many writers once each
+(open, commit, drop the handle) held a spine per writer: about 146 kB each
+at 10 000 writers in the crowd scenario of
+[#633](https://github.com/dialog-db/dialog-db/issues/633), 1.5 GB in all.
+The caches now hold the spine weakly: every open handle of one branch, and
+every snapshot or transaction taken from one, shares it, and the last of
+them dropped takes it with it.
+
+What this changes for you:
+
+- A branch opened again after its last handle went decodes its root once,
+  on its first commit, from the node cache (no block is read). In the
+  crowd scenario that first commit costs about 0.3 ms more than one with
+  the spine held at 1 000 writers (1.1 ms against 0.8 ms) and is within
+  the run-to-run noise at 10 000 (2.7 to 3.0 ms either way); every later
+  commit through the handle is as before, and a handle kept open commits
+  as before.
+- What an environment retains no longer grows with the number of branches
+  written through it once. The crowd scenario's peak at 10 000 writers
+  goes from 1.75 GB to 0.29 GB live (1.95 GB to 0.42 GB resident).
+- `HeldCaches::release` and `clear` behave as before. `SpineSlot` gains
+  `downgrade`, `shares` and `is_held`, and `WeakSpineSlot` is new.
+- Nothing stored is rewritten and no format changes: the persisted bytes
+  are identical with or without the spine.
+
+Why: the spine is an accelerator for the next commit on the branch, and
+only a handle can make that commit; keeping it after the handle went
+bought nothing and cost a root per writer.
+
+### A persisted node's bytes can be attributed to what they carry
+
+[#634](https://github.com/dialog-db/dialog-db/pull/634), for
+[#632](https://github.com/dialog-db/dialog-db/issues/632)
+
+`PersistentNode::attribution` reports where a node frame's bytes go: the
+prelude, the link hashes, separators and scales of an index, and its
+entries' keys, values and polarity, next to the weight the pacing metered
+for the same entries and a share per key layout. The perf matrix gains
+`first-query`: a replica that adopted a head by root, two hundred
+one-commit origins deep, runs one point query, and the gate holds the
+blocks and bytes it reads and the root frame's bytes.
+
+What this changes for you:
+
+- A new method on `PersistentNode` and a new `FrameAttribution` type in
+  `dialog-search-tree`. Nothing existing moves.
+- Nothing stored or synced changes.
+
+Why: the root a replica's first query reads carries the write buffer the
+history's commits left in it, and choosing a policy for what a published
+root may cost needs the bytes attributed and the shape in the gate first.
+
 ### A head carries no causal context, and its tree carries all of it
 
 [#625](https://github.com/dialog-db/dialog-db/pull/625)
@@ -428,6 +571,12 @@ Why: numbers are one band and a rule compiles against types; what the body can b
 
 #### Compatibility and migration
 
+- Nothing stored or synced changes shape, and nothing is rewritten on
+  upgrade. A fact can be missing at rest from any replica that wrote it
+  under 0.2.0 or 0.3.0 in one transaction of either shape above: the
+  write never reached the tree, and the history holds no record of it,
+  so it cannot be found or repaired from the data. Asserting the value
+  again in a new transaction restores it.
 - Nothing a replica stores or syncs is rewritten. A stored rule that no longer compiles under the head check (one that wrote a possibly negative integer into a `natural:` field, or a float into an `integer:` field) is held inert by `Branch::commit`, as any rule that fails to hydrate is: it stops firing and does not fail commits. Re-evaluate such a rule with a guard or a rounding formula, or widen the field, to have it fire again.
 
 ### A number binds a typed rule variable as the variable's type reads it

@@ -226,6 +226,16 @@ impl<Key, Value> PersistentNode<Key, Value> {
     pub(crate) fn size(&self) -> usize {
         self.buffer.as_ref().len()
     }
+
+    /// The length of this node's prelude, before the archived body: 0 for
+    /// a legacy node, whose whole buffer is the body.
+    pub(crate) fn prelude_len(&self) -> usize {
+        if self.root & LEGACY_BIT != 0 {
+            0
+        } else {
+            tagged_prelude(self.buffer.as_ref()).map_or(0, |prelude| prelude.len as usize)
+        }
+    }
 }
 
 // Manual impl: a clone shares the buffer, whatever the marker types are.
