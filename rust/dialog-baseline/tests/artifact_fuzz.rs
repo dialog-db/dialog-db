@@ -191,12 +191,18 @@ fn knob(name: &str, fallback: usize) -> usize {
         .unwrap_or(fallback)
 }
 
+// The fallbacks are what CI runs per PR, sized to about two minutes of
+// the debug test configuration. Seeds matter as much as length: the
+// canonicalization-points bug of #649 fails on seeds 4 and 23 of the first
+// 40 at 600 ops and on none of the first 16 at 1 200, so a rare bug is
+// found by the seed count, and 48 seeds find one that 5% of seeds hit
+// nine times in ten. The nightly soak runs 200 seeds.
 fn seeds() -> u64 {
-    knob("DIALOG_ARTIFACT_FUZZ_SEEDS", 3) as u64
+    knob("DIALOG_ARTIFACT_FUZZ_SEEDS", 48) as u64
 }
 
 fn op_count() -> usize {
-    knob("DIALOG_ARTIFACT_FUZZ_OPS", 120)
+    knob("DIALOG_ARTIFACT_FUZZ_OPS", 600)
 }
 
 /// Every grouping of the same instruction program, published or staged as
