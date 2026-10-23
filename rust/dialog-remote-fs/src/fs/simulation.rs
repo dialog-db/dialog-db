@@ -12,13 +12,19 @@
 //! Two independent facilities, both process-global:
 //!
 //! - **Metering** ([`tally`], [`reset_tally`]): counts every remote effect
-//!   and the payload bytes it moved, per effect kind. Always on; the cost is
-//!   a few relaxed atomic increments per invocation.
+//!   and the payload bytes it moved, per effect kind, including the bytes a
+//!   blob read or import streams after its open; and the longest chain of
+//!   requests each issued only after the one before it completed
+//!   ([`longest_chain`]), the round trips the client paid one after another.
+//!   Always on; the cost is a few relaxed atomic increments and one short
+//!   lock per invocation.
 //! - **Shaping** ([`configure`], [`NetworkShape`]): when configured, each
 //!   invocation awaits the modeled cost of its round trip before completing:
-//!   a fixed per-request authorization delay (modeling the access-service
-//!   redeem that a UCAN-backed remote pays per object), the link's round-trip
-//!   latency, and the payload's serialization time on a *shared* bottleneck
+//!   a connection, when the shape caps how many requests a client may have
+//!   open at once (a browser allows six per host over HTTP/1.1); a fixed
+//!   per-request authorization delay (modeling the access-service redeem
+//!   that a UCAN-backed remote pays per object); the link's round-trip
+//!   latency; and the payload's serialization time on a *shared* bottleneck
 //!   link (concurrent transfers queue for bandwidth, as they do on a real
 //!   last-mile link, while their latencies overlap). Unconfigured, nothing
 //!   sleeps and the transport behaves exactly as before.
@@ -27,7 +33,7 @@
 //! `DIALOG_FS_NETWORK` environment variable (read once, at first use), e.g.:
 //!
 //! ```text
-//! DIALOG_FS_NETWORK="latency=80ms,bandwidth=20mbps,auth=120ms"
+//! DIALOG_FS_NETWORK="latency=80ms,bandwidth=20mbps,auth=120ms,connections=6"
 //! ```
 //!
 //! Shaping is native-only: on wasm the variable does not exist and
@@ -38,7 +44,11 @@
 //! are ordinary `tokio::time` sleeps, so a harness running under
 //! `start_paused` measures modeled time deterministically and instantly.
 
+use std::future::poll_fn;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::Poll;
+
+use dialog_effects::blob::{BlobError, BlobReader, BlobSink, BlobSource, BlobWriter};
 
 /// The kinds of remote effect the [`Fs`](crate::Fs) transport serves, as
 /// metering buckets. One bucket per provider impl, so a tally maps directly
@@ -59,11 +69,11 @@ pub enum Traffic {
     MemoryPublish = 4,
     /// A head-cell retract (`memory::Retract`).
     MemoryRetract = 5,
-    /// A blob open (`blob::Read`). Bytes are not metered here — they move
-    /// through the returned reader, outside the invocation.
+    /// A blob open (`blob::Read`). The open is the request; the bytes
+    /// are metered as they stream through the returned reader.
     BlobRead = 6,
-    /// A blob import (`blob::Import`). Bytes are not metered here — they
-    /// move through the returned writer, outside the invocation.
+    /// A blob import (`blob::Import`). The open is the request; the bytes
+    /// are metered as they stream through the returned writer.
     BlobImport = 7,
 }
 
@@ -281,6 +291,130 @@ pub fn get_ledger() -> GetLedger {
     }
 }
 
+/// The dependency chain the requests so far form: the length of the
+/// longest sequence of requests in which each began only after the one
+/// before it completed.
+///
+/// A request can depend on another only if that one had completed when it
+/// began, so this is the fewest serial round trips the observed schedule
+/// can be explained by: over a link with latency, the latencies paid one
+/// after another. It is exact for the schedule the client ran, whatever
+/// link was modeled, and unlike a bound derived from modeled time it does
+/// not move with bandwidth or compute. Two requests ordered by chance
+/// rather than by dependency count as a chain of two: the measure is of
+/// the schedule, and only issuing them together brings it down, which is
+/// the behaviour it exists to reward.
+///
+/// Each request is assigned a depth when it begins (one more than the
+/// greatest depth of any request completed so far) and the chain is the
+/// greatest depth assigned. A request dropped before it completed keeps
+/// its depth but never raises the completed mark.
+struct Chain {
+    /// The greatest depth of any completed request.
+    completed: u64,
+    /// The greatest depth assigned to any request.
+    longest: u64,
+}
+
+static CHAIN: std::sync::Mutex<Chain> = std::sync::Mutex::new(Chain {
+    completed: 0,
+    longest: 0,
+});
+
+/// The longest chain of dependent requests since the last [`reset_tally`]
+/// (see [`Chain`]). The difference between two readings is the chain a
+/// phase between them added, exact when every request before the first
+/// reading had completed by then.
+pub fn longest_chain() -> u64 {
+    CHAIN.lock().expect("chain lock poisoned").longest
+}
+
+/// Yields to the executor exactly once, so requests issued by work polled
+/// alongside the caller begin before the caller completes. Without it an
+/// unshaped request that completes without yielding would serialize its
+/// genuinely concurrent siblings, and the chain would read a parallel
+/// wave as a run of dependent requests.
+async fn yield_once() {
+    let mut yielded = false;
+    poll_fn(move |context| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await
+}
+
+/// A blob reader whose chunks are metered in `bucket`, and serialized on
+/// the shared link when shaping is configured, as they are read.
+struct MeteredSource {
+    inner: BlobReader,
+    bucket: Traffic,
+    /// The connection the open took, held while the body streams.
+    _slot: shaping::Slot,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl BlobSource for MeteredSource {
+    async fn next(&mut self) -> Result<Option<Vec<u8>>, BlobError> {
+        let chunk = self.inner.next().await?;
+        if let Some(chunk) = &chunk {
+            BYTES[self.bucket as usize].fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            shaping::transfer(chunk.len()).await;
+        }
+        Ok(chunk)
+    }
+}
+
+/// A blob writer whose chunks are metered in `bucket`, and serialized on
+/// the shared link when shaping is configured, as they are written.
+struct MeteredSink {
+    inner: BlobWriter,
+    bucket: Traffic,
+    /// The connection the open took, held while the body streams.
+    _slot: shaping::Slot,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl BlobSink for MeteredSink {
+    async fn write_all(&mut self, bytes: &[u8]) -> Result<(), BlobError> {
+        self.inner.write_all(bytes).await?;
+        BYTES[self.bucket as usize].fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        shaping::transfer(bytes.len()).await;
+        Ok(())
+    }
+
+    async fn finish(self: Box<Self>) -> Result<dialog_common::Blake3Hash, BlobError> {
+        self.inner.finish().await
+    }
+}
+
+/// Meter the bytes `reader` streams in `bucket`, on the connection `slot`
+/// the open took: a body streams on the connection that opened it, so the
+/// connection is held until the reader is dropped.
+pub(crate) fn meter_reader(reader: BlobReader, bucket: Traffic, slot: shaping::Slot) -> BlobReader {
+    Box::new(MeteredSource {
+        inner: reader,
+        bucket,
+        _slot: slot,
+    })
+}
+
+/// Meter the bytes `writer` receives in `bucket`, on the connection `slot`
+/// the open took, held until the writer is dropped.
+pub(crate) fn meter_writer(writer: BlobWriter, bucket: Traffic, slot: shaping::Slot) -> BlobWriter {
+    Box::new(MeteredSink {
+        inner: writer,
+        bucket,
+        _slot: slot,
+    })
+}
+
 /// The current transfer tally.
 pub fn tally() -> TransferTally {
     let mut snapshot = TransferTally::default();
@@ -298,32 +432,60 @@ pub fn reset_tally() {
         BYTES[index].store(0, Ordering::Relaxed);
     }
     *GET_LEDGER.lock().expect("get ledger lock poisoned") = None;
+    let mut chain = CHAIN.lock().expect("chain lock poisoned");
+    chain.completed = 0;
+    chain.longest = 0;
 }
 
-/// An in-flight simulated request: [`begin`] has charged the request's
-/// authorization and latency; [`InFlight::complete`] charges the payload's
-/// transfer time and records its bytes.
+/// An in-flight simulated request: [`begin`] has taken a connection and
+/// charged the request's authorization and latency; [`InFlight::complete`]
+/// charges the payload's transfer time, records its bytes, and hands the
+/// connection back (or on, to a body that streams after the response).
 #[must_use = "call `complete` with the payload size to finish metering"]
 pub(crate) struct InFlight {
     bucket: Traffic,
+    /// This request's position in the dependency chain (see [`Chain`]).
+    depth: u64,
+    /// The connection the request holds while the shape caps them.
+    slot: shaping::Slot,
 }
 
 impl InFlight {
     /// Record `bytes` of payload for this request and, when shaping is
     /// configured, await the payload's serialization slot on the shared
     /// link.
-    pub(crate) async fn complete(self, bytes: usize) {
+    pub(crate) async fn complete(self, bytes: usize) -> shaping::Slot {
         BYTES[self.bucket as usize].fetch_add(bytes as u64, Ordering::Relaxed);
         shaping::transfer(bytes).await;
+        let mut chain = CHAIN.lock().expect("chain lock poisoned");
+        chain.completed = chain.completed.max(self.depth);
+        self.slot
     }
 }
 
-/// Meter one remote invocation in `bucket` and, when shaping is configured,
+/// Meter one remote invocation in `bucket`, place it in the dependency
+/// chain, and, when shaping is configured, wait for a connection and
 /// await the request's fixed costs (authorization + round-trip latency).
+///
+/// The chain position is taken when the client issues the request, before
+/// it waits for a connection: the chain measures what the client's
+/// schedule depends on, and a connection cap lengthens modeled time, not
+/// the dependency.
 pub(crate) async fn begin(bucket: Traffic) -> InFlight {
     COUNTS[bucket as usize].fetch_add(1, Ordering::Relaxed);
-    shaping::request().await;
-    InFlight { bucket }
+    let depth = {
+        let mut chain = CHAIN.lock().expect("chain lock poisoned");
+        let depth = chain.completed + 1;
+        chain.longest = chain.longest.max(depth);
+        depth
+    };
+    yield_once().await;
+    let slot = shaping::request().await;
+    InFlight {
+        bucket,
+        depth,
+        slot,
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -333,9 +495,10 @@ pub use shaping::{NetworkShape, configure};
 mod shaping {
     //! The native-only half: the link model and its delays.
 
-    use std::sync::{Mutex, OnceLock, RwLock};
+    use std::sync::{Arc, Mutex, OnceLock, RwLock};
     use std::time::Duration;
 
+    use tokio::sync::{OwnedSemaphorePermit, Semaphore};
     use tokio::time::Instant;
 
     /// A link model: what one simulated request costs.
@@ -344,7 +507,10 @@ mod shaping {
     /// freely across concurrent requests (propagation delay). `bandwidth`
     /// is a shared bottleneck: concurrent payloads queue for it, so ten
     /// parallel 64 KiB responses on a 20 Mbit/s link take ten payloads'
-    /// serialization time, not one.
+    /// serialization time, not one. `connections` caps how many requests
+    /// are open at once: the rest queue for a connection before they pay
+    /// anything, so a wave of sixteen over six connections costs three
+    /// latencies, not one.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct NetworkShape {
         /// Round-trip latency paid by every request.
@@ -357,18 +523,45 @@ mod shaping {
         /// Shared link bandwidth in bytes per second; `None` models an
         /// infinitely fast link (latency only).
         pub bandwidth: Option<u64>,
+        /// Connections the client may hold open at once; `None` models a
+        /// client that opens as many as it issues. A browser allows six
+        /// per host over HTTP/1.1, which is what tonk's replicas are.
+        pub connections: Option<usize>,
+    }
+
+    /// The connection a request holds while the shape caps them: a
+    /// permit of the cap's semaphore, or nothing under an uncapped shape.
+    /// Dropping it hands the connection to the next request waiting.
+    pub struct Slot(#[allow(dead_code)] Option<OwnedSemaphorePermit>);
+
+    /// The cap's semaphore, rebuilt when the cap changes. Requests in
+    /// flight across a change keep the permits of the semaphore they took.
+    static CONNECTIONS: Mutex<Option<(usize, Arc<Semaphore>)>> = Mutex::new(None);
+
+    fn connections(cap: usize) -> Arc<Semaphore> {
+        let mut current = CONNECTIONS.lock().expect("connection cap lock poisoned");
+        match &*current {
+            Some((size, semaphore)) if *size == cap => semaphore.clone(),
+            _ => {
+                let semaphore = Arc::new(Semaphore::new(cap));
+                *current = Some((cap, semaphore.clone()));
+                semaphore
+            }
+        }
     }
 
     impl NetworkShape {
         /// Parse a shape from the `DIALOG_FS_NETWORK` syntax:
         /// comma-separated `key=value` with keys `latency`, `auth`
-        /// (durations: `120ms`, `1.5s`) and `bandwidth` (`20mbps`,
-        /// `500kbps`, `1gbps`). Missing keys default to zero cost.
+        /// (durations: `120ms`, `1.5s`), `bandwidth` (`20mbps`,
+        /// `500kbps`, `1gbps`) and `connections` (a count). Missing keys
+        /// default to zero cost and no cap.
         pub fn parse(text: &str) -> Result<Self, String> {
             let mut shape = NetworkShape {
                 latency: Duration::ZERO,
                 auth_latency: Duration::ZERO,
                 bandwidth: None,
+                connections: None,
             };
             for part in text.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                 let (key, value) = part
@@ -378,6 +571,16 @@ mod shaping {
                     "latency" => shape.latency = parse_duration(value.trim())?,
                     "auth" => shape.auth_latency = parse_duration(value.trim())?,
                     "bandwidth" => shape.bandwidth = Some(parse_bandwidth(value.trim())?),
+                    "connections" => {
+                        let count: usize = value
+                            .trim()
+                            .parse()
+                            .map_err(|_| format!("bad connection count {value:?}"))?;
+                        if count == 0 {
+                            return Err("connections must be at least 1".to_string());
+                        }
+                        shape.connections = Some(count);
+                    }
                     other => return Err(format!("unknown key {other:?}")),
                 }
             }
@@ -460,14 +663,26 @@ mod shaping {
         })
     }
 
-    /// The fixed per-request delays: authorization, then round-trip latency.
-    pub(super) async fn request() {
-        if let Some(shape) = active() {
-            let fixed = shape.auth_latency + shape.latency;
-            if fixed > Duration::ZERO {
-                tokio::time::sleep(fixed).await;
-            }
+    /// A connection when the shape caps them, then the fixed per-request
+    /// delays: authorization, then round-trip latency.
+    pub(super) async fn request() -> Slot {
+        let Some(shape) = active() else {
+            return Slot(None);
+        };
+        let slot = match shape.connections {
+            Some(cap) => Slot(Some(
+                connections(cap)
+                    .acquire_owned()
+                    .await
+                    .expect("the connection semaphore is never closed"),
+            )),
+            None => Slot(None),
+        };
+        let fixed = shape.auth_latency + shape.latency;
+        if fixed > Duration::ZERO {
+            tokio::time::sleep(fixed).await;
         }
+        slot
     }
 
     /// The payload's serialization time on the shared link: reserve the
@@ -496,9 +711,14 @@ mod shaping {
 #[cfg(target_arch = "wasm32")]
 mod shaping {
     //! On wasm there is no environment and no simulated link: requests are
-    //! metered but never delayed.
+    //! metered but never delayed, and no connection is ever waited for.
 
-    pub(super) async fn request() {}
+    /// Nothing: an uncapped client holds no connection.
+    pub struct Slot;
+
+    pub(super) async fn request() -> Slot {
+        Slot
+    }
 
     pub(super) async fn transfer(_bytes: usize) {}
 }
@@ -506,16 +726,139 @@ mod shaping {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::shaping::NetworkShape;
+    use super::{
+        Traffic, begin, configure, longest_chain, meter_reader, meter_writer, reset_tally, tally,
+    };
+    use dialog_effects::blob::{BlobError, BlobReader, BlobSink, BlobSource, BlobWriter};
     use std::time::Duration;
+
+    /// One request, issued and awaited to completion with no payload.
+    async fn request(bucket: Traffic) {
+        begin(bucket).await.complete(0).await;
+    }
+
+    /// Under a connection cap, requests beyond the cap wait for one to
+    /// finish before they pay anything: four requests over two
+    /// connections cost two latencies, where uncapped they cost one. The
+    /// chain is unchanged, since the four were issued together.
+    #[tokio::test(start_paused = true)]
+    async fn it_caps_connections() {
+        let shape = NetworkShape {
+            latency: Duration::from_millis(10),
+            auth_latency: Duration::ZERO,
+            bandwidth: None,
+            connections: Some(2),
+        };
+        let wave = |cap| async move {
+            configure(Some(NetworkShape {
+                connections: cap,
+                ..shape
+            }));
+            let before = longest_chain();
+            let started = tokio::time::Instant::now();
+            futures_util::future::join_all((0..4).map(|_| request(Traffic::ArchiveGet))).await;
+            configure(None);
+            (started.elapsed(), longest_chain() - before)
+        };
+        let (capped, chain) = wave(Some(2)).await;
+        assert_eq!(
+            chain, 1,
+            "a wave issued together is one round, capped or not"
+        );
+        let (uncapped, _) = wave(None).await;
+        assert_eq!(uncapped, Duration::from_millis(10));
+        assert_eq!(capped, Duration::from_millis(20));
+    }
+
+    /// Requests issued one after another chain; requests issued together
+    /// do not, however many there are; and a request issued after a wave
+    /// completes sits one deeper than the wave. The unit test of the
+    /// round-trip count: the chain is the schedule's critical path, not
+    /// its request count.
+    #[tokio::test]
+    async fn it_counts_dependent_requests_as_a_chain() {
+        reset_tally();
+        let start = longest_chain();
+
+        for _ in 0..3 {
+            begin(Traffic::ArchiveGet).await.complete(0).await;
+        }
+        assert_eq!(longest_chain() - start, 3, "serial requests chain");
+
+        let wave = longest_chain();
+        let flights =
+            futures_util::future::join_all((0..16).map(|_| begin(Traffic::ArchiveGet))).await;
+        assert_eq!(longest_chain() - wave, 1, "a parallel wave is one round");
+        for flight in flights {
+            flight.complete(0).await;
+        }
+        begin(Traffic::MemoryResolve).await.complete(0).await;
+        assert_eq!(
+            longest_chain() - wave,
+            2,
+            "a request issued after the wave completed depends on it"
+        );
+    }
+
+    struct Chunks(Vec<Vec<u8>>);
+
+    #[async_trait::async_trait]
+    impl BlobSource for Chunks {
+        async fn next(&mut self) -> Result<Option<Vec<u8>>, BlobError> {
+            Ok(if self.0.is_empty() {
+                None
+            } else {
+                Some(self.0.remove(0))
+            })
+        }
+    }
+
+    struct Sink(usize);
+
+    #[async_trait::async_trait]
+    impl BlobSink for Sink {
+        async fn write_all(&mut self, bytes: &[u8]) -> Result<(), BlobError> {
+            self.0 += bytes.len();
+            Ok(())
+        }
+
+        async fn finish(self: Box<Self>) -> Result<dialog_common::Blake3Hash, BlobError> {
+            Ok(dialog_common::Blake3Hash::from([0u8; 32]))
+        }
+    }
+
+    /// The bytes a blob streams after its open land in its bucket, in
+    /// either direction: the open counts the request, the chunks count
+    /// the bytes.
+    #[tokio::test]
+    async fn it_meters_blob_bytes_as_they_stream() {
+        let before = tally();
+        let reader: BlobReader = Box::new(Chunks(vec![vec![1; 100], vec![2; 50]]));
+        let slot = begin(Traffic::BlobRead).await.complete(0).await;
+        let mut reader = meter_reader(reader, Traffic::BlobRead, slot);
+        while reader.next().await.unwrap().is_some() {}
+        let writer: BlobWriter = Box::new(Sink(0));
+        let slot = begin(Traffic::BlobImport).await.complete(0).await;
+        let mut writer = meter_writer(writer, Traffic::BlobImport, slot);
+        writer.write_all(&[3; 70]).await.unwrap();
+        writer.finish().await.unwrap();
+        let moved = tally().since(&before);
+        assert_eq!(moved.bytes(Traffic::BlobRead), 150);
+        assert_eq!(moved.bytes(Traffic::BlobImport), 70);
+        assert_eq!(moved.count(Traffic::BlobRead), 1, "the open is the request");
+    }
 
     /// The `DIALOG_FS_NETWORK` syntax parses into the intended shape, and
     /// bad input is rejected rather than silently zeroed.
     #[test]
     fn it_parses_a_network_shape() {
-        let shape = NetworkShape::parse("latency=80ms, bandwidth=20mbps, auth=120ms").unwrap();
+        let shape =
+            NetworkShape::parse("latency=80ms, bandwidth=20mbps, auth=120ms, connections=6")
+                .unwrap();
         assert_eq!(shape.latency, Duration::from_millis(80));
         assert_eq!(shape.auth_latency, Duration::from_millis(120));
         assert_eq!(shape.bandwidth, Some(2_500_000));
+        assert_eq!(shape.connections, Some(6));
 
         let seconds = NetworkShape::parse("latency=1.5s").unwrap();
         assert_eq!(seconds.latency, Duration::from_millis(1500));
@@ -525,5 +868,8 @@ mod tests {
         assert!(NetworkShape::parse("bandwidth=20").is_err());
         assert!(NetworkShape::parse("nonsense").is_err());
         assert!(NetworkShape::parse("speed=20mbps").is_err());
+        assert!(NetworkShape::parse("connections=0").is_err());
+        assert!(NetworkShape::parse("connections=six").is_err());
+        assert_eq!(NetworkShape::parse("latency=1s").unwrap().connections, None);
     }
 }

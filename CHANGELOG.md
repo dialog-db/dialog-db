@@ -57,6 +57,41 @@ has a tree to canonicalize even when the link itself wrote nothing.
   that mints a revision (one that changes a fact, or one with
   `allow_empty`). Nothing an embedder has to run.
 
+### A branch's live spine is held only while a handle of it is open
+
+[#637](https://github.com/dialog-db/dialog-db/pull/637)
+
+The environment's caches kept, per repository and branch name, the live
+buffered spine a commit leaves for the next commit on that branch, for the
+life of the environment. A repository visited by many writers once each
+(open, commit, drop the handle) held a spine per writer: about 146 kB each
+at 10 000 writers in the crowd scenario of
+[#633](https://github.com/dialog-db/dialog-db/issues/633), 1.5 GB in all.
+The caches now hold the spine weakly: every open handle of one branch, and
+every snapshot or transaction taken from one, shares it, and the last of
+them dropped takes it with it.
+
+What this changes for you:
+
+- A branch opened again after its last handle went decodes its root once,
+  on its first commit, from the node cache (no block is read). In the
+  crowd scenario that first commit costs about 0.3 ms more than one with
+  the spine held at 1 000 writers (1.1 ms against 0.8 ms) and is within
+  the run-to-run noise at 10 000 (2.7 to 3.0 ms either way); every later
+  commit through the handle is as before, and a handle kept open commits
+  as before.
+- What an environment retains no longer grows with the number of branches
+  written through it once. The crowd scenario's peak at 10 000 writers
+  goes from 1.75 GB to 0.29 GB live (1.95 GB to 0.42 GB resident).
+- `HeldCaches::release` and `clear` behave as before. `SpineSlot` gains
+  `downgrade`, `shares` and `is_held`, and `WeakSpineSlot` is new.
+- Nothing stored is rewritten and no format changes: the persisted bytes
+  are identical with or without the spine.
+
+Why: the spine is an accelerator for the next commit on the branch, and
+only a handle can make that commit; keeping it after the handle went
+bought nothing and cost a root per writer.
+
 ### A persisted node's bytes can be attributed to what they carry
 
 [#634](https://github.com/dialog-db/dialog-db/pull/634), for

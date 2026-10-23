@@ -48,7 +48,7 @@ use dialog_search_tree::{
 use futures_util::Stream;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::ops::RangeInclusive;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use crate::history::{RecordEntries, Version};
 use crate::tree::{ArtifactNodeCache, ArtifactTree, Stamp, WriteScope, write_instructions};
@@ -286,10 +286,44 @@ pub struct BufferedBatch {
 /// in `dialog-search-tree` and `it_commits_identically_when_the_spine_is_reused`
 /// here), and dropping the slot at any point only costs the next commit a
 /// fresh open.
+///
+/// Clones share one slot. The slot lives as long as a clone does; whoever
+/// keeps a registry of slots without keeping them alive holds a
+/// [`WeakSpineSlot`] instead, so a spine goes with the last handle that
+/// could commit through it.
 #[derive(Clone, Default)]
 pub struct SpineSlot {
     #[allow(clippy::type_complexity)]
     slot: Arc<Mutex<Option<(NodeHash, BufferedArtifactTree)>>>,
+}
+
+/// A [`SpineSlot`] held without keeping it alive: upgrades to the slot
+/// while some clone of it lives, and to nothing once the last clone went,
+/// its spine with it.
+#[derive(Clone, Default)]
+pub struct WeakSpineSlot {
+    #[allow(clippy::type_complexity)]
+    slot: Weak<Mutex<Option<(NodeHash, BufferedArtifactTree)>>>,
+}
+
+impl Debug for WeakSpineSlot {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("WeakSpineSlot")
+            .field("alive", &(self.slot.strong_count() > 0))
+            .finish()
+    }
+}
+
+impl WeakSpineSlot {
+    /// A handle on no slot: upgrades to nothing.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The slot, while a clone of it lives.
+    pub fn upgrade(&self) -> Option<SpineSlot> {
+        self.slot.upgrade().map(|slot| SpineSlot { slot })
+    }
 }
 
 impl Debug for SpineSlot {
@@ -304,6 +338,24 @@ impl SpineSlot {
     /// An empty slot.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A handle on this slot that does not keep it alive.
+    pub fn downgrade(&self) -> WeakSpineSlot {
+        WeakSpineSlot {
+            slot: Arc::downgrade(&self.slot),
+        }
+    }
+
+    /// Whether `other` is a clone of this slot: a commit through one is
+    /// the next commit's spine through the other.
+    pub fn shares(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.slot, &other.slot)
+    }
+
+    /// Whether a spine is held now.
+    pub fn is_held(&self) -> bool {
+        self.slot.lock().expect("spine slot lock").is_some()
     }
 
     /// Takes the held spine if it was persisted as `root`; a mismatch drops
