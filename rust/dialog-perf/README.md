@@ -70,6 +70,16 @@ the pull request, edited on each push, so the before and after need not
 be carried by hand. To reproduce locally, download the base commit's
 `perf-current` artifact into `target/perf-base` and run `perf:check`.
 
+An instruction count also depends on the CPU: valgrind passes the
+host's feature flags through, and code that picks a SIMD path at
+runtime retires a different count on another CPU model. A sweep records
+its CPU in `runner.txt`. When the base ran on the same model and flags,
+instructions are held to the tolerance; when not (GitHub's runner pool
+mixes several), each scenario is allowed its measured cross-CPU spread
+on top (`cross_cpu_pct` in the catalog, from eight identical sweeps in
+#653: rough, and meant to go once the measured build stops dispatching
+on CPU features, #652).
+
 Use `--release`: the baselines are recorded under the release profile,
 and `compare` refuses to compare across profiles.
 

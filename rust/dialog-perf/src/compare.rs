@@ -33,6 +33,7 @@ use anyhow::{Context as _, Result};
 
 use crate::report::Report;
 use crate::runner::Runner;
+use crate::scenario::{catalog, spec};
 
 /// How much growth the gate allows.
 #[derive(Debug, Clone)]
@@ -159,6 +160,12 @@ pub struct Comparison {
     pub rows: Vec<Row>,
     /// The CPU each side's sweep ran on, where it recorded one.
     pub runners: (Option<Runner>, Option<Runner>),
+    /// Whether this compares against a sweep that ran on another CPU
+    /// model or feature set, or one either side did not record. Each
+    /// scenario's instructions are then allowed its measured cross-CPU
+    /// spread ([`Spec::cross_cpu_pct`](crate::Spec::cross_cpu_pct)) on top
+    /// of the tolerance.
+    pub cross_cpu: bool,
 }
 
 impl Comparison {
@@ -191,6 +198,22 @@ impl Comparison {
             runner(&self.runners.0),
             runner(&self.runners.1),
         );
+        if self.cross_cpu {
+            let allowances: Vec<String> = catalog()
+                .iter()
+                .filter(|spec| spec.cross_cpu_pct > 0.0)
+                .map(|spec| format!("{} +{}%", spec.name, spec.cross_cpu_pct))
+                .collect();
+            let _ = writeln!(
+                out,
+                "Different or unrecorded CPUs: instructions are allowed each scenario's \
+                 cross-CPU spread on top of the tolerance ({}). The allowances are rough, \
+                 from eight identical sweeps.\n",
+                allowances.join(", ")
+            );
+        } else {
+            out.push_str("Same CPU model and flags: instructions are held to the tolerance.\n\n");
+        }
         for note in &self.notes {
             let _ = writeln!(out, "- {note}");
         }
@@ -323,8 +346,11 @@ pub fn compare_dirs(
         "no overlapping reports to compare"
     );
 
+    let runners = (Runner::read(baseline_dir), Runner::read(new_dir));
+    let same_cpu = matches!(&runners, (Some(base), Some(new)) if base == new);
     let mut comparison = Comparison {
-        runners: (Runner::read(baseline_dir), Runner::read(new_dir)),
+        cross_cpu: matches!(against, Against::Sweep { .. }) && !same_cpu,
+        runners,
         ..Comparison::default()
     };
     let names: BTreeSet<&String> = baseline.keys().chain(new.keys()).collect();
@@ -504,13 +530,18 @@ fn compare_reports(
             )
         }
         (Some(before), Some(after)) => {
+            let cross_cpu_pct = if out.cross_cpu {
+                spec(name).map_or(0.0, |spec| spec.cross_cpu_pct)
+            } else {
+                0.0
+            };
             gate.check(
                 out,
                 "instructions",
                 before,
                 after,
                 tolerance.instructions_slack,
-                tolerance.instructions_pct,
+                tolerance.instructions_pct + cross_cpu_pct,
             );
             format!("instructions {}", change(before, after))
         }
@@ -653,6 +684,29 @@ mod tests {
         compare_reports(&base, &new, &tolerance, &sweep(&[]), &mut against_base);
         assert!(!against_base.passed(), "+12.5% against the base");
         assert_eq!(against_base.rows[0].verdict, Verdict::Regressed);
+    }
+
+    /// Against a sweep from another CPU, a scenario's instructions get
+    /// its measured cross-CPU spread on top of the tolerance; on the same
+    /// CPU, none. rule-point's 2.4% lets +4% through across CPUs only.
+    #[test]
+    fn a_sweep_from_another_cpu_widens_instructions_by_the_scenario() {
+        let mut base = measured(48_000_000, &[]);
+        base.scenario = "rule-point".into();
+        let mut new = measured(49_920_000, &[]);
+        new.scenario = "rule-point".into();
+
+        let mut same = Comparison::default();
+        compare_reports(&base, &new, &Tolerance::default(), &sweep(&[]), &mut same);
+        assert!(!same.passed(), "+4% on one CPU fails");
+
+        let mut cross = Comparison {
+            cross_cpu: true,
+            ..Comparison::default()
+        };
+        compare_reports(&base, &new, &Tolerance::default(), &sweep(&[]), &mut cross);
+        assert!(cross.passed(), "{:?}", cross.regressions);
+        assert!(cross.markdown().contains("rule-point +2.4%"));
     }
 
     /// Re-recording a scenario's baseline file accepts its new cost: the
