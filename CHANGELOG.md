@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A chain canonicalized at a link that changes nothing is canonical
 
-[#PRNUM](https://github.com/dialog-db/dialog-db/pull/PRNUM)
+[#649](https://github.com/dialog-db/dialog-db/pull/649)
 
 A staged chain canonicalizes at its last link. When that link was an
 amend that changed nothing (a retract of a fact the chain never held, a
