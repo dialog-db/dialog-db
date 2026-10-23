@@ -80,6 +80,32 @@ fn regressed(base: u64, new: u64, slack: u64, threshold_pct: f64) -> bool {
     (new - base) as f64 / base as f64 * 100.0 > threshold_pct
 }
 
+/// Per-phase request slack on the unshaped profile, where the default of 2
+/// is narrower than what randomized identities alone move (#648). Each
+/// run mints its profile, space and session keys at random; they reach the
+/// tree through the revision records, history and context regions, so
+/// they move leaf seams. `claim` re-uploads the held nodes under the path
+/// its commit rewrites (#648's over-upload), as many as the seams put
+/// there, and `seeded`'s reverse replay reads whichever leaves the records
+/// region shares with the seed. Each value is the measured spread over 100
+/// runs at the default fixture (max minus median, plus 1): `claim` 5 to
+/// 10, median 5; `seeded` 59 to 69, median 63. Only requests take the override: the exact chain and
+/// duplicate gates stay at 2 on every phase. Deterministic identities in
+/// the harness (#652, item 4) remove this variance and these entries.
+const UNSHAPED_REQUEST_SLACK: &[(&str, &str, u64)] = &[("join", "claim", 6), ("join", "seeded", 7)];
+
+/// The request slack for `phase` of `scenario`: the unshaped override when
+/// one is listed, else `default`.
+fn request_slack_for(scenario: &str, phase: &str, shaped: bool, default: u64) -> u64 {
+    if shaped {
+        return default;
+    }
+    UNSHAPED_REQUEST_SLACK
+        .iter()
+        .find(|(s, p, _)| *s == scenario && *p == phase)
+        .map_or(default, |(_, _, slack)| *slack)
+}
+
 /// Load every `*.json` report in `dir`, keyed by file name.
 fn load(dir: &Path) -> Result<BTreeMap<String, Report>> {
     let mut reports = BTreeMap::new();
@@ -147,7 +173,7 @@ fn compare_reports(name: &str, base: &Report, new: &Report, threshold_pct: f64) 
         if regressed(
             base_phase.traffic.requests,
             new_phase.traffic.requests,
-            request_slack,
+            request_slack_for(&new.scenario, &new_phase.name, shaped, request_slack),
             request_threshold,
         ) {
             regressions.push(format!(
@@ -311,6 +337,53 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("duplicate fetches 0 -> 5")),
             "{found:?}"
+        );
+    }
+
+    /// The join's `claim` takes its measured request spread on the
+    /// unshaped profile, and only its requests: a longer chain there still
+    /// regresses at the default slack, as does the same growth on a phase
+    /// without an override.
+    #[test]
+    fn it_widens_only_listed_request_slack() {
+        // Requests grow, the chain holds at the baseline's 5. A render
+        // phase sizes the lazy-join total as a real report's, so the total
+        // absorbs the growth the override allows.
+        let render = || phase("render", 600, 1000, 0);
+        let grown = |name: &str, requests: u64| {
+            let mut grown = phase(name, requests, 1000, 0);
+            grown.round_trips = Some(5);
+            report("none", vec![grown, render()])
+        };
+        let within = 5 + 6;
+        let base = report("none", vec![phase("claim", 5, 1000, 0), render()]);
+        assert!(
+            compare_reports("join-none.json", &base, &grown("claim", within), 10.0).is_empty(),
+            "claim's spread passes"
+        );
+
+        let found = compare_reports("join-none.json", &base, &grown("claim", within + 1), 10.0);
+        assert!(
+            found
+                .iter()
+                .any(|line| line.contains(&format!("claim: requests 5 -> {}", within + 1))),
+            "{found:?}"
+        );
+
+        let mut chained = grown("claim", 5);
+        chained.phases[0].round_trips = Some(8);
+        let found = compare_reports("join-none.json", &base, &chained, 10.0);
+        assert!(
+            found
+                .iter()
+                .any(|line| line.contains("claim: round trips 5 -> 8")),
+            "{found:?}"
+        );
+
+        let base = report("none", vec![phase("probe", 5, 1000, 0), render()]);
+        assert!(
+            !compare_reports("join-none.json", &base, &grown("probe", within), 10.0).is_empty(),
+            "a phase without an override keeps the default slack"
         );
     }
 
