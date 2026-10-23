@@ -1,0 +1,179 @@
+{
+  "scenario": "writer",
+  "network": "none",
+  "latency_ms": 0.0,
+  "auth_ms": 0.0,
+  "bandwidth_mbps": 0.0,
+  "connections": null,
+  "fanout_n": 8,
+  "max_segment": 65536,
+  "entities": 4000,
+  "facts": 24011,
+  "commits": 33,
+  "vault_files": 396,
+  "vault_bytes": 19297318,
+  "phases": [
+    {
+      "name": "commit-1",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "round_trips": 6,
+      "blob_requests": 0,
+      "blob_bytes": 0,
+      "unique_blocks": 6,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            6,
+            365436
+          ]
+        ],
+        "requests": 6,
+        "bytes": 365436
+      }
+    },
+    {
+      "name": "push-1",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "round_trips": 3,
+      "blob_requests": 0,
+      "blob_bytes": 0,
+      "unique_blocks": 0,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.put",
+            1,
+            72684
+          ],
+          [
+            "memory.resolve",
+            1,
+            294
+          ],
+          [
+            "memory.publish",
+            1,
+            294
+          ]
+        ],
+        "requests": 3,
+        "bytes": 73272
+      }
+    },
+    {
+      "name": "commit-10",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "round_trips": 0,
+      "blob_requests": 0,
+      "blob_bytes": 0,
+      "unique_blocks": 0,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [],
+        "requests": 0,
+        "bytes": 0
+      }
+    },
+    {
+      "name": "push-10",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "round_trips": 3,
+      "blob_requests": 0,
+      "blob_bytes": 0,
+      "unique_blocks": 0,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.put",
+            1,
+            91316
+          ],
+          [
+            "memory.resolve",
+            1,
+            294
+          ],
+          [
+            "memory.publish",
+            1,
+            294
+          ]
+        ],
+        "requests": 3,
+        "bytes": 91904
+      }
+    },
+    {
+      "name": "commit-2000",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "round_trips": 40,
+      "blob_requests": 0,
+      "blob_bytes": 0,
+      "unique_blocks": 40,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.get",
+            40,
+            2788216
+          ]
+        ],
+        "requests": 40,
+        "bytes": 2788216
+      }
+    },
+    {
+      "name": "push-2000",
+      "virtual_ms": 0,
+      "rounds": 0.0,
+      "round_trips": 7,
+      "blob_requests": 0,
+      "blob_bytes": 0,
+      "unique_blocks": 0,
+      "duplicate_requests": 0,
+      "duplicate_bytes": 0,
+      "empty_requests": 0,
+      "traffic": {
+        "rows": [
+          [
+            "archive.put",
+            65,
+            3998548
+          ],
+          [
+            "memory.resolve",
+            1,
+            294
+          ],
+          [
+            "memory.publish",
+            1,
+            293
+          ]
+        ],
+        "requests": 67,
+        "bytes": 3999135
+      }
+    }
+  ]
+}

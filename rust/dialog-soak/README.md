@@ -40,11 +40,32 @@ and repeatable.
   amount. A run over a 300 ms link finishes in real seconds and reports
   deterministic modeled times.
 
+## Scenarios
+
+- **join** (`src/join.rs`): a fresh client joins a seeded space, phase by
+  phase, as above.
+- **catchup** (`src/catchup.rs`): a joined client with a live subscription
+  catches up on 1, 10 and 100 commits from the upstream writer (`pull-k`,
+  `poll-k`), then on 10 commits from 3 writers and 100 from 10, each
+  writer merging the others' pushes before its own (`pull-kxm`,
+  `poll-kxm`): what one head move costs a subscribed replica, and what
+  crossing origins adds.
+- **writer** (`src/writer.rs`): a joined client commits one fact, ten
+  facts in ten commits and a 2 000-fact batch, pushing after each
+  (`commit-n`, `push-n`): what a writer uploads, in objects, bytes and
+  rounds.
+
+Each module's docs state what its phases read and write against the
+code paths that serve them.
+
 ## Running
 
 ```sh
 # One run, one profile
 cargo run -p dialog-soak --release -- run --network mobile
+
+# Another scenario
+cargo run -p dialog-soak --release -- run --scenario catchup --network none
 
 # Custom link
 cargo run -p dialog-soak --release -- run --network custom \
@@ -53,6 +74,9 @@ cargo run -p dialog-soak --release -- run --network custom \
 # Sweep the tree's branching factor (fanout 2^5 = 32 vs 2^8 = 256)
 DIALOG_TREE_FANOUT_N=5 cargo run -p dialog-soak --release -- run --network mobile
 ```
+
+Every scenario seeds the same space (`--entities`, `--commits`,
+`--members`) before its measured phases.
 
 Network presets: `none` (counts only), `localhost`, `broadband`, `mobile`
 (a 4G-ish link: 80 ms RTT, 120 ms redeem, 20 Mbit/s), `browser` (the
@@ -72,7 +96,8 @@ cargo run -p dialog-soak --release -- sweep --out-dir target/soak-new --fanouts 
 cargo run -p dialog-soak --release -- compare soak/baseline target/soak-new
 ```
 
-The sweep runs each configuration three times and keeps the median run
+The sweep runs every scenario (`--scenarios join,catchup,writer`) over
+every profile, each configuration three times, and keeps the median run
 (identities and commit timestamps shift leaf boundaries slightly between
 runs). The `none` profile's request counts are deterministic, so the gate
 holds them tight; shaped profiles gate their lazy-join and download

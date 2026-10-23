@@ -8,8 +8,9 @@
 //! The sync/join soak CLI.
 //!
 //! ```text
-//! soak run --network mobile          # one scenario run (JSON to stdout)
-//! soak sweep --out-dir target/soak   # profiles x repeats, median reports
+//! soak run --network mobile          # one join run (JSON to stdout)
+//! soak run --scenario writer         # another scenario
+//! soak sweep --out-dir target/soak   # scenarios x profiles x repeats, median reports
 //! soak compare soak/baseline target/soak   # regression gate
 //! ```
 //!
@@ -26,7 +27,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use dialog_remote_fs::simulation::NetworkShape;
-use dialog_soak::{JoinScenario, SweepConfig, compare_dirs, run_join, sweep};
+use dialog_soak::{Kind, Scenario, SweepConfig, compare_dirs, run, sweep};
 
 /// Sync/join soak harness over a simulated network.
 #[derive(Debug, Parser)]
@@ -38,9 +39,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the join scenario once and print its JSON report to stdout.
+    /// Run one scenario once and print its JSON report to stdout.
     Run(RunArgs),
-    /// Run the scenario across network profiles, keeping each
+    /// Run the scenarios across network profiles, keeping each
     /// configuration's median run as its report.
     Sweep(SweepArgs),
     /// Compare two sweep directories and fail on regressions.
@@ -49,6 +50,10 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct RunArgs {
+    /// Scenario: join, catchup or writer.
+    #[arg(long, default_value = "join")]
+    scenario: Kind,
+
     /// Network preset: none, localhost, broadband, mobile, browser,
     /// intercontinental, or custom (with --latency-ms/--auth-ms/
     /// --bandwidth-mbps/--connections).
@@ -117,6 +122,10 @@ struct SweepArgs {
     /// Runs per configuration; the median by lazy-join time is kept.
     #[arg(long, default_value_t = 3)]
     repeats: usize,
+
+    /// Scenarios to sweep: join, catchup, writer.
+    #[arg(long, value_delimiter = ',', default_values_t = Kind::ALL)]
+    scenarios: Vec<Kind>,
 
     /// Network profiles to sweep. `none` runs unshaped: its request
     /// counts are deterministic and the regression gate holds them tight.
@@ -188,9 +197,10 @@ fn preset(name: &str, run: &RunArgs) -> Result<(Option<NetworkShape>, String)> {
     Ok((network, name.to_string()))
 }
 
-fn run(args: RunArgs) -> Result<()> {
+fn run_once(args: RunArgs) -> Result<()> {
     let (network, network_label) = preset(&args.network, &args)?;
-    let scenario = JoinScenario {
+    let scenario = Scenario {
+        kind: args.scenario,
         entities: args.entities,
         commits: args.commits,
         members: args.members,
@@ -206,7 +216,7 @@ fn run(args: RunArgs) -> Result<()> {
         if !args.real_time {
             tokio::time::pause();
         }
-        run_join(scenario).await
+        run(scenario).await
     })?;
 
     if !args.json_only {
@@ -219,7 +229,7 @@ fn run(args: RunArgs) -> Result<()> {
 fn main() -> Result<ExitCode> {
     match Cli::parse().command {
         Command::Run(args) => {
-            run(args)?;
+            run_once(args)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Sweep(args) => {
@@ -228,6 +238,7 @@ fn main() -> Result<ExitCode> {
                 entities: args.entities,
                 commits: args.commits,
                 repeats: args.repeats,
+                scenarios: args.scenarios,
                 networks: args.networks,
                 fanouts: args.fanouts,
             })?;
