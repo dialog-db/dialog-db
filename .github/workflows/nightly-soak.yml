@@ -161,10 +161,12 @@ jobs:
 
           # The first error lines of a failed arm: its job log from the
           # first panic or error line after the arm's `soak arm:` banner,
-          # 40 lines of it, or the log's last 40 lines when none matches.
+          # up to 40 lines and no further than the step's end, or the last
+          # 40 lines before the step's end when no line matches.
           first_errors() {
             gh api --allow-escape-sequences "repos/$GH_REPO/actions/jobs/$1/logs" \
               | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z ?//; s/\x1b\[[0-9;]*[A-Za-z]//g' \
+              | awk '/^##\[error\]Process completed|^Post job cleanup/ { exit } { print }' \
               > log.txt || true
             if [ ! -s log.txt ]; then
               echo "(the job log could not be fetched; see the run)"
@@ -185,7 +187,9 @@ jobs:
             --jq '.jobs[] | select(.name != "Report") | [.id, .conclusion, .name] | @tsv' \
             > arms.tsv
 
-          while IFS=$'\t' read -r job conclusion arm; do
+          # The arms come in on fd 3: gh reads stdin, and would swallow the
+          # rest of the list.
+          while IFS=$'\t' read -r job conclusion arm <&3; do
             title="Nightly soak: $arm is failing"
             issue=$(jq -r --arg title "$title" \
               'map(select(.title == $title)) | first | .number // empty' open.json)
@@ -217,4 +221,4 @@ jobs:
                 fi
                 ;;
             esac
-          done < arms.tsv
+          done 3< arms.tsv
