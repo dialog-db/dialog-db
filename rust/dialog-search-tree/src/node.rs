@@ -3,6 +3,9 @@ pub use persistent::*;
 
 mod archive;
 
+mod attribution;
+pub use attribution::*;
+
 pub(crate) mod codec;
 
 /// Front-codes a sorted key list into `(prefix, stream)`. Exposed for

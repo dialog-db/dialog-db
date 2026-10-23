@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use dialog_peer::helpers::Tally;
+use crate::env::Env;
 use tracing::Subscriber;
 use tracing::span::{Attributes, Id};
 use tracing_subscriber::layer::{Context, Layer};
@@ -36,9 +36,11 @@ impl Counters {
         counters
     }
 
-    /// Every count so far: `span.<name>` per span, and the archive
-    /// blocks and bytes `tally` has seen.
-    pub fn snapshot(&self, tally: &Tally) -> BTreeMap<String, u64> {
+    /// Every count so far: `span.<name>` per span, the archive blocks
+    /// and bytes `env`'s tally has seen, and the counters its scenario
+    /// added.
+    pub fn snapshot(&self, env: &Env) -> BTreeMap<String, u64> {
+        let tally = env.tally();
         let mut snapshot: BTreeMap<String, u64> = self
             .spans
             .lock()
@@ -50,6 +52,7 @@ impl Counters {
         snapshot.insert("archive.get.bytes".into(), tally.read_bytes() as u64);
         snapshot.insert("archive.put".into(), tally.writes() as u64);
         snapshot.insert("archive.put.bytes".into(), tally.write_bytes() as u64);
+        snapshot.extend(env.extra());
         snapshot
     }
 }

@@ -321,13 +321,13 @@ mod counted {
     async fn a_branch_commit_counts_a_commit_step() -> anyhow::Result<()> {
         let counters = counters();
         let env = Env::open().await?;
-        let before = counters.snapshot(env.tally());
+        let before = counters.snapshot(&env);
         env.commit(assert_all(
             [fact(&entity("thing", 0), "stuff/name", text("a"))],
             Pick::All,
         ))
         .await?;
-        let moved = since(&before, &counters.snapshot(env.tally()));
+        let moved = since(&before, &counters.snapshot(&env));
         assert!(
             moved.get("span.commit").copied().unwrap_or(0) >= 1,
             "one commit, counted: {moved:?}"

@@ -27,10 +27,18 @@
 //!   branch of a repository shares them.
 //! - **What is tagged by a line's rules or head, per branch:** assembled
 //!   rule sets, the rules set aside, rule discovery and the trigger
-//!   footprint, the live spine. An assembled set is keyed by its lines'
-//!   rules roots, one set per spelling of a concept, so held for the
-//!   environment the sets of repositories querying the same concept would
-//!   evict each other on every query.
+//!   footprint. An assembled set is keyed by its lines' rules roots, one
+//!   set per spelling of a concept, so held for the environment the sets
+//!   of repositories querying the same concept would evict each other on
+//!   every query.
+//! - **The live spine, per branch, while a handle of it is open.** The
+//!   spine is the accelerator for the next commit on the branch, and only
+//!   a handle (or a snapshot or transaction taken from one) can make that
+//!   commit, so every handle of one branch shares one spine and the last
+//!   handle dropped takes it with it. A branch opened again starts with
+//!   its nodes warm and decodes its root once, on its first commit.
+//!   Without this, a repository visited by many writers once each held a
+//!   spine per writer for the life of the environment.
 //! - **The outputs of cached formulas, for the whole environment:** a
 //!   formula is a pure function of its inputs, so what it computed for one
 //!   repository holds for any (see [`FormulaCache`]).
@@ -47,9 +55,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use dialog_artifacts::SpineSlot;
 use dialog_artifacts::history::{CausalityCache, ContextCache, RevisionRecord, Version};
 use dialog_artifacts::tree::{ArtifactNodeCache, SpillCache, spill_cache};
+use dialog_artifacts::{SpineSlot, WeakSpineSlot};
 use dialog_common::{Blake3Hash, Holds, held_key};
 use dialog_query::concept::query::PlanCache;
 use dialog_query::formula::FormulaCache;
@@ -80,9 +88,9 @@ struct Repository {
     /// tree they rewrite. The rewrite's blocks land in this repository's
     /// archive, so an entry answers only for it.
     rewrites: Cache<Blake3Hash, Blake3Hash>,
-    /// By branch name: its rule cache, its live spine, and the metadata
-    /// its queries fold in.
-    branches: Mutex<HashMap<String, (SharedRuleCache, SpineSlot, LayerMetadataMemo)>>,
+    /// By branch name: its rule cache, its live spine (held by its open
+    /// handles, not here), and the metadata its queries fold in.
+    branches: Mutex<HashMap<String, (SharedRuleCache, WeakSpineSlot, LayerMetadataMemo)>>,
 }
 
 impl Repository {
@@ -220,6 +228,24 @@ impl HeldCaches {
         self.nodes.bytes()
     }
 
+    /// How many branches of `repository` a spine is held for: those with
+    /// a handle open whose last commit left one.
+    #[cfg(test)]
+    pub(crate) fn held_spines(&self, repository: &Did) -> usize {
+        self.lock()
+            .get(&repository.to_string())
+            .map(|repository| {
+                repository
+                    .branches
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .values()
+                    .filter(|(_, spine, _)| spine.upgrade().is_some_and(|slot| slot.is_held()))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
     /// The repositories something is held for.
     pub fn repositories(&self) -> Vec<String> {
         self.lock().keys().cloned().collect()
@@ -275,19 +301,30 @@ impl HeldCaches {
             .entry(branch.of().to_string())
             .or_insert_with(|| Arc::new(Repository::new()))
             .clone();
-        let (rules, spine, metadata) = repository
-            .branches
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .entry(branch.name().to_string())
-            .or_insert_with(|| {
-                (
-                    Arc::new(RuleCache::sharing(shared.content.clone())),
-                    SpineSlot::new(),
-                    LayerMetadataMemo::default(),
-                )
-            })
-            .clone();
+        let (rules, spine, metadata) = {
+            let mut branches = repository
+                .branches
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let (rules, weak, metadata) =
+                branches
+                    .entry(branch.name().to_string())
+                    .or_insert_with(|| {
+                        (
+                            Arc::new(RuleCache::sharing(shared.content.clone())),
+                            WeakSpineSlot::new(),
+                            LayerMetadataMemo::default(),
+                        )
+                    });
+            // The spine of the handles already open, or a fresh slot for
+            // this one when the last of them went.
+            let spine = weak.upgrade().unwrap_or_else(|| {
+                let slot = SpineSlot::new();
+                *weak = slot.downgrade();
+                slot
+            });
+            (rules.clone(), spine, metadata.clone())
+        };
         Caches {
             nodes: self.nodes.scoped(scope(branch.of())),
             spills: repository.spills.clone(),
@@ -324,6 +361,7 @@ mod tests {
 
     use super::HeldCaches;
     use crate::helpers::test_repo;
+    use crate::registry::RegistryEnv;
     use crate::{Branch, CommitError, RemoteSite, Repository};
 
     /// A provider that passes every effect a commit needs through to the
@@ -548,6 +586,122 @@ mod tests {
                 .map(|revision| NodeHash::from(*revision.tree.hash())),
             Some(landed),
             "the head did not move"
+        );
+        Ok(())
+    }
+
+    /// Commits `fact` (one entity) to `branch`.
+    async fn commit_fact<Env>(branch: &Branch, fact: usize, env: &Env) -> Result<()>
+    where
+        Env: RegistryEnv,
+    {
+        branch
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: format!("user:{fact}").parse()?,
+                    is: Value::String("Alice".into()),
+                    cause: None,
+                },
+                Pick::All,
+            )]))
+            .perform(env)
+            .await?;
+        Ok(())
+    }
+
+    /// A branch's spine lives with its handles: a writer that opens a
+    /// branch, commits once and drops the handle leaves no spine behind,
+    /// however many writers do so.
+    #[dialog_common::test]
+    async fn it_drops_a_branch_spine_with_its_last_handle() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repository = test_repo(&operator, &profile).await;
+        let caches = HeldCaches::of(&operator);
+        let did = repository.did();
+        for i in 0..5 {
+            let writer = repository
+                .branch(format!("writer-{i}"))
+                .open()
+                .perform(&operator)
+                .await?;
+            commit_fact(&writer, i, &operator).await?;
+            assert_eq!(
+                caches.held_spines(&did),
+                1,
+                "the open handle holds the spine its commit left"
+            );
+            drop(writer);
+            assert_eq!(caches.held_spines(&did), 0, "the dropped handle took it");
+        }
+        Ok(())
+    }
+
+    /// Every handle of one branch shares one spine, and a snapshot taken
+    /// from a handle keeps it: a commit through one handle is the next
+    /// commit's spine through the other, and the spine goes only with the
+    /// last of them.
+    #[dialog_common::test]
+    async fn it_shares_one_spine_among_the_handles_of_a_branch() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repository = test_repo(&operator, &profile).await;
+        let caches = HeldCaches::of(&operator);
+        let did = repository.did();
+        let first = repository.branch("main").open().perform(&operator).await?;
+        let second = repository.branch("main").open().perform(&operator).await?;
+        assert!(first.spine().shares(second.spine()));
+
+        commit_fact(&first, 1, &operator).await?;
+        assert!(second.spine().is_held(), "the other handle sees the spine");
+        assert_eq!(caches.held_spines(&did), 1);
+        let snapshot = first.snapshot().expect("a head");
+        drop(first);
+        drop(second);
+        assert_eq!(
+            caches.held_spines(&did),
+            1,
+            "the snapshot taken from a handle keeps the spine"
+        );
+        drop(snapshot);
+        assert_eq!(caches.held_spines(&did), 0);
+        Ok(())
+    }
+
+    /// A branch opened again after its last handle went commits on a
+    /// fresh spine opened from its root, which the node cache holds: the
+    /// commit reads no block and lands as the handle's successor.
+    #[dialog_common::test]
+    async fn it_reopens_a_branch_on_a_fresh_spine_without_a_block_read() -> Result<()> {
+        use crate::helpers::Counting;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repository = test_repo(&operator, &profile).await;
+        let env = Counting::new(operator);
+        let caches = HeldCaches::of(&env);
+        let did = repository.did();
+        let main = repository.branch("main").open().perform(&env).await?;
+        commit_fact(&main, 1, &env).await?;
+        let landed = main.revision().expect("the commit set a head");
+        drop(main);
+        assert_eq!(caches.held_spines(&did), 0);
+
+        let again = repository.branch("main").open().perform(&env).await?;
+        assert!(
+            !again.spine().is_held(),
+            "the new handle starts without a spine"
+        );
+        env.reset();
+        commit_fact(&again, 2, &env).await?;
+
+        assert_eq!(env.block_reads(), 0, "the root came from the node cache");
+        let advanced = again.revision().expect("the commit set a head");
+        assert!(
+            advanced.version().edition > landed.version().edition,
+            "the commit landed as the successor of {landed:?}: {advanced:?}"
+        );
+        assert!(
+            again.spine().is_held(),
+            "the commit left a spine for the next"
         );
         Ok(())
     }

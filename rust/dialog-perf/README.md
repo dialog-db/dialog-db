@@ -22,7 +22,7 @@ poll) off the record, then its **measured phase**, and reports:
 | field | what it is | gate |
 |---|---|---|
 | `outcome` | what the phase produced: rows read, facts committed | exact |
-| `counters` | archive blocks read and written (and their bytes), and the engine's own steps: rule resolutions, rule hydrations, cell settlements, commits, tree writes | steps exact; blocks within two, bytes within 15% |
+| `counters` | archive blocks read and written (and their bytes), the engine's own steps: rule resolutions, rule hydrations, cell settlements, commits, tree writes, and any measure the scenario adds (`first-query` adds the root frame's bytes) | steps exact; blocks within two, bytes within 15% |
 | `instructions` | instructions the phase retired, under callgrind | within 3% |
 
 The counters come from the tracing spans the engine emits
