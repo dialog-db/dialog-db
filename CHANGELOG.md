@@ -612,6 +612,20 @@ Why: numbers are one band and a rule compiles against types; what the body can b
   write never reached the tree, and the history holds no record of it,
   so it cannot be found or repaired from the data. Asserting the value
   again in a new transaction restores it.
+- An embedder that logs what each transaction wrote, in order, can find
+  the transactions of 0.2.0 or 0.3.0 the squash bug may have affected.
+  Group each transaction's writes by cell, entity and attribute, a
+  concept statement's fields each their own cell. A cell is at risk when
+  it holds an `all` assertion of a value, then a write under `last`,
+  `max`, `min` or `top`, then another assertion of that value or its
+  retraction. A cell whose relation a rule derives, or that the session
+  overlay held, was settled correctly; counting it only over-reports. To
+  see what a flagged cell should hold, replay its writes one per commit
+  on a scratch branch and compare. One difference is not the bug: when a
+  choosing write lands on a cell holding two claims of its own
+  transaction, the two stand equal and the greater value is elected, so
+  one transaction and one commit per write can end differently, before this
+  release and after it.
 - Nothing a replica stores or syncs is rewritten. A stored rule that no longer compiles under the head check (one that wrote a possibly negative integer into a `natural:` field, or a float into an `integer:` field) is held inert by `Branch::commit`, as any rule that fails to hydrate is: it stops firing and does not fail commits. Re-evaluate such a rule with a guard or a rounding formula, or widen the field, to have it fire again.
 
 ### A number binds a typed rule variable as the variable's type reads it
