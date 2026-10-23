@@ -3339,6 +3339,258 @@ async fn it_downloads_the_account_branch_on_login(ucan: UcanS3Address) -> Result
     Ok(())
 }
 
+/// A device keeps its access when its access branch fast-forwards to a
+/// head another writer made: in the process that pulled it, and after a
+/// restart.
+///
+/// The login ([`it_regains_access_by_pulling_the_account`]) proves on
+/// demand because the powerline authorizing each fetch sits in a node of
+/// the device's own tree. A device with nothing of its own since its last
+/// sync takes the next account head by a fast-forward, which adopts the
+/// upstream tree by its root and reads none of it. The nodes the other
+/// writer rewrote, the root among them, are then named by the device's
+/// head and held nowhere on the device. The proof walk reads the access
+/// branch at its head, so reading those nodes needs a fetch, and the
+/// fetch needs the proof the walk cannot reach. Every read of the branch
+/// fails from then on, across restarts.
+///
+/// Two rounds, because the second fast-forward is from an upstream head of
+/// the same origin as the device's own: the round that reads nothing at
+/// all to decide it may fast-forward.
+///
+/// This is how a tonk profile whose `main` follows its account locked
+/// up: its head moved to another device's head, edition 498, whose root
+/// it had never stored.
+#[dialog_common::test]
+async fn it_keeps_access_after_fast_forwarding_to_another_writers_head(
+    ucan: UcanS3Address,
+) -> Result<()> {
+    use dialog_capability::access::{
+        Access as AccessAttenuation, Proof as _, Prove, Retain, TimeRange,
+    };
+    use dialog_credentials::{Credential as RawCredential, Ed25519Signer, SignerCredential};
+    use dialog_effects::storage::{LocationExt as _, Storage as StorageFx};
+    use dialog_ucan::{Parameters, Scope, Ucan, UcanDelegation};
+    use dialog_ucan_core::command::Command as UcanCommand;
+    use dialog_ucan_core::subject::Subject as UcanSubject;
+    use dialog_ucan_core::{DelegationBuilder, DelegationChain};
+    use dialog_varsig::Principal as _;
+
+    let ucan_site = SiteAddress::Ucan(UcanAddress::new(&ucan.access_service_url));
+
+    // The account, holding a space's grant in its pushed access branch.
+    let account_storage = test_storage().await;
+    let account_signer = Ed25519Signer::generate().await?;
+    StorageFx::profile(unique_name("account"))
+        .create(RawCredential::Signer(SignerCredential::from(
+            account_signer.clone(),
+        )))
+        .perform(&account_storage)
+        .await?;
+    let account_profile = {
+        let credential = SignerCredential::from(account_signer.clone());
+        Peer::new(credential.clone())
+            .with(account_storage.clone())
+            .space(test_state(&credential.did()))
+            .grant(test_grant().await)
+            .await?
+    };
+    let account_operator = account_profile
+        .session(b"account-device")
+        .space(account_profile.state())
+        .allow(Subject::any())
+        .await?;
+    let retain = |delegation| {
+        Subject::from(account_profile.did())
+            .attenuate(AccessAttenuation)
+            .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+                DelegationChain::new(delegation),
+            )))
+    };
+    let space = Ed25519Signer::generate().await?;
+    let space_grant = DelegationBuilder::new()
+        .issuer(dialog_credentials::Signer::from(space.clone()))
+        .audience(&account_signer)
+        .subject(UcanSubject::Specific(space.did()))
+        .command(vec!["storage".to_string()])
+        .try_build()
+        .await?;
+    retain(space_grant).perform(&account_operator).await?;
+    let account_repo = crate::Repository::from(account_profile.credential().clone());
+    let account_origin = connect(
+        "origin",
+        ucan_site.clone(),
+        account_repo.did(),
+        &account_operator,
+    )
+    .await?;
+    let account_branch = account_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&account_operator)
+        .await?;
+    let account_remote_branch = account_origin
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&account_operator)
+        .await?;
+    account_branch
+        .set_upstream(account_remote_branch)
+        .perform(&account_operator)
+        .await?;
+    assert!(
+        account_branch
+            .push()
+            .perform(&account_operator)
+            .await?
+            .is_some()
+    );
+
+    // The device logs in, as in the login test, and its access branch
+    // reaches the account.
+    let device_storage = test_storage().await;
+    let device_location = Location::profile(unique_name("device"));
+    let device_profile = open_peer(device_storage.clone(), device_location.clone()).await?;
+    let device_operator = device_profile
+        .session(b"device")
+        .space(device_profile.state())
+        .allow(Subject::any())
+        .await?;
+    let login_grant = DelegationBuilder::new()
+        .issuer(dialog_credentials::Signer::from(account_signer.clone()))
+        .audience(&device_profile.did())
+        .subject(UcanSubject::Any)
+        .command(vec![])
+        .try_build()
+        .await?;
+    Subject::from(device_profile.did())
+        .attenuate(AccessAttenuation)
+        .invoke(Retain::<Ucan>::new(UcanDelegation::new(
+            DelegationChain::new(login_grant),
+        )))
+        .perform(&device_operator)
+        .await?;
+    let device_repo = crate::Repository::from(device_profile.credential().clone());
+    let device_origin = connect(
+        "account",
+        ucan_site,
+        account_profile.did(),
+        &device_operator,
+    )
+    .await?;
+    let device_branch = device_repo
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&device_operator)
+        .await?;
+    let device_remote_branch = device_origin
+        .branch(crate::ACCESS_BRANCH)
+        .open()
+        .perform(&device_operator)
+        .await?;
+    device_branch
+        .set_upstream(device_remote_branch)
+        .perform(&device_operator)
+        .await?;
+    assert!(
+        device_branch
+            .pull()
+            .perform(&device_operator)
+            .await?
+            .is_some(),
+        "the login pull adopts the account's delegations"
+    );
+    assert!(
+        device_branch
+            .push()
+            .perform(&device_operator)
+            .await?
+            .is_some(),
+        "the device's powerline reaches the account"
+    );
+    // A pull with nothing new settles the device's sync point on its own
+    // pushed tree: from here it has nothing of its own to merge.
+    device_branch.pull().perform(&device_operator).await?;
+
+    let prove = |principal: &dialog_capability::Did, profile: &dialog_capability::Did| {
+        let mut claim = Prove::<Ucan>::new(
+            principal.clone(),
+            Scope {
+                subject: UcanSubject::Specific(space.did()),
+                command: UcanCommand(vec!["storage".to_string()]),
+                parameters: Parameters::default(),
+            },
+        );
+        claim.duration = TimeRange::unbounded();
+        Subject::from(profile.clone())
+            .attenuate(AccessAttenuation)
+            .invoke(claim)
+    };
+
+    // Another writer on the account commits to its access branch twice,
+    // and the device takes each head as it lands.
+    for round in 0..2 {
+        // The first round takes the device's pushed head.
+        account_branch.pull().perform(&account_operator).await?;
+        let grant = DelegationBuilder::new()
+            .issuer(dialog_credentials::Signer::from(account_signer.clone()))
+            .audience(&device_profile.did())
+            .subject(UcanSubject::Any)
+            .command(vec![format!("round-{round}")])
+            .try_build()
+            .await?;
+        retain(grant).perform(&account_operator).await?;
+        // The retain commits through the operator's own handle on the
+        // branch.
+        account_branch.refresh(&account_operator).await?;
+        assert!(
+            account_branch
+                .push()
+                .perform(&account_operator)
+                .await?
+                .is_some()
+        );
+
+        assert!(
+            device_branch
+                .pull()
+                .perform(&device_operator)
+                .await?
+                .is_some(),
+            "round {round}: the device takes the account's head"
+        );
+        match prove(&device_operator.did(), &device_profile.did())
+            .perform(&device_operator)
+            .await
+        {
+            Ok(proof) => assert_eq!(
+                proof.proofs().len(),
+                3,
+                "round {round}: space -> account -> profile -> operator"
+            ),
+            Err(error) => panic!("round {round}: the device lost its access: {error}"),
+        }
+    }
+
+    // The device restarts: a new peer over the same storage, holding
+    // nothing in memory.
+    let reopened = open_peer(device_storage, device_location).await?;
+    let reopened_operator = reopened
+        .session(b"device")
+        .space(reopened.state())
+        .allow(Subject::any())
+        .await?;
+    match prove(&reopened_operator.did(), &reopened.did())
+        .perform(&reopened_operator)
+        .await
+    {
+        Ok(proof) => assert_eq!(proof.proofs().len(), 3, "after a restart"),
+        Err(error) => panic!("the device lost its access after a restart: {error}"),
+    }
+
+    Ok(())
+}
+
 /// The upgrade path, end to end over the access service and local S3:
 /// a delegation sitting in the LEGACY certificate store (as an old
 /// install left it) no longer authorizes anything — the operator serves
