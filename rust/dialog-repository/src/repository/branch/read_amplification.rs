@@ -563,6 +563,11 @@ async fn measure_origins(origins: usize) -> Result<()> {
             .commit(stream::iter(vec![assert_fact(i, "origin")]))
             .perform(&env)
             .await?;
+        // The writer just committed holds the only live head: the
+        // previous writer's root is garbage once adopted.
+        if i % PRUNE_EVERY == PRUNE_EVERY - 1 {
+            prune(&env, &profile, &repo, &[&writer]).await?;
+        }
         previous = Some(writer);
     }
     let last = previous.expect("at least one origin");
