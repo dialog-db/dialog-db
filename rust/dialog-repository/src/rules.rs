@@ -174,7 +174,8 @@ pub(crate) fn source_bytes(source_claims: Vec<Artifact>) -> Option<Vec<u8>> {
 /// derived version-control concepts (empty otherwise).
 ///
 /// [`schema::Revision`], [`schema::RevisionAttestation`] and
-/// [`schema::RevisionParent`] have no stored facts: a revision describes itself with one signed
+/// [`schema::RevisionParent`] have no stored facts of their own: a
+/// revision describes itself with one signed
 /// `dialog.db/revision` record, and these rules project its fields at
 /// query time through the `dialog/revision` formulas — which refuse
 /// records that don't verify, so forged attribution never surfaces in

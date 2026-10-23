@@ -1034,8 +1034,8 @@ pub struct Revision {
 /// [`Revision::authority`] reports the profile a record *claims* its
 /// issuer acted for; this reports only what the record proves. Its
 /// issuer is always attested, by the record's signature. The profile is
-/// attested too when the record refers to a delegation, stored once in
-/// the tree, that hands the issuer the profile's whole authority.
+/// attested too when the tree holds a delegation, recorded once on the
+/// issuer, that hands the issuer the profile's whole authority.
 #[derive(Concept, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RevisionAttestation {
     /// The revision entity.

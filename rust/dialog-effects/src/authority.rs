@@ -71,8 +71,8 @@ pub struct Operator {
     pub operator: Did,
     /// The profile's UCAN delegation to the operator, DAG-CBOR encoded,
     /// when the operator is a session the profile handed its whole
-    /// authority. The revision records the operator mints refer to it to
-    /// prove the profile they attribute (see
+    /// authority. Recorded once in each tree the operator writes, it
+    /// proves the profile the operator's revision records name (see
     /// `dialog_artifacts::history::DelegationRecord`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation: Option<Vec<u8>>,

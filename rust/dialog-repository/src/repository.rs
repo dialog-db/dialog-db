@@ -1561,9 +1561,9 @@ mod tests {
 
         #[dialog_common::test]
         async fn it_attests_the_profile_a_session_acts_for() -> anyhow::Result<()> {
-            // A session holding its profile's whole authority refers its
-            // revisions to that delegation, stored once in the tree, so
-            // each record proves the profile as well as the session key.
+            // A session holding its profile's whole authority records
+            // that delegation once in the tree, so each of its records
+            // proves the profile as well as the session key.
             use crate::schema;
             use crate::schema::DidExt as _;
 
