@@ -518,9 +518,13 @@ impl Placements {
                 Target::Tree => &mut tree,
                 Target::Session => &mut session,
             };
+            // Each write moves as written, in its cell's order, as
+            // `take_transient` moves a transaction's transients.
             match instruction {
-                Instruction::Assert(a, pick) => into.associate(a.the, a.of, a.is, pick),
-                Instruction::Retract(a) => into.dissociate(a.the, a.of, a.is),
+                Instruction::Assert(a, pick) => {
+                    into.put_cell(a.the, a.of, vec![Change::Assert(a.is, pick)]);
+                }
+                Instruction::Retract(a) => into.put_cell(a.the, a.of, vec![Change::Retract(a.is)]),
             }
         }
         Ok(Partitioned { tree, session })

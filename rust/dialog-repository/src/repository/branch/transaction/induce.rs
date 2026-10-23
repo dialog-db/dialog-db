@@ -38,7 +38,7 @@ use std::sync::Arc;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
     Artifact, ArtifactSelector, Change, Changes, DialogArtifactsError, Entity, Instruction,
-    Relation, Select, Statement, Update as _, Value,
+    Relation, Select, Statement, Value,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -434,9 +434,16 @@ fn take_transient(changes: &mut Changes, placements: &Placements) -> Changes {
             Instruction::Assert(a, _) | Instruction::Retract(a) => placements.is_transient(&a.the),
         };
         let into = if transient { &mut taken } else { &mut kept };
+        // Each write moves as written, in its cell's order: the batch
+        // is already settled, and associating it afresh would fold a
+        // `last` write into the next one as if nothing stood between.
         match instruction {
-            Instruction::Assert(a, pick) => into.associate(a.the, a.of, a.is, pick),
-            Instruction::Retract(a) if !transient => into.dissociate(a.the, a.of, a.is),
+            Instruction::Assert(a, pick) => {
+                into.put_cell(a.the, a.of, vec![Change::Assert(a.is, pick)]);
+            }
+            Instruction::Retract(a) if !transient => {
+                into.put_cell(a.the, a.of, vec![Change::Retract(a.is)]);
+            }
             Instruction::Retract(_) => {}
         }
     }
