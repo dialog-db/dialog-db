@@ -12,8 +12,12 @@
 //! Two independent facilities, both process-global:
 //!
 //! - **Metering** ([`tally`], [`reset_tally`]): counts every remote effect
-//!   and the payload bytes it moved, per effect kind. Always on; the cost is
-//!   a few relaxed atomic increments per invocation.
+//!   and the payload bytes it moved, per effect kind, including the bytes a
+//!   blob read or import streams after its open; and the longest chain of
+//!   requests each issued only after the one before it completed
+//!   ([`longest_chain`]), the round trips the client paid one after another.
+//!   Always on; the cost is a few relaxed atomic increments and one short
+//!   lock per invocation.
 //! - **Shaping** ([`configure`], [`NetworkShape`]): when configured, each
 //!   invocation awaits the modeled cost of its round trip before completing:
 //!   a fixed per-request authorization delay (modeling the access-service
@@ -38,7 +42,11 @@
 //! are ordinary `tokio::time` sleeps, so a harness running under
 //! `start_paused` measures modeled time deterministically and instantly.
 
+use std::future::poll_fn;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::Poll;
+
+use dialog_effects::blob::{BlobError, BlobReader, BlobSink, BlobSource, BlobWriter};
 
 /// The kinds of remote effect the [`Fs`](crate::Fs) transport serves, as
 /// metering buckets. One bucket per provider impl, so a tally maps directly
@@ -59,11 +67,11 @@ pub enum Traffic {
     MemoryPublish = 4,
     /// A head-cell retract (`memory::Retract`).
     MemoryRetract = 5,
-    /// A blob open (`blob::Read`). Bytes are not metered here — they move
-    /// through the returned reader, outside the invocation.
+    /// A blob open (`blob::Read`). The open is the request; the bytes
+    /// are metered as they stream through the returned reader.
     BlobRead = 6,
-    /// A blob import (`blob::Import`). Bytes are not metered here — they
-    /// move through the returned writer, outside the invocation.
+    /// A blob import (`blob::Import`). The open is the request; the bytes
+    /// are metered as they stream through the returned writer.
     BlobImport = 7,
 }
 
@@ -281,6 +289,121 @@ pub fn get_ledger() -> GetLedger {
     }
 }
 
+/// The dependency chain the requests so far form: the length of the
+/// longest sequence of requests in which each began only after the one
+/// before it completed.
+///
+/// A request can depend on another only if that one had completed when it
+/// began, so this is the fewest serial round trips the observed schedule
+/// can be explained by: over a link with latency, the latencies paid one
+/// after another. It is exact for the schedule the client ran, whatever
+/// link was modeled, and unlike a bound derived from modeled time it does
+/// not move with bandwidth or compute. Two requests ordered by chance
+/// rather than by dependency count as a chain of two: the measure is of
+/// the schedule, and only issuing them together brings it down, which is
+/// the behaviour it exists to reward.
+///
+/// Each request is assigned a depth when it begins (one more than the
+/// greatest depth of any request completed so far) and the chain is the
+/// greatest depth assigned. A request dropped before it completed keeps
+/// its depth but never raises the completed mark.
+struct Chain {
+    /// The greatest depth of any completed request.
+    completed: u64,
+    /// The greatest depth assigned to any request.
+    longest: u64,
+}
+
+static CHAIN: std::sync::Mutex<Chain> = std::sync::Mutex::new(Chain {
+    completed: 0,
+    longest: 0,
+});
+
+/// The longest chain of dependent requests since the last [`reset_tally`]
+/// (see [`Chain`]). The difference between two readings is the chain a
+/// phase between them added, exact when every request before the first
+/// reading had completed by then.
+pub fn longest_chain() -> u64 {
+    CHAIN.lock().expect("chain lock poisoned").longest
+}
+
+/// Yields to the executor exactly once, so requests issued by work polled
+/// alongside the caller begin before the caller completes. Without it an
+/// unshaped request that completes without yielding would serialize its
+/// genuinely concurrent siblings, and the chain would read a parallel
+/// wave as a run of dependent requests.
+async fn yield_once() {
+    let mut yielded = false;
+    poll_fn(move |context| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await
+}
+
+/// A blob reader whose chunks are metered in `bucket`, and serialized on
+/// the shared link when shaping is configured, as they are read.
+struct MeteredSource {
+    inner: BlobReader,
+    bucket: Traffic,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl BlobSource for MeteredSource {
+    async fn next(&mut self) -> Result<Option<Vec<u8>>, BlobError> {
+        let chunk = self.inner.next().await?;
+        if let Some(chunk) = &chunk {
+            BYTES[self.bucket as usize].fetch_add(chunk.len() as u64, Ordering::Relaxed);
+            shaping::transfer(chunk.len()).await;
+        }
+        Ok(chunk)
+    }
+}
+
+/// A blob writer whose chunks are metered in `bucket`, and serialized on
+/// the shared link when shaping is configured, as they are written.
+struct MeteredSink {
+    inner: BlobWriter,
+    bucket: Traffic,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl BlobSink for MeteredSink {
+    async fn write_all(&mut self, bytes: &[u8]) -> Result<(), BlobError> {
+        self.inner.write_all(bytes).await?;
+        BYTES[self.bucket as usize].fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        shaping::transfer(bytes.len()).await;
+        Ok(())
+    }
+
+    async fn finish(self: Box<Self>) -> Result<dialog_common::Blake3Hash, BlobError> {
+        self.inner.finish().await
+    }
+}
+
+/// Meter the bytes `reader` streams in `bucket`.
+pub(crate) fn meter_reader(reader: BlobReader, bucket: Traffic) -> BlobReader {
+    Box::new(MeteredSource {
+        inner: reader,
+        bucket,
+    })
+}
+
+/// Meter the bytes `writer` receives in `bucket`.
+pub(crate) fn meter_writer(writer: BlobWriter, bucket: Traffic) -> BlobWriter {
+    Box::new(MeteredSink {
+        inner: writer,
+        bucket,
+    })
+}
+
 /// The current transfer tally.
 pub fn tally() -> TransferTally {
     let mut snapshot = TransferTally::default();
@@ -298,6 +421,9 @@ pub fn reset_tally() {
         BYTES[index].store(0, Ordering::Relaxed);
     }
     *GET_LEDGER.lock().expect("get ledger lock poisoned") = None;
+    let mut chain = CHAIN.lock().expect("chain lock poisoned");
+    chain.completed = 0;
+    chain.longest = 0;
 }
 
 /// An in-flight simulated request: [`begin`] has charged the request's
@@ -306,6 +432,8 @@ pub fn reset_tally() {
 #[must_use = "call `complete` with the payload size to finish metering"]
 pub(crate) struct InFlight {
     bucket: Traffic,
+    /// This request's position in the dependency chain (see [`Chain`]).
+    depth: u64,
 }
 
 impl InFlight {
@@ -315,15 +443,25 @@ impl InFlight {
     pub(crate) async fn complete(self, bytes: usize) {
         BYTES[self.bucket as usize].fetch_add(bytes as u64, Ordering::Relaxed);
         shaping::transfer(bytes).await;
+        let mut chain = CHAIN.lock().expect("chain lock poisoned");
+        chain.completed = chain.completed.max(self.depth);
     }
 }
 
-/// Meter one remote invocation in `bucket` and, when shaping is configured,
-/// await the request's fixed costs (authorization + round-trip latency).
+/// Meter one remote invocation in `bucket`, place it in the dependency
+/// chain, and, when shaping is configured, await the request's fixed costs
+/// (authorization + round-trip latency).
 pub(crate) async fn begin(bucket: Traffic) -> InFlight {
     COUNTS[bucket as usize].fetch_add(1, Ordering::Relaxed);
+    let depth = {
+        let mut chain = CHAIN.lock().expect("chain lock poisoned");
+        let depth = chain.completed + 1;
+        chain.longest = chain.longest.max(depth);
+        depth
+    };
+    yield_once().await;
     shaping::request().await;
-    InFlight { bucket }
+    InFlight { bucket, depth }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -506,7 +644,89 @@ mod shaping {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::shaping::NetworkShape;
+    use super::{Traffic, begin, longest_chain, meter_reader, meter_writer, reset_tally, tally};
+    use dialog_effects::blob::{BlobError, BlobReader, BlobSink, BlobSource, BlobWriter};
     use std::time::Duration;
+
+    /// Requests issued one after another chain; requests issued together
+    /// do not, however many there are; and a request issued after a wave
+    /// completes sits one deeper than the wave. The unit test of the
+    /// round-trip count: the chain is the schedule's critical path, not
+    /// its request count.
+    #[tokio::test]
+    async fn it_counts_dependent_requests_as_a_chain() {
+        reset_tally();
+        let start = longest_chain();
+
+        for _ in 0..3 {
+            begin(Traffic::ArchiveGet).await.complete(0).await;
+        }
+        assert_eq!(longest_chain() - start, 3, "serial requests chain");
+
+        let wave = longest_chain();
+        let flights =
+            futures_util::future::join_all((0..16).map(|_| begin(Traffic::ArchiveGet))).await;
+        assert_eq!(longest_chain() - wave, 1, "a parallel wave is one round");
+        for flight in flights {
+            flight.complete(0).await;
+        }
+        begin(Traffic::MemoryResolve).await.complete(0).await;
+        assert_eq!(
+            longest_chain() - wave,
+            2,
+            "a request issued after the wave completed depends on it"
+        );
+    }
+
+    struct Chunks(Vec<Vec<u8>>);
+
+    #[async_trait::async_trait]
+    impl BlobSource for Chunks {
+        async fn next(&mut self) -> Result<Option<Vec<u8>>, BlobError> {
+            Ok(if self.0.is_empty() {
+                None
+            } else {
+                Some(self.0.remove(0))
+            })
+        }
+    }
+
+    struct Sink(usize);
+
+    #[async_trait::async_trait]
+    impl BlobSink for Sink {
+        async fn write_all(&mut self, bytes: &[u8]) -> Result<(), BlobError> {
+            self.0 += bytes.len();
+            Ok(())
+        }
+
+        async fn finish(self: Box<Self>) -> Result<dialog_common::Blake3Hash, BlobError> {
+            Ok(dialog_common::Blake3Hash::from([0u8; 32]))
+        }
+    }
+
+    /// The bytes a blob streams after its open land in its bucket, in
+    /// either direction: the open counts the request, the chunks count
+    /// the bytes.
+    #[tokio::test]
+    async fn it_meters_blob_bytes_as_they_stream() {
+        let before = tally();
+        let reader: BlobReader = Box::new(Chunks(vec![vec![1; 100], vec![2; 50]]));
+        let mut reader = meter_reader(reader, Traffic::BlobRead);
+        while reader.next().await.unwrap().is_some() {}
+        let writer: BlobWriter = Box::new(Sink(0));
+        let mut writer = meter_writer(writer, Traffic::BlobImport);
+        writer.write_all(&[3; 70]).await.unwrap();
+        writer.finish().await.unwrap();
+        let moved = tally().since(&before);
+        assert_eq!(moved.bytes(Traffic::BlobRead), 150);
+        assert_eq!(moved.bytes(Traffic::BlobImport), 70);
+        assert_eq!(
+            moved.count(Traffic::BlobRead),
+            0,
+            "the open is metered by the provider"
+        );
+    }
 
     /// The `DIALOG_FS_NETWORK` syntax parses into the intended shape, and
     /// bad input is rejected rather than silently zeroed.

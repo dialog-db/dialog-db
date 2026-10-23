@@ -41,11 +41,31 @@ pub struct PhaseReport {
     /// modeled elapsed time divided by the per-request serial cost
     /// (round-trip latency plus auth latency). An upper bound, since
     /// bandwidth serialization and compute also advance the clock; 0 when
-    /// the run is unshaped. This is the round-trip metric parallelized
-    /// replication drives down: `requests` may grow while `rounds` should
-    /// approach tree depth times the number of ranges visited.
+    /// the run is unshaped. Kept beside [`round_trips`](Self::round_trips),
+    /// the exact count, because the gap between the two is the share of
+    /// modeled time that is not latency: bytes on the link and compute.
     #[serde(default)]
     pub rounds: f64,
+    /// The phase's longest chain of dependent requests: how many requests
+    /// the client issued one after another, each only once the one before
+    /// it had completed (`dialog_remote_fs::simulation::longest_chain`).
+    /// Exact and independent of the link model, so the unshaped profile
+    /// reports it too. This is the round-trip cost of the cost model:
+    /// `requests` may grow while `round_trips` should approach tree depth
+    /// times the number of ranges visited. `None` in a report recorded
+    /// before the count existed.
+    #[serde(default)]
+    pub round_trips: Option<u64>,
+    /// Blob opens the phase issued (`blob.read` and `blob.import`): the
+    /// objects beyond archive blocks and head cells. Counted in
+    /// `traffic.requests` too; separate here because a layout change that
+    /// moves bytes from blocks into blobs moves cost between the two.
+    #[serde(default)]
+    pub blob_requests: u64,
+    /// Bytes those blobs streamed, in either direction. Counted in
+    /// `traffic.bytes` too.
+    #[serde(default)]
+    pub blob_bytes: u64,
     /// Distinct blocks the phase's `archive.get` requests brought over.
     #[serde(default)]
     pub unique_blocks: u64,
@@ -121,13 +141,23 @@ impl Report {
         );
         let _ = writeln!(
             out,
-            "| {:<10} | {:>10} | {:>6} | {:>8} | {:>6} | {:>5} | {:>5} | {:>10} | breakdown",
-            "phase", "virtual ms", "rounds", "requests", "unique", "dup", "empty", "bytes"
+            "| {:<10} | {:>10} | {:>6} | {:>5} | {:>8} | {:>6} | {:>5} | {:>5} | {:>5} | {:>10} | {:>10} | breakdown",
+            "phase",
+            "virtual ms",
+            "rounds",
+            "chain",
+            "requests",
+            "unique",
+            "dup",
+            "empty",
+            "blobs",
+            "bytes",
+            "blob bytes"
         );
         let _ = writeln!(
             out,
-            "|{:-<12}|{:-<12}|{:-<8}|{:-<10}|{:-<8}|{:-<7}|{:-<7}|{:-<12}|----------",
-            "", "", "", "", "", "", "", ""
+            "|{:-<12}|{:-<12}|{:-<8}|{:-<7}|{:-<10}|{:-<8}|{:-<7}|{:-<7}|{:-<7}|{:-<12}|{:-<12}|----------",
+            "", "", "", "", "", "", "", "", "", "", ""
         );
         for phase in &self.phases {
             let breakdown = phase
@@ -137,17 +167,23 @@ impl Report {
                 .map(|(label, count, bytes)| format!("{label}:{count}({bytes}B)"))
                 .collect::<Vec<_>>()
                 .join(" ");
+            let chain = phase
+                .round_trips
+                .map_or_else(|| "-".to_string(), |chain| chain.to_string());
             let _ = writeln!(
                 out,
-                "| {:<10} | {:>10} | {:>6.0} | {:>8} | {:>6} | {:>5} | {:>5} | {:>10} | {}",
+                "| {:<10} | {:>10} | {:>6.0} | {:>5} | {:>8} | {:>6} | {:>5} | {:>5} | {:>5} | {:>10} | {:>10} | {}",
                 phase.name,
                 phase.virtual_ms,
                 phase.rounds,
+                chain,
                 phase.traffic.requests,
                 phase.unique_blocks,
                 phase.duplicate_requests,
                 phase.empty_requests,
+                phase.blob_requests,
                 phase.traffic.bytes,
+                phase.blob_bytes,
                 breakdown
             );
         }
