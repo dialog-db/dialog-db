@@ -16,7 +16,8 @@ says how to cut a release.
 
 ### A query pinned to one value of a single-valued attribute reads a cold replica in parallel
 
-For [#650](https://github.com/dialog-db/dialog-db/issues/650)
+[#658](https://github.com/dialog-db/dialog-db/pull/658), for
+[#650](https://github.com/dialog-db/dialog-db/issues/650)
 
 A premise that binds a single-valued attribute to a value without binding
 the entity, such as `status = "open"`, scans the value index for
