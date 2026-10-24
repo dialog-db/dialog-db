@@ -1752,6 +1752,78 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
     Ok(())
 }
 
+/// A push after a reset behind the sync base is refused, not taken for a
+/// fast-forward. Bob pushes B and then C; Alice pulls C, resets to B, and
+/// pushes. The remote still sits at Alice's sync base, so the tree check
+/// alone would publish B over C and drop C's fact. Alice's head does not
+/// hold the remote's, so the push is refused and the remote keeps C.
+#[dialog_common::test]
+async fn it_does_not_rewind_a_remote_with_a_head_a_reset_left_behind(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let (alice_repo, alice) = setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
+    let fact = |of: &str| {
+        Instruction::Assert(
+            Artifact {
+                the: "user/name".parse().expect("attribute parses"),
+                of: of.parse().expect("entity parses"),
+                is: Value::String("x".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )
+    };
+    alice
+        .commit(stream::iter(vec![fact("user:a")]))
+        .perform(&operator)
+        .await?;
+    alice.push().perform(&operator).await?;
+
+    let bob_repo = profile
+        .space(unique_name("bob"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
+    let bob = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    bob.set_upstream(remote_branch).perform(&operator).await?;
+    bob.pull().perform(&operator).await?;
+    bob.commit(stream::iter(vec![fact("user:b")]))
+        .perform(&operator)
+        .await?;
+    bob.push().perform(&operator).await?;
+    let b = bob.revision().context("bob has a head")?;
+    bob.commit(stream::iter(vec![fact("user:c")]))
+        .perform(&operator)
+        .await?;
+    bob.push().perform(&operator).await?;
+    let c = bob.revision().context("bob has a head")?;
+
+    alice.pull().perform(&operator).await?;
+    assert_eq!(
+        alice.revision().as_ref(),
+        Some(&c),
+        "alice fast-forwards to C"
+    );
+    alice.reset(b).perform(&operator).await?;
+    let tracked = alice.tracked();
+    let pushed = alice.push().perform(&operator).await;
+    assert!(
+        matches!(pushed, Err(crate::PushError::NonFastForward { .. })),
+        "the push is refused: {pushed:?}"
+    );
+    assert_eq!(alice.tracked(), tracked, "the refusal records no sync");
+
+    let remote = origin.branch("main").open().perform(&operator).await?;
+    remote.fetch().perform(&operator).await?;
+    assert_eq!(
+        remote.revision().map(|head| head.tree),
+        Some(c.tree),
+        "the remote keeps C"
+    );
+    Ok(())
+}
+
 /// A one-off pull from a remote branch that is not an upstream leaves
 /// what it pulled readable: reads cannot fall back to that remote, so
 /// the pull brings what it adopts.
