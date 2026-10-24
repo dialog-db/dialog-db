@@ -14,6 +14,44 @@ says how to cut a release.
 
 ## Unreleased
 
+### A difference prunes a subtree both sides route the same buffered ops to
+
+[#669](https://github.com/dialog-db/dialog-db/pull/669), fixing [#662](https://github.com/dialog-db/dialog-db/issues/662) and [#648](https://github.com/dialog-db/dialog-db/issues/648)
+
+Comparing two trees prunes a subtree both sides hold by the same hash
+only when nothing a buffer above it routes down could differ. Before
+this, any subtree with buffered ops routed down to it was expanded, even
+when both sides routed it the same ops. A root's buffer reaches every
+child, and a root cannot settle against the other side's root on its
+buffers alone, so a commit that added one fact made the walk read
+nearly every leaf of a deep tree. Now a pair with the same hash and the
+same winning routed ops prunes unread. A pair with the same hash and
+different routed ops is expanded one level, so the ops reach the
+children they belong to and the shared children prune there.
+
+What this changes for you:
+
+- A push after a commit on another writer's head no longer uploads the
+  whole tree. On a deep tree a replica that took turns with another
+  writer could download every leaf during induction's catch-up on its
+  second commit, and then upload every one of them on every later push
+  (about 350 nodes and 16 MB per push in the soak's alternating-writers
+  scenario, in about one run in five). Each push is the new root again.
+- A joiner's first push no longer re-uploads index nodes it held of the
+  adopted head (#648).
+- `TreeDifference`, `differentiate` and `differentiate_within` read and
+  report fewer blocks over trees whose buffers hold the same ops on both
+  sides. The changes they report are the same.
+
+Why: a wrong prune would silently drop a change in sync, so pruning
+stayed conservative wherever buffered ops were pending. Ops routed from
+an ancestor are not in a subtree's hash, but a subtree's whole
+contribution to the difference is its hash and the winning ops routed
+to it, so when both match nothing beneath can differ. The argument is
+in `SparseTree::prune`'s documentation, and a property test checks it
+against a materialized difference over random trees with divergent
+flush histories.
+
 ### A transaction's writes to a cell under `last` commit as they would one by one
 
 [#647](https://github.com/dialog-db/dialog-db/pull/647)
@@ -55,6 +93,41 @@ Why: the squash reasons about one value at a time, which is exact only
 while writes of different values commute. A choosing write is the one
 write that does not commute with the others, so a cell holding one has
 to reach the tree in the order it was written.
+
+### A query pinned to one value of a single-valued attribute reads a cold replica in parallel
+
+[#658](https://github.com/dialog-db/dialog-db/pull/658), for
+[#650](https://github.com/dialog-db/dialog-db/issues/650)
+
+A premise that binds a single-valued attribute to a value without binding
+the entity, such as `status = "open"`, scans the value index for
+candidates and checks each candidate against its entity's stored values,
+so that an entity whose winning value is no longer `"open"` is not
+yielded. Each check now goes out as a preload hint while an earlier one
+is awaited. The other premises' entity probes were already pipelined this
+way. The checks were not, and they were the chain. On a cold replica each
+check fetched one entity leaf, and the probes of the next premise landed
+in that same leaf, so the query cost one round trip per entity leaf it
+touched.
+
+What this changes for you:
+
+- A cold query driven by such a premise takes about a fifth of the round
+  trips it did. The soak's `rule` phase, a rule whose body pins
+  `status = "open"`, goes from a chain of 98 to 18 dependent requests and
+  from 8.4 s to 1.7 s on the broadband profile (22.6 s to 4.7 s on mobile,
+  22.4 s to 6.4 s in a browser). The `filtered` phase, a concept query
+  pinning a status, goes from 8.8 s to 1.7 s on broadband.
+- It fetches no more blocks: the hinted leaves are the ones the checks
+  read anyway. Request and byte counts are unchanged.
+- Results are unchanged, and so is the plan. A replica whose speculation
+  budget is zero (`FetchBudget::ZERO`) behaves as before.
+- Nothing stored or synced changes.
+
+Why: #536 made a rule body plan with its pinned values bound, which is
+correct and reads fewer blocks. It also made the value-pinned premise the
+driver, and that premise's checks were the one per-row read in the
+nested-loop join that nothing read ahead.
 
 ### A chain canonicalized at a link that changes nothing is canonical
 
@@ -1016,6 +1089,10 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Nothing stored changes for the difference that prunes shared
+  subtrees: no stored data is rewritten, trees are laid out as before,
+  and an older release reads everything this one writes. Only how many
+  blocks a comparison reads and reports changes.
 - An older replica holds heads that carry their whole context inline,
   or none, and trees with no context region. Nothing is rewritten on
   upgrade: those heads verify under their own payload shapes and pull as

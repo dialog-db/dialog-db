@@ -199,16 +199,75 @@
           "perf:gate" = {
             description = "Engine cost matrix (rust/dialog-perf) under callgrind, gated against perf/baseline";
             command = ''
+              perf:sweep
+              perf:check
+            '';
+          };
+
+          "perf:sweep" = {
+            description = "Sweep the engine cost matrix under callgrind into target/perf-current";
+            command = ''
               cargo run -p dialog-perf --release -- sweep --out-dir target/perf-current
-              cargo run -p dialog-perf --release -- compare perf/baseline target/perf-current
+            '';
+          };
+
+          # Gates target/perf-current against perf/baseline and, when
+          # target/perf-base holds another commit's sweep (CI fetches the
+          # one a pull request lands on, scripts/ci/base-sweep.sh), against
+          # that too, writing every row to target/perf-delta/table.md.
+          # Fails if either comparison regresses.
+          "perf:check" = {
+            description = "Gate target/perf-current against perf/baseline and, if present, target/perf-base";
+            command = ''
+              status=0
+              cargo run -p dialog-perf --release -- compare perf/baseline target/perf-current || status=1
+              if [ -d target/perf-base ]; then
+                mkdir -p target/perf-delta
+                rebaselined=$(paste -sd, target/perf-delta/rebaselined 2>/dev/null || true)
+                cargo run -p dialog-perf --release -- compare --base target/perf-base target/perf-current \
+                  --markdown target/perf-delta/table.md \
+                  ''${rebaselined:+--rebaselined "$rebaselined"} || status=1
+              fi
+              exit $status
             '';
           };
 
           "soak:gate" = {
             description = "Join cost on the unshaped none profile (rust/dialog-soak), gated against soak/baseline";
             command = ''
+              soak:sweep
+              soak:check
+            '';
+          };
+
+          "soak:sweep" = {
+            description = "Sweep the join on the unshaped none profile into target/soak-current";
+            command = ''
               cargo run -p dialog-soak --release -- sweep --out-dir target/soak-current --networks none
-              cargo run -p dialog-soak --release -- compare soak/baseline target/soak-current
+            '';
+          };
+
+          # The soak counterpart of perf:check: target/soak-current against
+          # soak/baseline and, when present, target/soak-base, with every
+          # row in target/soak-delta/table.md. The base comparison is
+          # report-only (--report-only) until the harness's identities are
+          # deterministic (#652 item 4): one run against one run with
+          # random identities fails about one time in ten. The change that
+          # makes them deterministic drops the flag.
+          "soak:check" = {
+            description = "Gate target/soak-current against soak/baseline and, if present, target/soak-base";
+            command = ''
+              status=0
+              cargo run -p dialog-soak --release -- compare soak/baseline target/soak-current || status=1
+              if [ -d target/soak-base ]; then
+                mkdir -p target/soak-delta
+                rebaselined=$(paste -sd, target/soak-delta/rebaselined 2>/dev/null || true)
+                cargo run -p dialog-soak --release -- compare --base target/soak-base target/soak-current \
+                  --report-only \
+                  --markdown target/soak-delta/table.md \
+                  ''${rebaselined:+--rebaselined "$rebaselined"} || status=1
+              fi
+              exit $status
             '';
           };
 
