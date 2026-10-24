@@ -336,8 +336,12 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
 
         // The revision whose tree the base is, when the sync that recorded
         // it said (see `Synced::version`), and only while the record still
-        // names this base: a concurrent sync may have moved it since the
-        // upstream was resolved.
+        // names this base. A record written before versions were kept, by
+        // an older release or by `upgrade`, says nothing of who holds the
+        // base, and a record a concurrent sync has moved since the upstream
+        // was resolved says nothing of this base: either way the base is
+        // trusted only where our tree is the base, as for a reset, a kept
+        // rival or anything else an older release left.
         let base_version = {
             let tracking = branch.tracked();
             let target = upstream.target();
@@ -355,8 +359,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // it at no read; otherwise one point read of our tree's region.
         if base.as_ref() == Some(&upstream_revision.tree) {
             let held = match (base_version, branch.revision()) {
-                (None, _) => true,
-                (Some(_), Some(local)) if Some(&local.tree) == base.as_ref() => true,
+                (_, Some(local)) if Some(&local.tree) == base.as_ref() => true,
                 (Some(version), Some(local)) => {
                     let store =
                         NetworkedIndex::erased(env, branch.archive().index(), remote.clone());
@@ -370,7 +373,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     .await?
                     .unwrap_or(false)
                 }
-                (Some(_), None) => false,
+                (_, None) | (None, Some(_)) => false,
             };
             if held {
                 return Ok(PreparedPull::NoOp);
@@ -570,9 +573,13 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // Merging from such a base drops what only the base held, records
         // and facts alike, or removes from our head what the upstream never
         // removed. So a base either head does not hold is not merged from.
-        // Decided from the two contexts, which are in hand, at no read. A
-        // base recorded before versions were kept, or an upstream head that
-        // publishes no context, is trusted as before.
+        // Decided from the two contexts, which are in hand, at no read. An
+        // upstream head that publishes no context is trusted on our side
+        // alone. A base whose version is not known (see `base_version`) is
+        // not merged from: the gates above have already adopted or kept a
+        // head wherever one side has seen the other, so what reaches here
+        // is a real merge, and it runs from no base once, after which the
+        // sync it records carries a version.
         let base_held = match (&base, base_version) {
             (Some(base), Some(version)) => {
                 (local_tree.as_ref() == Some(base) || local_context.observes(&version))
@@ -580,7 +587,8 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         .as_deref()
                         .is_none_or(|theirs| theirs.observes(&version))
             }
-            _ => true,
+            (Some(_), None) => false,
+            (None, _) => true,
         };
         if !base_held {
             // An upstream that has seen our head holds all of it, so its

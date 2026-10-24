@@ -15,8 +15,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::env;
 
 use anyhow::Result;
-use dialog_artifacts::history::{Edition, Origin, context_of};
-use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
+use dialog_artifacts::history::{Origin, Version, context_of};
+use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Pick, Value};
 use dialog_capability::Subject;
 use dialog_effects::authority::{Identify, OperatorExt as _};
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
@@ -96,6 +96,22 @@ macro_rules! retract {
     };
 }
 
+/// Rewrite `$branch`'s sync records as a release before versions were kept
+/// wrote them: the same bases, with no version.
+macro_rules! forget_versions {
+    ($branch:expr, $env:expr) => {{
+        let mut legacy = $branch.tracked();
+        for synced in legacy.synced.iter_mut() {
+            synced.version = None;
+        }
+        $branch
+            .tracking()
+            .checkpoint()
+            .publish(legacy, $env)
+            .await?;
+    }};
+}
+
 /// The entities `$branch` holds a title for, read through `$env`.
 macro_rules! titles {
     ($branch:expr, $env:expr) => {{
@@ -112,6 +128,36 @@ macro_rules! titles {
             titles.insert(row?.of.to_string());
         }
         titles
+    }};
+}
+
+/// The live claims of `post/title` and `post/state` in `$branch`, read
+/// through `$env`.
+macro_rules! claims {
+    ($branch:expr, $env:expr) => {{
+        let mut claims = BTreeSet::new();
+        for the in ["post/title", "post/state"] {
+            let rows = $branch
+                .claims()
+                .select(ArtifactSelector::new().the(the.parse()?))
+                .to_owned()
+                .perform($env)
+                .await?
+                .collect::<Vec<_>>()
+                .await;
+            for row in rows {
+                let row = row?;
+                let Value::String(is) = row.is else {
+                    panic!("every modeled value is a string");
+                };
+                claims.insert(Claim {
+                    the: the.to_string(),
+                    of: row.of.to_string(),
+                    is,
+                });
+            }
+        }
+        claims
     }};
 }
 
@@ -247,8 +293,9 @@ async fn it_keeps_the_history_whole_when_the_lesser_rival_adopts_the_greater() -
 /// and is adopted by root. Merging from the stale base would have kept the
 /// line's first commit and dropped the upstream's own first commit, which
 /// only the base held. `separate_caches` gives each writer caches of its
-/// own, as two processes over one store would have.
-async fn reset_behind_the_base(separate_caches: bool) -> Result<()> {
+/// own, as two processes over one store would have. `legacy` drops the
+/// versions from w1's sync records before the pull.
+async fn reset_behind_the_base(separate_caches: bool, legacy: bool) -> Result<()> {
     let (writer, profile) = test_session_with_peer().await;
     let name = unique_name("repo");
     profile.space(name.clone()).open().perform(&writer).await?;
@@ -270,6 +317,9 @@ async fn reset_behind_the_base(separate_caches: bool) -> Result<()> {
     assert_eq!(w2.revision().as_ref(), Some(&merge), "w2 fast-forwards");
 
     w1.reset(first).perform(&one).await?;
+    if legacy {
+        forget_versions!(w1, &one);
+    }
     w1.pull().from(&w2).perform(&one).await?;
 
     assert_eq!(
@@ -291,13 +341,20 @@ async fn reset_behind_the_base(separate_caches: bool) -> Result<()> {
 
 #[dialog_common::test]
 async fn it_does_not_merge_from_a_base_a_reset_left_ahead_of_the_head() -> Result<()> {
-    reset_behind_the_base(false).await
+    reset_behind_the_base(false, false).await
 }
 
 #[dialog_common::test]
 async fn it_does_not_merge_from_a_base_a_reset_left_ahead_of_the_head_with_separate_caches()
 -> Result<()> {
-    reset_behind_the_base(true).await
+    reset_behind_the_base(true, false).await
+}
+
+/// The same, with the sync record an older release wrote: the bad base
+/// carries no version, which does not make it trusted.
+#[dialog_common::test]
+async fn it_does_not_merge_from_a_legacy_base_a_reset_left_ahead_of_the_head() -> Result<()> {
+    reset_behind_the_base(false, true).await
 }
 
 /// A line reset behind its base, to an older head of the upstream's own
@@ -308,6 +365,18 @@ async fn it_does_not_merge_from_a_base_a_reset_left_ahead_of_the_head_with_separ
 /// version it never minted before.
 #[dialog_common::test]
 async fn it_merges_from_no_base_when_the_head_does_not_hold_it() -> Result<()> {
+    no_base(false).await
+}
+
+/// The same, with the sync record an older release wrote: a base with no
+/// version is not merged from either, so the first real pull after an
+/// upgrade runs from no base once.
+#[dialog_common::test]
+async fn it_merges_from_no_base_when_the_base_is_a_legacy_one() -> Result<()> {
+    no_base(true).await
+}
+
+async fn no_base(legacy: bool) -> Result<()> {
     let (writer, profile) = test_session_with_peer().await;
     let name = unique_name("repo");
     profile.space(name.clone()).open().perform(&writer).await?;
@@ -328,6 +397,9 @@ async fn it_merges_from_no_base_when_the_head_does_not_hold_it() -> Result<()> {
     // Behind the base (C), at B, above w1's only mint (A).
     w1.reset(b).perform(&one).await?;
     commit!(w1, &one, "post:e");
+    if legacy {
+        forget_versions!(w1, &one);
+    }
     w1.pull().from(&w2).perform(&one).await?;
 
     assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
@@ -339,6 +411,52 @@ async fn it_merges_from_no_base_when_the_head_does_not_hold_it() -> Result<()> {
         })
         .collect::<Result<_, _>>()?;
     assert_eq!(titles!(w1, &one), expected, "w1 holds every fact");
+    Ok(())
+}
+
+/// The upstream's head moved behind the base, not ours: w2 resets to a head
+/// of w3's that never held w2's C, which w1 synced at. Merging from C would
+/// read c, which C holds and the upstream lacks, as removed upstream, and
+/// remove it from w1, though no writer retracted it. The upstream does not
+/// hold C, so the merge runs from no base and w1 keeps c. The reset target
+/// sits above w2's last mint, so no version is reused.
+#[dialog_common::test]
+async fn it_merges_from_no_base_when_the_upstream_does_not_hold_it() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    profile.space(name.clone()).open().perform(&writer).await?;
+    let one = session!(profile, b"one");
+    let two = session!(profile, b"two");
+    let three = session!(profile, b"three");
+    let w1 = line!(profile, name, &one, "one");
+    let w2 = line!(profile, name, &two, "two");
+    let w3 = line!(profile, name, &three, "three");
+
+    commit!(w1, &one, "post:a");
+    w2.pull().from(&w1).perform(&two).await?;
+    w3.pull().from(&w1).perform(&three).await?;
+    commit!(w2, &two, "post:c");
+    let c = w2.revision().expect("C");
+    w1.pull().from(&w2).perform(&one).await?;
+    assert_eq!(w1.revision().as_ref(), Some(&c), "w1 fast-forwards to C");
+    commit!(w3, &three, "post:y");
+    commit!(w3, &three, "post:z");
+    let z = w3.revision().expect("Z");
+    assert!(z.edition > c.edition, "Z sits above w2's last mint");
+
+    w2.reset(z).perform(&two).await?;
+    commit!(w1, &one, "post:x");
+    w1.pull().from(&w2).perform(&one).await?;
+
+    assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
+    let expected: BTreeSet<String> = ["post:a", "post:c", "post:x", "post:y", "post:z"]
+        .iter()
+        .map(|of| {
+            of.parse::<dialog_artifacts::Entity>()
+                .map(|of| of.to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    assert_eq!(titles!(w1, &one), expected, "w1 keeps c");
     Ok(())
 }
 
@@ -387,26 +505,83 @@ async fn it_keeps_a_retraction_when_it_merges_from_no_base() -> Result<()> {
     Ok(())
 }
 
-/// Random interleavings of commit, retract, pull, mutual pull (which breeds
-/// rival merges) and reset across three writers. After every
-/// step the acting writer's head has a complete history. After every pull
-/// the puller holds exactly the facts either side held before it, less
-/// those retracted anywhere in either side's history: no fact is lost, and
-/// none a retraction covered comes back. A reset moves a
-/// writer to a head it has held, its own or another's, at or above the
-/// edition it last minted at: every revision it mints afterwards, a commit
-/// or a pull's merge, is then above everything it minted before, so no
-/// version is minted twice. A reset further back would have the writer
-/// mint a second revision under a version it already used, which no merge
-/// can tell apart from the first.
+/// A push after a reset behind the base does not rewind the upstream. w1
+/// fast-forwards to w2's C, resets to B, and pushes: the upstream still
+/// sits at the sync base, so the tree check alone would take the push for
+/// a fast-forward and move w2 back to B, losing c. The push is refused,
+/// since w1's head does not hold the upstream's.
+#[dialog_common::test]
+async fn it_does_not_push_a_head_a_reset_left_behind_the_base() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    profile.space(name.clone()).open().perform(&writer).await?;
+    let one = session!(profile, b"one");
+    let two = session!(profile, b"two");
+    let w1 = line!(profile, name, &one, "one");
+    let w2 = line!(profile, name, &two, "two");
+    commit!(w1, &one, "post:a");
+    w2.pull().from(&w1).perform(&two).await?;
+    commit!(w2, &two, "post:b");
+    let b = w2.revision().expect("B");
+    commit!(w2, &two, "post:c");
+    w1.pull().from(&w2).perform(&one).await?;
+    w1.reset(b).perform(&one).await?;
+    let pushed = w1.push().to(&w2).perform(&one).await;
+    assert!(
+        matches!(pushed, Err(crate::PushError::NonFastForward { .. })),
+        "the push is refused: {pushed:?}"
+    );
+    let w2 = line!(profile, name, &two, "two");
+    let c = "post:c".parse::<dialog_artifacts::Entity>()?.to_string();
+    assert!(titles!(w2, &two).contains(&c), "the upstream keeps c");
+    Ok(())
+}
+
+/// Random interleavings of commit, conflicting single-valued writes,
+/// retract, pull, mutual pull (which breeds rival merges), push and reset
+/// across three writers.
+///
+/// The model is the set of live claims, each an attribute, an entity and a
+/// value, and per head the claims its history has retired. Facts are of
+/// two attributes: `post/title`, written under `Pick::All`, whose writes
+/// append, and `post/state`, written under `Pick::Last` to one of three
+/// entities, so writers race on them. A write under `Last` retires the claim
+/// its pick returns, and concurrent writes leave several live claims for
+/// the next write to choose among; which one it retires is read from the
+/// writer's head before and after the write, not modeled. A retraction
+/// retires a live claim of either attribute. What a head's history retired
+/// is what its parents' histories retired plus what its own write retired.
+///
+/// What is checked:
+/// - after every step the acting writer's head has a complete history;
+/// - after every pull the puller holds exactly the claims either side held
+///   before it, less every claim either side's history retired: no claim is
+///   lost, and none that was retired comes back;
+/// - a push either lands, and the upstream then holds the pusher's head, or
+///   is refused as a non-fast-forward and leaves the upstream as it was; a
+///   push that lands never drops a claim the upstream held that the
+///   pusher's history had not retired, which a rewind would.
+///
+/// A reset moves a writer to a head it has held, or to the other writer's
+/// current head, but only to one that holds the revision the writer last
+/// minted. Every revision of one origin then stays on one chain, which
+/// every context assumes: a context keeps one watermark per origin, so
+/// holding an origin's edition n reads as holding all its revisions up to
+/// n. A reset to a head without the writer's last mint, followed by a
+/// commit, breaks that (#682): below the last mint the commit reuses a
+/// version, and above it (a takeover of another writer's line) it forks
+/// the origin, after which a context that holds one fork claims the other
+/// and a merge screens the other's records out as already seen. This test
+/// reproduced the second as a history hole before the floor was this one.
+/// A drawn target that does not hold the last mint is undone and counted.
 #[dialog_common::test]
 async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() -> Result<()> {
     let seeds: u64 = env::var("DIALOG_SYNC_BASE_INTERLEAVINGS")
         .ok()
         .and_then(|seeds| seeds.parse().ok())
-        .unwrap_or(6);
+        .unwrap_or(100);
     let steps = 32;
-    let (mut pulls, mut rivals, mut resets, mut merges, mut retracts) = (0, 0, 0, 0, 0);
+    let mut seen = Census::default();
     for seed in 0..seeds {
         let (writer, profile) = test_session_with_peer().await;
         let name = unique_name("repo");
@@ -416,16 +591,16 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
             session!(profile, b"two"),
             session!(profile, b"three"),
         ];
-        let lines = [
-            line!(profile, name, &envs[0], "one"),
-            line!(profile, name, &envs[1], "two"),
-            line!(profile, name, &envs[2], "three"),
+        let mut lines = [
+            line!(profile, name, &envs[0], NAMES[0]),
+            line!(profile, name, &envs[1], NAMES[1]),
+            line!(profile, name, &envs[2], NAMES[2]),
         ];
         let mut held: [Vec<Revision>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        // The facts retracted anywhere in each head's history.
-        let mut retracted: HashMap<String, BTreeSet<String>> = HashMap::new();
+        // The claims retired anywhere in each head's history.
+        let mut retired: HashMap<String, BTreeSet<Claim>> = HashMap::new();
         let key = |head: &Revision| format!("{:?}", (head.version(), &head.tree));
-        let mut minted: [Option<Edition>; 3] = [None, None, None];
+        let mut minted: [Option<Version>; 3] = [None, None, None];
         let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
         let mut next = |bound: u64| {
             state ^= state << 13;
@@ -437,51 +612,91 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
             let at = next(3) as usize;
             let other = (at + 1 + next(2) as usize) % 3;
             let behind = match (lines[at].revision(), minted[at]) {
-                (Some(head), Some(last)) => head.edition < last,
+                (Some(head), Some(last)) => head.edition < last.edition,
                 (None, Some(_)) => true,
                 _ => false,
             };
-            let op = next(7);
+            let op = next(10);
             let what = format!("seed {seed} step {step} writer {at} op {op}");
             let mut pullers = Vec::new();
-            match op {
+            // A write: the instruction, and the claim it must leave live,
+            // if any.
+            let write = match op {
                 0 | 1 if !behind => {
-                    let parent = lines[at].revision();
-                    commit!(lines[at], &envs[at], format!("post:{seed}-{step}"));
-                    let head = lines[at].revision().expect("a commit leaves a head");
-                    minted[at] = Some(head.edition);
-                    let inherited = parent
-                        .and_then(|parent| retracted.get(&key(&parent)).cloned())
-                        .unwrap_or_default();
-                    retracted.insert(key(&head), inherited);
+                    let claim = Claim::title(&format!("post:{seed}-{step}"));
+                    Some((claim.assert(Pick::All), Some(claim)))
+                }
+                7 if !behind => {
+                    let claim =
+                        Claim::state(&format!("post:k{}", next(3)), &format!("{seed}-{step}"));
+                    seen.conflicting += 1;
+                    Some((claim.assert(Pick::Last), Some(claim)))
                 }
                 6 if !behind => {
-                    let held_now: Vec<String> = titles!(lines[at], &envs[at]).into_iter().collect();
-                    if !held_now.is_empty() {
-                        let fact = held_now[next(held_now.len() as u64) as usize].clone();
-                        let parent = lines[at]
-                            .revision()
-                            .expect("a line holding a fact has a head");
-                        retract!(lines[at], &envs[at], fact);
-                        let head = lines[at].revision().expect("a retraction leaves a head");
-                        minted[at] = Some(head.edition);
-                        let mut inherited =
-                            retracted.get(&key(&parent)).cloned().unwrap_or_default();
-                        inherited.insert(fact);
-                        retracted.insert(key(&head), inherited);
-                        retracts += 1;
+                    let live: Vec<Claim> = claims!(lines[at], &envs[at]).into_iter().collect();
+                    if live.is_empty() {
+                        None
+                    } else {
+                        let claim = live[next(live.len() as u64) as usize].clone();
+                        seen.retracts += 1;
+                        Some((claim.retract(), None))
                     }
                 }
-                2 if !held[at].is_empty() => {
+                _ => None,
+            };
+            if let Some((instruction, kept)) = write {
+                let parent = lines[at].revision();
+                let before = claims!(lines[at], &envs[at]);
+                lines[at]
+                    .commit(stream::iter(vec![instruction]))
+                    .perform(&envs[at])
+                    .await?;
+                let head = lines[at].revision().expect("a write leaves a head");
+                minted[at] = Some(head.version());
+                let after = claims!(lines[at], &envs[at]);
+                if let Some(kept) = &kept {
+                    assert!(after.contains(kept), "{what}: the write is live");
+                }
+                let mut inherited = parent
+                    .and_then(|parent| retired.get(&key(&parent)).cloned())
+                    .unwrap_or_default();
+                inherited.extend(before.difference(&after).cloned());
+                retired.insert(key(&head), inherited);
+            }
+            match op {
+                2 => {
+                    // A head this writer has held, or the other writer's
+                    // current head: taking over its line.
                     let floor = minted[at];
-                    let targets: Vec<&Revision> = held[at]
-                        .iter()
-                        .filter(|head| floor.is_none_or(|floor| head.edition >= floor))
+                    let theirs = lines[other].revision();
+                    let mut targets: Vec<&Revision> = held[at].iter().collect();
+                    targets.extend(theirs.as_ref().filter(|head| !held[at].contains(head)));
+                    let targets: Vec<&Revision> = targets
+                        .into_iter()
+                        .filter(|head| floor.is_none_or(|floor| head.edition >= floor.edition))
                         .collect();
                     if !targets.is_empty() {
                         let target = targets[next(targets.len() as u64) as usize].clone();
-                        lines[at].reset(target).perform(&envs[at]).await?;
-                        resets += 1;
+                        let previous = lines[at].revision();
+                        lines[at].reset(target.clone()).perform(&envs[at]).await?;
+                        // Read once the target is the head, so the history
+                        // walks the target's own tree. A target that does
+                        // not hold the writer's last mint is a takeover, and
+                        // is undone: see the doc comment.
+                        let takeover = match &minted[at] {
+                            Some(own) => {
+                                !context_of(&target.version(), &lines[at].history(&envs[at]))
+                                    .await?
+                                    .observes(own)
+                            }
+                            None => false,
+                        };
+                        if let (true, Some(previous)) = (takeover, previous) {
+                            lines[at].reset(previous).perform(&envs[at]).await?;
+                            seen.declined += 1;
+                        } else {
+                            seen.resets += 1;
+                        }
                     }
                 }
                 3 => {
@@ -489,33 +704,84 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                     // met, both mint a merge of the same two heads.
                     pullers.push((at, other));
                     pullers.push((other, at));
-                    rivals += 1;
+                    seen.rivals += 1;
                 }
-                _ => pullers.push((at, other)),
+                8 | 9 => {
+                    let Some(ours) = lines[at].revision() else {
+                        continue;
+                    };
+                    let before = lines[other].revision();
+                    let theirs = claims!(lines[other], &envs[other]);
+                    let pushed = lines[at].push().to(&lines[other]).perform(&envs[at]).await;
+                    // The upstream as its own writer opens it again.
+                    lines[other] = line!(profile, name, &envs[other], NAMES[other]);
+                    let upstream = &lines[other];
+                    let after = upstream.revision();
+                    match pushed {
+                        // Our head is the base we last synced at: nothing
+                        // to send, and the upstream is left as it was.
+                        Ok(_) if after == before && after.as_ref() != Some(&ours) => {
+                            seen.idle += 1;
+                        }
+                        Ok(_) => {
+                            assert_eq!(
+                                after.as_ref(),
+                                Some(&ours),
+                                "{what}: a push lands our head"
+                            );
+                            let covered = retired.get(&key(&ours)).cloned().unwrap_or_default();
+                            let now = claims!(upstream, &envs[other]);
+                            let dropped: Vec<&Claim> = theirs
+                                .iter()
+                                .filter(|claim| !covered.contains(claim) && !now.contains(claim))
+                                .collect();
+                            assert!(
+                                dropped.is_empty(),
+                                "{what}: the push rewound {other}, dropping {dropped:?}"
+                            );
+                            seen.pushes += 1;
+                        }
+                        Err(crate::PushError::NonFastForward { .. }) => {
+                            assert_eq!(
+                                after, before,
+                                "{what}: a refused push leaves {other} as it was"
+                            );
+                            seen.refused += 1;
+                        }
+                        Err(error) => panic!("{what}: push from {at} to {other} failed: {error}"),
+                    }
+                    if let Some(after) = after
+                        && !held[other].contains(&after)
+                    {
+                        held[other].push(after);
+                    }
+                }
+                4 | 5 => pullers.push((at, other)),
+                _ => {}
             }
             for (to, from) in pullers {
                 let Some(theirs) = lines[from].revision() else {
                     continue;
                 };
                 let before = lines[to].revision();
-                let mut expected = titles!(lines[to], &envs[to]);
-                expected.extend(titles!(lines[from], &envs[from]));
+                let mut expected = claims!(lines[to], &envs[to]);
+                expected.extend(claims!(lines[from], &envs[from]));
                 let mut covered = before
                     .as_ref()
-                    .and_then(|before| retracted.get(&key(before)).cloned())
+                    .and_then(|before| retired.get(&key(before)).cloned())
                     .unwrap_or_default();
-                covered.extend(retracted.get(&key(&theirs)).cloned().unwrap_or_default());
-                expected.retain(|fact| !covered.contains(fact));
+                covered.extend(retired.get(&key(&theirs)).cloned().unwrap_or_default());
+                expected.retain(|claim| !covered.contains(claim));
                 lines[to]
                     .pull()
                     .from(&lines[from])
                     .perform(&envs[to])
                     .await?;
-                pulls += 1;
+                seen.pulls += 1;
                 let after = lines[to].revision().expect("a pull leaves a head");
                 if Some(&after) != before.as_ref() && after != theirs {
-                    minted[to] = Some(after.edition);
-                    merges += 1;
+                    minted[to] = Some(after.version());
+                    seen.merges += 1;
                 }
                 assert_eq!(
                     walkable!(lines[to], &envs[to]),
@@ -523,11 +789,11 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                     "{what}: writer {to}'s history after pulling {from}"
                 );
                 assert_eq!(
-                    titles!(lines[to], &envs[to]),
+                    claims!(lines[to], &envs[to]),
                     expected,
-                    "{what}: writer {to} holds what it and {from} held, less what either retracted"
+                    "{what}: writer {to} holds what it and {from} held, less what either retired"
                 );
-                retracted.entry(key(&after)).or_default().extend(covered);
+                retired.entry(key(&after)).or_default().extend(covered);
                 if !held[to].contains(&after) {
                     held[to].push(after);
                 }
@@ -544,9 +810,82 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
             }
         }
     }
-    eprintln!(
-        "{seeds} seeds: {pulls} pulls ({rivals} mutual), {merges} merges, {resets} resets, {retracts} retractions"
+    eprintln!("{seeds} seeds: {seen:?}");
+    assert!(
+        seen.pulls > 0
+            && seen.rivals > 0
+            && seen.merges > 0
+            && seen.resets > 0
+            && seen.declined > 0
+            && seen.retracts > 0
+            && seen.conflicting > 0
+            && seen.pushes > 0
+            && seen.refused > 0,
+        "every kind of step ran: {seen:?}"
     );
-    assert!(pulls > 0 && rivals > 0 && merges > 0 && resets > 0 && retracts > 0);
     Ok(())
+}
+
+/// The interleaving test's branches, one per writer.
+const NAMES: [&str; 3] = ["one", "two", "three"];
+
+/// What the interleaving test ran, so it can assert it ran each kind.
+#[derive(Debug, Default)]
+struct Census {
+    pulls: usize,
+    rivals: usize,
+    merges: usize,
+    resets: usize,
+    declined: usize,
+    retracts: usize,
+    conflicting: usize,
+    pushes: usize,
+    refused: usize,
+    idle: usize,
+}
+
+/// A claim as the interleaving test models it: attribute, entity, value.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Claim {
+    the: String,
+    of: String,
+    is: String,
+}
+
+impl Claim {
+    fn title(of: &str) -> Self {
+        Self::new("post/title", of, "body")
+    }
+
+    fn state(of: &str, is: &str) -> Self {
+        Self::new("post/state", of, is)
+    }
+
+    fn new(the: &str, of: &str, is: &str) -> Self {
+        Self {
+            the: the.to_string(),
+            of: of
+                .parse::<dialog_artifacts::Entity>()
+                .expect("entity parses")
+                .to_string(),
+            is: is.to_string(),
+        }
+    }
+
+    fn artifact(&self) -> Artifact {
+        Artifact {
+            the: self.the.parse().expect("attribute parses"),
+            of: self.of.parse().expect("entity parses"),
+            is: Value::String(self.is.clone()),
+            cause: None,
+        }
+    }
+
+    fn assert(&self, pick: Pick) -> Instruction {
+        Instruction::Assert(self.artifact(), pick)
+    }
+
+    fn retract(&self) -> Instruction {
+        Instruction::Retract(self.artifact())
+    }
 }

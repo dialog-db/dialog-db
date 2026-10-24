@@ -17,14 +17,16 @@ use dialog_search_tree::{
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::collections::HashSet;
 
+use super::context::{full_context, head_observes};
 use super::resolve::resolve;
 use crate::ResolveEnv;
 use crate::repository::archive::local::read_all;
 use crate::repository::archive::networked::fill_import;
 use crate::repository::remote::Step;
 use crate::{
-    Branch, ConnectedReplica, Index, LocalIndex, PublishError, PublishRemoteBranchError, PushError,
-    RemoteEdition, RemoteSite, RepositoryMemoryExt, Revision, Upstream, UpstreamBranch,
+    Branch, ConnectedReplica, Index, LocalIndex, NetworkedIndex, PublishError,
+    PublishRemoteBranchError, PushError, RemoteEdition, RemoteSite, RepositoryMemoryExt, Revision,
+    Upstream, UpstreamBranch,
 };
 use futures_util::future::join_all;
 
@@ -113,7 +115,8 @@ impl Push<'_> {
     /// - `Ok(Some(revision))` — pushed; upstream now at `revision`.
     /// - `Ok(None)` — nothing to push (branch has no local revision).
     /// - `Err(PushError::NonFastForward)` — upstream has moved since
-    ///   the last sync; pull to integrate before pushing again.
+    ///   the last sync, or our head does not hold the upstream's (a reset
+    ///   moved it behind); pull to integrate before pushing again.
     ///
     /// For remote upstream, bytes land on the remote in reference order
     /// — blob bytes and spilled values, then by-reference frontier
@@ -209,6 +212,36 @@ impl Push<'_> {
     }
 }
 
+/// Whether our `head` holds the upstream's head `theirs`, so that a push of
+/// it moves the upstream forward. The upstream's tree matching the sync
+/// base does not settle it: a reset can leave our head behind a base the
+/// upstream has not moved from, and a push from there would rewind the
+/// upstream to it, dropping what only the base held. Our own tree, the
+/// memo, our edition when the upstream's head is of our origin, or one
+/// point read of our tree's region answer it; a head minted before heads
+/// carried a region is answered by its full context.
+async fn holds<Env: ResolveEnv>(
+    branch: &Branch,
+    head: &Revision,
+    theirs: &Revision,
+    env: &Env,
+) -> Result<bool, PushError> {
+    if head.tree == theirs.tree {
+        return Ok(true);
+    }
+    let version = theirs.version();
+    let contexts = branch.contexts();
+    let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
+    if let Some(seen) =
+        head_observes(head, &version, &contexts, &store, &branch.node_cache()).await?
+    {
+        return Ok(seen);
+    }
+    let history = branch.history(env);
+    let context = full_context(head, &contexts, &store, &branch.node_cache(), &history).await?;
+    Ok(context.observes(&version))
+}
+
 /// Push `branch` to one upstream, fast-forward only.
 async fn push_upstream<Env>(
     branch: &Branch,
@@ -254,8 +287,13 @@ where
                     .perform(env)
                     .await?;
 
-                let current = target.revision().map(|r| r.tree);
-                if current != base {
+                let theirs = target.revision();
+                let current = theirs.as_ref().map(|r| r.tree.clone());
+                let forward = match &theirs {
+                    Some(theirs) => holds(branch, &revision, theirs, env).await?,
+                    None => true,
+                };
+                if current != base || !forward {
                     return Err(PushError::NonFastForward {
                         branch: branch.name().to_string(),
                         expected: base,
@@ -309,7 +347,11 @@ where
                 // push fast-forwards from here rather than being refused
                 // for a base the remote has moved past to our own head.
                 let landed = current.as_ref() == Some(&revision.tree);
-                if !landed && current != base {
+                let forward = match upstream.revision() {
+                    Some(theirs) if !landed => holds(branch, &revision, &theirs, env).await?,
+                    _ => true,
+                };
+                if !landed && (current != base || !forward) {
                     return Err(PushError::NonFastForward {
                         branch: branch.name().to_string(),
                         expected: base,
