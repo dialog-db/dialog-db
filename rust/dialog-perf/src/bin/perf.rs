@@ -95,6 +95,12 @@ struct CompareArgs {
     /// Also write every row as a Markdown table to this file.
     #[arg(long)]
     markdown: Option<PathBuf>,
+
+    /// Against the baseline files, write the rows that beat their file by
+    /// more than the allowance to this file as a Markdown warning (empty
+    /// when there are none).
+    #[arg(long, conflicts_with = "base")]
+    stale: Option<PathBuf>,
 }
 
 fn main() -> Result<ExitCode> {
@@ -138,6 +144,18 @@ fn main() -> Result<ExitCode> {
             let comparison = compare_dirs(&args.baseline, &args.new, &tolerance, &against)?;
             if let Some(path) = &args.markdown {
                 std::fs::write(path, comparison.markdown())?;
+            }
+            if let Some(path) = &args.stale {
+                std::fs::write(path, comparison.stale_markdown().unwrap_or_default())?;
+            }
+            // In GitHub Actions, a stale baseline is also a warning
+            // annotation on the run, so main's own gate shows it.
+            if !args.base && std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
+                for line in &comparison.improvements {
+                    println!(
+                        "::warning title=Stale perf baseline::{line}: re-record perf/baseline in the change that explains the move"
+                    );
+                }
             }
             for line in &comparison.summary {
                 println!("{line}");

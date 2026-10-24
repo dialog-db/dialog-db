@@ -6,9 +6,10 @@
 #   scripts/ci/delta-report.sh <perf-delta-dir> <soak-delta-dir> <body-file> [<pr-number>]
 #
 # Each delta dir holds what scripts/ci/base-sweep.sh and perf:check /
-# soak:check wrote: source.md (the base and how it was chosen) and
-# table.md (every row against it). A missing dir means the gate did not
-# get that far, and the report says so.
+# soak:check wrote: source.md (the base and how it was chosen), table.md
+# (every row against it) and, for perf, stale.md (rows that beat their
+# baseline file past the allowance, empty when none). A missing dir means
+# the gate did not get that far, and the report says so.
 #
 # The body always goes to the job summary. With a pull request number it
 # is also posted: the comment carrying the marker below is edited if there
@@ -31,6 +32,11 @@ section() {
   echo
   if [ -f "$dir/source.md" ]; then
     cat "$dir/source.md"
+    echo
+  fi
+  # Rows the sweep beats its baseline file by past the allowance.
+  if [ -s "$dir/stale.md" ]; then
+    cat "$dir/stale.md"
     echo
   fi
   if [ -f "$dir/table.md" ]; then

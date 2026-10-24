@@ -174,6 +174,28 @@ impl Comparison {
         self.regressions.is_empty()
     }
 
+    /// Against the baseline files, the rows that beat their file by more
+    /// than the allowance, as a Markdown warning; `None` when there are
+    /// none. An improvement that lands without re-recording the file
+    /// leaves room under it that a later regression can fill unseen (#625
+    /// left commit-derived 20% under its file), so it is flagged, never
+    /// failed: improvements must not block a change.
+    pub fn stale_markdown(&self) -> Option<String> {
+        if self.improvements.is_empty() {
+            return None;
+        }
+        let mut out = format!(
+            "⚠ **Stale baseline, re-record:** {} row(s) beat their baseline file by more than \
+             the allowance. Re-record the file in the change that explains the move, so the \
+             gate holds the new level.\n\n",
+            self.improvements.len()
+        );
+        for line in &self.improvements {
+            let _ = writeln!(out, "- {line}");
+        }
+        Some(out)
+    }
+
     /// The comparison as one Markdown table: the rows that moved, then
     /// the rows that did not, folded into a details block.
     pub fn markdown(&self) -> String {
@@ -707,6 +729,39 @@ mod tests {
         compare_reports(&base, &new, &Tolerance::default(), &sweep(&[]), &mut cross);
         assert!(cross.passed(), "{:?}", cross.regressions);
         assert!(cross.markdown().contains("rule-point +2.4%"));
+    }
+
+    /// A row that beats its file past the allowance is a stale baseline:
+    /// flagged in the warning, not failed.
+    #[test]
+    fn an_improvement_past_the_allowance_flags_a_stale_baseline() {
+        let file = measured(150_000_000, &[]);
+        let new = measured(116_000_000, &[]);
+        let mut comparison = Comparison::default();
+        compare_reports(
+            &file,
+            &new,
+            &Tolerance::default(),
+            &Against::Baseline,
+            &mut comparison,
+        );
+        assert!(comparison.passed());
+        let stale = comparison.stale_markdown().expect("a stale baseline");
+        assert!(stale.contains("Stale baseline, re-record"), "{stale}");
+        assert!(
+            stale.contains("- s: instructions 150000000 -> 116000000"),
+            "{stale}"
+        );
+
+        let mut comparison = Comparison::default();
+        compare_reports(
+            &new,
+            &new,
+            &Tolerance::default(),
+            &Against::Baseline,
+            &mut comparison,
+        );
+        assert_eq!(comparison.stale_markdown(), None);
     }
 
     /// Re-recording a scenario's baseline file accepts its new cost: the

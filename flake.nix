@@ -215,14 +215,17 @@
           # target/perf-base holds another commit's sweep (CI fetches the
           # one a pull request lands on, scripts/ci/base-sweep.sh), against
           # that too, writing every row to target/perf-delta/table.md.
-          # Fails if either comparison regresses.
+          # Fails if either comparison regresses. Rows that beat their
+          # baseline file past the allowance go to target/perf-delta/stale.md
+          # (and a warning annotation in CI): flagged, never failed.
           "perf:check" = {
             description = "Gate target/perf-current against perf/baseline and, if present, target/perf-base";
             command = ''
               status=0
-              cargo run -p dialog-perf --release -- compare perf/baseline target/perf-current || status=1
+              mkdir -p target/perf-delta
+              cargo run -p dialog-perf --release -- compare perf/baseline target/perf-current \
+                --stale target/perf-delta/stale.md || status=1
               if [ -d target/perf-base ]; then
-                mkdir -p target/perf-delta
                 rebaselined=$(paste -sd, target/perf-delta/rebaselined 2>/dev/null || true)
                 cargo run -p dialog-perf --release -- compare --base target/perf-base target/perf-current \
                   --markdown target/perf-delta/table.md \
