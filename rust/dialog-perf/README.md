@@ -86,9 +86,9 @@ and `compare` refuses to compare across profiles.
 A scenario whose instruction count is known to vary between runs of
 one binary past the allowance is marked volatile in the catalog, with
 the reason, and the gate holds its counters alone until the variance
-is understood. `transaction-reads` is one: its commit's tree write
-splits nodes in some runs and not others, on blocks that come out a
-few bytes different from one run to the next.
+is understood. `commit-succeed` is one: its commit's tree write varies
+by up to 12% between runs of one binary, every counter equal, in the
+delete path's forced merges.
 
 ## When the gate fails
 
