@@ -11,7 +11,7 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 
 use anyhow::Result;
@@ -423,8 +423,7 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
         ];
         let mut held: [Vec<Revision>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         // The facts retracted anywhere in each head's history.
-        let mut retracted: std::collections::HashMap<String, BTreeSet<String>> =
-            std::collections::HashMap::new();
+        let mut retracted: HashMap<String, BTreeSet<String>> = HashMap::new();
         let key = |head: &Revision| format!("{:?}", (head.version(), &head.tree));
         let mut minted: [Option<Edition>; 3] = [None, None, None];
         let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
