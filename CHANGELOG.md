@@ -14,6 +14,55 @@ says how to cut a release.
 
 ## Unreleased
 
+### A subscription catching up re-derives its touched entities together
+
+For [#646](https://github.com/dialog-db/dialog-db/issues/646)
+
+A poll that finds facts changed inside a subscription's cover re-derives
+each touched entity with a restricted evaluation of the query. Those
+evaluations ran one after another, and on a cold replica each one is a
+point read of its entity's leaf, so a catch-up cost a round trip per
+touched entity. They now run sixteen at a time, and their rows are folded
+into the result in entity order once all of them have finished.
+
+What this changes for you:
+
+- A subscription catching up on many changed entities waits on far fewer
+  round trips. In the catch-up soak, a poll after a hundred one-fact
+  commits goes from a chain of 80 dependent requests to 31, and from
+  18.2 s to 7.5 s on the mobile profile (6.9 s to 2.8 s on broadband,
+  18.2 s to 8.0 s in a browser). A poll after ten goes from a chain of 11
+  to 3. The remaining chain is the cover diff's own walk.
+- It reads the same blocks: request and byte counts are unchanged.
+- Deltas, their order and the retained results are as before.
+- Nothing stored or synced changes.
+
+Why: the restricted evaluations are independent of one another. Each
+reads its own entity's facts, and the cover they record is a union, so
+nothing ordered them but the loop.
+
+### A subscription poll that fails part-way no longer loses deltas
+
+For [#646](https://github.com/dialog-db/dialog-db/issues/646)
+
+When a poll's re-derivation of one touched entity failed, the poll
+returned the error, but the entities re-derived before it had already
+been applied to the subscription's retained results. The next poll found
+those entities unchanged and never emitted their rows, so a subscriber
+missed them for good. A failed poll now leaves the retained results as
+they were, and the next poll re-derives every touched entity and emits
+the whole delta.
+
+What this changes for you:
+
+- After a poll returns an error, the next successful poll emits every
+  change since the last successful one, including those of the entities
+  the failed poll had already re-derived.
+- The error a failed poll returns is unchanged.
+
+Why: a delta a subscriber never sees leaves its view wrong with nothing
+to correct it.
+
 ### A difference prunes a subtree both sides route the same buffered ops to
 
 [#669](https://github.com/dialog-db/dialog-db/pull/669), fixing [#662](https://github.com/dialog-db/dialog-db/issues/662) and [#648](https://github.com/dialog-db/dialog-db/issues/648)
