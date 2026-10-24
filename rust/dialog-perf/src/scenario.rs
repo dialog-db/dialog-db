@@ -94,10 +94,12 @@ pub fn catalog() -> Vec<Spec> {
             name: "commit-succeed",
             size: 500,
             about: "one transaction rewriting every entity's name under `last`: each write elects and retracts a standing claim",
-            // Like `transaction-reads`, its commit's tree write varies
-            // between runs of one binary (1.60 G to 1.85 G instructions,
-            // every counter equal), in the delete path's forced merges,
-            // on the PR head as on this branch. Gated on counters.
+            // Its commit's tree write varies between runs of one binary
+            // (1.60 G to 1.85 G instructions, every counter equal), in
+            // the delete path's forced merges. Ten runs on one machine
+            // spread 8% to 12% with identities seeded or not, and with
+            // std's hash keys fixed: not identities, not hash order.
+            // Gated on counters.
             volatile: true,
             cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(commit::succeed(size)),
@@ -114,13 +116,10 @@ pub fn catalog() -> Vec<Spec> {
             name: "transaction-reads",
             size: 300,
             about: "a transaction that reads the cell it just wrote, for every entity, then commits: the library-install shape",
-            // The commit's tree write splits nodes in some runs and not
-            // others (263 M to 394 M instructions across runs of one
-            // binary, every counter equal): four of its blocks come out
-            // eight bytes shorter in some runs, and the seal writes the
-            // delta's blocks in hash order. Gated on counters until the
-            // varying bytes are found.
-            volatile: true,
+            // Once volatile (263 M to 394 M instructions across runs of
+            // one binary). Ten runs of one binary now hold within 0.3%,
+            // every counter equal, so its instructions are gated again.
+            volatile: false,
             cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(transaction::reads(size)),
         },
@@ -192,12 +191,10 @@ pub fn catalog() -> Vec<Spec> {
             name: "rule-install",
             size: 100,
             about: "one transaction committing `size` rules, then the first read of the last one: discovery and hydration cold",
-            // Its commit's tree write varies between runs of one binary
-            // (221 M to 232 M instructions on main, 225 M to 234 M on the
-            // pick-entity head, every counter equal, with or without
-            // ASLR), all of it in vector growth in the reshape path.
-            // Gated on counters.
-            volatile: true,
+            // Once volatile (221 M to 234 M instructions across runs of
+            // one binary). Ten runs of one binary now hold within 0.4%,
+            // every counter equal, so its instructions are gated again.
+            volatile: false,
             cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(rule::install(size)),
         },

@@ -85,6 +85,57 @@ existed when the base was introduced, and nothing checked it once resets
 and rival merges could break it. Checking it against the revision the
 base stands for makes it hold however the heads moved.
 
+### A subscription catching up re-derives its touched entities together
+
+[#679](https://github.com/dialog-db/dialog-db/pull/679), for
+[#646](https://github.com/dialog-db/dialog-db/issues/646)
+
+A poll that finds facts changed inside a subscription's cover re-derives
+each touched entity with a restricted evaluation of the query. Those
+evaluations ran one after another, and on a cold replica each one is a
+point read of its entity's leaf, so a catch-up cost a round trip per
+touched entity. They now run sixteen at a time, and their rows are folded
+into the result in entity order once all of them have finished.
+
+What this changes for you:
+
+- A subscription catching up on many changed entities waits on far fewer
+  round trips. In the catch-up soak, a poll after a hundred one-fact
+  commits goes from a chain of 80 dependent requests to 31, and from
+  18.2 s to 7.5 s on the mobile profile (6.9 s to 2.8 s on broadband,
+  18.2 s to 8.0 s in a browser). A poll after ten goes from a chain of 11
+  to 3. The remaining chain is the cover diff's own walk.
+- It reads the same blocks: request and byte counts are unchanged.
+- Deltas, their order and the retained results are as before.
+- Nothing stored or synced changes.
+
+Why: the restricted evaluations are independent of one another. Each
+reads its own entity's facts, and the cover they record is a union, so
+nothing ordered them but the loop.
+
+### A subscription poll that fails part-way no longer loses deltas
+
+[#679](https://github.com/dialog-db/dialog-db/pull/679), for
+[#646](https://github.com/dialog-db/dialog-db/issues/646)
+
+When a poll's re-derivation of one touched entity failed, the poll
+returned the error, but the entities re-derived before it had already
+been applied to the subscription's retained results. The next poll found
+those entities unchanged and never emitted their rows, so a subscriber
+missed them for good. A failed poll now leaves the retained results as
+they were, and the next poll re-derives every touched entity and emits
+the whole delta.
+
+What this changes for you:
+
+- After a poll returns an error, the next successful poll emits every
+  change since the last successful one, including those of the entities
+  the failed poll had already re-derived.
+- The error a failed poll returns is unchanged.
+
+Why: a delta a subscriber never sees leaves its view wrong with nothing
+to correct it.
+
 ### dialog-query no longer turns on dialog-common's test helpers
 
 [#675](https://github.com/dialog-db/dialog-db/pull/675)
@@ -114,6 +165,41 @@ feature turned on through a normal dependency reaches every build above
 it. #670 puts a seeded source of identifiers for the soak harness behind
 that same feature, which makes keeping it out of production builds a
 requirement rather than a cleanup.
+
+### A query pinned to one value of a single-valued attribute reads a cold replica in parallel
+
+[#658](https://github.com/dialog-db/dialog-db/pull/658), for
+[#650](https://github.com/dialog-db/dialog-db/issues/650)
+
+A premise that binds a single-valued attribute to a value without binding
+the entity, such as `status = "open"`, scans the value index for
+candidates and checks each candidate against its entity's stored values,
+so that an entity whose winning value is no longer `"open"` is not
+yielded. Each check now goes out as a preload hint while an earlier one
+is awaited. The other premises' entity probes were already pipelined this
+way. The checks were not, and they were the chain. On a cold replica each
+check fetched one entity leaf, and the probes of the next premise landed
+in that same leaf, so the query cost one round trip per entity leaf it
+touched.
+
+What this changes for you:
+
+- A cold query driven by such a premise takes about a fifth of the round
+  trips it did. The soak's `rule` phase, a rule whose body pins
+  `status = "open"`, goes from a chain of 98 to 18 dependent requests and
+  from 8.4 s to 1.7 s on the broadband profile (22.6 s to 4.7 s on mobile,
+  22.4 s to 6.4 s in a browser). The `filtered` phase, a concept query
+  pinning a status, goes from 8.8 s to 1.7 s on broadband.
+- It fetches no more blocks: the hinted leaves are the ones the checks
+  read anyway. Request and byte counts are unchanged.
+- Results are unchanged, and so is the plan. A replica whose speculation
+  budget is zero (`FetchBudget::ZERO`) behaves as before.
+- Nothing stored or synced changes.
+
+Why: #536 made a rule body plan with its pinned values bound, which is
+correct and reads fewer blocks. It also made the value-pinned premise the
+driver, and that premise's checks were the one per-row read in the
+nested-loop join that nothing read ahead.
 
 ### A difference prunes a subtree both sides route the same buffered ops to
 
@@ -194,41 +280,6 @@ Why: the squash reasons about one value at a time, which is exact only
 while writes of different values commute. A choosing write is the one
 write that does not commute with the others, so a cell holding one has
 to reach the tree in the order it was written.
-
-### A query pinned to one value of a single-valued attribute reads a cold replica in parallel
-
-[#658](https://github.com/dialog-db/dialog-db/pull/658), for
-[#650](https://github.com/dialog-db/dialog-db/issues/650)
-
-A premise that binds a single-valued attribute to a value without binding
-the entity, such as `status = "open"`, scans the value index for
-candidates and checks each candidate against its entity's stored values,
-so that an entity whose winning value is no longer `"open"` is not
-yielded. Each check now goes out as a preload hint while an earlier one
-is awaited. The other premises' entity probes were already pipelined this
-way. The checks were not, and they were the chain. On a cold replica each
-check fetched one entity leaf, and the probes of the next premise landed
-in that same leaf, so the query cost one round trip per entity leaf it
-touched.
-
-What this changes for you:
-
-- A cold query driven by such a premise takes about a fifth of the round
-  trips it did. The soak's `rule` phase, a rule whose body pins
-  `status = "open"`, goes from a chain of 98 to 18 dependent requests and
-  from 8.4 s to 1.7 s on the broadband profile (22.6 s to 4.7 s on mobile,
-  22.4 s to 6.4 s in a browser). The `filtered` phase, a concept query
-  pinning a status, goes from 8.8 s to 1.7 s on broadband.
-- It fetches no more blocks: the hinted leaves are the ones the checks
-  read anyway. Request and byte counts are unchanged.
-- Results are unchanged, and so is the plan. A replica whose speculation
-  budget is zero (`FetchBudget::ZERO`) behaves as before.
-- Nothing stored or synced changes.
-
-Why: #536 made a rule body plan with its pinned values bound, which is
-correct and reads fewer blocks. It also made the value-pinned premise the
-driver, and that premise's checks were the one per-row read in the
-nested-loop join that nothing read ahead.
 
 ### A chain canonicalized at a link that changes nothing is canonical
 
@@ -348,22 +399,33 @@ root may cost needs the bytes attributed and the shape in the gate first.
 [#625](https://github.com/dialog-db/dialog-db/pull/625)
 
 A head no longer carries one watermark per origin its history ever
-included. It carries none, and a signed marker saying its tree holds
-them, in a new context region with one entry per origin. The region is
+included. It carries its own, as its edition and a signed count of its
+own origin's revisions, and a signed marker saying its tree holds the
+rest, in a new context region with one entry per origin. The region is
 exact for every origin except the head's own: that entry is where the
 writer's chain of commits began, and a reader brings it up to the head
-from the head's edition, one edition and one revision per commit. A
+from the head's edition, one edition and one revision per commit, and
+refuses a region that does not bring it to the count the head signed. A
 commit on a head of its own origin therefore writes nothing to the
-region. A commit on another origin's head writes two entries, and a
-merge writes its own entry and every entry its two sides hold
-differently. A pull decides "nothing new" from its own context and the
+region and reads nothing of it. A commit on another origin's head writes
+two entries: that origin's exact watermark, which the head carries, and
+its own, one past what the head holds of its origin, which one point read
+of the region answers: a root-to-leaf path, a subset of the whole region.
+A commit never reads the region whole. A merge writes its own entry and every entry its two sides hold
+differently. A pull answers whether our head has seen the upstream's
+from our head's record when the record names it as a parent or skip
+link, so a pull right after a commit on the upstream's head reads
+nothing. A pull decides "nothing new" from its own context and the
 upstream head's version, and a fast-forward from the two heads' editions
 when they share an origin, at zero reads; a fast-forward across origins
 reads the upstream's region, its root and a leaf.
 
 What this changes for you:
 
-- `Revision` has a field `region: bool`. A struct literal must name it.
+- `Revision` has fields `region: bool` and `count: Option<u64>`. A
+  struct literal must name them. `Revision::publish_region` takes the
+  head's own count, and `Revision::own_watermark` gives the head's own
+  watermark when it carries its count.
 - `Revision::context` is `None` on every head this release mints. A
   head's whole context is in its branch's memo
   (`Branch::contexts().cached(&version)`), in its tree
@@ -385,10 +447,15 @@ What this changes for you:
   `merge::context_scope`, `merge::without_context`,
   `history::context_in`, `history::region_writes` and `history::Held`.
 - `Revision::verify` refuses a head that claims both an inline context
-  and a context region. A pull refuses a head whose region holds no
-  entry for the head's own origin, holds it above the head, or holds an
-  entry outside the watermark bounds, as `DialogArtifactsError::InvalidKey`,
-  and keeps its own head.
+  and a context region, and a count on a head without a region, a zero
+  count, or a count above what the head's edition leaves room for. A
+  pull refuses a head whose region holds no entry for the head's own
+  origin, holds it above the head, holds an entry outside the watermark
+  bounds, or derives a count other than the one the head signed, as
+  `DialogArtifactsError::InvalidKey`, and keeps its own head.
+- A commit no longer remembers the new head's whole context in the
+  branch's memo unless it had the parent's there already. The first
+  reader that needs the whole map reads the region then.
 - `Revision::precedence` compares two heads by their contexts only when
   both carry them inline, and orders two heads of one origin exactly by
   edition. Any other pair is answered from editions without reading
@@ -1213,10 +1280,19 @@ thread multiplies whatever it holds by the size of the thread pool.
   whole map into its tree's region, once, in the same batch as its
   revision record.
 - An older release cannot verify a head this release mints: its signed
-  payload ends in a `0x02` marker the older release does not know, so
-  its pull refuses the head as an invalid signature. Upgrade every
-  replica that pulls from one running this release. Nothing an embedder
-  runs is needed beyond that.
+  payload ends in a `0x03` marker and the head's own count, which the
+  older release does not know, so its pull refuses the head as an
+  invalid signature. Upgrade every replica that pulls from one running
+  this release. Nothing an embedder runs is needed beyond that.
+- A head minted by a build of this release from before heads carried
+  their count ends in a lone `0x02` marker. No release or pre-release
+  tag carries such a build (none contains #625's commit), so these heads
+  exist only where an untagged build of `main` ran, and the `0x02` shape
+  can be retired before the release. Until then it still verifies and
+  pulls, nothing is rewritten, and a reader derives its count from its
+  region.
+  A commit on such a head of another origin reads the head's region for
+  the count, as those builds did, and the head it mints carries one.
 - `UcanAddress` encodes an optional `socket`, left out when absent, so an address without one keeps its bytes. An older replica reads an address that names a socket and drops the socket, reaching the peer over requests.
 - Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
 - The socket carries text `ping` and `pong` messages beside its frames. A service's socket must answer `ping` with `pong`, or a client closes the connection every `Liveness::deadline`; no released service has a socket, so none predates this.

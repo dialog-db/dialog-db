@@ -18,7 +18,7 @@ use dialog_effects::memory::{Publish, Resolve};
 use futures_util::TryStreamExt as _;
 use futures_util::future::{Either, join_all};
 
-use super::context::{full_context, head_observes, held, published_context};
+use super::context::{full_context, head_observes, held, own_count, published_context};
 use super::fetch::fetch_one;
 use super::migrate::aligned;
 use super::resolve::resolve;
@@ -367,6 +367,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         &local,
                         &version,
                         &branch.contexts(),
+                        &branch.records(),
                         &store,
                         &branch.node_cache(),
                     )
@@ -449,7 +450,9 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // anything, which is the fast-forward gate below with an empty
         // side. That needs nothing of the upstream's context, so none of
         // it is read here; it is remembered when the head carries it
-        // inline, and the first commit on top reads the rest.
+        // inline. A commit on top needs only the head's own count and one
+        // entry of its region, and the whole map is read by the first
+        // gate that needs it.
         if local_revision.is_none()
             && base.is_none()
             && (upstream_revision.region || upstream_revision.context.is_some())
@@ -485,6 +488,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 current,
                 &upstream_revision.version(),
                 &contexts,
+                &branch.records(),
                 &store,
                 &branch.node_cache(),
             )
@@ -542,6 +546,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     &upstream_revision,
                     &local.version(),
                     &contexts,
+                    &branch.records(),
                     &store,
                     &branch.node_cache(),
                 )
@@ -948,7 +953,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 ));
                 merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
-                revision.publish_region();
+                revision.publish_region(own_count(&revision, &context));
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
 
@@ -1124,7 +1129,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 ));
                 merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
-                revision.publish_region();
+                revision.publish_region(own_count(&revision, &context));
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
 
@@ -1333,7 +1338,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     .extend(region_writes(revision.version(), &context, &[started]));
                 merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
-                revision.publish_region();
+                revision.publish_region(own_count(&revision, &context));
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
                 revision
@@ -3247,6 +3252,7 @@ mod history_tests {
             edition: Edition::GENESIS,
             context: None,
             region: false,
+            count: None,
             signature: Vec::new(),
         };
         evil.reset(forged).perform(&operator).await?;

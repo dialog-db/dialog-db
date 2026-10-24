@@ -1,0 +1,59 @@
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+name: 'Baseline guard'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The perf and replication gates pass a pull request that gets slower
+  # if the same pull request re-records, removes or loosens what they
+  # compare against. Changing what the gates hold a pull request to is a
+  # maintainer's call, so a change to the baselines, the comparison or the
+  # gates' workflow fails here until the pull request carries the
+  # `gate-change-approved` label. Adding this workflow is not such a
+  # change; editing or deleting it is.
+  guard:
+    name: 'Baseline guard'
+    runs-on: 'ubuntu-latest'
+    steps:
+      # A pull_request run checks out the pull request merged onto the
+      # base branch's current tip, so the merge's first parent is the base
+      # the change lands on. `pull_request.base.sha` can be older, and a
+      # diff against it would count the base branch's own later commits.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: 'Check for unapproved changes to the gates'
+        shell: bash
+        env:
+          APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'gate-change-approved') }}
+        run: |
+          guarded=$(
+            git diff --name-only HEAD^1 HEAD -- \
+              'perf/baseline/' \
+              'soak/baseline/' \
+              'rust/dialog-perf/src/compare.rs' \
+              'rust/dialog-soak/src/compare.rs' \
+              '.github/workflows/test.yml'
+            git diff --name-only --diff-filter=MDR HEAD^1 HEAD -- \
+              '.github/workflows/baseline-guard.yml'
+          )
+          if [ -z "$guarded" ]; then
+            echo "No baseline, comparison or gate workflow changes."
+            exit 0
+          fi
+          echo "This pull request changes what the perf and replication gates hold it to:"
+          echo "$guarded" | sed 's/^/  /'
+          if [ "$APPROVED" = "true" ]; then
+            echo "Approved: the pull request carries the gate-change-approved label."
+            exit 0
+          fi
+          echo "::error::Changes to the gates need the maintainer's gate-change-approved label."
+          exit 1

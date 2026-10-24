@@ -86,6 +86,7 @@ mod tests {
             edition: Edition::GENESIS,
             context: None,
             region: false,
+            count: None,
             signature: Vec::new(),
         };
         branch.reset(revision.clone()).perform(&provider).await?;

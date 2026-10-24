@@ -232,8 +232,15 @@ async fn holds<Env: ResolveEnv>(
     let version = theirs.version();
     let contexts = branch.contexts();
     let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
-    if let Some(seen) =
-        head_observes(head, &version, &contexts, &store, &branch.node_cache()).await?
+    if let Some(seen) = head_observes(
+        head,
+        &version,
+        &contexts,
+        &branch.records(),
+        &store,
+        &branch.node_cache(),
+    )
+    .await?
     {
         return Ok(seen);
     }
