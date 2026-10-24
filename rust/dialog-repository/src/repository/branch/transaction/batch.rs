@@ -559,7 +559,9 @@ impl TransactionCommit<&Branch> {
                 let snapshot = Snapshot::staged(branch.subject(), revision.clone(), caches, line);
                 let version = revision.version();
                 snapshot.caches().records.insert(version, record.clone());
-                snapshot.caches().contexts.insert(version, context.clone());
+                if let Some(context) = &context {
+                    snapshot.caches().contexts.insert(version, context.clone());
+                }
                 TransactionBatch {
                     snapshot,
                     head,
@@ -567,7 +569,7 @@ impl TransactionCommit<&Branch> {
                     base_version,
                     induction: branch.induction_cell().clone(),
                     chain: vec![(version, record)],
-                    context: Some(context),
+                    context,
                     records: branch.records(),
                     contexts: branch.contexts(),
                     induced,
@@ -609,10 +611,10 @@ impl TransactionCommit<TransactionBatch> {
         // Amend only a staged revision: the chain's tip, which nobody has
         // seen. A batch with nothing staged sits on the published head,
         // which is never amended; its amend is an ordinary commit.
-        let amend = match (self.amend, batch.chain.last(), &batch.context) {
-            (true, Some((_, record)), Some(context)) => Some(Amended {
+        let amend = match (self.amend, batch.chain.last()) {
+            (true, Some((_, record))) => Some(Amended {
                 record: record.clone(),
-                context: context.clone(),
+                context: batch.context.clone(),
             }),
             _ => None,
         };
@@ -647,18 +649,20 @@ impl TransactionCommit<TransactionBatch> {
                 .caches()
                 .records
                 .insert(version, record.clone());
-            batch
-                .snapshot
-                .caches()
-                .contexts
-                .insert(version, context.clone());
+            if let Some(context) = &context {
+                batch
+                    .snapshot
+                    .caches()
+                    .contexts
+                    .insert(version, context.clone());
+            }
             if amending {
                 // The amended tip keeps its version and record; the chain
                 // holds it once, as it would a single commit.
                 batch.chain.pop();
             }
             batch.chain.push((version, record));
-            batch.context = Some(context);
+            batch.context = context;
         }
         Ok(batch)
     }
@@ -1360,6 +1364,93 @@ mod tests {
             whole.revision().tree,
             amended.revision().tree,
             "history folds across amends as it folds within a commit"
+        );
+        Ok(())
+    }
+
+    /// A chain canonicalized only at its last link reaches the canonical
+    /// tree even when that link changes nothing: the canonicalize rides the
+    /// amend, which replaces the tip's tree in place, so it is never dropped
+    /// with the no-op.
+    #[dialog_common::test]
+    async fn it_canonicalizes_an_amend_that_changes_nothing() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        // The same two links on the same head: the chains mint one
+        // version, and differ only in when they canonicalized. The second
+        // link retracts a fact the chain never held, so it changes nothing.
+        let (seed, absent) = (note("seed")?, note("absent")?);
+        let every_link = branch
+            .transaction()
+            .assert(seed.clone())
+            .commit()
+            .canonicalize()
+            .perform(&operator)
+            .await?
+            .retract(absent.clone())
+            .commit()
+            .amend()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+        let last_link = branch
+            .transaction()
+            .assert(seed)
+            .commit()
+            .perform(&operator)
+            .await?
+            .retract(absent)
+            .commit()
+            .amend()
+            .canonicalize()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(every_link.version(), last_link.version());
+        assert_eq!(
+            every_link.revision().tree,
+            last_link.revision().tree,
+            "a chain canonicalized at its last link reaches the canonical tree \
+             whether or not that link changed anything"
+        );
+        Ok(())
+    }
+
+    /// An amend that changes nothing leaves the line's live spine held, keyed
+    /// by the tip's root, so the next link appends to it instead of opening
+    /// the tip's root frame from bytes again.
+    #[dialog_common::test]
+    async fn it_keeps_the_spine_across_an_amend_that_changes_nothing() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let staged = branch
+            .transaction()
+            .assert(note("seed")?)
+            .commit()
+            .perform(&operator)
+            .await?;
+        let root = dialog_common::Blake3Hash::from(*staged.revision().tree.hash());
+        assert_eq!(branch.spine().root(), Some(root.clone()));
+
+        let amended = staged
+            .retract(note("absent")?)
+            .commit()
+            .amend()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            dialog_common::Blake3Hash::from(*amended.revision().tree.hash()),
+            root,
+            "an amend that changes nothing keeps the tip"
+        );
+        assert_eq!(
+            branch.spine().root(),
+            Some(root),
+            "the spine is held for the next link"
         );
         Ok(())
     }

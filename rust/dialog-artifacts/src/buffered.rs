@@ -261,6 +261,9 @@ pub struct BufferedBatch {
     manifest: Manifest,
     changed: bool,
     slot: Option<SpineSlot>,
+    /// The root the batch opened over: the key its spine goes back into
+    /// the slot under when the batch is [released](Self::release).
+    base: NodeHash,
     /// The values this batch spilled, staged until [`seal`](Self::seal)
     /// hands them to the caller's delta with the batch's nodes.
     staged: ArchiveDelta,
@@ -325,12 +328,9 @@ impl WeakSpineSlot {
 
 impl Debug for SpineSlot {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        let root = self
-            .slot
-            .lock()
-            .ok()
-            .and_then(|slot| slot.as_ref().map(|(root, _)| root.clone()));
-        f.debug_struct("SpineSlot").field("root", &root).finish()
+        f.debug_struct("SpineSlot")
+            .field("root", &self.root())
+            .finish()
     }
 }
 
@@ -371,6 +371,14 @@ impl SpineSlot {
     /// Stores `tree` as the live spine for `root`.
     fn put(&self, root: NodeHash, tree: BufferedArtifactTree) {
         *self.slot.lock().expect("spine slot lock") = Some((root, tree));
+    }
+
+    /// The root the held spine was persisted as, if the slot holds one.
+    pub fn root(&self) -> Option<NodeHash> {
+        self.slot
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|(root, _)| root.clone()))
     }
 }
 
@@ -511,6 +519,7 @@ impl BufferedBatch {
             manifest,
             changed,
             slot,
+            base: tree.root().clone(),
             staged,
         })
     }
@@ -552,6 +561,22 @@ impl BufferedBatch {
             changed: self.changed || changed,
             ..self
         })
+    }
+
+    /// Drops a batch that changed nothing without sealing it, handing its
+    /// spine back to the slot it came from.
+    ///
+    /// A batch that changed nothing left the spine as it found it, so the
+    /// spine still persists as the root the batch opened over, and the
+    /// caller's next commit can append to it instead of opening the root
+    /// frame from bytes again. A batch that did change something is simply
+    /// dropped: its spine no longer persists as that root.
+    pub fn release(self) {
+        if !self.changed
+            && let Some(slot) = self.slot
+        {
+            slot.put(self.base, self.tree);
+        }
     }
 
     /// Whether the applied instructions changed the indexes at all.
@@ -779,6 +804,102 @@ mod tests {
             is: Value::String(value.to_string()),
             cause: None,
         })
+    }
+
+    /// A batch that changed nothing hands its spine back when released, keyed
+    /// by the root it opened over, and the next commit appends to it with
+    /// the bytes a fresh open would write. A batch that changed something
+    /// hands nothing back.
+    #[dialog_common::test]
+    async fn it_hands_the_spine_back_when_a_batch_changed_nothing() -> Result<()> {
+        use super::{SpineSlot, apply_buffered_reusing};
+
+        let store = store();
+        let version = |edition| Version::new(Origin::from([7u8; 32]), Edition::new(edition));
+        let slot = SpineSlot::new();
+        let mut tree = ArtifactTree::empty();
+        let mut delta = ArchiveDelta::zero();
+        apply_buffered_reusing(
+            &slot,
+            &mut tree,
+            &store,
+            &mut delta,
+            Some(version(1)),
+            stream::iter(vec![assert_of("user:alice", "resident")]),
+            false,
+        )
+        .await?;
+        delta.flush_into(&store);
+        assert_eq!(
+            slot.root().as_ref(),
+            Some(tree.root()),
+            "the seal holds the spine"
+        );
+
+        let noop = BufferedBatch::apply_reusing(
+            &slot,
+            &tree,
+            &store,
+            Some(version(2)),
+            stream::iter(vec![retract_of("user:bob", "absent")]),
+            WriteScope::Application,
+        )
+        .await?;
+        assert!(!noop.changed());
+        assert_eq!(slot.root(), None, "the batch took the spine");
+        noop.release();
+        assert_eq!(
+            slot.root().as_ref(),
+            Some(tree.root()),
+            "a batch that changed nothing hands the spine back"
+        );
+
+        let mut reused = tree.clone();
+        let mut delta = ArchiveDelta::zero();
+        apply_buffered_reusing(
+            &slot,
+            &mut reused,
+            &store,
+            &mut delta,
+            Some(version(2)),
+            stream::iter(vec![assert_of("user:carol", "resident")]),
+            false,
+        )
+        .await?;
+        let mut fresh = tree.clone();
+        apply_buffered(
+            &mut fresh,
+            &store,
+            &mut ArchiveDelta::zero(),
+            Some(version(2)),
+            stream::iter(vec![assert_of("user:carol", "resident")]),
+            false,
+        )
+        .await?;
+        assert_eq!(
+            reused.root(),
+            fresh.root(),
+            "the handed-back spine writes what a fresh open writes"
+        );
+        delta.flush_into(&store);
+
+        let changed = BufferedBatch::apply_reusing(
+            &slot,
+            &reused,
+            &store,
+            Some(version(3)),
+            stream::iter(vec![assert_of("user:dave", "resident")]),
+            WriteScope::Application,
+        )
+        .await?;
+        assert!(changed.changed());
+        changed.release();
+        assert_eq!(
+            slot.root(),
+            None,
+            "a batch that changed something hands nothing back"
+        );
+        Ok(())
     }
 
     /// Many sequential buffered commits must retain every fact.

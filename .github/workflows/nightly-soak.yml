@@ -24,6 +24,12 @@ on:
         description: 'Artifact fuzz seed count'
         required: false
         default: '200'
+      rehearse:
+        description: >-
+          Rehearse the report: name an arm to fail it; every arm skips its
+          soak and the report prints what it would do instead of doing it
+        required: false
+        default: ''
   schedule:
     # 03:17 UTC nightly — off the busy on-the-hour spike.
     - cron: '17 3 * * *'
@@ -76,6 +82,9 @@ jobs:
         with:
           name: tonk-ops
           authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+          # Only main writes the cache: an upload must not fail a PR's
+          # checks, and an unmerged branch must not write what main reads.
+          skipPush: ${{ github.ref != 'refs/heads/main' }}
       # Knobs exported here are inherited by the menu command inside
       # `nix develop`; without an override the command's own defaults apply.
       #
@@ -85,7 +94,20 @@ jobs:
       # the Perf gate in test.yml and #638.
       - name: 'Run soak arm'
         shell: bash
+        env:
+          ARM: '${{ matrix.name }}'
+          REHEARSE: '${{ github.event.inputs.rehearse }}'
         run: |
+          # A rehearsal skips the soak and fails only the arm it names, to
+          # exercise the report job below without hours of soak.
+          if [ -n "$REHEARSE" ]; then
+            echo "soak arm: $ARM (rehearsal)"
+            if [ "$REHEARSE" = "$ARM" ]; then
+              echo "thread 'rehearsal' panicked: forced failure of the $ARM arm"
+              exit 1
+            fi
+            exit 0
+          fi
           override="${{ github.event.inputs[matrix.env_value_input] }}"
           if [ -n "${{ matrix.env_name }}" ] && [ -n "$override" ]; then
             export ${{ matrix.env_name }}="$override"
@@ -99,3 +121,107 @@ jobs:
             --accept-flake-config \
             --set-env-var CARGO_HOME /nix/cargo \
             --command ${{ matrix.command }}
+
+  # A red arm on main opens an issue titled by the arm, or comments on the
+  # one already open, with the run link and the first error lines; a green
+  # arm closes its open issue. The arms ran red for three weeks unnoticed
+  # before this (#652). Only a scheduled run, or a dispatch on main that is
+  # not a rehearsal, writes to issues; any other run prints what it would
+  # write.
+  report:
+    name: 'Report'
+    needs: ['soak']
+    if: always()
+    runs-on: 'ubuntu-latest'
+    permissions:
+      actions: read
+      issues: write
+    steps:
+      - name: 'Open, update or close an issue per arm'
+        shell: bash
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          GH_REPO: '${{ github.repository }}'
+          RUN_ID: '${{ github.run_id }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          DRY_RUN: "${{ github.ref != 'refs/heads/main' || (github.event_name != 'schedule' && github.event_name != 'workflow_dispatch') || github.event.inputs.rehearse != '' }}"
+        run: |
+          set -euo pipefail
+          echo "dry run: $DRY_RUN"
+
+          # Runs `gh` with the given arguments, or prints them (and the
+          # body file among them) on a dry run.
+          write() {
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "would run: gh$(printf ' %q' "$@")"
+              for arg in "$@"; do
+                if [ -f "$arg" ]; then sed 's/^/    /' "$arg"; fi
+              done
+            else
+              gh "$@"
+            fi
+          }
+
+          # The first error lines of a failed arm: its job log from the
+          # first panic or error line after the arm's `soak arm:` banner,
+          # up to 40 lines and no further than the step's end, or the last
+          # 40 lines before the step's end when no line matches.
+          first_errors() {
+            gh api --allow-escape-sequences "repos/$GH_REPO/actions/jobs/$1/logs" \
+              | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z ?//; s/\x1b\[[0-9;]*[A-Za-z]//g' \
+              | awk '/^##\[error\]Process completed|^Post job cleanup/ { exit } { print }' \
+              > log.txt || true
+            if [ ! -s log.txt ]; then
+              echo "(the job log could not be fetched; see the run)"
+              return
+            fi
+            banner=$(grep -n -m1 '^soak arm: ' log.txt | cut -d: -f1 || true)
+            start=$(awk -v from="${banner:-1}" \
+              'NR >= from && /panicked|^error|error\[|error:|FAILED|^Error/ { print NR; exit }' log.txt)
+            if [ -n "$start" ]; then
+              sed -n "${start},$((start + 39))p" log.txt
+            else
+              tail -n 40 log.txt
+            fi
+          }
+
+          gh issue list --state open --limit 1000 --json number,title > open.json
+          gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" --paginate \
+            --jq '.jobs[] | select(.name != "Report") | [.id, .conclusion, .name] | @tsv' \
+            > arms.tsv
+
+          # The arms come in on fd 3: gh reads stdin, and would swallow the
+          # rest of the list.
+          while IFS=$'\t' read -r job conclusion arm <&3; do
+            title="Nightly soak: $arm is failing"
+            issue=$(jq -r --arg title "$title" \
+              'map(select(.title == $title)) | first | .number // empty' open.json)
+            echo "arm '$arm': $conclusion; open issue: ${issue:-none}"
+            case "$conclusion" in
+              failure)
+                {
+                  echo "The nightly soak arm \"$arm\" failed on main at $GITHUB_SHA."
+                  echo
+                  echo "Run: $RUN_URL"
+                  echo
+                  echo "First error lines:"
+                  echo
+                  echo '```'
+                  first_errors "$job"
+                  echo '```'
+                } > body.md
+                if [ -n "$issue" ]; then
+                  write issue comment "$issue" --body-file body.md
+                else
+                  write issue create --title "$title" --body-file body.md
+                fi
+                ;;
+              success)
+                if [ -n "$issue" ]; then
+                  echo "The nightly soak arm \"$arm\" passed on main at $GITHUB_SHA: $RUN_URL" > body.md
+                  write issue comment "$issue" --body-file body.md
+                  write issue close "$issue"
+                fi
+                ;;
+            esac
+          done 3< arms.tsv

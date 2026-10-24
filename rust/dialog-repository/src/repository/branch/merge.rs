@@ -31,7 +31,7 @@ use dialog_effects::archive::{Get, Import, Put};
 use dialog_effects::authority::{Attest, Identify, OperatorExt as _};
 use dialog_effects::memory::{Publish, Resolve};
 
-use super::context::{held, published_context};
+use super::context::{held, own_count, published_context};
 use crate::repository::archive::persist;
 use crate::{Branch, CommitError, Index, NetworkedIndex, PublishError, Revision, TreeReference};
 
@@ -221,7 +221,7 @@ where
     }
     merged.record(&store, &mut delta, entries).await?;
     revision.tree = TreeReference::from(*merged.root().as_bytes());
-    revision.publish_region();
+    revision.publish_region(own_count(&revision, &merged_context));
     revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
     persist(
