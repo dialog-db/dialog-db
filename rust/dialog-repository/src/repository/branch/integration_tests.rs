@@ -1806,11 +1806,13 @@ async fn it_does_not_rewind_a_remote_with_a_head_a_reset_left_behind(s3: S3Addre
         "alice fast-forwards to C"
     );
     alice.reset(b).perform(&operator).await?;
+    let tracked = alice.tracked();
     let pushed = alice.push().perform(&operator).await;
     assert!(
         matches!(pushed, Err(crate::PushError::NonFastForward { .. })),
         "the push is refused: {pushed:?}"
     );
+    assert_eq!(alice.tracked(), tracked, "the refusal records no sync");
 
     let remote = origin.branch("main").open().perform(&operator).await?;
     remote.fetch().perform(&operator).await?;

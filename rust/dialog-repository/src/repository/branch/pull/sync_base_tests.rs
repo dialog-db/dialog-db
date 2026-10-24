@@ -517,6 +517,62 @@ async fn upstream_reset(commit_on_top: bool, record: Record) -> Result<()> {
     Ok(())
 }
 
+/// A replica that never resets keeps its own facts when another resets and
+/// pushes. w2 is the shared upstream. w3 pushes its fact; w1 pulls it,
+/// resets to its own earlier head, pushes, commits and pushes again. Before,
+/// the first push rewound w2 and the second published a head without w3's
+/// fact, and w3's next pull merged from its base and removed its own fact.
+/// Now both pushes are refused, w2 keeps w3's head, and w3 keeps every fact.
+#[dialog_common::test]
+async fn it_keeps_a_replica_that_never_reset_whole_when_another_resets_and_pushes() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    profile.space(name.clone()).open().perform(&writer).await?;
+    let one = session!(profile, b"one");
+    let two = session!(profile, b"two");
+    let three = session!(profile, b"three");
+    let w1 = line!(profile, name, &one, "one");
+    let w2 = line!(profile, name, &two, "two");
+    let w3 = line!(profile, name, &three, "three");
+
+    commit!(w2, &two, "post:a");
+    w1.pull().from(&w2).perform(&one).await?;
+    let b = w1.revision().expect("B");
+    commit!(w3, &three, "post:w3");
+    w3.pull().from(&w2).perform(&three).await?;
+    w3.push().to(&w2).perform(&three).await?;
+    let c = w3.revision().expect("C");
+    w1.pull().from(&w2).perform(&one).await?;
+
+    w1.reset(b).perform(&one).await?;
+    let pushed = w1.push().to(&w2).perform(&one).await;
+    assert!(
+        matches!(pushed, Err(crate::PushError::NonFastForward { .. })),
+        "a push from behind the base is refused: {pushed:?}"
+    );
+    commit!(w1, &one, "post:d");
+    let pushed = w1.push().to(&w2).perform(&one).await;
+    assert!(
+        matches!(pushed, Err(crate::PushError::NonFastForward { .. })),
+        "a push of a head without the upstream's is refused: {pushed:?}"
+    );
+    let w2 = line!(profile, name, &two, "two");
+    assert_eq!(w2.revision().as_ref(), Some(&c), "the upstream keeps C");
+
+    commit!(w3, &three, "post:e");
+    w3.pull().from(&w2).perform(&three).await?;
+    assert_eq!(walkable!(w3, &three), Ok(()), "w3's history is whole");
+    let expected: BTreeSet<String> = ["post:a", "post:w3", "post:e"]
+        .iter()
+        .map(|of| {
+            of.parse::<dialog_artifacts::Entity>()
+                .map(|of| of.to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    assert_eq!(titles!(w3, &three), expected, "w3 keeps its own fact");
+    Ok(())
+}
+
 /// A merge from no base keeps a retraction: a fact the upstream retracted
 /// stays retracted in a line that still holds the assertion. The line
 /// resets behind its base to a head holding the fact and commits on top,
@@ -583,11 +639,16 @@ async fn it_does_not_push_a_head_a_reset_left_behind_the_base() -> Result<()> {
     commit!(w2, &two, "post:c");
     w1.pull().from(&w2).perform(&one).await?;
     w1.reset(b).perform(&one).await?;
+    let (head, tracked, based) = (w1.revision(), w1.tracked(), w1.based());
     let pushed = w1.push().to(&w2).perform(&one).await;
     assert!(
         matches!(pushed, Err(crate::PushError::NonFastForward { .. })),
         "the push is refused: {pushed:?}"
     );
+    let w1 = line!(profile, name, &one, "one");
+    assert_eq!(w1.revision(), head, "the refusal leaves our head");
+    assert_eq!(w1.tracked(), tracked, "the refusal records no sync");
+    assert_eq!(w1.based(), based, "the refusal records no base");
     let w2 = line!(profile, name, &two, "two");
     let c = "post:c".parse::<dialog_artifacts::Entity>()?.to_string();
     assert!(titles!(w2, &two).contains(&c), "the upstream keeps c");

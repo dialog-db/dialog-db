@@ -59,14 +59,36 @@ our head's context observes the upstream's head.
 
 What this changes for you:
 
-- A pull after a reset keeps every fact either side held. Before, a
-  reset followed by a pull could lose facts the upstream held. This is in
-  the released `0.3.0` and every pre-release since.
-- A push after a reset behind the base fails with
-  `PushError::NonFastForward`, whose `expected` and `actual` can then name
-  the same tree; pull first. Before, it moved the upstream back to the
-  older head. This is also in the released `0.3.0`, to a local upstream
-  and to a remote one.
+- A pull after a reset keeps every fact either side held, and so does a
+  pull from an upstream someone else reset.
+- A push from a head that does not hold the upstream's head, as after a
+  reset behind the sync base, now fails with
+  `PushError::NonFastForward { branch, expected, actual }`, the error a
+  push to an upstream that moved already gets. `expected` and `actual`
+  can name the same tree here, since the upstream has not moved; the
+  local head is what is behind. Pull, then push again. A refused push
+  writes nothing: no block is uploaded, the upstream's head is not
+  published, and neither the head nor the sync records of the pushing
+  branch change. Before, the push published the older head and moved the
+  upstream back.
+- What the released `0.3.0` does, measured with this release's tests run
+  against it:
+  - A reset followed by a pull loses the upstream's facts that only the
+    base held: 40 of 40 runs.
+  - A reset followed by a push rewinds the upstream to the older head:
+    10 of 10 runs to a local upstream. The remote push has the same
+    tree-only check, read from the code.
+  - A replica that never resets is exposed too. When another writer
+    resets the upstream behind the replica's sync base, the replica's next
+    pull removes facts the base held: 10 of 10 runs. When another replica
+    resets, pushes, commits and pushes again, a replica that never reset
+    loses its own fact on its next pull: 10 of 10 runs. A deployment is
+    exposed if any writer of a branch it syncs with has reset that branch,
+    or pushed from a reset one.
+  - This change restores nothing already lost. Heads minted by a losing
+    merge lack those facts, and pulls carry the heads on. The facts may
+    still be in the trees of older revisions wherever their blocks are
+    kept, but nothing in dialog brings them back from there.
 - Pulls that settle rival merges leave complete histories, and
   `PreparedPull::novelty` vouches for every revision such a head brings
   in. This was introduced by #623, which no release contains.
