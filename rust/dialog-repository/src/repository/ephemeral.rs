@@ -800,12 +800,22 @@ impl State {
             self.rules = OnceLock::new();
         }
         self.sequence += 1;
-        let mut chunks: Vec<Vec<u8>> =
-            Vec::with_capacity(3 + delta.asserted.len() + delta.retracted.len());
+        let mut chunks: Vec<Vec<u8>> = Vec::with_capacity(
+            3 + delta.changes.len() + delta.asserted.len() + delta.retracted.len(),
+        );
         chunks.push(self.hash.as_bytes().to_vec());
         chunks.push(self.sequence.to_be_bytes().to_vec());
         chunks.push(vec![u8::from(delta.transient)]);
-        for (polarity, facts) in [(b'+', &delta.asserted), (b'-', &delta.retracted)] {
+        // What the store changed names the instant: what readers saw
+        // asserted and retracted is that, read without the tags, so
+        // hashing both would key every fact twice. A transient changes
+        // nothing in the store, and is named by what it carried.
+        let carried = if delta.changes.is_empty() {
+            [(b'+', &delta.asserted[..]), (b'-', &delta.retracted[..])]
+        } else {
+            [(b'+', &[][..]), (b'-', &[][..])]
+        };
+        for (polarity, facts) in carried {
             for fact in facts {
                 let (the, of, tail) = self.key(fact);
                 let mut chunk = Vec::with_capacity(1 + the.len() + of.len() + tail.len() + 2);
@@ -826,7 +836,8 @@ impl State {
                 StoreChange::Unshadow(_) => b'u',
             };
             let (the, of, tail) = self.key(change.fact());
-            let mut chunk = vec![tag];
+            let mut chunk = Vec::with_capacity(1 + the.len() + of.len() + tail.len() + 2);
+            chunk.push(tag);
             chunk.extend(the);
             chunk.push(0);
             chunk.extend(of);
