@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A pull merges from its sync base only while both heads hold it
 
-[#PRNUM](https://github.com/dialog-db/dialog-db/pull/PRNUM), fixing [#673](https://github.com/dialog-db/dialog-db/issues/673)
+[#681](https://github.com/dialog-db/dialog-db/pull/681), fixing [#673](https://github.com/dialog-db/dialog-db/issues/673)
 
 A pull merges three ways from the sync base it recorded with an upstream:
 it takes everything the base holds as already in our head, and anything
