@@ -16,7 +16,8 @@ says how to cut a release.
 
 ### A subscription catching up re-derives its touched entities together
 
-For [#646](https://github.com/dialog-db/dialog-db/issues/646)
+[#679](https://github.com/dialog-db/dialog-db/pull/679), for
+[#646](https://github.com/dialog-db/dialog-db/issues/646)
 
 A poll that finds facts changed inside a subscription's cover re-derives
 each touched entity with a restricted evaluation of the query. Those
@@ -43,7 +44,8 @@ nothing ordered them but the loop.
 
 ### A subscription poll that fails part-way no longer loses deltas
 
-For [#646](https://github.com/dialog-db/dialog-db/issues/646)
+[#679](https://github.com/dialog-db/dialog-db/pull/679), for
+[#646](https://github.com/dialog-db/dialog-db/issues/646)
 
 When a poll's re-derivation of one touched entity failed, the poll
 returned the error, but the entities re-derived before it had already
