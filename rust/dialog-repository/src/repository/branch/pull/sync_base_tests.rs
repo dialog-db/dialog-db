@@ -388,7 +388,7 @@ async fn it_keeps_a_retraction_when_it_merges_from_no_base() -> Result<()> {
 }
 
 /// Random interleavings of commit, retract, pull, mutual pull (which breeds
-/// rival merges), reset and takeover across three writers. After every
+/// rival merges) and reset across three writers. After every
 /// step the acting writer's head has a complete history. After every pull
 /// the puller holds exactly the facts either side held before it, less
 /// those retracted anywhere in either side's history: no fact is lost, and
