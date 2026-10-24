@@ -8,10 +8,15 @@
 //! branch's `sync` cell.
 
 use crate::RemoteFallback;
-use crate::{Branch, ConnectedBranch, ConnectedReplica, Revision, SiteAddress, TreeReference};
+use crate::{
+    Branch, ConnectedBranch, ConnectedReplica, PublishError, ResolveError, Revision, SiteAddress,
+    TreeReference,
+};
 use dialog_artifacts::Entity;
 use dialog_artifacts::history::Version;
-use dialog_capability::{Did, Subject};
+use dialog_capability::{Did, Provider, Subject};
+use dialog_common::ConditionalSync;
+use dialog_effects::memory::{Publish, Resolve};
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod legacy;
@@ -314,14 +319,6 @@ pub struct Synced {
     /// once, without tracking it: pushing that content on needs to know
     /// which peers can serve it.
     pub route: Route,
-    /// The revision whose tree `tree` is, when the sync that recorded it
-    /// said. A merge runs from the tree only while the branch's head holds
-    /// that revision: the merge takes everything the tree holds as already
-    /// in the head, which a reset to an older head, or a head kept against
-    /// a rival merge, makes untrue. `None` for a record written before
-    /// versions were kept, whose tree is trusted as before.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<Version>,
 }
 
 impl Tracking {
@@ -339,25 +336,10 @@ impl Tracking {
         self.get(target).cloned()
     }
 
-    /// The revision whose tree is recorded for `target`, when its sync
-    /// recorded it (see [`Synced::version`]).
-    pub fn version(&self, target: &Target) -> Option<Version> {
-        self.synced
-            .iter()
-            .find(|synced| synced.target == *target)
-            .and_then(|synced| synced.version)
-    }
-
     /// Record that `upstream` was last in sync at its tree. An upstream
     /// never synced has nothing to record, and a record it had is
     /// forgotten.
     pub fn record(&mut self, upstream: &Upstream) {
-        self.record_at(upstream, None);
-    }
-
-    /// Record that `upstream` was last in sync at its tree, the tree of
-    /// `version` when given (see [`Synced::version`]).
-    pub fn record_at(&mut self, upstream: &Upstream, version: Option<Version>) {
         let target = upstream.target();
         let Some(tree) = upstream.tree().cloned() else {
             self.synced.retain(|synced| synced.target != target);
@@ -372,13 +354,11 @@ impl Tracking {
             Some(synced) => {
                 synced.tree = tree;
                 synced.route = route;
-                synced.version = version;
             }
             None => self.synced.push(Synced {
                 target,
                 tree,
                 route,
-                version,
             }),
         }
     }
@@ -470,14 +450,105 @@ impl From<UpstreamBranch> for Upstream {
     }
 }
 
+/// The revision whose tree each sync base is, kept in a cell of its own
+/// beside the tracking cell (`BranchReference::bases`).
+///
+/// A merge from a sync base takes everything the base holds as already in
+/// both heads, which holds only while both heads hold the revision whose
+/// tree the base is: a reset to an older head, or a head kept against a
+/// rival merge, makes it untrue. So a sync records that revision with the
+/// base, and a pull checks it. It is written after the tracking cell, and
+/// an older release writes the tracking cell alone, so the two can
+/// disagree. An entry counts only while its tree is the tracking cell's
+/// tree for the same upstream; otherwise the revision is unknown, and an
+/// unknown base is not merged from.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Bases {
+    bases: Vec<Base>,
+}
+
+/// One upstream's sync base, and the revision whose tree it is.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Base {
+    target: Target,
+    tree: TreeReference,
+    version: Version,
+}
+
+impl Bases {
+    /// The revision whose tree `tree` is, as last recorded for `target`,
+    /// if the record is of that tree.
+    pub(crate) fn version(&self, target: &Target, tree: &TreeReference) -> Option<Version> {
+        self.bases
+            .iter()
+            .find(|base| base.target == *target && base.tree == *tree)
+            .map(|base| base.version)
+    }
+
+    /// Record that `target`'s sync base is `tree`, the tree of `version`.
+    pub(crate) fn record(&mut self, target: Target, tree: TreeReference, version: Version) {
+        match self.bases.iter_mut().find(|base| base.target == target) {
+            Some(base) => {
+                base.tree = tree;
+                base.version = version;
+            }
+            None => self.bases.push(Base {
+                target,
+                tree,
+                version,
+            }),
+        }
+    }
+}
+
+impl Branch {
+    /// Record that `target`'s sync base is `tree`, the tree of `version`,
+    /// once the tracking cell records that tree. Written after the tracking
+    /// cell and not atomically with it: a crash between the two, or an older
+    /// release moving the tracking cell, leaves this record naming another
+    /// tree, which reads as an unknown revision, and a pull then merges from
+    /// no base once. A mismatch is folded in again, as the tracking write
+    /// does, until it lands, unless a concurrent sync has since moved the
+    /// tracking cell's tree for `target`: that sync records its own base.
+    pub(crate) async fn record_base<Env, E>(
+        &self,
+        target: Target,
+        tree: TreeReference,
+        version: Version,
+        env: &Env,
+    ) -> Result<(), E>
+    where
+        Env: Provider<Publish> + Provider<Resolve> + ConditionalSync + 'static,
+        E: From<PublishError> + From<ResolveError>,
+    {
+        loop {
+            if self.tracked().get(&target) != Some(&tree) {
+                return Ok(());
+            }
+            let marker = self.bases.checkpoint();
+            let mut bases = self.based();
+            bases.record(target.clone(), tree.clone(), version);
+            match marker.publish(bases, env).await {
+                Ok(_) => return Ok(()),
+                Err(PublishError::VersionMismatch { .. }) => {
+                    self.bases.resolve().perform(env).await?;
+                    self.tracking().resolve().perform(env).await?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use super::{Tracking, Upstream};
+    use super::{Bases, Target, Tracking, Upstream};
     use crate::TreeReference;
+    use dialog_artifacts::history::{Edition, Origin, Version};
 
     /// The sync record keeps one tree per upstream, replacing it in
     /// place, and answers no tree for an upstream never synced.
@@ -509,62 +580,28 @@ mod tests {
         );
     }
 
-    /// A sync record written before versions were kept reads back with no
-    /// version, so its tree is trusted as it was; one written now carries
-    /// the version through, and a record replaced in place takes the new
-    /// version, or none, with its new tree.
+    /// A base's revision is known only for the tree it was recorded with:
+    /// a tracking record that has moved on, as an older release or a
+    /// crash between the two writes leaves it, finds none.
     #[dialog_common::test]
-    async fn it_keeps_the_version_of_a_sync_base_and_reads_older_records_without_one()
-    -> anyhow::Result<()> {
-        use super::{Route, Target};
-        use dialog_artifacts::history::{Edition, Origin, Version};
-        use dialog_storage::{CborEncoder, Encoder as _};
-        use serde::Serialize;
-
-        #[derive(Debug, Serialize)]
-        struct OldSynced {
-            target: Target,
-            tree: TreeReference,
-            route: Route,
-        }
-        #[derive(Debug, Serialize)]
-        struct OldTracking {
-            resolved: Option<super::Resolved>,
-            synced: Vec<OldSynced>,
-        }
+    fn it_knows_a_base_revision_only_for_its_own_tree() {
         let main = Target::Local("main".into());
-        let old = OldTracking {
-            resolved: None,
-            synced: vec![OldSynced {
-                target: main.clone(),
-                tree: TreeReference::from([1; 32]),
-                route: Route::Local {
-                    branch: "main".into(),
-                },
-            }],
-        };
-        let (_, bytes) = CborEncoder.encode(&old).await?;
-        let mut tracking: Tracking = CborEncoder.decode(&bytes).await?;
-        assert_eq!(tracking.tree(&main), Some(TreeReference::from([1; 32])));
-        assert_eq!(tracking.version(&main), None, "no version was recorded");
-
-        let version = Version::new(Origin::from([7; 32]), Edition::GENESIS);
-        let upstream = Upstream::Local {
-            branch: "main".into(),
-            tree: Some(TreeReference::from([2; 32])),
-        };
-        tracking.record_at(&upstream, Some(version));
-        let (_, bytes) = CborEncoder.encode(&tracking).await?;
-        let decoded: Tracking = CborEncoder.decode(&bytes).await?;
-        assert_eq!(decoded, tracking);
-        assert_eq!(decoded.version(&main), Some(version));
-
-        tracking.record(&upstream);
+        let develop = Target::Local("develop".into());
+        let one = Version::new(Origin::from([7; 32]), Edition::GENESIS);
+        let two = Version::new(Origin::from([8; 32]), Edition::GENESIS);
+        let mut bases = Bases::default();
+        bases.record(main.clone(), TreeReference::from([1; 32]), one);
         assert_eq!(
-            tracking.version(&main),
-            None,
-            "a record without one clears it"
+            bases.version(&main, &TreeReference::from([1; 32])),
+            Some(one)
         );
-        Ok(())
+        assert_eq!(bases.version(&main, &TreeReference::from([2; 32])), None);
+        assert_eq!(bases.version(&develop, &TreeReference::from([1; 32])), None);
+        bases.record(main.clone(), TreeReference::from([2; 32]), two);
+        assert_eq!(bases.version(&main, &TreeReference::from([1; 32])), None);
+        assert_eq!(
+            bases.version(&main, &TreeReference::from([2; 32])),
+            Some(two)
+        );
     }
 }

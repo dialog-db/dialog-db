@@ -624,7 +624,7 @@ where
         let marker = branch.tracking().checkpoint();
         let mut tracking = branch.tracked();
         let advanced = upstream_state.clone().with_tree(revision.tree.clone());
-        tracking.record_at(&advanced, Some(revision.version()));
+        tracking.record(&advanced);
         // The record is written until it lands. A mismatch means another
         // write to the cell came first: each is some sync recording its
         // own upstream, so there are only ever as many as syncs in flight,
@@ -644,10 +644,15 @@ where
             if !ours_untouched {
                 return Ok(Some(revision));
             }
-            tracking.record_at(&advanced, Some(revision.version()));
+            tracking.record(&advanced);
             publish = marker.publish(tracking, env).await;
         }
         publish?;
+
+        // The revision whose tree the new base is: the head pushed.
+        branch
+            .record_base::<_, PushError>(target, revision.tree.clone(), revision.version(), env)
+            .await?;
 
         Ok(Some(revision))
     }

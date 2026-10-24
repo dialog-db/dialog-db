@@ -15,14 +15,15 @@ use std::collections::{BTreeSet, HashMap};
 use std::env;
 
 use anyhow::Result;
-use dialog_artifacts::history::{Origin, Version, context_of};
+use dialog_artifacts::history::{Edition, Origin, Version, context_of};
 use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Pick, Value};
 use dialog_capability::Subject;
 use dialog_effects::authority::{Identify, OperatorExt as _};
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use futures_util::{StreamExt as _, stream};
 
-use crate::{HeldCaches, RepositoryExt as _, Revision};
+use crate::repository::branch::upstream::Bases;
+use crate::{HeldCaches, RepositoryExt as _, Revision, TreeReference};
 
 fn title(of: &str) -> Artifact {
     Artifact {
@@ -96,20 +97,42 @@ macro_rules! retract {
     };
 }
 
-/// Rewrite `$branch`'s sync records as a release before versions were kept
-/// wrote them: the same bases, with no version.
-macro_rules! forget_versions {
-    ($branch:expr, $env:expr) => {{
-        let mut legacy = $branch.tracked();
-        for synced in legacy.synced.iter_mut() {
-            synced.version = None;
+/// What `$branch`'s bases cell is made to hold before a pull, as `$record`
+/// says (see [`Record`]).
+macro_rules! rewrite_bases {
+    ($branch:expr, $env:expr, $record:expr) => {{
+        let bases = match $record {
+            Record::Kept => None,
+            Record::Missing => Some(Bases::default()),
+            Record::Stale => {
+                let mut bases = $branch.based();
+                for synced in $branch.tracked().synced {
+                    bases.record(
+                        synced.target,
+                        TreeReference::from([9; 32]),
+                        Version::new(Origin::from([9; 32]), Edition::GENESIS),
+                    );
+                }
+                Some(bases)
+            }
+        };
+        if let Some(bases) = bases {
+            $branch.bases().checkpoint().publish(bases, $env).await?;
         }
-        $branch
-            .tracking()
-            .checkpoint()
-            .publish(legacy, $env)
-            .await?;
     }};
+}
+
+/// What a test leaves of a branch's bases cell before the pull it checks.
+#[derive(Clone, Copy)]
+enum Record {
+    /// As the syncs wrote it.
+    Kept,
+    /// Empty, as a release before the cell, or `upgrade`, leaves it.
+    Missing,
+    /// Naming other trees than the tracking cell does, as an older release
+    /// that moved the tracking cell, or a crash between the two writes,
+    /// leaves it.
+    Stale,
 }
 
 /// The entities `$branch` holds a title for, read through `$env`.
@@ -293,9 +316,9 @@ async fn it_keeps_the_history_whole_when_the_lesser_rival_adopts_the_greater() -
 /// and is adopted by root. Merging from the stale base would have kept the
 /// line's first commit and dropped the upstream's own first commit, which
 /// only the base held. `separate_caches` gives each writer caches of its
-/// own, as two processes over one store would have. `legacy` drops the
-/// versions from w1's sync records before the pull.
-async fn reset_behind_the_base(separate_caches: bool, legacy: bool) -> Result<()> {
+/// own, as two processes over one store would have. `record` says what
+/// w1's bases cell holds at the pull.
+async fn reset_behind_the_base(separate_caches: bool, record: Record) -> Result<()> {
     let (writer, profile) = test_session_with_peer().await;
     let name = unique_name("repo");
     profile.space(name.clone()).open().perform(&writer).await?;
@@ -317,9 +340,7 @@ async fn reset_behind_the_base(separate_caches: bool, legacy: bool) -> Result<()
     assert_eq!(w2.revision().as_ref(), Some(&merge), "w2 fast-forwards");
 
     w1.reset(first).perform(&one).await?;
-    if legacy {
-        forget_versions!(w1, &one);
-    }
+    rewrite_bases!(w1, &one, record);
     w1.pull().from(&w2).perform(&one).await?;
 
     assert_eq!(
@@ -341,20 +362,27 @@ async fn reset_behind_the_base(separate_caches: bool, legacy: bool) -> Result<()
 
 #[dialog_common::test]
 async fn it_does_not_merge_from_a_base_a_reset_left_ahead_of_the_head() -> Result<()> {
-    reset_behind_the_base(false, false).await
+    reset_behind_the_base(false, Record::Kept).await
 }
 
 #[dialog_common::test]
 async fn it_does_not_merge_from_a_base_a_reset_left_ahead_of_the_head_with_separate_caches()
 -> Result<()> {
-    reset_behind_the_base(true, false).await
+    reset_behind_the_base(true, Record::Kept).await
 }
 
-/// The same, with the sync record an older release wrote: the bad base
-/// carries no version, which does not make it trusted.
+/// The same, with no revision recorded for the bad base: unknown is not
+/// trusted.
 #[dialog_common::test]
-async fn it_does_not_merge_from_a_legacy_base_a_reset_left_ahead_of_the_head() -> Result<()> {
-    reset_behind_the_base(false, true).await
+async fn it_does_not_merge_from_an_unrecorded_base_a_reset_left_ahead_of_the_head() -> Result<()> {
+    reset_behind_the_base(false, Record::Missing).await
+}
+
+/// The same, with the bases cell naming another tree than the tracking
+/// cell, as an older release or a crash between the two writes leaves it.
+#[dialog_common::test]
+async fn it_does_not_merge_from_a_stale_base_a_reset_left_ahead_of_the_head() -> Result<()> {
+    reset_behind_the_base(false, Record::Stale).await
 }
 
 /// A line reset behind its base, to an older head of the upstream's own
@@ -365,18 +393,23 @@ async fn it_does_not_merge_from_a_legacy_base_a_reset_left_ahead_of_the_head() -
 /// version it never minted before.
 #[dialog_common::test]
 async fn it_merges_from_no_base_when_the_head_does_not_hold_it() -> Result<()> {
-    no_base(false).await
+    no_base(Record::Kept).await
 }
 
-/// The same, with the sync record an older release wrote: a base with no
-/// version is not merged from either, so the first real pull after an
-/// upgrade runs from no base once.
+/// The same with no revision recorded for the base, as after an upgrade:
+/// the first merging pull runs from no base once.
 #[dialog_common::test]
-async fn it_merges_from_no_base_when_the_base_is_a_legacy_one() -> Result<()> {
-    no_base(true).await
+async fn it_merges_from_no_base_when_the_base_revision_is_unrecorded() -> Result<()> {
+    no_base(Record::Missing).await
 }
 
-async fn no_base(legacy: bool) -> Result<()> {
+/// The same with a stale bases cell.
+#[dialog_common::test]
+async fn it_merges_from_no_base_when_the_base_revision_is_stale() -> Result<()> {
+    no_base(Record::Stale).await
+}
+
+async fn no_base(record: Record) -> Result<()> {
     let (writer, profile) = test_session_with_peer().await;
     let name = unique_name("repo");
     profile.space(name.clone()).open().perform(&writer).await?;
@@ -397,9 +430,7 @@ async fn no_base(legacy: bool) -> Result<()> {
     // Behind the base (C), at B, above w1's only mint (A).
     w1.reset(b).perform(&one).await?;
     commit!(w1, &one, "post:e");
-    if legacy {
-        forget_versions!(w1, &one);
-    }
+    rewrite_bases!(w1, &one, record);
     w1.pull().from(&w2).perform(&one).await?;
 
     assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
@@ -422,6 +453,27 @@ async fn no_base(legacy: bool) -> Result<()> {
 /// sits above w2's last mint, so no version is reused.
 #[dialog_common::test]
 async fn it_merges_from_no_base_when_the_upstream_does_not_hold_it() -> Result<()> {
+    upstream_reset(true, Record::Kept).await
+}
+
+/// The same with w1 still at C, so its tree is the base.
+#[dialog_common::test]
+async fn it_merges_from_no_base_when_the_upstream_does_not_hold_our_tree() -> Result<()> {
+    upstream_reset(false, Record::Kept).await
+}
+
+/// The same with no revision recorded for the base. Our tree being the base
+/// is no reason to trust it: the base's revision is then our head, and the
+/// upstream does not hold it.
+#[dialog_common::test]
+async fn it_merges_from_no_base_when_the_upstream_does_not_hold_our_unrecorded_tree() -> Result<()>
+{
+    upstream_reset(false, Record::Missing).await
+}
+
+/// `commit_on_top` has w1 commit x after syncing at C; `record` says what
+/// w1's bases cell holds at the pull.
+async fn upstream_reset(commit_on_top: bool, record: Record) -> Result<()> {
     let (writer, profile) = test_session_with_peer().await;
     let name = unique_name("repo");
     profile.space(name.clone()).open().perform(&writer).await?;
@@ -445,11 +497,16 @@ async fn it_merges_from_no_base_when_the_upstream_does_not_hold_it() -> Result<(
     assert!(z.edition > c.edition, "Z sits above w2's last mint");
 
     w2.reset(z).perform(&two).await?;
-    commit!(w1, &one, "post:x");
+    let mut facts = vec!["post:a", "post:c", "post:y", "post:z"];
+    if commit_on_top {
+        commit!(w1, &one, "post:x");
+        facts.push("post:x");
+    }
+    rewrite_bases!(w1, &one, record);
     w1.pull().from(&w2).perform(&one).await?;
 
     assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
-    let expected: BTreeSet<String> = ["post:a", "post:c", "post:x", "post:y", "post:z"]
+    let expected: BTreeSet<String> = facts
         .iter()
         .map(|of| {
             of.parse::<dialog_artifacts::Entity>()
@@ -538,25 +595,30 @@ async fn it_does_not_push_a_head_a_reset_left_behind_the_base() -> Result<()> {
 }
 
 /// Random interleavings of commit, conflicting single-valued writes,
-/// retract, pull, mutual pull (which breeds rival merges), push and reset
-/// across three writers.
+/// retract, re-assert, pull, mutual pull (which breeds rival merges), push
+/// and reset across three writers.
 ///
-/// The model is the set of live claims, each an attribute, an entity and a
-/// value, and per head the claims its history has retired. Facts are of
-/// two attributes: `post/title`, written under `Pick::All`, whose writes
+/// The model keeps, per head, its live claims and the claims its history
+/// has retired. A claim is an attribute, an entity and a value, written by
+/// one write: a value asserted again after it was retracted is a new claim,
+/// which nothing that retired the first one retires. Facts are of two
+/// attributes: `post/title`, written under `Pick::All`, whose writes
 /// append, and `post/state`, written under `Pick::Last` to one of three
 /// entities, so writers race on them. A write under `Last` retires the claim
 /// its pick returns, and concurrent writes leave several live claims for
 /// the next write to choose among; which one it retires is read from the
-/// writer's head before and after the write, not modeled. A retraction
-/// retires a live claim of either attribute. What a head's history retired
-/// is what its parents' histories retired plus what its own write retired.
+/// writer's head after the write, not modeled. A retraction retires a live
+/// claim of either attribute, and a re-assertion writes again a value its
+/// writer's history retired. A head's history retired what its parents'
+/// histories retired plus what its own write retired.
 ///
 /// What is checked:
-/// - after every step the acting writer's head has a complete history;
+/// - after every step the acting writer's head has a complete history, and
+///   holds exactly the model's live claims;
 /// - after every pull the puller holds exactly the claims either side held
 ///   before it, less every claim either side's history retired: no claim is
-///   lost, and none that was retired comes back;
+///   lost, none that was retired comes back, and a re-asserted value
+///   survives a merge with a history that retired its earlier claim;
 /// - a push either lands, and the upstream then holds the pusher's head, or
 ///   is refused as a non-fast-forward and leaves the upstream as it was; a
 ///   push that lands never drops a claim the upstream held that the
@@ -597,9 +659,16 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
             line!(profile, name, &envs[2], NAMES[2]),
         ];
         let mut held: [Vec<Revision>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-        // The claims retired anywhere in each head's history.
-        let mut retired: HashMap<String, BTreeSet<Claim>> = HashMap::new();
+        // Per head, its live claims and the claims its history retired,
+        // each claim with the write that made it.
+        let mut live: HashMap<String, Written> = HashMap::new();
+        let mut retired: HashMap<String, Written> = HashMap::new();
         let key = |head: &Revision| format!("{:?}", (head.version(), &head.tree));
+        let of = |map: &HashMap<String, Written>, head: Option<&Revision>| {
+            head.and_then(|head| map.get(&key(head)).cloned())
+                .unwrap_or_default()
+        };
+        let mut writes = 0u64;
         let mut minted: [Option<Version>; 3] = [None, None, None];
         let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
         let mut next = |bound: u64| {
@@ -616,7 +685,7 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                 (None, Some(_)) => true,
                 _ => false,
             };
-            let op = next(10);
+            let op = next(11);
             let what = format!("seed {seed} step {step} writer {at} op {op}");
             let mut pullers = Vec::new();
             // A write: the instruction, and the claim it must leave live,
@@ -624,29 +693,46 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
             let write = match op {
                 0 | 1 if !behind => {
                     let claim = Claim::title(&format!("post:{seed}-{step}"));
-                    Some((claim.assert(Pick::All), Some(claim)))
+                    Some((claim.assert(), Some(claim)))
                 }
                 7 if !behind => {
                     let claim =
                         Claim::state(&format!("post:k{}", next(3)), &format!("{seed}-{step}"));
                     seen.conflicting += 1;
-                    Some((claim.assert(Pick::Last), Some(claim)))
+                    Some((claim.assert(), Some(claim)))
                 }
                 6 if !behind => {
-                    let live: Vec<Claim> = claims!(lines[at], &envs[at]).into_iter().collect();
-                    if live.is_empty() {
+                    let held_now: Vec<Claim> = project(&of(&live, lines[at].revision().as_ref()))
+                        .into_iter()
+                        .collect();
+                    if held_now.is_empty() {
                         None
                     } else {
-                        let claim = live[next(live.len() as u64) as usize].clone();
+                        let claim = held_now[next(held_now.len() as u64) as usize].clone();
                         seen.retracts += 1;
                         Some((claim.retract(), None))
+                    }
+                }
+                10 if !behind => {
+                    let head = lines[at].revision();
+                    let held_now = project(&of(&live, head.as_ref()));
+                    let gone: Vec<Claim> = project(&of(&retired, head.as_ref()))
+                        .into_iter()
+                        .filter(|claim| !held_now.contains(claim))
+                        .collect();
+                    if gone.is_empty() {
+                        None
+                    } else {
+                        let claim = gone[next(gone.len() as u64) as usize].clone();
+                        seen.reasserts += 1;
+                        Some((claim.assert(), Some(claim)))
                     }
                 }
                 _ => None,
             };
             if let Some((instruction, kept)) = write {
                 let parent = lines[at].revision();
-                let before = claims!(lines[at], &envs[at]);
+                let before = of(&live, parent.as_ref());
                 lines[at]
                     .commit(stream::iter(vec![instruction]))
                     .perform(&envs[at])
@@ -654,14 +740,20 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                 let head = lines[at].revision().expect("a write leaves a head");
                 minted[at] = Some(head.version());
                 let after = claims!(lines[at], &envs[at]);
-                if let Some(kept) = &kept {
-                    assert!(after.contains(kept), "{what}: the write is live");
+                let gone: Written = before
+                    .iter()
+                    .filter(|(claim, _)| !after.contains(claim))
+                    .cloned()
+                    .collect();
+                let mut now: Written = before.difference(&gone).cloned().collect();
+                if let Some(kept) = kept {
+                    writes += 1;
+                    now.insert((kept, writes));
                 }
-                let mut inherited = parent
-                    .and_then(|parent| retired.get(&key(&parent)).cloned())
-                    .unwrap_or_default();
-                inherited.extend(before.difference(&after).cloned());
-                retired.insert(key(&head), inherited);
+                let mut history = of(&retired, parent.as_ref());
+                history.extend(gone);
+                live.insert(key(&head), now);
+                retired.insert(key(&head), history);
             }
             match op {
                 2 => {
@@ -711,7 +803,7 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                         continue;
                     };
                     let before = lines[other].revision();
-                    let theirs = claims!(lines[other], &envs[other]);
+                    let theirs = of(&live, before.as_ref());
                     let pushed = lines[at].push().to(&lines[other]).perform(&envs[at]).await;
                     // The upstream as its own writer opens it again.
                     lines[other] = line!(profile, name, &envs[other], NAMES[other]);
@@ -729,11 +821,12 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                                 Some(&ours),
                                 "{what}: a push lands our head"
                             );
-                            let covered = retired.get(&key(&ours)).cloned().unwrap_or_default();
+                            let covered = of(&retired, Some(&ours));
                             let now = claims!(upstream, &envs[other]);
                             let dropped: Vec<&Claim> = theirs
-                                .iter()
-                                .filter(|claim| !covered.contains(claim) && !now.contains(claim))
+                                .difference(&covered)
+                                .map(|(claim, _)| claim)
+                                .filter(|claim| !now.contains(claim))
                                 .collect();
                             assert!(
                                 dropped.is_empty(),
@@ -764,14 +857,11 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                     continue;
                 };
                 let before = lines[to].revision();
-                let mut expected = claims!(lines[to], &envs[to]);
-                expected.extend(claims!(lines[from], &envs[from]));
-                let mut covered = before
-                    .as_ref()
-                    .and_then(|before| retired.get(&key(before)).cloned())
-                    .unwrap_or_default();
-                covered.extend(retired.get(&key(&theirs)).cloned().unwrap_or_default());
-                expected.retain(|claim| !covered.contains(claim));
+                let mut covered = of(&retired, before.as_ref());
+                covered.extend(of(&retired, Some(&theirs)));
+                let mut expected = of(&live, before.as_ref());
+                expected.extend(of(&live, Some(&theirs)));
+                let expected: Written = expected.difference(&covered).cloned().collect();
                 lines[to]
                     .pull()
                     .from(&lines[from])
@@ -790,10 +880,11 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                 );
                 assert_eq!(
                     claims!(lines[to], &envs[to]),
-                    expected,
+                    project(&expected),
                     "{what}: writer {to} holds what it and {from} held, less what either retired"
                 );
-                retired.entry(key(&after)).or_default().extend(covered);
+                live.insert(key(&after), expected);
+                retired.insert(key(&after), covered);
                 if !held[to].contains(&after) {
                     held[to].push(after);
                 }
@@ -803,6 +894,11 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                     walkable!(lines[at], &envs[at]),
                     Ok(()),
                     "{what}: writer {at}'s history"
+                );
+                assert_eq!(
+                    claims!(lines[at], &envs[at]),
+                    project(&of(&live, Some(&head))),
+                    "{what}: writer {at} holds the model's claims"
                 );
                 if !held[at].contains(&head) {
                     held[at].push(head);
@@ -818,12 +914,22 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
             && seen.resets > 0
             && seen.declined > 0
             && seen.retracts > 0
+            && seen.reasserts > 0
             && seen.conflicting > 0
             && seen.pushes > 0
             && seen.refused > 0,
         "every kind of step ran: {seen:?}"
     );
     Ok(())
+}
+
+/// Claims as the interleaving test models them, each with the write that
+/// made it.
+type Written = BTreeSet<(Claim, u64)>;
+
+/// The claims of `written`, as a branch reads them.
+fn project(written: &Written) -> BTreeSet<Claim> {
+    written.iter().map(|(claim, _)| claim.clone()).collect()
 }
 
 /// The interleaving test's branches, one per writer.
@@ -842,6 +948,7 @@ struct Census {
     pushes: usize,
     refused: usize,
     idle: usize,
+    reasserts: usize,
 }
 
 /// A claim as the interleaving test models it: attribute, entity, value.
@@ -881,7 +988,13 @@ impl Claim {
         }
     }
 
-    fn assert(&self, pick: Pick) -> Instruction {
+    /// The assertion of this claim under its attribute's pick.
+    fn assert(&self) -> Instruction {
+        let pick = if self.the == "post/state" {
+            Pick::Last
+        } else {
+            Pick::All
+        };
         Instruction::Assert(self.artifact(), pick)
     }
 

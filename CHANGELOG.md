@@ -44,15 +44,18 @@ after a reset behind the base published the older head and moved the
 upstream back, dropping what only the base held from every replica that
 then pulled it.
 
-The sync record now keeps the revision whose tree the base is. A merge
-runs from the base only when both heads' contexts observe that revision;
-otherwise it runs from no base, screened as a first contact is, or adopts
-the upstream by root when the upstream has seen our head. The shortcut for
-an upstream that has not moved checks the same of our head. A base whose
-revision is not known, because an older release or `upgrade` recorded it,
-is not merged from either: the first pull after an upgrade that has to
-merge runs from no base, and the sync it records carries the revision. A
-push lands only when our head's context observes the upstream's head.
+A sync now records the revision whose tree the base is, in a
+replica-local cell of its own beside the tracking cell, written after it.
+A merge runs from the base only when both heads' contexts observe that
+revision; otherwise it runs from no base, screened as a first contact is,
+or adopts the upstream by root when the upstream has seen our head. When
+our tree is the base, the revision is our head. Otherwise a revision that
+is not known (no record, as after an upgrade, or a record of another tree,
+as an older release moving the tracking cell or a crash between the two
+writes leaves it) is not trusted: the pull merges from no base once, and
+the sync it records writes the revision. The shortcut for an upstream
+that has not moved checks the same of our head. A push lands only when
+our head's context observes the upstream's head.
 
 What this changes for you:
 
@@ -67,18 +70,17 @@ What this changes for you:
 - Pulls that settle rival merges leave complete histories, and
   `PreparedPull::novelty` vouches for every revision such a head brings
   in. This was introduced by #623, which no release contains.
-- `Synced` has a field `version: Option<Version>`, so a struct literal
-  must name it. `Tracking::record_at` records a sync base with its
-  revision, and `Tracking::version` reads it back. `Tracking::record`
-  records one without.
 - A pull whose base either head no longer holds merges from no base. It
   reads both sides' differences in full, once, where a merge from the
   base read only what changed since it; the next pull runs from the new
   base again. The first merging pull after an upgrade does the same once
-  per upstream, since a base recorded by an older release is not trusted.
+  per upstream, since a base recorded by an older release is not trusted,
+  and so does a pull after a crash between a sync's two writes.
 - A push that does not land as is checks that our head holds the
   upstream's: from the memo, from our edition when the upstream's head is
   of our origin, or with one point read of our tree's region.
+- Opening a branch reads one more replica-local cell, and a sync writes
+  one more after the tracking cell. No API changes.
 
 Why: the merge's assumption about its base was true on every path that
 existed when the base was introduced, and nothing checked it once resets
@@ -317,14 +319,15 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
-- A branch's tracking cell, which is replica-local and never synced,
-  records each sync base's revision beside its tree. A record an older
-  release wrote has none, and its base is not merged from: the first pull
-  that has to merge runs from no base and writes a record with the
-  revision. That covers a bad base an older release left behind, by a
-  reset, a kept rival or `upgrade`. An older release reading a record this
-  one wrote ignores the field. Nothing is rewritten on upgrade, and
-  nothing an embedder runs is needed.
+- A branch has a new replica-local cell, `bases`, never synced, that
+  records each sync base's revision. A replica upgraded from an older
+  release has none, and its bases are not merged from: the first pull
+  that has to merge runs from no base and writes the record. That covers
+  a bad base an older release left behind, by a reset, a kept rival or
+  `upgrade`. An older release ignores the cell, and the tracking cell's
+  encoding is unchanged; when an older release moves the tracking cell
+  the record no longer matches it and is not used. Nothing is rewritten
+  on upgrade, and nothing an embedder runs is needed.
 - Nothing repairs what earlier pulls did. Heads already minted with a
   hole by a build of `main` since #623 keep it, and facts a replica lost
   to a pull after a reset are not restored by this change. Nothing synced

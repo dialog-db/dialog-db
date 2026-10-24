@@ -48,6 +48,9 @@ impl OpenBranch {
         let tracking = self.branch.tracking();
         tracking.resolve().perform(env).await?;
 
+        let bases = self.branch.bases();
+        bases.resolve().perform(env).await?;
+
         let induction = self.branch.induction();
         induction.resolve().perform(env).await?;
 
@@ -58,6 +61,7 @@ impl OpenBranch {
             reference: self.branch,
             revision,
             tracking,
+            bases,
             induction,
             node_cache: caches.nodes,
             spill_cache: caches.spills,

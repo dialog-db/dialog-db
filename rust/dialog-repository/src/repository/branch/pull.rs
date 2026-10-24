@@ -334,19 +334,19 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // hasn't moved and there's nothing to pull.
         let base = upstream.tree().cloned();
 
-        // The revision whose tree the base is, when the sync that recorded
-        // it said (see `Synced::version`), and only while the record still
-        // names this base. A record written before versions were kept, by
-        // an older release or by `upgrade`, says nothing of who holds the
-        // base, and a record a concurrent sync has moved since the upstream
-        // was resolved says nothing of this base: either way the base is
-        // trusted only where our tree is the base, as for a reset, a kept
-        // rival or anything else an older release left.
+        // The revision whose tree the base is, as the sync that recorded
+        // the base wrote it to the bases cell (see `upstream::Bases`), and
+        // only while the tracking cell still names this base. A base an
+        // older release or `upgrade` recorded has none, a crash between the
+        // two writes leaves the bases cell naming another tree, and a
+        // concurrent sync may have moved the tracking cell since the
+        // upstream was resolved: in each case the revision is unknown.
         let base_version = {
-            let tracking = branch.tracked();
             let target = upstream.target();
-            match (tracking.tree(&target), base.as_ref()) {
-                (Some(recorded), Some(base)) if recorded == *base => tracking.version(&target),
+            match (branch.tracked().tree(&target), base.as_ref()) {
+                (Some(recorded), Some(base)) if recorded == *base => {
+                    branch.based().version(&target, base)
+                }
                 _ => None,
             }
         };
@@ -580,11 +580,22 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // removed. So a base either head does not hold is not merged from.
         // Decided from the two contexts, which are in hand, at no read. An
         // upstream head that publishes no context is trusted on our side
-        // alone. A base whose version is not known (see `base_version`) is
-        // not merged from: the gates above have already adopted or kept a
-        // head wherever one side has seen the other, so what reaches here
-        // is a real merge, and it runs from no base once, after which the
-        // sync it records carries a version.
+        // alone.
+        //
+        // When our tree is the base, the base's revision is our head, known
+        // whatever the bases cell says, and the question is only whether
+        // the upstream holds it. Otherwise a base whose revision is unknown
+        // (see `base_version`) is not merged from: unknown is not trusted,
+        // since trusting it is what lost facts. The gates above have
+        // already adopted or kept a head wherever one side has seen the
+        // other, so what reaches here is a real merge, and it runs from no
+        // base once; the sync it records writes the revision.
+        let base_version = base_version.or_else(|| {
+            local_revision
+                .as_ref()
+                .filter(|local| base.as_ref() == Some(&local.tree))
+                .map(Revision::version)
+        });
         let base_held = match (&base, base_version) {
             (Some(base), Some(version)) => {
                 (local_tree.as_ref() == Some(base) || local_context.observes(&version))
@@ -1652,7 +1663,7 @@ impl PreparedPull<'_> {
         let target = sync.target();
         let marker = branch.tracking().checkpoint();
         let mut tracking = branch.tracked();
-        tracking.record_at(&sync, Some(merges.version()));
+        tracking.record(&sync);
         let mut publish = marker.publish(tracking, env).await;
         while let Err(PublishError::VersionMismatch { .. }) = publish {
             branch.tracking().resolve().perform(env).await?;
@@ -1664,10 +1675,17 @@ impl PreparedPull<'_> {
             if !ours_untouched {
                 return Ok(branch.revision());
             }
-            tracking.record_at(&sync, Some(merges.version()));
+            tracking.record(&sync);
             publish = marker.publish(tracking, env).await;
         }
         publish?;
+
+        // The revision whose tree the new base is: the upstream head merged.
+        if let Some(tree) = sync.tree().cloned() {
+            branch
+                .record_base::<_, PullError>(target, tree, merges.version(), env)
+                .await?;
+        }
 
         Ok(Some(new_revision))
     }
