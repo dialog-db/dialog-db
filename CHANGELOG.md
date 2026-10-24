@@ -316,22 +316,33 @@ root may cost needs the bytes attributed and the shape in the gate first.
 [#625](https://github.com/dialog-db/dialog-db/pull/625)
 
 A head no longer carries one watermark per origin its history ever
-included. It carries none, and a signed marker saying its tree holds
-them, in a new context region with one entry per origin. The region is
+included. It carries its own, as its edition and a signed count of its
+own origin's revisions, and a signed marker saying its tree holds the
+rest, in a new context region with one entry per origin. The region is
 exact for every origin except the head's own: that entry is where the
 writer's chain of commits began, and a reader brings it up to the head
-from the head's edition, one edition and one revision per commit. A
+from the head's edition, one edition and one revision per commit, and
+refuses a region that does not bring it to the count the head signed. A
 commit on a head of its own origin therefore writes nothing to the
-region. A commit on another origin's head writes two entries, and a
-merge writes its own entry and every entry its two sides hold
-differently. A pull decides "nothing new" from its own context and the
+region and reads nothing of it. A commit on another origin's head writes
+two entries: that origin's exact watermark, which the head carries, and
+its own, one past what the head holds of its origin, which one point read
+of the region answers: a root-to-leaf path, a subset of the whole region.
+A commit never reads the region whole. A merge writes its own entry and every entry its two sides hold
+differently. A pull answers whether our head has seen the upstream's
+from our head's record when the record names it as a parent or skip
+link, so a pull right after a commit on the upstream's head reads
+nothing. A pull decides "nothing new" from its own context and the
 upstream head's version, and a fast-forward from the two heads' editions
 when they share an origin, at zero reads; a fast-forward across origins
 reads the upstream's region, its root and a leaf.
 
 What this changes for you:
 
-- `Revision` has a field `region: bool`. A struct literal must name it.
+- `Revision` has fields `region: bool` and `count: Option<u64>`. A
+  struct literal must name them. `Revision::publish_region` takes the
+  head's own count, and `Revision::own_watermark` gives the head's own
+  watermark when it carries its count.
 - `Revision::context` is `None` on every head this release mints. A
   head's whole context is in its branch's memo
   (`Branch::contexts().cached(&version)`), in its tree
@@ -353,10 +364,15 @@ What this changes for you:
   `merge::context_scope`, `merge::without_context`,
   `history::context_in`, `history::region_writes` and `history::Held`.
 - `Revision::verify` refuses a head that claims both an inline context
-  and a context region. A pull refuses a head whose region holds no
-  entry for the head's own origin, holds it above the head, or holds an
-  entry outside the watermark bounds, as `DialogArtifactsError::InvalidKey`,
-  and keeps its own head.
+  and a context region, and a count on a head without a region, a zero
+  count, or a count above what the head's edition leaves room for. A
+  pull refuses a head whose region holds no entry for the head's own
+  origin, holds it above the head, holds an entry outside the watermark
+  bounds, or derives a count other than the one the head signed, as
+  `DialogArtifactsError::InvalidKey`, and keeps its own head.
+- A commit no longer remembers the new head's whole context in the
+  branch's memo unless it had the parent's there already. The first
+  reader that needs the whole map reads the region then.
 - `Revision::precedence` compares two heads by their contexts only when
   both carry them inline, and orders two heads of one origin exactly by
   edition. Any other pair is answered from editions without reading
@@ -1181,10 +1197,19 @@ thread multiplies whatever it holds by the size of the thread pool.
   whole map into its tree's region, once, in the same batch as its
   revision record.
 - An older release cannot verify a head this release mints: its signed
-  payload ends in a `0x02` marker the older release does not know, so
-  its pull refuses the head as an invalid signature. Upgrade every
-  replica that pulls from one running this release. Nothing an embedder
-  runs is needed beyond that.
+  payload ends in a `0x03` marker and the head's own count, which the
+  older release does not know, so its pull refuses the head as an
+  invalid signature. Upgrade every replica that pulls from one running
+  this release. Nothing an embedder runs is needed beyond that.
+- A head minted by a build of this release from before heads carried
+  their count ends in a lone `0x02` marker. No release or pre-release
+  tag carries such a build (none contains #625's commit), so these heads
+  exist only where an untagged build of `main` ran, and the `0x02` shape
+  can be retired before the release. Until then it still verifies and
+  pulls, nothing is rewritten, and a reader derives its count from its
+  region.
+  A commit on such a head of another origin reads the head's region for
+  the count, as those builds did, and the head it mints carries one.
 - `UcanAddress` encodes an optional `socket`, left out when absent, so an address without one keeps its bytes. An older replica reads an address that names a socket and drops the socket, reaching the peer over requests.
 - Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
 - The socket carries text `ping` and `pong` messages beside its frames. A service's socket must answer `ping` with `pong`, or a client closes the connection every `Liveness::deadline`; no released service has a socket, so none predates this.

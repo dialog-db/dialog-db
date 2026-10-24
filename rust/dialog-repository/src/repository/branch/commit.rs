@@ -1,4 +1,4 @@
-use super::context::{full_context, held};
+use super::context::{Successor, successor};
 use super::merge::merge_with_winner;
 use super::transaction::induction_ignores;
 use crate::repository::archive::persist;
@@ -9,7 +9,7 @@ use crate::{
 };
 use dialog_artifacts::ArchiveDelta;
 use dialog_artifacts::history::{
-    Context, Edition, Origin, RevisionRecord, TreeHistory, Version, extend_skips, region_writes,
+    Context, Edition, Origin, RevisionRecord, TreeHistory, Version, extend_skips,
 };
 use dialog_artifacts::tree::{Stamp, WriteScope};
 use dialog_artifacts::{Datum, DialogArtifactsError, Entity, Instruction, Key, NUMBER_BAND, State};
@@ -367,7 +367,9 @@ where
         // parent, and a memo entry from the losing attempt would be wrong.
         let version = revision.version();
         branch.records().insert(version, record);
-        branch.contexts().insert(version, context);
+        if let Some(context) = context {
+            branch.contexts().insert(version, context);
+        }
 
         // No induction ran, and none was owed: every fact here is a
         // reserved record the lag drops. The commit is then an inducing
@@ -460,7 +462,9 @@ where
         // an ancestry walk.
         let version = revision.version();
         snapshot.caches().records.insert(version, record);
-        snapshot.caches().contexts.insert(version, context);
+        if let Some(context) = context {
+            snapshot.caches().contexts.insert(version, context);
+        }
 
         Ok(revision)
     }
@@ -473,8 +477,10 @@ pub(crate) struct Minted {
     pub(crate) revision: Revision,
     /// Its signed in-tree record, for the verified-record memo.
     pub(crate) record: RevisionRecord,
-    /// Its causal context, for the context memo.
-    pub(crate) context: Arc<Context>,
+    /// Its causal context, for the context memo, when the commit had it
+    /// at no read. `None` leaves the memo to the first reader that needs
+    /// the whole map.
+    pub(crate) context: Option<Arc<Context>>,
 }
 
 /// How a [`Mint`] came out.
@@ -531,8 +537,9 @@ pub(crate) struct Mint<'a, Changes> {
 pub(crate) struct Amended {
     /// The revision's signed in-tree record.
     pub(crate) record: RevisionRecord,
-    /// The revision's causal context.
-    pub(crate) context: Arc<Context>,
+    /// The revision's causal context, when the commit that minted it
+    /// had it.
+    pub(crate) context: Option<Arc<Context>>,
 }
 
 impl<Changes> Mint<'_, Changes>
@@ -801,46 +808,38 @@ where
             None => Vec::new(),
         };
 
-        // The new head's causal context: the parent's plus this commit's
-        // own version. The parent's comes from the line's memo, from the
-        // parent's tree's context region, from the parent head itself (a
-        // head minted before the region carries its whole context), or
-        // once, for lineages minted before heads carried contexts, from
-        // the ancestry walk.
-        //
-        // The successor is the one copy of the map a commit pays for: the
-        // parent's context is shared with the memo, and the new one is
-        // shared with the head's memo entry once it is published. What the
-        // commit writes is the region entries the reader would not derive
-        // (`region_writes`): none on a head of its own origin, two on
-        // another origin's head, and the whole map once, atop a parent
-        // minted before the region existed. The head itself carries none.
-        let contexts = source.contexts();
-        let parent_context = match base_revision.as_ref() {
-            None => None,
-            Some(base) => {
-                let history = TreeHistory::from_root_with_cache(
+        // The new head's causal context is the parent's plus this
+        // commit's own version, and what the commit writes is the region
+        // entries a reader would not derive: none on a head of its own
+        // origin, two on another origin's head, and the whole map once,
+        // atop a parent minted before the region existed. The head itself
+        // carries none, only its own count. The parent's full context is
+        // taken only when it is free (the memo holds it, or the parent
+        // carries it); a commit never reads the parent's region whole to
+        // learn the two entries a takeover changes (see `successor`).
+        let Successor {
+            count,
+            region,
+            context,
+        } = successor(
+            base_revision.as_ref(),
+            version,
+            &source.contexts(),
+            &store,
+            &source.node_cache(),
+            || {
+                let base = base_revision
+                    .as_ref()
+                    .expect("only a commit with a parent walks its history");
+                TreeHistory::from_root_with_cache(
                     base.tree.hash(),
                     store.clone(),
                     source.node_cache(),
                 )
-                .with_record_cache(source.records());
-                Some(full_context(base, &contexts, &store, &source.node_cache(), &history).await?)
-            }
-        };
-        let context = {
-            let mut context = parent_context.as_deref().cloned().unwrap_or_default();
-            context.record(version);
-            Arc::new(context)
-        };
-        let region = region_writes(
-            version,
-            &context,
-            &[base_revision
-                .as_ref()
-                .zip(parent_context.as_deref())
-                .and_then(|(base, parent)| held(base, parent))],
-        );
+                .with_record_cache(source.records())
+            },
+        )
+        .await?;
 
         // The revision's tree root is set after the seal below (its own
         // record must enter the tree before the root is final); until then
@@ -902,7 +901,7 @@ where
         .await?;
 
         revision.tree = TreeReference::from(*tree.root().as_bytes());
-        revision.publish_region();
+        revision.publish_region(count);
         // Sign the head last: only now are the tree root and context
         // final, and the head signature is what binds them to the issuer
         // (the in-tree record cannot contain the root of the tree it
