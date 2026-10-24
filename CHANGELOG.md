@@ -14,6 +14,57 @@ says how to cut a release.
 
 ## Unreleased
 
+### A subscription catching up re-derives its touched entities together
+
+[#679](https://github.com/dialog-db/dialog-db/pull/679), for
+[#646](https://github.com/dialog-db/dialog-db/issues/646)
+
+A poll that finds facts changed inside a subscription's cover re-derives
+each touched entity with a restricted evaluation of the query. Those
+evaluations ran one after another, and on a cold replica each one is a
+point read of its entity's leaf, so a catch-up cost a round trip per
+touched entity. They now run sixteen at a time, and their rows are folded
+into the result in entity order once all of them have finished.
+
+What this changes for you:
+
+- A subscription catching up on many changed entities waits on far fewer
+  round trips. In the catch-up soak, a poll after a hundred one-fact
+  commits goes from a chain of 80 dependent requests to 31, and from
+  18.2 s to 7.5 s on the mobile profile (6.9 s to 2.8 s on broadband,
+  18.2 s to 8.0 s in a browser). A poll after ten goes from a chain of 11
+  to 3. The remaining chain is the cover diff's own walk.
+- It reads the same blocks: request and byte counts are unchanged.
+- Deltas, their order and the retained results are as before.
+- Nothing stored or synced changes.
+
+Why: the restricted evaluations are independent of one another. Each
+reads its own entity's facts, and the cover they record is a union, so
+nothing ordered them but the loop.
+
+### A subscription poll that fails part-way no longer loses deltas
+
+[#679](https://github.com/dialog-db/dialog-db/pull/679), for
+[#646](https://github.com/dialog-db/dialog-db/issues/646)
+
+When a poll's re-derivation of one touched entity failed, the poll
+returned the error, but the entities re-derived before it had already
+been applied to the subscription's retained results. The next poll found
+those entities unchanged and never emitted their rows, so a subscriber
+missed them for good. A failed poll now leaves the retained results as
+they were, and the next poll re-derives every touched entity and emits
+the whole delta.
+
+What this changes for you:
+
+- After a poll returns an error, the next successful poll emits every
+  change since the last successful one, including those of the entities
+  the failed poll had already re-derived.
+- The error a failed poll returns is unchanged.
+
+Why: a delta a subscriber never sees leaves its view wrong with nothing
+to correct it.
+
 ### dialog-query no longer turns on dialog-common's test helpers
 
 [#675](https://github.com/dialog-db/dialog-db/pull/675)
@@ -43,6 +94,41 @@ feature turned on through a normal dependency reaches every build above
 it. #670 puts a seeded source of identifiers for the soak harness behind
 that same feature, which makes keeping it out of production builds a
 requirement rather than a cleanup.
+
+### A query pinned to one value of a single-valued attribute reads a cold replica in parallel
+
+[#658](https://github.com/dialog-db/dialog-db/pull/658), for
+[#650](https://github.com/dialog-db/dialog-db/issues/650)
+
+A premise that binds a single-valued attribute to a value without binding
+the entity, such as `status = "open"`, scans the value index for
+candidates and checks each candidate against its entity's stored values,
+so that an entity whose winning value is no longer `"open"` is not
+yielded. Each check now goes out as a preload hint while an earlier one
+is awaited. The other premises' entity probes were already pipelined this
+way. The checks were not, and they were the chain. On a cold replica each
+check fetched one entity leaf, and the probes of the next premise landed
+in that same leaf, so the query cost one round trip per entity leaf it
+touched.
+
+What this changes for you:
+
+- A cold query driven by such a premise takes about a fifth of the round
+  trips it did. The soak's `rule` phase, a rule whose body pins
+  `status = "open"`, goes from a chain of 98 to 18 dependent requests and
+  from 8.4 s to 1.7 s on the broadband profile (22.6 s to 4.7 s on mobile,
+  22.4 s to 6.4 s in a browser). The `filtered` phase, a concept query
+  pinning a status, goes from 8.8 s to 1.7 s on broadband.
+- It fetches no more blocks: the hinted leaves are the ones the checks
+  read anyway. Request and byte counts are unchanged.
+- Results are unchanged, and so is the plan. A replica whose speculation
+  budget is zero (`FetchBudget::ZERO`) behaves as before.
+- Nothing stored or synced changes.
+
+Why: #536 made a rule body plan with its pinned values bound, which is
+correct and reads fewer blocks. It also made the value-pinned premise the
+driver, and that premise's checks were the one per-row read in the
+nested-loop join that nothing read ahead.
 
 ### A difference prunes a subtree both sides route the same buffered ops to
 
@@ -123,41 +209,6 @@ Why: the squash reasons about one value at a time, which is exact only
 while writes of different values commute. A choosing write is the one
 write that does not commute with the others, so a cell holding one has
 to reach the tree in the order it was written.
-
-### A query pinned to one value of a single-valued attribute reads a cold replica in parallel
-
-[#658](https://github.com/dialog-db/dialog-db/pull/658), for
-[#650](https://github.com/dialog-db/dialog-db/issues/650)
-
-A premise that binds a single-valued attribute to a value without binding
-the entity, such as `status = "open"`, scans the value index for
-candidates and checks each candidate against its entity's stored values,
-so that an entity whose winning value is no longer `"open"` is not
-yielded. Each check now goes out as a preload hint while an earlier one
-is awaited. The other premises' entity probes were already pipelined this
-way. The checks were not, and they were the chain. On a cold replica each
-check fetched one entity leaf, and the probes of the next premise landed
-in that same leaf, so the query cost one round trip per entity leaf it
-touched.
-
-What this changes for you:
-
-- A cold query driven by such a premise takes about a fifth of the round
-  trips it did. The soak's `rule` phase, a rule whose body pins
-  `status = "open"`, goes from a chain of 98 to 18 dependent requests and
-  from 8.4 s to 1.7 s on the broadband profile (22.6 s to 4.7 s on mobile,
-  22.4 s to 6.4 s in a browser). The `filtered` phase, a concept query
-  pinning a status, goes from 8.8 s to 1.7 s on broadband.
-- It fetches no more blocks: the hinted leaves are the ones the checks
-  read anyway. Request and byte counts are unchanged.
-- Results are unchanged, and so is the plan. A replica whose speculation
-  budget is zero (`FetchBudget::ZERO`) behaves as before.
-- Nothing stored or synced changes.
-
-Why: #536 made a rule body plan with its pinned values bound, which is
-correct and reads fewer blocks. It also made the value-pinned premise the
-driver, and that premise's checks were the one per-row read in the
-nested-loop join that nothing read ahead.
 
 ### A chain canonicalized at a link that changes nothing is canonical
 
