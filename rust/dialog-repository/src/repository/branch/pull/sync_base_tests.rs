@@ -24,6 +24,19 @@ use futures_util::{StreamExt as _, stream};
 
 use crate::{HeldCaches, RepositoryExt as _, Revision};
 
+fn title(of: &str) -> Artifact {
+    Artifact {
+        the: "post/title".parse().expect("attribute parses"),
+        of: of.parse().expect("entity parses"),
+        is: Value::String("body".to_string()),
+        cause: None,
+    }
+}
+
+fn retract_one(of: &str) -> Instruction {
+    Instruction::Retract(title(of))
+}
+
 fn assert_one(of: &str) -> Instruction {
     Instruction::Assert(
         Artifact {
@@ -68,6 +81,16 @@ macro_rules! commit {
     ($branch:expr, $env:expr, $of:expr) => {
         $branch
             .commit(stream::iter(vec![assert_one(&format!("{}", $of))]))
+            .perform($env)
+            .await?
+    };
+}
+
+/// Retract the fact about `$of` from `$branch` through `$env`.
+macro_rules! retract {
+    ($branch:expr, $env:expr, $of:expr) => {
+        $branch
+            .commit(stream::iter(vec![retract_one(&format!("{}", $of))]))
             .perform($env)
             .await?
     };
@@ -319,10 +342,57 @@ async fn it_merges_from_no_base_when_the_head_does_not_hold_it() -> Result<()> {
     Ok(())
 }
 
-/// Random interleavings of commit, pull, mutual pull (which breeds rival
-/// merges), reset and takeover across three writers. After every step the
-/// acting writer's head has a complete history, and after every pull the
-/// puller holds every fact either side held before it. A reset moves a
+/// A merge from no base keeps a retraction: a fact the upstream retracted
+/// stays retracted in a line that still holds the assertion. The line
+/// resets behind its base to a head holding the fact and commits on top,
+/// so the upstream has not seen its head and a real merge runs from no
+/// base. Every claim and record the upstream holds is integrated, its
+/// retraction's coverage record among them, and that record retires the
+/// line's copy of the assertion, as it does in any merge.
+#[dialog_common::test]
+async fn it_keeps_a_retraction_when_it_merges_from_no_base() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    profile.space(name.clone()).open().perform(&writer).await?;
+    let one = session!(profile, b"one");
+    let two = session!(profile, b"two");
+    let w1 = line!(profile, name, &one, "one");
+    let w2 = line!(profile, name, &two, "two");
+
+    commit!(w1, &one, "post:a");
+    w2.pull().from(&w1).perform(&two).await?;
+    commit!(w2, &two, "post:f");
+    w1.pull().from(&w2).perform(&one).await?;
+    let holding = w1.revision().expect("w1 holds f");
+    retract!(w2, &two, "post:f");
+    w1.pull().from(&w2).perform(&one).await?;
+    assert_eq!(w1.revision(), w2.revision(), "w1 takes the retraction");
+    commit!(w2, &two, "post:x");
+
+    // Behind the base, at a head that still asserts f, above w1's only
+    // mint, with a commit on top the upstream has not seen.
+    w1.reset(holding).perform(&one).await?;
+    commit!(w1, &one, "post:g");
+    w1.pull().from(&w2).perform(&one).await?;
+
+    assert_eq!(walkable!(w1, &one), Ok(()), "w1's history is whole");
+    let expected: BTreeSet<String> = ["post:a", "post:g", "post:x"]
+        .iter()
+        .map(|of| {
+            of.parse::<dialog_artifacts::Entity>()
+                .map(|of| of.to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    assert_eq!(titles!(w1, &one), expected, "f stays retracted");
+    Ok(())
+}
+
+/// Random interleavings of commit, retract, pull, mutual pull (which breeds
+/// rival merges), reset and takeover across three writers. After every
+/// step the acting writer's head has a complete history. After every pull
+/// the puller holds exactly the facts either side held before it, less
+/// those retracted anywhere in either side's history: no fact is lost, and
+/// none a retraction covered comes back. A reset moves a
 /// writer to a head it has held, its own or another's, at or above the
 /// edition it last minted at: every revision it mints afterwards, a commit
 /// or a pull's merge, is then above everything it minted before, so no
@@ -336,7 +406,7 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
         .and_then(|seeds| seeds.parse().ok())
         .unwrap_or(6);
     let steps = 32;
-    let (mut pulls, mut rivals, mut resets, mut merges) = (0, 0, 0, 0);
+    let (mut pulls, mut rivals, mut resets, mut merges, mut retracts) = (0, 0, 0, 0, 0);
     for seed in 0..seeds {
         let (writer, profile) = test_session_with_peer().await;
         let name = unique_name("repo");
@@ -352,6 +422,10 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
             line!(profile, name, &envs[2], "three"),
         ];
         let mut held: [Vec<Revision>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        // The facts retracted anywhere in each head's history.
+        let mut retracted: std::collections::HashMap<String, BTreeSet<String>> =
+            std::collections::HashMap::new();
+        let key = |head: &Revision| format!("{:?}", (head.version(), &head.tree));
         let mut minted: [Option<Edition>; 3] = [None, None, None];
         let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
         let mut next = |bound: u64| {
@@ -368,13 +442,36 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                 (None, Some(_)) => true,
                 _ => false,
             };
-            let op = next(6);
+            let op = next(7);
             let what = format!("seed {seed} step {step} writer {at} op {op}");
             let mut pullers = Vec::new();
             match op {
                 0 | 1 if !behind => {
+                    let parent = lines[at].revision();
                     commit!(lines[at], &envs[at], format!("post:{seed}-{step}"));
-                    minted[at] = lines[at].revision().map(|head| head.edition);
+                    let head = lines[at].revision().expect("a commit leaves a head");
+                    minted[at] = Some(head.edition);
+                    let inherited = parent
+                        .and_then(|parent| retracted.get(&key(&parent)).cloned())
+                        .unwrap_or_default();
+                    retracted.insert(key(&head), inherited);
+                }
+                6 if !behind => {
+                    let held_now: Vec<String> = titles!(lines[at], &envs[at]).into_iter().collect();
+                    if !held_now.is_empty() {
+                        let fact = held_now[next(held_now.len() as u64) as usize].clone();
+                        let parent = lines[at]
+                            .revision()
+                            .expect("a line holding a fact has a head");
+                        retract!(lines[at], &envs[at], fact);
+                        let head = lines[at].revision().expect("a retraction leaves a head");
+                        minted[at] = Some(head.edition);
+                        let mut inherited =
+                            retracted.get(&key(&parent)).cloned().unwrap_or_default();
+                        inherited.insert(fact);
+                        retracted.insert(key(&head), inherited);
+                        retracts += 1;
+                    }
                 }
                 2 if !held[at].is_empty() => {
                     let floor = minted[at];
@@ -404,6 +501,12 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                 let before = lines[to].revision();
                 let mut expected = titles!(lines[to], &envs[to]);
                 expected.extend(titles!(lines[from], &envs[from]));
+                let mut covered = before
+                    .as_ref()
+                    .and_then(|before| retracted.get(&key(before)).cloned())
+                    .unwrap_or_default();
+                covered.extend(retracted.get(&key(&theirs)).cloned().unwrap_or_default());
+                expected.retain(|fact| !covered.contains(fact));
                 lines[to]
                     .pull()
                     .from(&lines[from])
@@ -423,8 +526,9 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                 assert_eq!(
                     titles!(lines[to], &envs[to]),
                     expected,
-                    "{what}: writer {to} keeps every fact it and {from} held"
+                    "{what}: writer {to} holds what it and {from} held, less what either retracted"
                 );
+                retracted.entry(key(&after)).or_default().extend(covered);
                 if !held[to].contains(&after) {
                     held[to].push(after);
                 }
@@ -441,7 +545,9 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
             }
         }
     }
-    eprintln!("{seeds} seeds: {pulls} pulls ({rivals} mutual), {merges} merges, {resets} resets");
-    assert!(pulls > 0 && rivals > 0 && merges > 0 && resets > 0);
+    eprintln!(
+        "{seeds} seeds: {pulls} pulls ({rivals} mutual), {merges} merges, {resets} resets, {retracts} retractions"
+    );
+    assert!(pulls > 0 && rivals > 0 && merges > 0 && resets > 0 && retracts > 0);
     Ok(())
 }
