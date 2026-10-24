@@ -14,6 +14,58 @@ says how to cut a release.
 
 ## Unreleased
 
+### A pull merges from its sync base only while both heads hold it
+
+[#PRNUM](https://github.com/dialog-db/dialog-db/pull/PRNUM), fixing [#673](https://github.com/dialog-db/dialog-db/issues/673)
+
+A pull merges three ways from the sync base it recorded with an upstream:
+it takes everything the base holds as already in our head, and anything
+the base holds that the upstream lacks as removed upstream. That holds
+only while both heads hold the revision whose tree the base is, and three
+paths broke it:
+
+- Settling rival merges. When two writers each merge the same two heads
+  at once, the greater keeps its head and recorded the lesser's tree as
+  its base without holding it. Once the lesser had built on its merge,
+  the greater side's next pull from it never imported the lesser merge's
+  revision record. Every later head carried the hole: its ancestry walk
+  failed, and a replica that never held the lesser merge could not
+  vouch for the revisions a pull from it brought in.
+- A reset that moves our head behind the base. The next pull returned at
+  once when the upstream had not moved, or merged from the base and
+  dropped what only the base held, facts included.
+- A reset that moves the upstream's head behind the base. The merge read
+  what the upstream never held as removed there, and removed it from
+  ours.
+
+The sync record now keeps the revision whose tree the base is. A merge
+runs from the base only when both heads' contexts observe that revision;
+otherwise it runs from no base, screened as a first contact is, or adopts
+the upstream by root when the upstream has seen our head. The shortcut for
+an upstream that has not moved checks the same of our head.
+
+What this changes for you:
+
+- A pull after a reset keeps every fact either side held. Before, a
+  reset followed by a pull could lose facts the upstream held. This is in
+  the released `0.3.0` and every pre-release since.
+- Pulls that settle rival merges leave complete histories, and
+  `PreparedPull::novelty` vouches for every revision such a head brings
+  in. This was introduced by #623, which no release contains.
+- `Synced` has a field `version: Option<Version>`, so a struct literal
+  must name it. `Tracking::record_at` records a sync base with its
+  revision, and `Tracking::version` reads it back. `Tracking::record`
+  records one without.
+- A pull whose base either head no longer holds merges from no base. It
+  reads both sides' differences in full, once, where a merge from the
+  base read only what changed since it; the next pull runs from the new
+  base again.
+
+Why: the merge's assumption about its base was true on every path that
+existed when the base was introduced, and nothing checked it once resets
+and rival merges could break it. Checking it against the revision the
+base stands for makes it hold however the heads moved.
+
 ### dialog-query no longer turns on dialog-common's test helpers
 
 [#675](https://github.com/dialog-db/dialog-db/pull/675)
@@ -195,6 +247,15 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- A branch's tracking cell, which is replica-local and never synced,
+  records each sync base's revision beside its tree. A record an older
+  release wrote has none, and its tree is trusted as before; an older
+  release reading a record this one wrote ignores the field. Nothing is
+  rewritten on upgrade, and nothing an embedder runs is needed.
+- Nothing repairs what earlier pulls did. Heads already minted with a
+  hole by a build of `main` since #623 keep it, and facts a replica lost
+  to a pull after a reset are not restored by this change. Nothing synced
+  changes shape: an older release pulls everything this one mints.
 - Nothing a replica stores or syncs changes shape, and nothing is
   rewritten. A head an older release published from such a chain names
   a buffered tree; it stays valid, reads, pulls and merges as before,
