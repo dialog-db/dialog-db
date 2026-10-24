@@ -24,7 +24,7 @@ use super::{
     Transaction, TransactionCommit, carry_footprint, settle, touches_rule_facts, touches_rules,
 };
 use crate::Ephemeral;
-use crate::placement::Placements;
+use crate::placement::{Placements, carry_placements, touches_placements};
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::commit::{Amended, Mint, Minted, Outcome};
 use crate::repository::branch::session::Composite;
@@ -807,6 +807,7 @@ where
 {
     let touches = touches_rules(&changes);
     let touches_rule_facts = touches_rule_facts(&changes);
+    let touches_placements = touches_placements(&changes);
     let previous = base.clone();
     let machinery = store_assets(source, assets, env).await?;
     let outcome = Mint {
@@ -826,6 +827,9 @@ where
     if let Outcome::Minted(minted) = &outcome {
         if !touches {
             carry_footprint(&source.rule_cache(), previous.as_ref(), &minted.revision);
+        }
+        if !touches_placements {
+            carry_placements(&source.rule_cache(), previous.as_ref(), &minted.revision);
         }
         if !touches_rule_facts {
             source.rule_cache().carry_rules_root(

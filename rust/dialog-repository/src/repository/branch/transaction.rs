@@ -18,7 +18,7 @@ pub(crate) use succession::ReadSettlement;
 pub(crate) use succession::settle as settle_successions;
 
 use crate::Commit;
-use crate::placement::{Partitioned, Placements};
+use crate::placement::{Partitioned, Placements, carry_placements, touches_placements};
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::asset::store_assets;
 use crate::repository::branch::session::Composite;
@@ -287,6 +287,7 @@ impl TransactionCommit<&Snapshot> {
         let previous = snapshot.revision();
         let touches_rules = touches_rules(&settled.tree);
         let touches_rule_facts = touches_rule_facts(&settled.tree);
+        let touches_placements = touches_placements(&settled.tree);
         let changes = settled.tree;
         let machinery = store_assets(source, settled.assets, env).await?;
 
@@ -304,6 +305,9 @@ impl TransactionCommit<&Snapshot> {
 
         if !touches_rules {
             carry_footprint(&source.rule_cache(), Some(&previous), &revision);
+        }
+        if !touches_placements {
+            carry_placements(&source.rule_cache(), Some(&previous), &revision);
         }
         if !touches_rule_facts {
             SourceRef::Snapshot(snapshot)

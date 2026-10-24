@@ -73,9 +73,10 @@ use dialog_query::the;
 use futures_util::TryStreamExt as _;
 use parking_lot::RwLock;
 
-use crate::CommitError;
 use crate::repository::branch::session::{Erased, select_from_source};
 use crate::repository::source::SourceRef;
+use crate::rules::SharedRuleCache;
+use crate::{CommitError, Revision};
 
 /// The `dialog.attribute/scope` declaration attribute.
 pub(crate) fn scope_attr() -> Relation {
@@ -90,6 +91,35 @@ pub(crate) fn default_attr() -> Relation {
 /// The `dialog.attribute/transient` declaration attribute.
 pub(crate) fn transient_placement_attr() -> Relation {
     the!("dialog.attribute/transient").into()
+}
+
+/// Whether a batch writes a placement declaration: a scope, a default
+/// or a transient marker.
+pub(crate) fn touches_placements(changes: &Changes) -> bool {
+    let (scope, default, transient) = (scope_attr(), default_attr(), transient_placement_attr());
+    changes
+        .iter()
+        .any(|(_, the, _)| *the == scope || *the == default || *the == transient)
+}
+
+/// Carry the committed placements cached at `previous` forward to
+/// `revision`, for a commit that wrote no declaration: its tree declares
+/// what the tree it was committed onto declares. Without this every
+/// commit moves the head past the cache's key and scans the tree for
+/// declarations again on the next one.
+pub(crate) fn carry_placements(
+    cache: &SharedRuleCache,
+    previous: Option<&Revision>,
+    revision: &Revision,
+) {
+    let placements = match previous {
+        // A genesis commit lands on an empty line, which declares nothing.
+        None => Some(CommittedPlacements::default()),
+        Some(previous) => cache.placements(previous),
+    };
+    if let Some(placements) = placements {
+        cache.record_placements(revision.clone(), placements);
+    }
 }
 
 /// The URI scheme attribute entities are minted under.
