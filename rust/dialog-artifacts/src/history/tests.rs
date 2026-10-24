@@ -1982,6 +1982,139 @@ async fn it_verifies_signed_revision_records() -> Result<()> {
     Ok(())
 }
 
+/// A record names the profile its issuer acted for. The profile's
+/// delegation to the issuer, recorded on the issuer, proves it when it
+/// hands the issuer the profile's whole authority: any subject, the root
+/// command. Whether it does is separate from the record's own signature,
+/// which proves its issuer either way, and the record carries nothing of
+/// the delegation.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_attests_the_profile_a_session_delegation_binds() -> Result<()> {
+    use super::REVISION_RECORD_FORMAT;
+    use dialog_credentials::{Ed25519Signer, Signer};
+    use dialog_ucan_core::DelegationBuilder;
+    use dialog_ucan_core::subject::Subject;
+    use dialog_varsig::Principal as _;
+    use ed25519_dalek::Signer as _;
+
+    async fn signer(seed: u8) -> Signer {
+        Signer::from(Ed25519Signer::import(&[seed; 32]).await.expect("a key"))
+    }
+
+    async fn delegate(
+        issuer: &Signer,
+        audience: &Signer,
+        subject: Subject,
+        command: Vec<String>,
+    ) -> Vec<u8> {
+        DelegationBuilder::new()
+            .issuer(issuer.clone())
+            .audience(&audience.did())
+            .subject(subject)
+            .command(command)
+            .try_build()
+            .await
+            .expect("a delegation")
+            .encoded()
+            .to_vec()
+    }
+
+    let profile = signer(1).await;
+    let operator = signer(2).await;
+    let stranger = signer(3).await;
+    let operator_key = signing_key(2);
+
+    let mut record = RevisionRecord {
+        format: REVISION_RECORD_FORMAT,
+        branch: Entity::new()?,
+        issuer: operator.did().to_string(),
+        authority: profile.did().to_string(),
+        parents: Vec::new(),
+        skips: Vec::new(),
+        signature: Vec::new(),
+    };
+    record.signature = operator_key.sign(&record.payload()?).to_bytes().to_vec();
+    record.verify(&record.version())?;
+
+    // A session delegation binds the profile.
+    let session = delegate(&profile, &operator, Subject::Any, Vec::new()).await;
+    record.attests(&session)?;
+
+    // Each way a delegation can fail to bind is refused.
+    let mut tampered = session.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0x01;
+    let refused = [
+        // Issued by someone other than the named profile.
+        delegate(&stranger, &operator, Subject::Any, Vec::new()).await,
+        // Issued to someone other than the issuer.
+        delegate(&profile, &stranger, Subject::Any, Vec::new()).await,
+        // Narrower than the profile's whole authority.
+        delegate(&profile, &operator, Subject::Any, vec!["archive".into()]).await,
+        delegate(
+            &profile,
+            &operator,
+            Subject::Specific(stranger.did()),
+            Vec::new(),
+        )
+        .await,
+        // No longer carrying the profile's signature.
+        tampered,
+        // Not a delegation at all.
+        b"not a delegation".to_vec(),
+    ];
+    for delegation in refused {
+        assert!(record.attests(&delegation).is_err());
+    }
+
+    Ok(())
+}
+
+/// A session's delegation is written once per tree: a tree holding it
+/// reports so, whichever delegations already sit on the same key, and the
+/// fact is identical whoever writes it.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), tokio::test)]
+async fn it_records_a_session_delegation_once_per_tree() -> Result<()> {
+    use super::DelegationRecord;
+
+    let store = MemoryBlocks::new();
+    let session: Entity = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".parse()?;
+    let first = DelegationRecord::new(session.clone(), b"first delegation".to_vec());
+    let second = DelegationRecord::new(session.clone(), b"second delegation".to_vec());
+    let manifest = dialog_search_tree::Manifest::default();
+
+    let mut tree = ArtifactTree::empty();
+    let mut delta = ArchiveDelta::zero();
+    assert!(!first.is_in(&tree, &store, &delta).await?);
+
+    tree.record(&store, &mut delta, first.entries(&manifest)?)
+        .await?;
+    assert!(
+        first.is_in(&tree, &store, &delta).await?,
+        "read through the delta"
+    );
+    assert!(!second.is_in(&tree, &store, &delta).await?);
+
+    tree.record(&store, &mut delta, second.entries(&manifest)?)
+        .await?;
+    delta.flush_into(&store);
+    let flushed = ArchiveDelta::zero();
+    assert!(first.is_in(&tree, &store, &flushed).await?);
+    assert!(second.is_in(&tree, &store, &flushed).await?);
+
+    assert_eq!(
+        first.entries(&manifest)?.entries,
+        DelegationRecord::new(session, b"first delegation".to_vec())
+            .entries(&manifest)?
+            .entries,
+        "the fact does not depend on who writes it"
+    );
+
+    Ok(())
+}
+
 /// The durable history reader refuses records that don't vouch for
 /// themselves: an unsigned (or badly signed) record planted in the tree at
 /// a revision entity errors out of `revision_record`, while a properly
@@ -2087,7 +2220,7 @@ async fn it_reads_a_spilled_revision_record_back() -> Result<()> {
         ..Manifest::default()
     };
     let entries = record.entries(&small)?;
-    let Some((reference, _)) = entries.spill.clone() else {
+    let Some((reference, _)) = entries.spills.first().cloned() else {
         panic!("a record larger than inline_n spills");
     };
 

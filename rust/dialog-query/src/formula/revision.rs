@@ -98,6 +98,52 @@ impl Revision {
     }
 }
 
+/// Projects the profile a revision record proves responsible for its
+/// revision, given a delegation recorded on its issuer (the value of a
+/// `dialog.db/delegation` fact): the record's authority, when that
+/// delegation binds it (see [`RevisionRecord::attests`]). Unlike
+/// [`Revision`]'s `authority`, which reports what the record claims, this
+/// reports only what it proves; a delegation that does not bind projects
+/// nothing.
+#[derive(Debug, Clone, Formula)]
+#[formula(cached)]
+pub struct RevisionAttestation {
+    /// The revision record bytes — the value of a `dialog.db/revision`
+    /// fact.
+    pub of: RecordBytes,
+    /// A delegation recorded on the record's issuer — the value of a
+    /// `dialog.db/delegation` fact.
+    pub proof: RecordBytes,
+    /// The revision entity derived from the record's own contents.
+    #[output]
+    pub this: Entity,
+    /// DID (as entity) of the profile the record proves responsible.
+    #[output]
+    pub attested: Entity,
+}
+
+impl RevisionAttestation {
+    /// Project the attested profile; a record that does not verify, or
+    /// that `proof` does not bind, projects nothing.
+    pub fn compute(input: Input<Self>) -> Vec<Self> {
+        let Some(record) = verified(&input.of) else {
+            return Vec::new();
+        };
+        if record.attests(&input.proof.0).is_err() {
+            return Vec::new();
+        }
+        let Ok(attested) = record.authority.parse() else {
+            return Vec::new();
+        };
+        vec![RevisionAttestation {
+            of: input.of.clone(),
+            proof: input.proof.clone(),
+            this: record.version().entity(),
+            attested,
+        }]
+    }
+}
+
 /// Projects a revision record's DAG edge: one row per parent revision,
 /// each parent named by its content-derived revision entity. A genesis
 /// revision (no parents) projects nothing.
@@ -193,6 +239,30 @@ mod tests {
         let edges = RevisionParent::compute(RevisionParentInput { of });
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].parent, parent.entity());
+    }
+
+    /// A record attests its authority only through a delegation that
+    /// binds it: anything else handed in as the proof projects nothing,
+    /// while the record's claim still projects.
+    #[test]
+    fn it_projects_nothing_for_a_proof_that_does_not_bind() {
+        let (mut record, key) = signed_record(Vec::new());
+        record.authority = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK".into();
+        record.signature = key
+            .sign(&record.payload().expect("record encodes"))
+            .to_bytes()
+            .to_vec();
+        let of = RecordBytes(record.to_bytes().expect("record encodes"));
+
+        let claimed = Revision::compute(RevisionInput { of: of.clone() });
+        assert_eq!(claimed[0].authority.to_string(), record.authority);
+        assert!(
+            RevisionAttestation::compute(RevisionAttestationInput {
+                of,
+                proof: RecordBytes(b"not a delegation".to_vec()),
+            })
+            .is_empty()
+        );
     }
 
     /// A multi-row formula evaluated with an output already bound is a

@@ -41,7 +41,7 @@ use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use dialog_artifacts::history::REVISION_ATTRIBUTE;
+use dialog_artifacts::history::{DELEGATION_ATTRIBUTE, REVISION_ATTRIBUTE};
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::selector_range;
 use dialog_artifacts::{
@@ -50,7 +50,9 @@ use dialog_artifacts::{
 use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
 use dialog_query::error::EvaluationError;
-use dialog_query::formula::revision::{RevisionParentQuery, RevisionQuery};
+use dialog_query::formula::revision::{
+    RevisionAttestationQuery, RevisionParentQuery, RevisionQuery,
+};
 use dialog_query::rule::statement::{Reach, derives_entities};
 use dialog_query::session::Quarantine;
 use dialog_query::type_system::Type as Kind;
@@ -171,8 +173,9 @@ pub(crate) fn source_bytes(source_claims: Vec<Artifact>) -> Option<Vec<u8>> {
 /// The built-in rules concluding `concept`, if it is one of the
 /// derived version-control concepts (empty otherwise).
 ///
-/// [`schema::Revision`] and [`schema::RevisionParent`] have no stored
-/// facts: a revision describes itself with one signed
+/// [`schema::Revision`], [`schema::RevisionAttestation`] and
+/// [`schema::RevisionParent`] have no stored facts of their own: a
+/// revision describes itself with one signed
 /// `dialog.db/revision` record, and these rules project its fields at
 /// query time through the `dialog/revision` formulas — which refuse
 /// records that don't verify, so forged attribution never surfaces in
@@ -210,6 +213,14 @@ pub(crate) fn builtin(concept: &Entity) -> Vec<DeductiveRule> {
                 })
                 .clone(),
         ];
+    }
+
+    let attestation = <schema::RevisionAttestation as Descriptor<ConceptDescriptor>>::descriptor();
+    if *concept == attestation.this() {
+        static ATTESTATION: OnceLock<Vec<DeductiveRule>> = OnceLock::new();
+        return ATTESTATION
+            .get_or_init(|| attestation_rules(attestation.clone()))
+            .clone();
     }
 
     let parent = <schema::RevisionParent as Descriptor<ConceptDescriptor>>::descriptor();
@@ -277,6 +288,7 @@ pub(crate) fn builtin_rules() -> &'static [DeductiveRule] {
     ALL.get_or_init(|| {
         [
             <schema::Revision as Descriptor<ConceptDescriptor>>::descriptor().this(),
+            <schema::RevisionAttestation as Descriptor<ConceptDescriptor>>::descriptor().this(),
             <schema::RevisionParent as Descriptor<ConceptDescriptor>>::descriptor().this(),
             <schema::RevisionAncestor as Descriptor<ConceptDescriptor>>::descriptor().this(),
             <schema::PullUpstream as Descriptor<ConceptDescriptor>>::descriptor().this(),
@@ -417,7 +429,13 @@ fn ancestor_rules(conclusion: ConceptDescriptor, parent: ConceptDescriptor) -> V
 /// own contents, so sharing the variable with the scan's entity makes
 /// the join reject a record replayed at another revision entity.
 fn projection_rule(conclusion: ConceptDescriptor, formula: FormulaQuery) -> DeductiveRule {
-    let scan: Premise = AttributeQuery::new(
+    DeductiveRule::new(conclusion, vec![record_scan(), formula.into()])
+        .expect("the revision projection rule compiles")
+}
+
+/// The scan binding `record` to the revision record on `this`.
+fn record_scan() -> Premise {
+    AttributeQuery::new(
         Term::Constant(Value::Symbol(
             REVISION_ATTRIBUTE
                 .parse()
@@ -428,10 +446,63 @@ fn projection_rule(conclusion: ConceptDescriptor, formula: FormulaQuery) -> Dedu
         Term::blank(),
         Some(Cardinality::One),
     )
-    .into();
+    .into()
+}
 
-    DeductiveRule::new(conclusion, vec![scan, formula.into()])
-        .expect("the revision projection rule compiles")
+/// The rules concluding [`schema::RevisionAttestation`], one per principal
+/// a revision's record can prove:
+///
+/// - its issuer, whose signature every projected record carries;
+/// - its authority, when a delegation recorded on the issuer
+///   (`dialog.db/delegation`, written once per tree) binds it. The record
+///   holds no reference to the delegation, so this is a join on the
+///   issuer: the record's issuer names the entity the delegation is
+///   stored on, and the formula checks the pair.
+fn attestation_rules(conclusion: ConceptDescriptor) -> Vec<DeductiveRule> {
+    let revision = |issuer: &str| -> FormulaQuery {
+        RevisionQuery {
+            of: Term::var("record"),
+            this: Term::var("this"),
+            branch: Term::var("branch"),
+            issuer: Term::var(issuer),
+            authority: Term::var("authority"),
+            edition: Term::var("edition"),
+        }
+        .into()
+    };
+    let issuer = projection_rule(conclusion.clone(), revision("attested"));
+
+    let delegation: Premise = AttributeQuery::new(
+        Term::Constant(Value::Symbol(
+            DELEGATION_ATTRIBUTE
+                .parse()
+                .expect("the delegation attribute is valid"),
+        )),
+        Term::var("issuer"),
+        Term::<Any>::typed_var("proof", Kind::from(dialog_query::Type::Record)),
+        Term::blank(),
+        None,
+    )
+    .into();
+    let attested: FormulaQuery = RevisionAttestationQuery {
+        of: Term::var("record"),
+        proof: Term::var("proof"),
+        this: Term::var("this"),
+        attested: Term::var("attested"),
+    }
+    .into();
+    let authority = DeductiveRule::new(
+        conclusion,
+        vec![
+            record_scan(),
+            revision("issuer").into(),
+            delegation,
+            attested.into(),
+        ],
+    )
+    .expect("the revision attestation rule compiles");
+
+    vec![issuer, authority]
 }
 
 /// Per-branch caches for durable rule discovery + hydration.
