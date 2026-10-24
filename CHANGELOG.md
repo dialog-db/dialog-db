@@ -65,6 +65,36 @@ What this changes for you:
 Why: a delta a subscriber never sees leaves its view wrong with nothing
 to correct it.
 
+### dialog-query no longer turns on dialog-common's test helpers
+
+[#675](https://github.com/dialog-db/dialog-db/pull/675)
+
+dialog-query asked for dialog-common's `helpers` feature in its normal
+dependencies, though only its tests use anything behind it. Every build
+of dialog-query, and of dialog-repository and dialog-peer above it, on
+every target, therefore compiled dialog-common's test helpers: the
+`helpers` module (service provisioning, `BenchData`), and the `test` and
+`provider` macros. dialog-query now takes the feature as a
+dev-dependency only, so a build of these crates no longer turns it on.
+
+What this changes for you:
+
+- A dependent that uses `dialog_common::helpers`, `dialog_common::test`
+  or `dialog_common::provider` without enabling `dialog-common/helpers`
+  itself, and so got them only because dialog-query turned the feature
+  on, no longer compiles. Enable the feature where you use them,
+  usually in `[dev-dependencies]`:
+  `dialog-common = { version = "...", features = ["helpers"] }`.
+- Nothing else moves. dialog-query's, dialog-repository's and
+  dialog-peer's own APIs are unchanged, and nothing stored or synced
+  changes.
+
+Why: test scaffolding has no place in a production build, and a
+feature turned on through a normal dependency reaches every build above
+it. #670 puts a seeded source of identifiers for the soak harness behind
+that same feature, which makes keeping it out of production builds a
+requirement rather than a cleanup.
+
 ### A query pinned to one value of a single-valued attribute reads a cold replica in parallel
 
 [#658](https://github.com/dialog-db/dialog-db/pull/658), for
