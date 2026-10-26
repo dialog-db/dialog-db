@@ -133,6 +133,17 @@ pub struct Revision {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub region: bool,
 
+    /// How many of this head's own origin's revisions its ancestry holds,
+    /// itself included: the count of the head's own watermark, whose
+    /// edition is the head's. Carried by every head minted with its
+    /// context in its tree's region, so a commit on another origin's head
+    /// knows that origin's exact watermark from the head alone, at no
+    /// read. `None` on a head of any other shape, and on a region head
+    /// minted before heads carried it, whose count the region derives
+    /// ([`Revision::context_from_region`]). Covered by the head signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u64>,
+
     /// The issuer's Ed25519 signature over [`Revision::payload`], with the
     /// key the issuer DID names (`did:key`). This is what binds the tree
     /// root to the issuer: the in-tree [`RevisionRecord`] signs everything
@@ -154,6 +165,7 @@ impl Revision {
             edition: Edition::GENESIS,
             context: None,
             region: false,
+            count: None,
             signature: Vec::new(),
         }
     }
@@ -179,6 +191,7 @@ impl Revision {
             edition: self.edition.successor(),
             context: None,
             region: false,
+            count: None,
             signature: Vec::new(),
         }
     }
@@ -206,17 +219,30 @@ impl Revision {
             edition: self.edition.max(upstream.edition).successor(),
             context: None,
             region: false,
+            count: None,
             signature: Vec::new(),
         }
     }
 
     /// Mark this head as carrying its causal context in its tree's context
-    /// region, the shape every head is minted in. The caller writes the
-    /// region entries the head needs (see `history::region_writes` in
-    /// `dialog-artifacts`).
-    pub fn publish_region(&mut self) {
+    /// region, the shape every head is minted in, with `count`, how many
+    /// of its own origin's revisions its ancestry holds (itself included).
+    /// The caller writes the region entries the head needs (see
+    /// `history::region_writes` in `dialog-artifacts`).
+    pub fn publish_region(&mut self, count: u64) {
         self.context = None;
         self.region = true;
+        self.count = Some(count);
+    }
+
+    /// The head's own watermark, when the head carries it: its edition and
+    /// the count it was minted with. `None` for a head minted before heads
+    /// carried their count, whose own watermark only its context gives.
+    pub fn own_watermark(&self) -> Option<Watermark> {
+        self.count.map(|count| Watermark {
+            edition: self.edition,
+            count,
+        })
     }
 
     /// The head's whole causal context, when the head carries it inline:
@@ -244,7 +270,10 @@ impl Revision {
     ///
     /// A region without an entry for this head's origin, or with one above
     /// the head's edition, is not one any head minted, and is refused; so
-    /// is a derived entry outside [`Watermark::check`]'s bounds.
+    /// is a derived entry outside [`Watermark::check`]'s bounds, and one
+    /// whose count disagrees with the count the head carries: the head's
+    /// signature covers its count, and a region that derives another is
+    /// not the one its issuer minted.
     pub fn context_from_region(&self, mut region: Context) -> Result<Context, HistoryError> {
         let version = self.version();
         let refuse = |why: String| Err(HistoryError::InvalidReference(why));
@@ -265,6 +294,15 @@ impl Revision {
             count: stored.count.saturating_add(run),
         };
         derived.check()?;
+        if let Some(count) = self.count
+            && count != derived.count
+        {
+            return refuse(format!(
+                "the context region of head {version} derives its own count as {}, \
+                 but the head carries {count}",
+                derived.count
+            ));
+        }
         region.set(version.origin, derived);
         Ok(region)
     }
@@ -302,20 +340,24 @@ impl Revision {
     ///     0x01 ++ entry count (8, big-endian)
     ///          ++ entries (origin (32) ++ edition (8, big-endian)
     ///                      ++ revision count (8, big-endian), sorted)
-    /// context in the tree's region:
+    /// context in the tree's region, minted before heads carried a count:
     ///     0x02
+    /// context in the tree's region, with the head's own count:
+    ///     0x03 ++ count (unsigned LEB128)
     /// ```
     ///
     /// A head minted before heads carried a context appends nothing after
     /// the edition, one carrying its whole context inline appends `0x01`
-    /// and its entries, and one whose context is in its tree's region
-    /// appends the lone `0x02`. The marker byte sits at the same offset in
-    /// the two shapes that have one, and the pre-context shape ends where
-    /// they begin, so the encoding stays injective: a signature over one
-    /// shape never validates another. A head claiming both a region and an
-    /// inline context is refused by [`Revision::verify`]; it signs as the
-    /// `0x02` marker followed by the entries, so the payload stays total
-    /// and injective.
+    /// and its entries, one whose context is in its tree's region appends
+    /// `0x03` and its count, and one minted before heads carried their
+    /// count appends the lone `0x02`. The marker byte sits at the same
+    /// offset in every shape that has one, and the pre-context shape ends
+    /// where they begin, so the encoding stays injective: a signature over
+    /// one shape never validates another. Shapes [`Revision::verify`]
+    /// refuses still sign apart: a head claiming both a region and an
+    /// inline context signs as its region marker followed by the entries,
+    /// and a count on a head without a region follows that head's own
+    /// shape after a `0xff` marker.
     pub fn payload(&self) -> Vec<u8> {
         let mut bytes = HEAD_SIGNING_DOMAIN.to_vec();
         for field in [self.branch.as_str(), self.issuer.as_str()] {
@@ -332,14 +374,25 @@ impl Revision {
                 bytes.extend_from_slice(&watermark.count.to_be_bytes());
             }
         };
-        match (self.region, &self.context) {
-            (false, None) => {}
-            (false, Some(context)) => {
-                bytes.push(0x01);
-                entries(&mut bytes, context);
+        match (self.region, &self.context, self.count) {
+            (false, context, count) => {
+                if let Some(count) = count {
+                    bytes.push(0xff);
+                    leb128(&mut bytes, count);
+                }
+                if let Some(context) = context {
+                    bytes.push(0x01);
+                    entries(&mut bytes, context);
+                }
             }
-            (true, context) => {
-                bytes.push(0x02);
+            (true, context, count) => {
+                match count {
+                    None => bytes.push(0x02),
+                    Some(count) => {
+                        bytes.push(0x03);
+                        leb128(&mut bytes, count);
+                    }
+                }
                 if let Some(context) = context {
                     entries(&mut bytes, context);
                 }
@@ -388,6 +441,23 @@ impl Revision {
             return Err(HistoryError::InvalidReference(
                 "a head carries both an inline context and a context region".into(),
             ));
+        }
+        if let Some(count) = self.count {
+            if !self.region {
+                return Err(HistoryError::InvalidReference(
+                    "a head carries its own count without a context region".into(),
+                ));
+            }
+            if count == 0 {
+                return Err(HistoryError::InvalidReference(
+                    "a head's own count includes the head itself, and cannot be zero".into(),
+                ));
+            }
+            Watermark {
+                edition: self.edition,
+                count,
+            }
+            .check()?;
         }
         Ok(())
     }
@@ -450,6 +520,20 @@ pub enum Precedence {
     After,
     /// Neither built on the other.
     Concurrent,
+}
+
+/// Append `value` as unsigned LEB128: seven bits per byte, low group
+/// first, the high bit set on every byte but the last.
+fn leb128(bytes: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let low = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            bytes.push(low);
+            return;
+        }
+        bytes.push(low | 0x80);
+    }
 }
 
 /// The domain tag opening every head signing payload. Signing payload
@@ -644,11 +728,22 @@ mod tests {
         assert_eq!(second.precedence(&other), Precedence::Concurrent);
     }
 
-    /// A signed head at edition 1 000 whose context is in its tree's region.
+    /// A signed head at edition 1 000 whose context is in its tree's
+    /// region, minted before heads carried their own count.
     fn regional(issuer: &ed25519_dalek::SigningKey) -> Revision {
         signed_head(issuer, |head| {
             head.edition = Edition::new(1_000);
-            head.publish_region();
+            head.context = None;
+            head.region = true;
+        })
+    }
+
+    /// A signed head at edition 1 000 whose context is in its tree's
+    /// region and which carries its own count, 50.
+    fn counted(issuer: &ed25519_dalek::SigningKey) -> Revision {
+        signed_head(issuer, |head| {
+            head.edition = Edition::new(1_000);
+            head.publish_region(50);
         })
     }
 
@@ -657,9 +752,16 @@ mod tests {
     /// size does not depend on how many origins its history holds.
     #[test]
     fn it_roundtrips_a_region_head_through_dagcbor() {
-        let head = regional(&key(1));
+        let head = counted(&key(1));
         head.verify().expect("a region head verifies");
         assert!(head.context.is_none() && head.region);
+        assert_eq!(
+            head.own_watermark(),
+            Some(Watermark {
+                edition: Edition::new(1_000),
+                count: 50,
+            })
+        );
 
         let bytes = serde_ipld_dagcbor::to_vec(&head).expect("head encodes");
         let decoded: Revision = serde_ipld_dagcbor::from_slice(&bytes).expect("head decodes");
@@ -675,32 +777,38 @@ mod tests {
         );
     }
 
-    /// The three payload shapes (no context, the whole context inline, the
-    /// context in the region) sign apart: a signature over any one of them
+    /// The payload shapes (no context, the whole context inline, the
+    /// context in the region with and without the head's own count, and
+    /// two different counts) sign apart: a signature over any one of them
     /// never verifies the same head reshaped into another.
     #[test]
     fn it_signs_each_context_shape_apart() {
         let mut inline = Context::new();
         inline.record(Version::new(Origin::from([1u8; 32]), Edition::new(4)));
-        let shapes: [(&str, Option<Context>, bool); 3] = [
-            ("pre-context", None, false),
-            ("inline", Some(inline), false),
-            ("region", None, true),
+        let shapes: [(&str, Option<Context>, bool, Option<u64>); 5] = [
+            ("pre-context", None, false, None),
+            ("inline", Some(inline), false, None),
+            ("region", None, true, None),
+            ("region counting 1", None, true, Some(1)),
+            ("region counting 200", None, true, Some(200)),
         ];
-        for (signed_as, context, region) in &shapes {
+        for (signed_as, context, region, count) in &shapes {
             let head = signed_head(&key(1), |head| {
+                head.edition = Edition::new(1_000);
                 head.context = context.clone();
                 head.region = *region;
+                head.count = *count;
             });
             head.verify()
                 .unwrap_or_else(|error| panic!("the {signed_as} shape verifies: {error}"));
-            for (read_as, context, region) in &shapes {
+            for (read_as, context, region, count) in &shapes {
                 if read_as == signed_as {
                     continue;
                 }
                 let mut reshaped = head.clone();
                 reshaped.context = context.clone();
                 reshaped.region = *region;
+                reshaped.count = *count;
                 assert!(
                     matches!(reshaped.verify(), Err(HistoryError::InvalidSignature(_))),
                     "a signature over the {signed_as} shape must not verify the {read_as} shape"
@@ -720,6 +828,65 @@ mod tests {
             head.verify(),
             Err(HistoryError::InvalidReference(_))
         ));
+    }
+
+    /// A count no minter produces is refused even when validly signed: one
+    /// on a head without a region, a zero (the count includes the head
+    /// itself), and one above what the head's edition leaves room for.
+    #[test]
+    fn it_refuses_a_count_no_head_minted() {
+        let hostile: [(&str, bool, u64); 3] = [
+            ("a count without a region", false, 3),
+            ("a zero count", true, 0),
+            ("more revisions than editions", true, 1_002),
+        ];
+        for (why, region, count) in hostile {
+            let head = signed_head(&key(1), |head| {
+                head.edition = Edition::new(1_000);
+                head.context = None;
+                head.region = region;
+                head.count = Some(count);
+            });
+            assert!(
+                matches!(head.verify(), Err(HistoryError::InvalidReference(_))),
+                "{why} must be refused"
+            );
+        }
+    }
+
+    /// A head carrying its count reads its own entry as the region derives
+    /// it only when the two agree: the signed count names the region the
+    /// issuer minted, and a region deriving another count is refused
+    /// rather than believed over the head, or the head over the region.
+    #[test]
+    fn it_refuses_a_region_that_disagrees_with_the_heads_count() {
+        let head = counted(&key(1));
+        let own = head.origin();
+        let region = |count: u64| {
+            let mut region = Context::new();
+            region.set(
+                own,
+                Watermark {
+                    edition: Edition::new(990),
+                    count,
+                },
+            );
+            region
+        };
+        let context = head
+            .context_from_region(region(40))
+            .expect("ten commits since the chain began derive the head's 50");
+        assert_eq!(context.get(&own), head.own_watermark().as_ref());
+        for disagreeing in [39, 41] {
+            assert!(
+                matches!(
+                    head.context_from_region(region(disagreeing)),
+                    Err(HistoryError::InvalidReference(_))
+                ),
+                "a region deriving {} for a head carrying 50 must be refused",
+                disagreeing + 10
+            );
+        }
     }
 
     /// The region holds every origin exactly except the head's own, whose
@@ -815,11 +982,11 @@ mod tests {
     #[dialog_common::test]
     fn it_orders_region_heads_by_edition() {
         let mut first = genesis(&key(1));
-        first.publish_region();
+        first.publish_region(1);
         let mut second = successor(&first, &key(1), 2);
-        second.publish_region();
+        second.publish_region(2);
         let mut other = successor(&first, &key(2), 3);
-        other.publish_region();
+        other.publish_region(1);
 
         assert_eq!(second.precedence(&first), Precedence::After);
         assert_eq!(first.precedence(&second), Precedence::Before);
@@ -827,7 +994,7 @@ mod tests {
         assert_eq!(second.precedence(&other), Precedence::Concurrent);
 
         let mut later = successor(&other, &key(2), 4);
-        later.publish_region();
+        later.publish_region(2);
         assert_eq!(later.precedence(&first), Precedence::After);
         assert_eq!(
             first.precedence(&later),

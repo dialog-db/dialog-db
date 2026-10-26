@@ -29,7 +29,7 @@ thiserror = { workspace = true }
 # Dialog-DB dependencies
 dialog-artifacts = { workspace = true }
 dialog-capability = { workspace = true }
-dialog-common = { workspace = true, features = ["helpers"] }
+dialog-common = { workspace = true }
 dialog-effects = { workspace = true }
 
 # Async utilities
@@ -54,6 +54,10 @@ wasm-bindgen-futures = { workspace = true }
 
 
 [dev-dependencies]
+# The tests take `dialog_common::test`; the library needs nothing behind
+# `helpers`, and a normal dependency on it would put dialog-common's test
+# helpers into every production build of the crates above.
+dialog-common = { workspace = true, features = ["helpers"] }
 ed25519-dalek = { workspace = true }
 tokio-test = { workspace = true }
 dialog-artifacts = { workspace = true }

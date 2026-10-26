@@ -45,7 +45,8 @@ impl Provider<ForkInvocation<Fs, Get>> for Fs {
                     );
                 }
                 let flight = simulation::begin(Traffic::ArchiveGet).await;
-                let result = Provider::<Get>::execute(&filesystem, capability).await;
+                let result =
+                    simulation::serve(Provider::<Get>::execute(&filesystem, capability)).await;
                 let bytes = match &result {
                     Ok(Some(block)) => block.len(),
                     _ => 0,
@@ -77,8 +78,11 @@ impl Provider<ForkInvocation<Fs, Put>> for Fs {
     async fn execute(&self, input: ForkInvocation<Fs, Put>) -> Result<(), ArchiveError> {
         let flight = simulation::begin(Traffic::ArchivePut).await;
         let bytes = input.capability.constraint.block.as_ref().len();
-        let result =
-            Provider::<Put>::execute(input.authorization.filesystem(), input.capability).await;
+        let result = simulation::serve(Provider::<Put>::execute(
+            input.authorization.filesystem(),
+            input.capability,
+        ))
+        .await;
         flight.complete(bytes).await;
         result
     }
@@ -96,8 +100,11 @@ impl Provider<ForkInvocation<Fs, Import>> for Fs {
             .iter()
             .map(|block| block.as_ref().len())
             .sum();
-        let result =
-            Provider::<Import>::execute(input.authorization.filesystem(), input.capability).await;
+        let result = simulation::serve(Provider::<Import>::execute(
+            input.authorization.filesystem(),
+            input.capability,
+        ))
+        .await;
         flight.complete(bytes).await;
         result
     }

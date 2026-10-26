@@ -751,8 +751,11 @@ pub enum PushError {
     },
 
     /// Push was rejected because the upstream has advanced since the
-    /// last sync. The local branch must integrate upstream changes
-    /// (e.g. via `pull`) before pushing again.
+    /// last sync, or because the local head does not hold the upstream's
+    /// head, as after a reset to an older revision, so publishing it would
+    /// move the upstream back. The local branch must integrate upstream
+    /// changes (e.g. via `pull`) before pushing again. In the second case
+    /// `expected` and `actual` can name the same tree.
     #[error(
         "Non-fast-forward push of branch {branch}: expected upstream tree {expected:?}, found {actual:?}"
     )]

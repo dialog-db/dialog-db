@@ -47,6 +47,307 @@ Why: tonk keeps per-process and per-tab state beside a space's
 replicated branch, and needs to read and write both as one database
 without copying session facts into the tree.
 
+### A reset moves a branch forward only
+
+Fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
+
+`Branch::reset` now refuses a revision that does not hold the branch's
+head, and the head does not move. A reset back to an older head, or onto
+another writer's line that lacks this writer's commits, followed by a
+commit, broke what every causal context assumes: that one origin's
+revisions form one chain. Below the writer's last revision the commit
+re-minted a version already used; above it, on a line without that
+revision, the commit forked the origin. Either way a context holding one
+revision claimed the other, and merges dropped writes as already seen. The
+push guard from #681 could not catch the fork, since a context keeps one
+watermark per origin: a push from such a head rewound its upstream.
+
+What this changes for you:
+
+- A reset to a revision that does not hold the branch's head fails with
+  `PublishError::Rejected(Rejection::Unsupported { reason })`, whose
+  reason says a reset only moves a branch forward. Nothing is written. To
+  take another line's work, pull it; to go back to an older revision,
+  start a new branch from it.
+- A reset to a revision that holds the head, to the head's own tree, or
+  on a branch with no head, lands as before.
+- `Reset::perform` reads the archive to decide: one entry of the
+  revision's context, from the memo, from its edition when the head is of
+  the same origin, or one point read of its region, through the remote
+  that serves the branch's blocks when they are not local. Its bounds grow
+  from `Provider<Publish>` to the read bounds `Branch::history` takes plus
+  `Provider<Publish>`. An environment that is a bare storage provider
+  without those, such as `Volatile` on its own, can no longer reset a
+  branch; a session or a peer can.
+- A replica of an earlier release can still reset any way and sync with
+  this one. The sync-base and push checks of #681 meet a head it moved
+  back. A fork it makes (a takeover followed by a commit) is not detected
+  by anything on this release: the forked revisions share an origin and
+  no context can tell them apart. Upgrading every writer of a branch
+  closes it.
+
+Why: reset was documented as fast-forward bookkeeping, not rewind, and
+nothing held it to that. A rewind costs other replicas their writes, and
+no later check can tell the forked revisions apart.
+
+### A sync uses its base only while both heads hold it
+
+[#681](https://github.com/dialog-db/dialog-db/pull/681), fixing [#673](https://github.com/dialog-db/dialog-db/issues/673)
+
+A pull merges three ways from the sync base it recorded with an upstream:
+it takes everything the base holds as already in our head, and anything
+the base holds that the upstream lacks as removed upstream. That holds
+only while both heads hold the revision whose tree the base is, and three
+paths broke it:
+
+- Settling rival merges. When two writers each merge the same two heads
+  at once, the greater keeps its head and recorded the lesser's tree as
+  its base without holding it. Once the lesser had built on its merge,
+  the greater side's next pull from it never imported the lesser merge's
+  revision record. Every later head carried the hole: its ancestry walk
+  failed, and a replica that never held the lesser merge could not
+  vouch for the revisions a pull from it brought in.
+- A reset that moves our head behind the base. The next pull returned at
+  once when the upstream had not moved, or merged from the base and
+  dropped what only the base held, facts included.
+- A reset that moves the upstream's head behind the base. The merge read
+  what the upstream never held as removed there, and removed it from
+  ours.
+
+A push made the same assumption. It took the upstream for a fast-forward
+target whenever the upstream's tree was still the sync base, so a push
+after a reset behind the base published the older head and moved the
+upstream back, dropping what only the base held from every replica that
+then pulled it.
+
+A sync now records the revision whose tree the base is, in a
+replica-local cell of its own beside the tracking cell, written after it.
+A merge runs from the base only when both heads' contexts observe that
+revision; otherwise it runs from no base, screened as a first contact is,
+or adopts the upstream by root when the upstream has seen our head. When
+our tree is the base, the revision is our head. Otherwise a revision that
+is not known (no record, as after an upgrade, or a record of another tree,
+as an older release moving the tracking cell or a crash between the two
+writes leaves it) is not trusted: the pull merges from no base once, and
+the sync it records writes the revision. The shortcut for an upstream
+that has not moved checks the same of our head. A push lands only when
+our head's context observes the upstream's head.
+
+What this changes for you:
+
+- A pull after a reset keeps every fact either side held, and so does a
+  pull from an upstream someone else reset.
+- A push from a head that does not hold the upstream's head, as after a
+  reset behind the sync base, now fails with
+  `PushError::NonFastForward { branch, expected, actual }`, the error a
+  push to an upstream that moved already gets. `expected` and `actual`
+  can name the same tree here, since the upstream has not moved; the
+  local head is what is behind. Pull, then push again. A refused push
+  writes nothing: no block is uploaded, the upstream's head is not
+  published, and neither the head nor the sync records of the pushing
+  branch change. Before, the push published the older head and moved the
+  upstream back.
+- What the released `0.3.0` does, measured with this release's tests run
+  against it:
+  - A reset followed by a pull loses the upstream's facts that only the
+    base held: 40 of 40 runs.
+  - A reset followed by a push rewinds the upstream to the older head:
+    10 of 10 runs to a local upstream. The remote push has the same
+    tree-only check, read from the code.
+  - A replica that never resets is exposed too. When another writer
+    resets the upstream behind the replica's sync base, the replica's next
+    pull removes facts the base held: 10 of 10 runs. When another replica
+    resets, pushes, commits and pushes again, a replica that never reset
+    loses its own fact on its next pull: 10 of 10 runs. A deployment is
+    exposed if any writer of a branch it syncs with has reset that branch,
+    or pushed from a reset one.
+  - This change restores nothing already lost. Heads minted by a losing
+    merge lack those facts, and pulls carry the heads on. The facts may
+    still be in the trees of older revisions wherever their blocks are
+    kept, but nothing in dialog brings them back from there.
+- Pulls that settle rival merges leave complete histories, and
+  `PreparedPull::novelty` vouches for every revision such a head brings
+  in. This was introduced by #623, which no release contains.
+- A pull whose base either head no longer holds merges from no base. It
+  reads both sides' differences in full, once, where a merge from the
+  base read only what changed since it; the next pull runs from the new
+  base again. The first merging pull after an upgrade does the same once
+  per upstream, since a base recorded by an older release is not trusted,
+  and so does a pull after a crash between a sync's two writes.
+- A push that does not land as is checks that our head holds the
+  upstream's: from the memo, from our edition when the upstream's head is
+  of our origin, or with one point read of our tree's region. One case
+  needs the network: our head reached the branch without its region being
+  read (adopted by root, or reset to a head another replica made), the
+  upstream's head is of another origin, and the memo does not have the
+  answer. Then the read goes to the remote that serves our head's blocks,
+  even for a push to a local upstream. When that remote cannot be read,
+  as offline, the push fails with `PushError::Unreachable`, naming the
+  remote, with a reason saying it could not confirm the branch's head
+  holds the upstream's head, and writes nothing. Push again once the
+  remote answers: the read is kept locally, and the push lands.
+- Opening a branch reads one more replica-local cell, and a sync writes
+  one more after the tracking cell. No API changes.
+
+Why: the merge's assumption about its base was true on every path that
+existed when the base was introduced, and nothing checked it once resets
+and rival merges could break it. Checking it against the revision the
+base stands for makes it hold however the heads moved.
+
+### A subscription catching up re-derives its touched entities together
+
+[#679](https://github.com/dialog-db/dialog-db/pull/679), for
+[#646](https://github.com/dialog-db/dialog-db/issues/646)
+
+A poll that finds facts changed inside a subscription's cover re-derives
+each touched entity with a restricted evaluation of the query. Those
+evaluations ran one after another, and on a cold replica each one is a
+point read of its entity's leaf, so a catch-up cost a round trip per
+touched entity. They now run sixteen at a time, and their rows are folded
+into the result in entity order once all of them have finished.
+
+What this changes for you:
+
+- A subscription catching up on many changed entities waits on far fewer
+  round trips. In the catch-up soak, a poll after a hundred one-fact
+  commits goes from a chain of 80 dependent requests to 31, and from
+  18.2 s to 7.5 s on the mobile profile (6.9 s to 2.8 s on broadband,
+  18.2 s to 8.0 s in a browser). A poll after ten goes from a chain of 11
+  to 3. The remaining chain is the cover diff's own walk.
+- It reads the same blocks: request and byte counts are unchanged.
+- Deltas, their order and the retained results are as before.
+- Nothing stored or synced changes.
+
+Why: the restricted evaluations are independent of one another. Each
+reads its own entity's facts, and the cover they record is a union, so
+nothing ordered them but the loop.
+
+### A subscription poll that fails part-way no longer loses deltas
+
+[#679](https://github.com/dialog-db/dialog-db/pull/679), for
+[#646](https://github.com/dialog-db/dialog-db/issues/646)
+
+When a poll's re-derivation of one touched entity failed, the poll
+returned the error, but the entities re-derived before it had already
+been applied to the subscription's retained results. The next poll found
+those entities unchanged and never emitted their rows, so a subscriber
+missed them for good. A failed poll now leaves the retained results as
+they were, and the next poll re-derives every touched entity and emits
+the whole delta.
+
+What this changes for you:
+
+- After a poll returns an error, the next successful poll emits every
+  change since the last successful one, including those of the entities
+  the failed poll had already re-derived.
+- The error a failed poll returns is unchanged.
+
+Why: a delta a subscriber never sees leaves its view wrong with nothing
+to correct it.
+
+### dialog-query no longer turns on dialog-common's test helpers
+
+[#675](https://github.com/dialog-db/dialog-db/pull/675)
+
+dialog-query asked for dialog-common's `helpers` feature in its normal
+dependencies, though only its tests use anything behind it. Every build
+of dialog-query, and of dialog-repository and dialog-peer above it, on
+every target, therefore compiled dialog-common's test helpers: the
+`helpers` module (service provisioning, `BenchData`), and the `test` and
+`provider` macros. dialog-query now takes the feature as a
+dev-dependency only, so a build of these crates no longer turns it on.
+
+What this changes for you:
+
+- A dependent that uses `dialog_common::helpers`, `dialog_common::test`
+  or `dialog_common::provider` without enabling `dialog-common/helpers`
+  itself, and so got them only because dialog-query turned the feature
+  on, no longer compiles. Enable the feature where you use them,
+  usually in `[dev-dependencies]`:
+  `dialog-common = { version = "...", features = ["helpers"] }`.
+- Nothing else moves. dialog-query's, dialog-repository's and
+  dialog-peer's own APIs are unchanged, and nothing stored or synced
+  changes.
+
+Why: test scaffolding has no place in a production build, and a
+feature turned on through a normal dependency reaches every build above
+it. #670 puts a seeded source of identifiers for the soak harness behind
+that same feature, which makes keeping it out of production builds a
+requirement rather than a cleanup.
+
+### A query pinned to one value of a single-valued attribute reads a cold replica in parallel
+
+[#658](https://github.com/dialog-db/dialog-db/pull/658), for
+[#650](https://github.com/dialog-db/dialog-db/issues/650)
+
+A premise that binds a single-valued attribute to a value without binding
+the entity, such as `status = "open"`, scans the value index for
+candidates and checks each candidate against its entity's stored values,
+so that an entity whose winning value is no longer `"open"` is not
+yielded. Each check now goes out as a preload hint while an earlier one
+is awaited. The other premises' entity probes were already pipelined this
+way. The checks were not, and they were the chain. On a cold replica each
+check fetched one entity leaf, and the probes of the next premise landed
+in that same leaf, so the query cost one round trip per entity leaf it
+touched.
+
+What this changes for you:
+
+- A cold query driven by such a premise takes about a fifth of the round
+  trips it did. The soak's `rule` phase, a rule whose body pins
+  `status = "open"`, goes from a chain of 98 to 18 dependent requests and
+  from 8.4 s to 1.7 s on the broadband profile (22.6 s to 4.7 s on mobile,
+  22.4 s to 6.4 s in a browser). The `filtered` phase, a concept query
+  pinning a status, goes from 8.8 s to 1.7 s on broadband.
+- It fetches no more blocks: the hinted leaves are the ones the checks
+  read anyway. Request and byte counts are unchanged.
+- Results are unchanged, and so is the plan. A replica whose speculation
+  budget is zero (`FetchBudget::ZERO`) behaves as before.
+- Nothing stored or synced changes.
+
+Why: #536 made a rule body plan with its pinned values bound, which is
+correct and reads fewer blocks. It also made the value-pinned premise the
+driver, and that premise's checks were the one per-row read in the
+nested-loop join that nothing read ahead.
+
+### A difference prunes a subtree both sides route the same buffered ops to
+
+[#669](https://github.com/dialog-db/dialog-db/pull/669), fixing [#662](https://github.com/dialog-db/dialog-db/issues/662) and [#648](https://github.com/dialog-db/dialog-db/issues/648)
+
+Comparing two trees prunes a subtree both sides hold by the same hash
+only when nothing a buffer above it routes down could differ. Before
+this, any subtree with buffered ops routed down to it was expanded, even
+when both sides routed it the same ops. A root's buffer reaches every
+child, and a root cannot settle against the other side's root on its
+buffers alone, so a commit that added one fact made the walk read
+nearly every leaf of a deep tree. Now a pair with the same hash and the
+same winning routed ops prunes unread. A pair with the same hash and
+different routed ops is expanded one level, so the ops reach the
+children they belong to and the shared children prune there.
+
+What this changes for you:
+
+- A push after a commit on another writer's head no longer uploads the
+  whole tree. On a deep tree a replica that took turns with another
+  writer could download every leaf during induction's catch-up on its
+  second commit, and then upload every one of them on every later push
+  (about 350 nodes and 16 MB per push in the soak's alternating-writers
+  scenario, in about one run in five). Each push is the new root again.
+- A joiner's first push no longer re-uploads index nodes it held of the
+  adopted head (#648).
+- `TreeDifference`, `differentiate` and `differentiate_within` read and
+  report fewer blocks over trees whose buffers hold the same ops on both
+  sides. The changes they report are the same.
+
+Why: a wrong prune would silently drop a change in sync, so pruning
+stayed conservative wherever buffered ops were pending. Ops routed from
+an ancestor are not in a subtree's hash, but a subtree's whole
+contribution to the difference is its hash and the winning ops routed
+to it, so when both match nothing beneath can differ. The argument is
+in `SparseTree::prune`'s documentation, and a property test checks it
+against a materialized difference over random trees with divergent
+flush histories.
+
 ### A transaction's writes to a cell under `last` commit as they would one by one
 
 [#647](https://github.com/dialog-db/dialog-db/pull/647)
@@ -132,6 +433,22 @@ has a tree to canonicalize even when the link itself wrote nothing.
   facts as any others and ignores what they mean, so a branch that a
   stack wrote to stays readable there. Nothing an embedder runs is
   needed.
+- A reset that moves a branch forward only changes nothing stored or
+  synced, and rewrites nothing. Heads an earlier release forked by a
+  takeover and a commit keep their fork; nothing finds or repairs it.
+- A branch has a new replica-local cell, `bases`, never synced, that
+  records each sync base's revision. A replica upgraded from an older
+  release has none, and its bases are not merged from: the first pull
+  that has to merge runs from no base and writes the record. That covers
+  a bad base an older release left behind, by a reset, a kept rival or
+  `upgrade`. An older release ignores the cell, and the tracking cell's
+  encoding is unchanged; when an older release moves the tracking cell
+  the record no longer matches it and is not used. Nothing is rewritten
+  on upgrade, and nothing an embedder runs is needed.
+- Nothing repairs what earlier pulls did. Heads already minted with a
+  hole by a build of `main` since #623 keep it, and facts a replica lost
+  to a pull after a reset are not restored by this change. Nothing synced
+  changes shape: an older release pulls everything this one mints.
 - Nothing a replica stores or syncs changes shape, and nothing is
   rewritten. A head an older release published from such a chain names
   a buffered tree; it stays valid, reads, pulls and merges as before,
@@ -202,22 +519,33 @@ root may cost needs the bytes attributed and the shape in the gate first.
 [#625](https://github.com/dialog-db/dialog-db/pull/625)
 
 A head no longer carries one watermark per origin its history ever
-included. It carries none, and a signed marker saying its tree holds
-them, in a new context region with one entry per origin. The region is
+included. It carries its own, as its edition and a signed count of its
+own origin's revisions, and a signed marker saying its tree holds the
+rest, in a new context region with one entry per origin. The region is
 exact for every origin except the head's own: that entry is where the
 writer's chain of commits began, and a reader brings it up to the head
-from the head's edition, one edition and one revision per commit. A
+from the head's edition, one edition and one revision per commit, and
+refuses a region that does not bring it to the count the head signed. A
 commit on a head of its own origin therefore writes nothing to the
-region. A commit on another origin's head writes two entries, and a
-merge writes its own entry and every entry its two sides hold
-differently. A pull decides "nothing new" from its own context and the
+region and reads nothing of it. A commit on another origin's head writes
+two entries: that origin's exact watermark, which the head carries, and
+its own, one past what the head holds of its origin, which one point read
+of the region answers: a root-to-leaf path, a subset of the whole region.
+A commit never reads the region whole. A merge writes its own entry and every entry its two sides hold
+differently. A pull answers whether our head has seen the upstream's
+from our head's record when the record names it as a parent or skip
+link, so a pull right after a commit on the upstream's head reads
+nothing. A pull decides "nothing new" from its own context and the
 upstream head's version, and a fast-forward from the two heads' editions
 when they share an origin, at zero reads; a fast-forward across origins
 reads the upstream's region, its root and a leaf.
 
 What this changes for you:
 
-- `Revision` has a field `region: bool`. A struct literal must name it.
+- `Revision` has fields `region: bool` and `count: Option<u64>`. A
+  struct literal must name them. `Revision::publish_region` takes the
+  head's own count, and `Revision::own_watermark` gives the head's own
+  watermark when it carries its count.
 - `Revision::context` is `None` on every head this release mints. A
   head's whole context is in its branch's memo
   (`Branch::contexts().cached(&version)`), in its tree
@@ -239,10 +567,15 @@ What this changes for you:
   `merge::context_scope`, `merge::without_context`,
   `history::context_in`, `history::region_writes` and `history::Held`.
 - `Revision::verify` refuses a head that claims both an inline context
-  and a context region. A pull refuses a head whose region holds no
-  entry for the head's own origin, holds it above the head, or holds an
-  entry outside the watermark bounds, as `DialogArtifactsError::InvalidKey`,
-  and keeps its own head.
+  and a context region, and a count on a head without a region, a zero
+  count, or a count above what the head's edition leaves room for. A
+  pull refuses a head whose region holds no entry for the head's own
+  origin, holds it above the head, holds an entry outside the watermark
+  bounds, or derives a count other than the one the head signed, as
+  `DialogArtifactsError::InvalidKey`, and keeps its own head.
+- A commit no longer remembers the new head's whole context in the
+  branch's memo unless it had the parent's there already. The first
+  reader that needs the whole map reads the region then.
 - `Revision::precedence` compares two heads by their contexts only when
   both carry them inline, and orders two heads of one origin exactly by
   edition. Any other pair is answered from editions without reading
@@ -1056,6 +1389,10 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Nothing stored changes for the difference that prunes shared
+  subtrees: no stored data is rewritten, trees are laid out as before,
+  and an older release reads everything this one writes. Only how many
+  blocks a comparison reads and reports changes.
 - An older replica holds heads that carry their whole context inline,
   or none, and trees with no context region. Nothing is rewritten on
   upgrade: those heads verify under their own payload shapes and pull as
@@ -1063,10 +1400,19 @@ thread multiplies whatever it holds by the size of the thread pool.
   whole map into its tree's region, once, in the same batch as its
   revision record.
 - An older release cannot verify a head this release mints: its signed
-  payload ends in a `0x02` marker the older release does not know, so
-  its pull refuses the head as an invalid signature. Upgrade every
-  replica that pulls from one running this release. Nothing an embedder
-  runs is needed beyond that.
+  payload ends in a `0x03` marker and the head's own count, which the
+  older release does not know, so its pull refuses the head as an
+  invalid signature. Upgrade every replica that pulls from one running
+  this release. Nothing an embedder runs is needed beyond that.
+- A head minted by a build of this release from before heads carried
+  their count ends in a lone `0x02` marker. No release or pre-release
+  tag carries such a build (none contains #625's commit), so these heads
+  exist only where an untagged build of `main` ran, and the `0x02` shape
+  can be retired before the release. Until then it still verifies and
+  pulls, nothing is rewritten, and a reader derives its count from its
+  region.
+  A commit on such a head of another origin reads the head's region for
+  the count, as those builds did, and the head it mints carries one.
 - `UcanAddress` encodes an optional `socket`, left out when absent, so an address without one keeps its bytes. An older replica reads an address that names a socket and drops the socket, reaching the peer over requests.
 - Invocations now carry `iat`. A service from this release refuses a stale or replayed invocation (`AuthorizeError::Stale`, `AuthorizeError::Replayed`), and over HTTP still serves one without `iat`, so an older client keeps working against it; over a socket `iat` is required, and an older client never opens one.
 - The socket carries text `ping` and `pong` messages beside its frames. A service's socket must answer `ping` with `pong`, or a client closes the connection every `Liveness::deadline`; no released service has a socket, so none predates this.

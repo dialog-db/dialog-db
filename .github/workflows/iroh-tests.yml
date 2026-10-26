@@ -1,0 +1,57 @@
+name: 'Iroh Tests'
+
+# The QUIC tests of dialog-peer-iroh, beside the main test workflow so
+# they run in parallel with it. `local` binds endpoints on loopback and
+# runs its own relay, so it needs no network. `network` reaches n0's
+# public relays and address lookup, the way the S3 and R2 tests reach
+# real buckets, and runs nightly too because n0 can change under us
+# without this repository changing.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * *'
+  push:
+    branches:
+      - main
+      - patches/*
+    paths:
+      - 'rust/dialog-peer-iroh/**'
+      - 'rust/dialog-network/**'
+      - 'Cargo.lock'
+      - '.github/workflows/iroh-tests.yml'
+  pull_request:
+    paths:
+      - 'rust/dialog-peer-iroh/**'
+      - 'rust/dialog-network/**'
+      - 'Cargo.lock'
+      - '.github/workflows/iroh-tests.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  iroh-tests:
+    name: 'iroh (${{ matrix.name }})'
+    runs-on: 'ubuntu-latest'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: local
+            features: iroh-tests
+            filter: 'transport::tests::'
+          - name: network
+            features: iroh-network-tests
+            filter: 'transport::network_tests::'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-nix
+      - name: 'Run iroh tests'
+        shell: bash
+        run: |
+          nix develop --command cargo test --locked \
+            -p dialog-peer-iroh \
+            --features ${{ matrix.features }} \
+            -- ${{ matrix.filter }}

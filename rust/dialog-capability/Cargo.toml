@@ -25,7 +25,6 @@ serde-big-array = { workspace = true }
 # version-control identity types can derive/verify without a new dependency.
 rkyv = { workspace = true }
 ed25519-dalek = { workspace = true }
-rand = { workspace = true }
 blake3 = { workspace = true }
 serde_ipld_dagcbor = { workspace = true }
 async-trait = { workspace = true }

@@ -199,22 +199,86 @@
           "perf:gate" = {
             description = "Engine cost matrix (rust/dialog-perf) under callgrind, gated against perf/baseline";
             command = ''
+              perf:sweep
+              perf:check
+            '';
+          };
+
+          "perf:sweep" = {
+            description = "Sweep the engine cost matrix under callgrind into target/perf-current";
+            command = ''
               cargo run -p dialog-perf --release -- sweep --out-dir target/perf-current
-              cargo run -p dialog-perf --release -- compare perf/baseline target/perf-current
+            '';
+          };
+
+          # Gates target/perf-current against perf/baseline and, when
+          # target/perf-base holds another commit's sweep (CI fetches the
+          # one a pull request lands on, scripts/ci/base-sweep.sh), against
+          # that too, writing every row to target/perf-delta/table.md.
+          # Fails if either comparison regresses. Rows that beat their
+          # baseline file past the allowance go to target/perf-delta/stale.md
+          # (and a warning annotation in CI): flagged, never failed.
+          "perf:check" = {
+            description = "Gate target/perf-current against perf/baseline and, if present, target/perf-base";
+            command = ''
+              status=0
+              mkdir -p target/perf-delta
+              cargo run -p dialog-perf --release -- compare perf/baseline target/perf-current \
+                --stale target/perf-delta/stale.md || status=1
+              if [ -d target/perf-base ]; then
+                rebaselined=$(paste -sd, target/perf-delta/rebaselined 2>/dev/null || true)
+                cargo run -p dialog-perf --release -- compare --base target/perf-base target/perf-current \
+                  --markdown target/perf-delta/table.md \
+                  ''${rebaselined:+--rebaselined "$rebaselined"} || status=1
+              fi
+              exit $status
             '';
           };
 
           "soak:gate" = {
             description = "Join cost on the unshaped none profile (rust/dialog-soak), gated against soak/baseline";
+            # One fixed seed (DIALOG_SOAK_SEED, unset is the default), so
+            # every run writes the same tree and the counts are exact.
+            command = ''
+              soak:sweep
+              soak:check
+            '';
+          };
+
+          "soak:sweep" = {
+            description = "Sweep the join on the unshaped none profile into target/soak-current";
             command = ''
               cargo run -p dialog-soak --release -- sweep --out-dir target/soak-current --networks none
-              cargo run -p dialog-soak --release -- compare soak/baseline target/soak-current
+            '';
+          };
+
+          # The soak counterpart of perf:check: target/soak-current against
+          # soak/baseline and, when present, target/soak-base, with every
+          # row in target/soak-delta/table.md. Both runs use the fixed seed,
+          # so the base comparison gates as the baseline one does; a base
+          # swept under another seed is shown, not gated.
+          "soak:check" = {
+            description = "Gate target/soak-current against soak/baseline and, if present, target/soak-base";
+            command = ''
+              status=0
+              cargo run -p dialog-soak --release -- compare soak/baseline target/soak-current || status=1
+              if [ -d target/soak-base ]; then
+                mkdir -p target/soak-delta
+                rebaselined=$(paste -sd, target/soak-delta/rebaselined 2>/dev/null || true)
+                cargo run -p dialog-soak --release -- compare --base target/soak-base target/soak-current \
+                  --markdown target/soak-delta/table.md \
+                  ''${rebaselined:+--rebaselined "$rebaselined"} || status=1
+              fi
+              exit $status
             '';
           };
 
           "soak:sync" = {
             description = "Sync/join cost sweep over simulated networks, gated against soak/baseline";
+            # A fresh seed per run, so the repeats exercise the spread that
+            # identities cause; each report records its seed to replay it.
             command = ''
+              export DIALOG_SOAK_SEED="''${DIALOG_SOAK_SEED:-random}"
               cargo run -p dialog-soak --release -- sweep --out-dir target/soak-current
               cargo run -p dialog-soak --release -- compare soak/baseline target/soak-current
             '';

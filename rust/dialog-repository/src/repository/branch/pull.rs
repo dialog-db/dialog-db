@@ -18,7 +18,7 @@ use dialog_effects::memory::{Publish, Resolve};
 use futures_util::TryStreamExt as _;
 use futures_util::future::{Either, join_all};
 
-use super::context::{full_context, head_observes, held, published_context};
+use super::context::{full_context, head_observes, held, own_count, published_context};
 use super::fetch::fetch_one;
 use super::migrate::aligned;
 use super::resolve::resolve;
@@ -334,8 +334,51 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // hasn't moved and there's nothing to pull.
         let base = upstream.tree().cloned();
 
+        // The revision whose tree the base is, as the sync that recorded
+        // the base wrote it to the bases cell (see `upstream::Bases`), and
+        // only while the tracking cell still names this base. A base an
+        // older release or `upgrade` recorded has none, a crash between the
+        // two writes leaves the bases cell naming another tree, and a
+        // concurrent sync may have moved the tracking cell since the
+        // upstream was resolved: in each case the revision is unknown.
+        let base_version = {
+            let target = upstream.target();
+            match (branch.tracked().tree(&target), base.as_ref()) {
+                (Some(recorded), Some(base)) if recorded == *base => {
+                    branch.based().version(&target, base)
+                }
+                _ => None,
+            }
+        };
+
+        // The upstream has not moved since the sync base, so there is
+        // nothing to pull, as long as our head still holds what the base
+        // holds. A reset can move the head behind it, and then the pull
+        // goes on to bring back what the head lost. Our own head's tree,
+        // our edition when the base is of our origin, or the memo answer
+        // it at no read; otherwise one point read of our tree's region.
         if base.as_ref() == Some(&upstream_revision.tree) {
-            return Ok(PreparedPull::NoOp);
+            let held = match (base_version, branch.revision()) {
+                (_, Some(local)) if Some(&local.tree) == base.as_ref() => true,
+                (Some(version), Some(local)) => {
+                    let store =
+                        NetworkedIndex::erased(env, branch.archive().index(), remote.clone());
+                    head_observes(
+                        &local,
+                        &version,
+                        &branch.contexts(),
+                        &branch.records(),
+                        &store,
+                        &branch.node_cache(),
+                    )
+                    .await?
+                    .unwrap_or(false)
+                }
+                (_, None) | (None, Some(_)) => false,
+            };
+            if held {
+                return Ok(PreparedPull::NoOp);
+            }
         }
 
         // Checkpoint the head cell up front, capturing the version we read the
@@ -407,7 +450,9 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // anything, which is the fast-forward gate below with an empty
         // side. That needs nothing of the upstream's context, so none of
         // it is read here; it is remembered when the head carries it
-        // inline, and the first commit on top reads the rest.
+        // inline. A commit on top needs only the head's own count and one
+        // entry of its region, and the whole map is read by the first
+        // gate that needs it.
         if local_revision.is_none()
             && base.is_none()
             && (upstream_revision.region || upstream_revision.context.is_some())
@@ -443,6 +488,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 current,
                 &upstream_revision.version(),
                 &contexts,
+                &branch.records(),
                 &store,
                 &branch.node_cache(),
             )
@@ -500,6 +546,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     &upstream_revision,
                     &local.version(),
                     &contexts,
+                    &branch.records(),
                     &store,
                     &branch.node_cache(),
                 )
@@ -520,6 +567,68 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
 
         let upstream_context = upstream_context().await?;
         let local_context = local_context().await?;
+
+        // The merges below run three ways from the sync base: they take
+        // everything the base holds as already in our head, and anything
+        // the base holds that the upstream lacks as removed upstream. Both
+        // hold only while both heads hold the revision whose tree the base
+        // is, and nothing else keeps that true. A reset can move either
+        // head behind the base, and a head kept against a rival merge (see
+        // below) records the rival's tree as the base without holding it.
+        // Merging from such a base drops what only the base held, records
+        // and facts alike, or removes from our head what the upstream never
+        // removed. So a base either head does not hold is not merged from.
+        // Decided from the two contexts, which are in hand, at no read. An
+        // upstream head that publishes no context is trusted on our side
+        // alone.
+        //
+        // When our tree is the base, the base's revision is our head, known
+        // whatever the bases cell says, and the question is only whether
+        // the upstream holds it. Otherwise a base whose revision is unknown
+        // (see `base_version`) is not merged from: unknown is not trusted,
+        // since trusting it is what lost facts. The gates above have
+        // already adopted or kept a head wherever one side has seen the
+        // other, so what reaches here is a real merge, and it runs from no
+        // base once; the sync it records writes the revision.
+        let base_version = base_version.or_else(|| {
+            local_revision
+                .as_ref()
+                .filter(|local| base.as_ref() == Some(&local.tree))
+                .map(Revision::version)
+        });
+        let base_held = match (&base, base_version) {
+            (Some(base), Some(version)) => {
+                (local_tree.as_ref() == Some(base) || local_context.observes(&version))
+                    && upstream_context
+                        .as_deref()
+                        .is_none_or(|theirs| theirs.observes(&version))
+            }
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        if !base_held {
+            // An upstream that has seen our head holds all of it, so its
+            // tree is adopted by root, as the fast-forward gate above does
+            // for a base that is our tree: the shape a reset to an older
+            // head of the upstream's own line leaves.
+            if let (Some(local), Some(theirs)) = (&local_revision, upstream_context.as_deref())
+                && theirs.observes(&local.version())
+            {
+                return Ok(PreparedPull::Merged(Box::new(Merged {
+                    branch,
+                    head,
+                    new_revision: upstream_revision.clone(),
+                    merges: upstream_revision.clone(),
+                    sync: upstream.with_tree(upstream_revision.tree.clone()),
+                    base,
+                })));
+            }
+        }
+        // What the merges run from: the base when our head holds it, and
+        // otherwise nothing, so every claim and record the upstream holds
+        // is integrated, screened as on a first contact.
+        let merge_base = if base_held { base.clone() } else { None };
+        let base_tree = if base_held { base_tree } else { index_at(None) };
 
         // Replicas that have never observed one another (no origin in
         // common, see `merge::unacquainted`) integrate each other's
@@ -593,7 +702,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             // whichever side is smaller) are strictly cheaper; the
             // graft's economics need bulk on both sides.
             if let Some(local) = &local_revision
-                && let Some(base_sync) = &base
+                && let Some(base_sync) = &merge_base
                 && local_context
                     .divergence(theirs)
                     .min(theirs.divergence(&local_context))
@@ -855,7 +964,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 ));
                 merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
-                revision.publish_region();
+                revision.publish_region(own_count(&revision, &context));
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
 
@@ -1031,7 +1140,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 ));
                 merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
-                revision.publish_region();
+                revision.publish_region(own_count(&revision, &context));
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
                 contexts.insert(revision.version(), context);
 
@@ -1240,7 +1349,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     .extend(region_writes(revision.version(), &context, &[started]));
                 merged.record(&store, &mut delta, entries).await?;
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
-                revision.publish_region();
+                revision.publish_region(own_count(&revision, &context));
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
 
                 revision
@@ -1500,9 +1609,9 @@ impl PreparedPull<'_> {
             branch,
             head,
             new_revision,
+            merges,
             sync,
             base,
-            ..
         } = match self {
             PreparedPull::NoOp => return Ok(None),
             PreparedPull::Merged(merged) => *merged,
@@ -1570,6 +1679,20 @@ impl PreparedPull<'_> {
             publish = marker.publish(tracking, env).await;
         }
         publish?;
+
+        // The revision whose tree the new base is, the upstream head merged,
+        // and the head that holds it now.
+        if let Some(tree) = sync.tree().cloned() {
+            branch
+                .record_base::<_, PullError>(
+                    target,
+                    tree,
+                    merges.version(),
+                    new_revision.version(),
+                    env,
+                )
+                .await?;
+        }
 
         Ok(Some(new_revision))
     }
@@ -2249,6 +2372,9 @@ mod tests {
 
 #[cfg(test)]
 mod context_tests;
+
+#[cfg(test)]
+mod sync_base_tests;
 
 #[cfg(test)]
 mod history_tests {
@@ -3151,6 +3277,7 @@ mod history_tests {
             edition: Edition::GENESIS,
             context: None,
             region: false,
+            count: None,
             signature: Vec::new(),
         };
         evil.reset(forged).perform(&operator).await?;

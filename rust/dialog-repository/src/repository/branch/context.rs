@@ -11,11 +11,13 @@
 use std::sync::Arc;
 
 use dialog_artifacts::history::{
-    Context, ContextCache, Held, History, Version, context_in, region_entry,
+    Context, ContextCache, Held, History, RevisionRecord, Version, Watermark, context_in,
+    region_entry, region_writes,
 };
 use dialog_artifacts::tree::ArtifactNodeCache;
-use dialog_artifacts::{ArchiveReader, DialogArtifactsError};
+use dialog_artifacts::{ArchiveReader, Datum, DialogArtifactsError, Key, State, context_entry};
 use dialog_common::Blake3Hash as NodeHash;
+use dialog_search_tree::Cache;
 
 use crate::{Index, Revision};
 
@@ -80,13 +82,18 @@ where
 /// so this is also whether the head has seen everything `version`'s head
 /// had. The memo answers when it holds the head's context, and so does an
 /// inline context. Otherwise, for a version of the head's own origin the
-/// editions answer, since an origin's revisions form one chain; for any
-/// other origin the region holds its watermark exactly, and one point read
-/// of that entry answers (the tree's root and the path to its leaf).
+/// editions answer, since an origin's revisions form one chain. For any
+/// other origin, the head's record answers when `records` holds it and it
+/// names `version` as a parent or a skip link: the head built on it, as a
+/// commit on another origin's head does, and a pull of that same head
+/// after it is then answered at no read. Otherwise the region holds the
+/// origin's watermark exactly, and one point read of that entry answers
+/// (the tree's root and the path to its leaf).
 pub(crate) async fn head_observes<S>(
     head: &Revision,
     version: &Version,
     contexts: &ContextCache,
+    records: &Cache<Version, RevisionRecord>,
     store: &S,
     cache: &ArtifactNodeCache,
 ) -> Result<Option<bool>, DialogArtifactsError>
@@ -104,6 +111,12 @@ where
     }
     if version.origin == head.origin() {
         return Ok(Some(version.edition <= head.edition));
+    }
+    if records
+        .get_cached(&head.version())
+        .is_some_and(|record| record.parents.contains(version) || record.skips.contains(version))
+    {
+        return Ok(Some(true));
     }
     let tree = Index::from_hash_with_cache(NodeHash::from(*head.tree.hash()), cache.clone());
     Ok(Some(
@@ -131,6 +144,121 @@ where
         Some(context) => Ok(context),
         None => contexts.context_of(&head.version(), history).await,
     }
+}
+
+/// What a commit needs to know about the head it mints, `version`, built
+/// on `parent`: the count it signs, the region entries it writes, and its
+/// full context when that came at no read.
+pub(crate) struct Successor {
+    /// How many of its own origin's revisions the new head's ancestry
+    /// holds, itself included.
+    pub(crate) count: u64,
+    /// The context region entries the new head's tree must gain.
+    pub(crate) region: Vec<(Key, State<Datum>)>,
+    /// The new head's full context, for the memo, when the parent's was
+    /// in it (or the parent's shape made it free). `None` otherwise: the
+    /// first reader that needs it reads the region then.
+    pub(crate) context: Option<Arc<Context>>,
+}
+
+/// Work out the [`Successor`] of `parent` minted as `version`, reading as
+/// little as the parent's shape allows.
+///
+/// When the memo holds the parent's full context, or the parent is a head
+/// minted before the region (whose tree holds no entries, so the whole map
+/// is written once), the successor's context is the parent's plus
+/// `version`, and [`region_writes`] decides the entries, as before.
+///
+/// Otherwise the parent is a region head, and the commit does not
+/// materialize its context. If the parent carries its own count:
+///
+/// - on the parent's own origin the commit writes nothing (the stored
+///   entry where the chain began still derives the new head's) and signs
+///   the parent's count plus one, at no read;
+/// - on another origin's head (a takeover) it writes the two entries whose
+///   chains change hands: the parent origin's exact watermark, which the
+///   parent carries, and its own, one past what the parent holds of the
+///   commit's origin, which one point read of that entry of the parent's
+///   region answers.
+///
+/// The point read is the only source of that count. The line cannot know
+/// it from its own history: a head it adopts can hold revisions of its
+/// origin its own head does not, once the line has been reset to an
+/// earlier head, so no record kept on the line is exact for every head it
+/// later takes over. The read is one root-to-leaf path of the region,
+/// a subset of what materializing the parent's context reads.
+///
+/// A region head minted before heads carried their count takes the first
+/// path: its count is only in its region.
+pub(crate) async fn successor<S, H>(
+    parent: Option<&Revision>,
+    version: Version,
+    contexts: &ContextCache,
+    store: &S,
+    cache: &ArtifactNodeCache,
+    history: impl FnOnce() -> H,
+) -> Result<Successor, DialogArtifactsError>
+where
+    S: ArchiveReader + Clone,
+    H: History,
+{
+    let Some(parent) = parent else {
+        let mut context = Context::new();
+        context.record(version);
+        return Ok(Successor {
+            count: 1,
+            region: region_writes(version, &context, &[None]),
+            context: Some(Arc::new(context)),
+        });
+    };
+    let remembered = contexts.cached(&parent.version()).await;
+    if remembered.is_none()
+        && parent.region
+        && let Some(theirs) = parent.own_watermark()
+    {
+        if parent.origin() == version.origin {
+            return Ok(Successor {
+                count: theirs.count.saturating_add(1),
+                region: Vec::new(),
+                context: None,
+            });
+        }
+        let tree = Index::from_hash_with_cache(NodeHash::from(*parent.tree.hash()), cache.clone());
+        let held = region_entry(&tree, &version.origin, store).await?;
+        let ours = Watermark {
+            edition: version.edition,
+            count: held.map_or(0, |held| held.count).saturating_add(1),
+        };
+        ours.check()?;
+        return Ok(Successor {
+            count: ours.count,
+            region: vec![
+                context_entry(&parent.origin(), &theirs),
+                context_entry(&version.origin, &ours),
+            ],
+            context: None,
+        });
+    }
+    let before = match remembered {
+        Some(context) => context,
+        None => full_context(parent, contexts, store, cache, &history()).await?,
+    };
+    let mut context = Context::clone(&before);
+    context.record(version);
+    let region = region_writes(version, &context, &[held(parent, &before)]);
+    Ok(Successor {
+        count: context.get(&version.origin).map_or(1, |own| own.count),
+        region,
+        context: Some(Arc::new(context)),
+    })
+}
+
+/// The count `head` signs for its own origin, given `context`, its full
+/// causal context, which holds the head's own version.
+pub(crate) fn own_count(head: &Revision, context: &Context) -> u64 {
+    context
+        .get(&head.origin())
+        .map_or(1, |watermark| watermark.count)
 }
 
 /// What `head`'s tree holds in its context region, for deciding the region
@@ -213,6 +341,11 @@ where
     assert_eq!(
         read, walked,
         "{what}: the region reads as the ancestry walk"
+    );
+    assert_eq!(
+        head.own_watermark().as_ref(),
+        walked.get(&head.origin()),
+        "{what}: the head carries its own watermark's count"
     );
     if let Some(memo) = source.contexts().cached(&head.version()).await {
         assert_eq!(*memo, walked, "{what}: the memo holds the ancestry walk");

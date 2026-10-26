@@ -1752,6 +1752,177 @@ async fn it_pushes_and_pulls_data_between_repos(s3: S3Address) -> Result<()> {
     Ok(())
 }
 
+/// A push after a reset behind the sync base is refused, not taken for a
+/// fast-forward. Bob pushes B and then C; Alice pulls C, resets to B, and
+/// pushes. The remote still sits at Alice's sync base, so the tree check
+/// alone would publish B over C and drop C's fact. Alice's head does not
+/// hold the remote's, so the push is refused and the remote keeps C.
+#[dialog_common::test]
+async fn it_does_not_rewind_a_remote_with_a_head_a_reset_left_behind(s3: S3Address) -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let (alice_repo, alice) = setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
+    let fact = |of: &str| {
+        Instruction::Assert(
+            Artifact {
+                the: "user/name".parse().expect("attribute parses"),
+                of: of.parse().expect("entity parses"),
+                is: Value::String("x".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )
+    };
+    alice
+        .commit(stream::iter(vec![fact("user:a")]))
+        .perform(&operator)
+        .await?;
+    alice.push().perform(&operator).await?;
+
+    let bob_repo = profile
+        .space(unique_name("bob"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
+    let bob = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    bob.set_upstream(remote_branch).perform(&operator).await?;
+    bob.pull().perform(&operator).await?;
+    bob.commit(stream::iter(vec![fact("user:b")]))
+        .perform(&operator)
+        .await?;
+    bob.push().perform(&operator).await?;
+    let b = bob.revision().context("bob has a head")?;
+    bob.commit(stream::iter(vec![fact("user:c")]))
+        .perform(&operator)
+        .await?;
+    bob.push().perform(&operator).await?;
+    let c = bob.revision().context("bob has a head")?;
+
+    alice.pull().perform(&operator).await?;
+    assert_eq!(
+        alice.revision().as_ref(),
+        Some(&c),
+        "alice fast-forwards to C"
+    );
+    // Back to B, as a release before #682 still can (`perform_unchecked`).
+    alice.reset(b).perform_unchecked(&operator).await?;
+    let tracked = alice.tracked();
+    let pushed = alice.push().perform(&operator).await;
+    assert!(
+        matches!(pushed, Err(crate::PushError::NonFastForward { .. })),
+        "the push is refused: {pushed:?}"
+    );
+    assert_eq!(alice.tracked(), tracked, "the refusal records no sync");
+
+    let remote = origin.branch("main").open().perform(&operator).await?;
+    remote.fetch().perform(&operator).await?;
+    assert_eq!(
+        remote.revision().map(|head| head.tree),
+        Some(c.tree),
+        "the remote keeps C"
+    );
+    Ok(())
+}
+
+/// A push that cannot confirm our head holds the upstream's head, because
+/// the remote serving our head's blocks cannot be read, is refused with
+/// `PushError::Unreachable` and writes nothing; once the remote answers,
+/// the same push lands.
+///
+/// Bob's `main` adopts Alice's `S` by root from his local `staging`, which
+/// records `S` as staging's base, then resets forward to Alice's `H`, which
+/// holds `S`. Bob's archive holds none of `H`'s blocks, so whether `H`
+/// holds `S` is one read of `H`'s region through the remote. The remote is
+/// made unreadable by swapping its credential for a wrong one, which it
+/// answers with 403, as it would a lost connection, and restored after.
+#[dialog_common::test]
+async fn it_refuses_a_push_it_cannot_confirm_while_the_remote_is_unreachable(
+    s3: S3Address,
+) -> Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let (alice_repo, alice) = setup_repo_with_s3_remote(&operator, &profile, &s3, "alice").await?;
+    let fact = |of: &str| {
+        Instruction::Assert(
+            Artifact {
+                the: "user/name".parse().expect("attribute parses"),
+                of: of.parse().expect("entity parses"),
+                is: Value::String("x".into()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )
+    };
+    let side = alice_repo.branch("side").open().perform(&operator).await?;
+    side.commit(stream::iter(vec![fact("user:s")]))
+        .perform(&operator)
+        .await?;
+    let s = side.revision().context("S")?;
+    alice.pull().from(&side).perform(&operator).await?;
+    alice
+        .commit(stream::iter(vec![fact("user:h")]))
+        .perform(&operator)
+        .await?;
+    let h = alice.revision().context("H")?;
+    alice.push().perform(&operator).await?;
+
+    let bob_repo = profile
+        .space(unique_name("bob"))
+        .open()
+        .perform(&operator)
+        .await?;
+    let origin = connect("origin", s3_site_address(&s3), alice_repo.did(), &operator).await?;
+    let bob = bob_repo.branch("main").open().perform(&operator).await?;
+    let remote_branch = origin.branch("main").open().perform(&operator).await?;
+    bob.set_upstream(remote_branch).perform(&operator).await?;
+    let staging = bob_repo.branch("staging").open().perform(&operator).await?;
+    staging.reset(s.clone()).perform(&operator).await?;
+    bob.pull().from(&staging).perform(&operator).await?;
+    assert_eq!(bob.revision().as_ref(), Some(&s), "bob adopts S by root");
+    // Forward to H without reading it, as a release before #682 resets
+    // (`perform_unchecked`): this release's reset reads H's region to check
+    // that H holds S, which would leave nothing for the push to read.
+    bob.reset(h.clone()).perform_unchecked(&operator).await?;
+
+    let credential = |secret: String| {
+        let (profile, s3) = (&profile, &s3);
+        async move {
+            profile
+                .secrets()
+                .site(s3_site_address(s3))
+                .save(S3Credential::new(&s3.access_key_id, &secret))
+                .perform(profile)
+                .await
+        }
+    };
+    credential("not the secret".into()).await?;
+    let (tracked, based) = (bob.tracked(), bob.based());
+    let pushed = bob.push().to(&staging).perform(&operator).await;
+    assert!(
+        matches!(pushed, Err(crate::PushError::Unreachable { .. })),
+        "a push it cannot confirm is refused as unreachable: {pushed:?}"
+    );
+    assert_eq!(
+        bob.revision().as_ref(),
+        Some(&h),
+        "the refusal leaves our head"
+    );
+    assert_eq!(bob.tracked(), tracked, "the refusal records no sync");
+    assert_eq!(bob.based(), based, "the refusal records no base");
+    let staging = bob_repo.branch("staging").open().perform(&operator).await?;
+    assert_eq!(staging.revision().as_ref(), Some(&s), "staging keeps S");
+
+    credential(s3.secret_access_key.clone()).await?;
+    bob.push().to(&staging).perform(&operator).await?;
+    let staging = bob_repo.branch("staging").open().perform(&operator).await?;
+    assert_eq!(
+        staging.revision().as_ref(),
+        Some(&h),
+        "once the remote answers, the push lands"
+    );
+    Ok(())
+}
+
 /// A one-off pull from a remote branch that is not an upstream leaves
 /// what it pulled readable: reads cannot fall back to that remote, so
 /// the pull brings what it adopts.
@@ -4537,7 +4708,13 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
 
     // The head runs ahead of the archive: the account's revision, none
     // of its nodes. Every proof from here has to fetch to read.
-    device_branch.reset(head).perform(&device_operator).await?;
+    // Planted with `perform_unchecked`: the device's own access head is
+    // not in the account's, and the point here is a head whose nodes the
+    // archive lacks, not how it got there.
+    device_branch
+        .reset(head)
+        .perform_unchecked(&device_operator)
+        .await?;
 
     let outcome = timeout(
         Duration::from_secs(30),

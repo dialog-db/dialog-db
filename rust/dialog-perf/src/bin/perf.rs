@@ -12,6 +12,8 @@
 //! perf run rule-ranked                       # one scenario (JSON to stdout)
 //! perf sweep --out-dir target/perf-current   # every scenario under callgrind
 //! perf compare perf/baseline target/perf-current   # regression gate
+//! perf compare --base target/perf-base target/perf-current \
+//!     --markdown target/perf-delta.md   # against the commit landed on
 //! ```
 
 use std::path::PathBuf;
@@ -19,7 +21,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
-use dialog_perf::{SweepConfig, Tolerance, catalog, compare_dirs, run, sweep};
+use dialog_perf::{Against, SweepConfig, Tolerance, catalog, compare_dirs, run, sweep};
 
 /// The engine's cost matrix: counters and instruction counts per scenario.
 #[derive(Debug, Parser)]
@@ -78,6 +80,27 @@ struct CompareArgs {
     /// Instruction growth allowed, in percent.
     #[arg(long, default_value_t = Tolerance::default().instructions_pct)]
     threshold: f64,
+
+    /// The first directory is another commit's sweep, not the baseline
+    /// files: scenarios on one side only, or whose workload changed, are
+    /// reported rather than failed.
+    #[arg(long)]
+    base: bool,
+
+    /// With `--base`, scenarios whose baseline file the change re-records
+    /// (comma-separated): their growth is reported as accepted.
+    #[arg(long, value_delimiter = ',', requires = "base")]
+    rebaselined: Vec<String>,
+
+    /// Also write every row as a Markdown table to this file.
+    #[arg(long)]
+    markdown: Option<PathBuf>,
+
+    /// Against the baseline files, write the rows that beat their file by
+    /// more than the allowance to this file as a Markdown warning (empty
+    /// when there are none).
+    #[arg(long, conflicts_with = "base")]
+    stale: Option<PathBuf>,
 }
 
 fn main() -> Result<ExitCode> {
@@ -111,9 +134,43 @@ fn main() -> Result<ExitCode> {
                 instructions_pct: args.threshold,
                 ..Tolerance::default()
             };
-            let comparison = compare_dirs(&args.baseline, &args.new, &tolerance)?;
+            let against = if args.base {
+                Against::Sweep {
+                    rebaselined: args.rebaselined.into_iter().collect(),
+                }
+            } else {
+                Against::Baseline
+            };
+            let comparison = compare_dirs(&args.baseline, &args.new, &tolerance, &against)?;
+            if let Some(path) = &args.markdown {
+                std::fs::write(path, comparison.markdown())?;
+            }
+            if let Some(path) = &args.stale {
+                std::fs::write(path, comparison.stale_markdown().unwrap_or_default())?;
+            }
+            // In GitHub Actions, a stale baseline is also a warning
+            // annotation on the run, so main's own gate shows it.
+            if !args.base && std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
+                for line in &comparison.improvements {
+                    println!(
+                        "::warning title=Stale perf baseline::{line}: re-record perf/baseline in the change that explains the move"
+                    );
+                }
+            }
             for line in &comparison.summary {
                 println!("{line}");
+            }
+            for line in &comparison.notes {
+                println!("{line}");
+            }
+            if !comparison.accepted.is_empty() {
+                println!(
+                    "\n{} growth(s) past the allowance in re-baselined scenarios, accepted:",
+                    comparison.accepted.len()
+                );
+                for line in &comparison.accepted {
+                    println!("  {line}");
+                }
             }
             if !comparison.improvements.is_empty() {
                 println!(

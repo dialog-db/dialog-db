@@ -288,8 +288,10 @@ fn knob(name: &str, fallback: usize) -> usize {
 /// the exception.
 #[tokio::test]
 async fn it_converges_under_adversarial_manifests() -> Result<()> {
-    let seeds = knob("DIALOG_ADVERSARIAL_SEEDS", 3) as u64;
-    let op_count = knob("DIALOG_ADVERSARIAL_OPS", 180);
+    // What CI runs per PR: the nightly soak's program length at 16 of its
+    // 200 seeds, about 15 seconds in the debug test configuration.
+    let seeds = knob("DIALOG_ADVERSARIAL_SEEDS", 16) as u64;
+    let op_count = knob("DIALOG_ADVERSARIAL_OPS", 1200);
     for (label, manifest) in manifests() {
         for seed in 0..seeds {
             let program = generate(seed, op_count);

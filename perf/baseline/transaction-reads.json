@@ -10,7 +10,7 @@
     "archive.get": 0,
     "archive.get.bytes": 0,
     "archive.put": 12,
-    "archive.put.bytes": 446496,
+    "archive.put.bytes": 446672,
     "span.apply_batch_reusing": 1,
     "span.buffer_records": 2,
     "span.commit": 1,
@@ -21,6 +21,6 @@
     "span.settle_cell": 300,
     "span.write_instructions": 1
   },
-  "instructions": 344332152,
-  "volatile": true
+  "instructions": 297981039,
+  "volatile": false
 }

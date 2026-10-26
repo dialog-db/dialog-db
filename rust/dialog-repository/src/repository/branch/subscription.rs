@@ -89,7 +89,8 @@ use dialog_query::query::{Application, Output as _, Restriction};
 use dialog_query::source::SelectRules;
 use dialog_search_tree::Change;
 use dialog_storage::Blake3Hash;
-use futures_util::TryStreamExt as _;
+use futures_util::stream;
+use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use super::session::{Composite, QueryEnv, QueryLayer};
 use crate::placement::{Placements, ScopeMap};
@@ -98,6 +99,12 @@ use crate::stack::{Guide, GuidedLayer};
 use crate::{
     Branch, Drained, Ephemeral, Index, NetworkedIndex, Observer, RemoteSite, Revision, Staged,
 };
+
+/// How many touched entities a maintained poll re-derives at once.
+/// Measured on the catch-up soak's hundred-entity poll (#646): a
+/// window of 16 comes within 2% of the best modeled time on mobile,
+/// and a wider one holds more reads open for little gain.
+const MAINTAIN_WINDOW: usize = 16;
 
 /// The demand cover of one evaluation: every index key range the
 /// evaluation's selects read, recorded at the `Select` boundary.
@@ -448,6 +455,8 @@ pub struct Subscription<Q: Application> {
     recomputes: usize,
     /// Polls maintained incrementally (per-entity re-derivation).
     maintenances: usize,
+    /// How many touched entities a maintained poll re-derives at once.
+    window: usize,
 }
 
 impl Branch {
@@ -509,6 +518,7 @@ impl<Q: Application> Subscription<Q> {
             initialized: false,
             recomputes: 0,
             maintenances: 0,
+            window: MAINTAIN_WINDOW,
         }
     }
 
@@ -766,6 +776,14 @@ where
     /// whole query.
     pub fn maintenances(&self) -> usize {
         self.maintenances
+    }
+
+    /// Re-derive at most `window` touched entities at once; 1 is the
+    /// one-at-a-time order the window replaced.
+    #[cfg(test)]
+    fn with_window(mut self, window: usize) -> Self {
+        self.window = window.max(1);
+        self
     }
 
     /// The composite this subscription reads: every line with its
@@ -1259,32 +1277,58 @@ where
                 subjects.clone()
             };
 
+            // Each touched entity is re-derived by its own goal-directed
+            // evaluation, recording into the existing cover (the
+            // standing demand only grows between recomputes), and each
+            // row is put back in the open query's shape so it reads
+            // exactly like a recomputed one. The evaluations are
+            // independent (each reads its own entity's facts, and the
+            // cover they record is a union), so they run together, a
+            // window at a time: on a cold replica each is a point read
+            // of its entity's leaf, and run one after another they cost
+            // a round trip per entity. Every fallible step finishes
+            // before the retained results change, so a failure leaves
+            // them as they were and the next poll re-derives the same
+            // entities into the same delta.
+            let mut scoped = Vec::new();
+            for entity in &entities {
+                match self.query.restrict(entity) {
+                    Restriction::Scoped(query) => scoped.push((entity, query)),
+                    Restriction::Unaffected => {}
+                    Restriction::Unsupported => return Ok(None),
+                }
+            }
+            let demand = self.demand.clone();
+            let this = &*self;
+            let mut evaluations = Vec::with_capacity(scoped.len());
+            for (_, query) in &scoped {
+                evaluations.push(this.evaluate(env, &demand, query));
+            }
+            let derived: Vec<Vec<Q::Conclusion>> = stream::iter(evaluations)
+                .buffered(self.window)
+                .try_collect()
+                .await?;
+            let mut rederived = Vec::with_capacity(derived.len());
+            for ((entity, _), rows) in scoped.iter().zip(derived) {
+                let rows = rows
+                    .into_iter()
+                    .map(|row| self.query.adopt(row))
+                    .collect::<Result<Vec<_>, _>>()?;
+                rederived.push((*entity, rows));
+            }
+
+            // Over-delete every retained row of each entity, then put
+            // back what it re-derived, in entity order, exactly as a
+            // recompute would read.
             let mut asserted = Vec::new();
             let mut retracted = Vec::new();
-            for entity in &entities {
-                let scoped = match self.query.restrict(entity) {
-                    Restriction::Scoped(query) => query,
-                    Restriction::Unaffected => continue,
-                    Restriction::Unsupported => return Ok(None),
-                };
-                // Over-delete: every retained row for this entity...
+            for (entity, after) in rederived {
                 let before: Vec<Q::Conclusion> = self
                     .results
                     .iter()
                     .filter(|row| row.this() == entity)
                     .cloned()
                     .collect();
-                // ...re-derive + insert: goal-directed re-evaluation,
-                // recording into the existing cover (the standing
-                // demand only ever grows between recomputes), each
-                // row put back in the open query's shape so it reads
-                // exactly like a recomputed one.
-                let after = self
-                    .evaluate(env, &self.demand.clone(), &scoped)
-                    .await?
-                    .into_iter()
-                    .map(|row| self.query.adopt(row))
-                    .collect::<Result<Vec<_>, _>>()?;
                 for row in &after {
                     if !before.contains(row) {
                         asserted.push(row.clone());
@@ -1421,13 +1465,18 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+    use super::Delta;
     use crate::RemoteSite;
     use crate::helpers::test_repo;
+    use async_trait::async_trait;
     use dialog_artifacts::{Entity, Value};
     use dialog_artifacts::{NameShape, Relation as ArtifactsRelation, Symbol};
+    use dialog_capability::Command;
     use dialog_capability::{Fork, Provider};
+    use dialog_common::Held;
     use dialog_common::{ConditionalSend, ConditionalSync, Holds};
     use dialog_effects::archive::{Get, Put};
+    use dialog_effects::authority::AuthorityError;
     use dialog_effects::authority::Identify;
     use dialog_effects::blob::Read as BlobRead;
     use dialog_effects::memory::Resolve;
@@ -1435,13 +1484,17 @@ mod tests {
     use dialog_query::attribute::Relation;
     use dialog_query::attribute::{AttributeDescriptor, Keyed, The};
     use dialog_query::concept::descriptor::ConceptFieldDescriptor;
+    use dialog_query::error::EvaluationError;
     use dialog_query::type_system::Type as Kind;
     use dialog_query::types::{Any, Type as ValueType};
     use dialog_query::{AttributeQuery, Claim, Term, the};
     use dialog_query::{Cardinality, ConceptDescriptor, ConceptQuery, Output as _};
     use dialog_storage::provider::storage::VolatileSpace;
     use std::collections::BTreeSet;
+    use std::future::poll_fn;
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Poll;
 
     /// The head flag flips only for scans that can actually read the
     /// overlay-injected metadata: a head attribute pinned by `the`,
@@ -5298,6 +5351,318 @@ mod tests {
             stored.is_empty(),
             "the procedural half stays out of the tree"
         );
+        Ok(())
+    }
+
+    /// A small seeded generator, so a randomized test replays exactly.
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 % bound as u64) as usize
+        }
+    }
+
+    /// Re-deriving the touched entities a window at a time yields what
+    /// re-deriving them one at a time yields: the same deltas, rows in
+    /// the same order, and the same retained results, poll after poll.
+    /// Each round commits a random mix of salary and department changes,
+    /// asserted and retracted, to a random subset of people; the window
+    /// of 1 is the one-at-a-time order the window replaced. The windowed
+    /// subscription reads through an env whose commands finish out of
+    /// order, so re-derivations complete in an order other than the
+    /// entities'.
+    #[dialog_common::test]
+    async fn it_maintains_a_window_of_entities_as_it_does_one_at_a_time() -> anyhow::Result<()> {
+        use concepts::{Dept, Salary, Staffed};
+        use dialog_query::Query;
+
+        const PEOPLE: usize = 40;
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let people = (0..PEOPLE)
+            .map(|index| format!("id:person-{index:02}").parse())
+            .collect::<Result<Vec<Entity>, _>>()?;
+        let depts = (0..4)
+            .map(|index| format!("id:dept-{index}").parse())
+            .collect::<Result<Vec<Entity>, _>>()?;
+        let mut salary: Vec<Option<u32>> = vec![None; PEOPLE];
+        let mut dept: Vec<Option<usize>> = vec![None; PEOPLE];
+        let mut random = Xorshift(0x9e37_79b9_7f4a_7c15);
+
+        let mut seed = branch.transaction();
+        for (index, person) in people.iter().enumerate() {
+            if random.below(4) != 0 {
+                let value = 100 + random.below(50) as u32;
+                seed = seed.assert(Salary::of(person.clone()).is(value));
+                salary[index] = Some(value);
+            }
+            if random.below(4) != 0 {
+                let which = random.below(depts.len());
+                seed = seed.assert(Dept::of(person.clone()).is(depts[which].clone()));
+                dept[index] = Some(which);
+            }
+        }
+        seed.commit().publish().perform(&operator).await?;
+
+        let jittery = Unreliable {
+            jitter: true,
+            ..Unreliable::new(operator.clone())
+        };
+        let mut one = branch.subscribe(Query::<Staffed>::default()).with_window(1);
+        let mut many = branch
+            .subscribe(Query::<Staffed>::default())
+            .with_window(16);
+        let first = one.poll(&operator).await?.expect("initial");
+        let other = many.poll(&jittery).await?.expect("initial");
+        assert_eq!(first.asserted, other.asserted);
+
+        for round in 0..12 {
+            let mut changes = branch.transaction();
+            for _ in 0..1 + random.below(24) {
+                let index = random.below(PEOPLE);
+                let person = people[index].clone();
+                match random.below(4) {
+                    0 => {
+                        if let Some(old) = salary[index] {
+                            changes = changes.retract(Salary::of(person.clone()).is(old));
+                        }
+                        let value = 100 + random.below(50) as u32;
+                        changes = changes.assert(Salary::of(person).is(value));
+                        salary[index] = Some(value);
+                    }
+                    1 => {
+                        if let Some(old) = salary[index].take() {
+                            changes = changes.retract(Salary::of(person).is(old));
+                        }
+                    }
+                    2 => {
+                        if let Some(old) = dept[index] {
+                            changes =
+                                changes.retract(Dept::of(person.clone()).is(depts[old].clone()));
+                        }
+                        let which = random.below(depts.len());
+                        changes = changes.assert(Dept::of(person).is(depts[which].clone()));
+                        dept[index] = Some(which);
+                    }
+                    _ => {
+                        if let Some(old) = dept[index].take() {
+                            changes = changes.retract(Dept::of(person).is(depts[old].clone()));
+                        }
+                    }
+                }
+            }
+            changes.commit().publish().perform(&operator).await?;
+
+            let sequential = one.poll(&operator).await?;
+            let windowed = many.poll(&jittery).await?;
+            let rows = |delta: Option<Delta<Staffed>>| {
+                delta.map(|delta| (delta.asserted, delta.retracted))
+            };
+            assert_eq!(
+                rows(sequential),
+                rows(windowed),
+                "round {round}: the deltas differ"
+            );
+            assert_eq!(
+                one.results(),
+                many.results(),
+                "round {round}: the retained results differ"
+            );
+            assert_eq!(
+                (one.recomputes(), one.maintenances()),
+                (many.recomputes(), many.maintenances()),
+                "round {round}: the two took different paths"
+            );
+        }
+        assert!(
+            many.maintenances() > 0,
+            "the rounds were maintained, not recomputed"
+        );
+        Ok(())
+    }
+
+    /// A command an [`Unreliable`] env forwards, failing it when the
+    /// env says so. Only [`Identify`] ever fails: every restricted
+    /// re-derivation performs one first, so the count of them picks out
+    /// which entity's re-derivation fails.
+    trait Fault: Command {
+        fn fault() -> Option<Self::Output> {
+            None
+        }
+    }
+
+    impl Fault for Identify {
+        fn fault() -> Option<Self::Output> {
+            Some(Err(AuthorityError::Attestation("injected".into())))
+        }
+    }
+    impl Fault for BlobRead {}
+    impl Fault for Get {}
+    impl Fault for Put {}
+    impl Fault for Resolve {}
+    impl Fault for crate::Hydrate {}
+    impl Fault for dialog_artifacts::Preload {}
+    impl Fault for dialog_artifacts::Speculation {}
+    impl Fault for Fork<RemoteSite, Resolve> {}
+
+    /// An env that forwards to `inner` and fails every command whose
+    /// [`Fault`] says it can fail, once `allowed` of them have passed.
+    /// With `jitter`, every command first yields to the executor a
+    /// varying number of times, so reads that start in one order finish
+    /// in another, as they do over a network.
+    struct Unreliable<P> {
+        inner: P,
+        passed: AtomicUsize,
+        allowed: usize,
+        jitter: bool,
+        calls: AtomicUsize,
+    }
+
+    impl<P> Unreliable<P> {
+        fn new(inner: P) -> Self {
+            Self {
+                inner,
+                passed: AtomicUsize::new(0),
+                allowed: usize::MAX,
+                jitter: false,
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl<P: Holds> Holds for Unreliable<P> {
+        fn held(&self, key: &str) -> Option<Held> {
+            self.inner.held(key)
+        }
+
+        fn hold(&self, key: String, handle: Held) {
+            self.inner.hold(key, handle)
+        }
+
+        fn held_or(&self, key: &str, make: &dyn Fn() -> Held) -> Held {
+            self.inner.held_or(key, make)
+        }
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    impl<C, P> Provider<C> for Unreliable<P>
+    where
+        C: Fault + 'static,
+        C::Input: ConditionalSend,
+        P: Provider<C> + ConditionalSync,
+    {
+        async fn execute(&self, input: C::Input) -> C::Output {
+            if self.jitter {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                let mut pending = call.wrapping_mul(2_654_435_761) % 7;
+                poll_fn(|context| {
+                    if pending == 0 {
+                        return Poll::Ready(());
+                    }
+                    pending -= 1;
+                    context.waker().wake_by_ref();
+                    Poll::Pending
+                })
+                .await;
+            }
+            if let Some(fault) = C::fault() {
+                let seen = self.passed.fetch_add(1, Ordering::SeqCst);
+                if seen >= self.allowed {
+                    return fault;
+                }
+            }
+            self.inner.execute(input).await
+        }
+    }
+
+    /// A poll that fails while re-deriving a touched entity reports the
+    /// failure and leaves the retained results as they were, including
+    /// the entities whose re-derivation had already succeeded, so the
+    /// next poll re-derives every touched entity and emits the whole
+    /// delta. Applying the entities that succeeded before the failure
+    /// would make the retry find them unchanged and never emit their
+    /// rows.
+    #[dialog_common::test]
+    async fn it_keeps_its_results_when_a_rederivation_fails() -> anyhow::Result<()> {
+        use concepts::{Dept, Salary, Staffed};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let dept: Entity = "id:dept".parse()?;
+        let people = (0..6)
+            .map(|index| format!("id:person-{index}").parse())
+            .collect::<Result<Vec<Entity>, _>>()?;
+
+        let mut seed = branch.transaction();
+        for person in &people {
+            seed = seed
+                .assert(Dept::of(person.clone()).is(dept.clone()))
+                .assert(Salary::of(person.clone()).is(100u32));
+        }
+        seed.commit().publish().perform(&operator).await?;
+
+        for (round, window) in [1, 16].into_iter().enumerate() {
+            let mut reference = branch
+                .subscribe(Query::<Staffed>::default())
+                .with_window(window);
+            let mut failing = branch
+                .subscribe(Query::<Staffed>::default())
+                .with_window(window);
+            reference.poll(&operator).await?.expect("initial");
+            failing.poll(&operator).await?.expect("initial");
+
+            let mut raise = branch.transaction();
+            for person in &people {
+                raise = raise
+                    .retract(Salary::of(person.clone()).is(100 + round as u32))
+                    .assert(Salary::of(person.clone()).is(101 + round as u32));
+            }
+            raise.commit().publish().perform(&operator).await?;
+
+            // How many identities a clean poll asks for before its
+            // first re-derivation: the count on a clean poll, less one
+            // per touched entity.
+            let counted = Unreliable::new(operator.clone());
+            let expected = reference.poll(&counted).await?.expect("covered write");
+            let before = counted.passed.load(Ordering::SeqCst) - people.len();
+
+            // Let the first two entities re-derive, then fail the third.
+            let unreliable = Unreliable {
+                allowed: before + 2,
+                ..Unreliable::new(operator.clone())
+            };
+            let retained = failing.results().to_vec();
+            let outcome = failing.poll(&unreliable).await;
+            assert!(
+                matches!(&outcome, Err(EvaluationError::Store(reason)) if reason.contains("injected")),
+                "window {window}: the failure is reported, got {outcome:?}"
+            );
+            assert_eq!(
+                failing.results(),
+                retained.as_slice(),
+                "window {window}: a failed poll leaves the retained results as they were"
+            );
+
+            let retried = failing
+                .poll(&operator)
+                .await?
+                .expect("the retry re-derives");
+            assert_eq!(
+                (retried.asserted, retried.retracted),
+                (expected.asserted, expected.retracted),
+                "window {window}: the retry emits the whole delta"
+            );
+            assert_eq!(failing.results(), reference.results());
+        }
         Ok(())
     }
 }

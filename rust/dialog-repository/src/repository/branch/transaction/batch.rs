@@ -572,7 +572,9 @@ impl TransactionCommit<&Branch> {
                 let snapshot = Snapshot::staged(branch.subject(), revision.clone(), caches, line);
                 let version = revision.version();
                 snapshot.caches().records.insert(version, record.clone());
-                snapshot.caches().contexts.insert(version, context.clone());
+                if let Some(context) = &context {
+                    snapshot.caches().contexts.insert(version, context.clone());
+                }
                 TransactionBatch {
                     snapshot,
                     head,
@@ -580,7 +582,7 @@ impl TransactionCommit<&Branch> {
                     base_version,
                     induction: branch.induction_cell().clone(),
                     chain: vec![(version, record)],
-                    context: Some(context),
+                    context,
                     records: branch.records(),
                     contexts: branch.contexts(),
                     induced,
@@ -622,10 +624,10 @@ impl TransactionCommit<TransactionBatch> {
         // Amend only a staged revision: the chain's tip, which nobody has
         // seen. A batch with nothing staged sits on the published head,
         // which is never amended; its amend is an ordinary commit.
-        let amend = match (self.amend, batch.chain.last(), &batch.context) {
-            (true, Some((_, record)), Some(context)) => Some(Amended {
+        let amend = match (self.amend, batch.chain.last()) {
+            (true, Some((_, record))) => Some(Amended {
                 record: record.clone(),
-                context: context.clone(),
+                context: batch.context.clone(),
             }),
             _ => None,
         };
@@ -666,18 +668,20 @@ impl TransactionCommit<TransactionBatch> {
                 .caches()
                 .records
                 .insert(version, record.clone());
-            batch
-                .snapshot
-                .caches()
-                .contexts
-                .insert(version, context.clone());
+            if let Some(context) = &context {
+                batch
+                    .snapshot
+                    .caches()
+                    .contexts
+                    .insert(version, context.clone());
+            }
             if amending {
                 // The amended tip keeps its version and record; the chain
                 // holds it once, as it would a single commit.
                 batch.chain.pop();
             }
             batch.chain.push((version, record));
-            batch.context = Some(context);
+            batch.context = context;
         }
         Ok(batch)
     }
@@ -930,7 +934,9 @@ impl TransactionBatch {
                 let snapshot = Snapshot::staged(branch.subject(), revision.clone(), caches, line);
                 let version = revision.version();
                 snapshot.caches().records.insert(version, record.clone());
-                snapshot.caches().contexts.insert(version, context.clone());
+                if let Some(context) = &context {
+                    snapshot.caches().contexts.insert(version, context.clone());
+                }
                 TransactionBatch {
                     snapshot,
                     head,
@@ -938,7 +944,7 @@ impl TransactionBatch {
                     base_version,
                     induction: branch.induction_cell().clone(),
                     chain: vec![(version, record)],
-                    context: Some(context),
+                    context,
                     records: branch.records(),
                     contexts: branch.contexts(),
                     induced: Changes::new(),
@@ -1008,12 +1014,14 @@ impl TransactionBatch {
                 .caches()
                 .records
                 .insert(version, record.clone());
-            self.snapshot
-                .caches()
-                .contexts
-                .insert(version, context.clone());
+            if let Some(context) = &context {
+                self.snapshot
+                    .caches()
+                    .contexts
+                    .insert(version, context.clone());
+            }
             self.chain.push((version, record));
-            self.context = Some(context);
+            self.context = context;
         }
         // Whether or not the tree changed: a retraction of a fact only
         // the overlay holds changes no tree.
