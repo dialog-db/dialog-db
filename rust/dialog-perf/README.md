@@ -54,7 +54,31 @@ cargo run -p dialog-perf --release -- compare perf/baseline target/perf-current
 `<scenario>.callgrind` beside each report for `callgrind_annotate`.
 `compare` prints one line per scenario and exits non-zero on a
 regression. In the nix dev shell, `perf:gate` runs both; CI runs it on
-every pull request (the `Perf gate` job) and uploads the sweep.
+every pull request and every push to main (the `Perf gate` job) and
+uploads the sweep.
+
+On a pull request the gate also compares against the sweep main's own
+CI run recorded for the commit the pull request lands on
+(`compare --base <that sweep> target/perf-current`, fetched by
+`scripts/ci/base-sweep.sh`), and fails on a regression against either.
+The baseline files leave room: main often measures under them, after
+improvements nobody re-baselined, and three changes that each stay
+inside the allowance of a file sum past it. Against its own base a
+change has no such room. `--markdown` writes every row, moved or not,
+and the `Delta report` job posts both gates' tables as one comment on
+the pull request, edited on each push, so the before and after need not
+be carried by hand. To reproduce locally, download the base commit's
+`perf-current` artifact into `target/perf-base` and run `perf:check`.
+
+An instruction count also depends on the CPU: valgrind passes the
+host's feature flags through, and code that picks a SIMD path at
+runtime retires a different count on another CPU model. A sweep records
+its CPU in `runner.txt`. When the base ran on the same model and flags,
+instructions are held to the tolerance; when not (GitHub's runner pool
+mixes several), each scenario is allowed its measured cross-CPU spread
+on top (`cross_cpu_pct` in the catalog, from eight identical sweeps in
+#653: rough, and meant to go once the measured build stops dispatching
+on CPU features, #652).
 
 Use `--release`: the baselines are recorded under the release profile,
 and `compare` refuses to compare across profiles.
@@ -62,9 +86,9 @@ and `compare` refuses to compare across profiles.
 A scenario whose instruction count is known to vary between runs of
 one binary past the allowance is marked volatile in the catalog, with
 the reason, and the gate holds its counters alone until the variance
-is understood. `transaction-reads` is one: its commit's tree write
-splits nodes in some runs and not others, on blocks that come out a
-few bytes different from one run to the next.
+is understood. `commit-succeed` is one: its commit's tree write varies
+by up to 12% between runs of one binary, every counter equal, in the
+delete path's forced merges.
 
 ## When the gate fails
 
@@ -79,8 +103,11 @@ few bytes different from one run to the next.
   wrong answer, or a scenario whose shape changed. Both are a bug or a
   deliberate change to pin, never a re-baseline.
 - **A cost is the price of a change you mean to make** (a new record
-  per commit, say): re-baseline, and put the before and after numbers
-  in the pull request so the review sees what the change costs.
+  per commit, say): re-baseline. A scenario whose baseline file the
+  pull request re-records has accepted its cost, so its growth against
+  the base shows in the delta report marked as re-baselined and does
+  not fail the gate. The report is the before and after the review
+  reads.
 
 ## Re-baselining
 

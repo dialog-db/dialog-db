@@ -1,5 +1,6 @@
 //! The join scenario: a fresh client replicates a seeded space through a
-//! simulated network, phase by phase.
+//! simulated network, phase by phase. The site it joins, and the measured
+//! phase, are [`crate::scenario`]'s; the other scenarios share them.
 //!
 //! The phases mirror the shape of a real application join (tonk's space
 //! join runs this exact sequence of reads against a freshly adopted head):
@@ -39,22 +40,19 @@
 //!     (`pull().download()`): the eager-replication cost the lazy join
 //!     avoids up front but pays incrementally.
 
-use std::path::{Path, PathBuf};
-
 use anyhow::{Context as _, Result};
 use dialog_artifacts::{Artifact, ArtifactSelector, Instruction, Value};
-use dialog_credentials::{Credential, Ed25519Signer, SignerCredential};
+use dialog_credentials::{Credential, SignerCredential};
 use dialog_effects::credential::prelude::*;
-use dialog_effects::storage::{Directory, Location};
+use dialog_effects::storage::Location;
 use dialog_peer::Peer;
-use dialog_peer::helpers::{test_session_with_peer, unique_name};
+use dialog_peer::helpers::Seed;
 use dialog_query::rule::DeductiveRuleDescriptor;
 use dialog_query::{
     Concept, ConceptConclusion, ConceptDescriptor, ConceptQuery, DeductiveRule, Entity,
     Output as _, Parameters, Query, Term,
 };
 use dialog_remote_fs::FsAddress;
-use dialog_remote_fs::simulation::{self, NetworkShape, Traffic};
 use dialog_repository::{Branch, Repository, RepositoryExt as _, SiteAddress, contact};
 use dialog_storage::provider::FileSystem;
 use dialog_storage::provider::storage::VolatileSpace;
@@ -62,25 +60,8 @@ use dialog_storage::resource::Resource as _;
 use dialog_varsig::{Did, Principal};
 use futures_util::StreamExt as _;
 
-use crate::report::{PhaseReport, Report};
-
-/// Configuration for one join-scenario run.
-#[derive(Debug, Clone)]
-pub struct JoinScenario {
-    /// Entities to seed (each carries [`FACTS_PER_ENTITY`] facts).
-    pub entities: usize,
-    /// Commits the seed is split into (history depth of the space).
-    pub commits: usize,
-    /// Members seeded into the roster.
-    pub members: usize,
-    /// The link model the client joins over; `None` measures counts only.
-    pub network: Option<NetworkShape>,
-    /// Label for the report (`mobile`, `broadband`, ...).
-    pub network_label: String,
-    /// Directory to place the remote vault in. Created if absent; the
-    /// vault is written under a unique subdirectory per run.
-    pub vault_dir: PathBuf,
-}
+use crate::report::PhaseReport;
+use crate::scenario::{Scenario, Site, measured};
 
 /// Facts asserted per seeded entity.
 pub const FACTS_PER_ENTITY: usize = 6;
@@ -157,7 +138,7 @@ pub struct Listing {
 /// Build one entity's facts: sizes chosen to look like an issue-tracker
 /// row (short fields plus one few-hundred-byte body), the shape tonk
 /// spaces carry.
-fn entity_facts(index: usize) -> Result<Vec<Instruction>> {
+pub(crate) fn entity_facts(index: usize) -> Result<Vec<Instruction>> {
     let of: dialog_artifacts::Entity = format!("bug:{index}").parse()?;
     let title = format!(
         "Bug #{index}: the {} widget misbehaves on load",
@@ -204,7 +185,7 @@ fn entity_facts(index: usize) -> Result<Vec<Instruction>> {
 }
 
 /// The space's metadata and membership facts (what a join probes).
-fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
+pub(crate) fn meta_facts(members: usize) -> Result<Vec<Instruction>> {
     let mut facts = vec![Instruction::Assert(
         Artifact {
             the: "db/name".parse()?,
@@ -254,7 +235,7 @@ fn open_card_descriptor() -> Result<ConceptDescriptor> {
 /// "open" concludes an open card carrying its title and rank. The body
 /// is the general rule-join shape (two bound scans plus a value-pinned
 /// guard) that bead dialog-db-80's speculation targets.
-fn open_card_rule() -> Result<DeductiveRule> {
+pub(crate) fn open_card_rule() -> Result<DeductiveRule> {
     let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
         "deduce": {
             "with": {
@@ -320,7 +301,10 @@ fn claim_facts() -> Result<Vec<Instruction>> {
 /// Seed a fresh directory as the space for `repo` by writing its
 /// credential to `credential/key/self` (the same precondition
 /// `dialog-remote-fs` documents: the directory must already be a space).
-async fn seed_vault(repo: &Repository<SignerCredential>, location: &Location) -> Result<FsAddress> {
+pub(crate) async fn seed_vault(
+    repo: &Repository<SignerCredential>,
+    location: &Location,
+) -> Result<FsAddress> {
     let filesystem = FileSystem::open(location).await?;
     let credential = Credential::Signer(repo.credential().clone());
     repo.did()
@@ -339,17 +323,20 @@ async fn seed_vault(repo: &Repository<SignerCredential>, location: &Location) ->
 /// the one `vault` peer `origin`: recording the same peer under the same
 /// name again is idempotent, where a second peer under the name would
 /// make `origin` ambiguous and refuse every client after the first.
-async fn mount_client(
+pub(crate) async fn mount_client(
     operator: &Peer<VolatileSpace, dialog_peer::Session>,
     profile: &Peer<VolatileSpace>,
     server: &Repository<SignerCredential>,
     vault: &Did,
     address: &FsAddress,
+    seed: &Seed,
     name: &str,
 ) -> Result<Branch> {
+    let name = seed.name(name);
     let repo = profile
-        .space(unique_name(name))
-        .open()
+        .space(name.clone())
+        .create()
+        .with_credential(seed.signer(&name).await?)
         .perform(operator)
         .await?;
     let origin = {
@@ -395,203 +382,24 @@ async fn select_count(
     Ok(count)
 }
 
-/// Files and bytes under `dir`, recursively.
-fn vault_stats(dir: &Path) -> (u64, u64) {
-    let mut files = 0;
-    let mut bytes = 0;
-    let mut pending = vec![dir.to_path_buf()];
-    while let Some(next) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&next) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if let Ok(meta) = entry.metadata() {
-                files += 1;
-                bytes += meta.len();
-            }
-        }
-    }
-    (files, bytes)
-}
+/// The join's phases over a seeded site, in execution order.
+pub(crate) async fn phases(
+    site: &Site,
+    scenario: &Scenario,
+    phases: &mut Vec<PhaseReport>,
+) -> Result<()> {
+    let (client, client_operator) = site.mount("soak-client").await?;
 
-/// Measure one phase: reset-free tally deltas plus virtual elapsed time.
-async fn measured<F, T>(name: &str, phases: &mut Vec<PhaseReport>, work: F) -> Result<T>
-where
-    F: Future<Output = Result<T>>,
-{
-    let before_tally = simulation::tally();
-    let before_gets = simulation::get_ledger();
-    let before_chain = simulation::longest_chain();
-    if std::env::var("DIALOG_SOAK_DUMP_GETS").is_ok() {
-        eprintln!("PHASE-START {name}");
-    }
-    let before = tokio::time::Instant::now();
-    let outcome = work.await.with_context(|| format!("phase {name} failed"))?;
-    let elapsed = before.elapsed();
-    let traffic = simulation::tally().since(&before_tally);
-    let gets = simulation::get_ledger().since(&before_gets);
-    let round_trips = simulation::longest_chain() - before_chain;
-    let blob_requests = traffic.count(Traffic::BlobRead) + traffic.count(Traffic::BlobImport);
-    let blob_bytes = traffic.bytes(Traffic::BlobRead) + traffic.bytes(Traffic::BlobImport);
-    // With DIALOG_SOAK_DUMP_GETS set, print the phase's most re-requested
-    // keys so a duplication investigation can see which blocks they are.
-    if std::env::var("DIALOG_SOAK_DUMP_GETS").is_ok() {
-        for (key, record) in gets.offenders().into_iter().take(24) {
-            eprintln!(
-                "DUP {name} {key} requests={} empty={} bytes={}",
-                record.requests, record.empty, record.bytes
-            );
-        }
-    }
-    phases.push(PhaseReport {
-        name: name.to_string(),
-        virtual_ms: elapsed.as_millis() as u64,
-        rounds: 0.0,
-        round_trips: Some(round_trips),
-        blob_requests,
-        blob_bytes,
-        unique_blocks: gets.unique_blocks(),
-        duplicate_requests: gets.duplicate_requests(),
-        duplicate_bytes: gets.duplicate_bytes(),
-        empty_requests: gets.empty_requests(),
-        traffic: traffic.into(),
-    });
-    Ok(outcome)
-}
-
-/// Run the join scenario end to end and report what it measured.
-pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
-    // Seeding runs unshaped: the network model applies to the client's
-    // join, not to the server writing its own vault.
-    simulation::configure(None);
-    simulation::reset_tally();
-
-    let (operator, profile) = test_session_with_peer().await;
-    // Speculative preloading is ambient (the operator's queue, hints
-    // default-on). The unshaped profile turns it off: its job is to pin
-    // the engine's deterministic demand shape, and replication overlap
-    // is a latency behavior only the shaped profiles measure.
-    if scenario.network.is_none() {
-        use dialog_capability::Provider;
-        let queue = Provider::<dialog_artifacts::Speculation>::execute(&operator, ()).await;
-        queue.set_budget(dialog_artifacts::FetchBudget::ZERO);
-    }
-    let server = profile
-        .space(unique_name("soak-server"))
-        .create()
-        .perform(&operator)
-        .await?;
-    let chain = server
-        .access()
-        .claim(&server)
-        .delegate(profile.did())
-        .perform(&operator)
-        .await?;
-    profile.access().save(chain).perform(&operator).await?;
-
-    let run_dir = scenario.vault_dir.join(unique_name("soak-vault"));
-    std::fs::create_dir_all(&run_dir)?;
-    let location = Location::new(
-        Directory::At(run_dir.to_string_lossy().into_owned()),
-        "space",
-    );
-    let address = seed_vault(&server, &location).await?;
-    let vault = vault_peer().await?;
-
-    let origin = {
-        let site = SiteAddress::Fs(address.clone());
-        contact(&vault)
-            .add_address(site)
-            .name("origin")
-            .perform(&operator)
-            .await?;
-        contact("origin")
-            .connect()
-            .repository(server.did())
-            .open()
-            .perform(&operator)
-            .await?
-    };
-    let branch = server.branch("main").open().perform(&operator).await?;
-    let remote_branch = origin.branch("main").open().perform(&operator).await?;
-    branch
-        .set_upstream(remote_branch)
-        .perform(&operator)
-        .await?;
-
-    // Seed: metadata first, then the entities spread over the requested
-    // number of commits (history depth shapes the head the client adopts).
-    branch
-        .transaction()
-        .integrate(meta_facts(scenario.members)?.into_iter().collect())
-        .commit()
-        .publish()
-        .perform(&operator)
-        .await?;
-    // The derived-concept rule ships with the space: its facts live in
-    // the tree like any others, so a cold client discovers and hydrates
-    // the rule on first use (the `rule` phase).
-    branch
-        .transaction()
-        .assert(open_card_rule()?)
-        .commit()
-        .publish()
-        .perform(&operator)
-        .await?;
-    let commits = scenario.commits.max(1);
-    let per_commit = scenario.entities.div_ceil(commits);
-    let mut seeded = 0;
-    while seeded < scenario.entities {
-        let batch_end = (seeded + per_commit).min(scenario.entities);
-        let mut batch = Vec::new();
-        for index in seeded..batch_end {
-            batch.extend(entity_facts(index)?);
-        }
-        branch
-            .transaction()
-            .integrate(batch.into_iter().collect())
-            .commit()
-            .publish()
-            .perform(&operator)
-            .await?;
-        seeded = batch_end;
-    }
-    branch
-        .push()
-        .perform(&operator)
-        .await?
-        .context("seed push should ship the space")?;
-
-    let (vault_files, vault_bytes) = vault_stats(&run_dir);
-
-    // The client joins over the modeled link.
-    simulation::configure(scenario.network);
-    simulation::reset_tally();
-    let mut phases = Vec::new();
-
-    let client = mount_client(
-        &operator,
-        &profile,
-        &server,
-        &vault,
-        &address,
-        "soak-client",
-    )
-    .await?;
-
-    measured("pull", &mut phases, async {
-        client.pull().perform(&operator).await?;
+    measured("pull", phases, async {
+        client.pull().perform(&client_operator).await?;
         Ok(())
     })
     .await?;
 
-    measured("probe", &mut phases, async {
+    measured("probe", phases, async {
         let named = select_count(
             &client,
-            &operator,
+            &client_operator,
             ArtifactSelector::new().the("db/name".parse()?),
         )
         .await?;
@@ -600,22 +408,22 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     })
     .await?;
 
-    measured("roster", &mut phases, async {
+    measured("roster", phases, async {
         let names = select_count(
             &client,
-            &operator,
+            &client_operator,
             ArtifactSelector::new().the("member/name".parse()?),
         )
         .await?;
         let roles = select_count(
             &client,
-            &operator,
+            &client_operator,
             ArtifactSelector::new().the("member/role".parse()?),
         )
         .await?;
         let joined = select_count(
             &client,
-            &operator,
+            &client_operator,
             ArtifactSelector::new().the("member/joined".parse()?),
         )
         .await?;
@@ -627,17 +435,17 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     })
     .await?;
 
-    measured("claim", &mut phases, async {
+    measured("claim", phases, async {
         client
             .transaction()
             .integrate(claim_facts()?.into_iter().collect())
             .commit()
             .publish()
-            .perform(&operator)
+            .perform(&client_operator)
             .await?;
         client
             .push()
-            .perform(&operator)
+            .perform(&client_operator)
             .await?
             .context("claim push should publish")?;
         Ok(())
@@ -645,10 +453,10 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     .await?;
 
     let expected = scenario.entities;
-    measured("render", &mut phases, async {
+    measured("render", phases, async {
         let titles = select_count(
             &client,
-            &operator,
+            &client_operator,
             ArtifactSelector::new().the("bug/title".parse()?),
         )
         .await?;
@@ -657,10 +465,10 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     })
     .await?;
 
-    measured("entity", &mut phases, async {
+    measured("entity", phases, async {
         let details = select_count(
             &client,
-            &operator,
+            &client_operator,
             ArtifactSelector::new()
                 .the("bug/detail".parse()?)
                 .of(format!("bug:{}", expected / 2).parse()?),
@@ -671,10 +479,10 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     })
     .await?;
 
-    measured("requery", &mut phases, async {
+    measured("requery", phases, async {
         let titles = select_count(
             &client,
-            &operator,
+            &client_operator,
             ArtifactSelector::new().the("bug/title".parse()?),
         )
         .await?;
@@ -690,17 +498,12 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // phase is the yardstick issue #492 is judged by. The client is fresh
     // so every block is cold; the pull that adopts the head runs outside
     // the measured window.
-    let concept_client = mount_client(
-        &operator,
-        &profile,
-        &server,
-        &vault,
-        &address,
-        "soak-concept",
-    )
-    .await?;
-    concept_client.pull().perform(&operator).await?;
-    measured("concept", &mut phases, async {
+    let (concept_client, concept_client_operator) = site.mount("soak-concept").await?;
+    concept_client
+        .pull()
+        .perform(&concept_client_operator)
+        .await?;
+    measured("concept", phases, async {
         let layer = concept_client.query();
         let query = layer.select(Query::<Card> {
             this: Term::var("this"),
@@ -710,7 +513,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
             reporter: Term::var("reporter"),
             created: Term::var("created"),
         });
-        let cards: Vec<Card> = query.perform(&operator).try_vec().await?;
+        let cards: Vec<Card> = query.perform(&concept_client_operator).try_vec().await?;
         anyhow::ensure!(
             cards.len() == expected,
             "concept join should see every card"
@@ -723,20 +526,15 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // scan drives the join and the other premises become entity probes. The
     // contrast between this phase and `concept` is the block-count versus
     // round-trip tradeoff the merge-versus-fold decision weighs.
-    let filtered_client = mount_client(
-        &operator,
-        &profile,
-        &server,
-        &vault,
-        &address,
-        "soak-filtered",
-    )
-    .await?;
-    filtered_client.pull().perform(&operator).await?;
+    let (filtered_client, filtered_client_operator) = site.mount("soak-filtered").await?;
+    filtered_client
+        .pull()
+        .perform(&filtered_client_operator)
+        .await?;
     let closed = (0..scenario.entities)
         .filter(|index| index % 3 == 2)
         .count();
-    measured("filtered", &mut phases, async {
+    measured("filtered", phases, async {
         let layer = filtered_client.query();
         let query = layer.select(Query::<Card> {
             this: Term::var("this"),
@@ -746,7 +544,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
             reporter: Term::var("reporter"),
             created: Term::var("created"),
         });
-        let cards: Vec<Card> = query.perform(&operator).try_vec().await?;
+        let cards: Vec<Card> = query.perform(&filtered_client_operator).try_vec().await?;
         anyhow::ensure!(
             cards.len() == closed,
             "filtered join should see the closed cards"
@@ -759,17 +557,12 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // client. With the ambient queue the subscription's evaluation enqueues
     // and drives its own hints, so this phase gates bead dialog-db-82's
     // subscription parity.
-    let subscribe_client = mount_client(
-        &operator,
-        &profile,
-        &server,
-        &vault,
-        &address,
-        "soak-subscribe",
-    )
-    .await?;
-    subscribe_client.pull().perform(&operator).await?;
-    measured("subscribe", &mut phases, async {
+    let (subscribe_client, subscribe_client_operator) = site.mount("soak-subscribe").await?;
+    subscribe_client
+        .pull()
+        .perform(&subscribe_client_operator)
+        .await?;
+    measured("subscribe", phases, async {
         let mut subscription = subscribe_client.subscribe(Query::<Card> {
             this: Term::var("this"),
             title: Term::var("title"),
@@ -779,7 +572,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
             created: Term::var("created"),
         });
         let delta = subscription
-            .poll(&operator)
+            .poll(&subscribe_client_operator)
             .await
             .map_err(|error| anyhow::anyhow!("first poll failed: {error}"))?;
         let added = delta.map(|delta| delta.asserted.len()).unwrap_or(0);
@@ -797,17 +590,12 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // queue are shared across evaluations, so the unique count reads as
     // the union of the two footprints and duplicates stay zero), and the
     // rounds read as overlapped work, not the sum of two sequential runs.
-    let overlap_client = mount_client(
-        &operator,
-        &profile,
-        &server,
-        &vault,
-        &address,
-        "soak-overlap",
-    )
-    .await?;
-    overlap_client.pull().perform(&operator).await?;
-    measured("overlap", &mut phases, async {
+    let (overlap_client, overlap_client_operator) = site.mount("soak-overlap").await?;
+    overlap_client
+        .pull()
+        .perform(&overlap_client_operator)
+        .await?;
+    measured("overlap", phases, async {
         let board_layer = overlap_client.query();
         let board = board_layer.select(Query::<Card> {
             this: Term::var("this"),
@@ -825,8 +613,8 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
             rank: Term::var("rank"),
         });
         let (cards, rows): (Vec<Card>, Vec<Listing>) = futures_util::future::try_join(
-            board.perform(&operator).try_vec(),
-            list.perform(&operator).try_vec(),
+            board.perform(&overlap_client_operator).try_vec(),
+            list.perform(&overlap_client_operator).try_vec(),
         )
         .await?;
         anyhow::ensure!(
@@ -842,13 +630,12 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // scan), hydrate its body (source fetch), and run the body's join
     // cold. The general rule-join speculation of bead dialog-db-80 is
     // measured against this phase.
-    let rule_client =
-        mount_client(&operator, &profile, &server, &vault, &address, "soak-rule").await?;
-    rule_client.pull().perform(&operator).await?;
+    let (rule_client, rule_client_operator) = site.mount("soak-rule").await?;
+    rule_client.pull().perform(&rule_client_operator).await?;
     let open = (0..scenario.entities)
         .filter(|index| index % 3 == 0)
         .count();
-    measured("rule", &mut phases, async {
+    measured("rule", phases, async {
         let layer = rule_client.query();
         let mut terms = Parameters::new();
         terms.insert("this".into(), Term::var("this"));
@@ -858,23 +645,23 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
             predicate: open_card_descriptor()?,
             terms,
         };
-        let rows: Vec<ConceptConclusion> = layer.select(query).perform(&operator).try_vec().await?;
+        let rows: Vec<ConceptConclusion> = layer
+            .select(query)
+            .perform(&rule_client_operator)
+            .try_vec()
+            .await?;
         anyhow::ensure!(rows.len() == open, "the rule should derive every open card");
         Ok(())
     })
     .await?;
 
-    let downloader = mount_client(
-        &operator,
-        &profile,
-        &server,
-        &vault,
-        &address,
-        "soak-download",
-    )
-    .await?;
-    measured("download", &mut phases, async {
-        downloader.pull().download().perform(&operator).await?;
+    let (downloader, downloader_operator) = site.mount("soak-download").await?;
+    measured("download", phases, async {
+        downloader
+            .pull()
+            .download()
+            .perform(&downloader_operator)
+            .await?;
         Ok(())
     })
     .await?;
@@ -888,15 +675,7 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
     // the shape whose integrate read the remote tree leaf by leaf while
     // its opening pass looked ahead a fixed number of changes: the
     // rounds here should track the tree's depth, never its leaf count.
-    let seeded = mount_client(
-        &operator,
-        &profile,
-        &server,
-        &vault,
-        &address,
-        "soak-seeded",
-    )
-    .await?;
+    let (seeded, seeded_operator) = site.mount("soak-seeded").await?;
     let mut seed = Vec::new();
     for index in scenario.entities..scenario.entities + scenario.entities / 4 {
         seed.extend(entity_facts(index)?);
@@ -906,65 +685,21 @@ pub async fn run_join(scenario: JoinScenario) -> Result<Report> {
         .integrate(seed.into_iter().collect())
         .commit()
         .publish()
-        .perform(&operator)
+        .perform(&seeded_operator)
         .await?;
-    measured("seeded", &mut phases, async {
-        seeded.pull().perform(&operator).await?;
+    measured("seeded", phases, async {
+        seeded.pull().perform(&seeded_operator).await?;
         Ok(())
     })
     .await?;
 
-    simulation::configure(None);
-
-    // Every tree in this run was created here, so they all carry the
-    // format a new tree takes in this process (which the sweep sets
-    // through the environment); the report labels the run with it.
-    let manifest = dialog_search_tree::Manifest::default();
-    let (latency_ms, auth_ms, bandwidth_mbps) = match &scenario.network {
-        Some(shape) => (
-            shape.latency.as_secs_f64() * 1000.0,
-            shape.auth_latency.as_secs_f64() * 1000.0,
-            shape
-                .bandwidth
-                .map_or(0.0, |b| b as f64 * 8.0 / 1_000_000.0),
-        ),
-        None => (0.0, 0.0, 0.0),
-    };
-
-    // Derive each phase's sequential-fetch-chain estimate: under the paused
-    // clock a chain of dependent requests costs its length times the
-    // per-request serial cost (auth redeem, then the round trip), so the
-    // quotient bounds the chain depth from above. Bandwidth serialization
-    // also advances the clock, which is why this is a bound and not a count.
-    let per_request_ms = latency_ms + auth_ms;
-    if per_request_ms > 0.0 {
-        for phase in &mut phases {
-            phase.rounds = phase.virtual_ms as f64 / per_request_ms;
-        }
-    }
-
-    Ok(Report {
-        scenario: "join".into(),
-        network: scenario.network_label,
-        latency_ms,
-        auth_ms,
-        bandwidth_mbps,
-        connections: scenario.network.and_then(|shape| shape.connections),
-        fanout_n: manifest.fanout_n,
-        max_segment: manifest.max_segment,
-        entities: scenario.entities,
-        facts: scenario.entities * FACTS_PER_ENTITY + 1 + scenario.members * 2,
-        commits: commits + 1,
-        vault_files,
-        vault_bytes,
-        phases,
-    })
+    Ok(())
 }
 
 /// A DID to name the peer a vault directory is by. A directory has no DID
 /// of its own, so the soak gives it one, as an application names a peer
-/// by the DID it was given. Minted once per run: the clients of a run
+/// by the DID it was given. Derived once per run: the clients of a run
 /// share the operator's contacts, and a name is one peer's.
-async fn vault_peer() -> Result<Did> {
-    Ok(Principal::did(&Ed25519Signer::generate().await?))
+pub(crate) async fn vault_peer(seed: &Seed) -> Result<Did> {
+    Ok(Principal::did(&seed.signer("soak-vault").await?))
 }

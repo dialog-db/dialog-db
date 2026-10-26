@@ -8,10 +8,20 @@
 //! The sync/join soak CLI.
 //!
 //! ```text
-//! soak run --network mobile          # one scenario run (JSON to stdout)
-//! soak sweep --out-dir target/soak   # profiles x repeats, median reports
+//! soak run --network mobile          # one join run (JSON to stdout)
+//! soak run --scenario writer         # another scenario
+//! soak sweep --out-dir target/soak   # scenarios x profiles x repeats, median reports
 //! soak compare soak/baseline target/soak   # regression gate
+//! soak compare --base target/soak-base target/soak \
+//!     --markdown target/soak-delta.md      # against the commit landed on
 //! ```
+//!
+//! Every identity a run mints derives from one seed, `DIALOG_SOAK_SEED`
+//! (a number; unset is a fixed default), so a run with the same seed
+//! writes the same tree and repeats its counts exactly. `sweep` passes it
+//! to each run, or with `DIALOG_SOAK_SEED=random` draws a fresh one per
+//! run (the nightly); every report records its `seed`, and
+//! `DIALOG_SOAK_SEED=<seed> soak run ...` replays that run.
 //!
 //! `run` executes under tokio's paused test clock by default: simulated
 //! delays complete instantly while virtual time advances by exactly the
@@ -26,7 +36,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use dialog_remote_fs::simulation::NetworkShape;
-use dialog_soak::{JoinScenario, SweepConfig, compare_dirs, run_join, sweep};
+use dialog_soak::{Against, Kind, Scenario, Seeding, SweepConfig, compare_dirs, run, sweep};
 
 /// Sync/join soak harness over a simulated network.
 #[derive(Debug, Parser)]
@@ -38,9 +48,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the join scenario once and print its JSON report to stdout.
+    /// Run one scenario once and print its JSON report to stdout.
     Run(RunArgs),
-    /// Run the scenario across network profiles, keeping each
+    /// Run the scenarios across network profiles, keeping each
     /// configuration's median run as its report.
     Sweep(SweepArgs),
     /// Compare two sweep directories and fail on regressions.
@@ -49,6 +59,10 @@ enum Command {
 
 #[derive(Debug, Args)]
 struct RunArgs {
+    /// Scenario: join, catchup or writer.
+    #[arg(long, default_value = "join")]
+    scenario: Kind,
+
     /// Network preset: none, localhost, broadband, mobile, browser,
     /// intercontinental, or custom (with --latency-ms/--auth-ms/
     /// --bandwidth-mbps/--connections).
@@ -118,6 +132,10 @@ struct SweepArgs {
     #[arg(long, default_value_t = 3)]
     repeats: usize,
 
+    /// Scenarios to sweep: join, catchup, writer.
+    #[arg(long, value_delimiter = ',', default_values_t = Kind::ALL)]
+    scenarios: Vec<Kind>,
+
     /// Network profiles to sweep. `none` runs unshaped: its request
     /// counts are deterministic and the regression gate holds them tight.
     #[arg(long, value_delimiter = ',', default_values_t = [
@@ -147,6 +165,29 @@ struct CompareArgs {
     /// Percent growth in a total that counts as a regression.
     #[arg(long, default_value_t = 10.0)]
     threshold: f64,
+
+    /// The first directory is another commit's sweep, not the baseline
+    /// files: reports on one side only, or seeded differently, are
+    /// reported rather than skipped or failed.
+    #[arg(long)]
+    base: bool,
+
+    /// With `--base`, reports (file stems, `join-none`) whose baseline
+    /// file the change re-records (comma-separated): their growth is
+    /// reported as accepted.
+    #[arg(long, value_delimiter = ',', requires = "base")]
+    rebaselined: Vec<String>,
+
+    /// Also write every row as a Markdown table to this file.
+    #[arg(long)]
+    markdown: Option<PathBuf>,
+
+    /// Report regressions without failing. The base comparison runs with
+    /// this until the harness's identities are deterministic (#652): one
+    /// run against one run with random identities moves the join's
+    /// request counts past the threshold about one time in ten.
+    #[arg(long)]
+    report_only: bool,
 }
 
 /// A named preset link model.
@@ -188,26 +229,28 @@ fn preset(name: &str, run: &RunArgs) -> Result<(Option<NetworkShape>, String)> {
     Ok((network, name.to_string()))
 }
 
-fn run(args: RunArgs) -> Result<()> {
+fn run_once(args: RunArgs) -> Result<()> {
     let (network, network_label) = preset(&args.network, &args)?;
-    let scenario = JoinScenario {
+    let scenario = Scenario {
+        kind: args.scenario,
         entities: args.entities,
         commits: args.commits,
         members: args.members,
         network,
         network_label,
         vault_dir: args.vault_dir.clone().unwrap_or_else(std::env::temp_dir),
+        seed: Seeding::from_env()?.draw()?,
     };
 
+    // Paused from the start, so the paused clock and the timer it drives
+    // share their origin: paused later, the clock sits a real-time
+    // fraction of a millisecond off the timer's ticks, and a tick's
+    // deadline rounds differently from one run to the next.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
+        .start_paused(!args.real_time)
         .build()?;
-    let report = runtime.block_on(async {
-        if !args.real_time {
-            tokio::time::pause();
-        }
-        run_join(scenario).await
-    })?;
+    let report = runtime.block_on(run(scenario))?;
 
     if !args.json_only {
         eprintln!("{}", report.table());
@@ -219,7 +262,7 @@ fn run(args: RunArgs) -> Result<()> {
 fn main() -> Result<ExitCode> {
     match Cli::parse().command {
         Command::Run(args) => {
-            run(args)?;
+            run_once(args)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Sweep(args) => {
@@ -228,32 +271,74 @@ fn main() -> Result<ExitCode> {
                 entities: args.entities,
                 commits: args.commits,
                 repeats: args.repeats,
+                scenarios: args.scenarios,
                 networks: args.networks,
                 fanouts: args.fanouts,
+                seeding: Seeding::from_env()?,
             })?;
             eprintln!("reports written to {}", args.out_dir.display());
             eprintln!("{table}");
             Ok(ExitCode::SUCCESS)
         }
         Command::Compare(args) => {
-            let comparison = compare_dirs(&args.baseline, &args.new, args.threshold)?;
+            let against = if args.base {
+                Against::Sweep {
+                    rebaselined: args.rebaselined.into_iter().collect(),
+                }
+            } else {
+                Against::Baseline
+            };
+            let comparison = compare_dirs(&args.baseline, &args.new, args.threshold, &against)?;
+            if let Some(path) = &args.markdown {
+                let mut markdown = comparison.markdown();
+                if args.report_only {
+                    markdown.insert_str(
+                        0,
+                        "Report only: rows past tolerance here do not fail the gate until the \
+                         soak harness's identities are deterministic (#652), since one run \
+                         against one run with random identities crosses the threshold about \
+                         one time in ten.\n\n",
+                    );
+                }
+                std::fs::write(path, markdown)?;
+            }
             for line in &comparison.summary {
                 println!("{line}");
             }
-            if comparison.passed() {
-                println!("\nno regressions");
-                Ok(ExitCode::SUCCESS)
-            } else {
+            for line in &comparison.notes {
+                println!("{line}");
+            }
+            if !comparison.accepted.is_empty() {
                 println!(
-                    "\n{} regression(s) over {:.0}% threshold:",
-                    comparison.regressions.len(),
-                    args.threshold
+                    "\n{} growth(s) past the threshold in re-baselined reports, accepted:",
+                    comparison.accepted.len()
                 );
-                for line in &comparison.regressions {
+                for line in &comparison.accepted {
                     println!("  {line}");
                 }
-                Ok(ExitCode::FAILURE)
             }
+            if comparison.passed() {
+                println!("\nno regressions");
+                return Ok(ExitCode::SUCCESS);
+            }
+            println!(
+                "\n{} regression(s) over {:.0}% threshold{}:",
+                comparison.regressions.len(),
+                args.threshold,
+                if args.report_only {
+                    " (report only, not failing)"
+                } else {
+                    ""
+                }
+            );
+            for line in &comparison.regressions {
+                println!("  {line}");
+            }
+            Ok(if args.report_only {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
         }
     }
 }

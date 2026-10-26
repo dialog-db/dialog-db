@@ -13,6 +13,7 @@ use std::process::Command;
 use anyhow::{Context as _, Result, bail};
 
 use crate::report::Report;
+use crate::runner::Runner;
 use crate::scenario::catalog;
 
 /// Configuration for one sweep.
@@ -34,6 +35,7 @@ pub fn sweep(config: &SweepConfig) -> Result<Vec<Report>> {
     let exe = std::env::current_exe().context("resolving the perf binary")?;
     fs::create_dir_all(&config.out_dir)
         .with_context(|| format!("creating {}", config.out_dir.display()))?;
+    Runner::current().write(&config.out_dir)?;
     let mut reports = Vec::new();
     for spec in catalog() {
         if !config.only.is_empty() && !config.only.iter().any(|name| name == spec.name) {

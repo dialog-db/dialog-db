@@ -142,6 +142,9 @@ pub struct Branch {
     /// What this branch pulls from and pushes to, as last resolved from
     /// the registry, and how far it has synced with each.
     tracking: Cell<Tracking>,
+    /// The revision whose tree each sync base in `tracking` is, written
+    /// after it (see `upstream::Bases`). Replica-local.
+    bases: Cell<upstream::Bases>,
     /// The induction watermark: the last revision through which
     /// inductive rules evaluated on this replica. A transaction commit
     /// catches up over `(watermark, head]` before processing its own
@@ -520,6 +523,17 @@ impl Branch {
         &self.tracking
     }
 
+    /// What this branch's bases cell holds.
+    pub(crate) fn based(&self) -> upstream::Bases {
+        self.bases.content().unwrap_or_default()
+    }
+
+    /// This branch's bases cell.
+    #[cfg(test)]
+    pub(crate) fn bases(&self) -> &Cell<upstream::Bases> {
+        &self.bases
+    }
+
     /// Re-resolve this handle's head and upstream from storage, updating its
     /// caches to the current versions.
     ///
@@ -537,6 +551,7 @@ impl Branch {
     {
         self.revision.resolve().perform(env).await?;
         self.tracking.resolve().perform(env).await?;
+        self.bases.resolve().perform(env).await?;
         Ok(())
     }
 

@@ -12,8 +12,17 @@ on:
 name: 'Test'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Each commit on main gets its own group, so every merge runs to the end
+  # and keeps its artifacts. Other refs cancel a run a newer push replaces.
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+# Read-only by default. `actions: read` lets the gates download the base
+# commit's sweep from its run; the one job that writes (the delta report
+# comment) asks for that itself.
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   lint_nix:
@@ -55,13 +64,25 @@ jobs:
   # callgrind, its instruction count and exact step counts gated against
   # the baselines under perf/baseline. A regression here is a change in
   # what the engine does for a workload, caught before it lands.
+  #
+  # On a pull request the sweep is also gated against the one CI recorded
+  # for the main commit the pull request lands on
+  # (scripts/ci/base-sweep.sh), so a regression the baseline files leave
+  # room for still fails, and every row against that base goes to the
+  # delta report below. The files stay a gate too: they catch drift
+  # across pull requests that each pass against their own base.
   perf:
     name: 'Perf gate'
     needs: ['lint_nix']
     runs-on: 'ubuntu-latest'
     steps:
       - uses: cisagov/action-disable-apparmor@v1
+      # Two commits deep: on a pull request the checkout is the merge
+      # commit, and its first parent is the base the sweep is compared
+      # against.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: wimpysworld/nothing-but-nix@main
         with:
           root-safe-haven: '16384'
@@ -84,7 +105,7 @@ jobs:
       # cargo directly and reaches the registry about a minute in, so
       # the two raced: cargo extracted crates into ~/.cargo/registry
       # while rmz was deleting them (#638).
-      - name: 'Run the perf gate'
+      - name: 'Run the sweep'
         shell: bash
         run: |
           sudo mkdir -p /nix/cargo
@@ -92,27 +113,57 @@ jobs:
           nix develop \
             --accept-flake-config \
             --set-env-var CARGO_HOME /nix/cargo \
-            --command perf:gate
+            --command perf:sweep
+      # After the sweep, so a main commit merged just before this run
+      # started has usually finished its own gate by now. A failure here
+      # leaves the gate to the baseline files; the report says so.
+      - name: 'Fetch the base sweep'
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: '${{ github.token }}'
+        run: |
+          scripts/ci/base-sweep.sh perf-current 'Perf gate' perf/baseline target/perf-base target/perf-delta
+      - name: 'Run the perf gate'
+        shell: bash
+        run: |
+          nix develop \
+            --accept-flake-config \
+            --set-env-var CARGO_HOME /nix/cargo \
+            --command perf:check
       - name: 'Upload the sweep'
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: 'perf-current'
           path: 'target/perf-current'
+      - name: 'Upload the delta'
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: 'perf-delta'
+          path: 'target/perf-delta'
+          if-no-files-found: ignore
 
   # What a replica pays to join (rust/dialog-soak): the join scenario
   # over the unshaped `none` network profile, whose request counts are
   # deterministic protocol shape, gated against soak/baseline. The
   # shaped profiles (broadband, mobile, ...) stay on the nightly sweep
   # (nightly-soak.yml); see issue #642 for the gate this is the first
-  # step of.
+  # step of. On a pull request it is also compared against the base
+  # commit's sweep, as the Perf gate is. Both sweeps run under the same
+  # fixed seed, so their counts are exact (see soak:check in flake.nix).
   soak_sync:
     name: 'Replication gate'
     needs: ['lint_nix']
     runs-on: 'ubuntu-latest'
     steps:
       - uses: cisagov/action-disable-apparmor@v1
+      # Two commits deep, for the base: see the Perf gate.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - uses: wimpysworld/nothing-but-nix@main
         with:
           root-safe-haven: '16384'
@@ -130,7 +181,7 @@ jobs:
       # reason the Perf gate above gives: this job runs cargo directly,
       # and nothing-but-nix's background purge deletes $HOME/.cargo
       # while cargo may be extracting into it (#638).
-      - name: 'Run the replication gate'
+      - name: 'Run the sweep'
         shell: bash
         run: |
           sudo mkdir -p /nix/cargo
@@ -138,13 +189,79 @@ jobs:
           nix develop \
             --accept-flake-config \
             --set-env-var CARGO_HOME /nix/cargo \
-            --command soak:gate
+            --command soak:sweep
+      - name: 'Fetch the base sweep'
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: '${{ github.token }}'
+        run: |
+          scripts/ci/base-sweep.sh soak-current 'Replication gate' soak/baseline target/soak-base target/soak-delta
+      - name: 'Run the replication gate'
+        shell: bash
+        run: |
+          nix develop \
+            --accept-flake-config \
+            --set-env-var CARGO_HOME /nix/cargo \
+            --command soak:check
       - name: 'Upload the sweep'
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: 'soak-current'
           path: 'target/soak-current'
+      - name: 'Upload the delta'
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: 'soak-delta'
+          path: 'target/soak-delta'
+          if-no-files-found: ignore
+
+  # One comment per pull request with both gates' rows against the base,
+  # edited in place on every push (found by the marker in its body). It
+  # builds nothing: it reads the delta artifacts the gates uploaded, and
+  # runs when they fail too, since that is when the table matters most.
+  #
+  # The only job that writes. It runs on `pull_request`, never
+  # `pull_request_target`, so a fork's code never runs with this token;
+  # and on a fork's pull request GitHub grants a read-only token anyway,
+  # so there the report goes to the job summary instead.
+  delta_report:
+    name: 'Delta report'
+    needs: ['perf', 'soak_sync']
+    if: always() && github.event_name == 'pull_request'
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: 'perf-delta'
+          path: 'delta/perf'
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: 'soak-delta'
+          path: 'delta/soak'
+      - name: 'Post the report'
+        shell: bash
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR: '${{ github.event.pull_request.number }}'
+          FORK: '${{ github.event.pull_request.head.repo.full_name != github.repository }}'
+        run: |
+          if [ "$FORK" = true ]; then
+            scripts/ci/delta-report.sh delta/perf delta/soak delta/body.md
+          else
+            scripts/ci/delta-report.sh delta/perf delta/soak delta/body.md "$PR"
+          fi
 
   lints:
     name: 'Lints'

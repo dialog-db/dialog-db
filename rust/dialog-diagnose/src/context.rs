@@ -137,7 +137,7 @@ mod tests {
     #[test]
     fn it_profiles_a_region_head_from_its_region() {
         let mut head = head(20_000);
-        head.publish_region();
+        head.publish_region(6);
         assert_eq!(ContextProfile::of(&head), None);
 
         let mut region = Context::new();
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn it_refuses_a_region_without_the_heads_origin() {
         let mut head = head(10);
-        head.publish_region();
+        head.publish_region(1);
         assert!(matches!(
             ContextProfile::from_region(&head, Context::new()),
             Err(HistoryError::InvalidReference(_))
