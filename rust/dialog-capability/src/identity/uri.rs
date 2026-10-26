@@ -15,7 +15,6 @@ use ed25519_dalek::SigningKey;
 
 use super::{ENTITY_LENGTH, IdentityError};
 use dialog_common::Blake3Hash;
-#[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
 use dialog_common::random;
 
 /// A [`Uri`] is a helper type that helps validate and reliably convert between
@@ -61,14 +60,12 @@ impl Uri {
     pub fn unique() -> Result<Self, IdentityError> {
         const PREFIX: &str = "z6Mk";
 
-        #[cfg(not(all(target_arch = "wasm32", not(target_os = "unknown"))))]
-        let signing_key = SigningKey::generate(&mut rand::thread_rng());
-        // `thread_rng` seeds from `getrandom` 0.2, which reaches WASI through
-        // preview 1 alone. See `dialog_common::random`.
-        #[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
+        // Through `dialog_common::random::identifier` on every target: the
+        // system's source (on WASI, that of the target's own WASI version),
+        // which a harness that seeds its thread replays.
         let signing_key = {
             let mut seed = [0u8; 32];
-            random::fill(&mut seed)
+            random::identifier(&mut seed)
                 .map_err(|error| IdentityError::InvalidEntity(format!("{error}")))?;
             SigningKey::from_bytes(&seed)
         };

@@ -10,7 +10,7 @@ crate-type = ["rlib"]
 
 [features]
 default = []
-helpers = ["dep:anyhow"]
+helpers = ["dep:anyhow", "dialog-common/helpers"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
