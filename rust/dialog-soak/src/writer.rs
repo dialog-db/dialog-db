@@ -65,8 +65,8 @@ pub(crate) async fn phases(
     scenario: &Scenario,
     phases: &mut Vec<PhaseReport>,
 ) -> Result<()> {
-    let operator = &site.operator;
-    let client = site.mount("soak-writer").await?;
+    let (client, operator) = site.mount("soak-writer").await?;
+    let operator = &operator;
     client.pull().perform(operator).await?;
     // New entities start past the seeded range.
     let mut next = scenario.entities;

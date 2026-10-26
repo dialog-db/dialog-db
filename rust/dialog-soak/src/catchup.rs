@@ -143,11 +143,11 @@ pub(crate) async fn phases(
     let entities = scenario.entities;
 
     // The subscribed replica: joined, and its first poll paid.
-    let client = site.mount("soak-catchup").await?;
-    client.pull().perform(operator).await?;
+    let (client, client_operator) = site.mount("soak-catchup").await?;
+    client.pull().perform(&client_operator).await?;
     let mut subscription = client.subscribe(landing());
     let first = subscription
-        .poll(operator)
+        .poll(&client_operator)
         .await
         .map_err(|error| anyhow::anyhow!("first poll failed: {error}"))?
         .context("the first poll evaluates")?;
@@ -158,14 +158,14 @@ pub(crate) async fn phases(
     );
     // The application's reads after joining drive the first poll's
     // hints, so the measured catch-ups start with nothing pending.
-    let queue = Provider::<dialog_artifacts::Speculation>::execute(operator, ()).await;
+    let queue = Provider::<dialog_artifacts::Speculation>::execute(&client_operator, ()).await;
     let mut reads = 0;
     while queue.pending() > 0 && reads < 64 {
         let rows = client
             .claims()
             .select(ArtifactSelector::new().the("db/name".parse()?))
             .to_owned()
-            .perform(operator)
+            .perform(&client_operator)
             .await?
             .collect::<Vec<_>>()
             .await;
@@ -189,7 +189,7 @@ pub(crate) async fn phases(
         catch_up(
             &client,
             &mut subscription,
-            operator,
+            &client_operator,
             k,
             &k.to_string(),
             phases,
@@ -201,27 +201,32 @@ pub(crate) async fn phases(
         round += 1;
         let mut writers = Vec::with_capacity(m);
         for index in 0..m {
-            let writer = site.mount(&format!("soak-writer-{index}")).await?;
-            writer.pull().perform(operator).await?;
-            writers.push(writer);
+            let (writer, writer_operator) = site.mount(&format!("soak-writer-{index}")).await?;
+            writer.pull().perform(&writer_operator).await?;
+            writers.push((writer, writer_operator));
         }
         for j in 0..k {
-            let writer = &writers[j % m];
-            commit_each(writer, operator, vec![toggle(entities, k, j, round)?]).await?;
+            let (writer, writer_operator) = &writers[j % m];
+            commit_each(
+                writer,
+                writer_operator,
+                vec![toggle(entities, k, j, round)?],
+            )
+            .await?;
             // Merge what the other writers pushed since, then push: the
             // head the client catches up on is a chain of merges minted
             // by m origins.
-            writer.pull().perform(operator).await?;
+            writer.pull().perform(writer_operator).await?;
             writer
                 .push()
-                .perform(operator)
+                .perform(writer_operator)
                 .await?
                 .context("a writer's push should publish")?;
         }
         catch_up(
             &client,
             &mut subscription,
-            operator,
+            &client_operator,
             k,
             &format!("{k}x{m}"),
             phases,
