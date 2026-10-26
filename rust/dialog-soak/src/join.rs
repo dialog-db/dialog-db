@@ -388,12 +388,10 @@ pub(crate) async fn phases(
     scenario: &Scenario,
     phases: &mut Vec<PhaseReport>,
 ) -> Result<()> {
-    let operator = &site.operator;
-
-    let client = site.mount("soak-client").await?;
+    let (client, client_operator) = site.mount("soak-client").await?;
 
     measured("pull", phases, async {
-        client.pull().perform(operator).await?;
+        client.pull().perform(&client_operator).await?;
         Ok(())
     })
     .await?;
@@ -401,7 +399,7 @@ pub(crate) async fn phases(
     measured("probe", phases, async {
         let named = select_count(
             &client,
-            operator,
+            &client_operator,
             ArtifactSelector::new().the("db/name".parse()?),
         )
         .await?;
@@ -413,19 +411,19 @@ pub(crate) async fn phases(
     measured("roster", phases, async {
         let names = select_count(
             &client,
-            operator,
+            &client_operator,
             ArtifactSelector::new().the("member/name".parse()?),
         )
         .await?;
         let roles = select_count(
             &client,
-            operator,
+            &client_operator,
             ArtifactSelector::new().the("member/role".parse()?),
         )
         .await?;
         let joined = select_count(
             &client,
-            operator,
+            &client_operator,
             ArtifactSelector::new().the("member/joined".parse()?),
         )
         .await?;
@@ -443,11 +441,11 @@ pub(crate) async fn phases(
             .integrate(claim_facts()?.into_iter().collect())
             .commit()
             .publish()
-            .perform(operator)
+            .perform(&client_operator)
             .await?;
         client
             .push()
-            .perform(operator)
+            .perform(&client_operator)
             .await?
             .context("claim push should publish")?;
         Ok(())
@@ -458,7 +456,7 @@ pub(crate) async fn phases(
     measured("render", phases, async {
         let titles = select_count(
             &client,
-            operator,
+            &client_operator,
             ArtifactSelector::new().the("bug/title".parse()?),
         )
         .await?;
@@ -470,7 +468,7 @@ pub(crate) async fn phases(
     measured("entity", phases, async {
         let details = select_count(
             &client,
-            operator,
+            &client_operator,
             ArtifactSelector::new()
                 .the("bug/detail".parse()?)
                 .of(format!("bug:{}", expected / 2).parse()?),
@@ -484,7 +482,7 @@ pub(crate) async fn phases(
     measured("requery", phases, async {
         let titles = select_count(
             &client,
-            operator,
+            &client_operator,
             ArtifactSelector::new().the("bug/title".parse()?),
         )
         .await?;
@@ -500,8 +498,11 @@ pub(crate) async fn phases(
     // phase is the yardstick issue #492 is judged by. The client is fresh
     // so every block is cold; the pull that adopts the head runs outside
     // the measured window.
-    let concept_client = site.mount("soak-concept").await?;
-    concept_client.pull().perform(operator).await?;
+    let (concept_client, concept_client_operator) = site.mount("soak-concept").await?;
+    concept_client
+        .pull()
+        .perform(&concept_client_operator)
+        .await?;
     measured("concept", phases, async {
         let layer = concept_client.query();
         let query = layer.select(Query::<Card> {
@@ -512,7 +513,7 @@ pub(crate) async fn phases(
             reporter: Term::var("reporter"),
             created: Term::var("created"),
         });
-        let cards: Vec<Card> = query.perform(operator).try_vec().await?;
+        let cards: Vec<Card> = query.perform(&concept_client_operator).try_vec().await?;
         anyhow::ensure!(
             cards.len() == expected,
             "concept join should see every card"
@@ -525,8 +526,11 @@ pub(crate) async fn phases(
     // scan drives the join and the other premises become entity probes. The
     // contrast between this phase and `concept` is the block-count versus
     // round-trip tradeoff the merge-versus-fold decision weighs.
-    let filtered_client = site.mount("soak-filtered").await?;
-    filtered_client.pull().perform(operator).await?;
+    let (filtered_client, filtered_client_operator) = site.mount("soak-filtered").await?;
+    filtered_client
+        .pull()
+        .perform(&filtered_client_operator)
+        .await?;
     let closed = (0..scenario.entities)
         .filter(|index| index % 3 == 2)
         .count();
@@ -540,7 +544,7 @@ pub(crate) async fn phases(
             reporter: Term::var("reporter"),
             created: Term::var("created"),
         });
-        let cards: Vec<Card> = query.perform(operator).try_vec().await?;
+        let cards: Vec<Card> = query.perform(&filtered_client_operator).try_vec().await?;
         anyhow::ensure!(
             cards.len() == closed,
             "filtered join should see the closed cards"
@@ -553,8 +557,11 @@ pub(crate) async fn phases(
     // client. With the ambient queue the subscription's evaluation enqueues
     // and drives its own hints, so this phase gates bead dialog-db-82's
     // subscription parity.
-    let subscribe_client = site.mount("soak-subscribe").await?;
-    subscribe_client.pull().perform(operator).await?;
+    let (subscribe_client, subscribe_client_operator) = site.mount("soak-subscribe").await?;
+    subscribe_client
+        .pull()
+        .perform(&subscribe_client_operator)
+        .await?;
     measured("subscribe", phases, async {
         let mut subscription = subscribe_client.subscribe(Query::<Card> {
             this: Term::var("this"),
@@ -565,7 +572,7 @@ pub(crate) async fn phases(
             created: Term::var("created"),
         });
         let delta = subscription
-            .poll(operator)
+            .poll(&subscribe_client_operator)
             .await
             .map_err(|error| anyhow::anyhow!("first poll failed: {error}"))?;
         let added = delta.map(|delta| delta.asserted.len()).unwrap_or(0);
@@ -583,8 +590,11 @@ pub(crate) async fn phases(
     // queue are shared across evaluations, so the unique count reads as
     // the union of the two footprints and duplicates stay zero), and the
     // rounds read as overlapped work, not the sum of two sequential runs.
-    let overlap_client = site.mount("soak-overlap").await?;
-    overlap_client.pull().perform(operator).await?;
+    let (overlap_client, overlap_client_operator) = site.mount("soak-overlap").await?;
+    overlap_client
+        .pull()
+        .perform(&overlap_client_operator)
+        .await?;
     measured("overlap", phases, async {
         let board_layer = overlap_client.query();
         let board = board_layer.select(Query::<Card> {
@@ -603,8 +613,8 @@ pub(crate) async fn phases(
             rank: Term::var("rank"),
         });
         let (cards, rows): (Vec<Card>, Vec<Listing>) = futures_util::future::try_join(
-            board.perform(operator).try_vec(),
-            list.perform(operator).try_vec(),
+            board.perform(&overlap_client_operator).try_vec(),
+            list.perform(&overlap_client_operator).try_vec(),
         )
         .await?;
         anyhow::ensure!(
@@ -620,8 +630,8 @@ pub(crate) async fn phases(
     // scan), hydrate its body (source fetch), and run the body's join
     // cold. The general rule-join speculation of bead dialog-db-80 is
     // measured against this phase.
-    let rule_client = site.mount("soak-rule").await?;
-    rule_client.pull().perform(operator).await?;
+    let (rule_client, rule_client_operator) = site.mount("soak-rule").await?;
+    rule_client.pull().perform(&rule_client_operator).await?;
     let open = (0..scenario.entities)
         .filter(|index| index % 3 == 0)
         .count();
@@ -635,15 +645,23 @@ pub(crate) async fn phases(
             predicate: open_card_descriptor()?,
             terms,
         };
-        let rows: Vec<ConceptConclusion> = layer.select(query).perform(operator).try_vec().await?;
+        let rows: Vec<ConceptConclusion> = layer
+            .select(query)
+            .perform(&rule_client_operator)
+            .try_vec()
+            .await?;
         anyhow::ensure!(rows.len() == open, "the rule should derive every open card");
         Ok(())
     })
     .await?;
 
-    let downloader = site.mount("soak-download").await?;
+    let (downloader, downloader_operator) = site.mount("soak-download").await?;
     measured("download", phases, async {
-        downloader.pull().download().perform(operator).await?;
+        downloader
+            .pull()
+            .download()
+            .perform(&downloader_operator)
+            .await?;
         Ok(())
     })
     .await?;
@@ -657,7 +675,7 @@ pub(crate) async fn phases(
     // the shape whose integrate read the remote tree leaf by leaf while
     // its opening pass looked ahead a fixed number of changes: the
     // rounds here should track the tree's depth, never its leaf count.
-    let seeded = site.mount("soak-seeded").await?;
+    let (seeded, seeded_operator) = site.mount("soak-seeded").await?;
     let mut seed = Vec::new();
     for index in scenario.entities..scenario.entities + scenario.entities / 4 {
         seed.extend(entity_facts(index)?);
@@ -667,10 +685,10 @@ pub(crate) async fn phases(
         .integrate(seed.into_iter().collect())
         .commit()
         .publish()
-        .perform(operator)
+        .perform(&seeded_operator)
         .await?;
     measured("seeded", phases, async {
-        seeded.pull().perform(operator).await?;
+        seeded.pull().perform(&seeded_operator).await?;
         Ok(())
     })
     .await?;

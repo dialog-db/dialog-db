@@ -169,16 +169,16 @@
           [
             "archive.get",
             3,
-            129228
+            129996
           ],
           [
             "memory.resolve",
             1,
-            301
+            296
           ]
         ],
         "requests": 4,
-        "bytes": 129529
+        "bytes": 130292
       }
     },
     {
@@ -197,11 +197,11 @@
           [
             "archive.get",
             18,
-            1216880
+            1210096
           ]
         ],
         "requests": 18,
-        "bytes": 1216880
+        "bytes": 1210096
       }
     },
     {
@@ -220,26 +220,26 @@
           [
             "archive.get",
             2,
-            116968
+            112812
           ],
           [
             "memory.resolve",
             1,
-            300
+            299
           ]
         ],
         "requests": 3,
-        "bytes": 117268
+        "bytes": 113111
       }
     },
     {
       "name": "poll-100x10",
-      "virtual_ms": 83,
+      "virtual_ms": 82,
       "rounds": 0.0,
-      "round_trips": 83,
+      "round_trips": 82,
       "blob_requests": 0,
       "blob_bytes": 0,
-      "unique_blocks": 83,
+      "unique_blocks": 82,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
       "empty_requests": 0,
@@ -247,12 +247,12 @@
         "rows": [
           [
             "archive.get",
-            83,
-            5228928
+            82,
+            5252648
           ]
         ],
-        "requests": 83,
-        "bytes": 5228928
+        "requests": 82,
+        "bytes": 5252648
       }
     }
   ]
