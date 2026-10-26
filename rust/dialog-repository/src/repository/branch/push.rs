@@ -1,3 +1,4 @@
+use dialog_artifacts::history::Version;
 use dialog_artifacts::{
     Datum, Key as ArtifactKey, LoadBlob, ShipmentRef, State, shipment_ref, shipment_refs,
 };
@@ -26,7 +27,7 @@ use crate::repository::remote::Step;
 use crate::{
     Branch, ConnectedReplica, Index, LocalIndex, NetworkedIndex, PublishError,
     PublishRemoteBranchError, PushError, RemoteEdition, RemoteSite, RepositoryMemoryExt, Revision,
-    Upstream, UpstreamBranch,
+    TreeReference, Upstream, UpstreamBranch,
 };
 use futures_util::future::join_all;
 
@@ -216,37 +217,72 @@ impl Push<'_> {
 /// it moves the upstream forward. The upstream's tree matching the sync
 /// base does not settle it: a reset can leave our head behind a base the
 /// upstream has not moved from, and a push from there would rewind the
-/// upstream to it, dropping what only the base held. Our own tree, the
-/// memo, our edition when the upstream's head is of our origin, or one
-/// point read of our tree's region answer it; a head minted before heads
-/// carried a region is answered by its full context.
+/// upstream to it, dropping what only the base held.
+///
+/// Our head holds `theirs` when its context observes `theirs`, or when
+/// `theirs` is exactly the sync base recorded with `upstream` and our head
+/// observes the head that held the base when the sync recorded it (see
+/// `Bases::held`). The second is a head kept against a rival merge: it holds
+/// the rival's data without its revision, and pushing it over the rival,
+/// which nothing has built on, drops only the rival's own record.
+///
+/// Each answer is one entry of our context: our own tree, the memo, our
+/// edition when the version is of our origin, or one point read of our
+/// tree's region, through the store that serves our head's blocks (which
+/// can be a remote's, when the head was adopted by root and its region not
+/// read since). A head minted before heads carried a region is answered by
+/// its full context. The edition answer assumes our origin's revisions form
+/// one chain, which a reset to a head without our last mint followed by a
+/// commit breaks (#682): such a head can pass for holding an upstream head
+/// of our origin that it does not hold.
 async fn holds<Env: ResolveEnv>(
     branch: &Branch,
     head: &Revision,
     theirs: &Revision,
+    upstream: &Upstream,
+    base: Option<&TreeReference>,
     env: &Env,
 ) -> Result<bool, PushError> {
     if head.tree == theirs.tree {
         return Ok(true);
     }
-    let version = theirs.version();
-    let contexts = branch.contexts();
     let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
-    if let Some(seen) = head_observes(
-        head,
-        &version,
-        &contexts,
-        &branch.records(),
-        &store,
-        &branch.node_cache(),
-    )
-    .await?
-    {
-        return Ok(seen);
+    let observes = async |version: &Version| -> Result<bool, PushError> {
+        if let Some(seen) = head_observes(
+            head,
+            version,
+            &branch.contexts(),
+            &branch.records(),
+            &store,
+            &branch.node_cache(),
+        )
+        .await?
+        {
+            return Ok(seen);
+        }
+        let history = branch.history(env);
+        let context = full_context(
+            head,
+            &branch.contexts(),
+            &store,
+            &branch.node_cache(),
+            &history,
+        )
+        .await?;
+        Ok(context.observes(version))
+    };
+    if observes(&theirs.version()).await? {
+        return Ok(true);
     }
-    let history = branch.history(env);
-    let context = full_context(head, &contexts, &store, &branch.node_cache(), &history).await?;
-    Ok(context.observes(&version))
+    let settled = base.filter(|base| **base == theirs.tree).and_then(|base| {
+        branch
+            .based()
+            .held(&upstream.target(), base, &theirs.version())
+    });
+    match settled {
+        Some(held) => observes(&held).await,
+        None => Ok(false),
+    }
 }
 
 /// Push `branch` to one upstream, fast-forward only.
@@ -297,7 +333,17 @@ where
                 let theirs = target.revision();
                 let current = theirs.as_ref().map(|r| r.tree.clone());
                 let forward = match &theirs {
-                    Some(theirs) => holds(branch, &revision, theirs, env).await?,
+                    Some(theirs) => {
+                        holds(
+                            branch,
+                            &revision,
+                            theirs,
+                            &upstream_state,
+                            base.as_ref(),
+                            env,
+                        )
+                        .await?
+                    }
                     None => true,
                 };
                 if current != base || !forward {
@@ -355,7 +401,17 @@ where
                 // for a base the remote has moved past to our own head.
                 let landed = current.as_ref() == Some(&revision.tree);
                 let forward = match upstream.revision() {
-                    Some(theirs) if !landed => holds(branch, &revision, &theirs, env).await?,
+                    Some(theirs) if !landed => {
+                        holds(
+                            branch,
+                            &revision,
+                            &theirs,
+                            &upstream_state,
+                            base.as_ref(),
+                            env,
+                        )
+                        .await?
+                    }
                     _ => true,
                 };
                 if !landed && (current != base || !forward) {
@@ -649,9 +705,16 @@ where
         }
         publish?;
 
-        // The revision whose tree the new base is: the head pushed.
+        // The revision whose tree the new base is, the head pushed, which
+        // holds it.
         branch
-            .record_base::<_, PushError>(target, revision.tree.clone(), revision.version(), env)
+            .record_base::<_, PushError>(
+                target,
+                revision.tree.clone(),
+                revision.version(),
+                revision.version(),
+                env,
+            )
             .await?;
 
         Ok(Some(revision))

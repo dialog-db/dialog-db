@@ -107,10 +107,12 @@ macro_rules! rewrite_bases {
             Record::Stale => {
                 let mut bases = $branch.based();
                 for synced in $branch.tracked().synced {
+                    let elsewhere = Version::new(Origin::from([9; 32]), Edition::GENESIS);
                     bases.record(
                         synced.target,
                         TreeReference::from([9; 32]),
-                        Version::new(Origin::from([9; 32]), Edition::GENESIS),
+                        elsewhere,
+                        elsewhere,
                     );
                 }
                 Some(bases)
@@ -573,6 +575,69 @@ async fn it_keeps_a_replica_that_never_reset_whole_when_another_resets_and_pushe
     Ok(())
 }
 
+/// The greater rival can push onto the lesser once it has pulled it. The
+/// greater keeps its head against the lesser merge and records the lesser's
+/// tree as its base without holding that revision: the two merges hold the
+/// same data, and differ only by their own revision records. A push of the
+/// greater's head over the lesser's, which no head has built on, is the
+/// settlement the lesser reaches by pulling, and drops only the lesser
+/// merge's own record, which nothing names. The push guard accepts it: the
+/// base is the upstream's head, and our head holds the head that held the
+/// base when the pull recorded it.
+#[dialog_common::test]
+async fn it_lets_the_greater_rival_push_onto_the_lesser_after_a_pull() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    profile.space(name.clone()).open().perform(&writer).await?;
+    let envs = [
+        session!(profile, b"one"),
+        session!(profile, b"two"),
+        session!(profile, b"three"),
+    ];
+    let lines = [
+        line!(profile, name, &envs[0], "one"),
+        line!(profile, name, &envs[1], "two"),
+        line!(profile, name, &envs[2], "three"),
+    ];
+    let mut by_origin: Vec<(Origin, usize)> = Vec::new();
+    for at in 0..3 {
+        by_origin.push((origin!(lines[at], &envs[at]), at));
+    }
+    by_origin.sort();
+    let (committer, lesser, greater) = (by_origin[0].1, by_origin[1].1, by_origin[2].1);
+    let (c, b, k) = (&lines[committer], &lines[lesser], &lines[greater]);
+    let (ce, be, ke) = (&envs[committer], &envs[lesser], &envs[greater]);
+    commit!(c, ce, "post:a");
+    commit!(k, ke, "post:b");
+    b.pull().from(c).perform(be).await?;
+    b.pull().from(k).perform(be).await?;
+    k.pull().from(c).perform(ke).await?;
+    let keeper_merge = k.revision().expect("the greater merge");
+    k.pull().from(b).perform(ke).await?;
+    assert_eq!(
+        k.revision().as_ref(),
+        Some(&keeper_merge),
+        "the greater keeps its head"
+    );
+    k.push().to(b).perform(ke).await?;
+    let b = line!(profile, name, be, NAMES[lesser]);
+    assert_eq!(
+        b.revision().as_ref(),
+        Some(&keeper_merge),
+        "the lesser now holds the greater merge"
+    );
+    assert_eq!(walkable!(b, be), Ok(()), "the lesser's history is whole");
+    let expected: BTreeSet<String> = ["post:a", "post:b"]
+        .iter()
+        .map(|of| {
+            of.parse::<dialog_artifacts::Entity>()
+                .map(|of| of.to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    assert_eq!(titles!(b, be), expected, "the lesser holds every fact");
+    Ok(())
+}
+
 /// A merge from no base keeps a retraction: a fact the upstream retracted
 /// stays retracted in a line that still holds the assertion. The line
 /// resets behind its base to a head holding the fact and commits on top,
@@ -683,7 +748,9 @@ async fn it_does_not_push_a_head_a_reset_left_behind_the_base() -> Result<()> {
 /// - a push either lands, and the upstream then holds the pusher's head, or
 ///   is refused as a non-fast-forward and leaves the upstream as it was; a
 ///   push that lands never drops a claim the upstream held that the
-///   pusher's history had not retired, which a rewind would.
+///   pusher's history had not retired, which a rewind would;
+/// - no writer stays refused: after a refused push the writer pulls its
+///   target, and its next push lands.
 ///
 /// A reset moves a writer to a head it has held, or to the other writer's
 /// current head, but only to one that holds the revision the writer last
@@ -749,6 +816,8 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
             let op = next(11);
             let what = format!("seed {seed} step {step} writer {at} op {op}");
             let mut pullers = Vec::new();
+            // A refused push to retry once the pusher has pulled its target.
+            let mut retry = None;
             // A write: the instruction, and the claim it must leave live,
             // if any.
             let write = match op {
@@ -901,6 +970,8 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                                 "{what}: a refused push leaves {other} as it was"
                             );
                             seen.refused += 1;
+                            pullers.push((at, other));
+                            retry = Some((at, other));
                         }
                         Err(error) => panic!("{what}: push from {at} to {other} failed: {error}"),
                     }
@@ -950,6 +1021,28 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                     held[to].push(after);
                 }
             }
+            // No writer stays refused: once it has pulled its target, and
+            // the target has not moved since, its push lands.
+            if let Some((at, other)) = retry {
+                let pushed = lines[at].push().to(&lines[other]).perform(&envs[at]).await;
+                assert!(
+                    pushed.is_ok(),
+                    "{what}: after pulling {other}, writer {at}'s push lands: {pushed:?}"
+                );
+                lines[other] = line!(profile, name, &envs[other], NAMES[other]);
+                let (ours, theirs) = (lines[at].revision(), lines[other].revision());
+                assert_eq!(
+                    theirs.as_ref().map(|head| &head.tree),
+                    ours.as_ref().map(|head| &head.tree),
+                    "{what}: after pulling {other}, writer {at}'s push lands its head"
+                );
+                if let Some(theirs) = theirs
+                    && !held[other].contains(&theirs)
+                {
+                    held[other].push(theirs);
+                }
+                seen.recovered += 1;
+            }
             if let Some(head) = lines[at].revision() {
                 assert_eq!(
                     walkable!(lines[at], &envs[at]),
@@ -978,7 +1071,8 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
             && seen.reasserts > 0
             && seen.conflicting > 0
             && seen.pushes > 0
-            && seen.refused > 0,
+            && seen.refused > 0
+            && seen.recovered > 0,
         "every kind of step ran: {seen:?}"
     );
     Ok(())
@@ -1010,6 +1104,7 @@ struct Census {
     refused: usize,
     idle: usize,
     reasserts: usize,
+    recovered: usize,
 }
 
 /// A claim as the interleaving test models it: attribute, entity, value.

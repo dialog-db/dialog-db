@@ -1680,10 +1680,17 @@ impl PreparedPull<'_> {
         }
         publish?;
 
-        // The revision whose tree the new base is: the upstream head merged.
+        // The revision whose tree the new base is, the upstream head merged,
+        // and the head that holds it now.
         if let Some(tree) = sync.tree().cloned() {
             branch
-                .record_base::<_, PullError>(target, tree, merges.version(), env)
+                .record_base::<_, PullError>(
+                    target,
+                    tree,
+                    merges.version(),
+                    new_revision.version(),
+                    env,
+                )
                 .await?;
         }
 

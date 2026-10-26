@@ -467,12 +467,14 @@ pub(crate) struct Bases {
     bases: Vec<Base>,
 }
 
-/// One upstream's sync base, and the revision whose tree it is.
+/// One upstream's sync base, the revision whose tree it is, and the head
+/// that held it when the sync recorded it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Base {
     target: Target,
     tree: TreeReference,
     version: Version,
+    held: Version,
 }
 
 impl Bases {
@@ -485,17 +487,47 @@ impl Bases {
             .map(|base| base.version)
     }
 
-    /// Record that `target`'s sync base is `tree`, the tree of `version`.
-    pub(crate) fn record(&mut self, target: Target, tree: TreeReference, version: Version) {
+    /// The head that held `target`'s sync base when the sync recorded it,
+    /// if the record is of `tree` and of the revision `version`.
+    ///
+    /// Our head after a sync holds the base: it is the base's revision, or
+    /// observes it, except for a head kept against a rival merge, which
+    /// holds the rival's data without its revision. Only a push uses this,
+    /// to move such a head onto the rival's when the rival has not moved;
+    /// a merge must not, since it would take the rival's own record as
+    /// already in our head.
+    pub(crate) fn held(
+        &self,
+        target: &Target,
+        tree: &TreeReference,
+        version: &Version,
+    ) -> Option<Version> {
+        self.bases
+            .iter()
+            .find(|base| base.target == *target && base.tree == *tree && base.version == *version)
+            .map(|base| base.held)
+    }
+
+    /// Record that `target`'s sync base is `tree`, the tree of `version`,
+    /// held by our head `held`.
+    pub(crate) fn record(
+        &mut self,
+        target: Target,
+        tree: TreeReference,
+        version: Version,
+        held: Version,
+    ) {
         match self.bases.iter_mut().find(|base| base.target == target) {
             Some(base) => {
                 base.tree = tree;
                 base.version = version;
+                base.held = held;
             }
             None => self.bases.push(Base {
                 target,
                 tree,
                 version,
+                held,
             }),
         }
     }
@@ -503,7 +535,7 @@ impl Bases {
 
 impl Branch {
     /// Record that `target`'s sync base is `tree`, the tree of `version`,
-    /// once the tracking cell records that tree. Written after the tracking
+    /// held by our head `held`, once the tracking cell records that tree. Written after the tracking
     /// cell and not atomically with it: a crash between the two, or an older
     /// release moving the tracking cell, leaves this record naming another
     /// tree, which reads as an unknown revision, and a pull then merges from
@@ -515,6 +547,7 @@ impl Branch {
         target: Target,
         tree: TreeReference,
         version: Version,
+        held: Version,
         env: &Env,
     ) -> Result<(), E>
     where
@@ -527,7 +560,7 @@ impl Branch {
             }
             let marker = self.bases.checkpoint();
             let mut bases = self.based();
-            bases.record(target.clone(), tree.clone(), version);
+            bases.record(target.clone(), tree.clone(), version, held);
             match marker.publish(bases, env).await {
                 Ok(_) => return Ok(()),
                 Err(PublishError::VersionMismatch { .. }) => {
@@ -590,18 +623,28 @@ mod tests {
         let one = Version::new(Origin::from([7; 32]), Edition::GENESIS);
         let two = Version::new(Origin::from([8; 32]), Edition::GENESIS);
         let mut bases = Bases::default();
-        bases.record(main.clone(), TreeReference::from([1; 32]), one);
+        bases.record(main.clone(), TreeReference::from([1; 32]), one, one);
         assert_eq!(
             bases.version(&main, &TreeReference::from([1; 32])),
             Some(one)
         );
         assert_eq!(bases.version(&main, &TreeReference::from([2; 32])), None);
         assert_eq!(bases.version(&develop, &TreeReference::from([1; 32])), None);
-        bases.record(main.clone(), TreeReference::from([2; 32]), two);
+        bases.record(main.clone(), TreeReference::from([2; 32]), two, one);
         assert_eq!(bases.version(&main, &TreeReference::from([1; 32])), None);
         assert_eq!(
             bases.version(&main, &TreeReference::from([2; 32])),
             Some(two)
+        );
+        assert_eq!(
+            bases.held(&main, &TreeReference::from([2; 32]), &two),
+            Some(one),
+            "the head that held it"
+        );
+        assert_eq!(
+            bases.held(&main, &TreeReference::from([2; 32]), &one),
+            None,
+            "only for the revision recorded"
         );
     }
 }
