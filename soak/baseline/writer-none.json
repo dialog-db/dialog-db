@@ -54,7 +54,7 @@
           [
             "archive.put",
             1,
-            73520
+            73944
           ],
           [
             "memory.resolve",
@@ -64,11 +64,11 @@
           [
             "memory.publish",
             1,
-            297
+            299
           ]
         ],
         "requests": 3,
-        "bytes": 74117
+        "bytes": 74543
       }
     },
     {
@@ -104,31 +104,31 @@
           [
             "archive.put",
             1,
-            93584
+            93144
           ],
           [
             "memory.resolve",
             1,
-            297
+            299
           ],
           [
             "memory.publish",
             1,
-            300
+            302
           ]
         ],
         "requests": 3,
-        "bytes": 94181
+        "bytes": 93745
       }
     },
     {
       "name": "commit-2000",
-      "virtual_ms": 42,
+      "virtual_ms": 43,
       "rounds": 0.0,
-      "round_trips": 42,
+      "round_trips": 43,
       "blob_requests": 0,
       "blob_bytes": 0,
-      "unique_blocks": 42,
+      "unique_blocks": 43,
       "duplicate_requests": 0,
       "duplicate_bytes": 0,
       "empty_requests": 0,
@@ -136,19 +136,19 @@
         "rows": [
           [
             "archive.get",
-            42,
-            2875192
+            43,
+            2908712
           ]
         ],
-        "requests": 42,
-        "bytes": 2875192
+        "requests": 43,
+        "bytes": 2908712
       }
     },
     {
       "name": "push-2000",
-      "virtual_ms": 7,
+      "virtual_ms": 8,
       "rounds": 0.0,
-      "round_trips": 7,
+      "round_trips": 8,
       "blob_requests": 0,
       "blob_bytes": 0,
       "unique_blocks": 0,
@@ -159,13 +159,13 @@
         "rows": [
           [
             "archive.put",
-            65,
-            4062232
+            70,
+            4236772
           ],
           [
             "memory.resolve",
             1,
-            300
+            302
           ],
           [
             "memory.publish",
@@ -173,8 +173,8 @@
             298
           ]
         ],
-        "requests": 67,
-        "bytes": 4062830
+        "requests": 72,
+        "bytes": 4237372
       }
     }
   ]

@@ -160,16 +160,15 @@ impl FromStr for Seeding {
     }
 }
 
-/// The operator every replica of a run performs through.
+/// The operator a replica of a run performs through: the server's, or a
+/// client's own (see [`Site::mount`]).
 pub(crate) type Operator = Peer<VolatileSpace, dialog_peer::Session>;
 
 /// A seeded site: the server replica, the vault it pushed the space to,
 /// and what a client needs to mount it.
 pub(crate) struct Site {
-    /// The session every replica performs through.
+    /// The server's session.
     pub operator: Operator,
-    /// The profile the replicas are spaces of.
-    pub profile: Peer<VolatileSpace>,
     /// The server replica whose space the clients replicate.
     pub server: Repository<SignerCredential>,
     /// The server's `main`, tracking `origin/main`: the upstream writer.
@@ -190,6 +189,11 @@ pub(crate) struct Site {
     pub vault_bytes: u64,
     /// The run's own vault directory, removed when the run ends.
     pub run_dir: PathBuf,
+    /// The server's delegation to the profile, which each client's
+    /// operator saves so it may reach the server's repository.
+    pub chain: dialog_ucan::UcanDelegation,
+    /// Whether the run is unshaped, so every operator speculates nothing.
+    pub unshaped: bool,
 }
 
 impl Site {
@@ -202,13 +206,10 @@ impl Site {
         let seed = Seed::new(scenario.seed);
         let (operator, profile) = seed.session_with_peer().await;
         // Speculative preloading is ambient (the operator's queue, hints
-        // default-on). The unshaped profile turns it off: its job is to
-        // pin the engine's deterministic demand shape, and replication
-        // overlap is a latency behavior only the shaped profiles measure.
-        if scenario.network.is_none() {
-            use dialog_capability::Provider;
-            let queue = Provider::<dialog_artifacts::Speculation>::execute(&operator, ()).await;
-            queue.set_budget(dialog_artifacts::FetchBudget::ZERO);
+        // default-on); the unshaped profile turns it off on every operator.
+        let unshaped = scenario.network.is_none();
+        if unshaped {
+            speculate_nothing(&operator).await;
         }
         let server = profile
             .space(seed.name("soak-server"))
@@ -222,7 +223,11 @@ impl Site {
             .delegate(profile.did())
             .perform(&operator)
             .await?;
-        profile.access().save(chain).perform(&operator).await?;
+        profile
+            .access()
+            .save(chain.clone())
+            .perform(&operator)
+            .await?;
 
         // The vault's directory is the one name not derived from the seed:
         // runs of one seed share a temp directory, and the path reaches
@@ -313,7 +318,6 @@ impl Site {
 
         Ok(Site {
             operator,
-            profile,
             server,
             branch,
             vault,
@@ -324,23 +328,49 @@ impl Site {
             vault_files,
             vault_bytes,
             run_dir,
+            chain,
+            unshaped,
         })
     }
 
     /// Mount a fresh client replica of the site under `name`: its `main`
     /// tracks `origin/main`, with nothing pulled yet.
-    pub async fn mount(&self, name: &str) -> Result<Branch> {
-        mount_client(
-            &self.operator,
-            &self.profile,
+    ///
+    /// The client gets an operator of its own, opened over fresh storage
+    /// from the same profile key, so it shares no environment, cache or
+    /// speculation queue with the server or with another client: what it
+    /// knows of the space it fetched, as a replica on another device would.
+    pub async fn mount(&self, name: &str) -> Result<(Branch, Operator)> {
+        let (operator, profile) = self.seed.session_with_peer().await;
+        profile
+            .access()
+            .save(self.chain.clone())
+            .perform(&operator)
+            .await?;
+        if self.unshaped {
+            speculate_nothing(&operator).await;
+        }
+        let branch = mount_client(
+            &operator,
+            &profile,
             &self.server,
             &self.vault,
             &self.address,
             &self.seed,
             name,
         )
-        .await
+        .await?;
+        Ok((branch, operator))
     }
+}
+
+/// Turn speculative preloading off for `operator`. The unshaped profile's
+/// job is to pin the engine's deterministic demand shape, and replication
+/// overlap is a latency behavior only the shaped profiles measure.
+async fn speculate_nothing(operator: &Operator) {
+    use dialog_capability::Provider;
+    let queue = Provider::<dialog_artifacts::Speculation>::execute(operator, ()).await;
+    queue.set_budget(dialog_artifacts::FetchBudget::ZERO);
 }
 
 /// Files and bytes under `dir`, recursively.
