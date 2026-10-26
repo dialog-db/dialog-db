@@ -1805,7 +1805,8 @@ async fn it_does_not_rewind_a_remote_with_a_head_a_reset_left_behind(s3: S3Addre
         Some(&c),
         "alice fast-forwards to C"
     );
-    alice.reset(b).perform(&operator).await?;
+    // Back to B, as a release before #682 still can (`perform_unchecked`).
+    alice.reset(b).perform_unchecked(&operator).await?;
     let tracked = alice.tracked();
     let pushed = alice.push().perform(&operator).await;
     assert!(
@@ -1878,7 +1879,10 @@ async fn it_refuses_a_push_it_cannot_confirm_while_the_remote_is_unreachable(
     staging.reset(s.clone()).perform(&operator).await?;
     bob.pull().from(&staging).perform(&operator).await?;
     assert_eq!(bob.revision().as_ref(), Some(&s), "bob adopts S by root");
-    bob.reset(h.clone()).perform(&operator).await?;
+    // Forward to H without reading it, as a release before #682 resets
+    // (`perform_unchecked`): this release's reset reads H's region to check
+    // that H holds S, which would leave nothing for the push to read.
+    bob.reset(h.clone()).perform_unchecked(&operator).await?;
 
     let credential = |secret: String| {
         let (profile, s3) = (&profile, &s3);
@@ -4704,7 +4708,13 @@ async fn it_never_waits_on_its_own_fetch_when_the_access_head_ran_ahead_of_the_a
 
     // The head runs ahead of the archive: the account's revision, none
     // of its nodes. Every proof from here has to fetch to read.
-    device_branch.reset(head).perform(&device_operator).await?;
+    // Planted with `perform_unchecked`: the device's own access head is
+    // not in the account's, and the point here is a head whose nodes the
+    // archive lacks, not how it got there.
+    device_branch
+        .reset(head)
+        .perform_unchecked(&device_operator)
+        .await?;
 
     let outcome = timeout(
         Duration::from_secs(30),
