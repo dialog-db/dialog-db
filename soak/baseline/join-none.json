@@ -11,7 +11,7 @@
   "facts": 24011,
   "commits": 33,
   "vault_files": 384,
-  "vault_bytes": 19298212,
+  "vault_bytes": 19298220,
   "seed": 6840353898566254593,
   "seeded_root": "5f184d281a3c2cb87a0a8baf3026297f78ddb5f80e62e1f17508579be207fb8d",
   "phases": [
@@ -31,11 +31,11 @@
           [
             "memory.resolve",
             1,
-            292
+            300
           ]
         ],
         "requests": 1,
-        "bytes": 292
+        "bytes": 300
       }
     },
     {
@@ -104,16 +104,16 @@
           [
             "memory.resolve",
             1,
-            292
+            300
           ],
           [
             "memory.publish",
             1,
-            291
+            298
           ]
         ],
         "requests": 5,
-        "bytes": 93271
+        "bytes": 93286
       }
     },
     {
@@ -315,11 +315,11 @@
           [
             "memory.resolve",
             1,
-            291
+            298
           ]
         ],
         "requests": 383,
-        "bytes": 19302379
+        "bytes": 19302386
       }
     },
     {
@@ -343,11 +343,11 @@
           [
             "memory.resolve",
             1,
-            291
+            298
           ]
         ],
         "requests": 63,
-        "bytes": 3717291
+        "bytes": 3717298
       }
     }
   ]

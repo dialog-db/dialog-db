@@ -46,6 +46,13 @@ pub struct Spec {
     /// binary by more than the gate allows, so the gate holds it to its
     /// counters alone. Each such scenario says why in the catalog.
     pub volatile: bool,
+    /// Instruction growth, in percent, allowed on top of the tolerance
+    /// when this scenario is compared against a sweep that ran on a
+    /// different CPU model or feature set: the spread across CPU models
+    /// past the spread within one, from eight identical CI sweeps (#653).
+    /// Runtime CPU dispatch makes the difference; zero where it is under
+    /// 0.2%. Rough: five runs on one model and one on each of three others.
+    pub cross_cpu_pct: f64,
     prepare: Prepare,
 }
 
@@ -64,6 +71,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 1000,
             about: "one transaction asserting two facts per entity under `all`, committed and published",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(commit::batch(size)),
         },
         Spec {
@@ -71,6 +79,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 100,
             about: "one commit per entity: the per-commit cost of records, signing and publication",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(commit::rows(size)),
         },
         Spec {
@@ -78,17 +87,21 @@ pub fn catalog() -> Vec<Spec> {
             size: 100,
             about: "one commit per entity, each also re-asserting one standing fact: the per-commit cost of a key every commit rewrites",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(commit::hot_key(size)),
         },
         Spec {
             name: "commit-succeed",
             size: 500,
             about: "one transaction rewriting every entity's name under `last`: each write elects and retracts a standing claim",
-            // Like `transaction-reads`, its commit's tree write varies
-            // between runs of one binary (1.60 G to 1.85 G instructions,
-            // every counter equal), in the delete path's forced merges,
-            // on the PR head as on this branch. Gated on counters.
+            // Its commit's tree write varies between runs of one binary
+            // (1.60 G to 1.85 G instructions, every counter equal), in
+            // the delete path's forced merges. Ten runs on one machine
+            // spread 8% to 12% with identities seeded or not, and with
+            // std's hash keys fixed: not identities, not hash order.
+            // Gated on counters.
             volatile: true,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(commit::succeed(size)),
         },
         Spec {
@@ -96,19 +109,18 @@ pub fn catalog() -> Vec<Spec> {
             size: 200,
             about: "one transaction writing under `last` to a relation a rule also derives: the commit settles each cell through the rule",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(commit::derived(size)),
         },
         Spec {
             name: "transaction-reads",
             size: 300,
             about: "a transaction that reads the cell it just wrote, for every entity, then commits: the library-install shape",
-            // The commit's tree write splits nodes in some runs and not
-            // others (263 M to 394 M instructions across runs of one
-            // binary, every counter equal): four of its blocks come out
-            // eight bytes shorter in some runs, and the seal writes the
-            // delta's blocks in hash order. Gated on counters until the
-            // varying bytes are found.
-            volatile: true,
+            // Once volatile (263 M to 394 M instructions across runs of
+            // one binary). Ten runs of one binary now hold within 0.3%,
+            // every counter equal, so its instructions are gated again.
+            volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(transaction::reads(size)),
         },
         Spec {
@@ -116,6 +128,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 200,
             about: "one point read on a replica that adopted, by root, a head `size` one-commit origins deep: the first query of a device that faults blocks in",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(replica::first_query(size)),
         },
         Spec {
@@ -123,6 +136,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "two hundred single-entity reads of one attribute over a seeded branch",
             volatile: false,
+            cross_cpu_pct: 0.9,
             prepare: |size| Box::pin(read::point(size)),
         },
         Spec {
@@ -130,6 +144,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "one concept read over a single attribute, every entity",
             volatile: false,
+            cross_cpu_pct: 0.2,
             prepare: |size| Box::pin(read::scan(size)),
         },
         Spec {
@@ -137,6 +152,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "one two-attribute concept read: the planner's join",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(read::join(size)),
         },
         Spec {
@@ -144,6 +160,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "one read of a concept a committed rule derives from two stored attributes, every entity",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(rule::scan(size)),
         },
         Spec {
@@ -151,6 +168,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "two hundred single-entity reads of a concept a committed rule derives",
             volatile: false,
+            cross_cpu_pct: 2.4,
             prepare: |size| Box::pin(rule::point(size)),
         },
         Spec {
@@ -158,6 +176,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 20,
             about: "one read of a transitive closure over `size` chains of depth 25, derived by a base and a recursive rule",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(rule::recursive(size)),
         },
         Spec {
@@ -165,18 +184,18 @@ pub fn catalog() -> Vec<Spec> {
             size: 1000,
             about: "one read of a ranked field four rules each state a case for, elected best first, every entity",
             volatile: false,
+            cross_cpu_pct: 0.5,
             prepare: |size| Box::pin(rule::ranked(size)),
         },
         Spec {
             name: "rule-install",
             size: 100,
             about: "one transaction committing `size` rules, then the first read of the last one: discovery and hydration cold",
-            // Its commit's tree write varies between runs of one binary
-            // (221 M to 232 M instructions on main, 225 M to 234 M on the
-            // pick-entity head, every counter equal, with or without
-            // ASLR), all of it in vector growth in the reshape path.
-            // Gated on counters.
-            volatile: true,
+            // Once volatile (221 M to 234 M instructions across runs of
+            // one binary). Ten runs of one binary now hold within 0.4%,
+            // every counter equal, so its instructions are gated again.
+            volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(rule::install(size)),
         },
         Spec {
@@ -184,6 +203,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "two hundred single-entity reads of a concept a rule derives, each read carrying the rule in its own overlay",
             volatile: false,
+            cross_cpu_pct: 0.3,
             prepare: |size| Box::pin(rule::overlay(size)),
         },
         Spec {
@@ -191,6 +211,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "two hundred rounds of a session-overlay fact that is no rule, then a single-entity read of a concept a committed rule derives",
             volatile: false,
+            cross_cpu_pct: 0.3,
             prepare: |size| Box::pin(rule::session(size)),
         },
         Spec {
@@ -198,6 +219,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 500,
             about: "one transaction asserting a fact per entity that a chain of three inductive rules relays: a round of induction per link",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(commit::dispatch(size)),
         },
         Spec {
@@ -205,6 +227,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 1000,
             about: "one transaction asserting a timestamp, a price, a count and a size per item: how numbers key",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(number::commit(size)),
         },
         Spec {
@@ -212,6 +235,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "two hundred single-item reads of a float price",
             volatile: false,
+            cross_cpu_pct: 0.4,
             prepare: |size| Box::pin(number::point(size)),
         },
         Spec {
@@ -219,6 +243,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "one read of every item's float price: a number decoded per row",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(number::scan(size)),
         },
         Spec {
@@ -226,6 +251,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "twenty reads of the ten items in a window of integer timestamps, the window pushed into the scan",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(number::narrow(size)),
         },
         Spec {
@@ -233,6 +259,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "one read of every item priced at 500 or more, about half, the bound pushed into the scan",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(number::wide(size)),
         },
         Spec {
@@ -240,6 +267,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 2000,
             about: "one read of the tenth of items with the largest size, a relation holding naturals, integers and floats",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(number::mixed(size)),
         },
         Spec {
@@ -247,6 +275,7 @@ pub fn catalog() -> Vec<Spec> {
             size: 1000,
             about: "a commit that moves ten entities to a better-ranked case, then the subscription's poll",
             volatile: false,
+            cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(subscribe::repoll(size)),
         },
     ]

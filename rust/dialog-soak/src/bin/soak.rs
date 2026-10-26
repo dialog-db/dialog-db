@@ -12,6 +12,8 @@
 //! soak run --scenario writer         # another scenario
 //! soak sweep --out-dir target/soak   # scenarios x profiles x repeats, median reports
 //! soak compare soak/baseline target/soak   # regression gate
+//! soak compare --base target/soak-base target/soak \
+//!     --markdown target/soak-delta.md      # against the commit landed on
 //! ```
 //!
 //! Every identity a run mints derives from one seed, `DIALOG_SOAK_SEED`
@@ -34,7 +36,7 @@ use std::time::Duration;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use dialog_remote_fs::simulation::NetworkShape;
-use dialog_soak::{Kind, Scenario, Seeding, SweepConfig, compare_dirs, run, sweep};
+use dialog_soak::{Against, Kind, Scenario, Seeding, SweepConfig, compare_dirs, run, sweep};
 
 /// Sync/join soak harness over a simulated network.
 #[derive(Debug, Parser)]
@@ -163,6 +165,29 @@ struct CompareArgs {
     /// Percent growth in a total that counts as a regression.
     #[arg(long, default_value_t = 10.0)]
     threshold: f64,
+
+    /// The first directory is another commit's sweep, not the baseline
+    /// files: reports on one side only, or seeded differently, are
+    /// reported rather than skipped or failed.
+    #[arg(long)]
+    base: bool,
+
+    /// With `--base`, reports (file stems, `join-none`) whose baseline
+    /// file the change re-records (comma-separated): their growth is
+    /// reported as accepted.
+    #[arg(long, value_delimiter = ',', requires = "base")]
+    rebaselined: Vec<String>,
+
+    /// Also write every row as a Markdown table to this file.
+    #[arg(long)]
+    markdown: Option<PathBuf>,
+
+    /// Report regressions without failing. The base comparison runs with
+    /// this until the harness's identities are deterministic (#652): one
+    /// run against one run with random identities moves the join's
+    /// request counts past the threshold about one time in ten.
+    #[arg(long)]
+    report_only: bool,
 }
 
 /// A named preset link model.
@@ -256,24 +281,64 @@ fn main() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Compare(args) => {
-            let comparison = compare_dirs(&args.baseline, &args.new, args.threshold)?;
+            let against = if args.base {
+                Against::Sweep {
+                    rebaselined: args.rebaselined.into_iter().collect(),
+                }
+            } else {
+                Against::Baseline
+            };
+            let comparison = compare_dirs(&args.baseline, &args.new, args.threshold, &against)?;
+            if let Some(path) = &args.markdown {
+                let mut markdown = comparison.markdown();
+                if args.report_only {
+                    markdown.insert_str(
+                        0,
+                        "Report only: rows past tolerance here do not fail the gate until the \
+                         soak harness's identities are deterministic (#652), since one run \
+                         against one run with random identities crosses the threshold about \
+                         one time in ten.\n\n",
+                    );
+                }
+                std::fs::write(path, markdown)?;
+            }
             for line in &comparison.summary {
                 println!("{line}");
             }
-            if comparison.passed() {
-                println!("\nno regressions");
-                Ok(ExitCode::SUCCESS)
-            } else {
+            for line in &comparison.notes {
+                println!("{line}");
+            }
+            if !comparison.accepted.is_empty() {
                 println!(
-                    "\n{} regression(s) over {:.0}% threshold:",
-                    comparison.regressions.len(),
-                    args.threshold
+                    "\n{} growth(s) past the threshold in re-baselined reports, accepted:",
+                    comparison.accepted.len()
                 );
-                for line in &comparison.regressions {
+                for line in &comparison.accepted {
                     println!("  {line}");
                 }
-                Ok(ExitCode::FAILURE)
             }
+            if comparison.passed() {
+                println!("\nno regressions");
+                return Ok(ExitCode::SUCCESS);
+            }
+            println!(
+                "\n{} regression(s) over {:.0}% threshold{}:",
+                comparison.regressions.len(),
+                args.threshold,
+                if args.report_only {
+                    " (report only, not failing)"
+                } else {
+                    ""
+                }
+            );
+            for line in &comparison.regressions {
+                println!("  {line}");
+            }
+            Ok(if args.report_only {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
         }
     }
 }

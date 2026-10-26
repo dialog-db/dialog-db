@@ -48,7 +48,7 @@ pub mod scenario;
 pub mod sweep;
 pub mod writer;
 
-pub use compare::{Comparison, compare_dirs};
+pub use compare::{Against, Comparison, Row, Verdict, compare_dirs};
 pub use report::{PhaseReport, Report, TallyRows};
 pub use scenario::{DEFAULT_SEED, Kind, SEED_VARIABLE, Scenario, Seeding, run};
 pub use sweep::{SweepConfig, sweep};

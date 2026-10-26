@@ -3,6 +3,19 @@
 //! This crate constitutes a library of light weight helpers that are shared
 //! across multiple other crates. Their chief quality is that they have
 //! virtually zero dependencies.
+#![cfg_attr(
+    not(feature = "helpers"),
+    doc = r#"
+
+Its test helpers (the `helpers` module, the `test` and `provider` macros)
+exist only with the `helpers` feature, which a production build never
+turns on. Without it they are not there:
+
+```compile_fail
+use dialog_common::helpers::Service;
+```
+"#
+)]
 
 // Allow the crate to refer to itself as `dialog_common`
 extern crate self as dialog_common;

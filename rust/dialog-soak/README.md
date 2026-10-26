@@ -129,7 +129,13 @@ checked-in baseline under `soak/baseline` with random seeds, so variance
 is still exercised there. The pull-request workflow's `Replication gate`
 job (`soak:gate`) runs the `none` profile alone, under the fixed seed,
 against the same baseline, so a change to the protocol's shape is caught
-before it lands; the shaped profiles stay nightly.
+before it lands; the shaped profiles stay nightly. On a pull request it
+also compares against the sweep main's CI recorded for the commit the
+pull request lands on (`compare --base`), and the `Delta report` comment
+shows every phase's rows against that base, as for the perf gate (see
+`rust/dialog-perf/README.md`). Both sweeps run under the fixed seed, so
+that comparison gates as exactly as the baseline one; a report run over
+another seed than the base's is shown, not gated.
 
 To replay a nightly run, take the `seed` from its report:
 
