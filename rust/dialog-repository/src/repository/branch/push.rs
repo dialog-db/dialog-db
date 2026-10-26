@@ -238,9 +238,9 @@ impl Push<'_> {
 /// can be a remote's, when the head was adopted by root and its region not
 /// read since). When that remote cannot be read, as offline, the push fails
 /// with [`PushError::Unreachable`] saying it could not confirm our head
-/// holds the upstream's, and writes nothing; a read that succeeds is kept
-/// locally, so after it, or after any pull that read the region, the same
-/// push answers offline. A head minted before heads carried a region is
+/// holds the upstream's, and writes nothing. Once the remote answers, the
+/// same push reads the entry and lands; the read is kept locally, so a
+/// later check of the same entry answers offline. A head minted before heads carried a region is
 /// answered by its full context. The edition answer assumes our origin's revisions form
 /// one chain, which a reset to a head without our last mint followed by a
 /// commit breaks (#682): such a head can pass for holding an upstream head
@@ -260,8 +260,7 @@ async fn holds<Env: ResolveEnv>(
     // The remote that serves what our head holds by reference, if any:
     // when a read through it fails, the push could not tell whether our
     // head holds the upstream's, and says so rather than passing on the
-    // read's error. A read served once is written back locally, so after
-    // it the same check answers offline.
+    // read's error. A read served once is written back locally.
     let serving = match &fallback {
         RemoteFallback::Remote(remote) => Some(remote.name()),
         RemoteFallback::Unavailable { remote, .. } => Some(remote.clone()),
@@ -370,20 +369,22 @@ where
 
                 let theirs = target.revision();
                 let current = theirs.as_ref().map(|r| r.tree.clone());
-                let forward = match &theirs {
-                    Some(theirs) => {
-                        holds(
-                            branch,
-                            &revision,
-                            theirs,
-                            &upstream_state,
-                            base.as_ref(),
-                            env,
-                        )
-                        .await?
-                    }
-                    None => true,
-                };
+                // The tree check first: a push it refuses reads nothing.
+                let forward = current == base
+                    && match &theirs {
+                        Some(theirs) => {
+                            holds(
+                                branch,
+                                &revision,
+                                theirs,
+                                &upstream_state,
+                                base.as_ref(),
+                                env,
+                            )
+                            .await?
+                        }
+                        None => true,
+                    };
                 if current != base || !forward {
                     return Err(PushError::NonFastForward {
                         branch: branch.name().to_string(),
@@ -438,20 +439,22 @@ where
                 // push fast-forwards from here rather than being refused
                 // for a base the remote has moved past to our own head.
                 let landed = current.as_ref() == Some(&revision.tree);
-                let forward = match upstream.revision() {
-                    Some(theirs) if !landed => {
-                        holds(
-                            branch,
-                            &revision,
-                            &theirs,
-                            &upstream_state,
-                            base.as_ref(),
-                            env,
-                        )
-                        .await?
-                    }
-                    _ => true,
-                };
+                // The tree check first: a push it refuses reads nothing.
+                let forward = current == base
+                    && match upstream.revision() {
+                        Some(theirs) if !landed => {
+                            holds(
+                                branch,
+                                &revision,
+                                &theirs,
+                                &upstream_state,
+                                base.as_ref(),
+                                env,
+                            )
+                            .await?
+                        }
+                        _ => true,
+                    };
                 if !landed && (current != base || !forward) {
                     return Err(PushError::NonFastForward {
                         branch: branch.name().to_string(),

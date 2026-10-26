@@ -101,14 +101,15 @@ What this changes for you:
 - A push that does not land as is checks that our head holds the
   upstream's: from the memo, from our edition when the upstream's head is
   of our origin, or with one point read of our tree's region. One case
-  needs the network: our head was adopted by root from a remote and its
-  region has not been read since, the upstream's head is of another
-  origin, and the memo does not have the answer. Then the read goes to
-  that remote, even for a push to a local upstream. Offline, such a push
-  fails with `PushError::Unreachable`, naming the remote, with a reason
-  saying it could not confirm the branch's head holds the upstream's
-  head, and writes nothing. A read that succeeds is kept locally, so once
-  any pull or read has read the region, the same push works offline.
+  needs the network: our head reached the branch without its region being
+  read (adopted by root, or reset to a head another replica made), the
+  upstream's head is of another origin, and the memo does not have the
+  answer. Then the read goes to the remote that serves our head's blocks,
+  even for a push to a local upstream. When that remote cannot be read,
+  as offline, the push fails with `PushError::Unreachable`, naming the
+  remote, with a reason saying it could not confirm the branch's head
+  holds the upstream's head, and writes nothing. Push again once the
+  remote answers: the read is kept locally, and the push lands.
 - Opening a branch reads one more replica-local cell, and a sync writes
   one more after the tracking cell. No API changes.
 
