@@ -3,6 +3,19 @@
 //! This crate constitutes a library of light weight helpers that are shared
 //! across multiple other crates. Their chief quality is that they have
 //! virtually zero dependencies.
+#![cfg_attr(
+    not(feature = "helpers"),
+    doc = r#"
+
+Its test helpers (the `helpers` module, the `test` and `provider` macros)
+exist only with the `helpers` feature, which a production build never
+turns on. Without it they are not there:
+
+```compile_fail
+use dialog_common::helpers::Service;
+```
+"#
+)]
 
 // Allow the crate to refer to itself as `dialog_common`
 extern crate self as dialog_common;
@@ -145,7 +158,10 @@ pub mod helpers;
 /// Run integration tests with:
 /// - `cargo test --features integration-tests` - native only
 /// - `cargo test --features web-integration-tests` - spawns wasm subprocess for each test
-#[cfg(feature = "helpers")]
+///
+/// This crate's own unit tests take it without the feature too, so they
+/// also run in a build without `helpers`.
+#[cfg(any(test, feature = "helpers"))]
 pub use dialog_macros::test;
 
 /// Provider macro for defining service providers for integration tests.
