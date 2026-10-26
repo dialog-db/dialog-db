@@ -20,6 +20,8 @@ use std::collections::HashSet;
 
 use super::context::{full_context, head_observes};
 use super::resolve::resolve;
+use super::upstream::Target;
+use crate::RemoteFallback;
 use crate::ResolveEnv;
 use crate::repository::archive::local::read_all;
 use crate::repository::archive::networked::fill_import;
@@ -224,14 +226,22 @@ impl Push<'_> {
 /// observes the head that held the base when the sync recorded it (see
 /// `Bases::held`). The second is a head kept against a rival merge: it holds
 /// the rival's data without its revision, and pushing it over the rival,
-/// which nothing has built on, drops only the rival's own record.
+/// which nothing has built on, drops only the rival's own record. A head a
+/// reset moved does not observe the recorded holder, so it stays refused.
+/// The holder is for pushes only: a pull that took it as holding the base
+/// would merge as if the rival's own record were already in our head, and
+/// never import it.
 ///
 /// Each answer is one entry of our context: our own tree, the memo, our
 /// edition when the version is of our origin, or one point read of our
 /// tree's region, through the store that serves our head's blocks (which
 /// can be a remote's, when the head was adopted by root and its region not
-/// read since). A head minted before heads carried a region is answered by
-/// its full context. The edition answer assumes our origin's revisions form
+/// read since). When that remote cannot be read, as offline, the push fails
+/// with [`PushError::Unreachable`] saying it could not confirm our head
+/// holds the upstream's, and writes nothing; a read that succeeds is kept
+/// locally, so after it, or after any pull that read the region, the same
+/// push answers offline. A head minted before heads carried a region is
+/// answered by its full context. The edition answer assumes our origin's revisions form
 /// one chain, which a reset to a head without our last mint followed by a
 /// commit breaks (#682): such a head can pass for holding an upstream head
 /// of our origin that it does not hold.
@@ -246,30 +256,58 @@ async fn holds<Env: ResolveEnv>(
     if head.tree == theirs.tree {
         return Ok(true);
     }
-    let store = NetworkedIndex::erased(env, branch.archive().index(), branch.fallback());
+    let fallback = branch.fallback();
+    // The remote that serves what our head holds by reference, if any:
+    // when a read through it fails, the push could not tell whether our
+    // head holds the upstream's, and says so rather than passing on the
+    // read's error. A read served once is written back locally, so after
+    // it the same check answers offline.
+    let serving = match &fallback {
+        RemoteFallback::Remote(remote) => Some(remote.name()),
+        RemoteFallback::Unavailable { remote, .. } => Some(remote.clone()),
+        RemoteFallback::None => None,
+    };
+    let store = NetworkedIndex::erased(env, branch.archive().index(), fallback);
+    let target = match upstream.target() {
+        Target::Local(name) => format!("branch {name}"),
+        Target::Remote(entity) => format!("upstream {entity}"),
+    };
     let observes = async |version: &Version| -> Result<bool, PushError> {
-        if let Some(seen) = head_observes(
-            head,
-            version,
-            &branch.contexts(),
-            &branch.records(),
-            &store,
-            &branch.node_cache(),
-        )
-        .await?
-        {
-            return Ok(seen);
-        }
-        let history = branch.history(env);
-        let context = full_context(
-            head,
-            &branch.contexts(),
-            &store,
-            &branch.node_cache(),
-            &history,
-        )
-        .await?;
-        Ok(context.observes(version))
+        let answer = async {
+            if let Some(seen) = head_observes(
+                head,
+                version,
+                &branch.contexts(),
+                &branch.records(),
+                &store,
+                &branch.node_cache(),
+            )
+            .await?
+            {
+                return Ok(seen);
+            }
+            let history = branch.history(env);
+            let context = full_context(
+                head,
+                &branch.contexts(),
+                &store,
+                &branch.node_cache(),
+                &history,
+            )
+            .await?;
+            Ok::<_, dialog_artifacts::DialogArtifactsError>(context.observes(version))
+        };
+        answer.await.map_err(|error| match &serving {
+            Some(remote) => PushError::Unreachable {
+                upstream: remote.clone(),
+                reason: format!(
+                    "could not confirm that branch {}'s head holds the head of {target}: \
+                     reading what the head holds by reference from {remote} failed: {error}",
+                    branch.name(),
+                ),
+            },
+            None => error.into(),
+        })
     };
     if observes(&theirs.version()).await? {
         return Ok(true);

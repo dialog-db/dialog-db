@@ -100,10 +100,15 @@ What this changes for you:
   and so does a pull after a crash between a sync's two writes.
 - A push that does not land as is checks that our head holds the
   upstream's: from the memo, from our edition when the upstream's head is
-  of our origin, or with one point read of our tree's region. That read
-  goes to a remote when our head was adopted by root and its region not
-  read since, so such a push, even to a local upstream, now needs the
-  network. Offline it fails with the read's error and writes nothing.
+  of our origin, or with one point read of our tree's region. One case
+  needs the network: our head was adopted by root from a remote and its
+  region has not been read since, the upstream's head is of another
+  origin, and the memo does not have the answer. Then the read goes to
+  that remote, even for a push to a local upstream. Offline, such a push
+  fails with `PushError::Unreachable`, naming the remote, with a reason
+  saying it could not confirm the branch's head holds the upstream's
+  head, and writes nothing. A read that succeeds is kept locally, so once
+  any pull or read has read the region, the same push works offline.
 - Opening a branch reads one more replica-local cell, and a sync writes
   one more after the tracking cell. No API changes.
 
