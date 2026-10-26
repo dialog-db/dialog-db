@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A difference fetches the blocks it reads a batch at a time
 
-Part of [#646](https://github.com/dialog-db/dialog-db/issues/646)
+[#690](https://github.com/dialog-db/dialog-db/pull/690), part of [#646](https://github.com/dialog-db/dialog-db/issues/646)
 
 `Prefetch::Lazy`, the default for every difference (`compute`,
 `compute_with`, `compute_within`, `differentiate_within`), read each block
