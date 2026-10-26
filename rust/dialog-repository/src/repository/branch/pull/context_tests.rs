@@ -1088,15 +1088,10 @@ async fn it_counts_a_takeover_exactly_after_every_head_move() -> Result<()> {
 /// across three writers of one space: at every head a writer mints or
 /// adopts, the signed count is the walked count. A restart reopens the
 /// peer over the same storage, so commits after it have no context
-/// remembered from the pulls before it and take the region path.
-///
-/// Two known holes in the history are kept out of what this checks, both
-/// #673. Settling rival merges can leave a head whose ancestry walk fails,
-/// and three writers reach that by commits and pulls alone: such a head
-/// has no walked count to compare against, so it is counted and skipped,
-/// and the test asserts most heads were checked. Resets are left to the
-/// deterministic tests above, since a pull after one leaves such a head
-/// every time in this crate's own tests.
+/// remembered from the pulls before it and take the region path. Every
+/// head's ancestry walks, so every head is checked. Resets are left to the
+/// deterministic tests above and to the interleavings in
+/// `sync_base_tests`.
 #[dialog_common::test]
 async fn it_signs_walked_counts_under_random_interleavings() -> Result<()> {
     let seeds: u64 = env::var("DIALOG_COUNT_INTERLEAVINGS")
@@ -1105,19 +1100,17 @@ async fn it_signs_walked_counts_under_random_interleavings() -> Result<()> {
         .unwrap_or(6);
     let steps = 32;
     let (mut commits, mut takeovers, mut merges, mut restarts) = (0, 0, 0, 0);
-    let (mut checked, mut holes) = (0u64, 0u64);
-    // Whether `line`'s head has a walkable ancestry: false for a head
-    // carrying #673's hole, which no count can be checked against.
-    async fn walkable<Env>(line: &Branch, env: &Env) -> Result<bool>
+    let mut checked = 0u64;
+    // `line`'s head's ancestry walks to the end.
+    async fn walk<Env>(line: &Branch, env: &Env, what: &str) -> Result<()>
     where
         Env: crate::ResolveEnv,
     {
         let head = line.revision().expect("the branch has a head");
-        match context_of(&head.version(), &line.history(env)).await {
-            Ok(_) => Ok(true),
-            Err(DialogArtifactsError::IncompleteHistory(_)) => Ok(false),
-            Err(error) => Err(error.into()),
-        }
+        context_of(&head.version(), &line.history(env))
+            .await
+            .map_err(|error| anyhow::anyhow!("{what}: the history is whole: {error}"))?;
+        Ok(())
     }
     for seed in 0..seeds {
         let storage = test_storage().await;
@@ -1172,12 +1165,9 @@ async fn it_signs_walked_counts_under_random_interleavings() -> Result<()> {
                 if parent.is_some_and(|parent| parent.origin() != head.origin()) {
                     takeovers += 1;
                 }
-                if walkable(line, env).await? {
-                    assert_exact_count!(line, env, what);
-                    checked += 1;
-                } else {
-                    holes += 1;
-                }
+                walk(line, env, &what).await?;
+                assert_exact_count!(line, env, what);
+                checked += 1;
             } else {
                 let from = &lines[(at + 1 + next(2) as usize) % 3];
                 let Some(theirs) = from.revision() else {
@@ -1191,22 +1181,15 @@ async fn it_signs_walked_counts_under_random_interleavings() -> Result<()> {
                 if Some(&after) != before.as_ref() && after != theirs {
                     merges += 1;
                 }
-                if walkable(line, env).await? {
-                    assert_exact_count!(line, env, what);
-                    checked += 1;
-                } else {
-                    holes += 1;
-                }
+                walk(line, env, &what).await?;
+                assert_exact_count!(line, env, what);
+                checked += 1;
             }
         }
     }
     eprintln!(
-        "{seeds} seeds: {commits} commits ({takeovers} takeovers), {merges} merges, {restarts} restarts; {checked} heads checked, {holes} skipped for #673"
+        "{seeds} seeds: {commits} commits ({takeovers} takeovers), {merges} merges, {restarts} restarts; {checked} heads checked"
     );
-    assert!(takeovers > 0 && merges > 0 && restarts > 0);
-    assert!(
-        holes * 4 < checked,
-        "most heads are checked: {checked} checked, {holes} skipped"
-    );
+    assert!(takeovers > 0 && merges > 0 && restarts > 0 && checked > 0);
     Ok(())
 }

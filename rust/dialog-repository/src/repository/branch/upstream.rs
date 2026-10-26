@@ -8,9 +8,15 @@
 //! branch's `sync` cell.
 
 use crate::RemoteFallback;
-use crate::{Branch, ConnectedBranch, ConnectedReplica, Revision, SiteAddress, TreeReference};
+use crate::{
+    Branch, ConnectedBranch, ConnectedReplica, PublishError, ResolveError, Revision, SiteAddress,
+    TreeReference,
+};
 use dialog_artifacts::Entity;
-use dialog_capability::{Did, Subject};
+use dialog_artifacts::history::Version;
+use dialog_capability::{Did, Provider, Subject};
+use dialog_common::ConditionalSync;
+use dialog_effects::memory::{Publish, Resolve};
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod legacy;
@@ -444,14 +450,138 @@ impl From<UpstreamBranch> for Upstream {
     }
 }
 
+/// The revision whose tree each sync base is, kept in a cell of its own
+/// beside the tracking cell (`BranchReference::bases`).
+///
+/// A merge from a sync base takes everything the base holds as already in
+/// both heads, which holds only while both heads hold the revision whose
+/// tree the base is: a reset to an older head, or a head kept against a
+/// rival merge, makes it untrue. So a sync records that revision with the
+/// base, and a pull checks it. It is written after the tracking cell, and
+/// an older release writes the tracking cell alone, so the two can
+/// disagree. An entry counts only while its tree is the tracking cell's
+/// tree for the same upstream; otherwise the revision is unknown, and an
+/// unknown base is not merged from.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Bases {
+    bases: Vec<Base>,
+}
+
+/// One upstream's sync base, the revision whose tree it is, and the head
+/// that held it when the sync recorded it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct Base {
+    target: Target,
+    tree: TreeReference,
+    version: Version,
+    held: Version,
+}
+
+impl Bases {
+    /// The revision whose tree `tree` is, as last recorded for `target`,
+    /// if the record is of that tree.
+    pub(crate) fn version(&self, target: &Target, tree: &TreeReference) -> Option<Version> {
+        self.bases
+            .iter()
+            .find(|base| base.target == *target && base.tree == *tree)
+            .map(|base| base.version)
+    }
+
+    /// The head that held `target`'s sync base when the sync recorded it,
+    /// if the record is of `tree` and of the revision `version`.
+    ///
+    /// Our head after a sync holds the base: it is the base's revision, or
+    /// observes it, except for a head kept against a rival merge, which
+    /// holds the rival's data without its revision. Only a push uses this,
+    /// to move such a head onto the rival's when the rival has not moved;
+    /// a merge must not, since it would take the rival's own record as
+    /// already in our head.
+    pub(crate) fn held(
+        &self,
+        target: &Target,
+        tree: &TreeReference,
+        version: &Version,
+    ) -> Option<Version> {
+        self.bases
+            .iter()
+            .find(|base| base.target == *target && base.tree == *tree && base.version == *version)
+            .map(|base| base.held)
+    }
+
+    /// Record that `target`'s sync base is `tree`, the tree of `version`,
+    /// held by our head `held`.
+    pub(crate) fn record(
+        &mut self,
+        target: Target,
+        tree: TreeReference,
+        version: Version,
+        held: Version,
+    ) {
+        match self.bases.iter_mut().find(|base| base.target == target) {
+            Some(base) => {
+                base.tree = tree;
+                base.version = version;
+                base.held = held;
+            }
+            None => self.bases.push(Base {
+                target,
+                tree,
+                version,
+                held,
+            }),
+        }
+    }
+}
+
+impl Branch {
+    /// Record that `target`'s sync base is `tree`, the tree of `version`,
+    /// held by our head `held`, once the tracking cell records that tree. Written after the tracking
+    /// cell and not atomically with it: a crash between the two, or an older
+    /// release moving the tracking cell, leaves this record naming another
+    /// tree, which reads as an unknown revision, and a pull then merges from
+    /// no base once. A mismatch is folded in again, as the tracking write
+    /// does, until it lands, unless a concurrent sync has since moved the
+    /// tracking cell's tree for `target`: that sync records its own base.
+    pub(crate) async fn record_base<Env, E>(
+        &self,
+        target: Target,
+        tree: TreeReference,
+        version: Version,
+        held: Version,
+        env: &Env,
+    ) -> Result<(), E>
+    where
+        Env: Provider<Publish> + Provider<Resolve> + ConditionalSync + 'static,
+        E: From<PublishError> + From<ResolveError>,
+    {
+        loop {
+            if self.tracked().get(&target) != Some(&tree) {
+                return Ok(());
+            }
+            let marker = self.bases.checkpoint();
+            let mut bases = self.based();
+            bases.record(target.clone(), tree.clone(), version, held);
+            match marker.publish(bases, env).await {
+                Ok(_) => return Ok(()),
+                Err(PublishError::VersionMismatch { .. }) => {
+                    self.bases.resolve().perform(env).await?;
+                    self.tracking().resolve().perform(env).await?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
-    use super::{Tracking, Upstream};
+    use super::{Bases, Target, Tracking, Upstream};
     use crate::TreeReference;
+    use dialog_artifacts::history::{Edition, Origin, Version};
 
     /// The sync record keeps one tree per upstream, replacing it in
     /// place, and answers no tree for an upstream never synced.
@@ -480,6 +610,41 @@ mod tests {
         assert_eq!(
             syncs.get(&develop([0; 32]).target()),
             Some(&TreeReference::from([2; 32]))
+        );
+    }
+
+    /// A base's revision is known only for the tree it was recorded with:
+    /// a tracking record that has moved on, as an older release or a
+    /// crash between the two writes leaves it, finds none.
+    #[dialog_common::test]
+    fn it_knows_a_base_revision_only_for_its_own_tree() {
+        let main = Target::Local("main".into());
+        let develop = Target::Local("develop".into());
+        let one = Version::new(Origin::from([7; 32]), Edition::GENESIS);
+        let two = Version::new(Origin::from([8; 32]), Edition::GENESIS);
+        let mut bases = Bases::default();
+        bases.record(main.clone(), TreeReference::from([1; 32]), one, one);
+        assert_eq!(
+            bases.version(&main, &TreeReference::from([1; 32])),
+            Some(one)
+        );
+        assert_eq!(bases.version(&main, &TreeReference::from([2; 32])), None);
+        assert_eq!(bases.version(&develop, &TreeReference::from([1; 32])), None);
+        bases.record(main.clone(), TreeReference::from([2; 32]), two, one);
+        assert_eq!(bases.version(&main, &TreeReference::from([1; 32])), None);
+        assert_eq!(
+            bases.version(&main, &TreeReference::from([2; 32])),
+            Some(two)
+        );
+        assert_eq!(
+            bases.held(&main, &TreeReference::from([2; 32]), &two),
+            Some(one),
+            "the head that held it"
+        );
+        assert_eq!(
+            bases.held(&main, &TreeReference::from([2; 32]), &one),
+            None,
+            "only for the revision recorded"
         );
     }
 }

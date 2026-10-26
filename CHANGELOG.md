@@ -14,6 +14,110 @@ says how to cut a release.
 
 ## Unreleased
 
+### A sync uses its base only while both heads hold it
+
+[#681](https://github.com/dialog-db/dialog-db/pull/681), fixing [#673](https://github.com/dialog-db/dialog-db/issues/673)
+
+A pull merges three ways from the sync base it recorded with an upstream:
+it takes everything the base holds as already in our head, and anything
+the base holds that the upstream lacks as removed upstream. That holds
+only while both heads hold the revision whose tree the base is, and three
+paths broke it:
+
+- Settling rival merges. When two writers each merge the same two heads
+  at once, the greater keeps its head and recorded the lesser's tree as
+  its base without holding it. Once the lesser had built on its merge,
+  the greater side's next pull from it never imported the lesser merge's
+  revision record. Every later head carried the hole: its ancestry walk
+  failed, and a replica that never held the lesser merge could not
+  vouch for the revisions a pull from it brought in.
+- A reset that moves our head behind the base. The next pull returned at
+  once when the upstream had not moved, or merged from the base and
+  dropped what only the base held, facts included.
+- A reset that moves the upstream's head behind the base. The merge read
+  what the upstream never held as removed there, and removed it from
+  ours.
+
+A push made the same assumption. It took the upstream for a fast-forward
+target whenever the upstream's tree was still the sync base, so a push
+after a reset behind the base published the older head and moved the
+upstream back, dropping what only the base held from every replica that
+then pulled it.
+
+A sync now records the revision whose tree the base is, in a
+replica-local cell of its own beside the tracking cell, written after it.
+A merge runs from the base only when both heads' contexts observe that
+revision; otherwise it runs from no base, screened as a first contact is,
+or adopts the upstream by root when the upstream has seen our head. When
+our tree is the base, the revision is our head. Otherwise a revision that
+is not known (no record, as after an upgrade, or a record of another tree,
+as an older release moving the tracking cell or a crash between the two
+writes leaves it) is not trusted: the pull merges from no base once, and
+the sync it records writes the revision. The shortcut for an upstream
+that has not moved checks the same of our head. A push lands only when
+our head's context observes the upstream's head.
+
+What this changes for you:
+
+- A pull after a reset keeps every fact either side held, and so does a
+  pull from an upstream someone else reset.
+- A push from a head that does not hold the upstream's head, as after a
+  reset behind the sync base, now fails with
+  `PushError::NonFastForward { branch, expected, actual }`, the error a
+  push to an upstream that moved already gets. `expected` and `actual`
+  can name the same tree here, since the upstream has not moved; the
+  local head is what is behind. Pull, then push again. A refused push
+  writes nothing: no block is uploaded, the upstream's head is not
+  published, and neither the head nor the sync records of the pushing
+  branch change. Before, the push published the older head and moved the
+  upstream back.
+- What the released `0.3.0` does, measured with this release's tests run
+  against it:
+  - A reset followed by a pull loses the upstream's facts that only the
+    base held: 40 of 40 runs.
+  - A reset followed by a push rewinds the upstream to the older head:
+    10 of 10 runs to a local upstream. The remote push has the same
+    tree-only check, read from the code.
+  - A replica that never resets is exposed too. When another writer
+    resets the upstream behind the replica's sync base, the replica's next
+    pull removes facts the base held: 10 of 10 runs. When another replica
+    resets, pushes, commits and pushes again, a replica that never reset
+    loses its own fact on its next pull: 10 of 10 runs. A deployment is
+    exposed if any writer of a branch it syncs with has reset that branch,
+    or pushed from a reset one.
+  - This change restores nothing already lost. Heads minted by a losing
+    merge lack those facts, and pulls carry the heads on. The facts may
+    still be in the trees of older revisions wherever their blocks are
+    kept, but nothing in dialog brings them back from there.
+- Pulls that settle rival merges leave complete histories, and
+  `PreparedPull::novelty` vouches for every revision such a head brings
+  in. This was introduced by #623, which no release contains.
+- A pull whose base either head no longer holds merges from no base. It
+  reads both sides' differences in full, once, where a merge from the
+  base read only what changed since it; the next pull runs from the new
+  base again. The first merging pull after an upgrade does the same once
+  per upstream, since a base recorded by an older release is not trusted,
+  and so does a pull after a crash between a sync's two writes.
+- A push that does not land as is checks that our head holds the
+  upstream's: from the memo, from our edition when the upstream's head is
+  of our origin, or with one point read of our tree's region. One case
+  needs the network: our head reached the branch without its region being
+  read (adopted by root, or reset to a head another replica made), the
+  upstream's head is of another origin, and the memo does not have the
+  answer. Then the read goes to the remote that serves our head's blocks,
+  even for a push to a local upstream. When that remote cannot be read,
+  as offline, the push fails with `PushError::Unreachable`, naming the
+  remote, with a reason saying it could not confirm the branch's head
+  holds the upstream's head, and writes nothing. Push again once the
+  remote answers: the read is kept locally, and the push lands.
+- Opening a branch reads one more replica-local cell, and a sync writes
+  one more after the tracking cell. No API changes.
+
+Why: the merge's assumption about its base was true on every path that
+existed when the base was introduced, and nothing checked it once resets
+and rival merges could break it. Checking it against the revision the
+base stands for makes it hold however the heads moved.
+
 ### A subscription catching up re-derives its touched entities together
 
 [#679](https://github.com/dialog-db/dialog-db/pull/679), for
@@ -246,6 +350,19 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- A branch has a new replica-local cell, `bases`, never synced, that
+  records each sync base's revision. A replica upgraded from an older
+  release has none, and its bases are not merged from: the first pull
+  that has to merge runs from no base and writes the record. That covers
+  a bad base an older release left behind, by a reset, a kept rival or
+  `upgrade`. An older release ignores the cell, and the tracking cell's
+  encoding is unchanged; when an older release moves the tracking cell
+  the record no longer matches it and is not used. Nothing is rewritten
+  on upgrade, and nothing an embedder runs is needed.
+- Nothing repairs what earlier pulls did. Heads already minted with a
+  hole by a build of `main` since #623 keep it, and facts a replica lost
+  to a pull after a reset are not restored by this change. Nothing synced
+  changes shape: an older release pulls everything this one mints.
 - Nothing a replica stores or syncs changes shape, and nothing is
   rewritten. A head an older release published from such a chain names
   a buffered tree; it stays valid, reads, pulls and merges as before,
