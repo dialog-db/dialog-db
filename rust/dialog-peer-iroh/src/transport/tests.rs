@@ -17,8 +17,9 @@ use dialog_effects::archive::{self, ArchiveError};
 use dialog_effects::blob::{self, BlobError};
 use dialog_effects::prelude::*;
 use dialog_peer::helpers::test_session_with_peer;
-use iroh::Endpoint;
 use iroh::endpoint::presets;
+use iroh::tls::CaTlsConfig;
+use iroh::{Endpoint, RelayMode};
 use iroh_base::{EndpointAddr, SecretKey};
 
 use super::{ALPN, IrohChannel, accept};
@@ -236,6 +237,90 @@ async fn an_import_that_lies_about_its_digest_is_refused() {
         responder.store().blob(&declared),
         None,
         "nothing was committed under the digest that was not delivered"
+    );
+
+    dialing.close().await;
+    serving.close().await;
+}
+
+/// A peer named by its key and a relay, with no IP address to dial, is
+/// reached through that relay.
+///
+/// Everything above dials a direct route on loopback, which is the one
+/// path a peer behind a NAT does not have. The relay here runs in this
+/// process, so the test needs no network: what it pins is that a signed
+/// container survives being carried by a relay, and that an address
+/// whose only route is a relay is enough to dial.
+#[tokio::test]
+async fn a_peer_is_reached_through_a_relay() {
+    let (relays, relay, _server) = iroh::test_utils::run_relay_server()
+        .await
+        .expect("a relay runs on loopback");
+
+    let serving = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Custom(relays.clone()))
+        .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+        .alpns(vec![ALPN.to_vec()])
+        .bind()
+        .await
+        .expect("an endpoint binds");
+    serving.online().await;
+    let responder: Peer = Arc::new(Responder::new(
+        Volatile::default(),
+        CachingResolver::new(WebResolver::new()),
+    ));
+    tokio::spawn(accept(serving.clone(), responder.clone()));
+
+    let dialing = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Custom(relays))
+        .ca_tls_config(CaTlsConfig::insecure_skip_verify())
+        .bind()
+        .await
+        .expect("an endpoint binds");
+    let site = Iroh::new(IrohChannel::new(dialing.clone()));
+
+    let address = IrohAddress::from(EndpointAddr::new(serving.id()).with_relay_url(relay));
+    assert_eq!(
+        address.addr().ip_addrs().count(),
+        0,
+        "the address carries no route but the relay"
+    );
+
+    let (session, host) = test_session_with_peer().await;
+    let subject = host.did();
+    let bytes = b"carried by a relay, signed and verified".to_vec();
+    let digest = Buffer::from(bytes.clone()).blake3_hash().clone();
+
+    let put = Subject::from(subject.clone())
+        .writer()
+        .archive()
+        .catalog("blocks")
+        .put(Buffer::from(bytes.clone()));
+    let fork: IrohFork<archive::Put> = Fork::<Iroh, _>::new(put, address.clone()).into();
+    let invocation = fork.authorize(&session).await.expect("authorized");
+    let stored: Result<(), ArchiveError> =
+        Provider::<ForkInvocation<Iroh, archive::Put>>::execute(&site, invocation).await;
+    stored.expect("the relay carries the put");
+
+    assert_eq!(
+        responder.store().get(&digest),
+        Some(bytes.clone()),
+        "the block reached the peer's store"
+    );
+
+    let read = Subject::from(subject)
+        .reader()
+        .archive()
+        .catalog("blocks")
+        .get(digest);
+    let fork: IrohFork<archive::Get> = Fork::<Iroh, _>::new(read, address).into();
+    let invocation = fork.authorize(&session).await.expect("authorized");
+    let found: Result<Option<Vec<u8>>, ArchiveError> =
+        Provider::<ForkInvocation<Iroh, archive::Get>>::execute(&site, invocation).await;
+    assert_eq!(
+        found.expect("the get succeeds"),
+        Some(bytes),
+        "the block came back intact"
     );
 
     dialing.close().await;
