@@ -21,8 +21,11 @@ use crate::fs::simulation::{self, Traffic};
 impl Provider<ForkInvocation<Fs, Read>> for Fs {
     async fn execute(&self, input: ForkInvocation<Fs, Read>) -> Result<BlobReader, BlobError> {
         let flight = simulation::begin(Traffic::BlobRead).await;
-        let result =
-            Provider::<Read>::execute(input.authorization.filesystem(), input.capability).await;
+        let result = simulation::serve(Provider::<Read>::execute(
+            input.authorization.filesystem(),
+            input.capability,
+        ))
+        .await;
         let slot = flight.complete(0).await;
         result.map(|reader| simulation::meter_reader(reader, Traffic::BlobRead, slot))
     }
@@ -33,8 +36,11 @@ impl Provider<ForkInvocation<Fs, Read>> for Fs {
 impl Provider<ForkInvocation<Fs, Import>> for Fs {
     async fn execute(&self, input: ForkInvocation<Fs, Import>) -> Result<BlobWriter, BlobError> {
         let flight = simulation::begin(Traffic::BlobImport).await;
-        let result =
-            Provider::<Import>::execute(input.authorization.filesystem(), input.capability).await;
+        let result = simulation::serve(Provider::<Import>::execute(
+            input.authorization.filesystem(),
+            input.capability,
+        ))
+        .await;
         let slot = flight.complete(0).await;
         result.map(|writer| simulation::meter_writer(writer, Traffic::BlobImport, slot))
     }
