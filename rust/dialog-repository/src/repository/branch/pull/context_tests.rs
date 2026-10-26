@@ -2,6 +2,11 @@
 //! context region holds every origin's watermark exactly except the head's
 //! own, which the head's edition brings up to date.
 //!
+//! The resets here move heads back, or onto a line that lacks the
+//! writer's own commits, through `Reset::perform_unchecked`: a release
+//! before #682 resets any way, so its replicas still produce those heads,
+//! and the region has to stay exact under them.
+//!
 //! One test per way a head is minted or installed, each checking the region
 //! the way a reader that remembers nothing would read it
 //! ([`region_agrees`]): brought up to the head, it equals the ancestry walk
@@ -118,7 +123,10 @@ macro_rules! plant_signed {
         let edit: &dyn Fn(&mut Revision) = &$edit;
         edit(&mut head);
         head.signature = Attest::new(head.payload()).perform($operator).await?;
-        $branch.reset(head.clone()).perform($operator).await?;
+        $branch
+            .reset(head.clone())
+            .perform_unchecked($operator)
+            .await?;
         head
     }};
 }
@@ -295,7 +303,7 @@ async fn it_keeps_the_region_exact_through_amend_reset_and_adoption() -> Result<
     commit!(reset, &operator, "post:r0");
     reset
         .reset(main.revision().expect("main has a head"))
-        .perform(&operator)
+        .perform_unchecked(&operator)
         .await?;
     region_agrees(&reset, &operator, "a reset").await?;
     commit!(reset, &operator, "post:r1");
@@ -915,7 +923,7 @@ async fn it_counts_a_takeover_exactly_after_a_reset_to_an_adopted_head() -> Resu
     commit!(b, &bob, "post:u");
     let u = b.revision().expect("U");
 
-    a.reset(x).perform(&alice).await?;
+    a.reset(x).perform_unchecked(&alice).await?;
     a.pull().from(&b).perform(&alice).await?;
     assert_eq!(a.revision().as_ref(), Some(&u), "a fast-forward to U");
     assert!(
@@ -958,7 +966,7 @@ async fn it_counts_a_takeover_exactly_after_a_reset_to_its_own_head() -> Result<
     commit!(b, &bob, "post:u");
     let u = b.revision().expect("U");
 
-    a.reset(l1).perform(&alice).await?;
+    a.reset(l1).perform_unchecked(&alice).await?;
     a.pull().from(&b).perform(&alice).await?;
     assert_eq!(a.revision().as_ref(), Some(&u), "a fast-forward to U");
     commit!(a, &alice, "post:a3");
@@ -994,7 +1002,7 @@ async fn it_counts_a_takeover_exactly_after_a_reset_and_a_restart() -> Result<()
     b.pull().from(&a).perform(&bob).await?;
     commit!(b, &bob, "post:u");
     let u = b.revision().expect("U");
-    a.reset(l1).perform(&alice).await?;
+    a.reset(l1).perform_unchecked(&alice).await?;
     a.pull().from(&b).perform(&alice).await?;
     assert_eq!(a.revision().as_ref(), Some(&u), "a's head is U");
 
@@ -1062,7 +1070,7 @@ async fn it_counts_a_takeover_exactly_after_every_head_move() -> Result<()> {
     // A reset to b's older head, then a fast-forward to b's newest.
     b.pull().from(&a).perform(&bob).await?;
     commit!(b, &bob, "post:b2");
-    a.reset(older).perform(&alice).await?;
+    a.reset(older).perform_unchecked(&alice).await?;
     assert_exact_count!(&a, &alice, "a reset to an older head");
     a.pull().from(&b).perform(&alice).await?;
     assert_exact_count!(&a, &alice, "a pull after a reset");
