@@ -237,6 +237,8 @@
 
           "soak:gate" = {
             description = "Join cost on the unshaped none profile (rust/dialog-soak), gated against soak/baseline";
+            # One fixed seed (DIALOG_SOAK_SEED, unset is the default), so
+            # every run writes the same tree and the counts are exact.
             command = ''
               soak:sweep
               soak:check
@@ -252,11 +254,9 @@
 
           # The soak counterpart of perf:check: target/soak-current against
           # soak/baseline and, when present, target/soak-base, with every
-          # row in target/soak-delta/table.md. The base comparison is
-          # report-only (--report-only) until the harness's identities are
-          # deterministic (#652 item 4): one run against one run with
-          # random identities fails about one time in ten. The change that
-          # makes them deterministic drops the flag.
+          # row in target/soak-delta/table.md. Both runs use the fixed seed,
+          # so the base comparison gates as the baseline one does; a base
+          # swept under another seed is shown, not gated.
           "soak:check" = {
             description = "Gate target/soak-current against soak/baseline and, if present, target/soak-base";
             command = ''
@@ -266,7 +266,6 @@
                 mkdir -p target/soak-delta
                 rebaselined=$(paste -sd, target/soak-delta/rebaselined 2>/dev/null || true)
                 cargo run -p dialog-soak --release -- compare --base target/soak-base target/soak-current \
-                  --report-only \
                   --markdown target/soak-delta/table.md \
                   ''${rebaselined:+--rebaselined "$rebaselined"} || status=1
               fi
@@ -276,7 +275,10 @@
 
           "soak:sync" = {
             description = "Sync/join cost sweep over simulated networks, gated against soak/baseline";
+            # A fresh seed per run, so the repeats exercise the spread that
+            # identities cause; each report records its seed to replay it.
             command = ''
+              export DIALOG_SOAK_SEED="''${DIALOG_SOAK_SEED:-random}"
               cargo run -p dialog-soak --release -- sweep --out-dir target/soak-current
               cargo run -p dialog-soak --release -- compare soak/baseline target/soak-current
             '';

@@ -53,6 +53,8 @@
 //! - **Wasm mode** (`--features web-integration-tests`): Native outer test starts provider,
 //!   serializes address to env var, spawns wasm inner test which deserializes and runs
 
+pub mod entropy;
+
 use async_trait::async_trait;
 use dialog_common::ConditionalSend;
 use rand::{Rng, SeedableRng, rngs::StdRng};

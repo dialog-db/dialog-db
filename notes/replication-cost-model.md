@@ -27,7 +27,7 @@ assigns every request a depth one greater than the deepest request that
 had completed when it began, and the phase's chain is the greatest depth
 assigned. It is a property of the schedule the client ran, so it reads
 the same on every profile, including the unshaped `none` profile, and
-the gate holds it tight there. `rounds` is older and is a bound: modeled
+the gate holds it tight there (see lockstep, below). `rounds` is older and is a bound: modeled
 time divided by the per-request serial cost. Bandwidth and compute also
 advance the clock, so `rounds` reads above `chain` by the share of the
 phase that was bytes on the link rather than latency; the gap between
@@ -40,6 +40,24 @@ the number exists to reward. The `Counting` meter in
 longest run of fetches that were each alone in flight; a chain of
 parallel waves has no solo fetch and still costs one round trip per
 wave, which is why the soak counts the chain and not the run.
+
+On the unshaped `none` profile the simulated link runs in **lockstep**
+(`dialog_remote_fs::simulation::lockstep`), and there the chain has a
+sharper definition: a request's depth is the **round it was issued in**,
+the number of distinct instants of the paused clock at which requests
+went out, up to its own. Every request waits one tick before it is
+served and its file operation completes inside that tick, so everything
+issued at an earlier instant has answered by a later one. The chain is
+then an upper bound on the true dependency depth: requests issued in the
+same round count once, and anything issued in a later round counts as
+dependent on the earlier ones, whether it read their answers or not.
+That is what latency charges for, so the bound is the right one to gate.
+Without lockstep, an unshaped request answered as soon as the
+filesystem's thread pool handed it back, so a request issued beside a
+sibling counted as dependent whenever the sibling happened to finish
+first: the chain measured thread timing. `it_counts_an_independent_pair_once_and_a_dependent_pair_twice_in_lockstep`
+pins the definition. In lockstep, modeled time on `none` reads one
+millisecond per round.
 
 **Objects** are requests: archive block reads and writes, head-cell
 reads and writes, and blob opens, counted together. This is the cost of

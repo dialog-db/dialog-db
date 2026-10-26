@@ -152,8 +152,8 @@ jobs:
   # shaped profiles (broadband, mobile, ...) stay on the nightly sweep
   # (nightly-soak.yml); see issue #642 for the gate this is the first
   # step of. On a pull request it is also compared against the base
-  # commit's sweep, as the Perf gate is, but report-only until the
-  # harness's identities are deterministic (see soak:check in flake.nix).
+  # commit's sweep, as the Perf gate is. Both sweeps run under the same
+  # fixed seed, so their counts are exact (see soak:check in flake.nix).
   soak_sync:
     name: 'Replication gate'
     needs: ['lint_nix']

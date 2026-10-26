@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use dialog_remote_fs::simulation::NetworkShape;
-use dialog_soak::{JoinScenario, PhaseReport, run_join};
+use dialog_soak::{DEFAULT_SEED, Kind, PhaseReport, Scenario, run};
 
 /// The exact chain and the request count of the phase named `name`.
 fn chain_and_requests(phases: &[PhaseReport], name: &str) -> Result<(u64, u64)> {
@@ -38,7 +38,8 @@ fn chain_and_requests(phases: &[PhaseReport], name: &str) -> Result<(u64, u64)> 
 #[tokio::test(start_paused = true)]
 async fn it_overlaps_the_entity_reads_of_a_value_pinned_join() -> Result<()> {
     let vault = std::env::temp_dir().join("dialog-soak-value-pinned-join");
-    let report = run_join(JoinScenario {
+    let report = run(Scenario {
+        kind: Kind::Join,
         entities: 1200,
         commits: 4,
         members: 5,
@@ -50,6 +51,7 @@ async fn it_overlaps_the_entity_reads_of_a_value_pinned_join() -> Result<()> {
         }),
         network_label: "localhost".into(),
         vault_dir: vault,
+        seed: DEFAULT_SEED,
     })
     .await?;
 
