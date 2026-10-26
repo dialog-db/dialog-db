@@ -100,7 +100,10 @@ What this changes for you:
   and so does a pull after a crash between a sync's two writes.
 - A push that does not land as is checks that our head holds the
   upstream's: from the memo, from our edition when the upstream's head is
-  of our origin, or with one point read of our tree's region.
+  of our origin, or with one point read of our tree's region. That read
+  goes to a remote when our head was adopted by root and its region not
+  read since, so such a push, even to a local upstream, now needs the
+  network. Offline it fails with the read's error and writes nothing.
 - Opening a branch reads one more replica-local cell, and a sync writes
   one more after the tracking cell. No API changes.
 
