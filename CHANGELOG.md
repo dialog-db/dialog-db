@@ -14,6 +14,49 @@ says how to cut a release.
 
 ## Unreleased
 
+### A reset moves a branch forward only
+
+Fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
+
+`Branch::reset` now refuses a revision that does not hold the branch's
+head, and the head does not move. A reset back to an older head, or onto
+another writer's line that lacks this writer's commits, followed by a
+commit, broke what every causal context assumes: that one origin's
+revisions form one chain. Below the writer's last revision the commit
+re-minted a version already used; above it, on a line without that
+revision, the commit forked the origin. Either way a context holding one
+revision claimed the other, and merges dropped writes as already seen. The
+push guard from #681 could not catch the fork, since a context keeps one
+watermark per origin: a push from such a head rewound its upstream.
+
+What this changes for you:
+
+- A reset to a revision that does not hold the branch's head fails with
+  `PublishError::Rejected(Rejection::Unsupported { reason })`, whose
+  reason says a reset only moves a branch forward. Nothing is written. To
+  take another line's work, pull it; to go back to an older revision,
+  start a new branch from it.
+- A reset to a revision that holds the head, to the head's own tree, or
+  on a branch with no head, lands as before.
+- `Reset::perform` reads the archive to decide: one entry of the
+  revision's context, from the memo, from its edition when the head is of
+  the same origin, or one point read of its region, through the remote
+  that serves the branch's blocks when they are not local. Its bounds grow
+  from `Provider<Publish>` to the read bounds `Branch::history` takes plus
+  `Provider<Publish>`. An environment that is a bare storage provider
+  without those, such as `Volatile` on its own, can no longer reset a
+  branch; a session or a peer can.
+- A replica of an earlier release can still reset any way and sync with
+  this one. The sync-base and push checks of #681 meet a head it moved
+  back. A fork it makes (a takeover followed by a commit) is not detected
+  by anything on this release: the forked revisions share an origin and
+  no context can tell them apart. Upgrading every writer of a branch
+  closes it.
+
+Why: reset was documented as fast-forward bookkeeping, not rewind, and
+nothing held it to that. A rewind costs other replicas their writes, and
+no later check can tell the forked revisions apart.
+
 ### A sync uses its base only while both heads hold it
 
 [#681](https://github.com/dialog-db/dialog-db/pull/681), fixing [#673](https://github.com/dialog-db/dialog-db/issues/673)
@@ -350,6 +393,9 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- A reset that moves a branch forward only changes nothing stored or
+  synced, and rewrites nothing. Heads an earlier release forked by a
+  takeover and a commit keep their fork; nothing finds or repairs it.
 - A branch has a new replica-local cell, `bases`, never synced, that
   records each sync base's revision. A replica upgraded from an older
   release has none, and its bases are not merged from: the first pull

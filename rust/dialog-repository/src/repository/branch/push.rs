@@ -393,7 +393,10 @@ where
                     });
                 }
 
-                target.reset(revision.clone()).perform(env).await?;
+                target
+                    .reset(revision.clone())
+                    .perform_unchecked(env)
+                    .await?;
             }
             Upstream::Unreachable { target, reason, .. } => {
                 return Err(PushError::Unreachable {

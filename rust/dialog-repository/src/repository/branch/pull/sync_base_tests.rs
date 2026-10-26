@@ -7,6 +7,12 @@
 //! records the rival's tree as the base without holding it, and a reset to
 //! an older head, which moves the head behind the base. Each test runs its
 //! writers as sessions of their own, each with a branch of its own.
+//!
+//! The resets here move heads back, or onto a line that lacks the writer's
+//! own commits, through `Reset::perform_unchecked`: a release before #682
+//! resets any way, so its replicas still produce those heads, and pulls
+//! and pushes on this release have to meet them. The tests of the reset
+//! itself, which refuses such moves, use `Reset::perform`.
 
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
@@ -341,7 +347,7 @@ async fn reset_behind_the_base(separate_caches: bool, record: Record) -> Result<
     w2.pull().from(&w1).perform(&two).await?;
     assert_eq!(w2.revision().as_ref(), Some(&merge), "w2 fast-forwards");
 
-    w1.reset(first).perform(&one).await?;
+    w1.reset(first).perform_unchecked(&one).await?;
     rewrite_bases!(w1, &one, record);
     w1.pull().from(&w2).perform(&one).await?;
 
@@ -430,7 +436,7 @@ async fn no_base(record: Record) -> Result<()> {
     commit!(w2, &two, "post:d");
 
     // Behind the base (C), at B, above w1's only mint (A).
-    w1.reset(b).perform(&one).await?;
+    w1.reset(b).perform_unchecked(&one).await?;
     commit!(w1, &one, "post:e");
     rewrite_bases!(w1, &one, record);
     w1.pull().from(&w2).perform(&one).await?;
@@ -498,7 +504,7 @@ async fn upstream_reset(commit_on_top: bool, record: Record) -> Result<()> {
     let z = w3.revision().expect("Z");
     assert!(z.edition > c.edition, "Z sits above w2's last mint");
 
-    w2.reset(z).perform(&two).await?;
+    w2.reset(z).perform_unchecked(&two).await?;
     let mut facts = vec!["post:a", "post:c", "post:y", "post:z"];
     if commit_on_top {
         commit!(w1, &one, "post:x");
@@ -546,7 +552,7 @@ async fn it_keeps_a_replica_that_never_reset_whole_when_another_resets_and_pushe
     let c = w3.revision().expect("C");
     w1.pull().from(&w2).perform(&one).await?;
 
-    w1.reset(b).perform(&one).await?;
+    w1.reset(b).perform_unchecked(&one).await?;
     let pushed = w1.push().to(&w2).perform(&one).await;
     assert!(
         matches!(pushed, Err(crate::PushError::NonFastForward { .. })),
@@ -638,6 +644,119 @@ async fn it_lets_the_greater_rival_push_onto_the_lesser_after_a_pull() -> Result
     Ok(())
 }
 
+/// Whether `$result` is the refusal of a reset that would move a branch
+/// to a revision without its head.
+macro_rules! refused {
+    ($result:expr) => {
+        matches!(
+            $result,
+            Err(crate::PublishError::Rejected(
+                dialog_effects::Rejection::Unsupported { .. }
+            ))
+        )
+    };
+}
+
+/// A reset back to an older head of the writer's own line is refused, and
+/// the head stays: the next commit would re-mint a version already used.
+#[dialog_common::test]
+async fn it_refuses_a_reset_back_to_an_older_head() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    profile.space(name.clone()).open().perform(&writer).await?;
+    let one = session!(profile, b"one");
+    let w1 = line!(profile, name, &one, "one");
+    commit!(w1, &one, "post:a");
+    let older = w1.revision().expect("A1");
+    commit!(w1, &one, "post:b");
+    let head = w1.revision();
+
+    let reset = w1.reset(older).perform(&one).await;
+    assert!(refused!(reset), "a reset back is refused: {reset:?}");
+    assert_eq!(w1.revision(), head, "the head stays");
+    let w1 = line!(profile, name, &one, "one");
+    assert_eq!(w1.revision(), head, "nothing was written");
+    Ok(())
+}
+
+/// A takeover push cannot rewind the upstream, because the takeover is
+/// refused at the reset. w1 pushes A2 to w2, then tries to reset to w3's Z,
+/// which never held A2: Z's edition is above A2's, so no version would be
+/// reused, but a commit on Z would fork w1's origin, and a push of it
+/// would pass the push guard's edition answer and rewind w2, dropping b.
+/// The reset is refused, the head stays at A2, and the next commit and
+/// push move w2 forward with b kept.
+#[dialog_common::test]
+async fn it_refuses_a_takeover_so_a_push_cannot_rewind_the_upstream() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    profile.space(name.clone()).open().perform(&writer).await?;
+    let one = session!(profile, b"one");
+    let two = session!(profile, b"two");
+    let three = session!(profile, b"three");
+    let w1 = line!(profile, name, &one, "one");
+    let w2 = line!(profile, name, &two, "two");
+    let w3 = line!(profile, name, &three, "three");
+    commit!(w1, &one, "post:a");
+    w3.pull().from(&w1).perform(&three).await?;
+    commit!(w3, &three, "post:y");
+    commit!(w3, &three, "post:z");
+    let z = w3.revision().expect("Z");
+    commit!(w1, &one, "post:b");
+    w1.push().to(&w2).perform(&one).await?;
+    let pushed_b = w1.revision().expect("A2");
+    assert!(z.edition > pushed_b.edition, "Z sits above w1's last mint");
+
+    let reset = w1.reset(z).perform(&one).await;
+    assert!(refused!(reset), "the takeover is refused: {reset:?}");
+    assert_eq!(w1.revision().as_ref(), Some(&pushed_b), "the head stays");
+
+    commit!(w1, &one, "post:e");
+    w1.push().to(&w2).perform(&one).await?;
+    let w2 = line!(profile, name, &two, "two");
+    let expected: BTreeSet<String> = ["post:a", "post:b", "post:e"]
+        .iter()
+        .map(|of| {
+            of.parse::<dialog_artifacts::Entity>()
+                .map(|of| of.to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    assert_eq!(titles!(w2, &two), expected, "the upstream keeps b");
+    Ok(())
+}
+
+/// A reset forward lands: to a head that holds the branch's head, to any
+/// head on a branch that has none, and to the head's own tree.
+#[dialog_common::test]
+async fn it_moves_a_branch_forward() -> Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    profile.space(name.clone()).open().perform(&writer).await?;
+    let one = session!(profile, b"one");
+    let two = session!(profile, b"two");
+    let w1 = line!(profile, name, &one, "one");
+    let w2 = line!(profile, name, &two, "two");
+    commit!(w1, &one, "post:a");
+    let a = w1.revision().expect("A");
+    w2.pull().from(&w1).perform(&two).await?;
+    commit!(w2, &two, "post:b");
+    let b = w2.revision().expect("B");
+
+    w1.reset(b.clone()).perform(&one).await?;
+    assert_eq!(
+        w1.revision().as_ref(),
+        Some(&b),
+        "forward onto a head holding ours"
+    );
+    w1.reset(b.clone()).perform(&one).await?;
+    assert_eq!(w1.revision().as_ref(), Some(&b), "onto the head itself");
+
+    let fresh = line!(profile, name, &one, "fresh");
+    fresh.reset(a.clone()).perform(&one).await?;
+    assert_eq!(fresh.revision().as_ref(), Some(&a), "a branch with no head");
+    Ok(())
+}
+
 /// A merge from no base keeps a retraction: a fact the upstream retracted
 /// stays retracted in a line that still holds the assertion. The line
 /// resets behind its base to a head holding the fact and commits on top,
@@ -667,7 +786,7 @@ async fn it_keeps_a_retraction_when_it_merges_from_no_base() -> Result<()> {
 
     // Behind the base, at a head that still asserts f, above w1's only
     // mint, with a commit on top the upstream has not seen.
-    w1.reset(holding).perform(&one).await?;
+    w1.reset(holding).perform_unchecked(&one).await?;
     commit!(w1, &one, "post:g");
     w1.pull().from(&w2).perform(&one).await?;
 
@@ -703,7 +822,7 @@ async fn it_does_not_push_a_head_a_reset_left_behind_the_base() -> Result<()> {
     let b = w2.revision().expect("B");
     commit!(w2, &two, "post:c");
     w1.pull().from(&w2).perform(&one).await?;
-    w1.reset(b).perform(&one).await?;
+    w1.reset(b).perform_unchecked(&one).await?;
     let (head, tracked, based) = (w1.revision(), w1.tracked(), w1.based());
     let pushed = w1.push().to(&w2).perform(&one).await;
     assert!(
@@ -900,7 +1019,10 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                     if !targets.is_empty() {
                         let target = targets[next(targets.len() as u64) as usize].clone();
                         let previous = lines[at].revision();
-                        lines[at].reset(target.clone()).perform(&envs[at]).await?;
+                        lines[at]
+                            .reset(target.clone())
+                            .perform_unchecked(&envs[at])
+                            .await?;
                         // Read once the target is the head, so the history
                         // walks the target's own tree. A target that does
                         // not hold the writer's last mint is a takeover, and
@@ -914,7 +1036,10 @@ async fn it_keeps_histories_whole_and_facts_kept_under_random_interleavings() ->
                             None => false,
                         };
                         if let (true, Some(previous)) = (takeover, previous) {
-                            lines[at].reset(previous).perform(&envs[at]).await?;
+                            lines[at]
+                                .reset(previous)
+                                .perform_unchecked(&envs[at])
+                                .await?;
                             seen.declined += 1;
                         } else {
                             seen.resets += 1;
