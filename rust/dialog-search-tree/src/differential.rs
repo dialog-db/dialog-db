@@ -6519,11 +6519,180 @@ mod tests {
         Ok(levels)
     }
 
-    /// Asserts the planned walk reads exactly the blocks the serial walk
-    /// reads, each side from its own storage, as often, and leaves the same
-    /// frontier for the entry walk: planning moves when a block is read,
-    /// never which blocks are.
-    #[allow(clippy::too_many_arguments)]
+    /// One side of a difference, as text to compare: every frontier node
+    /// (its kind, bound, hash and ops), the expanded nodes, the hashes seen
+    /// and the unresolved links.
+    fn side_state(
+        side: &super::SparseTree<'_, [u8; 4], Vec<u8>, CountingBackend>,
+    ) -> (
+        Vec<String>,
+        Vec<Blake3Hash>,
+        Vec<Blake3Hash>,
+        Vec<Blake3Hash>,
+    ) {
+        let frontier = side
+            .nodes
+            .iter()
+            .map(|node| match node {
+                super::SparseTreeNode::Loaded {
+                    node,
+                    lower_bound,
+                    pending,
+                } => format!("loaded {lower_bound:?} {} {pending:?}", node.hash()),
+                super::SparseTreeNode::Ref(link) => {
+                    format!("ref {:?} {}", link.separator, link.node)
+                }
+                super::SparseTreeNode::Pending { link, pending } => {
+                    format!("pending {:?} {} {pending:?}", link.separator, link.node)
+                }
+                super::SparseTreeNode::Settled { lower_bound, ops } => {
+                    format!("settled {lower_bound:?} {ops:?}")
+                }
+            })
+            .collect();
+        let expanded = side
+            .expanded
+            .iter()
+            .map(|node| node.hash().clone())
+            .collect();
+        let mut seen: Vec<_> = side.seen.iter().cloned().collect();
+        seen.sort();
+        let unresolved = side
+            .unresolved
+            .iter()
+            .map(|link| link.node.clone())
+            .collect();
+        (frontier, expanded, seen, unresolved)
+    }
+
+    /// What [`walk_outcome`] shows of a difference: the blocks read from
+    /// each side's storage (sorted), both sides' state, the changes in order,
+    /// the novel nodes and the target's unresolved links.
+    type WalkOutcome = (
+        Vec<Blake3Hash>,
+        Vec<Blake3Hash>,
+        String,
+        String,
+        String,
+        String,
+    );
+
+    /// Everything a difference computed with `reads` shows. Unscoped, the
+    /// target is expanded as [`TreeDifference::compute_with`] expands it for
+    /// `novel_nodes`. An error stands in for whatever it cut short.
+    async fn walk_outcome(
+        source: &TestTree,
+        target: &TestTree,
+        source_storage: &CountingBackend,
+        target_storage: &CountingBackend,
+        scope: Option<&[core::ops::RangeInclusive<[u8; 4]>]>,
+        missing: super::MissingPolicy,
+        reads: super::Reads,
+    ) -> WalkOutcome {
+        source_storage.take_journal();
+        target_storage.take_journal();
+        let computed = TreeDifference::compute_scoped(
+            source,
+            target,
+            source_storage,
+            target_storage,
+            scope,
+            missing,
+            reads,
+        )
+        .await;
+        let failed = |error: String| {
+            (
+                source_storage.take_journal(),
+                target_storage.take_journal(),
+                error,
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+        };
+        let mut difference = match computed {
+            Ok(difference) => difference,
+            Err(error) => return failed(format!("error {error}")),
+        };
+        if scope.is_none() {
+            let mut index = 0;
+            while index < difference.target.nodes.len() {
+                let bound = difference.target.nodes[index].lower_bound().to_vec();
+                match difference.target.expand_at(&bound).await {
+                    Ok(true) => {}
+                    Ok(false) => index += 1,
+                    Err(error) => return failed(format!("expansion error {error}")),
+                }
+            }
+        }
+        let source_read = source_storage.take_journal();
+        let target_read = target_storage.take_journal();
+        let state = format!(
+            "{:?}\n{:?}",
+            side_state(&difference.source),
+            side_state(&difference.target)
+        );
+        let changes: Vec<Result<Change<[u8; 4], Vec<u8>>, _>> = match scope {
+            Some(scope) => difference.changes_within(scope).collect().await,
+            None => difference.changes().collect().await,
+        };
+        let changes = format!(
+            "{:?}",
+            changes
+                .iter()
+                .map(|change| match change {
+                    Ok(Change::Add(entry)) => format!("+{:?}={:?}", entry.key, entry.value),
+                    Ok(Change::Remove(entry)) => format!("-{:?}={:?}", entry.key, entry.value),
+                    Err(error) => format!("error {error}"),
+                })
+                .collect::<Vec<_>>()
+        );
+        let novel: Vec<Result<crate::PersistentNode<[u8; 4], Vec<u8>>, _>> =
+            difference.novel_nodes().collect().await;
+        let novel = format!(
+            "{:?}",
+            novel
+                .iter()
+                .map(|node| match node {
+                    Ok(node) => node.hash().to_string(),
+                    Err(error) => format!("error {error}"),
+                })
+                .collect::<Vec<_>>()
+        );
+        let unresolved = format!(
+            "{:?}",
+            difference
+                .unresolved_target()
+                .iter()
+                .map(|link| link.node.to_string())
+                .collect::<Vec<_>>()
+        );
+        (source_read, target_read, state, changes, novel, unresolved)
+    }
+
+    /// Where two walk outcomes differ, or `None` when they agree in full.
+    fn outcome_divergence(serial: &WalkOutcome, planned: &WalkOutcome) -> Option<String> {
+        (serial != planned).then(|| {
+            let parts = [
+                serial.0 == planned.0,
+                serial.1 == planned.1,
+                serial.2 == planned.2,
+                serial.3 == planned.3,
+                serial.4 == planned.4,
+                serial.5 == planned.5,
+            ];
+            format!(
+                "equal [source reads, target reads, state, changes, novel, unresolved] = {parts:?}"
+            )
+        })
+    }
+
+    /// Asserts the planned walk is indistinguishable from the serial one:
+    /// the same blocks read from each side's storage, as often, the same
+    /// state on both sides, the same changes in order, the same novel nodes
+    /// and the same unresolved links. Planning moves when a block is read,
+    /// never which blocks are, nor anything the walk decides.
     async fn assert_planned_reads_match(
         source: &TestTree,
         target: &TestTree,
@@ -6533,43 +6702,249 @@ mod tests {
         missing: super::MissingPolicy,
         context: &str,
     ) -> Result<()> {
-        let mut walks = Vec::new();
-        for planned in [false, true] {
-            source_storage.take_journal();
-            target_storage.take_journal();
-            let difference = TreeDifference::compute_scoped(
-                source,
-                target,
-                source_storage,
-                target_storage,
-                scope,
-                missing,
-                if planned {
-                    super::Reads::Planned
-                } else {
-                    super::Reads::Serial
-                },
+        let serial = walk_outcome(
+            source,
+            target,
+            source_storage,
+            target_storage,
+            scope,
+            missing,
+            super::Reads::Serial,
+        )
+        .await;
+        let planned = walk_outcome(
+            source,
+            target,
+            source_storage,
+            target_storage,
+            scope,
+            missing,
+            super::Reads::Planned,
+        )
+        .await;
+        if let Some(divergence) = outcome_divergence(&serial, &planned) {
+            panic!("{context}: the planned walk must be the serial walk: {divergence}");
+        }
+        Ok(())
+    }
+
+    /// The planned walk against the serial one, over what the oracle's
+    /// shared store does not reach: each tree in its own store, a scoped
+    /// difference, and the missing-block boundary on both sides (push's
+    /// policy) over stores holding a random two thirds of either side's
+    /// blocks, in every combination, both ways. Each run compares
+    /// everything [`walk_outcome`] shows. `DIALOG_DIFF_PLANNED_CASES` runs
+    /// more for a longer local soak.
+    #[dialog_common::test]
+    async fn it_walks_as_it_would_reading_block_by_block() -> Result<()> {
+        use super::{MissingBlocks, MissingPolicy, Reads};
+        let cases: u64 = std::env::var("DIALOG_DIFF_PLANNED_CASES")
+            .ok()
+            .and_then(|cases| cases.parse().ok())
+            .unwrap_or(150);
+        let mut failures = Vec::new();
+        for seed in 0..cases {
+            let mut rng = 0x5EED_1234_ABCD_9876u64 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut next = move || {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                (rng >> 32) as u32
+            };
+            let mut storage = CountingBackend::new();
+            let manifest = Manifest {
+                max_segment: [256u32, 512, 2_048][next() as usize % 3],
+                frame_ceiling_factor: 0,
+                ..Manifest::default()
+            };
+            let rotated = next().is_multiple_of(3);
+            let key =
+                move |index: u32| -> u32 { if rotated { index.rotate_left(8) } else { index } };
+            let base_size = 50 + next() % 3_000;
+            let keyspace = base_size + 300;
+            let base = build_with_manifest(
+                (0..base_size).map(|i| (key(i), vec![(i % 251) as u8])),
+                manifest,
+                &mut storage,
             )
             .await?;
-            let frontier = difference.divergent_bounds();
-            walks.push((
-                source_storage.take_journal(),
-                target_storage.take_journal(),
-                frontier,
-            ));
+            let hot: Vec<u32> = match next() % 3 {
+                0 => (0..1 + next() % 40)
+                    .map(|_| key(next() % keyspace))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let values: u32 = if next().is_multiple_of(2) { 4 } else { 251 };
+            let ops = |count: u32, next: &mut dyn FnMut() -> u32| {
+                (0..count)
+                    .map(|_| {
+                        let insert = !next().is_multiple_of(3);
+                        let at = if hot.is_empty() {
+                            key(next() % keyspace)
+                        } else {
+                            hot[next() as usize % hot.len()]
+                        };
+                        (insert, at, vec![(next() % values) as u8])
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let buffer_size =
+                |next: &mut dyn FnMut() -> u32| [1usize, 8, 64, 1_000_000][next() as usize % 4];
+            let mut target_base = base.clone();
+            if next().is_multiple_of(3) {
+                let edges = leaf_edges(&base, &storage)?;
+                let edits: Vec<(bool, u32, Vec<u8>)> = (0..5 + next() % 30)
+                    .map(|_| {
+                        let edge = u32::from_le_bytes(edges[next() as usize % edges.len()]);
+                        match next() % 2 {
+                            0 => (false, edge, vec![]),
+                            _ => (true, edge.wrapping_add(1 << 24), vec![7]),
+                        }
+                    })
+                    .collect();
+                target_base =
+                    canonicalized(&base, &edits, buffer_size(&mut next), &mut storage).await?;
+            }
+            let rounds: Vec<_> = (0..1 + next() % 4)
+                .map(|_| {
+                    let count = next() % 60;
+                    ops(count, &mut next)
+                })
+                .collect();
+            let mut source = base.clone();
+            for round in &rounds {
+                source = buffered(&source, round, buffer_size(&mut next), &mut storage).await?;
+            }
+            let mut target = target_base.clone();
+            for round in &rounds {
+                target = buffered(&target, round, buffer_size(&mut next), &mut storage).await?;
+            }
+            let source_count = next() % 6;
+            let source_ops = ops(source_count, &mut next);
+            source = buffered(&source, &source_ops, buffer_size(&mut next), &mut storage).await?;
+            let target_count = if next().is_multiple_of(4) {
+                base_size / 2 + next() % (base_size * 2)
+            } else {
+                1 + next() % 8
+            };
+            let target_ops = ops(target_count, &mut next);
+            target = buffered(&target, &target_ops, buffer_size(&mut next), &mut storage).await?;
+
+            let source_blocks = reachable(source.root(), &storage)?;
+            let target_blocks = reachable(target.root(), &storage)?;
+            let (full_source, full_target, partial_source, partial_target) = (
+                CountingBackend::new(),
+                CountingBackend::new(),
+                CountingBackend::new(),
+                CountingBackend::new(),
+            );
+            for block in &source_blocks {
+                full_source.store(block.clone());
+                if !next().is_multiple_of(3) {
+                    partial_source.store(block.clone());
+                }
+            }
+            for block in &target_blocks {
+                full_target.store(block.clone());
+                if !next().is_multiple_of(3) {
+                    partial_target.store(block.clone());
+                }
+            }
+            let bounds: Vec<u32> = (0..keyspace).map(key).collect();
+            let scope: Vec<core::ops::RangeInclusive<[u8; 4]>> = (0..1 + next() % 2)
+                .map(|_| {
+                    let mut ends = [
+                        bounds[next() as usize % bounds.len()].to_le_bytes(),
+                        bounds[next() as usize % bounds.len()].to_le_bytes(),
+                    ];
+                    ends.sort();
+                    ends[0]..=ends[1]
+                })
+                .collect();
+            let both = MissingPolicy {
+                source: MissingBlocks::Boundary,
+                target: MissingBlocks::Boundary,
+            };
+            type Run<'r> = (
+                &'r str,
+                &'r CountingBackend,
+                &'r CountingBackend,
+                Option<&'r [core::ops::RangeInclusive<[u8; 4]>]>,
+                MissingPolicy,
+            );
+            let runs: Vec<Run<'_>> = vec![
+                (
+                    "deny, distinct stores",
+                    &full_source,
+                    &full_target,
+                    None,
+                    MissingPolicy::default(),
+                ),
+                (
+                    "deny, scoped",
+                    &full_source,
+                    &full_target,
+                    Some(&scope[..]),
+                    MissingPolicy::default(),
+                ),
+                (
+                    "boundary both, partial both",
+                    &partial_source,
+                    &partial_target,
+                    None,
+                    both,
+                ),
+                (
+                    "boundary both, partial source",
+                    &partial_source,
+                    &full_target,
+                    None,
+                    both,
+                ),
+                (
+                    "boundary both, partial target",
+                    &full_source,
+                    &partial_target,
+                    None,
+                    both,
+                ),
+            ];
+            for (label, source_storage, target_storage, scope, missing) in runs {
+                for (from, to, from_storage, to_storage, way) in [
+                    (&source, &target, source_storage, target_storage, "forward"),
+                    (&target, &source, target_storage, source_storage, "reverse"),
+                ] {
+                    let serial = walk_outcome(
+                        from,
+                        to,
+                        from_storage,
+                        to_storage,
+                        scope,
+                        missing,
+                        Reads::Serial,
+                    )
+                    .await;
+                    let planned = walk_outcome(
+                        from,
+                        to,
+                        from_storage,
+                        to_storage,
+                        scope,
+                        missing,
+                        Reads::Planned,
+                    )
+                    .await;
+                    if let Some(divergence) = outcome_divergence(&serial, &planned) {
+                        failures.push(format!("seed {seed}, {label}, {way}: {divergence}"));
+                    }
+                }
+            }
         }
-        let (serial, planned) = (&walks[0], &walks[1]);
         assert!(
-            serial == planned,
-            "{context}: the planned walk must read what the serial walk reads \
-             (serial {} + {} reads, planned {} + {}) and leave the same frontier \
-             ({} spans, {} spans)",
-            serial.0.len(),
-            serial.1.len(),
-            planned.0.len(),
-            planned.1.len(),
-            serial.2.len(),
-            planned.2.len(),
+            failures.is_empty(),
+            "{} divergences:\n{}",
+            failures.len(),
+            failures.join("\n")
         );
         Ok(())
     }
