@@ -25,8 +25,10 @@ const SEAL: u8 = 0x00;
 /// The `info` tag for a derived secret.
 ///
 /// Distinct from [`SEAL`] so the two uses of one agreement key stay disjoint
-/// by structure: a derivation's `info` can never collide with a sealing's,
-/// whatever labels the two carry.
+/// by structure: a derivation's `info` never collides with a sealing's while
+/// neither label holds the byte of [`SEAL`] or of [`DERIVE`]. No constant
+/// label holds either, and a host that takes a label from code it does not
+/// trust, with [`Context::from_bytes`], must refuse one that does.
 const DERIVE: u8 = 0x01;
 
 /// Build the HKDF `info` string binding a key to its purpose and participants.
@@ -35,8 +37,8 @@ const DERIVE: u8 = 0x01;
 /// pair, and the context label keeps a secret sealed for one purpose from being
 /// opened as another. This binding is what provides domain separation between
 /// the Ed25519 signing use of an identity and its X25519 agreement use.
-fn info(context: Context, ephemeral: &[u8; 32], recipient: &[u8; 32]) -> Vec<u8> {
-    let label = context.as_str().as_bytes();
+fn info(context: Context<'_>, ephemeral: &[u8; 32], recipient: &[u8; 32]) -> Vec<u8> {
+    let label = context.as_bytes();
     let mut info = Vec::with_capacity(label.len() + 65);
     info.extend_from_slice(label);
     info.push(SEAL);
@@ -49,8 +51,12 @@ fn info(context: Context, ephemeral: &[u8; 32], recipient: &[u8; 32]) -> Vec<u8>
 ///
 /// The identity key is fixed-width and precedes the variable-width label, so
 /// the concatenation stays injective in the label without a length prefix.
-fn derivation_info(context: Context, identity: &[u8; 32], label: &[u8]) -> Vec<u8> {
-    let tag = context.as_str().as_bytes();
+/// It stays injective in the tag only while no tag holds the byte of
+/// [`DERIVE`]: then the first such byte ends the tag. No constant label holds
+/// it, and a host that takes a label from code it does not trust, with
+/// [`Context::from_bytes`], must refuse one that does before it derives.
+fn derivation_info(context: Context<'_>, identity: &[u8; 32], label: &[u8]) -> Vec<u8> {
+    let tag = context.as_bytes();
     let mut info = Vec::with_capacity(tag.len() + 33 + label.len());
     info.extend_from_slice(tag);
     info.push(DERIVE);
@@ -71,7 +77,7 @@ fn aad(recipient: &Ed25519Verifier) -> Vec<u8> {
 pub(super) async fn conceal(
     recipient_key: &X25519PublicKey,
     recipient: &Ed25519Verifier,
-    context: Context,
+    context: Context<'_>,
     plain: &[u8],
 ) -> Result<SealedSecret, SecretError> {
     // A fresh ephemeral pair per message: the sender's long-term key never
@@ -102,7 +108,7 @@ pub(super) async fn conceal(
 pub(super) async fn reveal(
     key: &X25519SecretKey,
     recipient: &Ed25519Verifier,
-    context: Context,
+    context: Context<'_>,
     sealed: &SealedSecret,
 ) -> Result<Vec<u8>, SecretError> {
     let ephemeral = X25519PublicKey::from_bytes(&sealed.ephemeral_public_key).await?;
@@ -133,7 +139,7 @@ pub(super) async fn reveal(
 /// platform: there is no nonce for an implementation to hedge.
 pub(super) async fn derive(
     key: &X25519SecretKey,
-    context: Context,
+    context: Context<'_>,
     label: &[u8],
 ) -> Result<[u8; 32], SecretError> {
     let public = key.public_key();
