@@ -57,26 +57,42 @@ pub use message::SealedSecret;
 /// # use dialog_credentials::secret::Context;
 /// const VAULT: Context = Context::new("dialog/vault/v1");
 /// ```
+///
+/// A host that seals on behalf of code it does not trust, such as a guest
+/// that names its own contexts, takes the label as bytes with
+/// [`Context::from_bytes`]. The bytes bind exactly as the bytes of a constant
+/// label do, so a secret sealed under a constant opens under the same bytes.
+/// Such a host refuses a label that holds the byte `0x00` or `0x01`: a seal
+/// ends its label with the one, and a derivation with the other, so either
+/// byte in a label could make one label, or one use, stand for another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Context(&'static str);
+pub struct Context<'a>(&'a [u8]);
 
-impl Context {
+impl Context<'static> {
     /// Create a context from a static label.
     #[must_use]
     pub const fn new(label: &'static str) -> Self {
+        Self(label.as_bytes())
+    }
+}
+
+impl<'a> Context<'a> {
+    /// Create a context from the bytes of a label.
+    #[must_use]
+    pub const fn from_bytes(label: &'a [u8]) -> Self {
         Self(label)
     }
 
-    /// Get the label.
+    /// Get the bytes of the label.
     #[must_use]
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_bytes(&self) -> &'a [u8] {
         self.0
     }
 }
 
-impl std::fmt::Display for Context {
+impl std::fmt::Display for Context<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
+        f.write_str(&String::from_utf8_lossy(self.0))
     }
 }
 
@@ -88,7 +104,7 @@ impl std::fmt::Display for Context {
 #[derive(Debug, Clone, Copy)]
 pub struct Seal<'a> {
     recipient: &'a Ed25519Verifier,
-    context: Context,
+    context: Context<'a>,
 }
 
 impl Seal<'_> {
@@ -111,7 +127,7 @@ impl Seal<'_> {
 #[derive(Debug, Clone, Copy)]
 pub struct Secret<'a, E = crate::ed25519::Sealed> {
     signer: &'a Ed25519Signer<E>,
-    context: Context,
+    context: Context<'a>,
 }
 
 impl<E> Secret<'_, E> {
@@ -241,7 +257,7 @@ impl<E> SecretExtractableDerive for Secret<'_, E> {
 impl Ed25519Verifier {
     /// Seal secrets to this identity, scoped to `context`.
     #[must_use]
-    pub const fn secret(&self, context: Context) -> Seal<'_> {
+    pub const fn secret<'a>(&'a self, context: Context<'a>) -> Seal<'a> {
         Seal {
             recipient: self,
             context,
@@ -252,7 +268,7 @@ impl Ed25519Verifier {
 impl<E> Ed25519Signer<E> {
     /// Seal and open secrets for this identity, scoped to `context`.
     #[must_use]
-    pub const fn secret(&self, context: Context) -> Secret<'_, E> {
+    pub const fn secret<'a>(&'a self, context: Context<'a>) -> Secret<'a, E> {
         Secret {
             signer: self,
             context,
@@ -273,6 +289,44 @@ mod tests {
 
     async fn signer(seed: u8) -> Ed25519Signer {
         Ed25519Signer::import(&[seed; 32]).await.unwrap()
+    }
+
+    /// A context from bytes binds as the constant with the same bytes does: a
+    /// secret concealed under one reveals under the other, and a derivation
+    /// under one gives the key of the other. Other bytes open nothing.
+    #[dialog_common::test]
+    async fn a_context_from_bytes_binds_as_its_constant() {
+        let profile = signer(1).await;
+        let label = b"dialog/vault/v1".to_vec();
+        let from_bytes = Context::from_bytes(&label);
+
+        let sealed = profile
+            .ed25519_did()
+            .secret(VAULT)
+            .conceal(b"a letter")
+            .await
+            .unwrap();
+        let opened = profile.secret(from_bytes).reveal(&sealed).await.unwrap();
+        let derived = profile.secret(from_bytes).derive(b"peer").await.unwrap();
+
+        assert_eq!(opened, b"a letter");
+        assert_eq!(
+            derived.ed25519_did(),
+            profile
+                .secret(VAULT)
+                .derive(b"peer")
+                .await
+                .unwrap()
+                .ed25519_did()
+        );
+        let other = b"dialog/vault/v2".to_vec();
+        assert!(matches!(
+            profile
+                .secret(Context::from_bytes(&other))
+                .reveal(&sealed)
+                .await,
+            Err(SecretError::Failed)
+        ));
     }
 
     /// Both derivations give the same identity; only extractability differs.
