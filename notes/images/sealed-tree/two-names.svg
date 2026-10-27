@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 290" width="720" height="290" role="img" aria-label="The tree links nodes by plaintext identity and the archive holds envelopes by their own hash. The signed head carries both the plaintext root and the sealed root; a party's known map pairs each identity with its envelope address and structure key, learned as each parent opens.">
+<style>
+svg{--bg:#fbfbf9;--ink:#1c2125;--muted:#5b656d;--rule:#c9cec7;--code:#eceee9;--pub:#9a5f0e;--pubs:#f5e6cf;--l1:#1f5f78;--l1s:#d8e8ee;--l2:#62489a;--l2s:#e6e0f2;--l3:#1d6e48;--l3s:#d9ecdf}
+@media (prefers-color-scheme: dark){svg{--bg:#171b1f;--ink:#e1e5e8;--muted:#9aa4ac;--rule:#3a424a;--code:#1d2227;--pub:#e1a64f;--pubs:#3a2d18;--l1:#6bb7d3;--l1s:#17313b;--l2:#b6a0e3;--l2s:#2a2340;--l3:#69cf9b;--l3s:#173326}}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.bg{fill:var(--bg)}
+.s-line{stroke:var(--ink);fill:none;stroke-width:1.2}
+.s-thin{stroke:var(--rule);fill:none;stroke-width:1.2}
+.s-dash{stroke:var(--ink);fill:none;stroke-width:1.2;stroke-dasharray:4 3}
+.s-pub-line{stroke:var(--pub);fill:none;stroke-width:2.2}
+.s-l1-line{stroke:var(--l1);fill:none;stroke-width:1.6}
+.s-l3-line{stroke:var(--l3);fill:none;stroke-width:2}
+.f-pub{fill:var(--pubs);stroke:var(--pub);stroke-width:1.2}
+.f-l1{fill:var(--l1s);stroke:var(--l1);stroke-width:1.2}
+.f-l2{fill:var(--l2s);stroke:var(--l2);stroke-width:1.2}
+.f-l3{fill:var(--l3s);stroke:var(--l3);stroke-width:1.2}
+.f-plain{fill:var(--bg);stroke:var(--ink);stroke-width:1.2}
+.f-muted{fill:var(--code);stroke:var(--rule);stroke-width:1.2}
+.f-ink{fill:var(--ink)}.f-pubink{fill:var(--pub)}.f-l1ink{fill:var(--l1)}.f-l3ink{fill:var(--l3)}
+.t{fill:var(--ink);font-size:12.5px}
+.t-sm{fill:var(--ink);font-size:11px}
+.t-mute{fill:var(--muted);font-size:11px}
+.t-b{fill:var(--ink);font-size:12.5px;font-weight:600}
+.t-mono{fill:var(--ink);font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.t-pub{fill:var(--pub);font-size:12px;font-weight:600}
+.t-l1{fill:var(--l1);font-size:12px;font-weight:600}
+.t-l2{fill:var(--l2);font-size:12px;font-weight:600}
+.t-l3{fill:var(--l3);font-size:12px;font-weight:600}
+</style>
+<rect class="bg" x="0" y="0" width="720" height="290" rx="4"/>
+<defs><marker id="arr-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker></defs>
+<rect class="f-pub" x="200" y="12" width="320" height="52"/>
+<text class="t-pub" x="360" y="32" text-anchor="middle">signed revision head</text>
+<text class="t-mono" x="360" y="52" text-anchor="middle" xml:space="preserve">tree = r     sealed = (@r, S_r)</text>
+<text class="t-b" x="135" y="98">search tree</text>
+<text class="t-mute" x="135" y="114">plaintext: cache, diffs, merge</text>
+<rect class="f-plain" x="95" y="130" width="60" height="30"/>
+<text class="t-mono" x="125" y="150" text-anchor="middle">r</text>
+<rect class="f-plain" x="30" y="220" width="60" height="30"/>
+<text class="t-mono" x="60" y="240" text-anchor="middle">a</text>
+<rect class="f-plain" x="160" y="220" width="60" height="30"/>
+<text class="t-mono" x="190" y="240" text-anchor="middle">b</text>
+<line class="s-line" x1="115" y1="160" x2="65" y2="220"/>
+<line class="s-line" x1="135" y1="160" x2="185" y2="220"/>
+<text class="t-mute" x="125" y="275" text-anchor="middle">links name children by identity</text>
+<text class="t-b" x="585" y="98" text-anchor="end">archive catalog</text>
+<text class="t-mute" x="585" y="114" text-anchor="end">envelopes, by BLAKE3 of their bytes</text>
+<rect class="f-l1" x="560" y="130" width="70" height="30"/>
+<text class="t-mono" x="595" y="150" text-anchor="middle">@r</text>
+<rect class="f-l1" x="495" y="220" width="70" height="30"/>
+<text class="t-mono" x="530" y="240" text-anchor="middle">@a</text>
+<rect class="f-l1" x="625" y="220" width="70" height="30"/>
+<text class="t-mono" x="660" y="240" text-anchor="middle">@b</text>
+<line class="s-l1-line" x1="585" y1="160" x2="535" y2="220"/>
+<line class="s-l1-line" x1="605" y1="160" x2="655" y2="220"/>
+<text class="t-mute" x="595" y="275" text-anchor="middle">structure region names (@a, S_a), (@b, S_b)</text>
+<rect class="f-muted" x="265" y="130" width="190" height="104"/>
+<text class="t-b" x="360" y="150" text-anchor="middle">known map</text>
+<text class="t-mono" x="360" y="174" text-anchor="middle">r → @r, S_r</text>
+<text class="t-mono" x="360" y="194" text-anchor="middle">a → @a, S_a</text>
+<text class="t-mono" x="360" y="214" text-anchor="middle">b → @b, S_b</text>
+<text class="t-mute" x="360" y="252" text-anchor="middle">admitted from the head,</text>
+<text class="t-mute" x="360" y="266" text-anchor="middle">then learned as each parent opens</text>
+<line class="s-dash" x1="155" y1="145" x2="263" y2="170" marker-end="url(#arr-n)"/>
+<line class="s-dash" x1="457" y1="170" x2="558" y2="145" marker-end="url(#arr-n)"/>
+<path class="s-line" d="M200,38 L125,38 L125,128" marker-end="url(#arr-n)"/>
+<path class="s-line" d="M520,38 L595,38 L595,128" marker-end="url(#arr-n)"/>
+</svg>

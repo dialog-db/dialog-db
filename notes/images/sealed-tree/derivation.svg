@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 270" width="720" height="270" role="img" aria-label="Key derivation as built. The node plaintext and the content secret give S. S and the range secret give R. R and the content secret give C. S opens the structure region, R the range region, C the content region. Values and assets take their own keys from the content secret.">
+<style>
+svg{--bg:#fbfbf9;--ink:#1c2125;--muted:#5b656d;--rule:#c9cec7;--code:#eceee9;--pub:#9a5f0e;--pubs:#f5e6cf;--l1:#1f5f78;--l1s:#d8e8ee;--l2:#62489a;--l2s:#e6e0f2;--l3:#1d6e48;--l3s:#d9ecdf}
+@media (prefers-color-scheme: dark){svg{--bg:#171b1f;--ink:#e1e5e8;--muted:#9aa4ac;--rule:#3a424a;--code:#1d2227;--pub:#e1a64f;--pubs:#3a2d18;--l1:#6bb7d3;--l1s:#17313b;--l2:#b6a0e3;--l2s:#2a2340;--l3:#69cf9b;--l3s:#173326}}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.bg{fill:var(--bg)}
+.s-line{stroke:var(--ink);fill:none;stroke-width:1.2}
+.s-thin{stroke:var(--rule);fill:none;stroke-width:1.2}
+.s-dash{stroke:var(--ink);fill:none;stroke-width:1.2;stroke-dasharray:4 3}
+.s-pub-line{stroke:var(--pub);fill:none;stroke-width:2.2}
+.s-l1-line{stroke:var(--l1);fill:none;stroke-width:1.6}
+.s-l3-line{stroke:var(--l3);fill:none;stroke-width:2}
+.f-pub{fill:var(--pubs);stroke:var(--pub);stroke-width:1.2}
+.f-l1{fill:var(--l1s);stroke:var(--l1);stroke-width:1.2}
+.f-l2{fill:var(--l2s);stroke:var(--l2);stroke-width:1.2}
+.f-l3{fill:var(--l3s);stroke:var(--l3);stroke-width:1.2}
+.f-plain{fill:var(--bg);stroke:var(--ink);stroke-width:1.2}
+.f-muted{fill:var(--code);stroke:var(--rule);stroke-width:1.2}
+.f-ink{fill:var(--ink)}.f-pubink{fill:var(--pub)}.f-l1ink{fill:var(--l1)}.f-l3ink{fill:var(--l3)}
+.t{fill:var(--ink);font-size:12.5px}
+.t-sm{fill:var(--ink);font-size:11px}
+.t-mute{fill:var(--muted);font-size:11px}
+.t-b{fill:var(--ink);font-size:12.5px;font-weight:600}
+.t-mono{fill:var(--ink);font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.t-pub{fill:var(--pub);font-size:12px;font-weight:600}
+.t-l1{fill:var(--l1);font-size:12px;font-weight:600}
+.t-l2{fill:var(--l2);font-size:12px;font-weight:600}
+.t-l3{fill:var(--l3);font-size:12px;font-weight:600}
+</style>
+<rect class="bg" x="0" y="0" width="720" height="270" rx="4"/>
+<defs><marker id="arr-k" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker></defs>
+<rect class="f-plain" x="20" y="30" width="120" height="34"/>
+<text class="t" x="80" y="52" text-anchor="middle">node plaintext</text>
+<rect class="f-l3" x="20" y="80" width="120" height="34"/>
+<text class="t-l3" x="80" y="102" text-anchor="middle">content secret</text>
+<rect class="f-l2" x="250" y="80" width="110" height="34"/>
+<text class="t-l2" x="305" y="102" text-anchor="middle">range secret</text>
+<rect class="f-l3" x="450" y="80" width="120" height="34"/>
+<text class="t-l3" x="510" y="102" text-anchor="middle">content secret</text>
+<circle class="f-l1" cx="200" cy="140" r="22"/>
+<text class="t-l1" x="200" y="145" text-anchor="middle">S</text>
+<circle class="f-l2" cx="400" cy="140" r="22"/>
+<text class="t-l2" x="400" y="145" text-anchor="middle">R</text>
+<circle class="f-l3" cx="620" cy="140" r="22"/>
+<text class="t-l3" x="620" y="145" text-anchor="middle">C</text>
+<line class="s-line" x1="140" y1="52" x2="185" y2="122" marker-end="url(#arr-k)"/>
+<line class="s-line" x1="140" y1="100" x2="179" y2="130" marker-end="url(#arr-k)"/>
+<line class="s-line" x1="222" y1="140" x2="376" y2="140" marker-end="url(#arr-k)"/>
+<line class="s-line" x1="320" y1="114" x2="385" y2="124" marker-end="url(#arr-k)"/>
+<line class="s-line" x1="422" y1="140" x2="596" y2="140" marker-end="url(#arr-k)"/>
+<line class="s-line" x1="535" y1="114" x2="603" y2="124" marker-end="url(#arr-k)"/>
+<text class="t-mute" x="200" y="182" text-anchor="middle">opens structure</text>
+<text class="t-mute" x="400" y="182" text-anchor="middle">opens ranges</text>
+<text class="t-mute" x="620" y="182" text-anchor="middle">opens content</text>
+<text class="t-sm" x="200" y="16" text-anchor="middle">from the parent's structure region,</text>
+<text class="t-sm" x="200" y="29" text-anchor="middle">or the head for the root</text>
+<line class="s-dash" x1="230" y1="34" x2="210" y2="114"/>
+<line class="s-line" x1="160" y1="200" x2="240" y2="200"/>
+<text class="t-l1" x="200" y="216" text-anchor="middle">replicator stops</text>
+<line class="s-line" x1="360" y1="200" x2="440" y2="200"/>
+<text class="t-l2" x="400" y="216" text-anchor="middle">validator stops</text>
+<line class="s-line" x1="580" y1="200" x2="660" y2="200"/>
+<text class="t-l3" x="620" y="216" text-anchor="middle">member</text>
+<rect class="f-l3" x="20" y="232" width="330" height="28"/>
+<text class="t-mono" x="32" y="250">V = keyed(content secret, value hash)</text>
+<rect class="f-l3" x="370" y="232" width="330" height="28"/>
+<text class="t-mono" x="382" y="250">A = keyed(content secret, salt)</text>
+</svg>

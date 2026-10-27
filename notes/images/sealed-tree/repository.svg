@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 300" width="720" height="300" role="img" aria-label="Writing a sealed line: persist stages blocks, the space seals them children first, sealed values and envelopes are stored, then the space settles and the head is signed with the sealed root. Reading: a verified head is admitted, then each node is located, fetched by address, hydrated on a local miss, and opened, which locates its children and values.">
+<style>
+svg{--bg:#fbfbf9;--ink:#1c2125;--muted:#5b656d;--rule:#c9cec7;--code:#eceee9;--pub:#9a5f0e;--pubs:#f5e6cf;--l1:#1f5f78;--l1s:#d8e8ee;--l2:#62489a;--l2s:#e6e0f2;--l3:#1d6e48;--l3s:#d9ecdf}
+@media (prefers-color-scheme: dark){svg{--bg:#171b1f;--ink:#e1e5e8;--muted:#9aa4ac;--rule:#3a424a;--code:#1d2227;--pub:#e1a64f;--pubs:#3a2d18;--l1:#6bb7d3;--l1s:#17313b;--l2:#b6a0e3;--l2s:#2a2340;--l3:#69cf9b;--l3s:#173326}}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.bg{fill:var(--bg)}
+.s-line{stroke:var(--ink);fill:none;stroke-width:1.2}
+.s-thin{stroke:var(--rule);fill:none;stroke-width:1.2}
+.s-dash{stroke:var(--ink);fill:none;stroke-width:1.2;stroke-dasharray:4 3}
+.s-pub-line{stroke:var(--pub);fill:none;stroke-width:2.2}
+.s-l1-line{stroke:var(--l1);fill:none;stroke-width:1.6}
+.s-l3-line{stroke:var(--l3);fill:none;stroke-width:2}
+.f-pub{fill:var(--pubs);stroke:var(--pub);stroke-width:1.2}
+.f-l1{fill:var(--l1s);stroke:var(--l1);stroke-width:1.2}
+.f-l2{fill:var(--l2s);stroke:var(--l2);stroke-width:1.2}
+.f-l3{fill:var(--l3s);stroke:var(--l3);stroke-width:1.2}
+.f-plain{fill:var(--bg);stroke:var(--ink);stroke-width:1.2}
+.f-muted{fill:var(--code);stroke:var(--rule);stroke-width:1.2}
+.f-ink{fill:var(--ink)}.f-pubink{fill:var(--pub)}.f-l1ink{fill:var(--l1)}.f-l3ink{fill:var(--l3)}
+.t{fill:var(--ink);font-size:12.5px}
+.t-sm{fill:var(--ink);font-size:11px}
+.t-mute{fill:var(--muted);font-size:11px}
+.t-b{fill:var(--ink);font-size:12.5px;font-weight:600}
+.t-mono{fill:var(--ink);font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.t-pub{fill:var(--pub);font-size:12px;font-weight:600}
+.t-l1{fill:var(--l1);font-size:12px;font-weight:600}
+.t-l2{fill:var(--l2);font-size:12px;font-weight:600}
+.t-l3{fill:var(--l3);font-size:12px;font-weight:600}
+</style>
+<rect class="bg" x="0" y="0" width="720" height="300" rx="4"/>
+<defs><marker id="arr-f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker></defs>
+<text class="t-b" x="20" y="26">write: commit, merge, pull</text>
+<rect class="f-l3" x="20" y="38" width="124" height="54" rx="3"/>
+<text class="t-b" x="82" y="61" text-anchor="middle">persist_line</text>
+<text class="t-sm" x="82" y="79" text-anchor="middle">stage the delta</text>
+<line class="s-line" x1="145" y1="65" x2="158" y2="65" marker-end="url(#arr-f)"/>
+<rect class="f-l3" x="159" y="38" width="124" height="54" rx="3"/>
+<text class="t-b" x="221" y="61" text-anchor="middle">Space::seal</text>
+<text class="t-sm" x="221" y="79" text-anchor="middle">children first</text>
+<line class="s-line" x1="284" y1="65" x2="297" y2="65" marker-end="url(#arr-f)"/>
+<rect class="f-l3" x="298" y="38" width="124" height="54" rx="3"/>
+<text class="t-b" x="360" y="61" text-anchor="middle">blob store</text>
+<text class="t-sm" x="360" y="79" text-anchor="middle">sealed values</text>
+<line class="s-line" x1="423" y1="65" x2="436" y2="65" marker-end="url(#arr-f)"/>
+<rect class="f-l3" x="437" y="38" width="124" height="54" rx="3"/>
+<text class="t-b" x="499" y="61" text-anchor="middle">archive Import</text>
+<text class="t-sm" x="499" y="79" text-anchor="middle">envelopes</text>
+<line class="s-line" x1="562" y1="65" x2="575" y2="65" marker-end="url(#arr-f)"/>
+<rect class="f-l3" x="576" y="38" width="124" height="54" rx="3"/>
+<text class="t-b" x="638" y="61" text-anchor="middle">settle, sign head</text>
+<text class="t-sm" x="638" y="79" text-anchor="middle">tree r, sealed @r</text>
+<text class="t-mute" x="20" y="112">Sealing finishes before anything is written; a refused seal (reader, missing node) writes nothing.</text>
+<text class="t-b" x="20" y="152">read: branch, snapshot, merge sides, verified upstream head, sync points</text>
+<rect class="f-l1" x="20" y="164" width="124" height="54" rx="3"/>
+<text class="t-b" x="82" y="187" text-anchor="middle">admit</text>
+<text class="t-sm" x="82" y="205" text-anchor="middle">r → (@r, S_r)</text>
+<line class="s-line" x1="145" y1="191" x2="158" y2="191" marker-end="url(#arr-f)"/>
+<rect class="f-l1" x="159" y="164" width="124" height="54" rx="3"/>
+<text class="t-b" x="221" y="187" text-anchor="middle">locate(identity)</text>
+<text class="t-sm" x="221" y="205" text-anchor="middle">→ address, S</text>
+<line class="s-line" x1="284" y1="191" x2="297" y2="191" marker-end="url(#arr-f)"/>
+<rect class="f-l1" x="298" y="164" width="124" height="54" rx="3"/>
+<text class="t-b" x="360" y="187" text-anchor="middle">Get by address</text>
+<text class="t-sm" x="360" y="205" text-anchor="middle">miss: hydrate remote</text>
+<line class="s-line" x1="423" y1="191" x2="436" y2="191" marker-end="url(#arr-f)"/>
+<rect class="f-l1" x="437" y="164" width="124" height="54" rx="3"/>
+<text class="t-b" x="499" y="187" text-anchor="middle">open</text>
+<text class="t-sm" x="499" y="205" text-anchor="middle">check, decrypt</text>
+<line class="s-line" x1="562" y1="191" x2="575" y2="191" marker-end="url(#arr-f)"/>
+<rect class="f-l1" x="576" y="164" width="124" height="54" rx="3"/>
+<text class="t-b" x="638" y="187" text-anchor="middle">learn</text>
+<text class="t-sm" x="638" y="205" text-anchor="middle">children and values</text>
+<path class="s-dash" d="M638,219 L638,250 L360,250 L360,221" marker-end="url(#arr-f)"/>
+<text class="t-mute" x="499" y="266" text-anchor="middle">each child and value the tree asks for next</text>
+<text class="t-mute" x="20" y="290">Push uploads envelopes and sealed values by address; export and download carry the same bytes.</text>
+</svg>

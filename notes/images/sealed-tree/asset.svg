@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 270" width="720" height="270" role="img" aria-label="A sealed asset: a 65-byte header, then 64 KiB pieces each with a 16-byte tag. A range read fetches the header and then only the pieces the range touches, opens them, and trims the first and last.">
+<style>
+svg{--bg:#fbfbf9;--ink:#1c2125;--muted:#5b656d;--rule:#c9cec7;--code:#eceee9;--pub:#9a5f0e;--pubs:#f5e6cf;--l1:#1f5f78;--l1s:#d8e8ee;--l2:#62489a;--l2s:#e6e0f2;--l3:#1d6e48;--l3s:#d9ecdf}
+@media (prefers-color-scheme: dark){svg{--bg:#171b1f;--ink:#e1e5e8;--muted:#9aa4ac;--rule:#3a424a;--code:#1d2227;--pub:#e1a64f;--pubs:#3a2d18;--l1:#6bb7d3;--l1s:#17313b;--l2:#b6a0e3;--l2s:#2a2340;--l3:#69cf9b;--l3s:#173326}}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.bg{fill:var(--bg)}
+.s-line{stroke:var(--ink);fill:none;stroke-width:1.2}
+.s-thin{stroke:var(--rule);fill:none;stroke-width:1.2}
+.s-dash{stroke:var(--ink);fill:none;stroke-width:1.2;stroke-dasharray:4 3}
+.s-pub-line{stroke:var(--pub);fill:none;stroke-width:2.2}
+.s-l1-line{stroke:var(--l1);fill:none;stroke-width:1.6}
+.s-l3-line{stroke:var(--l3);fill:none;stroke-width:2}
+.f-pub{fill:var(--pubs);stroke:var(--pub);stroke-width:1.2}
+.f-l1{fill:var(--l1s);stroke:var(--l1);stroke-width:1.2}
+.f-l2{fill:var(--l2s);stroke:var(--l2);stroke-width:1.2}
+.f-l3{fill:var(--l3s);stroke:var(--l3);stroke-width:1.2}
+.f-plain{fill:var(--bg);stroke:var(--ink);stroke-width:1.2}
+.f-muted{fill:var(--code);stroke:var(--rule);stroke-width:1.2}
+.f-ink{fill:var(--ink)}.f-pubink{fill:var(--pub)}.f-l1ink{fill:var(--l1)}.f-l3ink{fill:var(--l3)}
+.t{fill:var(--ink);font-size:12.5px}
+.t-sm{fill:var(--ink);font-size:11px}
+.t-mute{fill:var(--muted);font-size:11px}
+.t-b{fill:var(--ink);font-size:12.5px;font-weight:600}
+.t-mono{fill:var(--ink);font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.t-pub{fill:var(--pub);font-size:12px;font-weight:600}
+.t-l1{fill:var(--l1);font-size:12px;font-weight:600}
+.t-l2{fill:var(--l2);font-size:12px;font-weight:600}
+.t-l3{fill:var(--l3);font-size:12px;font-weight:600}
+</style>
+<rect class="bg" x="0" y="0" width="720" height="270" rx="4"/>
+<defs><marker id="arr-a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker></defs>
+<text class="t-b" x="20" y="20">sealed copy, stored under BLAKE3 of these bytes</text>
+<rect class="f-pub" x="20" y="32" width="90" height="42"/>
+<text class="t-pub" x="30" y="50">header</text>
+<text class="t-mute" x="30" y="66">ver, gen, salt</text>
+<rect class="f-muted" x="114" y="32" width="130" height="42"/>
+<text class="t-sm" x="124" y="50">piece 0</text>
+<text class="t-mute" x="124" y="66">64 KiB + 16</text>
+<rect class="f-l3" x="248" y="32" width="130" height="42"/>
+<text class="t-l3" x="258" y="50">piece 1</text>
+<text class="t-mute" x="258" y="66">64 KiB + 16</text>
+<rect class="f-l3" x="382" y="32" width="130" height="42"/>
+<text class="t-l3" x="392" y="50">piece 2</text>
+<text class="t-mute" x="392" y="66">64 KiB + 16</text>
+<rect class="f-muted" x="516" y="32" width="40" height="42"/>
+<text class="t-sm" x="536" y="58" text-anchor="middle">…</text>
+<rect class="f-muted" x="560" y="32" width="140" height="42"/>
+<text class="t-sm" x="570" y="50">last piece</text>
+<text class="t-mute" x="570" y="66">rest + 16</text>
+<line class="s-line" x1="114" y1="140" x2="700" y2="140"/>
+<text class="t-mute" x="20" y="144">plaintext</text>
+<line class="s-line" x1="114" y1="134" x2="114" y2="146"/>
+<line class="s-line" x1="246" y1="134" x2="246" y2="146"/>
+<line class="s-line" x1="380" y1="134" x2="380" y2="146"/>
+<line class="s-line" x1="514" y1="134" x2="514" y2="146"/>
+<rect class="f-l3" x="300" y="122" width="150" height="12"/>
+<text class="t-l3" x="375" y="116" text-anchor="middle">requested range</text>
+<line class="s-dash" x1="300" y1="122" x2="290" y2="76"/>
+<line class="s-dash" x1="450" y1="122" x2="455" y2="76"/>
+<text class="t-mute" x="273" y="162" text-anchor="middle">skip</text>
+<line class="s-thin" x1="248" y1="154" x2="298" y2="154"/>
+<text class="t-mute" x="482" y="162" text-anchor="middle">dropped</text>
+<line class="s-thin" x1="452" y1="154" x2="512" y2="154"/>
+<text class="t-sm" x="20" y="194">1. Read the header (65 bytes) and check its generation.</text>
+<text class="t-sm" x="20" y="212">2. Read only the sealed span of the pieces the range touches; its offsets follow from the recorded size.</text>
+<text class="t-sm" x="20" y="230">3. Open each piece, drop what precedes the range and what follows it. A whole read also checks the asset's hash.</text>
+<text class="t-mono" x="20" y="258">pieceᵢ = AES-256-GCM(A, i ‖ last ‖ 0, plainᵢ, aad = header)</text>
+</svg>

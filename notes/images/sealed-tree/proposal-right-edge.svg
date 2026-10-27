@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 270" width="720" height="270" role="img" aria-label="A three-level tree. Most nodes are sealed. One node per level straddles the boundary, and nodes to its right are fully public. Public links run down the right edge, and a reader without keys can follow only those.">
+<style>
+svg{--bg:#fbfbf9;--ink:#1c2125;--muted:#5b656d;--rule:#c9cec7;--code:#eceee9;--pub:#9a5f0e;--pubs:#f5e6cf;--l1:#1f5f78;--l1s:#d8e8ee;--l2:#62489a;--l2s:#e6e0f2;--l3:#1d6e48;--l3s:#d9ecdf}
+@media (prefers-color-scheme: dark){svg{--bg:#171b1f;--ink:#e1e5e8;--muted:#9aa4ac;--rule:#3a424a;--code:#1d2227;--pub:#e1a64f;--pubs:#3a2d18;--l1:#6bb7d3;--l1s:#17313b;--l2:#b6a0e3;--l2s:#2a2340;--l3:#69cf9b;--l3s:#173326}}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.bg{fill:var(--bg)}
+.s-line{stroke:var(--ink);fill:none;stroke-width:1.2}
+.s-thin{stroke:var(--rule);fill:none;stroke-width:1.2}
+.s-dash{stroke:var(--ink);fill:none;stroke-width:1.2;stroke-dasharray:4 3}
+.s-pub-line{stroke:var(--pub);fill:none;stroke-width:2.2}
+.s-l1-line{stroke:var(--l1);fill:none;stroke-width:1.6}
+.s-l3-line{stroke:var(--l3);fill:none;stroke-width:2}
+.f-pub{fill:var(--pubs);stroke:var(--pub);stroke-width:1.2}
+.f-l1{fill:var(--l1s);stroke:var(--l1);stroke-width:1.2}
+.f-l2{fill:var(--l2s);stroke:var(--l2);stroke-width:1.2}
+.f-l3{fill:var(--l3s);stroke:var(--l3);stroke-width:1.2}
+.f-plain{fill:var(--bg);stroke:var(--ink);stroke-width:1.2}
+.f-muted{fill:var(--code);stroke:var(--rule);stroke-width:1.2}
+.f-ink{fill:var(--ink)}.f-pubink{fill:var(--pub)}.f-l1ink{fill:var(--l1)}.f-l3ink{fill:var(--l3)}
+.t{fill:var(--ink);font-size:12.5px}
+.t-sm{fill:var(--ink);font-size:11px}
+.t-mute{fill:var(--muted);font-size:11px}
+.t-b{fill:var(--ink);font-size:12.5px;font-weight:600}
+.t-mono{fill:var(--ink);font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.t-pub{fill:var(--pub);font-size:12px;font-weight:600}
+.t-l1{fill:var(--l1);font-size:12px;font-weight:600}
+.t-l2{fill:var(--l2);font-size:12px;font-weight:600}
+.t-l3{fill:var(--l3);font-size:12px;font-weight:600}
+</style>
+<rect class="bg" x="0" y="0" width="720" height="270" rx="4"/>
+<defs>
+      <marker id="arr-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-pubink"/></marker>
+    </defs>
+    <!-- level 0 -->
+    <rect class="f-l3" x="300" y="20" width="70" height="30"/>
+    <rect class="f-pub" x="370" y="20" width="30" height="30"/>
+    <text class="t-sm" x="350" y="40" text-anchor="middle">root</text>
+    <!-- level 1 -->
+    <rect class="f-l3" x="110" y="110" width="90" height="30"/>
+    <rect class="f-l3" x="250" y="110" width="90" height="30"/>
+    <rect class="f-l3" x="390" y="110" width="55" height="30"/>
+    <rect class="f-pub" x="445" y="110" width="35" height="30"/>
+    <rect class="f-pub" x="530" y="110" width="90" height="30"/>
+    <!-- level 2 leaves -->
+    <rect class="f-l3" x="40" y="200" width="60" height="30"/>
+    <rect class="f-l3" x="110" y="200" width="60" height="30"/>
+    <rect class="f-l3" x="180" y="200" width="60" height="30"/>
+    <rect class="f-l3" x="250" y="200" width="60" height="30"/>
+    <rect class="f-l3" x="320" y="200" width="60" height="30"/>
+    <rect class="f-l3" x="390" y="200" width="36" height="30"/>
+    <rect class="f-pub" x="426" y="200" width="24" height="30"/>
+    <rect class="f-pub" x="460" y="200" width="60" height="30"/>
+    <rect class="f-pub" x="530" y="200" width="60" height="30"/>
+    <rect class="f-pub" x="600" y="200" width="60" height="30"/>
+    <!-- sealed links -->
+    <line class="s-thin" x1="325" y1="50" x2="155" y2="110"/>
+    <line class="s-thin" x1="335" y1="50" x2="295" y2="110"/>
+    <line class="s-thin" x1="150" y1="140" x2="70" y2="200"/>
+    <line class="s-thin" x1="155" y1="140" x2="140" y2="200"/>
+    <line class="s-thin" x1="165" y1="140" x2="210" y2="200"/>
+    <line class="s-thin" x1="290" y1="140" x2="280" y2="200"/>
+    <line class="s-thin" x1="300" y1="140" x2="350" y2="200"/>
+    <!-- public links (right edge) -->
+    <line class="s-pub-line" x1="385" y1="50" x2="425" y2="110" marker-end="url(#arr-a)"/>
+    <line class="s-pub-line" x1="392" y1="50" x2="570" y2="110" marker-end="url(#arr-a)"/>
+    <line class="s-pub-line" x1="455" y1="140" x2="420" y2="200" marker-end="url(#arr-a)"/>
+    <line class="s-pub-line" x1="465" y1="140" x2="488" y2="200" marker-end="url(#arr-a)"/>
+    <line class="s-pub-line" x1="570" y1="140" x2="560" y2="200" marker-end="url(#arr-a)"/>
+    <line class="s-pub-line" x1="580" y1="140" x2="628" y2="200" marker-end="url(#arr-a)"/>
+    <!-- labels -->
+    <text class="t-pub" x="628" y="100">public links</text>
+    <text class="t-mute" x="20" y="100">sealed links, in the header</text>
+    <text class="t-sm" x="222" y="262">sealed nodes</text>
+    <text class="t-sm" x="438" y="262" text-anchor="middle">straddling</text>
+    <text class="t-sm" x="595" y="262" text-anchor="middle">public nodes</text>
+</svg>

@@ -912,6 +912,8 @@ Neither is worth doing before there is a reason to care, but both mean the
 
 `dialog-keyring::layered` prototypes step 7 below: a tree whose nodes open in
 nested levels, `notes/privacy.md`'s L1–L3, rather than whole or not at all.
+`notes/sealed-tree.md` is the design as built, with figures, compared with
+the "Dialog Sealed Trees" proposal.
 
 | Level | Holds | Can |
 | --- | --- | --- |
@@ -1216,9 +1218,9 @@ on the filesystem one:
   and a range holder routes to the leaf a key belongs in without seeing them.
   That is the claim; anything stronger would mean putting buffered keys in
   the range region.
-- **Not run in a browser.** Everything compiles for wasm. The tests have run
-  natively only: `wbg-pool`, which runs them in a browser, is not installed
-  here.
+- **Browser runs come from CI.** Everything compiles for wasm. Locally the
+  tests ran natively; CI's `test:web` and `test:cross:integration` jobs run
+  them in a headless browser.
 
 ## Suggested sequence
 

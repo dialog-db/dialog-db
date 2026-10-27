@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 250" width="720" height="250" role="img" aria-label="A node block: a plaintext public part, then a sealed header opened by S, sealed ranges opened by R, and a sealed body opened by C. The address is the hash of every byte.">
+<style>
+svg{--bg:#fbfbf9;--ink:#1c2125;--muted:#5b656d;--rule:#c9cec7;--code:#eceee9;--pub:#9a5f0e;--pubs:#f5e6cf;--l1:#1f5f78;--l1s:#d8e8ee;--l2:#62489a;--l2s:#e6e0f2;--l3:#1d6e48;--l3s:#d9ecdf}
+@media (prefers-color-scheme: dark){svg{--bg:#171b1f;--ink:#e1e5e8;--muted:#9aa4ac;--rule:#3a424a;--code:#1d2227;--pub:#e1a64f;--pubs:#3a2d18;--l1:#6bb7d3;--l1s:#17313b;--l2:#b6a0e3;--l2s:#2a2340;--l3:#69cf9b;--l3s:#173326}}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.bg{fill:var(--bg)}
+.s-line{stroke:var(--ink);fill:none;stroke-width:1.2}
+.s-thin{stroke:var(--rule);fill:none;stroke-width:1.2}
+.s-dash{stroke:var(--ink);fill:none;stroke-width:1.2;stroke-dasharray:4 3}
+.s-pub-line{stroke:var(--pub);fill:none;stroke-width:2.2}
+.s-l1-line{stroke:var(--l1);fill:none;stroke-width:1.6}
+.s-l3-line{stroke:var(--l3);fill:none;stroke-width:2}
+.f-pub{fill:var(--pubs);stroke:var(--pub);stroke-width:1.2}
+.f-l1{fill:var(--l1s);stroke:var(--l1);stroke-width:1.2}
+.f-l2{fill:var(--l2s);stroke:var(--l2);stroke-width:1.2}
+.f-l3{fill:var(--l3s);stroke:var(--l3);stroke-width:1.2}
+.f-plain{fill:var(--bg);stroke:var(--ink);stroke-width:1.2}
+.f-muted{fill:var(--code);stroke:var(--rule);stroke-width:1.2}
+.f-ink{fill:var(--ink)}.f-pubink{fill:var(--pub)}.f-l1ink{fill:var(--l1)}.f-l3ink{fill:var(--l3)}
+.t{fill:var(--ink);font-size:12.5px}
+.t-sm{fill:var(--ink);font-size:11px}
+.t-mute{fill:var(--muted);font-size:11px}
+.t-b{fill:var(--ink);font-size:12.5px;font-weight:600}
+.t-mono{fill:var(--ink);font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.t-pub{fill:var(--pub);font-size:12px;font-weight:600}
+.t-l1{fill:var(--l1);font-size:12px;font-weight:600}
+.t-l2{fill:var(--l2);font-size:12px;font-weight:600}
+.t-l3{fill:var(--l3);font-size:12px;font-weight:600}
+</style>
+<rect class="bg" x="0" y="0" width="720" height="250" rx="4"/>
+<line class="s-line" x1="20" y1="30" x2="700" y2="30"/>
+    <line class="s-line" x1="20" y1="25" x2="20" y2="35"/>
+    <line class="s-line" x1="700" y1="25" x2="700" y2="35"/>
+    <text class="t-b" x="360" y="20" text-anchor="middle">address = BLAKE3(every byte of the block)</text>
+    <rect class="f-pub" x="20" y="48" width="220" height="130"/>
+    <text class="t-pub" x="32" y="68">public part</text>
+    <text class="t-sm" x="32" y="90">version · flags</text>
+    <text class="t-sm" x="32" y="108">g2 · g3 generations</text>
+    <text class="t-sm" x="32" y="126">public entries and ops</text>
+    <text class="t-sm" x="32" y="144">public links</text>
+    <text class="t-mute" x="32" y="166">keys ≥ 0xFF only</text>
+    <rect class="f-l1" x="250" y="48" width="140" height="130"/>
+    <text class="t-l1" x="262" y="68">header</text>
+    <text class="t-sm" x="262" y="90">child addresses</text>
+    <text class="t-sm" x="262" y="108">child structure keys</text>
+    <text class="t-sm" x="262" y="126">spilled-value refs</text>
+    <rect class="f-l2" x="400" y="48" width="120" height="130"/>
+    <text class="t-l2" x="412" y="68">ranges</text>
+    <text class="t-sm" x="412" y="90">separators</text>
+    <rect class="f-l3" x="530" y="48" width="170" height="130"/>
+    <text class="t-l3" x="542" y="68">body</text>
+    <text class="t-sm" x="542" y="90">sealed entries</text>
+    <text class="t-sm" x="542" y="108">sealed buffered ops</text>
+    <text class="t-sm" x="542" y="126">scales</text>
+    <text class="t-b" x="130" y="206" text-anchor="middle">no key</text>
+    <text class="t-mute" x="130" y="224" text-anchor="middle">anyone who can fetch it</text>
+    <text class="t-l1" x="320" y="206" text-anchor="middle">opened by S</text>
+    <text class="t-mute" x="320" y="224" text-anchor="middle">L1 and above</text>
+    <text class="t-l2" x="460" y="206" text-anchor="middle">opened by R</text>
+    <text class="t-mute" x="460" y="224" text-anchor="middle">L2 and above</text>
+    <text class="t-l3" x="615" y="206" text-anchor="middle">opened by C</text>
+    <text class="t-mute" x="615" y="224" text-anchor="middle">L3</text>
+</svg>

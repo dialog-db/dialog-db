@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 284" width="720" height="284" role="img" aria-label="One edit reseals only the path from the edited leaf to the root, sealing children before parents. Every other node keeps its envelope and address.">
+<style>
+svg{--bg:#fbfbf9;--ink:#1c2125;--muted:#5b656d;--rule:#c9cec7;--code:#eceee9;--pub:#9a5f0e;--pubs:#f5e6cf;--l1:#1f5f78;--l1s:#d8e8ee;--l2:#62489a;--l2s:#e6e0f2;--l3:#1d6e48;--l3s:#d9ecdf}
+@media (prefers-color-scheme: dark){svg{--bg:#171b1f;--ink:#e1e5e8;--muted:#9aa4ac;--rule:#3a424a;--code:#1d2227;--pub:#e1a64f;--pubs:#3a2d18;--l1:#6bb7d3;--l1s:#17313b;--l2:#b6a0e3;--l2s:#2a2340;--l3:#69cf9b;--l3s:#173326}}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.bg{fill:var(--bg)}
+.s-line{stroke:var(--ink);fill:none;stroke-width:1.2}
+.s-thin{stroke:var(--rule);fill:none;stroke-width:1.2}
+.s-dash{stroke:var(--ink);fill:none;stroke-width:1.2;stroke-dasharray:4 3}
+.s-pub-line{stroke:var(--pub);fill:none;stroke-width:2.2}
+.s-l1-line{stroke:var(--l1);fill:none;stroke-width:1.6}
+.s-l3-line{stroke:var(--l3);fill:none;stroke-width:2}
+.f-pub{fill:var(--pubs);stroke:var(--pub);stroke-width:1.2}
+.f-l1{fill:var(--l1s);stroke:var(--l1);stroke-width:1.2}
+.f-l2{fill:var(--l2s);stroke:var(--l2);stroke-width:1.2}
+.f-l3{fill:var(--l3s);stroke:var(--l3);stroke-width:1.2}
+.f-plain{fill:var(--bg);stroke:var(--ink);stroke-width:1.2}
+.f-muted{fill:var(--code);stroke:var(--rule);stroke-width:1.2}
+.f-ink{fill:var(--ink)}.f-pubink{fill:var(--pub)}.f-l1ink{fill:var(--l1)}.f-l3ink{fill:var(--l3)}
+.t{fill:var(--ink);font-size:12.5px}
+.t-sm{fill:var(--ink);font-size:11px}
+.t-mute{fill:var(--muted);font-size:11px}
+.t-b{fill:var(--ink);font-size:12.5px;font-weight:600}
+.t-mono{fill:var(--ink);font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.t-pub{fill:var(--pub);font-size:12px;font-weight:600}
+.t-l1{fill:var(--l1);font-size:12px;font-weight:600}
+.t-l2{fill:var(--l2);font-size:12px;font-weight:600}
+.t-l3{fill:var(--l3);font-size:12px;font-weight:600}
+</style>
+<rect class="bg" x="0" y="0" width="720" height="284" rx="4"/>
+<defs><marker id="arr-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="f-ink"/></marker></defs>
+<rect class="f-l3" x="330" y="30" width="60" height="30"/>
+<text class="t-mono" x="360" y="50" text-anchor="middle">root′</text>
+<line class="s-thin" x1="360" y1="60" x2="140" y2="110"/>
+<rect class="f-muted" x="110" y="110" width="60" height="30"/>
+<text class="t-mono" x="140" y="130" text-anchor="middle">index</text>
+<line class="s-thin" x1="140" y1="140" x2="70" y2="190"/>
+<rect class="f-muted" x="45" y="190" width="50" height="30"/>
+<text class="t-mono" x="70" y="210" text-anchor="middle">leaf</text>
+<line class="s-thin" x1="140" y1="140" x2="140" y2="190"/>
+<rect class="f-muted" x="115" y="190" width="50" height="30"/>
+<text class="t-mono" x="140" y="210" text-anchor="middle">leaf</text>
+<line class="s-thin" x1="140" y1="140" x2="210" y2="190"/>
+<rect class="f-muted" x="185" y="190" width="50" height="30"/>
+<text class="t-mono" x="210" y="210" text-anchor="middle">leaf</text>
+<line class="s-thin" x1="360" y1="60" x2="360" y2="110"/>
+<rect class="f-l3" x="330" y="110" width="60" height="30"/>
+<text class="t-mono" x="360" y="130" text-anchor="middle">index′</text>
+<line class="s-thin" x1="360" y1="140" x2="290" y2="190"/>
+<rect class="f-muted" x="265" y="190" width="50" height="30"/>
+<text class="t-mono" x="290" y="210" text-anchor="middle">leaf</text>
+<line class="s-thin" x1="360" y1="140" x2="360" y2="190"/>
+<rect class="f-muted" x="335" y="190" width="50" height="30"/>
+<text class="t-mono" x="360" y="210" text-anchor="middle">leaf</text>
+<line class="s-thin" x1="360" y1="140" x2="430" y2="190"/>
+<rect class="f-l3" x="405" y="190" width="50" height="30"/>
+<text class="t-mono" x="430" y="210" text-anchor="middle">leaf′</text>
+<line class="s-thin" x1="360" y1="60" x2="580" y2="110"/>
+<rect class="f-muted" x="550" y="110" width="60" height="30"/>
+<text class="t-mono" x="580" y="130" text-anchor="middle">index</text>
+<line class="s-thin" x1="580" y1="140" x2="510" y2="190"/>
+<rect class="f-muted" x="485" y="190" width="50" height="30"/>
+<text class="t-mono" x="510" y="210" text-anchor="middle">leaf</text>
+<line class="s-thin" x1="580" y1="140" x2="580" y2="190"/>
+<rect class="f-muted" x="555" y="190" width="50" height="30"/>
+<text class="t-mono" x="580" y="210" text-anchor="middle">leaf</text>
+<line class="s-thin" x1="580" y1="140" x2="650" y2="190"/>
+<rect class="f-muted" x="625" y="190" width="50" height="30"/>
+<text class="t-mono" x="650" y="210" text-anchor="middle">leaf</text>
+<line class="s-l3-line" x1="430" y1="190" x2="372" y2="142" marker-end="url(#arr-r)"/>
+<line class="s-l3-line" x1="360" y1="110" x2="360" y2="62" marker-end="url(#arr-r)"/>
+<text class="t-l3" x="430" y="238" text-anchor="middle">1. edit, seal leaf</text>
+<text class="t-l3" x="372" y="92">2. seal parent: records leaf′ address and S</text>
+<text class="t-l3" x="400" y="24">3. seal root; head names root′ and its S</text>
+<rect class="f-l3" x="20" y="256" width="14" height="14"/><text class="t-sm" x="40" y="267">resealed: new envelope, new address</text>
+<rect class="f-muted" x="280" y="256" width="14" height="14"/><text class="t-sm" x="300" y="267">reused: the parent copies the known address and S; nothing is sealed or stored</text>
+</svg>

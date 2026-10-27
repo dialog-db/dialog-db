@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 320" width="720" height="320" role="img" aria-label="A layered envelope: a plaintext header naming the generations, then a structure region opened by S, a range region opened by R and a content region opened by C. The address is the hash of every byte.">
+<style>
+svg{--bg:#fbfbf9;--ink:#1c2125;--muted:#5b656d;--rule:#c9cec7;--code:#eceee9;--pub:#9a5f0e;--pubs:#f5e6cf;--l1:#1f5f78;--l1s:#d8e8ee;--l2:#62489a;--l2s:#e6e0f2;--l3:#1d6e48;--l3s:#d9ecdf}
+@media (prefers-color-scheme: dark){svg{--bg:#171b1f;--ink:#e1e5e8;--muted:#9aa4ac;--rule:#3a424a;--code:#1d2227;--pub:#e1a64f;--pubs:#3a2d18;--l1:#6bb7d3;--l1s:#17313b;--l2:#b6a0e3;--l2s:#2a2340;--l3:#69cf9b;--l3s:#173326}}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.bg{fill:var(--bg)}
+.s-line{stroke:var(--ink);fill:none;stroke-width:1.2}
+.s-thin{stroke:var(--rule);fill:none;stroke-width:1.2}
+.s-dash{stroke:var(--ink);fill:none;stroke-width:1.2;stroke-dasharray:4 3}
+.s-pub-line{stroke:var(--pub);fill:none;stroke-width:2.2}
+.s-l1-line{stroke:var(--l1);fill:none;stroke-width:1.6}
+.s-l3-line{stroke:var(--l3);fill:none;stroke-width:2}
+.f-pub{fill:var(--pubs);stroke:var(--pub);stroke-width:1.2}
+.f-l1{fill:var(--l1s);stroke:var(--l1);stroke-width:1.2}
+.f-l2{fill:var(--l2s);stroke:var(--l2);stroke-width:1.2}
+.f-l3{fill:var(--l3s);stroke:var(--l3);stroke-width:1.2}
+.f-plain{fill:var(--bg);stroke:var(--ink);stroke-width:1.2}
+.f-muted{fill:var(--code);stroke:var(--rule);stroke-width:1.2}
+.f-ink{fill:var(--ink)}.f-pubink{fill:var(--pub)}.f-l1ink{fill:var(--l1)}.f-l3ink{fill:var(--l3)}
+.t{fill:var(--ink);font-size:12.5px}
+.t-sm{fill:var(--ink);font-size:11px}
+.t-mute{fill:var(--muted);font-size:11px}
+.t-b{fill:var(--ink);font-size:12.5px;font-weight:600}
+.t-mono{fill:var(--ink);font-size:11.5px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.t-pub{fill:var(--pub);font-size:12px;font-weight:600}
+.t-l1{fill:var(--l1);font-size:12px;font-weight:600}
+.t-l2{fill:var(--l2);font-size:12px;font-weight:600}
+.t-l3{fill:var(--l3);font-size:12px;font-weight:600}
+</style>
+<rect class="bg" x="0" y="0" width="720" height="320" rx="4"/>
+<line class="s-line" x1="20" y1="30" x2="700" y2="30"/>
+<line class="s-line" x1="20" y1="25" x2="20" y2="35"/>
+<line class="s-line" x1="700" y1="25" x2="700" y2="35"/>
+<text class="t-b" x="360" y="20" text-anchor="middle">address = BLAKE3(every byte of the envelope)</text>
+<rect class="f-pub" x="20" y="48" width="160" height="130"/>
+<text class="t-pub" x="32" y="68">header</text>
+<text class="t-sm" x="32" y="90">version</text>
+<text class="t-sm" x="32" y="108">range generation</text>
+<text class="t-sm" x="32" y="126">content generation</text>
+<text class="t-sm" x="32" y="144">structure nonce</text>
+<text class="t-mute" x="32" y="166">bound into every region</text>
+<rect class="f-l1" x="190" y="48" width="180" height="130"/>
+<text class="t-l1" x="202" y="68">structure region</text>
+<text class="t-sm" x="202" y="90">each child's address</text>
+<text class="t-sm" x="202" y="108">each child's S</text>
+<text class="t-sm" x="202" y="126">each attachment's address</text>
+<text class="t-mute" x="202" y="144">(the sealed values</text>
+<text class="t-mute" x="202" y="158">the node spills)</text>
+<rect class="f-l2" x="380" y="48" width="130" height="130"/>
+<text class="t-l2" x="392" y="68">range region</text>
+<text class="t-sm" x="392" y="90">each child's</text>
+<text class="t-sm" x="392" y="108">separator</text>
+<rect class="f-l3" x="520" y="48" width="180" height="130"/>
+<text class="t-l3" x="532" y="68">content region</text>
+<text class="t-sm" x="532" y="90">the node's own bytes,</text>
+<text class="t-sm" x="532" y="108">exactly as the tree</text>
+<text class="t-sm" x="532" y="126">persists it today</text>
+<text class="t-b" x="100" y="204" text-anchor="middle">no key</text>
+<text class="t-mute" x="100" y="222" text-anchor="middle">anyone who fetches it</text>
+<text class="t-l1" x="280" y="204" text-anchor="middle">opened by S</text>
+<text class="t-mute" x="280" y="222" text-anchor="middle">structure and above</text>
+<text class="t-l2" x="445" y="204" text-anchor="middle">opened by R</text>
+<text class="t-mute" x="445" y="222" text-anchor="middle">range and above</text>
+<text class="t-l3" x="610" y="204" text-anchor="middle">opened by C</text>
+<text class="t-mute" x="610" y="222" text-anchor="middle">content</text>
+<text class="t-mute" x="20" y="244">bytes on the wire</text>
+<rect class="f-pub" x="20" y="252" width="34" height="38" rx="2"/><text class="t-pub" x="26" y="267">ver</text><text class="t-mute" x="26" y="283">1</text><rect class="f-pub" x="57" y="252" width="74" height="38" rx="2"/><text class="t-pub" x="63" y="267">range gen</text><text class="t-mute" x="63" y="283">32</text><rect class="f-pub" x="134" y="252" width="80" height="38" rx="2"/><text class="t-pub" x="140" y="267">content gen</text><text class="t-mute" x="140" y="283">32</text><rect class="f-pub" x="217" y="252" width="52" height="38" rx="2"/><text class="t-pub" x="223" y="267">nonce</text><text class="t-mute" x="223" y="283">12</text><rect class="f-l1" x="272" y="252" width="32" height="38" rx="2"/><text class="t-l1" x="278" y="267">len</text><text class="t-mute" x="278" y="283">4</text><rect class="f-l1" x="307" y="252" width="112" height="38" rx="2"/><text class="t-l1" x="313" y="267">structure</text><text class="t-mute" x="313" y="283">+16 tag</text><rect class="f-l2" x="422" y="252" width="32" height="38" rx="2"/><text class="t-l2" x="428" y="267">len</text><text class="t-mute" x="428" y="283">4</text><rect class="f-l2" x="457" y="252" width="96" height="38" rx="2"/><text class="t-l2" x="463" y="267">range</text><text class="t-mute" x="463" y="283">+16 tag</text><rect class="f-l3" x="556" y="252" width="131" height="38" rx="2"/><text class="t-l3" x="562" y="267">content</text><text class="t-mute" x="562" y="283">+16 tag, rest</text>
+<text class="t-mute" x="20" y="310">Each region is AES-256-GCM with additional data header ‖ region label. Fixed overhead: 133 bytes per envelope.</text>
+</svg>
