@@ -47,6 +47,44 @@ Why: tonk keeps per-process and per-tab state beside a space's
 replicated branch, and needs to read and write both as one database
 without copying session facts into the tree.
 
+### A difference fetches the blocks it reads a batch at a time
+
+[#690](https://github.com/dialog-db/dialog-db/pull/690), part of [#646](https://github.com/dialog-db/dialog-db/issues/646)
+
+`Prefetch::Lazy`, the default for every difference (`compute`,
+`compute_with`, `compute_within`, `differentiate_within`), read each block
+at the moment its walk reached it, so a difference over a remote store
+paid one round trip per block, one after another. Each pass of the walk
+now first plans its reads: a dry run of the walk finds the blocks it is
+going to read without reading any, they are fetched concurrently, up to 16
+at a time, and the dry run goes on from what they turned out to be until
+the pass needs nothing more. The walk then makes the decisions it made
+before, over blocks already fetched. It reads the same blocks as before,
+each as often; a test holds it to that, read for read, over every case of
+the differential's oracle. A pass also resumes where the last one stopped
+instead of starting over, below any change since.
+
+What this changes for you:
+
+- A difference over a store with latency costs a round trip per batch
+  rather than per block: on a large tree with 1 000 changes spread across
+  it, 184 round trips instead of 1 053, for the same 1 054 reads. A
+  one-change difference reads 8 blocks in 4 round trips instead of 7.
+- Up to 16 reads of one difference are in flight at once against its
+  store, and fetched blocks wait for the walk: at most 63 in that
+  measurement.
+- In memory, where there is no latency to save, a difference costs about
+  the same: the spread one about a quarter less CPU, since a pass no
+  longer rescans what the last one passed, and a small repeated one, as a
+  subscription's poll takes, about 1% more instructions.
+- Nothing else is observable: the same blocks, the same changes, the same
+  errors and the same `MissingBlocks` outcomes. `Prefetch::Eager` is
+  unchanged.
+
+Why: the round trips of a difference were most of what a subscribed
+replica waited on to catch up (#646), and they were serial only because
+the walk read as it went, not because its reads depended on each other.
+
 ### A reset moves a branch forward only
 
 Fixing [#682](https://github.com/dialog-db/dialog-db/issues/682)
