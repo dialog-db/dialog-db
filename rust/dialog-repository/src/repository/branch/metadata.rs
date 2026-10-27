@@ -89,7 +89,9 @@ impl Branch {
 
     /// The schema metadata for this branch as if its head were
     /// `revision`: what a read pinned at a captured revision injects.
-    /// Not memoized; a pinned read is a stack's, which holds few.
+    /// Not memoized here: the layer metadata that folds it in is
+    /// (see `Branch::layer_metadata`), so it is derived once per
+    /// revision a stack pins.
     pub(crate) fn metadata_at(
         &self,
         operator: &Capability<Operator>,

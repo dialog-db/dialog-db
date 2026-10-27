@@ -281,7 +281,11 @@ impl<'a> SourceRef<'a> {
             SourceRef::Pinned(branch, revision) => {
                 let metadata = branch.metadata_at(operator, revision.cloned());
                 let entity = metadata.branch.this.clone();
-                metadata.assert(changes);
+                metadata.replica.assert(changes);
+                metadata.branch.assert(changes);
+                if let Some(revision) = metadata.revision {
+                    revision.assert(heads);
+                }
                 Some(entity)
             }
             SourceRef::Snapshot(snapshot) => {

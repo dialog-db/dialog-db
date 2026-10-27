@@ -3,6 +3,103 @@
 Measured on `claude/state-layers` at fb7db24, with the ungated scenarios this
 change adds to `dialog-perf` (`rust/dialog-perf/src/scenario/stack.rs`). The
 question is whether a stack can carry a UI's per-frame events and session state.
+*After the fixes* says what changed since. Everything from *Setup* on is the
+measurement of fb7db24 that found it.
+
+## After the fixes
+
+The measurements further down are of fb7db24 as it was. The same branch now
+carries four fixes for what they found. Numbers are from one binary, this
+container's toolchain, before and after.
+
+1. **A rule's head under a pick that elects no longer piles up in a store.**
+   `induce` now knows where each head lands (`Landing`: the session store by
+   a branch's bindings, an ephemeral layer by a stack's links). A head that
+   lands in a store keeps its pick and skips `resolve_against`, exactly as a
+   transaction's own write there does. The store then elects among its own
+   rows of the cell.
+   - This is not stack-only. A branch whose scope is bound to its session
+     store leaked the same way: `it_succeeds_a_rule_concluded_session_row`
+     held `["/a", "/b", "/c"]` before the fix and holds `["/c"]` after.
+   - It is not on `main`. There, nothing routes by placement, so a rule's
+     head always lands in the tree, where `resolve_against` is right. The
+     leak came with placement routing on this branch.
+   - Two new tests pin it, and both fail without the fix. One more test,
+     `it_holds_the_watermark_of_a_read_only_bottom_in_memory`, had asserted
+     the leaked rows (`[1, 2]`); it now asserts `[2]`. A second firing would
+     still show, as a 3.
+2. **A pinned read reuses its metadata overlay.** `QueryLayer::overlay`
+   memoized the metadata only for a layer over one `SourceRef::Branch`. A
+   stack reads its bottom as `SourceRef::Pinned`, so it re-derived the
+   overlay twice per commit and twice per poll. The memo
+   (`Branch::layer_metadata`) is now keyed by the revision read, and a
+   pinned source splits off its revision facts the way a live branch does.
+3. **A link refresh on an ephemeral layer writes only what moved.** The link
+   facts the layer already holds are dropped before they are applied
+   (`Ephemeral::unheld`). Re-asserting them changed nothing and cost a cell
+   scan each. Under maintenance, which may clear the layer, every link fact
+   is still re-stamped.
+4. **An ephemeral-only commit does not read the watermark twice.** When the
+   watermark already stands at the head the commit read, the post-commit
+   catch-up, which could only return, is skipped.
+
+Results (instructions; "per op" divides by commits, or by clicks for
+`stack-frame`):
+
+| scenario | before | after | per op, before → after |
+|---|---:|---:|---|
+| stack-cursor (2000) | 236.3 M | 88.3 M | commit 1.135 M → 396 k |
+| stack-cursor (20000) | 235.8 M | 88.4 M | flat |
+| stack-event (2000) | 949.9 M | 418.0 M | 4.75 M (leaking) → 2.09 M per commit, linear |
+| stack-event (20000) | 949.2 M | 418.9 M | flat |
+| stack-frame (2000) | 2012.2 M | 1671.9 M | 1.01 M → 836 k per click |
+| stack-subscribe (2000) | 476.6 M | 194.1 M | commit 1.165 M → 426 k, poll 1.175 M → 503 k |
+| stack-subscribe (20000) | 475.5 M | 193.1 M | flat |
+| branch-cursor (2000) | 5.77 M | 5.77 M | unchanged |
+| branch-subscribe (2000) | 41.16 M | 41.03 M | unchanged |
+
+Outcomes are now right: `stack-event` holds one count of 200 (`counted` =
+200), and `stack-frame` holds one per counter (`counted` = 2000). Archive
+counters are still 0. `stack-event` no longer re-resolves its rule bundle
+(`resolve_bundle` 1 → 0), because the overlay it keys by is now the same
+line from commit to commit.
+
+The gated scenarios that go through induction, settlement or the metadata
+overlay were swept with both binaries and compared with `compare --base`:
+commit-batch, commit-rows, commit-hot-key, commit-derived, transaction-reads,
+rule-point, rule-scan, rule-session, rule-overlay, rule-dispatch,
+rule-install, subscribe-repoll, read-point and first-query. Every counter
+was unchanged, and instructions moved within ±1% (rule-dispatch +0.5%,
+read-point +0.9%, first-query −2.5%). The result was "no regressions".
+
+Where a cursor commit's 396 k goes now:
+
+| bucket | share of stack-cursor |
+|---|---:|
+| capture: link fact construction | 11.2% |
+| capture: store writes and minting (`apply_held`) | 11.8% |
+| induction with no rule to fire (lag, trigger probing) | 16.7% |
+| placement resolution (×3 per commit) | 7.6% |
+| watermark cell (one resolve) | 5.5% |
+| `composite_at` and topology clones | 4.9% |
+| observer bookkeeping | 4.1% |
+| per-instant `blake3` | 0.9% |
+
+What is left, and why it was not changed here:
+
+- **The stack against the session store directly.** A write costs about 18×
+  more (396 k against 21.5 k) and a poll about 3× more (503 k against
+  167 k), down from 53× and 7×. The rest is the transaction machinery:
+  placements, induction, settlement and capture. A cheaper path would be a
+  design change, not a fix.
+- **Link fact construction (11%).** It still builds all 15 facts to find the
+  one that moved. Building only the revision would need the stack to know
+  the layer still holds the rest. Another stack's maintenance can clear a
+  shared layer, so knowing that takes a read, which is what `unheld` does.
+- **The per-instant hash (0.9%).** Not worth a sequence number.
+- **Event cost is now rule evaluation.** 70% of `stack-event` is
+  `fire_seeded`, about 730 k per seeded evaluation, two per commit. That is
+  the query engine's cost of one three-premise rule, the same on a branch.
 
 ## Setup, and where it departs from the brief
 

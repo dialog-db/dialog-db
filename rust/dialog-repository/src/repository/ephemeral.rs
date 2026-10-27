@@ -1224,6 +1224,21 @@ impl Ephemeral {
         state.mint_held(delta, hold);
     }
 
+    /// The instructions of `changes` that would change this layer, in
+    /// order: an assertion of a fact it holds already is left out, since
+    /// applying it would change nothing.
+    pub(crate) fn unheld(&self, changes: Changes) -> Vec<Instruction> {
+        let state = self.state.read();
+        changes
+            .into_instructions()
+            .into_iter()
+            .filter(|instruction| match instruction {
+                Instruction::Assert(fact, _) => !state.facts.holds(fact),
+                Instruction::Retract(_) => true,
+            })
+            .collect()
+    }
+
     /// Everything this layer holds, as one batch: each tombstone as
     /// the retraction that hides its fact beneath, then each held fact
     /// as an assertion. The batch serializes (see [`Changes`]), so a

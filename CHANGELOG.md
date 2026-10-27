@@ -42,6 +42,11 @@ What this changes for you:
 - A placement held in a layer's session store is honoured beside the
   committed ones, so a process can place its own session state without a
   commit.
+- A rule whose head is under a pick that elects (`last`, `max`, ...) and
+  lands in a session store or an ephemeral layer succeeds the row it
+  concluded before, as a transaction's own write there does. Before, each
+  conclusion was added beside the last, so a counter a rule kept on an
+  ephemeral layer held every value it ever had.
 
 Why: tonk keeps per-process and per-tab state beside a space's
 replicated branch, and needs to read and write both as one database

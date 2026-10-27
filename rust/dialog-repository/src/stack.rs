@@ -127,7 +127,7 @@ use crate::repository::branch::QueryLayer;
 use crate::repository::branch::registry::RegistryEnv;
 use crate::repository::branch::resolve::ResolveEnv;
 use crate::repository::branch::session::{Composite, QueryEnv};
-use crate::repository::branch::transaction::induce::{Watermark, Witness, induce};
+use crate::repository::branch::transaction::induce::{Landing, Watermark, Witness, induce};
 use crate::repository::branch::transaction::{refuse_nan, settle_successions};
 use crate::repository::source::{Source, SourceRef};
 use crate::schema::DidExt as _;
@@ -619,6 +619,21 @@ impl Topology {
                     .all(|index| !matches!(self.layers[*index], Layer::Ephemeral(_)))
             }),
         }
+    }
+
+    /// The scopes whose writes land in an ephemeral layer: every name a
+    /// link binds to one, as [`lands_in_trees`](Self::lands_in_trees)
+    /// reads them.
+    fn store_scopes(&self) -> HashSet<Entity> {
+        self.bound
+            .iter()
+            .filter(|(_, indices)| {
+                indices
+                    .iter()
+                    .any(|index| matches!(self.layers[*index], Layer::Ephemeral(_)))
+            })
+            .map(|(scope, _)| scope.clone())
+            .collect()
     }
 
     /// The bottom layer as a branch, or `None` when it is not one.
@@ -2226,7 +2241,23 @@ impl Stack {
         if batch.is_empty() && maintenance.is_none() && topology.links[index].is_empty() {
             return Ok(None);
         }
-        topology.link_facts(index, heads, &mut batch);
+        match (&topology.layers[index], maintenance) {
+            // An ephemeral layer holds its wiring from the commit that
+            // stamped it, and a refresh moves the revision alone: the facts
+            // it holds already are left out rather than re-asserted, which
+            // would change nothing at the price of a cell scan each.
+            // Maintenance may clear the layer, so it re-stamps them all.
+            (Layer::Ephemeral(ephemeral), None) => {
+                let mut wiring = Changes::new();
+                topology.link_facts(index, heads, &mut wiring);
+                for instruction in ephemeral.unheld(wiring) {
+                    if let Instruction::Assert(fact, pick) = instruction {
+                        batch.associate(fact.the, fact.of, fact.is, pick);
+                    }
+                }
+            }
+            _ => topology.link_facts(index, heads, &mut batch),
+        }
         match &topology.layers[index] {
             Layer::Branch(branch) => {
                 let staged = self.state.write().staged[index].take();
@@ -2948,16 +2979,18 @@ impl<'a> StackCommit<'a> {
         // head it reads at, and where the watermark stands, settle once
         // the commit publishes. A bottom under a read-only link is never
         // written, so the stack holds its watermark in memory.
-        let (watermark, lagged) = if topology.writable(0) {
+        // A watermark that already stands at the head read has nothing to
+        // catch up, and the commit skips reading it again once it lands.
+        let (watermark, lagged, caught_up) = if topology.writable(0) {
             let cell = primary.induction_cell();
             cell.resolve()
                 .perform(env)
                 .await
                 .map_err(CommitError::from)?;
-            let lagged = source
-                .revision()
-                .map(|head| (head, cell.content().map(|revision| revision.version())));
-            (Watermark::Cell, lagged)
+            let head = source.revision();
+            let caught_up = head.is_some() && cell.content() == head;
+            let lagged = head.map(|head| (head, cell.content().map(|revision| revision.version())));
+            (Watermark::Cell, lagged, caught_up)
         } else {
             let held = match &rewiring {
                 Some(state) => state.watermark.clone(),
@@ -2966,6 +2999,7 @@ impl<'a> StackCommit<'a> {
             (
                 Watermark::Held(held),
                 source.revision().map(|head| (head, None)),
+                false,
             )
         };
         // Each round's transients are witnessed on the store of every
@@ -3065,6 +3099,7 @@ impl<'a> StackCommit<'a> {
             watermark,
             &composite,
             &staged,
+            Landing::Stores(topology.store_scopes()),
             &mut changes,
             self.transients.export(),
             stimulus,
@@ -3144,7 +3179,7 @@ impl<'a> StackCommit<'a> {
         }
         stack.hold_until_published(pending.keep());
         drop(stack.entered.drain(stack.id));
-        if !waits {
+        if !waits && !caught_up {
             stack.catch_up_induction(lagged, env).await?;
         }
         Ok(heads)
@@ -4819,6 +4854,115 @@ mod tests {
             values::<u64>(&stack, &operator, "ui/cursor", &doc).await?,
             vec![Value::UnsignedInt(3)],
             "one fact in two layers reads as one row"
+        );
+        Ok(())
+    }
+
+    /// A rule head under `last` placed on an ephemeral layer succeeds the
+    /// row it concluded before, as a transaction's own `last` write to the
+    /// layer does: an increment run three times leaves one count, not four.
+    #[dialog_common::test]
+    async fn it_succeeds_a_rule_concluded_row_of_an_ephemeral_layer() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let increment: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": {
+                    "count": { "the": "counter/count", "as": "UnsignedInteger", "pick": "last:" }
+                }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": { "counter": { "the": "cmd.increment/counter", "as": "Entity" } }
+                    },
+                    "where": { "counter": { "?": { "name": "this" } } }
+                },
+                {
+                    "assert": {
+                        "with": {
+                            "count": { "the": "counter/count", "as": "UnsignedInteger", "pick": "last:" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "count": { "?": { "name": "prev" } }
+                    }
+                },
+                {
+                    "assert": "math/sum",
+                    "where": {
+                        "of": { "?": { "name": "prev" } },
+                        "with": 1,
+                        "is": { "?": { "name": "count" } }
+                    }
+                }
+            ]
+        }))?;
+        shared
+            .transaction()
+            .assert(Placement::new("counter/count".parse()?, name("state")))
+            .assert(Placement::new(
+                "cmd.increment/counter".parse()?,
+                name("state"),
+            ))
+            .assert(crate::TransientAttribute::new(
+                "cmd.increment/counter".parse()?,
+            ))
+            .assert(increment)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+
+        let counter: Entity = "ctr:1".parse()?;
+        let mut zero = Changes::new();
+        zero.associate(
+            "counter/count".parse()?,
+            counter.clone(),
+            Value::UnsignedInt(0),
+            Pick::Last,
+        );
+        stack
+            .transaction()
+            .assert(zero)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        for index in 0..3u32 {
+            stack
+                .transaction()
+                .assert(
+                    dialog_query::the!("cmd.increment/counter")
+                        .of(format!("cmd:{index}").parse::<Entity>()?)
+                        .is(counter.clone()),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+
+        let held: Vec<Value> = state
+            .scan(&ArtifactSelector::new().the("counter/count".parse()?))
+            .into_iter()
+            .map(|fact| fact.is)
+            .collect();
+        assert_eq!(
+            held,
+            vec![Value::UnsignedInt(3)],
+            "each conclusion succeeds the one before"
         );
         Ok(())
     }
@@ -6905,12 +7049,11 @@ mod tests {
                 .perform(&operator)
                 .await?;
         }
-        // An ephemeral layer holds no claim for a write to succeed, so the
-        // count that the rule concludes stands beside the first one. A
-        // second firing would add a third.
+        // The count that the rule concludes succeeds the first one in the
+        // ephemeral layer. A second firing would succeed it with a third.
         assert_eq!(
             values::<u64>(&stack, &operator, "counter/count", &counter).await?,
-            vec![Value::UnsignedInt(1), Value::UnsignedInt(2)],
+            vec![Value::UnsignedInt(2)],
             "the rule fired once over what the other writer added"
         );
         assert_eq!(

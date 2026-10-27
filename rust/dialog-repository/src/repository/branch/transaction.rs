@@ -370,6 +370,7 @@ where
         induce::Watermark::Cell,
         view,
         &staged,
+        induce::Landing::Line(source.bindings()),
         &mut changes,
         transients,
         Vec::new(),

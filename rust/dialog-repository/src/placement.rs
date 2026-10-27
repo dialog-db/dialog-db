@@ -1257,6 +1257,70 @@ mod tests {
         Ok(())
     }
 
+    /// A rule head under `last` placed on the session store succeeds the
+    /// row it concluded before, as a transaction's own `last` write to the
+    /// store does: the store holds one row of the cell, not one per commit.
+    #[dialog_common::test]
+    async fn it_succeeds_a_rule_concluded_session_row() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
+
+        let current: InductiveRule = serde_json::from_value(json!({
+            "assert!": {
+                "with": { "href": { "the": "site/current", "as": "Text", "pick": "last:" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "title": { "the": "doc/title", "as": "Text" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "title": { "?": { "name": "href" } }
+                }
+            }]
+        }))?;
+        branch
+            .transaction()
+            .assert(Placement::new("site/current".parse()?, session()))
+            .assert(current)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        for title in ["/a", "/b", "/c"] {
+            branch
+                .transaction()
+                .assert(
+                    dialog_query::the!("doc/title")
+                        .of(doc.clone())
+                        .is(title.to_string()),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            branch.refresh(&operator).await?;
+        }
+
+        let held: Vec<Value> = branch
+            .overlay()
+            .scan(&ArtifactSelector::new().the("site/current".parse()?))
+            .into_iter()
+            .map(|fact| fact.is)
+            .collect();
+        assert_eq!(
+            held,
+            vec![Value::String("/c".into())],
+            "each conclusion succeeds the one before"
+        );
+        Ok(())
+    }
+
     /// A write to an attribute placed on a scope the layer does not
     /// bind fails the commit instead of landing somewhere else, and
     /// binding it afterwards makes the same write succeed.

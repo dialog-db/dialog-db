@@ -330,10 +330,12 @@ impl Writer {
 }
 
 impl Branch {
-    /// The metadata a query layer over this branch alone folds in, as
-    /// `derive` computes it (`heads` computing its revision facts alone), reused while the profile, operator, and head
-    /// are those it was derived under. Shared rather than copied: every
-    /// query over the branch reads the same facts.
+    /// The metadata a query layer over this branch alone folds in, read
+    /// at `revision` (its head, or the revision a stack pins it at), as
+    /// `derive` computes it (`heads` computing its revision facts alone),
+    /// reused while the profile, operator, and revision are those it was
+    /// derived under. Shared rather than copied: every query over the
+    /// branch reads the same facts.
     ///
     /// Only the revision facts move with the head, so the rest is kept
     /// as a line of its own while the profile and operator stay, and a
@@ -342,12 +344,12 @@ impl Branch {
     pub(crate) fn layer_metadata(
         &self,
         operator: &Capability<Operator>,
+        revision: Option<Revision>,
         derive: impl FnOnce() -> (Changes, Changes),
         heads: impl FnOnce() -> Changes,
     ) -> Ephemeral {
         let profile = operator.profile();
         let did = operator.did();
-        let revision = self.revision();
         let mut cache = self
             .layer_metadata_cache
             .lock()
