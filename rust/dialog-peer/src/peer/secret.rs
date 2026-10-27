@@ -93,7 +93,7 @@ const KEY: Context = Context::new("dialog.secret/key");
 const PRINCIPAL_KEY: Context = Context::new("dialog.principal/key");
 
 /// The context the key of a principal of `kind` is held sealed in.
-fn held_context(kind: &str) -> Context {
+fn held_context(kind: &str) -> Context<'static> {
     if kind == spaces::SPACE {
         SPACE_KEY
     } else {
