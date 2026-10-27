@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A peer refuses an invocation that is stale or was presented before
 
-[#PR](https://github.com/dialog-db/dialog-db/pull/PR)
+[#691](https://github.com/dialog-db/dialog-db/pull/691)
 
 A peer that answers invocations over iroh verified each one's chain, its
 signatures, revocations and delegation window, and then performed it. It
