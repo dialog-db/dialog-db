@@ -93,7 +93,7 @@ use futures_util::stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use super::session::{Composite, QueryEnv, QueryLayer};
-use crate::placement::{Placements, ScopeMap};
+use crate::placement::{Placements, ScopeMap, declarations_of, pending_declarations};
 use crate::repository::source::Source;
 use crate::stack::{Guide, GuidedLayer};
 use crate::{
@@ -828,12 +828,8 @@ where
         let (Some(_), Some(bottom)) = (&self.guide, self.sources.first()) else {
             return Ok(None);
         };
-        let mut pending = Staged::default();
-        pending.apply(self.changes.clone());
-        for layer in &self.layers {
-            pending.apply(layer.export());
-        }
-        let placements = Placements::resolve(bottom.as_ref(), &pending.export(), env)
+        let pending = pending_declarations(declarations_of(&self.changes), &self.layers);
+        let placements = Placements::resolve(bottom.as_ref(), &pending, env)
             .await
             .map_err(|error| EvaluationError::Store(format!("resolve the placements: {error}")))?;
         Ok(Some(placements.scopes()))

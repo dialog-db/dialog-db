@@ -100,6 +100,43 @@ What is left, and why it was not changed here:
 - **Event cost is now rule evaluation.** 70% of `stack-event` is
   `fire_seeded`, about 730 k per seeded evaluation, two per commit. That is
   the query engine's cost of one three-premise rule, the same on a branch.
+  Most of that turned out to be the fifth fix below.
+
+### The placement map of every read of a stack
+
+5. **A read of a stack resolves its placement map from the declarations
+   alone.** `QueryEnv::guided`, which every guided read runs once (three per
+   commit with a rule), exported the read's whole overlay and every pending
+   layer into a `Staged`, exported that again, and handed it to
+   `Placements::resolve`. `resolve` reads only the three declaration
+   attributes from it. The read now exports only those
+   (`placement::pending_declarations`, and `Ephemeral::export_of`, which
+   reads them by attribute). The subscription's guide had the same export
+   and uses the same helper.
+
+   That was 40.7% of `stack-event` after fixes 1-4: 170 M of 418 M. I
+   expected it to grow with the facts the application layer holds, and it
+   does not. It walked the read's own overlay and the commit's pending
+   batch, not the ephemeral layers. So it was a fixed cost per read, not a
+   scaling one:
+
+   | `stack-event-held` (100-entity space, `size` facts in the application layer) | before | after |
+   |---|---:|---:|
+   | 1,000 facts held | 422.7 M | 261.4 M |
+   | 10,000 facts held | 424.2 M | 263.4 M |
+
+   An event commit goes from 2.11 M to 1.31 M instructions (−38%), flat in
+   the state beside it.
+
+### Gated
+
+The five stack scenarios are now in `catalog()`, gated like every other
+scenario: `stack-event`, `stack-event-held` (size 10000), `stack-cursor`,
+`stack-frame` and `stack-subscribe`. `branch-cursor` and `branch-subscribe`
+stay in `ungated()`, as comparison points. Their baselines are the `Perf
+gate` job's own sweep of this pull request, so they are the nix toolchain's
+numbers on a CI runner, as the README asks. `cross_cpu_pct` is 0 for each,
+since there are no repeated cross-CPU sweeps to set it from yet.
 
 ## Setup, and where it departs from the brief
 
@@ -132,6 +169,9 @@ What is left, and why it was not changed here:
   unaffected.
 
 ### Gating
+
+(As first written. The stack scenarios have since been promoted; see
+*Gated* above.)
 
 `compare` fails a scenario that has no baseline file (`compare.rs:384`,
 "a scenario the sweep ran with no baseline is ungated, and ... both fail").

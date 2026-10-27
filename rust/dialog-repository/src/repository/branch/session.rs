@@ -36,7 +36,7 @@ use tokio::sync::OnceCell;
 use crate::CommitError;
 use crate::REGISTRY;
 use crate::layer::{Hidden, MergeKeys, filter_hidden, guide_rows, merge_grouped};
-use crate::placement::{Placements, ScopeMap};
+use crate::placement::{Placements, ScopeMap, declarations_held, pending_declarations};
 use crate::repository::archive::networked::Reads;
 use crate::repository::branch::select::line_manifest;
 use crate::repository::ephemeral::Window;
@@ -815,12 +815,10 @@ impl QueryEnv<'_> {
         let scopes = self
             .scopes
             .get_or_try_init(|| async {
-                let mut pending = Staged::default();
-                pending.apply(self.overlay.export());
-                for layer in self.layers() {
-                    pending.apply(layer.export());
-                }
-                Placements::resolve(bottom.as_ref(), &pending.export(), self.env)
+                // Only the declarations: every read of a stack resolves
+                // this, and the layers may hold a great deal else.
+                let pending = pending_declarations(declarations_held(&self.overlay), self.layers());
+                Placements::resolve(bottom.as_ref(), &pending, self.env)
                     .await
                     .map(|placements| Arc::new(placements.scopes()))
                     .map_err(|error| DialogArtifactsError::Storage(error.to_string()))

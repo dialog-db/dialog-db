@@ -18,7 +18,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::Result;
-use dialog_artifacts::{ArtifactSelector, Entity, Pick, Value};
+use dialog_artifacts::{ArtifactSelector, Entity, Pick, Update as _, Value};
 use dialog_query::query::Output as _;
 use dialog_query::{ConceptConclusion, ConceptDescriptor, ConceptQuery, InductiveRule};
 use dialog_repository::{
@@ -139,7 +139,8 @@ async fn stacked(
         .assert(Placement::new(attribute("ui/click"), application_scope()))
         .assert(TransientAttribute::new(attribute("ui/click")))
         .assert(Placement::new(attribute("ui/count"), application_scope()))
-        .assert(Placement::new(attribute("ui/cursor"), application_scope()));
+        .assert(Placement::new(attribute("ui/cursor"), application_scope()))
+        .assert(Placement::new(attribute("ui/item"), application_scope()));
     if rule {
         declarations = declarations.assert(count_rule()?);
     }
@@ -232,6 +233,36 @@ impl Prepared for Event {
 /// into the counter's next count on the application layer.
 pub async fn event(size: usize) -> Result<Box<dyn Prepared>> {
     let (env, stack, application) = stacked(size, true, counters(1)).await?;
+    Ok(Box::new(Event {
+        env,
+        stack,
+        application,
+    }))
+}
+
+/// The space under `stack-event-held`: small, since the scenario is about
+/// what the application layer holds.
+const HELD_SPACE: usize = 100;
+
+/// `stack-event-held`: `stack-event` with `size` session facts held in the
+/// application layer beside the counter, as a UI's state accumulates. An
+/// event's cost must not grow with them: no read of the commit may walk
+/// what the layers hold to find what it needs.
+pub async fn event_held(size: usize) -> Result<Box<dyn Prepared>> {
+    let mut seed = counters(1);
+    for index in 0..size {
+        seed.associate(
+            attribute("ui/item"),
+            entity("item", index),
+            Value::UnsignedInt(index as u128),
+            Pick::Last,
+        );
+    }
+    let (env, stack, application) = stacked(HELD_SPACE, true, seed).await?;
+    anyhow::ensure!(
+        held(&application, "ui/item").len() == size,
+        "the application layer holds every item"
+    );
     Ok(Box::new(Event {
         env,
         stack,

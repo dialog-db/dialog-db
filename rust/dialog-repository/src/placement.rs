@@ -93,6 +93,37 @@ pub(crate) fn transient_placement_attr() -> Relation {
     the!("dialog.attribute/transient").into()
 }
 
+/// The pending placement declarations of a read: those `held` (the
+/// declarations of a store, or of a batch, read first) and those of each
+/// staged layer after it, folded in order as the read sees them. It is
+/// all that [`Placements::resolve`] reads of the pending writes, at the
+/// cost of the declarations alone rather than of everything the layers
+/// hold.
+pub(crate) fn pending_declarations(held: Changes, layers: &[crate::Staged]) -> Changes {
+    let (scope, default, transient) = (scope_attr(), default_attr(), transient_placement_attr());
+    let mut pending = crate::Staged::default();
+    pending.apply(held);
+    for layer in layers {
+        pending
+            .apply(layer.export_cells(|the| *the == scope || *the == default || *the == transient));
+    }
+    pending.export()
+}
+
+/// The placement declarations of `changes`, in their order.
+pub(crate) fn declarations_of(changes: &Changes) -> Changes {
+    let (scope, default, transient) = (scope_attr(), default_attr(), transient_placement_attr());
+    changes
+        .clone()
+        .take_cells(|the| *the == scope || *the == default || *the == transient)
+}
+
+/// The placement declarations `store` holds, as its
+/// [`export`](crate::Ephemeral::export) carries them.
+pub(crate) fn declarations_held(store: &crate::Ephemeral) -> Changes {
+    store.export_of(&[scope_attr(), default_attr(), transient_placement_attr()])
+}
+
 /// Whether a batch writes a placement declaration: a scope, a default
 /// or a transient marker.
 pub(crate) fn touches_placements(changes: &Changes) -> bool {

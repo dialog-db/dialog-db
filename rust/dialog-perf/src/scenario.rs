@@ -279,17 +279,6 @@ pub fn catalog() -> Vec<Spec> {
             cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(subscribe::repoll(size)),
         },
-    ]
-}
-
-/// Scenarios outside the gate: a sweep runs them only when `--only`
-/// names them, and `compare` never sees them unless a sweep wrote them.
-/// The gate fails a scenario with no baseline file, and recording one
-/// is the maintainer's call, so a scenario that measures a question
-/// rather than a path the gate should hold waits here until it is
-/// promoted into [`catalog`] with its baseline.
-pub fn ungated() -> Vec<Spec> {
-    vec![
         Spec {
             name: "stack-event",
             size: 2000,
@@ -297,6 +286,14 @@ pub fn ungated() -> Vec<Spec> {
             volatile: false,
             cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(stack::event(size)),
+        },
+        Spec {
+            name: "stack-event-held",
+            size: 10000,
+            about: "`stack-event` over a small space with `size` session facts held in the application layer: an event's cost must not grow with the state beside it",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(stack::event_held(size)),
         },
         Spec {
             name: "stack-cursor",
@@ -322,6 +319,18 @@ pub fn ungated() -> Vec<Spec> {
             cross_cpu_pct: 0.0,
             prepare: |size| Box::pin(stack::subscribe(size)),
         },
+    ]
+}
+
+/// Scenarios outside the gate: a sweep runs them only when `--only`
+/// names them, and `compare` never sees them unless a sweep wrote them.
+/// The gate fails a scenario with no baseline file, and recording one
+/// is the maintainer's call, so a scenario that measures a question
+/// rather than a path the gate should hold waits here until it is
+/// promoted into [`catalog`] with its baseline. The `branch-*` pair are
+/// the stack scenarios' counterparts without a stack, for comparison.
+pub fn ungated() -> Vec<Spec> {
+    vec![
         Spec {
             name: "branch-cursor",
             size: 2000,
