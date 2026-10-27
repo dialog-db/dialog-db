@@ -86,6 +86,12 @@ fn refused(refusal: Refusal) -> BlobError {
             recourse: dialog_capability::access::Recourse::None,
             reason,
         }),
+        Refusal::Stale { issued_at, at } => {
+            BlobError::Authorization(AuthorizeError::Stale { issued_at, at })
+        }
+        Refusal::Replayed(invocation) => {
+            BlobError::Authorization(AuthorizeError::Replayed { invocation })
+        }
         Refusal::UnknownCommand(command) => BlobError::Rejected(Rejection::Unclassified {
             detail: format!("the peer does not serve {command}"),
         }),

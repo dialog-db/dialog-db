@@ -25,6 +25,9 @@ use std::sync::Mutex;
 #[derive(Default)]
 struct Recording {
     blocks: Mutex<HashMap<Blake3Hash, Vec<u8>>>,
+    /// How many puts were performed: a put of the same block twice leaves
+    /// the blocks as they were, so this is what tells a copy apart.
+    puts: Mutex<usize>,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -32,6 +35,7 @@ struct Recording {
 impl Provider<archive::Put> for Recording {
     async fn execute(&self, input: Capability<archive::Put>) -> Result<(), ArchiveError> {
         let block = &input.constraint.block;
+        *self.puts.lock().expect("not poisoned") += 1;
         self.blocks
             .lock()
             .expect("not poisoned")
@@ -161,13 +165,36 @@ async fn signers() -> (Ed25519Signer, Ed25519Signer) {
 }
 
 /// Mint what a client would send: a delegation from the subject to the
-/// operator, an invocation of `capability`, and the blocks its arguments
-/// name, all in one `ctn-v1` container.
+/// operator, an invocation of `capability` saying it was issued now, and
+/// the blocks its arguments name, all in one `ctn-v1` container.
 async fn request<Fx>(
     subject: &Ed25519Signer,
     operator: &Ed25519Signer,
     capability: &Capability<Fx>,
     blocks: Vec<Vec<u8>>,
+) -> Vec<u8>
+where
+    Fx: dialog_capability::Effect + Clone,
+    Fx::Of: dialog_capability::Constraint,
+    Capability<Fx>: Ability,
+{
+    request_issued(
+        subject,
+        operator,
+        capability,
+        blocks,
+        Some(dialog_ucan_core::time::Timestamp::now()),
+    )
+    .await
+}
+
+/// [`request`], saying it was issued at `issued_at`, or not saying.
+async fn request_issued<Fx>(
+    subject: &Ed25519Signer,
+    operator: &Ed25519Signer,
+    capability: &Capability<Fx>,
+    blocks: Vec<Vec<u8>>,
+    issued_at: Option<dialog_ucan_core::time::Timestamp>,
 ) -> Vec<u8>
 where
     Fx: dialog_capability::Effect + Clone,
@@ -192,16 +219,18 @@ where
         .expect("the delegation builds");
     let proof = delegation.to_cid();
 
-    let invocation = InvocationBuilder::new()
+    let builder = InvocationBuilder::new()
         .issuer(operator.clone())
         .audience(&subject_did)
         .subject(&subject_did)
         .command(command)
         .arguments(scope.parameters.args())
-        .proofs(vec![proof])
-        .try_build()
-        .await
-        .expect("the invocation builds");
+        .proofs(vec![proof]);
+    let invocation = match issued_at {
+        Some(issued_at) => builder.issued_at(issued_at).try_build().await,
+        None => builder.try_build().await,
+    }
+    .expect("the invocation builds");
 
     let chain = InvocationChain::new(
         invocation,
@@ -215,6 +244,18 @@ where
 
 fn responder(store: Recording) -> Responder<Recording, CachingResolver<WebResolver>> {
     Responder::new(store, CachingResolver::new(WebResolver::new()))
+}
+
+/// Whether `response` is a put that ran and succeeded.
+fn performed_put(response: &Response) -> bool {
+    match response {
+        Response::Performed(encoded) => {
+            let outcome: Result<(), ArchiveError> =
+                crate::wire::decode("output", encoded).expect("the output decodes");
+            outcome.is_ok()
+        }
+        _ => false,
+    }
 }
 
 fn put_of(subject: &Ed25519Signer, bytes: &[u8]) -> Capability<archive::Put> {
@@ -248,6 +289,93 @@ async fn a_put_travels_and_is_stored() {
         Some(&bytes),
         "the block must be stored under its own hash"
     );
+}
+
+/// A captured invocation verifies as well the second time as the first.
+/// Presented again, to the same peer, it is refused as a copy and does
+/// not run again.
+#[dialog_common::test]
+async fn a_replayed_invocation_is_refused() {
+    let (subject, operator) = signers().await;
+    let bytes = b"a block put once".to_vec();
+    let capability = put_of(&subject, &bytes);
+    let container = request(&subject, &operator, &capability, vec![bytes.clone()]).await;
+
+    let responder = responder(Recording::default());
+    let first = responder.answer(&container).await.without_stream();
+    assert!(
+        performed_put(&first),
+        "the first presentation runs: {first:?}"
+    );
+
+    let copy = responder.answer(&container).await.without_stream();
+    assert!(
+        matches!(copy, Response::Refused(Refusal::Replayed(_))),
+        "a copy must be refused as replayed, got {copy:?}"
+    );
+    assert_eq!(
+        *responder.store.puts.lock().expect("not poisoned"),
+        1,
+        "the copy must not run"
+    );
+}
+
+/// An invocation issued long before it is presented is refused as stale,
+/// with what the peer's clock read, and nothing runs.
+#[dialog_common::test]
+async fn a_stale_invocation_is_refused() {
+    let (subject, operator) = signers().await;
+    let bytes = b"a block put too late".to_vec();
+    let capability = put_of(&subject, &bytes);
+    let container = request(&subject, &operator, &capability, vec![bytes.clone()]).await;
+
+    // The peer's clock reads ten minutes past when the invocation says it
+    // was made: the invocation was captured and presented later.
+    let later = dialog_ucan::admission::system_now() + 600;
+    let responder =
+        responder(Recording::default()).with_admission(Admission::new().with_clock(move || later));
+    let response = responder.answer(&container).await.without_stream();
+
+    assert!(
+        matches!(
+            response,
+            Response::Refused(Refusal::Stale { issued_at: Some(_), at }) if at == later
+        ),
+        "an old invocation must be refused as stale, saying the peer's clock, got {response:?}"
+    );
+    assert_eq!(*responder.store.puts.lock().expect("not poisoned"), 0);
+    assert!(
+        responder
+            .store
+            .blocks
+            .lock()
+            .expect("not poisoned")
+            .is_empty(),
+        "nothing may be stored for a stale invocation"
+    );
+}
+
+/// An invocation that does not say when it was issued, as a client older
+/// than issue times sends, is still served, and still refused when it is
+/// presented again.
+#[dialog_common::test]
+async fn an_invocation_that_does_not_say_when_is_served_once() {
+    let (subject, operator) = signers().await;
+    let bytes = b"a block from an older client".to_vec();
+    let capability = put_of(&subject, &bytes);
+    let container =
+        request_issued(&subject, &operator, &capability, vec![bytes.clone()], None).await;
+
+    let responder = responder(Recording::default());
+    let first = responder.answer(&container).await.without_stream();
+    assert!(performed_put(&first), "it is served: {first:?}");
+
+    let copy = responder.answer(&container).await.without_stream();
+    assert!(
+        matches!(copy, Response::Refused(Refusal::Replayed(_))),
+        "a copy must be refused as replayed, got {copy:?}"
+    );
+    assert_eq!(*responder.store.puts.lock().expect("not poisoned"), 1);
 }
 
 /// The attack `resolve::block` exists for, end to end: a well-formed,

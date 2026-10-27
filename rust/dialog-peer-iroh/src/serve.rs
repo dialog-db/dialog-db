@@ -18,6 +18,12 @@
 //!    [`crate::resolve`] finds them in the container and proves they are
 //!    what was committed to.
 //!
+//! 4. **Is it the request its issuer just made?** A captured invocation
+//!    verifies as well the second time as the first, so one issued further
+//!    from this peer's clock than the freshness window is refused as
+//!    [`Refusal::Stale`], and one presented before as
+//!    [`Refusal::Replayed`] ([`Admission`]).
+//!
 //! Only then does anything run.
 //!
 //! # What is not served, and why
@@ -30,6 +36,7 @@
 //! buffering a whole blob into a response. Until that exists they are
 //! refused by name rather than silently missing.
 
+use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Capability, Provider, Subject};
 use dialog_capability::{Constraint, Policy};
 use dialog_common::ConditionalSync;
@@ -48,6 +55,7 @@ use std::sync::Arc;
 
 use crate::wire::{BlobAnswer, Refusal, Response, encode};
 use dialog_ucan::Args;
+use dialog_ucan::admission::{Admission, Issuance};
 
 /// What a peer performs invocations against.
 ///
@@ -124,17 +132,23 @@ impl Answer {
 
 /// Answers invocations against a local store.
 ///
-/// Holds the two policies verification needs and the store performing
-/// is done against. Resolution and revocation are the embedder's to
-/// choose, exactly as they are for the S3 authorizer: a peer with no
-/// revocation index establishes nothing about revocation status, and
-/// [`UnverifiedRevocations`] is named so that is not a surprise.
+/// Holds the two policies verification needs, the record of what it
+/// admitted, and the store performing is done against. Resolution and
+/// revocation are the embedder's to choose, exactly as they are for the
+/// S3 authorizer: a peer with no revocation index establishes nothing
+/// about revocation status, and [`UnverifiedRevocations`] is named so
+/// that is not a surprise.
+///
+/// One responder answers every connection of a peer, so its record of
+/// what was presented covers them all: a copy of an invocation is refused
+/// on a new connection as on the one it first came over.
 ///
 /// [`UnverifiedRevocations`]: dialog_ucan_core::UnverifiedRevocations
 pub struct Responder<S, Resolver, Revocations = dialog_ucan_core::UnverifiedRevocations> {
     store: S,
     resolver: Arc<Resolver>,
     revocations: Arc<Revocations>,
+    admission: Admission,
 }
 
 impl<S, Resolver> Responder<S, Resolver> {
@@ -144,6 +158,7 @@ impl<S, Resolver> Responder<S, Resolver> {
             store,
             resolver: Arc::new(resolver),
             revocations: Arc::new(dialog_ucan_core::UnverifiedRevocations),
+            admission: Admission::new(),
         }
     }
 }
@@ -163,7 +178,17 @@ impl<S, Resolver, Revocations> Responder<S, Resolver, Revocations> {
             store: self.store,
             resolver: self.resolver,
             revocations: Arc::new(revocations),
+            admission: self.admission,
         }
+    }
+
+    /// Judge freshness and remember what was presented by `admission`
+    /// rather than by the system clock and a record of this process: a
+    /// test whose clock differs from its clients', or an embedder that
+    /// keeps the record where every process of the peer reaches it.
+    pub fn with_admission(mut self, admission: Admission) -> Self {
+        self.admission = admission;
+        self
     }
 }
 
@@ -195,6 +220,7 @@ where
             .map_err(|error| Refusal::Malformed(format!("incomplete proofs: {error}")))?;
 
         self.verify(&chain).await?;
+        self.admit(&chain).await?;
 
         let subject = chain.subject().clone();
         let args = chain.arguments();
@@ -285,6 +311,29 @@ where
             Ok(writer) => Answer::Writing(writer),
             Err(error) => Answer::Value(performed(Err::<BlobAnswer, _>(error))),
         })
+    }
+
+    /// Refuse a verified invocation that is stale or was presented
+    /// before. Asked only after the chain verifies, so an invocation is
+    /// never refused as a copy unless it is authentic.
+    ///
+    /// An invocation that does not say when it was issued is accepted, as
+    /// the access service accepts one for a request: this peer answers
+    /// requests, and refuses a watch by name.
+    async fn admit(
+        &self,
+        chain: &InvocationChain<dialog_varsig::AnySignature>,
+    ) -> Result<(), Refusal> {
+        let issued_at = chain.invocation.issued_at().map(|issued| issued.to_unix());
+        let invocation = chain.invocation.to_cid().to_string();
+        self.admission
+            .admit(issued_at, &invocation, Issuance::Optional)
+            .await
+            .map_err(|error| match error {
+                AuthorizeError::Stale { issued_at, at } => Refusal::Stale { issued_at, at },
+                AuthorizeError::Replayed { invocation } => Refusal::Replayed(invocation),
+                other => Refusal::Unauthorized(other.to_string()),
+            })
     }
 
     async fn verify(

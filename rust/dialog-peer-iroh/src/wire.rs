@@ -93,6 +93,20 @@ pub enum Refusal {
     Malformed(String),
     /// The authorization did not cover the invocation.
     Unauthorized(String),
+    /// The invocation says it was issued further from the peer's clock
+    /// than the peer accepts. Nothing about the authority is in question:
+    /// a fresh invocation is expected to succeed, and `at` lets a client
+    /// whose clock is off correct it before making one.
+    Stale {
+        /// Unix seconds the invocation says it was issued at.
+        issued_at: Option<u64>,
+        /// Unix seconds the peer's clock read when it refused.
+        at: u64,
+    },
+    /// The invocation was presented before, so this one is a copy. A
+    /// fresh invocation carries a nonce of its own and is expected to
+    /// succeed.
+    Replayed(String),
     /// The peer failed for a reason of its own.
     Internal(String),
 }

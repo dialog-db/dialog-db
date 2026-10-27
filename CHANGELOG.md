@@ -14,6 +14,45 @@ says how to cut a release.
 
 ## Unreleased
 
+### A peer refuses an invocation that is stale or was presented before
+
+[#PR](https://github.com/dialog-db/dialog-db/pull/PR)
+
+A peer that answers invocations over iroh verified each one's chain, its
+signatures, revocations and delegation window, and then performed it. It
+did not ask whether the invocation was the one its issuer just made. So a
+captured invocation was performed again each time it was presented, to
+the same peer or another, for as long as its delegations held. The access
+service already refused such a copy as stale or replayed; a peer now asks
+the same two questions, after the chain verifies: an invocation that says
+it was issued further than 30 seconds from the peer's clock is refused as
+stale, and one presented to the peer before is refused as replayed. An
+invocation that does not say when it was issued is still served once, as
+the access service serves one over HTTP.
+
+What this changes for you:
+
+- New: `dialog_ucan::admission`, with `Admission` (the freshness window,
+  the record of what was presented, and the clock), and `Clock`,
+  `Presented`, `RecentInvocations`, `Issuance` and `FRESHNESS`, which
+  move there from `dialog-remote-ucan`. `dialog-remote-ucan` re-exports
+  them under the same names, so nothing that imports them from there
+  changes.
+- `Responder::with_admission` sets a peer's clock, window or record. One
+  responder answers every connection of a peer, so a copy is refused on
+  a new connection as on the one it first came over.
+- `Refusal` (the iroh wire's) has two new variants, `Stale { issued_at,
+  at }` and `Replayed`. A client reads them as `AuthorizeError::Stale`
+  and `AuthorizeError::Replayed`, so a connection whose clock is behind
+  the peer's corrects it and asks again, as it does against the access
+  service. A `match` on `Refusal` needs the two arms.
+- A request to a peer whose clock differs from the client's by more than
+  30 seconds is refused once, then retried with a corrected issue time.
+
+Why: verification proves who asked for what under whose authority, not
+that this request is the one they made. Without the record, anyone who
+saw an invocation on its way could have it performed again.
+
 ### A difference fetches the blocks it reads a batch at a time
 
 [#690](https://github.com/dialog-db/dialog-db/pull/690), part of [#646](https://github.com/dialog-db/dialog-db/issues/646)
@@ -431,6 +470,7 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- A peer from this release refuses a stale or replayed invocation with one of two new `Refusal` variants. An older client cannot decode either, so it reads the refusal as a malformed answer rather than as an access error, and does not correct its clock. Nothing is stored or rewritten: upgrade clients that talk to peers whose clocks may differ from theirs.
 - A reset that moves a branch forward only changes nothing stored or
   synced, and rewrites nothing. Heads an earlier release forked by a
   takeover and a commit keep their fork; nothing finds or repairs it.

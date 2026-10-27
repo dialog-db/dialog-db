@@ -5,6 +5,7 @@
 //! `profile.access().claim().delegate()` (see `dialog_identity::access`).
 
 mod access;
+pub mod admission;
 mod certificate_store;
 pub mod clock;
 mod invocation;

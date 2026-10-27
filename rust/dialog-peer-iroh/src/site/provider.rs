@@ -227,6 +227,8 @@ fn refused<E: From<AuthorizeError> + From<Rejection>>(refusal: Refusal) -> E {
             recourse: Recourse::None,
             reason,
         }),
+        Refusal::Stale { issued_at, at } => E::from(AuthorizeError::Stale { issued_at, at }),
+        Refusal::Replayed(invocation) => E::from(AuthorizeError::Replayed { invocation }),
         Refusal::UnknownCommand(command) => E::from(Rejection::Unclassified {
             detail: format!("the peer does not serve {command}"),
         }),

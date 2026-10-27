@@ -15,6 +15,7 @@ use super::*;
 use crate::channel::{Channel, ChannelError};
 use crate::helpers::Volatile;
 use crate::serve::Responder;
+use dialog_capability::access::AuthorizeError;
 use dialog_capability::{
     Ability, Capability, Effect, Fork, ForkInvocation, Provider, SiteFork, Subject,
 };
@@ -72,12 +73,38 @@ where
             Effect = Fx,
         >,
 {
-    let (session, host) = test_session_with_peer().await;
     let responder = Arc::new(Responder::new(
         Volatile::default(),
         CachingResolver::new(WebResolver::new()),
     ));
-    let site = Iroh::new(Loopback(responder.clone()));
+    exchange_over(responder.clone(), Loopback(responder.clone()), build).await
+}
+
+/// [`exchange`], against `responder`, over `channel`.
+async fn exchange_over<Fx>(
+    responder: Arc<Responder<Volatile, CachingResolver<WebResolver>>>,
+    channel: impl Channel + 'static,
+    build: impl FnOnce(&dialog_capability::Did) -> Capability<Fx>,
+) -> (
+    Fx::Output,
+    Arc<Responder<Volatile, CachingResolver<WebResolver>>>,
+)
+where
+    Fx: Effect + crate::carries::Carries + Clone + 'static,
+    Fx::Of: dialog_capability::Constraint,
+    Capability<Fx>: Ability,
+    Iroh: Provider<dialog_capability::ForkInvocation<Iroh, Fx>>,
+    IrohFork<Fx>: SiteFork<
+            dialog_peer::Peer<
+                dialog_storage::provider::storage::VolatileSpace,
+                dialog_peer::Session,
+            >,
+            Site = Iroh,
+            Effect = Fx,
+        >,
+{
+    let (session, host) = test_session_with_peer().await;
+    let site = Iroh::new(channel);
 
     // The subject is the profile the operator actually holds authority
     // for. Any other DID is a subject it cannot prove, which is the
@@ -121,6 +148,85 @@ async fn a_put_signed_here_is_performed_there() {
 /// A get comes back typed, which is the half a refusal-only test would
 /// miss: the output crossed the wire as bytes and decoded into the
 /// effect's own `Result`.
+/// Presents every request twice and answers with the second answer: what
+/// a peer sees when someone who captured the request sends it again.
+struct Twice(Arc<Responder<Volatile, CachingResolver<WebResolver>>>);
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl Channel for Twice {
+    async fn exchange(
+        &self,
+        _peer: &IrohAddress,
+        request: Vec<u8>,
+    ) -> Result<Vec<u8>, ChannelError> {
+        let _ = self.0.answer(&request).await;
+        let response = self.0.answer(&request).await.without_stream();
+        Ok(crate::wire::encode("response", &response).expect("a response encodes"))
+    }
+}
+
+/// A peer whose clock is ahead of the client's refuses its invocation as
+/// stale, and the client reads that as the access error saying what the
+/// peer's clock read: the refusal a connection corrects its clock on and
+/// asks again after.
+#[dialog_common::test]
+async fn a_stale_refusal_says_what_the_peers_clock_read() {
+    let later = dialog_ucan::admission::system_now() + 600;
+    let responder = Arc::new(
+        Responder::new(
+            Volatile::default(),
+            CachingResolver::new(WebResolver::new()),
+        )
+        .with_admission(dialog_ucan::admission::Admission::new().with_clock(move || later)),
+    );
+    let bytes = b"a block from a client whose clock is behind".to_vec();
+    let carried = bytes.clone();
+    let (outcome, responder) =
+        exchange_over(responder.clone(), Loopback(responder), move |subject| {
+            put_of(subject, &carried)
+        })
+        .await;
+
+    assert!(
+        matches!(
+            outcome,
+            Err(ArchiveError::Authorization(AuthorizeError::Stale { issued_at: Some(_), at }))
+                if at == later
+        ),
+        "expected a stale refusal carrying the peer's clock, got {outcome:?}"
+    );
+    assert_eq!(
+        responder.store().get(Buffer::from(bytes).blake3_hash()),
+        None,
+        "nothing may be stored for a stale invocation"
+    );
+}
+
+/// A copy of a request the peer already performed reaches the client as
+/// a replay, not as authority it lacks.
+#[dialog_common::test]
+async fn a_replayed_request_reads_as_replayed() {
+    let responder = Arc::new(Responder::new(
+        Volatile::default(),
+        CachingResolver::new(WebResolver::new()),
+    ));
+    let bytes = b"a block sent twice".to_vec();
+    let carried = bytes.clone();
+    let (outcome, _) = exchange_over(responder.clone(), Twice(responder), move |subject| {
+        put_of(subject, &carried)
+    })
+    .await;
+
+    assert!(
+        matches!(
+            outcome,
+            Err(ArchiveError::Authorization(AuthorizeError::Replayed { .. }))
+        ),
+        "expected the copy to be refused as replayed, got {outcome:?}"
+    );
+}
+
 #[dialog_common::test]
 async fn a_get_that_finds_nothing_is_an_answer() {
     let (outcome, _) = exchange(|subject| {

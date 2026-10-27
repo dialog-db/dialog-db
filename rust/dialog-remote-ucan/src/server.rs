@@ -17,14 +17,12 @@
 //! content type, a version and a body, which the embedder relays
 //! however it serves HTTP.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use dialog_capability::access::AuthorizeError;
 use dialog_capability::{Did, Policy, Provider, Subject};
-use dialog_common::time::{self, UNIX_EPOCH};
-use dialog_common::{Blake3Hash, Buffer, Checksum, ConditionalSend, ConditionalSync};
+use dialog_common::{Blake3Hash, Buffer, Checksum, ConditionalSync};
 use dialog_did_web::{CachingResolver, Resolve, WebResolver};
 use dialog_effects::MethodExt as _;
 use dialog_effects::Rejection;
@@ -51,96 +49,16 @@ pub const REFUSAL_MEDIA_TYPE: &str = "application/json";
 /// rebase onto it and write again without a read of its own.
 pub const CELL_STATE_MEDIA_TYPE: &str = "application/vnd.dialog.cell-state+cbor";
 
-/// How long after it was issued an invocation is accepted, and how far
-/// ahead of the service's clock its issue time may be: an invocation is
-/// good when it is made, and the window allows for its trip and for
-/// clocks that disagree.
-pub const FRESHNESS: Duration = Duration::from_secs(30);
-
-/// Whether an invocation must say when it was issued.
-///
-/// One that says is refused once it is older than the freshness window,
-/// whichever way it arrives. One that does not say cannot be aged, so
-/// where a captured invocation would grant lasting access (a watch,
-/// which follows a cell for as long as its chain holds) saying is
-/// required, and elsewhere it is not, so clients that predate it are
-/// still served.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Issuance {
-    /// An invocation that does not say when it was issued is refused.
-    Required,
-    /// An invocation that does not say when it was issued is accepted.
-    Optional,
-}
-
-/// The invocations a service accepted lately, remembered so that one
-/// presented again is refused.
-///
-/// An invocation carries a nonce, so one made again is never the same as
-/// one made before: an invocation presented twice was copied. It need
-/// only be remembered while it is fresh, since after that it is refused
-/// as stale anyway.
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-pub trait Presented: ConditionalSync {
-    /// Remember `invocation`, its content identifier, until `until` (Unix
-    /// seconds), answering `false` when it is remembered already. `now` is
-    /// what the service's clock reads, by which what was remembered until
-    /// before now may be forgotten.
-    async fn record(&self, invocation: &str, until: u64, now: u64) -> bool;
-}
-
-/// What a service's clock reads, in Unix seconds: the time it judges how
-/// long ago an invocation was issued by, and checks a running watch's
-/// authority as of.
-///
-/// The system clock by default ([`Access::with_clock`] to change it).
-pub trait Clock: ConditionalSend + ConditionalSync {
-    /// What the clock reads now, in Unix seconds.
-    fn now(&self) -> u64;
-}
-
-impl<F> Clock for F
-where
-    F: Fn() -> u64 + ConditionalSend + ConditionalSync,
-{
-    fn now(&self) -> u64 {
-        self()
-    }
-}
-
-/// Presented invocations remembered in the memory of one process: what
-/// a service that runs in one process, or keeps one instance per space,
-/// needs. A service spread over many processes shares a record they all
-/// reach instead.
-#[derive(Debug, Default)]
-pub struct RecentInvocations(Mutex<HashMap<String, u64>>);
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl Presented for RecentInvocations {
-    async fn record(&self, invocation: &str, until: u64, now: u64) -> bool {
-        let mut presented = self
-            .0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        presented.retain(|_, remembered| *remembered >= now);
-        if presented.contains_key(invocation) {
-            return false;
-        }
-        presented.insert(invocation.to_string(), until);
-        true
-    }
-}
+pub use dialog_ucan::admission::{
+    Admission, Clock, FRESHNESS, Issuance, Presented, RecentInvocations,
+};
 
 /// An access service over a provider of the effects it performs.
 pub struct Access<P, Resolver = CachingResolver<WebResolver>, Revocations = UnverifiedRevocations> {
     provider: P,
     resolver: Arc<Resolver>,
     revocations: Arc<Revocations>,
-    freshness: Duration,
-    presented: Arc<dyn Presented>,
-    clock: Arc<dyn Clock>,
+    admission: Admission,
 }
 
 impl<P: std::fmt::Debug, Resolver, Revocations> std::fmt::Debug
@@ -176,9 +94,7 @@ impl<P, Resolver> Access<P, Resolver> {
             provider,
             resolver,
             revocations: Arc::new(UnverifiedRevocations),
-            freshness: FRESHNESS,
-            presented: Arc::new(RecentInvocations::default()),
-            clock: Arc::new(now_s),
+            admission: Admission::new(),
         }
     }
 }
@@ -191,9 +107,7 @@ impl<P, Resolver, Revocations> Access<P, Resolver, Revocations> {
             provider: self.provider,
             resolver: self.resolver,
             revocations: Arc::new(revocations),
-            freshness: self.freshness,
-            presented: self.presented,
-            clock: self.clock,
+            admission: self.admission,
         }
     }
 
@@ -201,7 +115,7 @@ impl<P, Resolver, Revocations> Access<P, Resolver, Revocations> {
     /// clock: an embedder whose platform keeps time its own way, or a test
     /// of a service whose clock differs from its clients'.
     pub fn with_clock(mut self, clock: impl Clock + 'static) -> Self {
-        self.clock = Arc::new(clock);
+        self.admission = self.admission.with_clock(clock);
         self
     }
 
@@ -209,13 +123,13 @@ impl<P, Resolver, Revocations> Access<P, Resolver, Revocations> {
     /// [`Access::recheck`], and a session's deliveries, so a watch's
     /// authority is checked by the clock it was accepted by.
     pub fn now(&self) -> u64 {
-        self.clock.now()
+        self.admission.now()
     }
 
     /// The same service, accepting an invocation for `freshness` after it
     /// was issued (see [`FRESHNESS`]).
     pub fn with_freshness(mut self, freshness: Duration) -> Self {
-        self.freshness = freshness;
+        self.admission = self.admission.with_freshness(freshness);
         self
     }
 
@@ -223,7 +137,7 @@ impl<P, Resolver, Revocations> Access<P, Resolver, Revocations> {
     /// `presented`: an embedder that builds a service per request keeps
     /// one record across them.
     pub fn with_presented(mut self, presented: Arc<dyn Presented>) -> Self {
-        self.presented = presented;
+        self.admission = self.admission.with_presented(presented);
         self
     }
 
@@ -625,23 +539,11 @@ where
     ) -> Result<Verified, Refusal> {
         let chain =
             verify_invocation(container, self.resolver.as_ref(), &*self.revocations).await?;
-        let at = self.clock.now();
-        let window = self.freshness.as_secs();
         let issued_at = chain.invocation.issued_at().map(|issued| issued.to_unix());
-        let fresh = match issued_at {
-            Some(issued) => {
-                issued.saturating_add(window) >= at && issued <= at.saturating_add(window)
-            }
-            None => issuance == Issuance::Optional,
-        };
-        if !fresh {
-            return Err(AuthorizeError::Stale { issued_at, at }.into());
-        }
         let invocation = chain.invocation.to_cid().to_string();
-        let until = issued_at.unwrap_or(at).saturating_add(window);
-        if !self.presented.record(&invocation, until, at).await {
-            return Err(AuthorizeError::Replayed { invocation }.into());
-        }
+        self.admission
+            .admit(issued_at, &invocation, issuance)
+            .await?;
         Ok(Verified { chain })
     }
 
@@ -705,7 +607,7 @@ where
             space,
             cell,
             container: bytes,
-            checked: self.clock.now(),
+            checked: self.admission.now(),
         };
         Ok((subscription, state))
     }
@@ -1177,12 +1079,4 @@ impl From<memory::MemoryError> for Failure {
             memory::MemoryError::Storage(detail) => Self::storage(detail),
         }
     }
-}
-
-/// The service's clock, in Unix seconds.
-fn now_s() -> u64 {
-    time::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_secs())
-        .unwrap_or_default()
 }
