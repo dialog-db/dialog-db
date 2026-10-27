@@ -268,7 +268,7 @@ Ability to replicate only needed subtrees rather than entire database. This feat
 
 ### Incremental View Maintenance
 
-DBSP-based approach to efficiently update query results when facts change. Instead of re-running complex queries after each transaction, incremental view maintenance computes only the delta (change) to the result set, dramatically improving performance for standing queries and subscriptions.
+How standing query subscriptions keep their results current. It is pull-driven demand transformation over the top-down engine, not DBSP dataflow: each evaluation records a demand cover (the index key ranges it read) at the `Select` boundary, and a poll diffs the pinned tree root against the new one scoped to that cover (`differentiate_within`), so writes outside the cover cost nothing. Changes inside the cover are maintained per entity with DRed, over-deleting the touched entities' rows and re-deriving them via `Application::restrict`; recursive concepts carry their fixpoint answer table forward as a semi-naive continuation. DBSP's algebra only informs what each step must compute. See [`incremental-subscriptions.md`](./incremental-subscriptions.md) and the module doc of `rust/dialog-repository/src/repository/branch/subscription.rs`.
 
 ### Top-Down Evaluation
 
