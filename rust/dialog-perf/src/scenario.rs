@@ -17,6 +17,7 @@ mod number;
 mod read;
 mod replica;
 mod rule;
+mod stack;
 mod subscribe;
 mod transaction;
 
@@ -281,9 +282,71 @@ pub fn catalog() -> Vec<Spec> {
     ]
 }
 
-/// The scenario named `name`.
+/// Scenarios outside the gate: a sweep runs them only when `--only`
+/// names them, and `compare` never sees them unless a sweep wrote them.
+/// The gate fails a scenario with no baseline file, and recording one
+/// is the maintainer's call, so a scenario that measures a question
+/// rather than a path the gate should hold waits here until it is
+/// promoted into [`catalog`] with its baseline.
+pub fn ungated() -> Vec<Spec> {
+    vec![
+        Spec {
+            name: "stack-event",
+            size: 2000,
+            about: "two hundred stack commits of one transient click each, which an inductive rule turns into a count under `last` on an ephemeral layer: nothing durable",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(stack::event(size)),
+        },
+        Spec {
+            name: "stack-cursor",
+            size: 2000,
+            about: "two hundred stack commits each moving one cursor under `last` on an ephemeral layer, then one read of it through the stack",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(stack::cursor_moves(size)),
+        },
+        Spec {
+            name: "stack-frame",
+            size: 2000,
+            about: "twenty stack commits of a hundred transient clicks each on distinct counters, which an inductive rule counts on an ephemeral layer",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(stack::frame(size)),
+        },
+        Spec {
+            name: "stack-subscribe",
+            size: 2000,
+            about: "`stack-cursor` with a subscription to every cursor over the stack, polled after every commit",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(stack::subscribe(size)),
+        },
+        Spec {
+            name: "branch-cursor",
+            size: 2000,
+            about: "`stack-cursor` without a stack: two hundred cursor moves under `last` into the branch's session store, then one read",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(stack::branch_cursor(size)),
+        },
+        Spec {
+            name: "branch-subscribe",
+            size: 2000,
+            about: "`stack-subscribe` without a stack: a branch subscription to every cursor, polled after each move into the session store",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(stack::branch_subscribe(size)),
+        },
+    ]
+}
+
+/// The scenario named `name`, gated or not.
 pub fn spec(name: &str) -> Option<Spec> {
-    catalog().into_iter().find(|spec| spec.name == name)
+    catalog()
+        .into_iter()
+        .chain(ungated())
+        .find(|spec| spec.name == name)
 }
 
 /// The `stuff` population: `stuff/name` and `stuff/role` per entity.
