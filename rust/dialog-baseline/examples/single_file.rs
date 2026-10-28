@@ -121,6 +121,7 @@ pub(crate) mod native {
         }
         Ok(size)
     }
+    // bare-send-ok: this native-only harness compares providers backed by blocking worker threads.
     async fn run<A>(
         archive: A,
         log: &SeLog,

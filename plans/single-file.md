@@ -86,3 +86,7 @@ counter and instruction tolerance, and report any failure without rebasing it.
   experiment in its own targeted workflow; no protected gates or approval labels
   change. Build/workload/attribution failures remain fatal; adoption outcomes
   remain explicit in the experimental report.
+
+- Full CI caught two unannotated native-only Send/Sync bounds in the codec and
+  comparison harness. Document their deliberate blocking-thread requirements
+  using the existing convention exemption; behavior and measurements unchanged.

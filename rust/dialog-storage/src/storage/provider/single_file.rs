@@ -40,6 +40,7 @@ pub struct BlockFrame {
 /// The identifier is persisted and checked when opening the file. A codec must
 /// change it whenever its metadata format changes. `encode` must accept opaque
 /// blocks as well as any specialized node format it recognizes.
+// bare-send-ok: native-only codec shared with Tokio blocking worker threads.
 pub trait FrameCodec: Send + Sync + 'static {
     /// Stable on-disk codec identifier.
     fn identifier(&self) -> &'static str;
