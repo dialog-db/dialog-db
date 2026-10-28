@@ -110,9 +110,9 @@ This is a specified synthetic workload, not a claim about real Tonk data. The
 ordinary all-conforming graph reports zero nonconforming bytes. Latest local
 reports are in `target/graph-perf-review`, covering all six graph scenarios.
 
-The Test workflow also offers a manual `perf_only` boolean, default false, for
-collecting the new Linux instruction baselines before the full draft-PR matrix.
-Its guards explicitly leave push and pull-request workflows unchanged.
+A temporary manual `perf_only` mode collected the Linux baselines before the
+full draft-PR matrix. After collection, the Test workflow was restored byte for
+byte to `becde743`; no workflow gate change remains in the final diff.
 
 ## Reproduction
 

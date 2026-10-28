@@ -1,11 +1,5 @@
 on:
   workflow_dispatch:
-    inputs:
-      perf_only:
-        description: 'Run only the performance sweep and gate'
-        type: boolean
-        required: false
-        default: false
   pull_request:
   push:
     branches:
@@ -42,9 +36,6 @@ jobs:
           ignore-missing-flake-lock: false
 
   lint_rust:
-    # Manual baseline collection can skip unrelated build matrices. Pull
-    # requests and pushes always run the ordinary full workflow.
-    if: github.event_name != 'workflow_dispatch' || !inputs.perf_only
     name: 'Lint Rust'
     needs: ['lint_nix']
     runs-on: 'ubuntu-latest'
@@ -164,9 +155,6 @@ jobs:
   # commit's sweep, as the Perf gate is. Both sweeps run under the same
   # fixed seed, so their counts are exact (see soak:check in flake.nix).
   soak_sync:
-    # Manual baseline collection can skip unrelated build matrices. Pull
-    # requests and pushes always run the ordinary full workflow.
-    if: github.event_name != 'workflow_dispatch' || !inputs.perf_only
     name: 'Replication gate'
     needs: ['lint_nix']
     runs-on: 'ubuntu-latest'
