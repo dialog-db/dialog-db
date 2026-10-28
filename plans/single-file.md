@@ -69,8 +69,8 @@ counter and instruction tolerance, and report any failure without rebasing it.
   `notes/measurements/single-file-archive.json`; overlapping probes remain marked
   as excluded from timing medians. Reductions: 10.85x (2048), 12.11x (4096), 11.58x
   (wide 1024). Performance limits and slower rows are explicit in the note.
-- The manual Test workflow with `single_file_comparison=true` runs paired
-  Linux sweeps, verifies nonzero real-codec attribution, and preserves comparison
+- The separate `Single-file archive comparison` workflow runs paired
+  Linux sweeps on targeted pull requests or manual dispatch, verifies nonzero real-codec attribution, and preserves comparison
   exit codes and full artifacts. This evidence is still pending; ordinary CI
   does not establish performance of the swapped provider.
 - Final API regression removes an unnecessary Clone bound on the codec; handles
@@ -81,3 +81,8 @@ counter and instruction tolerance, and report any failure without rebasing it.
   `first-query`, size16) return identical outcomes and every counter for fs and
   single-file. These are not instruction measurements; Linux attribution is
   still pending. Final storage9 / repository2 regressions pass after Clone fix.
+
+- CI follow-up: restore Test workflow byte-for-byte to becde743 and isolate the
+  experiment in its own targeted workflow; no protected gates or approval labels
+  change. Build/workload/attribution failures remain fatal; adoption outcomes
+  remain explicit in the experimental report.

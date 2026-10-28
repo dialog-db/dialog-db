@@ -75,8 +75,9 @@ DIALOG_PERF_ARCHIVE=single-file target/release/perf sweep --out-dir target/perf-
 target/release/perf compare target/perf-fs target/perf-single-file --base --threshold 10
 ```
 
-The `Test` workflow's manual `single_file_comparison=true` dispatch runs only
-this paired experiment and uploads both full sweeps, annotated codec costs,
+The separate `Single-file archive comparison` workflow runs on pull requests
+that change its provider, codec, perf adapter or CI script, and supports manual
+dispatch. It uploads both full sweeps, annotated codec costs,
 the exact comparison exit code, candidate SHA and toolchain. A negative adoption
 comparison is explicitly reported in the job summary; build/sweep or missing
 codec-attribution failures fail the job. Ordinary PR gates remain unchanged.

@@ -1,10 +1,5 @@
 on:
   workflow_dispatch:
-    inputs:
-      single_file_comparison:
-        description: 'Run only the experimental paired archive comparison'
-        type: boolean
-        default: false
   pull_request:
   push:
     branches:
@@ -31,7 +26,6 @@ permissions:
 
 jobs:
   lint_nix:
-    if: github.event_name != 'workflow_dispatch' || !inputs.single_file_comparison
     name: 'Lint Nix'
     runs-on: 'ubuntu-latest'
     steps:
@@ -324,50 +318,3 @@ jobs:
             --set-env-var TMPDIR /nix/tmp \
             --command ${{ matrix.configuration }}
 
-
-  # An experimental provider comparison, requested explicitly by dispatching
-  # this existing workflow on the candidate ref. Ordinary PR gates above are
-  # untouched. Comparison failures are recorded as research outcomes; build,
-  # workload and missing CPU-attribution failures still fail this job.
-  single_file_archive:
-    name: 'Single-file archive comparison'
-    if: github.event_name == 'workflow_dispatch' && inputs.single_file_comparison
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    steps:
-      - uses: actions/checkout@v4
-      - uses: wimpysworld/nothing-but-nix@main
-        with:
-          root-safe-haven: '16384'
-      - uses: cachix/install-nix-action@v31
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
-      - uses: cachix/cachix-action@v16
-        with:
-          name: tonk-ops
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-          skipPush: true
-      - name: Build and sweep both providers on one runner
-        shell: bash
-        run: |
-          sudo mkdir -p /nix/cargo /nix/tmp
-          sudo chown "$(id -u):$(id -g)" /nix/cargo /nix/tmp
-          nix develop --accept-flake-config \
-            --set-env-var CARGO_HOME /nix/cargo \
-            --set-env-var TMPDIR /nix/tmp \
-            --command bash scripts/ci/single-file-sweep.sh
-      - name: Publish measured outcome
-        if: always()
-        shell: bash
-        run: |
-          if test -f target/single-file-comparison/summary.md; then
-            cat target/single-file-comparison/summary.md >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'Single-file comparison incomplete: inspect the failed build or sweep step.' >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: single-file-archive-comparison
-          path: target/single-file-comparison
-          if-no-files-found: warn
