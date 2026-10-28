@@ -464,6 +464,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 branch,
                 head,
                 new_revision: upstream_revision.clone(),
+                context: None,
                 merges: upstream_revision.clone(),
                 sync: upstream.with_tree(upstream_revision.tree.clone()),
                 base,
@@ -507,6 +508,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 branch,
                 head,
                 new_revision: current.clone(),
+                context: None,
                 merges: upstream_revision.clone(),
                 sync: upstream.with_tree(upstream_revision.tree.clone()),
                 base,
@@ -558,6 +560,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     branch,
                     head,
                     new_revision: upstream_revision.clone(),
+                    context: None,
                     merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
@@ -618,6 +621,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     branch,
                     head,
                     new_revision: upstream_revision.clone(),
+                    context: None,
                     merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
@@ -675,6 +679,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 branch,
                 head,
                 new_revision,
+                context: None,
                 merges: upstream_revision.clone(),
                 sync: upstream.with_tree(upstream_revision.tree.clone()),
                 base,
@@ -908,6 +913,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: upstream_revision.clone(),
+                        context: None,
                         merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
@@ -918,6 +924,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: local.clone(),
+                        context: None,
                         merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
@@ -966,7 +973,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 revision.publish_region(own_count(&revision, &context));
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
-                contexts.insert(revision.version(), context);
 
                 persist(
                     &branch.archive().index(),
@@ -980,6 +986,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     branch,
                     head,
                     new_revision: revision,
+                    context: Some(Arc::new(context)),
                     merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
@@ -1083,6 +1090,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: upstream_revision.clone(),
+                        context: None,
                         merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
@@ -1093,6 +1101,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                         branch,
                         head,
                         new_revision: local.clone(),
+                        context: None,
                         merges: upstream_revision.clone(),
                         sync: upstream.with_tree(upstream_revision.tree.clone()),
                         base,
@@ -1142,7 +1151,6 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                 revision.tree = TreeReference::from(*merged.root().as_bytes());
                 revision.publish_region(own_count(&revision, &context));
                 revision.signature = Attest::new(revision.payload()).perform(env).await?;
-                contexts.insert(revision.version(), context);
 
                 persist(
                     &branch.archive().index(),
@@ -1156,6 +1164,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
                     branch,
                     head,
                     new_revision: revision,
+                    context: Some(Arc::new(context)),
                     merges: upstream_revision.clone(),
                     sync: upstream.with_tree(upstream_revision.tree.clone()),
                     base,
@@ -1366,11 +1375,11 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         // base records may be in neither side is a branch with no head
         // but a stale nonempty sync base — an inconsistent state; skip
         // the memo and let the next pull derive by the walk.
-        if had_local_head || base.is_none() {
+        let context = (had_local_head || base.is_none()).then(|| {
             let mut context = merged_context;
             context.record(new_revision.version());
-            contexts.insert(new_revision.version(), context);
-        }
+            Arc::new(context)
+        });
 
         // Persist the merged tree's pending nodes to the local archive
         // before referencing its root in a revision. The whole flush
@@ -1390,6 +1399,7 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
             branch,
             head,
             new_revision,
+            context,
             merges: upstream_revision.clone(),
             sync: upstream.with_tree(upstream_revision.tree),
             base,
@@ -1473,6 +1483,13 @@ pub struct Merged<'a> {
     head: Checkpoint<Revision>,
     /// The merged revision to publish as the new head.
     new_revision: Revision,
+    /// The new head's full context, remembered only once the head lands.
+    /// A merge that loses its publish is minted again under the same
+    /// version with other parents (as the commit that beat it may already
+    /// be), so a memo entry written at prepare time would speak for a
+    /// revision that never landed, and later merges would screen out the
+    /// upstream's claims as seen.
+    context: Option<Arc<Context>>,
     /// The upstream revision this merge brings in: the head the prepare
     /// fetched and verified, and the only one the commit adopts, however
     /// far the upstream has moved since.
@@ -1609,6 +1626,7 @@ impl PreparedPull<'_> {
             branch,
             head,
             new_revision,
+            context,
             merges,
             sync,
             base,
@@ -1642,6 +1660,9 @@ impl PreparedPull<'_> {
             // another handle must still know it moved by this writer's
             // own doing (see `Commit::merge`).
             branch.writer().adopt(new_revision.version());
+        }
+        if let Some(context) = context {
+            branch.contexts().insert(new_revision.version(), context);
         }
 
         // Advance the pulled upstream's recorded sync base to the tree we
@@ -2015,6 +2036,64 @@ mod tests {
             "the pulled upstream change must survive too"
         );
 
+        Ok(())
+    }
+
+    /// A pull whose publish loses its CAS leaves nothing in the memo for
+    /// the head it minted. A pull prepared on a stale view of the head
+    /// mints the same version as the commit that already landed on it
+    /// (both build on the same parent), and were its context remembered,
+    /// it would speak for that commit: the commit would read as having
+    /// seen the upstream, and the next merge would screen out the
+    /// upstream's claims as removed.
+    #[dialog_common::test]
+    async fn it_forgets_the_context_of_a_merge_that_lost_its_publish() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let assert = |the: &str, of: &str| -> Result<Instruction> {
+            Ok(Instruction::Assert(
+                Artifact {
+                    the: the.parse()?,
+                    of: of.parse()?,
+                    is: Value::String(of.to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            ))
+        };
+
+        let main = repo.branch("main").open().perform(&operator).await?;
+        main.commit(stream::iter(vec![assert("user/name", "user:main")?]))
+            .perform(&operator)
+            .await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+        feature
+            .commit(stream::iter(vec![assert("user/email", "user:f1")?]))
+            .perform(&operator)
+            .await?;
+
+        // Another handle commits on the head `feature` still holds, and
+        // `feature` then prepares a merge on that stale head: both mint
+        // one version.
+        let other = repo.branch("feature").open().perform(&operator).await?;
+        other
+            .commit(stream::iter(vec![assert("user/email", "user:f2")?]))
+            .perform(&operator)
+            .await?;
+        let prepared = feature.pull().prepare(&operator).await?;
+        let minted = prepared.revision().map(|revision| revision.version());
+        let landed = other.revision().map(|revision| revision.version());
+        assert_eq!(
+            minted, landed,
+            "the merge mints the landed commit's version"
+        );
+        assert!(
+            prepared.commit(&operator).await.is_err(),
+            "the merge loses its publish"
+        );
+
+        super::super::context::region_agrees(&other, &operator, "the landed commit").await?;
         Ok(())
     }
 
