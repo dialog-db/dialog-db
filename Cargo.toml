@@ -82,6 +82,9 @@ dashmap = "6"
 dirs = "5"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+# `hazmat` exposes `encapsulate_deterministic`, which lets the randomness come
+# from `dialog_common::random` rather than a `rand_core` 0.10 RNG.
+x-wing = { version = "0.1.1", features = ["hazmat"] }
 futures = "0.3"
 futures-core = "0.3"
 flate2 = "1"

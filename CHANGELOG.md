@@ -14,6 +14,40 @@ says how to cut a release.
 
 ## Unreleased
 
+### A secret can be concealed with X-Wing, so it holds against a quantum computer
+
+Part of [#694](https://github.com/dialog-db/dialog-db/issues/694)
+
+`dialog-credentials` conceals a secret with X25519 against the key a
+recipient's `did:key` carries. A quantum computer recovers that key from
+the DID, so a secret stored today can be revealed then. A secret can now be
+concealed with X-Wing (X25519 and ML-KEM-768, combined so that it holds as
+long as either does) to an `XWingPublicKey` the recipient publishes beside
+its DID. HKDF-SHA256 and AES-256-GCM stay as they were. `Secret::reveal`
+opens both schemes, and the `SealedSecret` says which one it holds.
+
+What this changes for you:
+
+- `Seal::with(&XWingPublicKey)` conceals with X-Wing. Without it,
+  `Seal::conceal` conceals with X25519 as before: nothing that conceals
+  today changes until it is given a key.
+- `Secret::with(&XWingSecretKey)` reveals X-Wing secrets, and makes
+  `Secret::conceal` to self use X-Wing. A `Secret` given a key still
+  reveals every X25519 secret.
+- New types `XWingSecretKey` (a 32-byte seed its holder stores; held in
+  wasm memory in the browser, since WebCrypto has no ML-KEM) and
+  `XWingPublicKey` (1216 bytes), and `SealedSecret::scheme()` returning
+  `Scheme::X25519` or `Scheme::XWing`, to find secrets still to conceal
+  again.
+- `SecretError` has a new variant, `XWingKeyUnavailable`, for an X-Wing
+  secret revealed without an X-Wing key.
+- An X-Wing secret is 1121 bytes longer than an X25519 one: 1213 bytes
+  for a 32-byte secret.
+
+Why: concealed secrets (space keys, vaults, held principals) live long,
+and a recorded ciphertext is exposed retroactively, unlike a signature,
+which only matters from the day it can be forged.
+
 ### A difference fetches the blocks it reads a batch at a time
 
 [#690](https://github.com/dialog-db/dialog-db/pull/690), part of [#646](https://github.com/dialog-db/dialog-db/issues/646)
@@ -431,6 +465,16 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- A secret concealed with X-Wing opens with a versioned header, 32 zero
+  bytes and a version byte. Every X25519 secret opens with its sender's
+  ephemeral key, which is never all zeros (that point has low order, and
+  reveal refuses it), so the two are told apart without guessing, and every
+  secret concealed before still reveals, unchanged. An older release
+  cannot reveal an X-Wing secret: it reads one as an X25519 secret and
+  fails. Nothing is rewritten on upgrade, and nothing writes X-Wing
+  secrets until a caller passes an X-Wing key, so a replica keeps
+  producing what older releases read until it opts in. Re-concealing an
+  X25519 secret takes the recipient's `XWingPublicKey`.
 - A reset that moves a branch forward only changes nothing stored or
   synced, and rewrites nothing. Heads an earlier release forked by a
   takeover and a commit keep their fork; nothing finds or repairs it.

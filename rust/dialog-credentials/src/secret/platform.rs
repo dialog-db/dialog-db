@@ -5,9 +5,13 @@
 //! implementations rather than a software AES compiled to wasm. Both produce
 //! the same bytes -- AES-GCM and HKDF are fully specified -- so a secret sealed
 //! on one platform opens on the other.
+//!
+//! X-Wing runs in Rust on both: WebCrypto has no ML-KEM to route it through.
 
-use super::{Context, SealedSecret, SecretError};
+use super::message::Encapsulation;
+use super::{Context, SealedSecret, SecretError, XWingPublicKey, XWingSecretKey};
 use crate::ed25519::{Ed25519Verifier, X25519PublicKey, X25519SecretKey};
+use x_wing::{ENCAPSULATION_RANDOMNESS_SIZE, TryDecapsulate};
 
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod native;
@@ -29,6 +33,12 @@ const SEAL: u8 = 0x00;
 /// whatever labels the two carry.
 const DERIVE: u8 = 0x01;
 
+/// The `info` tag for a secret sealed with X-Wing.
+///
+/// Distinct from [`SEAL`], so a key derived for one scheme is never the key
+/// derived for the other.
+const SEAL_X_WING: u8 = 0x02;
+
 /// Build the HKDF `info` string binding a key to its purpose and participants.
 ///
 /// Including both public keys means a derived key is usable only for this exact
@@ -41,6 +51,20 @@ fn info(context: Context, ephemeral: &[u8; 32], recipient: &[u8; 32]) -> Vec<u8>
     info.extend_from_slice(label);
     info.push(SEAL);
     info.extend_from_slice(ephemeral);
+    info.extend_from_slice(recipient);
+    info
+}
+
+/// Build the HKDF `info` string for a secret sealed with X-Wing.
+///
+/// The X-Wing ciphertext and public key take the place of the two X25519 keys.
+/// Both are fixed-width, so the concatenation stays injective.
+fn x_wing_info(context: Context, ciphertext: &[u8], recipient: &[u8]) -> Vec<u8> {
+    let label = context.as_str().as_bytes();
+    let mut info = Vec::with_capacity(label.len() + 1 + ciphertext.len() + recipient.len());
+    info.extend_from_slice(label);
+    info.push(SEAL_X_WING);
+    info.extend_from_slice(ciphertext);
     info.extend_from_slice(recipient);
     info
 }
@@ -92,26 +116,87 @@ pub(super) async fn conceal(
     let ciphertext = backend::encrypt(&key, &nonce, plain, &aad(recipient)).await?;
 
     Ok(SealedSecret {
-        ephemeral_public_key,
+        encapsulation: Encapsulation::X25519(ephemeral_public_key),
         nonce,
         ciphertext,
     })
 }
 
-/// Reveal a secret sealed to `recipient`.
+/// Reveal a secret sealed to `recipient` with X25519.
 pub(super) async fn reveal(
     key: &X25519SecretKey,
     recipient: &Ed25519Verifier,
     context: Context,
+    ephemeral_public_key: &[u8; 32],
     sealed: &SealedSecret,
 ) -> Result<Vec<u8>, SecretError> {
-    let ephemeral = X25519PublicKey::from_bytes(&sealed.ephemeral_public_key).await?;
+    let ephemeral = X25519PublicKey::from_bytes(ephemeral_public_key).await?;
     let recipient_bytes = key.public_key().to_bytes();
 
     let shared = key.diffie_hellman(&ephemeral).await?;
     let derived = backend::derive_key(
         &shared,
-        &info(context, &sealed.ephemeral_public_key, &recipient_bytes),
+        &info(context, ephemeral_public_key, &recipient_bytes),
+    )
+    .await?;
+
+    backend::decrypt(&derived, &sealed.nonce, &sealed.ciphertext, &aad(recipient)).await
+}
+
+/// Conceal `plain` to `recipient` with X-Wing.
+///
+/// The X-Wing shared secret replaces the X25519 one; HKDF, AES-256-GCM and
+/// the recipient's DID as additional data stay as they are.
+pub(super) async fn conceal_x_wing(
+    recipient_key: &XWingPublicKey,
+    recipient: &Ed25519Verifier,
+    context: Context,
+    plain: &[u8],
+) -> Result<SealedSecret, SecretError> {
+    let mut randomness = [0u8; ENCAPSULATION_RANDOMNESS_SIZE];
+    dialog_common::random::fill(&mut randomness).map_err(|e| SecretError::Crypto(e.to_string()))?;
+    // Fresh, uniform randomness on every call is the whole of what the
+    // deterministic entry point asks of its caller.
+    let (encapsulated, shared) = recipient_key
+        .encapsulation_key()
+        .encapsulate_deterministic(&randomness.into());
+    randomness.fill(0);
+
+    let mut ciphertext = Box::new([0u8; x_wing::CIPHERTEXT_SIZE]);
+    ciphertext.copy_from_slice(&encapsulated);
+    let key = backend::derive_key(
+        &shared.into(),
+        &x_wing_info(context, ciphertext.as_slice(), &recipient_key.to_bytes()),
+    )
+    .await?;
+
+    let nonce = random_nonce()?;
+    let sealed = backend::encrypt(&key, &nonce, plain, &aad(recipient)).await?;
+
+    Ok(SealedSecret {
+        encapsulation: Encapsulation::XWing(ciphertext),
+        nonce,
+        ciphertext: sealed,
+    })
+}
+
+/// Reveal a secret sealed to `recipient` with X-Wing.
+pub(super) async fn reveal_x_wing(
+    key: &XWingSecretKey,
+    recipient: &Ed25519Verifier,
+    context: Context,
+    encapsulated: &[u8; x_wing::CIPHERTEXT_SIZE],
+    sealed: &SealedSecret,
+) -> Result<Vec<u8>, SecretError> {
+    // A non-contributory X25519 half is refused, as the X25519 scheme refuses
+    // it; anything else that is wrong surfaces as a failed decryption.
+    let shared = key
+        .decapsulation_key()
+        .try_decapsulate(&(*encapsulated).into())
+        .map_err(|_| SecretError::Failed)?;
+    let derived = backend::derive_key(
+        &shared.into(),
+        &x_wing_info(context, encapsulated, &key.public_key().to_bytes()),
     )
     .await?;
 
