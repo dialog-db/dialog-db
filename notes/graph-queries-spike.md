@@ -150,3 +150,19 @@ with these new baselines and obtain the required maintainer approval.
 | graph-read | 22,722,210 | 0 |
 | graph-rename | 271,093,474 | 3 |
 | graph-root | 271,817,550 | 3 |
+
+The reduced I/O does not imply low update CPU cost. At 100 roots, a shared-name
+update consumes 271,093,474 instructions, about 11.9 times the 22,722,210 warm
+one-shot read; incomplete bags cost 27,485,449 and an unchanged poll costs 2,778.
+Update scenarios include both the commit and poll, whereas read scenarios do
+not. For context, the same sweep's ordinary `subscribe-repoll` (1,000 rows,
+ten changes, commit plus poll) uses 15,248,819 instructions; `commit-rows` uses
+194,494,030 for its different commit workload. These are not controlled workload
+comparisons, and the three-block result must not be presented as a CPU win.
+
+The current graph cache shares immutable block buffers only. Differential
+loaders still parse/validate buffers with `PersistentNode::try_from` on repeated
+per-field walks. Sharing parsed nodes would require explicit optional-cache
+plumbing through the search-tree differential loaders and focused validation;
+the `LoadBlock` wrapper alone cannot return parsed nodes. A grouped-demand diff
+would be a broader algorithm change. Neither optimization is claimed here.
