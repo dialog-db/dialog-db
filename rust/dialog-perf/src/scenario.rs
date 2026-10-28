@@ -13,6 +13,7 @@ use dialog_query::ConceptDescriptor;
 use crate::env::{Env, assert_all, concept, entity, fact, text};
 
 mod commit;
+mod graph;
 mod number;
 mod read;
 mod replica;
@@ -66,6 +67,46 @@ impl Spec {
 /// Every scenario, in the order a sweep runs them.
 pub fn catalog() -> Vec<Spec> {
     vec![
+        Spec {
+            name: "graph-noop",
+            size: 100,
+            about: "an unchanged graph poll without traversing its nodes",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(graph::repoll(size, graph::Change::Noop)),
+        },
+        Spec {
+            name: "graph-read",
+            size: 100,
+            about: "one graph read of issues sharing a typed assignee",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(graph::read(size)),
+        },
+        Spec {
+            name: "graph-rename",
+            size: 100,
+            about: "a shared nested entity rename and normalized graph delta",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(graph::repoll(size, graph::Change::Rename)),
+        },
+        Spec {
+            name: "graph-edge",
+            size: 100,
+            about: "an edge move and prompt discovery of its new target",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(graph::repoll(size, graph::Change::Edge)),
+        },
+        Spec {
+            name: "graph-root",
+            size: 100,
+            about: "a root field change in a standing graph",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(graph::repoll(size, graph::Change::Root)),
+        },
         Spec {
             name: "commit-batch",
             size: 1000,
