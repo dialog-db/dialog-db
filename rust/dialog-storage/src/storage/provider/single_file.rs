@@ -79,7 +79,7 @@ pub struct SingleFile<C = RawFrameCodec> {
 struct Log {
     file: File,
     end: u64,
-    tokens: HashMap<Vec<u8>, u64>,
+    tokens: HashMap<Arc<[u8]>, u64>,
     offsets: HashMap<u64, Arc<[u8]>>,
     blocks: HashMap<(String, [u8; 32]), u64>,
     poisoned: bool,
@@ -113,7 +113,50 @@ fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
+/// Resident-index accounting, excluding allocator/hash-table overhead.
+#[derive(Debug, Clone, Copy)]
+pub struct ArchiveStats {
+    /// Distinct shared tokens.
+    pub tokens: usize,
+    /// Token payload bytes (shared by both indexes).
+    pub token_bytes: usize,
+    /// Lower bound including index entries and catalog strings, not allocator overhead.
+    pub index_bytes_lower_bound: usize,
+}
+
 impl<C: FrameCodec> SingleFile<C> {
+    /// Report resident token/index lower bounds for workload measurements.
+    pub fn stats(&self) -> io::Result<ArchiveStats> {
+        let log = self
+            .inner
+            .lock()
+            .map_err(|_| invalid("archive lock poisoned"))?;
+        let token_bytes = log.offsets.values().map(|v| v.len()).sum::<usize>();
+        let index_bytes_lower_bound = token_bytes
+            + log.offsets.len()
+                * (2 * std::mem::size_of::<(u64, Arc<[u8]>)>() + 2 * std::mem::size_of::<usize>())
+            + log
+                .blocks
+                .iter()
+                .map(|((catalog, _), _)| {
+                    std::mem::size_of::<((String, [u8; 32]), u64)>() + catalog.len()
+                })
+                .sum::<usize>();
+        Ok(ArchiveStats {
+            tokens: log.offsets.len(),
+            token_bytes,
+            index_bytes_lower_bound,
+        })
+    }
+    /// Snapshot catalog/hash keys, for archive verification and migration tools.
+    pub fn entries(&self) -> io::Result<Vec<(String, [u8; 32])>> {
+        let log = self
+            .inner
+            .lock()
+            .map_err(|_| invalid("archive lock poisoned"))?;
+        Ok(log.blocks.keys().cloned().collect())
+    }
+
     /// Open or create an archive. The parent directory must already exist.
     /// A second independently opened handle fails while this handle is alive.
     pub async fn open(path: impl AsRef<Path>, codec: C) -> io::Result<Self> {
@@ -210,7 +253,7 @@ impl Log {
         let len = log.file.metadata()?.len();
         while log.end < len {
             let start = log.end;
-            if len - start < 8 {
+            if len - start < 16 {
                 log.file.set_len(start)?;
                 break;
             }
@@ -218,17 +261,22 @@ impl Log {
             let mut size = [0; 8];
             log.file.read_exact(&mut size)?;
             let size = u64::from_le_bytes(size);
+            let mut complement = [0; 8];
+            log.file.read_exact(&mut complement)?;
+            if u64::from_le_bytes(complement) != !size {
+                return Err(invalid("archive record length checksum mismatch"));
+            }
             // An impossible length is corruption, not evidence of a torn tail.
             if size > MAX_RECORD as u64 {
                 return Err(invalid("archive record exceeds size limit"));
             }
-            if len - start - 8 < size + 32 {
+            if len - start - 16 < size + 32 {
                 log.file.set_len(start)?;
                 break;
             }
             let payload = log.read_record(start)?;
             log.index(start, &payload)?;
-            log.end += 8 + size + 32;
+            log.end += 16 + size + 32;
         }
         Ok(log)
     }
@@ -237,6 +285,11 @@ impl Log {
         let mut size = [0; 8];
         self.file.read_exact(&mut size)?;
         let size = u64::from_le_bytes(size);
+        let mut complement = [0; 8];
+        self.file.read_exact(&mut complement)?;
+        if u64::from_le_bytes(complement) != !size {
+            return Err(invalid("archive record length checksum mismatch"));
+        }
         if size > MAX_RECORD as u64 {
             return Err(invalid("archive record exceeds size limit"));
         }
@@ -253,8 +306,9 @@ impl Log {
         let mut data = payload;
         match take(&mut data, 1)?[0] {
             0 => {
-                self.tokens.insert(data.to_vec(), at);
-                self.offsets.insert(at, Arc::from(data));
+                let token: Arc<[u8]> = Arc::from(data);
+                self.tokens.insert(token.clone(), at);
+                self.offsets.insert(at, token);
             }
             1 => {
                 let catalog = std::str::from_utf8(sized(&mut data)?)
@@ -290,6 +344,8 @@ impl Log {
         let result = (|| {
             self.file.seek(SeekFrom::Start(at))?;
             self.file.write_all(&(payload.len() as u64).to_le_bytes())?;
+            self.file
+                .write_all(&(!(payload.len() as u64)).to_le_bytes())?;
             self.file.write_all(payload)?;
             self.file.write_all(blake3::hash(payload).as_bytes())?;
             Ok(())
@@ -298,7 +354,7 @@ impl Log {
             self.poisoned = true;
             return Err(error);
         }
-        self.end += 8 + payload.len() as u64 + 32;
+        self.end += 16 + payload.len() as u64 + 32;
         self.index(at, payload)?;
         Ok(at)
     }
@@ -325,7 +381,7 @@ impl Log {
         put_bytes(&mut payload, &frame.metadata);
         put_u64(&mut payload, frame.tokens.len() as u64);
         for token in frame.tokens {
-            let offset = match self.tokens.get(&token) {
+            let offset = match self.tokens.get(token.as_slice()) {
                 Some(offset) => *offset,
                 None => {
                     let mut record = vec![0];
@@ -406,3 +462,6 @@ impl<C: FrameCodec> Provider<Import> for SingleFile<C> {
 
 #[cfg(test)]
 mod tests;
+
+mod proof;
+pub use proof::RangeSnapshot;

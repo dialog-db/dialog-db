@@ -375,6 +375,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bao"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9125f93587b894c196d58b0a752ce2213552d0d483c98ee41530e38202a511"
+dependencies = [
+ "arrayvec",
+ "blake3",
+]
+
+[[package]]
 name = "base-x"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2014,6 +2024,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "bao",
  "base58",
  "blake3",
  "bytes",

@@ -80,3 +80,20 @@ async fn cloned_handles_serialize_writes() -> io::Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn corrupt_middle_length_never_truncates_history() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("archive");
+    let archive = SingleFile::open(&path, RawFrameCodec).await?;
+    archive.put("tree", b"first".to_vec()).await?;
+    archive.put("tree", b"second".to_vec()).await?;
+    drop(archive);
+    let mut bytes = std::fs::read(&path)?;
+    let first = MAGIC.len() + 8 + "raw-v1".len();
+    bytes[first + 2] ^= 1;
+    std::fs::write(&path, &bytes)?;
+    assert!(SingleFile::open(&path, RawFrameCodec).await.is_err());
+    assert_eq!(std::fs::read(&path)?, bytes);
+    Ok(())
+}
