@@ -154,8 +154,24 @@ impl Guide {
     /// Whether a read takes a row of `attribute` from `layer`, under the
     /// placements `scopes`. A row it does not take is reported.
     pub(crate) fn admits(&self, layer: &GuidedLayer, scopes: &ScopeMap, attribute: &str) -> bool {
+        let (admitted, scope) = self.placed(layer, scopes, attribute);
+        if !admitted {
+            self.divergences.report(attribute, &layer.address, scope);
+        }
+        admitted
+    }
+
+    /// Whether a read of `layer` takes `attribute`, and the scope that
+    /// decides it, without reporting anything: what [`admits`](Self::admits)
+    /// decides for a row it found.
+    pub(crate) fn placed<'s>(
+        &self,
+        layer: &GuidedLayer,
+        scopes: &'s ScopeMap,
+        attribute: &str,
+    ) -> (bool, Option<&'s Entity>) {
         if attribute.starts_with("dialog.") {
-            return true;
+            return (true, None);
         }
         // The placement of the attribute decides first, so that a default
         // scope never overrides it.
@@ -179,11 +195,8 @@ impl Guide {
             (None, Some(default)) => (layer.bottom, Some(default)),
             // No placement and no default: the stack reads the attribute
             // from every layer, as it reads an unguided composite.
-            (None, None) => return true,
+            (None, None) => return (true, None),
         };
-        if !admitted {
-            self.divergences.report(attribute, &layer.address, scope);
-        }
-        admitted
+        (admitted, scope)
     }
 }
