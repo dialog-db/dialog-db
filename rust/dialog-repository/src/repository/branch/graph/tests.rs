@@ -896,7 +896,7 @@ async fn graph_exhausted_concurrent_retries_preserve_published_results_and_can_r
     let outcome = match select(Box::pin(graph.poll(&env)), Box::pin(writer)).await {
         Either::Left((outcome, _writer)) => outcome,
         Either::Right((error, _poll)) => {
-            return Err(error.err().expect("writer only ends on error"));
+            return Err(error.expect_err("writer only ends on error"));
         }
     };
     assert!(matches!(outcome, Err(GraphError::UnstableRead)));

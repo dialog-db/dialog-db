@@ -68,6 +68,14 @@ impl Spec {
 pub fn catalog() -> Vec<Spec> {
     vec![
         Spec {
+            name: "graph-incomplete",
+            size: 100,
+            about: "graph with ten percent incomplete optional targets, counting their normalized bag bytes",
+            volatile: false,
+            cross_cpu_pct: 0.0,
+            prepare: |size| Box::pin(graph::incomplete(size)),
+        },
+        Spec {
             name: "graph-noop",
             size: 100,
             about: "an unchanged graph poll without traversing its nodes",

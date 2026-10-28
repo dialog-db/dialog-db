@@ -5,7 +5,7 @@ use std::pin::Pin;
 
 use anyhow::Result;
 use dialog_artifacts::{Pick, Value};
-use dialog_query::graph::{GraphEdge, GraphQuery, GraphSchema, GraphShape};
+use dialog_query::graph::{GraphEdge, GraphQuery, GraphSchema, GraphShape, check_bag};
 use dialog_repository::GraphSubscription;
 use serde_json::json;
 
@@ -74,6 +74,7 @@ async fn seed(size: usize) -> Result<Env> {
 struct Read {
     env: Env,
     size: usize,
+    incomplete: usize,
 }
 impl Prepared for Read {
     fn env(&self) -> &Env {
@@ -81,15 +82,66 @@ impl Prepared for Read {
     }
     fn measure<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = Result<Outcome>> + 'a>> {
         Box::pin(async move {
+            let mut query = graph()?;
+            if self.incomplete > 0 {
+                let issue = serde_json::from_value(json!({"with": {
+                    "title": {"the": "issue/title", "as": "text:"},
+                    "assignee": {"the": "issue/assignee", "as": "entity:", "optional": true}
+                }}))?;
+                query.root.predicate = issue;
+                query
+                    .schema
+                    .shapes
+                    .get_mut("issue")
+                    .expect("issue shape")
+                    .concept = query.root.predicate.clone();
+                query
+                    .schema
+                    .shapes
+                    .get_mut("person")
+                    .expect("person shape")
+                    .concept = serde_json::from_value(json!({"with": {
+                    "name": {"the": "person/name", "as": "text:"},
+                    "email": {"the": "person/email", "as": "text:", "optional": true}
+                }}))?;
+            }
             let result = self
                 .env
                 .branch
                 .query()
-                .graph(graph()?)
+                .graph(query.clone())
                 .perform(&self.env.operator)
                 .await?;
-            anyhow::ensure!(result.roots.len() == self.size && result.nodes.len() == self.size + 1);
+            anyhow::ensure!(
+                result.roots.len() == self.size
+                    && result.nodes.len() == self.size + 1 + self.incomplete
+            );
+            let total_bytes = serde_json::to_vec(&result)?.len() as u64;
+            let mut invalid_nodes = 0u64;
+            let mut invalid_bytes = 0u64;
+            for (entity, shapes) in &result.nodes {
+                for (name, bag) in shapes {
+                    if !check_bag(&query.schema.shapes[name].concept, bag).is_empty() {
+                        invalid_nodes += 1;
+                        // Include normalized entity/shape addressing with each
+                        // bag, not only its values; this conservatively counts
+                        // two container braces per invalid node as well.
+                        invalid_bytes += serde_json::to_vec(&BTreeMap::from([(
+                            entity,
+                            BTreeMap::from([(name, bag)]),
+                        )]))?
+                        .len() as u64;
+                    }
+                }
+            }
+            anyhow::ensure!(invalid_nodes == self.incomplete as u64);
             Ok(Outcome::from([
+                ("nonconforming_nodes".into(), invalid_nodes),
+                ("nonconforming.bytes".into(), invalid_bytes),
+                (
+                    "nonconforming_ratio_ppm".into(),
+                    invalid_bytes * 1_000_000 / total_bytes,
+                ),
                 ("roots".into(), result.roots.len() as u64),
                 ("nodes".into(), result.nodes.len() as u64),
                 (
@@ -106,6 +158,34 @@ pub async fn read(size: usize) -> Result<Box<dyn Prepared>> {
     Ok(Box::new(Read {
         env: seed(size).await?,
         size,
+        incomplete: 0,
+    }))
+}
+
+/// Ten percent of optional targets have an email but lack the required name.
+/// Measures the bytes returned for incomplete bags alongside conforming nodes.
+pub async fn incomplete(size: usize) -> Result<Box<dyn Prepared>> {
+    let env = seed(size).await?;
+    let incomplete = (size / 10).max(1).min(size.saturating_sub(1));
+    let mut facts = Vec::new();
+    for index in 0..incomplete {
+        let person = entity("incomplete", index);
+        facts.push(fact(
+            &entity("issue", index),
+            "issue/assignee",
+            Value::Entity(person.clone()),
+        ));
+        facts.push(fact(
+            &person,
+            "person/email",
+            text(format!("missing-{index}@example.invalid")),
+        ));
+    }
+    env.commit(assert_all(facts, Pick::Last)).await?;
+    Ok(Box::new(Read {
+        env,
+        size,
+        incomplete,
     }))
 }
 
