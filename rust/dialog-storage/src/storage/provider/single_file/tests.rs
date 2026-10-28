@@ -120,6 +120,8 @@ async fn profiling_entrypoints_run_codec_on_calling_thread() -> io::Result<()> {
         ThreadCodec(std::thread::current().id()),
     )
     .await?;
+    // The codec itself need not implement Clone: handles share it via Arc.
+    let archive = archive.clone();
     let hash = archive.put_blocking("tree", b"profiled bytes")?;
     assert_eq!(
         archive.get_blocking("tree", hash)?,

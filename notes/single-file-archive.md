@@ -88,7 +88,7 @@ inside the Callgrind measurement marker. Calling the normal async provider here
 would offload that CPU work to unmarked worker threads and undercount it. This
 instruction comparison intentionally excludes SingleFile worker scheduling;
 the repository wall-clock harness uses its normal async provider. Before citing
-instruction results, inspect Callgrind attribution and confirm nonzero costs for
+instruction results, inspect the complete self-cost/callee Callgrind annotation and confirm nonzero costs for
 `ProfiledCodec` encode/decode boundaries around the actual `TreeFrameCodec` and the single-file log on exercised paths.
 Default
 builds do not compile the override, and the existing volatile perf baselines
@@ -109,3 +109,47 @@ Do not describe ordinary CI's default perf run as proof of the swapped provider.
 - The measured ratios, not the feature's existence, determine whether this
   exploration meets the idea's adoption thresholds. Full-scale measurements and
   paired instruction gates must be reported before recommending adoption.
+
+## Local results, 2026-10-28
+
+[All raw samples and exclusions](measurements/single-file-archive.json) were
+recorded on an Apple M3 Pro, arm64 macOS, Rust 1.99.1, with the repository's
+release profile. Each row below is the median of three sequential samples. One
+4096 sample and an extra wide probe deliberately overlapped another replay;
+they remain in the raw data but are excluded from timing medians. The shared
+host was nearly full and running other development work. In particular, 4096
+filesystem commit times ranged from 13.8 to 105.7 seconds. These are noisy sanity
+checks, not substitutes for the Linux instruction gate.
+
+Sizes are decimal MB. “Live tree” is the reachable tree at the last root;
+“live facts” counts the current modeled facts after picks in the input log.
+
+| Workload | Live facts | Filesystem MB | Single-file MB | Reduction | Live tree MB | Single-file bytes/live fact |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Synthetic SE, 2048 commits | 3,755 | 358.18 | 33.02 | 10.85x | 9.90 | 8,795 |
+| Synthetic SE, 4096 commits | 7,212 | 1,021.58 | 84.37 | 12.11x | 19.72 | 11,698 |
+| Wide updates, 1024 commits | 1,000 | 282.77 | 24.43 | 11.58x | 12.84 | 24,429 |
+
+| Workload | FS commits s | File commits s | FS all-block reads s | File all-block reads s | File reopen s | Resident index lower bound MB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| SE 2048 | 10.879 | 12.232 | 2.053 | 1.949 | 0.500 | 9.60 |
+| SE 4096 | 68.027 | 44.036 | 7.073 | 4.440 | 1.506 | 22.09 |
+| Wide 1024 | 1.661 | 2.031 | 0.782 | 1.043 | 0.181 | 10.42 |
+
+Filesystem open does not scan an index and rounded to zero milliseconds in
+these runs. Single-file token payloads were 7.80, 18.11 and 9.64 MB respectively.
+Whole-process maximum RSS over included samples was 358, 459 and 389 MB; that
+includes fixtures, both sequential providers and repository caches, so it must
+not be presented as archive-only resident memory. BAO outboards added about
+2.06, 5.27 and 1.53 MB when explicitly requested.
+
+Space clears the order-of-magnitude target on these synthetic workloads.
+Compression does not eliminate historical frames: doubling SE commits grew the
+file 2.55x while the live tree grew 1.99x. It defers reclamation rather than
+proving growth solely proportional to live facts.
+
+The 2048 write median is 12.4% slower and the wide write median 22.3% slower;
+the wide read median is 33.4% slower. These costs are reported, not waived by
+the space win. Other medians favor the file but the timing spread is too large
+for a speed claim. The paired Linux instruction/counter comparison remains
+required, and no adoption recommendation follows from the local results alone.

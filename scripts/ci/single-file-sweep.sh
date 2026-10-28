@@ -11,29 +11,28 @@ for archive in fs single-file; do
   DIALOG_PERF_ARCHIVE="$archive" target/release/perf sweep --out-dir "$out/$archive" \
     > "$out/$archive.stdout" 2> "$out/$archive.stderr"
 done
-# Stable uninlined codec boundaries ensure inclusive instruction attribution is
-# visible even under release LTO. Test both writes and a cold first query.
+# Stable uninlined codec boundaries remain visible under release LTO. Print
+# every positive self cost plus callees: inclusive sorting can hit its cumulative
+# threshold at main and omit the codec. Test writes and a cold first query.
 for scenario in commit-batch first-query; do
-  callgrind_annotate --inclusive=yes --threshold=100 --auto=no \
+  callgrind_annotate --inclusive=no --tree=calling --threshold=100 --auto=no \
     "$out/single-file/$scenario.callgrind" > "$out/$scenario.annotated.txt"
 done
-python3 - "$out" <<'PY'
-import pathlib, re, sys
-root = pathlib.Path(sys.argv[1])
-checks = [("commit-batch", "encode"), ("commit-batch", "decode"), ("first-query", "decode")]
-evidence = []
-for scenario, operation in checks:
-    matches = []
-    for line in (root / f"{scenario}.annotated.txt").read_text().splitlines():
-        if "ProfiledCodec" in line and operation in line:
-            count = re.match(r"\s*([0-9,]+)", line)
-            if count and int(count[1].replace(",", "")) > 0:
-                matches.append(line)
-    if not matches:
-        raise SystemExit(f"No measured nonzero codec {operation} cost in {scenario}; instruction comparison is invalid")
-    evidence.extend([f"{scenario} {operation}", *matches])
-(root / "codec-attribution.txt").write_text("\n".join(evidence) + "\n")
-PY
+for check in 'commit-batch encode' 'commit-batch decode' 'first-query decode'; do
+  read -r scenario operation <<< "$check"
+  printf '%s %s\n' "$scenario" "$operation" >> "$out/codec-attribution.txt"
+  if ! awk -v operation="$operation" '
+    /ProfiledCodec/ && index($0, operation) {
+      cost = $1
+      gsub(/,/, "", cost)
+      if (cost + 0 > 0) { print; found = 1 }
+    }
+    END { exit !found }
+  ' "$out/$scenario.annotated.txt" >> "$out/codec-attribution.txt"; then
+    echo "No measured nonzero codec $operation cost in $scenario; instruction comparison is invalid" >&2
+    exit 1
+  fi
+done
 # A negative result is a valid exploration outcome, explicitly recorded below.
 # The existing comparison's 10% exploration threshold is unchanged from the idea.
 set +e

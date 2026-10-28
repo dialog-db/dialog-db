@@ -71,10 +71,17 @@ impl FrameCodec for RawFrameCodec {
 }
 
 /// A cloneable native archive backed by one exclusively locked file.
-#[derive(Clone)]
 pub struct SingleFile<C = RawFrameCodec> {
     inner: Arc<Mutex<Log>>,
     codec: Arc<C>,
+}
+impl<C> Clone for SingleFile<C> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            codec: self.codec.clone(),
+        }
+    }
 }
 struct Log {
     file: File,

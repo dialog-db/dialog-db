@@ -55,3 +55,29 @@ Feature `dialog-perf/single-file-archive` swaps existing scenarios to a disk
 provider via `DIALOG_PERF_ARCHIVE=fs|single-file`. Default build stays unchanged;
 no existing baselines are edited. Compare paired disk sweeps with the existing
 counter and instruction tolerance, and report any failure without rebasing it.
+
+## Review and measurement completion
+
+- Fresh review identified worker-thread instruction undercounting and an empty
+  wide-workload query. Fixed in f229e409: profiling calls the same codec/log
+  synchronously under the marker, and queries assert actual written values.
+- c082ac35 adds bounded fast frame compression after the uncompressed 2048
+  result failed the minimum space bar (1.802x). Nine storage tests and two
+  repository integration tests pass, including expansion limits and compressed
+  torn tails. Existing baselines remain untouched.
+- Three usable release samples at each scale are recorded in
+  `notes/measurements/single-file-archive.json`; overlapping probes remain marked
+  as excluded from timing medians. Reductions: 10.85x (2048), 12.11x (4096), 11.58x
+  (wide 1024). Performance limits and slower rows are explicit in the note.
+- The manual Test workflow with `single_file_comparison=true` runs paired
+  Linux sweeps, verifies nonzero real-codec attribution, and preserves comparison
+  exit codes and full artifacts. This evidence is still pending; ordinary CI
+  does not establish performance of the swapped provider.
+- Final API regression removes an unnecessary Clone bound on the codec; handles
+  share their Arc even when the codec is not Clone. No format/algorithm change.
+- Next: fresh review round2, corrections if any, draft PR, ordinary CI and the
+  explicit Linux experiment. Do not label adoption/performance verified early.
+- Final local smoke runs of the optional perf adapter (`commit-batch` and
+  `first-query`, size16) return identical outcomes and every counter for fs and
+  single-file. These are not instruction measurements; Linux attribution is
+  still pending. Final storage9 / repository2 regressions pass after Clone fix.
