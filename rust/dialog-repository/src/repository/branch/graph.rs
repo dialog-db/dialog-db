@@ -90,6 +90,9 @@ impl GraphSubscription {
 
     /// Refresh the graph. New reachability is read in this poll, cycles are
     /// pruned from roots, and shared nodes produce one field delta per shape.
+    /// Concurrent branch or overlay changes discard the assembled result and
+    /// retry. After eight interrupted attempts this returns `UnstableRead`,
+    /// keeping the last published graph intact so callers can retry later.
     pub async fn poll<Env>(&mut self, env: &Env) -> Result<Option<GraphDelta>, GraphError>
     where
         Env: Provider<BlobRead>
@@ -105,39 +108,51 @@ impl GraphSubscription {
             + ConditionalSync
             + 'static,
     {
-        // Capture before any await: concurrent writes are caught by the next
-        // poll rather than being accidentally acknowledged without reading.
-        let revision = self.branch.revision();
-        let sequence = self.branch.overlay().revision().sequence;
-        if self.initialized && self.revision == revision && self.overlay_sequence == sequence {
-            return Ok(None);
-        }
-        self.used.clear();
-        let query = self.query.clone();
-        let diff_cache = DiffBlockCache::default();
-        let next = query
-            .read(&mut SubscriptionReader {
-                graph: self,
-                env,
-                diff_cache: &diff_cache,
-            })
-            .await?;
-        self.fields.retain(|key, subscription| {
-            if self.used.contains(key) {
-                true
-            } else {
-                self.retired_recomputes += subscription.recomputes();
-                self.retired_maintenances += subscription.maintenances();
-                false
+        for _ in 0..8 {
+            // Publish only an attempt whose branch and overlay did not move while
+            // root matching and field reads awaited independently. Retained query
+            // pins still advance on discarded attempts; retrying brings each to the
+            // new state through its ordinary maintenance path.
+            let edition = self.branch.revision.edition();
+            let revision = edition.as_ref().map(|edition| edition.content.clone());
+            let sequence = self.branch.overlay().revision().sequence;
+            if self.initialized && self.revision == revision && self.overlay_sequence == sequence {
+                return Ok(None);
             }
-        });
-        let delta = self.results.delta(&next);
-        self.results = next;
-        let initial = !self.initialized;
-        self.initialized = true;
-        self.revision = revision;
-        self.overlay_sequence = sequence;
-        Ok((initial || !delta.is_empty()).then_some(delta))
+            self.used.clear();
+            let query = self.query.clone();
+            let diff_cache = DiffBlockCache::default();
+            let read = query
+                .read(&mut SubscriptionReader {
+                    graph: self,
+                    env,
+                    diff_cache: &diff_cache,
+                })
+                .await;
+            if self.branch.revision.edition() != edition
+                || self.branch.overlay().revision().sequence != sequence
+            {
+                continue;
+            }
+            let next = read?;
+            self.fields.retain(|key, subscription| {
+                if self.used.contains(key) {
+                    true
+                } else {
+                    self.retired_recomputes += subscription.recomputes();
+                    self.retired_maintenances += subscription.maintenances();
+                    false
+                }
+            });
+            let delta = self.results.delta(&next);
+            self.results = next;
+            let initial = !self.initialized;
+            self.initialized = true;
+            self.revision = revision;
+            self.overlay_sequence = sequence;
+            return Ok((initial || !delta.is_empty()).then_some(delta));
+        }
+        Err(GraphError::UnstableRead)
     }
 }
 

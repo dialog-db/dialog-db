@@ -110,6 +110,9 @@ pub fn check_bag(concept: &ConceptDescriptor, bag: &AttributeBag) -> Vec<Conform
 /// A malformed graph schema or an evaluation error.
 #[derive(Debug, thiserror::Error)]
 pub enum GraphError {
+    /// Concurrent writes prevented a coherent read after bounded retries.
+    #[error("graph changed during every read attempt; retry the poll")]
+    UnstableRead,
     /// A schema reference or constraint is invalid.
     #[error("invalid graph: {0}")]
     Invalid(String),
@@ -282,17 +285,18 @@ pub struct GraphDelta {
 impl GraphResult {
     /// Compare normalized results, emitting shared entity changes only once.
     pub fn delta(&self, next: &Self) -> GraphDelta {
-        let roots_added = next
-            .roots
-            .iter()
-            .filter(|id| !self.roots.contains(id))
-            .cloned()
+        // Inputs decoded from the wire need not be sorted or unique. Sets keep
+        // root membership comparison O(n log n), avoiding a scan of the other
+        // root vector for every root in large, mostly unchanged graphs.
+        let before: BTreeSet<_> = self.roots.iter().collect();
+        let after: BTreeSet<_> = next.roots.iter().collect();
+        let roots_added = after
+            .difference(&before)
+            .map(|entity| (*entity).clone())
             .collect();
-        let roots_removed = self
-            .roots
-            .iter()
-            .filter(|id| !next.roots.contains(id))
-            .cloned()
+        let roots_removed = before
+            .difference(&after)
+            .map(|entity| (*entity).clone())
             .collect();
         let mut delta = GraphDelta {
             roots_added,
