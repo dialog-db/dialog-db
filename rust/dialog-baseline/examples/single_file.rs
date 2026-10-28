@@ -148,9 +148,38 @@ pub(crate) mod native {
             roots.push(repo.root().expect("committed root"));
         }
         let elapsed = start.elapsed().as_millis();
+        // Query a relation actually present in this workload, including --wide.
+        let relation = log
+            .transactions
+            .iter()
+            .flatten()
+            .next()
+            .map(|fact| fact.the.as_str());
+        let Some(relation) = relation else {
+            anyhow::bail!("measurement requires at least one fact");
+        };
         let selector = dialog_artifacts::ArtifactSelector::new()
-            .the("se.post/kind".parse::<dialog_artifacts::Relation>()?);
+            .the(relation.parse::<dialog_artifacts::Relation>()?);
         let warm = repo.collect(selector.clone()).await?;
+        assert!(!warm.is_empty(), "selected written relation must have rows");
+        // Picks retain history, so each entity must expose its latest asserted
+        // value even when earlier assertions of that relation are also retained.
+        let mut expected = HashMap::new();
+        for fact in log
+            .transactions
+            .iter()
+            .flatten()
+            .filter(|fact| fact.the == relation)
+        {
+            expected.insert(fact.of.clone(), fact.value.to_dialog()?);
+        }
+        for (entity, value) in expected {
+            let entity = entity.parse::<dialog_artifacts::Entity>()?;
+            assert!(
+                warm.iter().any(|row| row.of == entity && row.is == value),
+                "latest written value missing for {entity}"
+            );
+        }
         let reopened = repo.reopen().await?;
         let cold = repo.collect_from(&reopened, selector).await?;
         assert_eq!(warm, cold, "cold branch scan preserves results");
@@ -165,11 +194,19 @@ pub(crate) mod native {
         Ok((elapsed, blocks, roots, live_bytes))
     }
     #[cfg(test)]
-    pub async fn check_repository_roundtrip() -> anyhow::Result<()> {
+    pub async fn check_repository_roundtrip(wide: bool) -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("archive");
         let archive = SingleFile::open(&path, Codec::new()).await?;
-        let (_, _, roots, _) = run(archive.clone(), &SeLog::synthetic(12)).await?;
+        let (_, _, roots, _) = run(
+            archive.clone(),
+            &if wide {
+                wide_log(12)
+            } else {
+                SeLog::synthetic(12)
+            },
+        )
+        .await?;
         drop(archive);
         let archive = SingleFile::open(&path, Codec::new()).await?;
         let catalogs = archive

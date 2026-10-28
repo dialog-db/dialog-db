@@ -8,20 +8,42 @@ use dialog_artifacts::{Datum, Key, State};
 use dialog_capability::{Capability, Command, Provider};
 use dialog_common::{ConditionalSend, ConditionalSync, Held, Holds};
 use dialog_effects::{
-    archive::{ArchiveError, Get, Import, Put},
+    archive::{
+        ArchiveError, Get, Import, Put,
+        prelude::{GetExt, ImportExt, PutExt},
+    },
     storage::{Directory, Location},
 };
 use dialog_search_tree::TreeFrameCodec;
+use dialog_storage::provider::single_file::{BlockFrame, FrameCodec};
 use dialog_storage::{
     provider::{FileSystem, SingleFile},
     resource::Resource,
 };
 use std::{any::Any, sync::Arc};
 
+// Stable uninlined attribution boundaries around the real codec, only in this
+// opt-in measurement build. Inclusive Callgrind costs include all codec work.
+#[derive(Clone)]
+struct ProfiledCodec<C>(C);
+impl<C: FrameCodec> FrameCodec for ProfiledCodec<C> {
+    fn identifier(&self) -> &'static str {
+        self.0.identifier()
+    }
+    #[inline(never)]
+    fn encode(&self, bytes: &[u8]) -> std::io::Result<BlockFrame> {
+        self.0.encode(bytes)
+    }
+    #[inline(never)]
+    fn decode(&self, metadata: &[u8], tokens: &[&[u8]]) -> std::io::Result<Vec<u8>> {
+        self.0.decode(metadata, tokens)
+    }
+}
+
 #[derive(Clone)]
 enum Archive {
     FileSystem(FileSystem),
-    SingleFile(SingleFile<TreeFrameCodec<Key, State<Datum>>>),
+    SingleFile(SingleFile<ProfiledCodec<TreeFrameCodec<Key, State<Datum>>>>),
 }
 /// One temporary disk archive, shared across a scenario's sessions.
 #[derive(Clone)]
@@ -43,7 +65,11 @@ impl DiskArchive {
                 .await?,
             ),
             Ok("single-file") => Archive::SingleFile(
-                SingleFile::open(directory.path().join("archive"), TreeFrameCodec::new()).await?,
+                SingleFile::open(
+                    directory.path().join("archive"),
+                    ProfiledCodec(TreeFrameCodec::new()),
+                )
+                .await?,
             ),
             _ => anyhow::bail!("DIALOG_PERF_ARCHIVE must be fs or single-file"),
         };
@@ -53,22 +79,55 @@ impl DiskArchive {
         })
     }
 }
-macro_rules! provide {
-    ($effect:ty, $output:ty) => {
-        #[async_trait::async_trait]
-        impl Provider<$effect> for DiskArchive {
-            async fn execute(&self, effect: Capability<$effect>) -> Result<$output, ArchiveError> {
-                match &self.archive {
-                    Archive::FileSystem(archive) => <FileSystem as Provider<$effect>>::execute(archive, effect).await,
-                    Archive::SingleFile(archive) => <SingleFile<TreeFrameCodec<Key, State<Datum>>> as Provider<$effect>>::execute(archive, effect).await,
+// Callgrind's measurement marker only toggles the thread that enters it.
+// Keep encoding/decoding, hashing and dictionary operations on that thread.
+// Ordinary asynchronous SingleFile providers still offload to spawn_blocking;
+// this adapter excludes worker scheduling overhead, not archive CPU work.
+#[async_trait::async_trait]
+impl Provider<Get> for DiskArchive {
+    async fn execute(&self, effect: Capability<Get>) -> Result<Option<Vec<u8>>, ArchiveError> {
+        match &self.archive {
+            Archive::FileSystem(archive) => {
+                <FileSystem as Provider<Get>>::execute(archive, effect).await
+            }
+            Archive::SingleFile(archive) => archive
+                .get_blocking(effect.catalog(), *effect.digest().as_bytes())
+                .map_err(|e| ArchiveError::Storage(e.to_string())),
+        }
+    }
+}
+#[async_trait::async_trait]
+impl Provider<Put> for DiskArchive {
+    async fn execute(&self, effect: Capability<Put>) -> Result<(), ArchiveError> {
+        match &self.archive {
+            Archive::FileSystem(archive) => {
+                <FileSystem as Provider<Put>>::execute(archive, effect).await
+            }
+            Archive::SingleFile(archive) => archive
+                .put_blocking(effect.catalog(), effect.content())
+                .map(|_| ())
+                .map_err(|e| ArchiveError::Storage(e.to_string())),
+        }
+    }
+}
+#[async_trait::async_trait]
+impl Provider<Import> for DiskArchive {
+    async fn execute(&self, effect: Capability<Import>) -> Result<(), ArchiveError> {
+        match &self.archive {
+            Archive::FileSystem(archive) => {
+                <FileSystem as Provider<Import>>::execute(archive, effect).await
+            }
+            Archive::SingleFile(archive) => {
+                for block in effect.blocks() {
+                    archive
+                        .put_blocking(effect.catalog(), block.as_ref())
+                        .map_err(|e| ArchiveError::Storage(e.to_string()))?;
                 }
+                Ok(())
             }
         }
-    };
+    }
 }
-provide!(Get, Option<Vec<u8>>);
-provide!(Put, ());
-provide!(Import, ());
 
 /// A measurement-only archive override; all other commands use the normal peer.
 #[derive(Clone)]

@@ -182,6 +182,29 @@ impl<C: FrameCodec> SingleFile<C> {
         .await
         .map_err(io::Error::other)?
     }
+    /// Read a block synchronously on the calling thread.
+    ///
+    /// This uses the same codec, verification and log as [`Self::get`], but
+    /// deliberately excludes async worker scheduling. It is useful for CPU
+    /// profiling under a thread-local collection marker. Do not call it on an
+    /// async executor in an application; use [`Self::get`] there.
+    pub fn get_blocking(&self, catalog: &str, hash: [u8; 32]) -> io::Result<Option<Vec<u8>>> {
+        self.inner
+            .lock()
+            .map_err(|_| invalid("archive lock poisoned"))?
+            .get(catalog, hash, self.codec.as_ref())
+    }
+    /// Store a block synchronously on the calling thread.
+    ///
+    /// This executes the same encoding, hashing, dictionary lookup and I/O as
+    /// [`Self::put`], without worker scheduling. See [`Self::get_blocking`].
+    pub fn put_blocking(&self, catalog: &str, bytes: &[u8]) -> io::Result<[u8; 32]> {
+        self.inner
+            .lock()
+            .map_err(|_| invalid("archive lock poisoned"))?
+            .put(catalog, bytes, self.codec.as_ref())
+    }
+
     /// Read a catalog's block by its existing BLAKE3 wire hash.
     pub async fn get(&self, catalog: &str, hash: [u8; 32]) -> io::Result<Option<Vec<u8>>> {
         let inner = self.inner.clone();

@@ -69,7 +69,16 @@ DIALOG_PERF_ARCHIVE=single-file target/release/perf sweep --out-dir target/perf-
 target/release/perf compare target/perf-fs target/perf-single-file --base --threshold 10
 ```
 
-Run these on Linux with callgrind (the Nix environment supplies it). Default
+Run these on Linux with callgrind (the Nix environment supplies it). The opt-in
+perf adapter calls `get_blocking` / `put_blocking` on the same log and codec so
+encoding, realization, hashing and dictionary operations run on the thread
+inside the Callgrind measurement marker. Calling the normal async provider here
+would offload that CPU work to unmarked worker threads and undercount it. This
+instruction comparison intentionally excludes SingleFile worker scheduling;
+the repository wall-clock harness uses its normal async provider. Before citing
+instruction results, inspect Callgrind attribution and confirm nonzero costs for
+`TreeFrameCodec` encode/decode and the single-file log on exercised paths.
+Default
 builds do not compile the override, and the existing volatile perf baselines
 are unchanged. Without an explicit selection the opt-in build chooses `fs`.
 Do not describe ordinary CI's default perf run as proof of the swapped provider.

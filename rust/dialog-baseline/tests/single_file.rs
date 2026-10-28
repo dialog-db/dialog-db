@@ -6,5 +6,10 @@ mod measurement;
 
 #[tokio::test]
 async fn repository_commits_cold_scans_and_historical_roots() -> anyhow::Result<()> {
-    measurement::native::check_repository_roundtrip().await
+    measurement::native::check_repository_roundtrip(false).await
+}
+
+#[tokio::test]
+async fn wide_workload_reads_written_body_values() -> anyhow::Result<()> {
+    measurement::native::check_repository_roundtrip(true).await
 }

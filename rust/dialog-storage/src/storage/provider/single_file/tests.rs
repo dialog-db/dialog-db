@@ -97,3 +97,33 @@ async fn corrupt_middle_length_never_truncates_history() -> io::Result<()> {
     assert_eq!(std::fs::read(&path)?, bytes);
     Ok(())
 }
+
+#[tokio::test]
+async fn profiling_entrypoints_run_codec_on_calling_thread() -> io::Result<()> {
+    struct ThreadCodec(std::thread::ThreadId);
+    impl FrameCodec for ThreadCodec {
+        fn identifier(&self) -> &'static str {
+            "thread-probe-v1"
+        }
+        fn encode(&self, bytes: &[u8]) -> io::Result<BlockFrame> {
+            assert_eq!(std::thread::current().id(), self.0);
+            RawFrameCodec.encode(bytes)
+        }
+        fn decode(&self, metadata: &[u8], tokens: &[&[u8]]) -> io::Result<Vec<u8>> {
+            assert_eq!(std::thread::current().id(), self.0);
+            RawFrameCodec.decode(metadata, tokens)
+        }
+    }
+    let dir = tempfile::tempdir()?;
+    let archive = SingleFile::open(
+        dir.path().join("archive"),
+        ThreadCodec(std::thread::current().id()),
+    )
+    .await?;
+    let hash = archive.put_blocking("tree", b"profiled bytes")?;
+    assert_eq!(
+        archive.get_blocking("tree", hash)?,
+        Some(b"profiled bytes".to_vec())
+    );
+    Ok(())
+}
