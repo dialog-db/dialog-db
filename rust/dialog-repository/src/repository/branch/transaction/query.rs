@@ -49,6 +49,9 @@
 //! queried mid-transaction or after commit — it's part of evaluating a
 //! query, not an optional composition.
 
+use dialog_query::graph::{GraphError, GraphQuery, GraphResult};
+use futures_util::stream::once as once_stream;
+
 use dialog_artifacts::DialogArtifactsError;
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -87,7 +90,7 @@ impl<'a> TransactionQuery<'a> {
     }
 
     /// Stage a graph read against the transaction's pending writes.
-    pub fn graph(self, query: dialog_query::graph::GraphQuery) -> TransactionSelectGraph<'a> {
+    pub fn graph(self, query: GraphQuery) -> TransactionSelectGraph<'a> {
         TransactionSelectGraph {
             source: self.source,
             layers: self.layers,
@@ -179,15 +182,12 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
 pub struct TransactionSelectGraph<'a> {
     source: SourceRef<'a>,
     layers: Vec<Staged>,
-    query: dialog_query::graph::GraphQuery,
+    query: GraphQuery,
 }
 
 impl<'a> TransactionSelectGraph<'a> {
     /// Evaluate matching and shaping against the transaction's view.
-    pub async fn perform<Env>(
-        self,
-        env: &'a Env,
-    ) -> Result<dialog_query::graph::GraphResult, dialog_query::graph::GraphError>
+    pub async fn perform<Env>(self, env: &'a Env) -> Result<GraphResult, GraphError>
     where
         Env: Provider<BlobRead>
             + Provider<Get>
@@ -206,18 +206,19 @@ impl<'a> TransactionSelectGraph<'a> {
         let operator = Identify
             .perform(env)
             .await
-            .map_err(|e| dialog_query::graph::GraphError::Invalid(format!("identify: {e}")))?;
+            .map_err(|e| GraphError::Invalid(format!("identify: {e}")))?;
         let overlay = QueryLayer::from(self.source).overlay(&operator);
         let sources = vec![self.source.to_source()];
         let query_env = QueryEnv::new(sources.clone(), overlay, env).with_layers(self.layers);
-        let results = Box::pin(futures_util::stream::once(self.query.perform(&query_env)));
+        let results = Box::pin(once_stream(self.query.perform(&query_env)));
         let queue = Provider::<dialog_artifacts::Speculation>::execute(env, ()).await;
         let mut driven = Box::pin(crate::repository::fetch::Driven::new(
             results, sources, env, queue,
         ));
-        driven.try_next().await?.ok_or_else(|| {
-            dialog_query::graph::GraphError::Invalid("graph read ended without a result".into())
-        })
+        driven
+            .try_next()
+            .await?
+            .ok_or_else(|| GraphError::Invalid("graph read ended without a result".into()))
     }
 }
 

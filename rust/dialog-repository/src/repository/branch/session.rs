@@ -1,4 +1,7 @@
 use dialog_effects::blob::Read as BlobRead;
+use dialog_query::graph::{GraphError, GraphQuery, GraphResult};
+use futures_util::stream::once as once_stream;
+
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::iter::once;
@@ -278,7 +281,7 @@ impl<'a> QueryLayer<'a> {
     }
 
     /// Stage a graph read over these same lines and overlay.
-    pub fn graph(&self, query: dialog_query::graph::GraphQuery) -> SelectGraph<'a> {
+    pub fn graph(&self, query: GraphQuery) -> SelectGraph<'a> {
         SelectGraph {
             layer: self.clone(),
             query,
@@ -396,15 +399,12 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
 /// A graph read over a query layer, preserving its overlay and metadata.
 pub struct SelectGraph<'a> {
     layer: QueryLayer<'a>,
-    query: dialog_query::graph::GraphQuery,
+    query: GraphQuery,
 }
 
 impl<'a> SelectGraph<'a> {
     /// Evaluate the matching and shaping stages in one query scope.
-    pub async fn perform<Env>(
-        self,
-        env: &'a Env,
-    ) -> Result<dialog_query::graph::GraphResult, dialog_query::graph::GraphError>
+    pub async fn perform<Env>(self, env: &'a Env) -> Result<GraphResult, GraphError>
     where
         Env: Provider<BlobRead>
             + Provider<Get>
@@ -423,7 +423,7 @@ impl<'a> SelectGraph<'a> {
         let operator = Identify
             .perform(env)
             .await
-            .map_err(|e| dialog_query::graph::GraphError::Invalid(format!("identify: {e}")))?;
+            .map_err(|e| GraphError::Invalid(format!("identify: {e}")))?;
         let overlay = self.layer.overlay(&operator);
         let sources: Vec<Source> = self
             .layer
@@ -432,12 +432,13 @@ impl<'a> SelectGraph<'a> {
             .map(|source| source.to_source())
             .collect();
         let query_env = QueryEnv::new(sources.clone(), overlay, env);
-        let results = Box::pin(futures_util::stream::once(self.query.perform(&query_env)));
+        let results = Box::pin(once_stream(self.query.perform(&query_env)));
         let queue = Provider::<Speculation>::execute(env, ()).await;
         let mut driven = Box::pin(Driven::new(results, sources, env, queue));
-        driven.try_next().await?.ok_or_else(|| {
-            dialog_query::graph::GraphError::Invalid("graph read ended without a result".into())
-        })
+        driven
+            .try_next()
+            .await?
+            .ok_or_else(|| GraphError::Invalid("graph read ended without a result".into()))
     }
 }
 

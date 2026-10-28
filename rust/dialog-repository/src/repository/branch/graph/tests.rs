@@ -348,6 +348,7 @@ async fn graph_constraints_distinguish_matching_and_shaping_and_read_transaction
         "shaping never removes root"
     );
     assert_eq!(result.nodes.len(), 1);
+    assert!(!result.nodes[&entity("issue1")]["issue"].contains_key("assignee"));
     let edge = query
         .schema
         .shapes

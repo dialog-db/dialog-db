@@ -2,6 +2,7 @@
 //!
 //! Shape names are local references, not concept identities. A cycle in shapes
 //! therefore neither changes a concept's hash nor introduces recursive rules.
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
@@ -281,19 +282,23 @@ pub struct GraphDelta {
 impl GraphResult {
     /// Compare normalized results, emitting shared entity changes only once.
     pub fn delta(&self, next: &Self) -> GraphDelta {
-        let mut delta = GraphDelta::default();
-        delta.roots_added = next
+        let roots_added = next
             .roots
             .iter()
             .filter(|id| !self.roots.contains(id))
             .cloned()
             .collect();
-        delta.roots_removed = self
+        let roots_removed = self
             .roots
             .iter()
             .filter(|id| !next.roots.contains(id))
             .cloned()
             .collect();
+        let mut delta = GraphDelta {
+            roots_added,
+            roots_removed,
+            ..GraphDelta::default()
+        };
         for (entity, shapes) in &next.nodes {
             for (shape, bag) in shapes {
                 if let Some(old) = self.nodes.get(entity).and_then(|shapes| shapes.get(shape)) {
@@ -376,7 +381,7 @@ async fn bag<R: GraphReader>(
         let mut values = reader.field(name, field, entity, None).await?;
         values.sort_by(|left, right| match (left, right) {
             (Value::Float(left), Value::Float(right)) => left.total_cmp(right),
-            _ => left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal),
+            _ => left.partial_cmp(right).unwrap_or(Ordering::Equal),
         });
         values.dedup();
         if !values.is_empty() {
@@ -485,7 +490,14 @@ impl GraphQuery {
                             pending.push((target.clone(), edge.target.clone()));
                         }
                     }
+                    let omitted = retained.is_empty()
+                        && shape.concept.with().iter().any(|(name, field_descriptor)| {
+                            name == field && field_descriptor.cardinality() == Cardinality::One
+                        });
                     *targets = retained;
+                    if omitted {
+                        values.remove(field);
+                    }
                 }
             }
             result.nodes.entry(entity).or_default().insert(name, values);
