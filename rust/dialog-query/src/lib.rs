@@ -40,6 +40,8 @@ pub mod environment;
 pub mod error;
 /// Built-in formulas for data transformations and computations.
 pub mod formula;
+/// Typed graph shaping and normalized graph results.
+pub mod graph;
 /// Benchmark helpers (`BenchEnv`). Available to the crate's own tests;
 /// the benches include this same source via `#[path]` so they can build
 /// it against the dev-dependency cycle (dialog-repository depends on

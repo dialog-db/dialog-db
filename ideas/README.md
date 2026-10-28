@@ -7,3 +7,5 @@ it out without asking.
 
 An idea that gets spiked should link its results here. An idea that lands
 becomes a note in `notes/`.
+
+- [Graph query implementation and measurements](../notes/graph-queries-spike.md)

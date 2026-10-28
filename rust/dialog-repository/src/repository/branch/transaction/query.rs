@@ -49,6 +49,8 @@
 //! queried mid-transaction or after commit — it's part of evaluating a
 //! query, not an optional composition.
 
+use dialog_query::graph::{GraphError, GraphQuery, GraphResult};
+
 use dialog_artifacts::DialogArtifactsError;
 use dialog_capability::{Fork, Provider};
 use dialog_common::{ConditionalSync, Holds};
@@ -83,6 +85,15 @@ impl<'a> TransactionQuery<'a> {
         Self {
             source: source.into(),
             layers,
+        }
+    }
+
+    /// Stage a graph read against the transaction's pending writes.
+    pub fn graph(self, query: GraphQuery) -> TransactionSelectGraph<'a> {
+        TransactionSelectGraph {
+            source: self.source,
+            layers: self.layers,
+            query,
         }
     }
 
@@ -163,6 +174,37 @@ impl<'a, Q: Application> TransactionSelectQuery<'a, Q> {
                 yield result?;
             }
         }
+    }
+}
+
+/// A graph read with the same uncommitted-write semantics as ordinary queries.
+pub struct TransactionSelectGraph<'a> {
+    source: SourceRef<'a>,
+    layers: Vec<Staged>,
+    query: GraphQuery,
+}
+
+impl<'a> TransactionSelectGraph<'a> {
+    /// Evaluate matching and shaping against the transaction's view.
+    pub async fn perform<Env>(self, env: &'a Env) -> Result<GraphResult, GraphError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
+            + ConditionalSync
+            + 'static,
+    {
+        QueryLayer::from(self.source)
+            .graph(self.query)
+            .perform_with_layers(self.layers, env)
+            .await
     }
 }
 

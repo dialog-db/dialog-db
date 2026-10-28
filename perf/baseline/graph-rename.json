@@ -1,0 +1,29 @@
+{
+  "scenario": "graph-rename",
+  "size": 100,
+  "profile": "release",
+  "outcome": {
+    "delta.bytes": 179,
+    "field_changes": 1,
+    "maintenances": 1,
+    "nested_display_subscriptions": 303,
+    "new_entities": 0,
+    "new_evaluations": 0,
+    "retained_subscriptions": 202
+  },
+  "counters": {
+    "archive.get": 3,
+    "archive.get.bytes": 101960,
+    "archive.put": 1,
+    "archive.put.bytes": 2792,
+    "span.apply_batch_reusing": 1,
+    "span.buffer_records": 2,
+    "span.commit": 1,
+    "span.resolve_bundle": 0,
+    "span.resolve_rules": 0,
+    "span.seal_batch": 1,
+    "span.settle": 1,
+    "span.write_instructions": 1
+  },
+  "instructions": 271093474
+}
