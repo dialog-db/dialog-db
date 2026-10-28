@@ -1,0 +1,28 @@
+{
+  "scenario": "graph-incomplete",
+  "size": 100,
+  "profile": "release",
+  "outcome": {
+    "nodes": 111,
+    "nonconforming.bytes": 700,
+    "nonconforming_nodes": 10,
+    "nonconforming_ratio_ppm": 73183,
+    "result.bytes": 9565,
+    "roots": 100
+  },
+  "counters": {
+    "archive.get": 0,
+    "archive.get.bytes": 0,
+    "archive.put": 0,
+    "archive.put.bytes": 0,
+    "span.apply_batch_reusing": 0,
+    "span.buffer_records": 0,
+    "span.commit": 0,
+    "span.resolve_bundle": 5,
+    "span.resolve_rules": 6,
+    "span.seal_batch": 0,
+    "span.settle": 0,
+    "span.write_instructions": 0
+  },
+  "instructions": 27485449
+}

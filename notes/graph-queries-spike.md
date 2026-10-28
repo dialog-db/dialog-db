@@ -129,3 +129,24 @@ directory or a duplicate release build for routine review.
 Round-two correction verification: all 12 focused graph/cache tests passed;
 scoped all-target/all-feature Clippy passed with warnings denied; all six local
 graph counter scenarios passed again (rename/edge/root: three blocks read each).
+
+## Linux baseline provenance
+
+The six new graph baseline JSON files were copied unchanged from `perf-current`
+artifact 12815037276 of [run 40684507810](https://github.com/dialog-db/dialog-db/actions/runs/40684507810),
+measuring commit `52f48d49ba952320a4c0025cf400ee1b9b277fe4`.
+The workflow ran `nix develop --command perf:sweep`, using the pinned Nix Rust
+1.99.0 toolchain, release profile and callgrind. `runner.txt` identifies an
+AMD EPYC 7763 CPU with flags hash `d14bb80d302b2adf`.
+All 25 existing scenarios passed; the gate failed only for the six absent graph
+baselines. No existing baseline was modified. The final PR must rerun the gate
+with these new baselines and obtain the required maintainer approval.
+
+| Scenario | Instructions | Archive blocks read |
+| --- | ---: | ---: |
+| graph-edge | 271,073,818 | 3 |
+| graph-incomplete | 27,485,449 | 0 |
+| graph-noop | 2,778 | 0 |
+| graph-read | 22,722,210 | 0 |
+| graph-rename | 271,093,474 | 3 |
+| graph-root | 271,817,550 | 3 |
