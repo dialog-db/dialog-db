@@ -375,6 +375,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bao"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9125f93587b894c196d58b0a752ce2213552d0d483c98ee41530e38202a511"
+dependencies = [
+ "arrayvec",
+ "blake3",
+]
+
+[[package]]
 name = "base-x"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1691,6 +1701,7 @@ name = "dialog-perf"
 version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
+ "async-trait",
  "blake3",
  "clap",
  "dialog-artifacts",
@@ -1701,10 +1712,12 @@ dependencies = [
  "dialog-peer",
  "dialog-query",
  "dialog-repository",
+ "dialog-search-tree",
  "dialog-storage",
  "futures-util",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2014,6 +2027,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "bao",
  "base58",
  "blake3",
  "bytes",
@@ -2024,6 +2038,7 @@ dependencies = [
  "dialog-effects",
  "dialog-varsig",
  "dirs",
+ "flate2",
  "futures-util",
  "getrandom 0.2.16",
  "http-body-util",

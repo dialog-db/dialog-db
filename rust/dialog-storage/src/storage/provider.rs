@@ -42,3 +42,8 @@ pub use space::{Space, SpaceProvider};
 
 pub mod storage;
 pub use storage::{CredentialStore, Storage};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod single_file;
+#[cfg(not(target_arch = "wasm32"))]
+pub use single_file::SingleFile;

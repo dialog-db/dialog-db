@@ -26,7 +26,11 @@ use dialog_storage::provider::storage::VolatileSpace;
 
 /// The operator every scenario commits and reads through: a session on
 /// a volatile peer, its archive traffic tallied beneath every cache.
+#[cfg(not(feature = "single-file-archive"))]
 pub type Operator = Metered<Peer<VolatileSpace, Session>, Probe>;
+/// The same scenario operator with an explicitly selected disk archive.
+#[cfg(feature = "single-file-archive")]
+pub type Operator = Metered<crate::archive::ArchiveOperator<Peer<VolatileSpace, Session>>, Probe>;
 
 /// The meter on the operator: a tally, and, with `DIALOG_PERF_BLOCKS`
 /// naming a file, a line per block moved (`put`/`get`, its length and
@@ -141,6 +145,8 @@ pub struct Env {
     profile: Peer<VolatileSpace>,
     /// Counters scenarios add beside the tally's.
     extra: Arc<Mutex<BTreeMap<String, u64>>>,
+    #[cfg(feature = "single-file-archive")]
+    archive: crate::archive::DiskArchive,
 }
 
 impl Env {
@@ -154,6 +160,10 @@ impl Env {
             .space(profile.state())
             .allow(Subject::any())
             .await?;
+        #[cfg(feature = "single-file-archive")]
+        let archive = crate::archive::DiskArchive::open().await?;
+        #[cfg(feature = "single-file-archive")]
+        let session = crate::archive::ArchiveOperator::new(session, archive.clone());
         let operator = Metered::new(session, Probe::open());
         let repository = profile.space("perf").open().perform(&operator).await?;
         let branch = repository
@@ -167,6 +177,8 @@ impl Env {
             repository,
             profile,
             extra: Default::default(),
+            #[cfg(feature = "single-file-archive")]
+            archive,
         })
     }
 
@@ -196,6 +208,8 @@ impl Env {
             .space(self.profile.state())
             .allow(Subject::any())
             .await?;
+        #[cfg(feature = "single-file-archive")]
+        let session = crate::archive::ArchiveOperator::new(session, self.archive.clone());
         let operator = Metered::new(session, self.operator.meter().clone());
         let repository = self.profile.space("perf").open().perform(&operator).await?;
         let upstream = repository

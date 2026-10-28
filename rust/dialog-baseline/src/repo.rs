@@ -146,6 +146,25 @@ where
         Self::assemble(wrap(session), &profile).await
     }
 
+    /// Open a reproducible repository whose keys and identifiers derive from `seed`.
+    /// Hold `seed.entropy()` on the calling thread throughout the replay.
+    pub async fn seeded_through(
+        seed: &dialog_peer::helpers::Seed,
+        wrap: impl FnOnce(Peer<VolatileSpace, Session>) -> Env,
+    ) -> Result<Self> {
+        let (session, profile) = seed.session_with_peer().await;
+        let operator = wrap(session);
+        let name = seed.name("repo");
+        let repo = profile
+            .space(name.clone())
+            .create()
+            .with_credential(seed.signer(&name).await?)
+            .perform(&operator)
+            .await?;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        Ok(Self { operator, branch })
+    }
+
     /// Open the repository under `peer` and its `main` branch.
     async fn assemble<S: Clone>(operator: Env, profile: &Peer<S>) -> Result<Self> {
         let repo = profile

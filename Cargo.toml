@@ -67,6 +67,7 @@ auto_enums = { version = "0.8", features = ["futures03"] }
 axum = "0.8"
 aes-gcm = "0.10"
 base58 = "0.2"
+bao = "0.13.1"
 base64 = "0.22"
 blake3 = "1"
 brotli = "8"

@@ -195,3 +195,8 @@ pub use walker::*;
 /// for testing, including the `tree_spec!` macro and `DistributionSimulator`.
 #[cfg(any(test, feature = "helpers"))]
 pub mod helpers;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod file_codec;
+#[cfg(not(target_arch = "wasm32"))]
+pub use file_codec::TreeFrameCodec;
