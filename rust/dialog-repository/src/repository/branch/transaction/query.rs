@@ -50,7 +50,6 @@
 //! query, not an optional composition.
 
 use dialog_query::graph::{GraphError, GraphQuery, GraphResult};
-use futures_util::stream::once as once_stream;
 
 use dialog_artifacts::DialogArtifactsError;
 use dialog_capability::{Fork, Provider};
@@ -202,23 +201,10 @@ impl<'a> TransactionSelectGraph<'a> {
             + ConditionalSync
             + 'static,
     {
-        use futures_util::TryStreamExt as _;
-        let operator = Identify
-            .perform(env)
+        QueryLayer::from(self.source)
+            .graph(self.query)
+            .perform_with_layers(self.layers, env)
             .await
-            .map_err(|e| GraphError::Invalid(format!("identify: {e}")))?;
-        let overlay = QueryLayer::from(self.source).overlay(&operator);
-        let sources = vec![self.source.to_source()];
-        let query_env = QueryEnv::new(sources.clone(), overlay, env).with_layers(self.layers);
-        let results = Box::pin(once_stream(self.query.perform(&query_env)));
-        let queue = Provider::<dialog_artifacts::Speculation>::execute(env, ()).await;
-        let mut driven = Box::pin(crate::repository::fetch::Driven::new(
-            results, sources, env, queue,
-        ));
-        driven
-            .try_next()
-            .await?
-            .ok_or_else(|| GraphError::Invalid("graph read ended without a result".into()))
     }
 }
 

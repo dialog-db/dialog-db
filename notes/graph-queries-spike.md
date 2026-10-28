@@ -84,6 +84,16 @@ a stable later poll can retry. Counts include work performed by discarded
 attempts. Deterministic provider barriers test atomic commits and overlay writes
 between root selection and the first field read, plus exhaustion and retry.
 
+One-shot query-layer and transaction graph reads use the same bounded retry
+strategy across every joined branch edition and source overlay sequence. Stamps
+are captured before identity resolution and metadata/overlay construction;
+validation covers both successful and failed evaluations. Staged transaction
+layers survive retries. The deterministic one-shot barrier is at identity
+resolution (before query evaluation), and explicitly asserts a retry for changes
+to the second joined branch, its overlay, and a transaction's underlying branch;
+it also checks pending facts remain uncommitted. The separate subscription
+barriers above exercise changes between matching and shaping.
+
 Root deltas use ordered set differences rather than searching the other vector
 for every root. A 50,000-root regression includes unsorted roots and duplicates.
 
@@ -115,3 +125,7 @@ cargo run -p dialog-perf --locked -- sweep --no-callgrind --only graph-read,grap
 The existing `target` directory holds the compiled debug dependencies. The first
 repository test binary build took several minutes; do not create a fresh target
 directory or a duplicate release build for routine review.
+
+Round-two correction verification: all 12 focused graph/cache tests passed;
+scoped all-target/all-feature Clippy passed with warnings denied; all six local
+graph counter scenarios passed again (rename/edge/root: three blocks read each).

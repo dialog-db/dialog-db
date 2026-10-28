@@ -419,26 +419,75 @@ impl<'a> SelectGraph<'a> {
             + ConditionalSync
             + 'static,
     {
+        self.perform_with_layers(Vec::new(), env).await
+    }
+
+    pub(crate) async fn perform_with_layers<Env>(
+        self,
+        layers: Vec<Staged>,
+        env: &'a Env,
+    ) -> Result<GraphResult, GraphError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Hydrate>
+            + Provider<Preload>
+            + Provider<Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
+            + ConditionalSync
+            + 'static,
+    {
         use futures_util::TryStreamExt as _;
-        let operator = Identify
-            .perform(env)
-            .await
-            .map_err(|e| GraphError::Invalid(format!("identify: {e}")))?;
-        let overlay = self.layer.overlay(&operator);
-        let sources: Vec<Source> = self
-            .layer
-            .sources
-            .iter()
-            .map(|source| source.to_source())
-            .collect();
-        let query_env = QueryEnv::new(sources.clone(), overlay, env);
-        let results = Box::pin(once_stream(self.query.perform(&query_env)));
-        let queue = Provider::<Speculation>::execute(env, ()).await;
-        let mut driven = Box::pin(Driven::new(results, sources, env, queue));
-        driven
-            .try_next()
-            .await?
-            .ok_or_else(|| GraphError::Invalid("graph read ended without a result".into()))
+        // Capture every live source before constructing metadata or overlays.
+        // Editions also detect an ABA head change; snapshot heads are immutable.
+        let stamps = || {
+            self.layer
+                .sources
+                .iter()
+                .map(|source| {
+                    let edition = match source {
+                        SourceRef::Branch(branch) => branch.revision.edition(),
+                        SourceRef::Snapshot(_) => None,
+                    };
+                    (edition, source.overlay().revision().sequence)
+                })
+                .collect::<Vec<_>>()
+        };
+        for _ in 0..8 {
+            let before = stamps();
+            let result = async {
+                let operator = Identify
+                    .perform(env)
+                    .await
+                    .map_err(|e| GraphError::Invalid(format!("identify: {e}")))?;
+                let overlay = self.layer.overlay(&operator);
+                let sources: Vec<Source> = self
+                    .layer
+                    .sources
+                    .iter()
+                    .map(|source| source.to_source())
+                    .collect();
+                let query_env =
+                    QueryEnv::new(sources.clone(), overlay, env).with_layers(layers.clone());
+                let results = Box::pin(once_stream(self.query.perform(&query_env)));
+                let queue = Provider::<Speculation>::execute(env, ()).await;
+                let mut driven = Box::pin(Driven::new(results, sources, env, queue));
+                driven
+                    .try_next()
+                    .await?
+                    .ok_or_else(|| GraphError::Invalid("graph read ended without a result".into()))
+            }
+            .await;
+            // Errors from an interrupted view are not stable evidence either.
+            if before == stamps() {
+                return result;
+            }
+        }
+        Err(GraphError::UnstableRead)
     }
 }
 

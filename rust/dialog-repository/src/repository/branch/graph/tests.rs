@@ -567,6 +567,7 @@ struct Interleaved<Env> {
     inner: Env,
     identifies: AtomicUsize,
     repeat: bool,
+    pause_at: usize,
     paused: Arc<Notify>,
     resume: Arc<Notify>,
 }
@@ -596,7 +597,7 @@ where
         use std::any::TypeId;
         use std::sync::atomic::Ordering;
         if TypeId::of::<C>() == TypeId::of::<Identify>()
-            && (self.repeat || self.identifies.fetch_add(1, Ordering::SeqCst) == 1)
+            && (self.repeat || self.identifies.fetch_add(1, Ordering::SeqCst) == self.pause_at)
         {
             // The first Identify evaluated root membership. The second is the
             // first field read: stop exactly between matching and shaping.
@@ -654,6 +655,7 @@ async fn interleaved_graph_read(overlay: bool) -> anyhow::Result<()> {
         inner: operator.clone(),
         identifies: AtomicUsize::new(0),
         repeat: false,
+        pause_at: 1,
         paused: paused.clone(),
         resume: resume.clone(),
     };
@@ -868,6 +870,7 @@ async fn graph_exhausted_concurrent_retries_preserve_published_results_and_can_r
         inner: operator.clone(),
         identifies: AtomicUsize::new(0),
         repeat: true,
+        pause_at: 1,
         paused: paused.clone(),
         resume: resume.clone(),
     };
@@ -915,5 +918,99 @@ async fn graph_exhausted_concurrent_retries_preserve_published_results_and_can_r
         branch.query().graph(query).perform(&operator).await?
     );
     assert!(graph.recomputes() >= counters.0 && graph.maintenances() >= counters.1);
+    Ok(())
+}
+
+#[dialog_common::test]
+async fn graph_one_shot_retries_joined_heads_and_overlays_preserving_staged_layers()
+-> anyhow::Result<()> {
+    use dialog_query::Statement;
+    use std::sync::atomic::Ordering;
+    // The Identify barrier is after the read stamp and before metadata/overlay
+    // construction. Assert a retry explicitly, even if this particular timing
+    // would otherwise happen to produce a coherent newer result.
+    for mode in 0..3 {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let first = repo.branch("first").open().perform(&operator).await?;
+        let second = repo.branch("second").open().perform(&operator).await?;
+        let paused = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        let env = Interleaved {
+            inner: operator.clone(),
+            identifies: AtomicUsize::new(0),
+            repeat: false,
+            pause_at: 0,
+            paused: paused.clone(),
+            resume: resume.clone(),
+        };
+        let writer = async {
+            paused.notified().await;
+            let fact = the!("issue/title").of(entity("new")).is("New".to_string());
+            let result: anyhow::Result<()> = if mode == 1 {
+                let mut changes = dialog_artifacts::Changes::new();
+                fact.assert(&mut changes);
+                second
+                    .overlay()
+                    .assert(changes)
+                    .map(|_| ())
+                    .map_err(Into::into)
+            } else {
+                second
+                    .transaction()
+                    .assert(fact)
+                    .commit()
+                    .publish()
+                    .perform(&operator)
+                    .await
+                    .map(|_| ())
+                    .map_err(Into::into)
+            };
+            resume.notify_one();
+            result
+        };
+        let read = async {
+            if mode == 2 {
+                let transaction = second.transaction().assert(
+                    the!("issue/title")
+                        .of(entity("staged"))
+                        .is("Pending".to_string()),
+                );
+                transaction
+                    .query()
+                    .graph(issue_query(false))
+                    .perform(&env)
+                    .await
+            } else {
+                first
+                    .query()
+                    .join(&second)
+                    .graph(issue_query(false))
+                    .perform(&env)
+                    .await
+            }
+        };
+        let (result, written) = join(read, writer).await;
+        written?;
+        let result = result?;
+        assert!(result.roots.contains(&entity("new")));
+        assert_eq!(result.roots.contains(&entity("staged")), mode == 2);
+        assert_eq!(
+            env.identifies.load(Ordering::SeqCst),
+            2,
+            "every changed source, including the second joined source, retries"
+        );
+        if mode == 2 {
+            let committed = second
+                .query()
+                .graph(issue_query(false))
+                .perform(&operator)
+                .await?;
+            assert!(
+                !committed.roots.contains(&entity("staged")),
+                "retry never commits staged layers"
+            );
+        }
+    }
     Ok(())
 }
