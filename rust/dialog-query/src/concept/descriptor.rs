@@ -696,6 +696,24 @@ impl ConceptConclusion {
         &self.this
     }
 
+    /// Read a field's value without choosing a Rust scalar type. Graph bags and
+    /// wire adapters use this to retain the value's original type.
+    pub fn value(&self, field: &str) -> Result<Value, EvaluationError> {
+        let term = self
+            .terms
+            .get(field)
+            .ok_or_else(|| EvaluationError::UnboundVariable {
+                variable_name: field.to_string(),
+            })?;
+        match term {
+            Term::Constant(value) => Ok(value.clone()),
+            Term::Variable { name: Some(_), .. } => self.source.lookup(term)?.content(),
+            Term::Variable { name: None, .. } => Err(EvaluationError::UnboundVariable {
+                variable_name: field.to_string(),
+            }),
+        }
+    }
+
     /// Look up a field value by its concept field name (e.g. "name", "age").
     pub fn get<T>(&self, field: &str) -> Result<T, EvaluationError>
     where
