@@ -15,8 +15,8 @@
 //! 2. Each candidate's body evaluates against the frozen round view
 //!    (branch ⊕ durable changes ⊕ this round's transients). Sibling
 //!    rules in a round read identical state.
-//! 3. Bound heads emit facts by cardinality (`Replace` for one,
-//!    `Assert` for many). A head concept carrying the
+//! 3. Bound heads emit facts under the pick of each field (a choosing
+//!    pick succeeds the claim it elects, `all` adds beside them). A head concept carrying the
 //!    `dialog.concept/transient` marker routes to the next round's
 //!    stimulus and is never committed; a durable head passes a novelty
 //!    check (an instruction that leaves the view unchanged contributes
@@ -31,7 +31,8 @@
 //! and the `retract!` head polarity.
 
 use dialog_effects::blob::Read as BlobRead;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
@@ -49,13 +50,14 @@ use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
+use crate::placement::{Bindings, Placements};
 use crate::repository::branch::QueryLayer;
-use crate::repository::branch::session::QueryEnv;
+use crate::repository::branch::session::{Composite, QueryEnv};
 use crate::repository::source::SourceRef;
 use crate::rules::{
     TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
 };
-use crate::{CommitError, RemoteSite, Revision, Staged};
+use crate::{CommitError, Ephemeral, RemoteSite, Revision, RuleCache, Staged};
 
 /// Round bound for the induction loop: a cascade still emitting
 /// transients or novelty after this many rounds fails the commit
@@ -63,16 +65,53 @@ use crate::{CommitError, RemoteSite, Revision, Staged};
 /// recursive trigger depth).
 pub(crate) const MAX_ROUNDS: u32 = 16;
 
+/// Where each induction round's transients are witnessed: minted as an
+/// instant for the observers of some ephemeral store, so a fact that
+/// lives for one round is seen by whoever registered to see it even
+/// though no fold keeps it. A round is one instant.
+pub(crate) trait Witness {
+    /// The transients visible to rule bodies in the round starting now.
+    fn round(&mut self, transients: &Changes);
+}
+
+/// Nothing witnesses: the rounds' transients expire unseen.
+impl Witness for () {
+    fn round(&mut self, _: &Changes) {}
+}
+
+/// One ephemeral store witnesses every round.
+impl Witness for &Ephemeral {
+    fn round(&mut self, transients: &Changes) {
+        self.witness(transients.clone());
+    }
+}
+
 /// Run commit-time induction over `changes` + `transients`, folding
 /// durable novelty into `changes`. Transients never enter `changes`;
-/// they are visible to rule bodies for exactly one round.
+/// they are visible to rule bodies for exactly one round, and each
+/// round's are handed to `witness` as they become visible.
+///
+/// `source` is the line whose watermark the lag is measured against,
+/// read from where `watermark` says;
+/// `view` is every line a rule body reads and every line whose rules
+/// dispatch, which is `source` alone for a transaction on one branch
+/// and the whole composite for a [`Stack`](crate::Stack). `entered` is
+/// what entered the upper layers of a stack outside it since its last
+/// commit: a change of this commit, as the lag of `source` is.
 ///
 /// Returns every transient a rule head emitted, across all rounds. The
 /// dispatched `transients` are not part of it.
-pub(crate) async fn induce<Env>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn induce<Env, W: Witness>(
     source: SourceRef<'_>,
+    watermark: Watermark,
+    view: &Composite,
+    placements: &Placements,
+    landing: Landing<'_>,
     changes: &mut Changes,
-    transients: Changes,
+    mut transients: Changes,
+    entered: Vec<Instruction>,
+    witness: &mut W,
     env: &Env,
 ) -> Result<Changes, CommitError>
 where
@@ -89,6 +128,11 @@ where
         + ConditionalSync
         + 'static,
 {
+    // A fact asserted under a transient attribute is a dispatched
+    // command: it moves to the transient bucket before anything reads
+    // the batch, so `assert` and `dispatch` say the same thing for it.
+    take_transient(changes, placements).assert(&mut transients);
+
     // Transients never commit, so an asset among them would be dropped:
     // refuse the commit before anything is written instead.
     if transients.has_assets() {
@@ -104,34 +148,71 @@ where
     // missed one is caught up.
     let mut stimulus: Vec<Instruction> = changes.clone().into_instructions();
     stimulus.extend(transients.clone().into_instructions());
-    stimulus.extend(lag_delta(source, env).await?);
+    let mut lag = lag_delta(source, watermark, env).await?;
+    // In a stack, the lag is what entered the bottom, and a read of the
+    // bottom is guided by placement: a fact of an attribute placed on
+    // another scope fires no rule, as it answers no query.
+    if let Some(guide) = &view.guide
+        && let Some(bottom) = guide.lines.first()
+    {
+        let scopes = placements.scopes();
+        lag.retain(|instruction| {
+            let (Instruction::Assert(fact, _) | Instruction::Retract(fact)) = instruction;
+            guide.admits(bottom, &scopes, fact.the.as_str())
+        });
+    }
+    stimulus.extend(lag);
+    // What entered an upper layer of a stack outside it since its last
+    // commit, such as what a channel received: a change of this commit,
+    // as the lag is for the bottom.
+    stimulus.extend(entered);
     let mut induced = Changes::new();
     if stimulus.is_empty() {
         return Ok(induced);
     }
 
-    // Committed trigger structures, resolved once per induction: the
-    // footprint (which `on:` keys exist at all — the O(1) gate) and
-    // the head it was scanned at, which keys every committed-slice
-    // cache lookup below. The overlay slice is never head-cached; it
-    // is re-scanned each round (cheap, in-memory) so rules installed
-    // by this very commit — or by a rule during induction — fire.
-    let dispatch = Dispatch::resolve(source, env).await?;
+    // Committed trigger structures, resolved once per induction and
+    // per line of the view: the footprint (which `on:` keys exist at
+    // all — the O(1) gate) and the head it was scanned at, which keys
+    // every committed-slice cache lookup below. Ephemeral layers and
+    // the overlay slice are never head-cached; they are re-scanned
+    // each round (cheap, in-memory) so rules installed by this very
+    // commit — or by a rule during induction — fire.
+    let dispatch = Dispatch::resolve(view, env).await?;
 
     // The identity is resolved once: it only feeds the schema-metadata
     // overlay of the round view, which does not change across rounds.
     let operator = Identify.perform(env).await?;
 
+    // The rules, and the markers of transient concepts, that the
+    // transaction dispatched are rules of this commit alone: every
+    // round reads them, as it reads the rules staged in `changes`, and
+    // nothing commits them. A host can so bring rules of its own to a
+    // commit without writing them into the branch.
+    let dispatched_rules = rule_records(&transients);
+    let dispatched_entities: BTreeSet<Entity> = dispatched_rules
+        .iter()
+        .map(|(entity, _, _)| entity.clone())
+        .collect();
+
     // This round's transient facts. Round 1 sees the dispatched
     // commands; round N+1 sees only the transients round N emitted —
-    // a transient lives for exactly one round.
+    // a transient lives for exactly one round — and the dispatched
+    // rules.
     let mut transient_overlay = transients;
+    let heads = Heads {
+        placements,
+        landing,
+    };
 
     let mut round: u32 = 0;
     while !stimulus.is_empty() {
         round += 1;
         if round > MAX_ROUNDS {
             return Err(CommitError::InductionDivergence(MAX_ROUNDS));
+        }
+        if !transient_overlay.is_empty() {
+            witness.round(&transient_overlay);
         }
 
         // Probe keys straight off the instructions — no schema lookup.
@@ -173,7 +254,7 @@ where
         // The overlay's trigger slice: rules, markers, and support
         // edges staged in this transaction (including novelty from
         // earlier rounds).
-        let overlay = OverlayTriggers::scan(changes);
+        let overlay = OverlayTriggers::scan(&[changes, &dispatched_rules]);
 
         // Installation handles current state: a rule is itself a fact,
         // so the circumstance "rule exists ∧ premises hold" completes
@@ -192,6 +273,12 @@ where
         let mut installed_deductive: BTreeSet<Entity> = BTreeSet::new();
         for instruction in &stimulus {
             if let Instruction::Assert(a, _) = instruction {
+                // A dispatched rule is not installed by this commit: it
+                // fires on the delta through its triggers, as a committed
+                // rule does, not on the whole branch.
+                if dispatched_entities.contains(&a.of) {
+                    continue;
+                }
                 if a.the == on {
                     installed.insert(a.of.clone());
                 } else if a.the == reads {
@@ -210,17 +297,17 @@ where
             }
         }
 
-        // The frozen round view: branch ⊕ durable changes ⊕ this
+        // The frozen round view: every line ⊕ durable changes ⊕ this
         // round's transients, through the same layered QueryEnv a
         // transaction query uses, so rule bodies read exactly what a
         // mid-transaction query would: the writes as staged layers
         // beside the shared metadata.
-        let view = QueryEnv::new(
-            vec![source.to_source()],
-            QueryLayer::from(source).overlay(&operator),
-            env,
-        )
-        .with_layers(vec![
+        let mut layer = QueryLayer::new();
+        for line in &view.sources {
+            layer = layer.join(QueryLayer::from(SourceRef::from(line)));
+        }
+        let metadata = layer.overlay(&operator);
+        let view = QueryEnv::over(view.clone(), metadata, env).with_layers(vec![
             Staged::from(changes.clone()),
             Staged::from(transient_overlay.clone()),
         ]);
@@ -256,7 +343,8 @@ where
             };
             let transient_head = dispatch
                 .is_transient(&rule.conclusion().this(), &overlay, env)
-                .await?;
+                .await?
+                || concludes_transient(&rule, placements);
 
             // Delta restriction: bind stimulus rows into the premises
             // they match and evaluate with those bindings fixed, so
@@ -280,6 +368,7 @@ where
                 fire(
                     &rule,
                     transient_head,
+                    &heads,
                     &view,
                     &mut novelty,
                     &mut emitted_transients,
@@ -289,6 +378,7 @@ where
                 fire_seeded(
                     &rule,
                     transient_head,
+                    &heads,
                     &assert_rows,
                     &view,
                     &mut novelty,
@@ -306,22 +396,129 @@ where
         stimulus.extend(emitted_transients.clone().into_instructions());
         novelty.assert(changes);
         emitted_transients.clone().assert(&mut induced);
+        dispatched_rules.clone().assert(&mut emitted_transients);
         transient_overlay = emitted_transients;
     }
 
     Ok(induced)
 }
 
-/// The committed side of trigger dispatch for one induction run: the
-/// line (branch or snapshot), the head every cache entry is keyed by,
-/// and the trigger footprint (the O(1) gate). All committed lookups
-/// flow through the line's shared [`RuleCache`](crate::RuleCache) under
-/// the established disciplines — discovery head-keyed, hydrated bodies
-/// content-addressed, the overlay never head-cached.
-struct Dispatch<'a> {
+/// Where the heads of a commit's rules land: in a tree, or in a store
+/// (a session store or an ephemeral layer), as the commit routes the
+/// settled batch.
+pub(crate) enum Landing<'a> {
+    /// A branch or snapshot commit: a scope bound to the session store.
+    Line(&'a Bindings),
+    /// A stack commit: a scope its links bind to an ephemeral layer.
+    Stores(HashSet<Entity>),
+}
+
+/// What emitting a head needs to know of the commit: the placements it
+/// routes by, and where they land.
+struct Heads<'a> {
+    placements: &'a Placements,
+    landing: Landing<'a>,
+}
+
+impl Heads<'_> {
+    /// Whether a head written under `the` lands in a store, where the
+    /// store elects among its own rows of the cell, as it does for a
+    /// transaction's own write to it.
+    fn in_store(&self, the: &Relation) -> bool {
+        match &self.landing {
+            Landing::Line(bindings) => !self.placements.lands_in_tree(the, bindings),
+            Landing::Stores(scopes) => self
+                .placements
+                .placement_of(the)
+                .is_some_and(|scope| scopes.contains(scope)),
+        }
+    }
+}
+
+/// The records of rules, and the markers of transient concepts, among
+/// `changes`: what [`OverlayTriggers::scan`] reads.
+fn rule_records(changes: &Changes) -> Changes {
+    use dialog_artifacts::Update as _;
+
+    let transient = transient_attr();
+    let mut records = Changes::new();
+    for (entity, attribute, change) in changes.iter() {
+        if !attribute.to_string().starts_with("dialog.rule/") && *attribute != transient {
+            continue;
+        }
+        match change {
+            Change::Assert(value, pick) => records.associate(
+                attribute.clone(),
+                entity.clone(),
+                value.clone(),
+                pick.clone(),
+            ),
+            Change::Retract(value) => {
+                records.dissociate(attribute.clone(), entity.clone(), value.clone())
+            }
+        }
+    }
+    records
+}
+
+/// Move the facts asserted under transient attributes out of
+/// `changes`, as the transients they are. A retract of one has nothing
+/// durable to remove and is dropped.
+fn take_transient(changes: &mut Changes, placements: &Placements) -> Changes {
+    // Each cell moves as written, in its order: the batch is already
+    // settled, and associating it afresh would fold a `last` write into
+    // the next one as if nothing stood between.
+    let taken = changes.take_cells(|the| placements.is_transient(the));
+    if taken.is_empty() {
+        return taken;
+    }
+    // A transient is never held, so a retraction of one retracts nothing.
+    let mut asserted = Changes::new();
+    for instruction in taken.into_instructions() {
+        if let Instruction::Assert(a, pick) = instruction {
+            asserted.put_cell(a.the, a.of, vec![Change::Assert(a.is, pick)]);
+        }
+    }
+    asserted
+}
+
+/// Whether a rule's conclusion is transient attributes alone: its
+/// head then lives one round, as if its concept carried the marker.
+fn concludes_transient(rule: &InductiveRule, placements: &Placements) -> bool {
+    let mut any = false;
+    let all = rule.conclusion().with().iter().all(|(_, field)| {
+        any = true;
+        match field.descriptor().the() {
+            The::Relation(the) => placements.is_transient(&Relation::from(the)),
+            The::Collection { .. } => false,
+        }
+    });
+    any && all
+}
+
+/// One tree line's committed trigger slice: the line, the head every
+/// cache entry is keyed by, and the trigger footprint (the O(1) gate).
+/// All committed lookups flow through the line's shared
+/// [`RuleCache`](crate::RuleCache) under the established disciplines —
+/// discovery head-keyed, hydrated bodies content-addressed, the
+/// overlay never head-cached.
+struct TreeSlice<'a> {
     source: SourceRef<'a>,
     head: Option<Revision>,
     footprint: TriggerFootprint,
+}
+
+/// The committed side of trigger dispatch for one induction run: a
+/// slice per tree line of the view, bottom first, and every standalone
+/// ephemeral layer, scanned fresh. A rule fires from whichever line of
+/// the view holds it; where its conclusion lands is placement's
+/// business, not dispatch's. Only the dispatching line's watermark
+/// feeds the lag, so a rule on an upper layer fires on what this
+/// commit changes and on the bottom's catch-up, not on what entered
+/// its own layer outside the stack.
+struct Dispatch<'a> {
+    trees: Vec<TreeSlice<'a>>,
+    memories: Vec<&'a Ephemeral>,
 }
 
 /// The transaction overlay's trigger slice, re-scanned each round:
@@ -346,14 +543,14 @@ struct OverlayTriggers {
 }
 
 impl OverlayTriggers {
-    fn scan(changes: &Changes) -> Self {
+    fn scan(layers: &[&Changes]) -> Self {
         let on = on_attr();
         let reads = reads_attr();
         let source = source_attr();
         let transient = transient_attr();
 
         let mut slice = OverlayTriggers::default();
-        for (entity, attribute, change) in changes.iter() {
+        for (entity, attribute, change) in layers.iter().flat_map(|changes| changes.iter()) {
             if *attribute == on {
                 if let Change::Assert(Value::Entity(key), _) = change {
                     slice
@@ -395,11 +592,13 @@ impl OverlayTriggers {
     }
 }
 
-impl<'a> Dispatch<'a> {
-    /// Resolve the committed dispatch state: the branch head and the
-    /// trigger footprint at it (cached per head; one range scan over
-    /// each of `dialog.rule/on` and `dialog.rule/reads` on a miss).
-    async fn resolve<Env>(source: SourceRef<'a>, env: &Env) -> Result<Dispatch<'a>, CommitError>
+impl<'a> TreeSlice<'a> {
+    /// Resolve one tree line's committed trigger structures: the
+    /// footprint (which `on:` keys exist at all) and the head it was
+    /// scanned at, which keys every committed-slice cache lookup
+    /// (cached per head; one range scan over each of `dialog.rule/on`
+    /// and `dialog.rule/reads` on a miss).
+    async fn resolve<Env>(source: SourceRef<'a>, env: &Env) -> Result<TreeSlice<'a>, CommitError>
     where
         Env: Provider<BlobRead>
             + Provider<Get>
@@ -415,7 +614,7 @@ impl<'a> Dispatch<'a> {
         let head = source.revision();
         let Some(head) = head else {
             // A branch with no commits has no committed rules.
-            return Ok(Dispatch {
+            return Ok(TreeSlice {
                 source,
                 head: None,
                 footprint: TriggerFootprint::default(),
@@ -443,16 +642,110 @@ impl<'a> Dispatch<'a> {
                 footprint
             }
         };
-        Ok(Dispatch {
+        Ok(TreeSlice {
             source,
             head: Some(head),
             footprint,
         })
     }
 
-    /// The inductive-rule entities watching `on`: the committed slice
-    /// (footprint-gated, head-cached) unioned with the overlay's,
-    /// minus rules the overlay retracts.
+    /// The committed entities holding `attribute = on` in this line:
+    /// footprint-gated, head-cached under `cached`, else probed and
+    /// recorded through `record`.
+    async fn watchers<Env>(
+        &self,
+        on: &Entity,
+        gate: &BTreeSet<Entity>,
+        attribute: Relation,
+        cached: impl Fn(&RuleCache, &Entity, &Revision) -> Option<Vec<Entity>>,
+        record: impl Fn(&RuleCache, Entity, Revision, Vec<Entity>),
+        env: &Env,
+    ) -> Result<Vec<Entity>, CommitError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let Some(head) = &self.head else {
+            return Ok(Vec::new());
+        };
+        if !gate.contains(on) {
+            return Ok(Vec::new());
+        }
+        let cache = self.source.rule_cache();
+        if let Some(entities) = cached(&cache, on, head) {
+            return Ok(entities);
+        }
+        let selector = ArtifactSelector::new()
+            .the(attribute)
+            .is(Value::Entity(on.clone()));
+        let entities: Vec<Entity> = committed(self.source, selector, env)
+            .await?
+            .into_iter()
+            .map(|claim| claim.of)
+            .collect();
+        record(&cache, on.clone(), head.clone(), entities.clone());
+        Ok(entities)
+    }
+}
+
+impl<'a> Dispatch<'a> {
+    /// Resolve the committed trigger structures of every line in
+    /// `view`, once per induction.
+    async fn resolve<Env>(view: &'a Composite, env: &Env) -> Result<Dispatch<'a>, CommitError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let mut trees = Vec::with_capacity(view.sources.len());
+        for source in &view.sources {
+            trees.push(TreeSlice::resolve(source.as_ref(), env).await?);
+        }
+        Ok(Dispatch {
+            trees,
+            memories: view.ephemerals.iter().collect(),
+        })
+    }
+
+    /// The cache hydrated bodies are recorded in: the bottom tree
+    /// line's. Bodies are content-addressed, so any line's cache is
+    /// correct and peers sharing a line share its entries. `None` for
+    /// a view with no tree line, which caches nothing.
+    fn body_cache(&self) -> Option<Arc<RuleCache>> {
+        self.trees.first().map(|slice| slice.source.rule_cache())
+    }
+
+    /// The entities holding `attribute = on` in every ephemeral layer,
+    /// scanned fresh: the layers are in memory and never head-cached.
+    fn remembered(&self, on: &Entity, attribute: Relation) -> Vec<Entity> {
+        let selector = ArtifactSelector::new()
+            .the(attribute)
+            .is(Value::Entity(on.clone()));
+        self.memories
+            .iter()
+            .flat_map(|line| line.scan(&selector))
+            .map(|claim| claim.of)
+            .collect()
+    }
+
+    /// The inductive-rule entities watching `on`: every line's
+    /// committed slice (footprint-gated, head-cached), every ephemeral
+    /// layer's, and the overlay's, minus rules the overlay retracts.
     async fn triggers<Env>(
         &self,
         on: &Entity,
@@ -472,27 +765,21 @@ impl<'a> Dispatch<'a> {
             + 'static,
     {
         let mut entities: Vec<Entity> = Vec::new();
-        if let Some(head) = &self.head
-            && self.footprint.on.contains(on)
-        {
-            let cache = self.source.rule_cache();
-            let committed_entities = match cache.triggers(on, head) {
-                Some(entities) => entities,
-                None => {
-                    let selector = ArtifactSelector::new()
-                        .the(on_attr())
-                        .is(Value::Entity(on.clone()));
-                    let entities: Vec<Entity> = committed(self.source, selector, env)
-                        .await?
-                        .into_iter()
-                        .map(|claim| claim.of)
-                        .collect();
-                    cache.record_triggers(on.clone(), head.clone(), entities.clone());
-                    entities
-                }
-            };
-            entities.extend(committed_entities);
+        for slice in &self.trees {
+            entities.extend(
+                slice
+                    .watchers(
+                        on,
+                        &slice.footprint.on,
+                        on_attr(),
+                        |cache, on, head| cache.triggers(on, head),
+                        |cache, on, head, entities| cache.record_triggers(on, head, entities),
+                        env,
+                    )
+                    .await?,
+            );
         }
+        entities.extend(self.remembered(on, on_attr()));
         if let Some(staged) = overlay.on.get(on) {
             entities.extend(staged.iter().cloned());
         }
@@ -526,31 +813,25 @@ impl<'a> Dispatch<'a> {
             + ConditionalSync
             + 'static,
     {
-        let cache = self.source.rule_cache();
         let mut frontier: Vec<Reach> = touched.iter().cloned().collect();
         while let Some(reach) = frontier.pop() {
             let mut readers: Vec<Entity> = Vec::new();
             for on in reach.probes() {
-                if let Some(head) = &self.head
-                    && self.footprint.reads.contains(&on)
-                {
-                    let committed_readers = match cache.reads(&on, head) {
-                        Some(entities) => entities,
-                        None => {
-                            let selector = ArtifactSelector::new()
-                                .the(reads_attr())
-                                .is(Value::Entity(on.clone()));
-                            let entities: Vec<Entity> = committed(self.source, selector, env)
-                                .await?
-                                .into_iter()
-                                .map(|claim| claim.of)
-                                .collect();
-                            cache.record_reads(on.clone(), head.clone(), entities.clone());
-                            entities
-                        }
-                    };
-                    readers.extend(committed_readers);
+                for slice in &self.trees {
+                    readers.extend(
+                        slice
+                            .watchers(
+                                &on,
+                                &slice.footprint.reads,
+                                reads_attr(),
+                                |cache, on, head| cache.reads(on, head),
+                                |cache, on, head, entities| cache.record_reads(on, head, entities),
+                                env,
+                            )
+                            .await?,
+                    );
                 }
+                readers.extend(self.remembered(&on, reads_attr()));
                 if let Some(staged) = overlay.reads.get(&on) {
                     readers.extend(staged.iter().cloned());
                 }
@@ -594,7 +875,7 @@ impl<'a> Dispatch<'a> {
             + ConditionalSync
             + 'static,
     {
-        let cache = self.source.rule_cache();
+        let cache = self.body_cache();
         let bytes = match overlay.sources.get(entity) {
             Some(bytes) => Some(bytes.clone()),
             None => self.source_bytes(entity, env).await?,
@@ -602,7 +883,7 @@ impl<'a> Dispatch<'a> {
         let Some(bytes) = bytes else {
             return Ok(None);
         };
-        if let Some(body) = cache.body(entity, &bytes) {
+        if let Some(body) = cache.as_ref().and_then(|cache| cache.body(entity, &bytes)) {
             return Ok(Some(body));
         }
         Ok(hydrate(&bytes)
@@ -611,7 +892,9 @@ impl<'a> Dispatch<'a> {
             // mismatching entity are inert.
             .filter(|body| body.stored_as(entity))
             .inspect(|body| {
-                cache.record_body(entity.clone(), &bytes, body.clone());
+                if let Some(cache) = &cache {
+                    cache.record_body(entity.clone(), &bytes, body.clone());
+                }
             }))
     }
 
@@ -637,7 +920,7 @@ impl<'a> Dispatch<'a> {
             + ConditionalSync
             + 'static,
     {
-        let cache = self.source.rule_cache();
+        let cache = self.body_cache();
         let bytes = match overlay.sources.get(entity) {
             Some(bytes) => Some(bytes.clone()),
             None => self.source_bytes(entity, env).await?,
@@ -645,7 +928,10 @@ impl<'a> Dispatch<'a> {
         let Some(bytes) = bytes else {
             return Ok(None);
         };
-        if let Some(rule) = cache.inductive(entity, &bytes) {
+        if let Some(rule) = cache
+            .as_ref()
+            .and_then(|cache| cache.inductive(entity, &bytes))
+        {
             return Ok(Some(rule));
         }
         // Undecodable bytes, or bytes whose content address is not the
@@ -659,14 +945,16 @@ impl<'a> Dispatch<'a> {
         if !rule.stored_as(entity) {
             return Ok(None);
         }
-        cache.record_inductive(entity.clone(), &bytes, rule.clone());
+        if let Some(cache) = &cache {
+            cache.record_inductive(entity.clone(), &bytes, rule.clone());
+        }
         Ok(Some(rule))
     }
 
     /// Whether the concept at `entity` carries the
     /// `dialog.concept/transient` marker: the overlay's verdict wins
-    /// (marked or unmarked in this very commit), else the committed
-    /// slice, head-cached.
+    /// (marked or unmarked in this very commit), else any line's
+    /// committed slice (head-cached) or ephemeral layer.
     async fn is_transient<Env>(
         &self,
         concept: &Entity,
@@ -691,22 +979,36 @@ impl<'a> Dispatch<'a> {
         if overlay.unmarked.contains(concept) {
             return Ok(false);
         }
-        let Some(head) = &self.head else {
-            return Ok(false);
-        };
-        let cache = self.source.rule_cache();
-        if let Some(verdict) = cache.transient(concept, head) {
-            return Ok(verdict);
-        }
         let selector = ArtifactSelector::new()
             .the(transient_attr())
             .of(concept.clone());
-        let verdict = !committed(self.source, selector, env).await?.is_empty();
-        cache.record_transient(concept.clone(), head.clone(), verdict);
-        Ok(verdict)
+        for slice in &self.trees {
+            let Some(head) = &slice.head else {
+                continue;
+            };
+            let cache = slice.source.rule_cache();
+            let verdict = match cache.transient(concept, head) {
+                Some(verdict) => verdict,
+                None => {
+                    let verdict = !committed(slice.source, selector.clone(), env)
+                        .await?
+                        .is_empty();
+                    cache.record_transient(concept.clone(), head.clone(), verdict);
+                    verdict
+                }
+            };
+            if verdict {
+                return Ok(true);
+            }
+        }
+        Ok(self
+            .memories
+            .iter()
+            .any(|line| !line.scan(&selector).is_empty()))
     }
 
-    /// The committed `dialog.rule/source` bytes for a rule entity, if any.
+    /// The `dialog.rule/source` bytes for a rule entity held in any
+    /// line of the view, if any.
     async fn source_bytes<Env>(
         &self,
         entity: &Entity,
@@ -724,20 +1026,41 @@ impl<'a> Dispatch<'a> {
             + ConditionalSync
             + 'static,
     {
-        if self.head.is_none() {
-            return Ok(None);
-        }
         let selector = ArtifactSelector::new()
             .the(source_attr())
             .of(entity.clone());
-        Ok(committed(self.source, selector, env)
-            .await?
-            .into_iter()
-            .find_map(|claim| match claim.is {
+        fn bytes_of(claims: Vec<Artifact>) -> Option<Vec<u8>> {
+            claims.into_iter().find_map(|claim| match claim.is {
                 Value::Bytes(bytes) => Some(bytes),
                 _ => None,
-            }))
+            })
+        }
+        for slice in &self.trees {
+            if slice.head.is_none() {
+                continue;
+            }
+            if let Some(bytes) = bytes_of(committed(slice.source, selector.clone(), env).await?) {
+                return Ok(Some(bytes));
+            }
+        }
+        Ok(self
+            .memories
+            .iter()
+            .find_map(|line| bytes_of(line.scan(&selector))))
     }
+}
+
+/// Where the induction watermark of a line stands.
+#[derive(Debug, Clone)]
+pub(crate) enum Watermark {
+    /// In the induction cell of the line, which a commit of the line
+    /// moves.
+    Cell,
+    /// In the memory of a stack whose bottom is under a read-only link:
+    /// the head of the line that its last commit induced over, if any. A
+    /// stack never writes a layer that it only reads, its induction cell
+    /// included.
+    Held(Option<Revision>),
 }
 
 /// The watermark lag: instructions for every fact that entered or
@@ -756,7 +1079,11 @@ impl<'a> Dispatch<'a> {
 /// records, which every commit writes) are excluded from the lag, so
 /// catching up over N commits stimulates rules with the *data* those
 /// commits changed, not their bookkeeping.
-async fn lag_delta<Env>(source: SourceRef<'_>, env: &Env) -> Result<Vec<Instruction>, CommitError>
+async fn lag_delta<Env>(
+    source: SourceRef<'_>,
+    watermark: Watermark,
+    env: &Env,
+) -> Result<Vec<Instruction>, CommitError>
 where
     Env: Provider<BlobRead>
         + Provider<Get>
@@ -774,15 +1101,21 @@ where
     use dialog_common::Blake3Hash as NodeHash;
     use dialog_search_tree::Change as TreeChange;
 
-    let SourceRef::Branch(branch) = source else {
+    let Some(branch) = source.branch() else {
         return Ok(Vec::new());
     };
-    let Some(head) = branch.revision() else {
+    let Some(head) = source.revision() else {
         return Ok(Vec::new());
     };
-    let cell = branch.induction_cell();
-    cell.resolve().perform(env).await?;
-    let Some(watermark) = cell.content() else {
+    let watermark = match watermark {
+        Watermark::Cell => {
+            let cell = branch.induction_cell();
+            cell.resolve().perform(env).await?;
+            cell.content()
+        }
+        Watermark::Held(held) => held,
+    };
+    let Some(watermark) = watermark else {
         // Never induced: adopt the head, fire-forward only.
         return Ok(Vec::new());
     };
@@ -918,6 +1251,7 @@ async fn select<'a>(
 async fn fire<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    heads: &Heads<'_>,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
@@ -931,7 +1265,16 @@ async fn fire<'a>(
     if matches.is_empty() {
         return Ok(());
     }
-    emit_matches(rule, transient_head, matches, view, novelty, transients).await
+    emit_matches(
+        rule,
+        transient_head,
+        heads,
+        matches,
+        view,
+        novelty,
+        transients,
+    )
+    .await
 }
 
 /// The reach of a rule's concept premises, split by polarity:
@@ -963,9 +1306,11 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 /// premise (removal-enabled and derived-premise firings take the
 /// full-body path instead), so seeding is complete for this candidate
 /// class while costing the delta's join fan-out, not relation size.
+#[allow(clippy::too_many_arguments)]
 async fn fire_seeded<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    heads: &Heads<'_>,
     rows: &[Artifact],
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
@@ -1038,7 +1383,16 @@ async fn fire_seeded<'a>(
     if matches.is_empty() {
         return Ok(());
     }
-    emit_matches(rule, transient_head, matches, view, novelty, transients).await
+    emit_matches(
+        rule,
+        transient_head,
+        heads,
+        matches,
+        view,
+        novelty,
+        transients,
+    )
+    .await
 }
 
 /// Bind a seed value into a premise term: a named variable binds (and
@@ -1076,6 +1430,7 @@ fn bind_seed(
 async fn emit_matches<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    heads: &Heads<'_>,
     matches: Vec<Match>,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
@@ -1139,9 +1494,16 @@ async fn emit_matches<'a>(
         }
         // A head written by succession elects the claim it succeeds
         // against the round view, as a transaction's own writes do
-        // against the line at commit.
+        // against the line at commit. A head that lands in a store keeps
+        // its pick instead: the store's rows are no claims, so settled
+        // here it would be asserted beside the row it succeeds.
+        let stored = head.take_cells(|the| heads.in_store(the));
         Box::pin(super::succession::resolve_against(view, &mut head)).await?;
-        for instruction in head.into_instructions() {
+        for instruction in head
+            .into_instructions()
+            .into_iter()
+            .chain(stored.into_instructions())
+        {
             if is_novel(view, &instruction).await? {
                 match instruction {
                     Instruction::Assert(a, policy) => {
@@ -1187,6 +1549,7 @@ mod tests {
     use crate::helpers::test_repo;
     use crate::rules::Transient;
     use crate::{Branch, CommitError, RemoteSite, Revision};
+    use crate::{Drained, Observer, TransientAttribute};
     use anyhow::Result;
     use dialog_artifacts::{ArtifactSelector, Changes, Entity, Instruction, Value};
     use dialog_capability::{Fork, Provider};
@@ -1905,6 +2268,156 @@ mod tests {
                 .is_empty(),
             "a reported transient still never reaches the branch"
         );
+        Ok(())
+    }
+
+    /// Rules and transient markers dispatched beside a command are rules
+    /// of that commit alone: they fire on the command, in every round of
+    /// the cascade, and none of them reaches the branch.
+    #[dialog_common::test]
+    async fn it_induces_with_rules_dispatched_beside_a_command() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let command: Entity = "cmd:start".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        let batch = branch
+            .transaction()
+            .dispatch(transient_target("cmd.stage/target")?)
+            .dispatch(transient_target("cmd.finish/target")?)
+            .dispatch(relay("cmd.start/target", "cmd.stage/target")?)
+            .dispatch(relay("cmd.stage/target", "cmd.finish/target")?)
+            .dispatch(
+                dialog_query::the!("cmd.start/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            asserted(batch.induced()),
+            vec![
+                (
+                    "cmd.finish/target".to_string(),
+                    command.clone(),
+                    Value::Entity(target.clone())
+                ),
+                (
+                    "cmd.stage/target".to_string(),
+                    command.clone(),
+                    Value::Entity(target.clone())
+                ),
+            ],
+            "the dispatched rules fire in both rounds"
+        );
+        batch.publish().perform(&operator).await?;
+        for prefix in ["dialog.rule/", "dialog.concept/"] {
+            let records = branch
+                .claims()
+                .select(ArtifactSelector::new().the_starting_with(prefix))
+                .perform(&operator)
+                .await?
+                .collect::<Vec<_>>()
+                .await;
+            assert!(records.is_empty(), "no rule nor marker reaches the branch");
+        }
+
+        // The next commit has none of those rules.
+        let batch = branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.start/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+        assert!(batch.induced().is_empty());
+        Ok(())
+    }
+
+    /// A dispatched rule fires on the delta of its commit, as a committed
+    /// rule does: a fact that an earlier commit wrote does not fire it
+    /// again at a dispatch that does not touch what it reads.
+    #[dialog_common::test]
+    async fn it_fires_a_dispatched_rule_on_the_delta_alone() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let command: Entity = "cmd:start".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("cmd.start/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let batch = branch
+            .transaction()
+            .dispatch(transient_target("cmd.stage/target")?)
+            .dispatch(relay("cmd.start/target", "cmd.stage/target")?)
+            .dispatch(
+                dialog_query::the!("cmd.other/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .perform(&operator)
+            .await?;
+
+        assert!(
+            batch.induced().is_empty(),
+            "the committed fact does not fire the dispatched rule again"
+        );
+        Ok(())
+    }
+
+    /// A dispatched rule whose head is durable commits its head, and not
+    /// itself.
+    #[dialog_common::test]
+    async fn it_commits_the_durable_head_of_a_dispatched_rule() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let command: Entity = "cmd:start".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .dispatch(relay("cmd.start/target", "doc.done/target")?)
+            .dispatch(
+                dialog_query::the!("cmd.start/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        assert_eq!(
+            values(&branch, &operator, "doc.done/target", &command).await?,
+            vec![Value::Entity(target)]
+        );
+        let rules = branch
+            .claims()
+            .select(ArtifactSelector::new().the_starting_with("dialog.rule/"))
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await;
+        assert!(rules.is_empty(), "no rule reaches the branch");
         Ok(())
     }
 
@@ -3486,6 +3999,285 @@ mod tests {
             matches!(result, Err(CommitError::Induction(ref message)) if message.contains("Milk")),
             "an uppercase key is not a dictionary key: {result:?}"
         );
+        Ok(())
+    }
+
+    /// The facts an observer saw asserted, as `(attribute, entity)`,
+    /// in order.
+    fn seen(observer: &Observer) -> Vec<(String, String)> {
+        match observer.drain() {
+            Drained::Instants(instants) => instants
+                .into_iter()
+                .flat_map(|instant| instant.asserted)
+                .map(|fact| (fact.the.to_string(), fact.of.to_string()))
+                .collect(),
+            Drained::Gap { .. } => panic!("the observer gapped"),
+        }
+    }
+
+    /// A dispatched command is witnessed on the branch's session store
+    /// in the commit that consumes it: an observer of the store sees
+    /// it, though the branch never holds it.
+    #[dialog_common::test]
+    async fn it_witnesses_a_dispatched_command_to_the_session_store() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let counter: Entity = "ctr:1".parse()?;
+        branch
+            .transaction()
+            .assert(increment_rule())
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let observer = branch.overlay().observe_everything();
+        let command: Entity = "cmd:1".parse()?;
+        branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command.clone())
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        assert_eq!(
+            seen(&observer),
+            vec![("cmd.increment/counter".to_string(), "cmd:1".to_string())],
+            "the command is witnessed exactly once"
+        );
+        assert_eq!(
+            values(&branch, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)]
+        );
+        assert!(
+            values(&branch, &operator, "cmd.increment/counter", &command)
+                .await?
+                .is_empty(),
+            "and never held"
+        );
+        assert!(branch.overlay().is_empty(), "nor held by the session store");
+        Ok(())
+    }
+
+    /// Rounds are instants: a transient a rule concluded and the next
+    /// round consumed — folded away, never in any layer — is witnessed
+    /// in its own round, after the command that started the cascade.
+    #[dialog_common::test]
+    async fn it_witnesses_a_folded_intermediate_in_its_own_round() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let intermediate: ConceptDescriptor = serde_json::from_value(json!({
+            "with": { "target": { "the": "cmd.stage/target", "as": "Entity" } }
+        }))?;
+        let stage: InductiveRule = serde_json::from_value(json!({
+            "assert!": { "with": { "target": { "the": "cmd.stage/target", "as": "Entity" } } },
+            "when": [{
+                "assert": { "with": { "target": { "the": "cmd.start/target", "as": "Entity" } } },
+                "where": { "this": { "?": { "name": "this" } }, "target": { "?": { "name": "target" } } }
+            }]
+        }))?;
+        let finish: InductiveRule = serde_json::from_value(json!({
+            "assert!": { "with": { "target": { "the": "result/target", "as": "Entity" } } },
+            "when": [{
+                "assert": { "with": { "target": { "the": "cmd.stage/target", "as": "Entity" } } },
+                "where": { "this": { "?": { "name": "this" } }, "target": { "?": { "name": "target" } } }
+            }]
+        }))?;
+        branch
+            .transaction()
+            .assert(Transient(intermediate.this()))
+            .assert(stage)
+            .assert(finish)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let observer = branch.overlay().observe_everything();
+        let command: Entity = "cmd:start".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.start/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let Drained::Instants(instants) = observer.drain() else {
+            panic!("gapped")
+        };
+        assert_eq!(instants.len(), 2, "one instant per round with transients");
+        assert_eq!(
+            instants[0]
+                .asserted
+                .iter()
+                .map(|f| f.the.to_string())
+                .collect::<Vec<_>>(),
+            vec!["cmd.start/target".to_string()]
+        );
+        assert_eq!(
+            instants[1]
+                .asserted
+                .iter()
+                .map(|f| f.the.to_string())
+                .collect::<Vec<_>>(),
+            vec!["cmd.stage/target".to_string()],
+            "the folded intermediate is witnessed in the round it lived"
+        );
+        assert_eq!(
+            instants[1].retracted, instants[1].asserted,
+            "and gone within its instant"
+        );
+        assert_eq!(
+            values(&branch, &operator, "result/target", &command).await?,
+            vec![Value::Entity(target)]
+        );
+        Ok(())
+    }
+
+    /// A fact asserted under a transient attribute is a dispatched
+    /// command: it fires the rule, is witnessed for the round it
+    /// lives, and is never held — `assert` and `dispatch` say the same
+    /// thing for it.
+    #[dialog_common::test]
+    async fn it_treats_an_asserted_transient_attribute_as_dispatched() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let counter: Entity = "ctr:1".parse()?;
+        branch
+            .transaction()
+            .assert(TransientAttribute::new("cmd.increment/counter".parse()?))
+            .assert(increment_rule())
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let observer = branch.overlay().observe_everything();
+        let command: Entity = "cmd:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command.clone())
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        assert_eq!(
+            seen(&observer),
+            vec![("cmd.increment/counter".to_string(), "cmd:1".to_string())]
+        );
+        assert_eq!(
+            values(&branch, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)],
+            "the asserted command fires the rule"
+        );
+        assert!(
+            values(&branch, &operator, "cmd.increment/counter", &command)
+                .await?
+                .is_empty(),
+            "and is never held"
+        );
+        Ok(())
+    }
+
+    /// A rule whose conclusion is transient attributes alone has a
+    /// transient head, with no concept marker: the intermediate
+    /// cascades to the next round and never lands.
+    #[dialog_common::test]
+    async fn it_gives_a_rule_a_transient_head_by_attribute() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let stage: InductiveRule = serde_json::from_value(json!({
+            "assert!": { "with": { "target": { "the": "cmd.stage/target", "as": "Entity" } } },
+            "when": [{
+                "assert": { "with": { "target": { "the": "cmd.start/target", "as": "Entity" } } },
+                "where": { "this": { "?": { "name": "this" } }, "target": { "?": { "name": "target" } } }
+            }]
+        }))?;
+        let finish: InductiveRule = serde_json::from_value(json!({
+            "assert!": { "with": { "target": { "the": "result/target", "as": "Entity" } } },
+            "when": [{
+                "assert": { "with": { "target": { "the": "cmd.stage/target", "as": "Entity" } } },
+                "where": { "this": { "?": { "name": "this" } }, "target": { "?": { "name": "target" } } }
+            }]
+        }))?;
+        branch
+            .transaction()
+            .assert(TransientAttribute::new("cmd.start/target".parse()?))
+            .assert(TransientAttribute::new("cmd.stage/target".parse()?))
+            .assert(stage)
+            .assert(finish)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let command: Entity = "cmd:start".parse()?;
+        let target: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("cmd.start/target")
+                    .of(command.clone())
+                    .is(target.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        assert_eq!(
+            values(&branch, &operator, "result/target", &command).await?,
+            vec![Value::Entity(target)],
+            "the cascade lands the durable head"
+        );
+        for attribute in ["cmd.start/target", "cmd.stage/target"] {
+            assert!(
+                values(&branch, &operator, attribute, &command)
+                    .await?
+                    .is_empty(),
+                "{attribute} is transient by declaration"
+            );
+        }
         Ok(())
     }
 }

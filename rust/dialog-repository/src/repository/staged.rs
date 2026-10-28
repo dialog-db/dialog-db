@@ -292,9 +292,25 @@ impl Staged {
     /// what this store reads as over it.
     pub(crate) fn export(&self) -> Changes {
         let mut changes = self.0.assets.clone();
+        self.put_cells(&mut changes, |_| true);
+        changes
+    }
+
+    /// The cells of the attributes `selects` accepts, as
+    /// [`export`](Self::export) leaves them, without the assets.
+    pub(crate) fn export_cells<F: Fn(&Relation) -> bool>(&self, selects: F) -> Changes {
+        let mut changes = Changes::new();
+        self.put_cells(&mut changes, selects);
+        changes
+    }
+
+    fn put_cells<F: Fn(&Relation) -> bool>(&self, changes: &mut Changes, selects: F) {
         let mut cells: Vec<(Relation, Entity)> = Vec::new();
         let mut writes: HashMap<(Relation, Entity), Vec<Change>> = HashMap::new();
         for (the, of, change) in &self.0.log {
+            if !selects(the) {
+                continue;
+            }
             let key = (the.clone(), of.clone());
             if !writes.contains_key(&key) {
                 cells.push(key.clone());
@@ -306,7 +322,6 @@ impl Staged {
             let (the, of) = key;
             changes.put_cell(the, of, squash(cell, &|_| true));
         }
-        changes
     }
 
     /// Whether nothing was written.

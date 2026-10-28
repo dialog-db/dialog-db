@@ -9,6 +9,7 @@ use dialog_effects::memory;
 use dialog_query::concept::query::PlanCache;
 
 use crate::NetworkedIndex;
+use crate::placement::{Bindings, Target as StoreTarget};
 use crate::repository::source::{Caches, SourceRef};
 use dialog_artifacts::Changes;
 use dialog_artifacts::DialogArtifactsError;
@@ -37,7 +38,7 @@ pub use blob::*;
 mod claims;
 pub use claims::*;
 
-mod commit;
+pub(crate) mod commit;
 pub use commit::*;
 
 pub(crate) mod context;
@@ -95,7 +96,7 @@ pub use upgrade::*;
 mod select;
 pub use select::*;
 
-mod session;
+pub(crate) mod session;
 use dialog_effects::archive::prelude::ArchiveScope;
 pub use session::*;
 
@@ -105,7 +106,7 @@ pub use subscription::*;
 mod set_upstream;
 pub use set_upstream::*;
 
-mod transaction;
+pub(crate) mod transaction;
 pub use transaction::*;
 
 pub(crate) mod upstream;
@@ -172,10 +173,15 @@ pub struct Branch {
     /// once per (concept, head) rather than per query.
     rule_cache: SharedRuleCache,
     /// The branch's ephemeral line: session facts folded into every
-    /// read of this branch, never committed. Shared across clones like
-    /// the caches; every change mints an instant subscriptions
-    /// maintain from. See [`Ephemeral`].
+    /// read of this branch, never committed, and the store behind
+    /// the session scope. Shared across clones like the caches; every
+    /// change mints an instant subscriptions maintain from. See
+    /// [`Ephemeral`].
     overlay: Ephemeral,
+    /// Which store each scope a placement can target is bound to on
+    /// this replica. Shared across clones like the caches. See
+    /// [`Bindings`].
+    bindings: Bindings,
     /// Shared plan cache for the deductive rules resolved on this branch,
     /// keyed by content-addressed `(rule, adornment)`. Handed to each
     /// per-query `ConceptRules` assembly so a re-assembled rule set reuses
@@ -324,10 +330,12 @@ impl Writer {
 }
 
 impl Branch {
-    /// The metadata a query layer over this branch alone folds in, as
-    /// `derive` computes it (`heads` computing its revision facts alone), reused while the profile, operator, and head
-    /// are those it was derived under. Shared rather than copied: every
-    /// query over the branch reads the same facts.
+    /// The metadata a query layer over this branch alone folds in, read
+    /// at `revision` (its head, or the revision a stack pins it at), as
+    /// `derive` computes it (`heads` computing its revision facts alone),
+    /// reused while the profile, operator, and revision are those it was
+    /// derived under. Shared rather than copied: every query over the
+    /// branch reads the same facts.
     ///
     /// Only the revision facts move with the head, so the rest is kept
     /// as a line of its own while the profile and operator stay, and a
@@ -336,12 +344,12 @@ impl Branch {
     pub(crate) fn layer_metadata(
         &self,
         operator: &Capability<Operator>,
+        revision: Option<Revision>,
         derive: impl FnOnce() -> (Changes, Changes),
         heads: impl FnOnce() -> Changes,
     ) -> Ephemeral {
         let profile = operator.profile();
         let did = operator.did();
-        let revision = self.revision();
         let mut cache = self
             .layer_metadata_cache
             .lock()
@@ -415,6 +423,24 @@ impl Branch {
     /// persists. See [`Ephemeral`].
     pub fn overlay(&self) -> &Ephemeral {
         &self.overlay
+    }
+
+    /// Bind a scope to one of this branch's stores, so a write to an
+    /// attribute placed on that scope routes there. Local to this
+    /// replica; see [`Bindings`].
+    pub fn bind(&self, scope: Entity, target: StoreTarget) -> &Self {
+        self.bindings.bind(scope, target);
+        self
+    }
+
+    /// This branch's scope bindings.
+    pub fn bindings(&self) -> &Bindings {
+        &self.bindings
+    }
+
+    /// The cell holding this branch's head.
+    pub(crate) fn revision_cell(&self) -> &Cell<Revision> {
+        &self.revision
     }
 
     /// Returns the current revision of this branch, or `None` if the branch
