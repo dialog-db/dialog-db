@@ -47,6 +47,13 @@ What this changes for you:
   concluded before, as a transaction's own write there does. Before, each
   conclusion was added beside the last, so a counter a rule kept on an
   ephemeral layer held every value it ever had.
+- A rule premised on a transient attribute is not evaluated in a round
+  that holds no fact of it, among the round's transients and the
+  changes it induces over. A transient is never held, so such a rule
+  concluded nothing there anyway. One case differs: a fact of the
+  attribute stored before it was declared transient, or by a writer
+  that ran no induction, is joined only in the round that brings it,
+  not again at every later commit.
 
 Why: tonk keeps per-process and per-tab state beside a space's
 replicated branch, and needs to read and write both as one database

@@ -45,6 +45,7 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
 use dialog_query::attribute::The;
+use dialog_query::planner::Conjunction;
 use dialog_query::rule::inductive::Polarity;
 use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
@@ -203,6 +204,7 @@ where
     let heads = Heads {
         placements,
         landing,
+        plans: dispatch.body_cache(),
     };
 
     let mut round: u32 = 0;
@@ -335,6 +337,17 @@ where
         // row cannot seed.
         let expanded: BTreeSet<Reach> = touched.difference(&direct).cloned().collect();
 
+        // The attributes this round holds a fact of that no line stores:
+        // its transients and its stimulus. A transient attribute is read
+        // only from these.
+        let present: BTreeSet<Relation> = transient_overlay
+            .iter()
+            .map(|(_, attribute, _)| attribute.clone())
+            .chain(stimulus.iter().map(|instruction| match instruction {
+                Instruction::Assert(a, _) | Instruction::Retract(a) => a.the.clone(),
+            }))
+            .collect();
+
         let mut novelty = Changes::new();
         let mut emitted_transients = Changes::new();
         for entity in candidates {
@@ -345,6 +358,9 @@ where
                 .is_transient(&rule.conclusion().this(), &overlay, env)
                 .await?
                 || concludes_transient(&rule, placements);
+            if starved(&rule, placements, &present, &expanded) {
+                continue;
+            }
 
             // Delta restriction: bind stimulus rows into the premises
             // they match and evaluate with those bindings fixed, so
@@ -367,6 +383,7 @@ where
             if full {
                 fire(
                     &rule,
+                    &entity,
                     transient_head,
                     &heads,
                     &view,
@@ -377,6 +394,7 @@ where
             } else {
                 fire_seeded(
                     &rule,
+                    &entity,
                     transient_head,
                     &heads,
                     &assert_rows,
@@ -413,14 +431,34 @@ pub(crate) enum Landing<'a> {
     Stores(HashSet<Entity>),
 }
 
-/// What emitting a head needs to know of the commit: the placements it
-/// routes by, and where they land.
+/// What firing a rule needs to know of the commit: the placements its
+/// heads route by, where they land, and the cache its plans are kept in.
 struct Heads<'a> {
     placements: &'a Placements,
     landing: Landing<'a>,
+    plans: Option<Arc<RuleCache>>,
 }
 
 impl Heads<'_> {
+    /// The plan of `rule`, stored as `entity`, for `scope`. A plan depends
+    /// on the rule and on which variables `scope` binds alone, so a rule
+    /// that fires every commit is planned once per seed shape rather than
+    /// once per firing.
+    fn plan(&self, entity: &Entity, rule: &InductiveRule, scope: &Environment) -> Conjunction {
+        if let Some(plan) = self
+            .plans
+            .as_ref()
+            .and_then(|plans| plans.plan(entity, scope))
+        {
+            return plan;
+        }
+        let plan = rule.plan(scope);
+        if let Some(plans) = &self.plans {
+            plans.record_plan(entity.clone(), scope, plan.clone());
+        }
+        plan
+    }
+
     /// Whether a head written under `the` lands in a store, where the
     /// store elects among its own rows of the cell, as it does for a
     /// transaction's own write to it.
@@ -480,6 +518,38 @@ fn take_transient(changes: &mut Changes, placements: &Placements) -> Changes {
         }
     }
     asserted
+}
+
+/// Whether a positive premise of `rule` reads, in a required field, a
+/// transient attribute that the round holds no fact of (`present` is
+/// every attribute among its transients and its stimulus). A transient
+/// lives one round and is never held, so such a premise matches nothing
+/// and the body cannot hold: evaluating it would only find that out. A
+/// premise the deductive closure reaches this round (`expanded`) is left
+/// to the evaluation, since a rule may derive what it reads.
+fn starved(
+    rule: &InductiveRule,
+    placements: &Placements,
+    present: &BTreeSet<Relation>,
+    expanded: &BTreeSet<Reach>,
+) -> bool {
+    use dialog_query::{Premise, Proposition};
+
+    rule.analysis().premises.iter().any(|premise| {
+        let Premise::Assert(Proposition::Concept(query)) = premise else {
+            return false;
+        };
+        query.predicate.with().iter().any(|(_, field)| {
+            let The::Relation(the) = field.descriptor().the() else {
+                return false;
+            };
+            let attribute = Relation::from(the);
+            !field.is_optional()
+                && placements.is_transient(&attribute)
+                && !present.contains(&attribute)
+                && !expanded.iter().any(|reach| reach.covers(&attribute))
+        })
+    })
 }
 
 /// Whether a rule's conclusion is transient attributes alone: its
@@ -1036,11 +1106,23 @@ impl<'a> Dispatch<'a> {
             })
         }
         for slice in &self.trees {
-            if slice.head.is_none() {
+            let Some(head) = &slice.head else {
                 continue;
-            }
-            if let Some(bytes) = bytes_of(committed(slice.source, selector.clone(), env).await?) {
-                return Ok(Some(bytes));
+            };
+            // Whether the rule is stored at this head, and as what: kept
+            // with the head, so a rule that fires every commit reads its
+            // bytes once per head rather than once per firing.
+            let cache = slice.source.rule_cache();
+            let bytes = match cache.source(entity, head) {
+                Some(bytes) => bytes,
+                None => {
+                    let bytes = bytes_of(committed(slice.source, selector.clone(), env).await?);
+                    cache.record_source(entity.clone(), head.clone(), bytes.clone());
+                    bytes
+                }
+            };
+            if bytes.is_some() {
+                return Ok(bytes);
             }
         }
         Ok(self
@@ -1248,15 +1330,17 @@ async fn select<'a>(
 /// Evaluate one rule's body against the frozen round view and emit its
 /// head for every binding: transient heads into `transients`, durable
 /// heads (novelty-checked against the view) into `novelty`.
+#[allow(clippy::too_many_arguments)]
 async fn fire<'a>(
     rule: &InductiveRule,
+    entity: &Entity,
     transient_head: bool,
     heads: &Heads<'_>,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
-    let plan = rule.plan(&Environment::new());
+    let plan = heads.plan(entity, rule, &Environment::new());
     let matches: Vec<Match> = plan
         .evaluate(Match::new().seed(), view)
         .try_collect()
@@ -1309,6 +1393,7 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 #[allow(clippy::too_many_arguments)]
 async fn fire_seeded<'a>(
     rule: &InductiveRule,
+    entity: &Entity,
     transient_head: bool,
     heads: &Heads<'_>,
     rows: &[Artifact],
@@ -1371,7 +1456,7 @@ async fn fire_seeded<'a>(
                 continue;
             }
 
-            let plan = rule.plan(&scope);
+            let plan = heads.plan(entity, rule, &scope);
             let seeded_matches: Vec<Match> = plan
                 .evaluate(matched.seed(), view)
                 .try_collect()
