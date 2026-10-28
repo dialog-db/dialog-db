@@ -8,6 +8,8 @@ license.workspace = true
 publish = false
 
 [features]
+# Opt-in paired disk-provider measurements; default scenarios are unchanged.
+single-file-archive = ["dep:dialog-search-tree", "dep:tempfile"]
 # Enable integration tests (tests with service provisioning)
 integration-tests = ["dialog-common/integration-tests"]
 # Enable web integration tests
@@ -20,7 +22,10 @@ dialog-common = { workspace = true }
 # valgrind and reads the filesystem. The crate compiles to nothing on
 # wasm32 (see the crate-level cfg in src/lib.rs).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dialog-search-tree = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 dialog-artifacts = { workspace = true }

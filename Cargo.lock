@@ -1701,6 +1701,7 @@ name = "dialog-perf"
 version = "0.4.0-rc.3"
 dependencies = [
  "anyhow",
+ "async-trait",
  "blake3",
  "clap",
  "dialog-artifacts",
@@ -1711,10 +1712,12 @@ dependencies = [
  "dialog-peer",
  "dialog-query",
  "dialog-repository",
+ "dialog-search-tree",
  "dialog-storage",
  "futures-util",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
