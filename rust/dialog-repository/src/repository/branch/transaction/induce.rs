@@ -31,7 +31,7 @@
 //! and the `retract!` head polarity.
 
 use dialog_effects::blob::Read as BlobRead;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
@@ -50,7 +50,7 @@ use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
 use futures_util::{StreamExt as _, TryStreamExt};
 
-use crate::placement::Placements;
+use crate::placement::{Bindings, Placements};
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::{Composite, QueryEnv};
 use crate::repository::source::SourceRef;
@@ -107,6 +107,7 @@ pub(crate) async fn induce<Env, W: Witness>(
     watermark: Watermark,
     view: &Composite,
     placements: &Placements,
+    landing: Landing<'_>,
     changes: &mut Changes,
     mut transients: Changes,
     entered: Vec<Instruction>,
@@ -199,6 +200,10 @@ where
     // a transient lives for exactly one round — and the dispatched
     // rules.
     let mut transient_overlay = transients;
+    let heads = Heads {
+        placements,
+        landing,
+    };
 
     let mut round: u32 = 0;
     while !stimulus.is_empty() {
@@ -363,6 +368,7 @@ where
                 fire(
                     &rule,
                     transient_head,
+                    &heads,
                     &view,
                     &mut novelty,
                     &mut emitted_transients,
@@ -372,6 +378,7 @@ where
                 fire_seeded(
                     &rule,
                     transient_head,
+                    &heads,
                     &assert_rows,
                     &view,
                     &mut novelty,
@@ -394,6 +401,38 @@ where
     }
 
     Ok(induced)
+}
+
+/// Where the heads of a commit's rules land: in a tree, or in a store
+/// (a session store or an ephemeral layer), as the commit routes the
+/// settled batch.
+pub(crate) enum Landing<'a> {
+    /// A branch or snapshot commit: a scope bound to the session store.
+    Line(&'a Bindings),
+    /// A stack commit: a scope its links bind to an ephemeral layer.
+    Stores(HashSet<Entity>),
+}
+
+/// What emitting a head needs to know of the commit: the placements it
+/// routes by, and where they land.
+struct Heads<'a> {
+    placements: &'a Placements,
+    landing: Landing<'a>,
+}
+
+impl Heads<'_> {
+    /// Whether a head written under `the` lands in a store, where the
+    /// store elects among its own rows of the cell, as it does for a
+    /// transaction's own write to it.
+    fn in_store(&self, the: &Relation) -> bool {
+        match &self.landing {
+            Landing::Line(bindings) => !self.placements.lands_in_tree(the, bindings),
+            Landing::Stores(scopes) => self
+                .placements
+                .placement_of(the)
+                .is_some_and(|scope| scopes.contains(scope)),
+        }
+    }
 }
 
 /// The records of rules, and the markers of transient concepts, among
@@ -1212,6 +1251,7 @@ async fn select<'a>(
 async fn fire<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    heads: &Heads<'_>,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
@@ -1225,7 +1265,16 @@ async fn fire<'a>(
     if matches.is_empty() {
         return Ok(());
     }
-    emit_matches(rule, transient_head, matches, view, novelty, transients).await
+    emit_matches(
+        rule,
+        transient_head,
+        heads,
+        matches,
+        view,
+        novelty,
+        transients,
+    )
+    .await
 }
 
 /// The reach of a rule's concept premises, split by polarity:
@@ -1257,9 +1306,11 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 /// premise (removal-enabled and derived-premise firings take the
 /// full-body path instead), so seeding is complete for this candidate
 /// class while costing the delta's join fan-out, not relation size.
+#[allow(clippy::too_many_arguments)]
 async fn fire_seeded<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    heads: &Heads<'_>,
     rows: &[Artifact],
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
@@ -1332,7 +1383,16 @@ async fn fire_seeded<'a>(
     if matches.is_empty() {
         return Ok(());
     }
-    emit_matches(rule, transient_head, matches, view, novelty, transients).await
+    emit_matches(
+        rule,
+        transient_head,
+        heads,
+        matches,
+        view,
+        novelty,
+        transients,
+    )
+    .await
 }
 
 /// Bind a seed value into a premise term: a named variable binds (and
@@ -1370,6 +1430,7 @@ fn bind_seed(
 async fn emit_matches<'a>(
     rule: &InductiveRule,
     transient_head: bool,
+    heads: &Heads<'_>,
     matches: Vec<Match>,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
@@ -1433,9 +1494,16 @@ async fn emit_matches<'a>(
         }
         // A head written by succession elects the claim it succeeds
         // against the round view, as a transaction's own writes do
-        // against the line at commit.
+        // against the line at commit. A head that lands in a store keeps
+        // its pick instead: the store's rows are no claims, so settled
+        // here it would be asserted beside the row it succeeds.
+        let stored = head.take_cells(|the| heads.in_store(the));
         Box::pin(super::succession::resolve_against(view, &mut head)).await?;
-        for instruction in head.into_instructions() {
+        for instruction in head
+            .into_instructions()
+            .into_iter()
+            .chain(stored.into_instructions())
+        {
             if is_novel(view, &instruction).await? {
                 match instruction {
                     Instruction::Assert(a, policy) => {

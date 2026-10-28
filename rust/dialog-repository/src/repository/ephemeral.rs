@@ -1224,6 +1224,43 @@ impl Ephemeral {
         state.mint_held(delta, hold);
     }
 
+    /// What [`export`](Self::export) carries of `attributes`: their
+    /// tombstones, then the facts held under them. Read by attribute, so
+    /// it costs what the layer holds of them, not everything it holds.
+    pub(crate) fn export_of(&self, attributes: &[Relation]) -> Changes {
+        let state = self.state.read();
+        let mut changes = Changes::new();
+        for fact in state.shadowed.values() {
+            if attributes.contains(&fact.the) {
+                changes.dissociate(fact.the.clone(), fact.of.clone(), fact.is.clone());
+            }
+        }
+        for attribute in attributes {
+            for fact in state
+                .facts
+                .scan(&ArtifactSelector::new().the(attribute.clone()))
+            {
+                changes.associate(fact.the, fact.of, fact.is, Pick::All);
+            }
+        }
+        changes
+    }
+
+    /// The instructions of `changes` that would change this layer, in
+    /// order: an assertion of a fact it holds already is left out, since
+    /// applying it would change nothing.
+    pub(crate) fn unheld(&self, changes: Changes) -> Vec<Instruction> {
+        let state = self.state.read();
+        changes
+            .into_instructions()
+            .into_iter()
+            .filter(|instruction| match instruction {
+                Instruction::Assert(fact, _) => !state.facts.holds(fact),
+                Instruction::Retract(_) => true,
+            })
+            .collect()
+    }
+
     /// Everything this layer holds, as one batch: each tombstone as
     /// the retraction that hides its fact beneath, then each held fact
     /// as an assertion. The batch serializes (see [`Changes`]), so a

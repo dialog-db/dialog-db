@@ -93,6 +93,37 @@ pub(crate) fn transient_placement_attr() -> Relation {
     the!("dialog.attribute/transient").into()
 }
 
+/// The pending placement declarations of a read: those `held` (the
+/// declarations of a store, or of a batch, read first) and those of each
+/// staged layer after it, folded in order as the read sees them. It is
+/// all that [`Placements::resolve`] reads of the pending writes, at the
+/// cost of the declarations alone rather than of everything the layers
+/// hold.
+pub(crate) fn pending_declarations(held: Changes, layers: &[crate::Staged]) -> Changes {
+    let (scope, default, transient) = (scope_attr(), default_attr(), transient_placement_attr());
+    let mut pending = crate::Staged::default();
+    pending.apply(held);
+    for layer in layers {
+        pending
+            .apply(layer.export_cells(|the| *the == scope || *the == default || *the == transient));
+    }
+    pending.export()
+}
+
+/// The placement declarations of `changes`, in their order.
+pub(crate) fn declarations_of(changes: &Changes) -> Changes {
+    let (scope, default, transient) = (scope_attr(), default_attr(), transient_placement_attr());
+    changes
+        .clone()
+        .take_cells(|the| *the == scope || *the == default || *the == transient)
+}
+
+/// The placement declarations `store` holds, as its
+/// [`export`](crate::Ephemeral::export) carries them.
+pub(crate) fn declarations_held(store: &crate::Ephemeral) -> Changes {
+    store.export_of(&[scope_attr(), default_attr(), transient_placement_attr()])
+}
+
 /// Whether a batch writes a placement declaration: a scope, a default
 /// or a transient marker.
 pub(crate) fn touches_placements(changes: &Changes) -> bool {
@@ -1253,6 +1284,70 @@ mod tests {
                 .await?
                 .is_empty(),
             "the conclusion never reaches the tree"
+        );
+        Ok(())
+    }
+
+    /// A rule head under `last` placed on the session store succeeds the
+    /// row it concluded before, as a transaction's own `last` write to the
+    /// store does: the store holds one row of the cell, not one per commit.
+    #[dialog_common::test]
+    async fn it_succeeds_a_rule_concluded_session_row() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch.bind(session(), Target::Session);
+
+        let current: InductiveRule = serde_json::from_value(json!({
+            "assert!": {
+                "with": { "href": { "the": "site/current", "as": "Text", "pick": "last:" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "title": { "the": "doc/title", "as": "Text" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "title": { "?": { "name": "href" } }
+                }
+            }]
+        }))?;
+        branch
+            .transaction()
+            .assert(Placement::new("site/current".parse()?, session()))
+            .assert(current)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        for title in ["/a", "/b", "/c"] {
+            branch
+                .transaction()
+                .assert(
+                    dialog_query::the!("doc/title")
+                        .of(doc.clone())
+                        .is(title.to_string()),
+                )
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+            branch.refresh(&operator).await?;
+        }
+
+        let held: Vec<Value> = branch
+            .overlay()
+            .scan(&ArtifactSelector::new().the("site/current".parse()?))
+            .into_iter()
+            .map(|fact| fact.is)
+            .collect();
+        assert_eq!(
+            held,
+            vec![Value::String("/c".into())],
+            "each conclusion succeeds the one before"
         );
         Ok(())
     }

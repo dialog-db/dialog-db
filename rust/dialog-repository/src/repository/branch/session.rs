@@ -36,7 +36,7 @@ use tokio::sync::OnceCell;
 use crate::CommitError;
 use crate::REGISTRY;
 use crate::layer::{Hidden, MergeKeys, filter_hidden, guide_rows, merge_grouped};
-use crate::placement::{Placements, ScopeMap};
+use crate::placement::{Placements, ScopeMap, declarations_held, pending_declarations};
 use crate::repository::archive::networked::Reads;
 use crate::repository::branch::select::line_manifest;
 use crate::repository::ephemeral::Window;
@@ -217,12 +217,20 @@ impl<'a> QueryLayer<'a> {
     /// other query over the same branch, profile, operator and head.
     fn shared_metadata(&self, operator: &Capability<Operator>) -> Ephemeral {
         // Every query folds this in, and for a layer over one branch it
-        // depends only on the profile, the operator and the head, so the
-        // branch keeps it: deriving it hashes and base58-renders entities
-        // and re-parses both DIDs each time.
-        if let [SourceRef::Branch(branch)] = self.sources.as_slice() {
+        // depends only on the profile, the operator and the revision read,
+        // so the branch keeps it: deriving it hashes and base58-renders
+        // entities and re-parses both DIDs each time. A stack reads its
+        // bottom pinned, at every commit and poll, so a pinned read keeps
+        // it too.
+        let revision = match self.sources.as_slice() {
+            [SourceRef::Branch(branch)] => Some((*branch, branch.revision())),
+            [SourceRef::Pinned(branch, revision)] => Some((*branch, revision.cloned())),
+            _ => None,
+        };
+        if let Some((branch, revision)) = revision {
             return branch.layer_metadata(
                 operator,
+                revision,
                 || self.derive_metadata(operator),
                 || self.derive_heads(operator),
             );
@@ -237,9 +245,14 @@ impl<'a> QueryLayer<'a> {
     fn derive_heads(&self, operator: &Capability<Operator>) -> Changes {
         let mut heads = Changes::new();
         for source in &self.sources {
-            if let SourceRef::Branch(branch) = source
-                && let Some(revision) = branch.metadata(operator).revision
-            {
+            let revision = match source {
+                SourceRef::Branch(branch) => branch.metadata(operator).revision,
+                SourceRef::Pinned(branch, revision) => {
+                    branch.metadata_at(operator, revision.cloned()).revision
+                }
+                SourceRef::Snapshot(_) => None,
+            };
+            if let Some(revision) = revision {
                 revision.assert(&mut heads);
             }
         }
@@ -802,12 +815,10 @@ impl QueryEnv<'_> {
         let scopes = self
             .scopes
             .get_or_try_init(|| async {
-                let mut pending = Staged::default();
-                pending.apply(self.overlay.export());
-                for layer in self.layers() {
-                    pending.apply(layer.export());
-                }
-                Placements::resolve(bottom.as_ref(), &pending.export(), self.env)
+                // Only the declarations: every read of a stack resolves
+                // this, and the layers may hold a great deal else.
+                let pending = pending_declarations(declarations_held(&self.overlay), self.layers());
+                Placements::resolve(bottom.as_ref(), &pending, self.env)
                     .await
                     .map(|placements| Arc::new(placements.scopes()))
                     .map_err(|error| DialogArtifactsError::Storage(error.to_string()))
