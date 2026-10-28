@@ -56,7 +56,8 @@ use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::{Composite, QueryEnv};
 use crate::repository::source::SourceRef;
 use crate::rules::{
-    TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
+    TriggerFootprint, builtin_derives, derives_attr, derives_selector, hydrate, hydrate_inductive,
+    on_attr, reads_attr, source_attr, transient_attr,
 };
 use crate::{CommitError, Ephemeral, RemoteSite, Revision, RuleCache, Staged};
 
@@ -348,6 +349,10 @@ where
             }))
             .collect();
 
+        // Whether the view could hold a fact of a transient attribute the
+        // round brings none of, resolved once per attribute per round.
+        let mut sourced: HashMap<Relation, bool> = HashMap::new();
+
         let mut novelty = Changes::new();
         let mut emitted_transients = Changes::new();
         for entity in candidates {
@@ -358,7 +363,26 @@ where
                 .is_transient(&rule.conclusion().this(), &overlay, env)
                 .await?
                 || concludes_transient(&rule, placements);
-            if starved(&rule, placements, &present, &expanded) {
+            // A rule whose premise nothing in the view can match has no
+            // firing to find: it is not evaluated.
+            let mut starved = false;
+            for attribute in unsupplied(&rule, placements, &present, &expanded) {
+                let could = match sourced.get(&attribute) {
+                    Some(could) => *could,
+                    None => {
+                        let could = dispatch
+                            .could_hold(&attribute, &[changes, &transient_overlay], env)
+                            .await?;
+                        sourced.insert(attribute, could);
+                        could
+                    }
+                };
+                if !could {
+                    starved = true;
+                    break;
+                }
+            }
+            if starved {
                 continue;
             }
 
@@ -419,6 +443,89 @@ where
     }
 
     Ok(induced)
+}
+
+impl Dispatch<'_> {
+    /// Whether the view could hold a fact of `attribute` that the round
+    /// does not bring: a line stores one, or a rule deriving it, at its
+    /// head; a line's session store or an ephemeral layer holds one, or
+    /// such a rule; `staged` (the commit's writes and the round's
+    /// transients) asserts such a rule; or a built-in rule derives it.
+    /// What a line stores is read once per head.
+    async fn could_hold<Env>(
+        &self,
+        attribute: &Relation,
+        staged: &[&Changes],
+        env: &Env,
+    ) -> Result<bool, CommitError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let probes = Reach::Relation(attribute.clone()).probes();
+        if probes.iter().any(builtin_derives) {
+            return Ok(true);
+        }
+        let derives = derives_attr();
+        let staged_rule = staged.iter().flat_map(|changes| changes.iter()).any(
+            |(_, the, change)| {
+                *the == derives
+                    && matches!(change, Change::Assert(Value::Entity(on), _) if probes.contains(on))
+            },
+        );
+        if staged_rule {
+            return Ok(true);
+        }
+        let facts = ArtifactSelector::new().the(attribute.clone());
+        let holds = |store: &Ephemeral| {
+            !store.scan(&facts).is_empty()
+                || probes
+                    .iter()
+                    .any(|on| !store.scan(&derives_selector(on)).is_empty())
+        };
+        if self.memories.iter().any(|memory| holds(memory)) {
+            return Ok(true);
+        }
+        for slice in &self.trees {
+            if holds(slice.source.overlay()) {
+                return Ok(true);
+            }
+            let Some(head) = &slice.head else {
+                continue;
+            };
+            let cache = slice.source.rule_cache();
+            let stored = match cache.holds(attribute, head) {
+                Some(stored) => stored,
+                None => {
+                    let mut stored = !committed(slice.source, facts.clone(), env)
+                        .await?
+                        .is_empty();
+                    for on in &probes {
+                        if stored {
+                            break;
+                        }
+                        stored = !committed(slice.source, derives_selector(on), env)
+                            .await?
+                            .is_empty();
+                    }
+                    cache.record_holds(attribute.clone(), head.clone(), stored);
+                    stored
+                }
+            };
+            if stored {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 /// Where the heads of a commit's rules land: in a tree, or in a store
@@ -520,36 +627,41 @@ fn take_transient(changes: &mut Changes, placements: &Placements) -> Changes {
     asserted
 }
 
-/// Whether a positive premise of `rule` reads, in a required field, a
-/// transient attribute that the round holds no fact of (`present` is
-/// every attribute among its transients and its stimulus). A transient
-/// lives one round and is never held, so such a premise matches nothing
-/// and the body cannot hold: evaluating it would only find that out. A
-/// premise the deductive closure reaches this round (`expanded`) is left
-/// to the evaluation, since a rule may derive what it reads.
-fn starved(
+/// The transient attributes that a positive premise of `rule` reads in a
+/// required field and that the round brings no fact of (`present` is
+/// every attribute among its transients and its stimulus), leaving out
+/// any the deductive closure reaches this round (`expanded`). Such a
+/// premise matches only a fact the view holds apart from the round; when
+/// [`Dispatch::could_hold`] finds no way it could hold one, the body
+/// cannot hold, and evaluating it would only find that out.
+fn unsupplied(
     rule: &InductiveRule,
     placements: &Placements,
     present: &BTreeSet<Relation>,
     expanded: &BTreeSet<Reach>,
-) -> bool {
+) -> BTreeSet<Relation> {
     use dialog_query::{Premise, Proposition};
 
-    rule.analysis().premises.iter().any(|premise| {
+    let mut attributes = BTreeSet::new();
+    for premise in &rule.analysis().premises {
         let Premise::Assert(Proposition::Concept(query)) = premise else {
-            return false;
+            continue;
         };
-        query.predicate.with().iter().any(|(_, field)| {
+        for (_, field) in query.predicate.with().iter() {
             let The::Relation(the) = field.descriptor().the() else {
-                return false;
+                continue;
             };
             let attribute = Relation::from(the);
-            !field.is_optional()
+            if !field.is_optional()
                 && placements.is_transient(&attribute)
                 && !present.contains(&attribute)
                 && !expanded.iter().any(|reach| reach.covers(&attribute))
-        })
-    })
+            {
+                attributes.insert(attribute);
+            }
+        }
+    }
+    attributes
 }
 
 /// Whether a rule's conclusion is transient attributes alone: its

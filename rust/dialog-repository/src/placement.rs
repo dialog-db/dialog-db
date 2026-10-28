@@ -1479,6 +1479,91 @@ mod tests {
         Ok(())
     }
 
+    /// A fact of a transient attribute that a line stores, written by a
+    /// writer that ran no induction, is joined like any stored fact: a
+    /// later commit that brings the rest of the rule's premises fires the
+    /// rule over it, though the round brings no transient of it.
+    #[dialog_common::test]
+    async fn it_joins_a_stored_fact_of_a_transient_attribute() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(TransientAttribute::new("cmd.ping/target".parse()?))
+            .assert(TransientAttribute::new("cmd.ping/note".parse()?))
+            .assert(ping_rule()?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // The command is stored raw, while its target has no name.
+        let doc: Entity = "doc:1".parse()?;
+        let command: Entity = "cmd:1".parse()?;
+        let fact = |the: &str, is: Value| -> Result<Instruction> {
+            Ok(Instruction::Assert(
+                Artifact {
+                    the: the.parse()?,
+                    of: command.clone(),
+                    is,
+                    cause: None,
+                },
+                Pick::All,
+            ))
+        };
+        let other = repo.branch("main").open().perform(&operator).await?;
+        other
+            .commit(stream::iter(vec![
+                fact("cmd.ping/target", Value::Entity(doc.clone()))?,
+                fact("cmd.ping/note", Value::String("stored".into()))?,
+            ]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // A commit induces over the lag: the command, with no name yet.
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("note/text")
+                    .of(doc.clone())
+                    .is("x".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert!(
+            committed(&branch, &operator, "ping/last", &doc)
+                .await?
+                .is_empty(),
+            "no name, no firing"
+        );
+
+        // The name arrives in a later commit, which brings no command.
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/name")
+                    .of(doc.clone())
+                    .is("a".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            committed(&branch, &operator, "ping/last", &doc).await?,
+            vec![Value::String("stored".into())],
+            "the stored command joins the name"
+        );
+        Ok(())
+    }
+
     /// A rule head under `last` placed on the session store succeeds the
     /// row it concluded before, as a transaction's own `last` write to the
     /// store does: the store holds one row of the cell, not one per commit.

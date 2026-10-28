@@ -509,6 +509,9 @@ struct RuleCacheInner {
     /// of a branch head: whether the rule exists there, which only a read
     /// of the line answers.
     sources: HashMap<Entity, (Revision, Option<Vec<u8>>)>,
+    /// Whether a line stores a fact of an attribute, or a rule deriving
+    /// it, as of a branch head.
+    holds: HashMap<Relation, (Revision, bool)>,
     /// Whether a concept carries the committed `dialog.concept/transient`
     /// marker, as of a branch head.
     transient: HashMap<Entity, (Revision, bool)>,
@@ -901,6 +904,21 @@ impl RuleCache {
     /// none there.
     pub(crate) fn record_source(&self, rule: Entity, head: Revision, bytes: Option<Vec<u8>>) {
         self.inner.write().sources.insert(rule, (head, bytes));
+    }
+
+    /// Whether the line stores a fact of `attribute`, or a rule deriving
+    /// it, at `head`, if read at that head before.
+    pub(crate) fn holds(&self, attribute: &Relation, head: &Revision) -> Option<bool> {
+        match self.inner.read().holds.get(attribute) {
+            Some((read_at, stored)) if read_at == head => Some(*stored),
+            _ => None,
+        }
+    }
+
+    /// Record whether the line stores a fact of `attribute`, or a rule
+    /// deriving it, at `head`.
+    pub(crate) fn record_holds(&self, attribute: Relation, head: Revision, stored: bool) {
+        self.inner.write().holds.insert(attribute, (head, stored));
     }
 
     /// The plan of inductive rule `rule` for `scope`, if planned before.
