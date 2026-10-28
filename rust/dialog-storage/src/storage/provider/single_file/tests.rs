@@ -127,3 +127,65 @@ async fn profiling_entrypoints_run_codec_on_calling_thread() -> io::Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn compressed_frames_reopen_and_recover_every_torn_tail() -> io::Result<()> {
+    struct MetadataCodec;
+    impl FrameCodec for MetadataCodec {
+        fn identifier(&self) -> &'static str {
+            "metadata-v1"
+        }
+        fn encode(&self, bytes: &[u8]) -> io::Result<BlockFrame> {
+            Ok(BlockFrame {
+                metadata: bytes.to_vec(),
+                tokens: vec![],
+            })
+        }
+        fn decode(&self, metadata: &[u8], tokens: &[&[u8]]) -> io::Result<Vec<u8>> {
+            assert!(tokens.is_empty());
+            Ok(metadata.to_vec())
+        }
+    }
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("archive");
+    let archive = SingleFile::open(&path, MetadataCodec).await?;
+    let old = archive.put("tree", b"old".to_vec()).await?;
+    let before = std::fs::metadata(&path)?.len() as usize;
+    let content = vec![7; 100_000];
+    let hash = archive.put("tree", content.clone()).await?;
+    drop(archive);
+    let bytes = std::fs::read(&path)?;
+    assert!(bytes.len() - before < content.len() / 10);
+    assert_eq!(bytes[before + 16], 2, "compressed frame discriminator");
+    for end in before..=bytes.len() {
+        let cut = dir.path().join("cut");
+        std::fs::write(&cut, &bytes[..end])?;
+        let archive = SingleFile::open(&cut, MetadataCodec).await?;
+        assert_eq!(archive.get("tree", old).await?, Some(b"old".to_vec()));
+        let result = archive.get("tree", hash).await?;
+        if end == bytes.len() {
+            assert_eq!(result, Some(content.clone()));
+        } else {
+            assert!(result.is_none());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn compressed_frame_expansion_is_bounded_and_validated() -> io::Result<()> {
+    let mut payload = vec![1];
+    payload.extend_from_slice(&vec![0; 100_000]);
+    let packed = pack_record(&payload)?;
+    assert_eq!(unpack_record(packed.clone())?, payload);
+    let mut oversized = packed.clone();
+    oversized[1..9].copy_from_slice(&((MAX_RECORD as u64) + 1).to_le_bytes());
+    assert!(unpack_record(oversized).is_err());
+    let mut short = packed.clone();
+    short[1..9].copy_from_slice(&10u64.to_le_bytes());
+    assert!(unpack_record(short).is_err());
+    let mut corrupt = packed;
+    *corrupt.last_mut().unwrap() ^= 1;
+    assert!(unpack_record(corrupt).is_err());
+    Ok(())
+}

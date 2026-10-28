@@ -16,7 +16,8 @@ let archive = SingleFile::open("replica.dlg", TreeFrameCodec::<Key, State<Datum>
 Arena columns become complete component tokens, dictionary columns become their
 full distinct tokens. Each distinct byte token is recorded once in the file;
 frames refer to earlier token-record offsets. Relative pointers, value payloads,
-and other node bytes remain verbatim. Decoding uses the existing front-coding
+and other node bytes are reconstructed verbatim. Block frames use bounded fast
+DEFLATE compression when it saves bytes; shared token records stay uncompressed. Decoding uses the existing front-coding
 algorithm, then checks the original wire block hash. Opaque and noncanonical
 blocks remain lossless. Tree layout, identity, commit hashes and replication
 block boundaries do not change; this is a provider, not a new tree format.
@@ -37,6 +38,11 @@ that prefix. Snapshot construction is linear in file size, and its in-memory
 outboard costs about 6.25% of the file; extraction reads the requested chunks
 and authentication path. It is not a claim that the live growing file retains
 one root. This follows the [BAO outboard and slice API](https://docs.rs/bao/0.13.1/bao/encode/index.html).
+
+The initial uncompressed-frame prototype failed the space bar: at 2048 synthetic
+SE commits it used 198,803,387 bytes against the filesystem's 358,178,816 bytes
+(1.802x). Only 7,796,353 bytes were shared token payloads; frame metadata dominated.
+That evidence motivated compressing frames, rather than weakening the threshold.
 
 ## Measurement commands
 
@@ -69,6 +75,12 @@ DIALOG_PERF_ARCHIVE=single-file target/release/perf sweep --out-dir target/perf-
 target/release/perf compare target/perf-fs target/perf-single-file --base --threshold 10
 ```
 
+The `Test` workflow's manual `single_file_comparison=true` dispatch runs only
+this paired experiment and uploads both full sweeps, annotated codec costs,
+the exact comparison exit code, candidate SHA and toolchain. A negative adoption
+comparison is explicitly reported in the job summary; build/sweep or missing
+codec-attribution failures fail the job. Ordinary PR gates remain unchanged.
+
 Run these on Linux with callgrind (the Nix environment supplies it). The opt-in
 perf adapter calls `get_blocking` / `put_blocking` on the same log and codec so
 encoding, realization, hashing and dictionary operations run on the thread
@@ -77,7 +89,7 @@ would offload that CPU work to unmarked worker threads and undercount it. This
 instruction comparison intentionally excludes SingleFile worker scheduling;
 the repository wall-clock harness uses its normal async provider. Before citing
 instruction results, inspect Callgrind attribution and confirm nonzero costs for
-`TreeFrameCodec` encode/decode and the single-file log on exercised paths.
+`ProfiledCodec` encode/decode boundaries around the actual `TreeFrameCodec` and the single-file log on exercised paths.
 Default
 builds do not compile the override, and the existing volatile perf baselines
 are unchanged. Without an explicit selection the opt-in build chooses `fs`.

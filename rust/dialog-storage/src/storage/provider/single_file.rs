@@ -23,7 +23,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-const MAGIC: &[u8; 8] = b"DLGAR001";
+const MAGIC: &[u8; 8] = b"DLGAR002";
 const MAX_RECORD: usize = 256 * 1024 * 1024;
 
 /// A block split into private metadata and file-wide reusable byte tokens.
@@ -235,6 +235,42 @@ impl<C: FrameCodec> SingleFile<C> {
     }
 }
 
+// Metadata retains value layouts and relative pointers verbatim. Compressing
+// frame records removes their repeated padding/payload bytes without changing
+// tokens, wire content, or the cost of the default filesystem provider.
+fn pack_record(payload: &[u8]) -> io::Result<Vec<u8>> {
+    if payload.first() != Some(&1) || payload.len() < 256 {
+        return Ok(payload.to_vec());
+    }
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(payload)?;
+    let compressed = encoder.finish()?;
+    if compressed.len() + 9 >= payload.len() {
+        return Ok(payload.to_vec());
+    }
+    let mut record = vec![2];
+    put_u64(&mut record, payload.len() as u64);
+    record.extend_from_slice(&compressed);
+    Ok(record)
+}
+fn unpack_record(payload: Vec<u8>) -> io::Result<Vec<u8>> {
+    if payload.first() != Some(&2) {
+        return Ok(payload);
+    }
+    let mut input = &payload[1..];
+    let expected = number(&mut input)?;
+    if expected > MAX_RECORD as u64 {
+        return Err(invalid("expanded frame exceeds size limit"));
+    }
+    let decoder = flate2::read::ZlibDecoder::new(input);
+    let mut output = Vec::new();
+    decoder.take(expected + 1).read_to_end(&mut output)?;
+    if output.len() as u64 != expected || output.first() != Some(&1) {
+        return Err(invalid("invalid compressed frame length or kind"));
+    }
+    Ok(output)
+}
+
 impl Log {
     fn healthy(&self) -> io::Result<()> {
         if self.poisoned {
@@ -323,7 +359,7 @@ impl Log {
         if blake3::hash(&payload).as_bytes() != &hash {
             return Err(invalid("archive checksum mismatch"));
         }
-        Ok(payload)
+        unpack_record(payload)
     }
     fn index(&mut self, at: u64, payload: &[u8]) -> io::Result<()> {
         let mut data = payload;
@@ -363,21 +399,22 @@ impl Log {
         if payload.len() > MAX_RECORD {
             return Err(invalid("archive record exceeds size limit"));
         }
+        let encoded = pack_record(payload)?;
         let at = self.end;
         let result = (|| {
             self.file.seek(SeekFrom::Start(at))?;
-            self.file.write_all(&(payload.len() as u64).to_le_bytes())?;
+            self.file.write_all(&(encoded.len() as u64).to_le_bytes())?;
             self.file
-                .write_all(&(!(payload.len() as u64)).to_le_bytes())?;
-            self.file.write_all(payload)?;
-            self.file.write_all(blake3::hash(payload).as_bytes())?;
+                .write_all(&(!(encoded.len() as u64)).to_le_bytes())?;
+            self.file.write_all(&encoded)?;
+            self.file.write_all(blake3::hash(&encoded).as_bytes())?;
             Ok(())
         })();
         if let Err(error) = result {
             self.poisoned = true;
             return Err(error);
         }
-        self.end += 16 + payload.len() as u64 + 32;
+        self.end += 16 + encoded.len() as u64 + 32;
         self.index(at, payload)?;
         Ok(at)
     }

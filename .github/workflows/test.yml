@@ -1,5 +1,10 @@
 on:
   workflow_dispatch:
+    inputs:
+      single_file_comparison:
+        description: 'Run only the experimental paired archive comparison'
+        type: boolean
+        default: false
   pull_request:
   push:
     branches:
@@ -26,6 +31,7 @@ permissions:
 
 jobs:
   lint_nix:
+    if: github.event_name != 'workflow_dispatch' || !inputs.single_file_comparison
     name: 'Lint Nix'
     runs-on: 'ubuntu-latest'
     steps:
@@ -325,7 +331,7 @@ jobs:
   # workload and missing CPU-attribution failures still fail this job.
   single_file_archive:
     name: 'Single-file archive comparison'
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.single_file_comparison
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:

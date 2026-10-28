@@ -254,6 +254,18 @@ pub(crate) mod native {
         } else {
             SeLog::load(count)?
         };
+        let mut live = HashMap::<(&str, &str), std::collections::HashSet<String>>::new();
+        for fact in log.transactions.iter().flatten() {
+            let values = live.entry((&fact.of, &fact.the)).or_default();
+            if !dialog_baseline::se::is_multi_valued(&fact.the) {
+                values.clear();
+            }
+            values.insert(format!("{:?}", fact.value));
+        }
+        let live_facts = live
+            .values()
+            .map(std::collections::HashSet::len)
+            .sum::<usize>();
         let real = std::env::var_os("DIALOG_SE_CSV").is_some();
         let temp = tempfile::tempdir()?;
         tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
@@ -309,9 +321,9 @@ pub(crate) mod native {
             dialog_storage::provider::single_file::RangeSnapshot::verify(snapshot.root(), 0, length, &proof)?;
             let fs_bytes = disk(&temp.path().join("fs"))?;
             let file_bytes = disk(&path)?;
-            println!("source={} commits={} facts={} unique_blocks={} fs_bytes={} file_bytes={} ratio={:.3} fs_commit_ms={} file_commit_ms={} reopen_ms={} all_blocks_read_ms={} read_bytes={} tokens={} token_bytes={} index_bytes_lower_bound={} live_tree_bytes={} fs_reopen_ms={} fs_all_blocks_read_ms={} bao_snapshot_ms={} bao_outboard_bytes={}",
+            println!("source={} commits={} facts={} unique_blocks={} fs_bytes={} file_bytes={} ratio={:.3} fs_commit_ms={} file_commit_ms={} reopen_ms={} all_blocks_read_ms={} read_bytes={} tokens={} token_bytes={} index_bytes_lower_bound={} live_tree_bytes={} fs_reopen_ms={} fs_all_blocks_read_ms={} bao_snapshot_ms={} bao_outboard_bytes={} live_facts={} file_bytes_per_live_fact={:.1}",
                 if wide {"synthetic-wide"} else if real {"csv"} else {"synthetic-se"}, count, log.fact_count(), blocks.len(), fs_bytes, file_bytes,
-                fs_bytes as f64 / file_bytes as f64, fs_ms, file_ms, open_ms, read_ms, read_bytes, stats.tokens, stats.token_bytes, stats.index_bytes_lower_bound, live_bytes, fs_open_ms, fs_read_ms, snapshot_ms, snapshot.outboard_bytes());
+                fs_bytes as f64 / file_bytes as f64, fs_ms, file_ms, open_ms, read_ms, read_bytes, stats.tokens, stats.token_bytes, stats.index_bytes_lower_bound, live_bytes, fs_open_ms, fs_read_ms, snapshot_ms, snapshot.outboard_bytes(), live_facts, file_bytes as f64 / live_facts as f64);
             Ok(())
         })
     }

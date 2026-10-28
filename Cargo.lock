@@ -2038,6 +2038,7 @@ dependencies = [
  "dialog-effects",
  "dialog-varsig",
  "dirs",
+ "flate2",
  "futures-util",
  "getrandom 0.2.16",
  "http-body-util",
