@@ -61,7 +61,7 @@
 //! [`AnalyzedRule::is_entity_local`]: dialog_query::rule::analyzer::AnalyzedRule::is_entity_local
 
 use dialog_effects::blob::Read as BlobRead;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
@@ -76,7 +76,7 @@ use dialog_artifacts::{
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
-use dialog_common::{ConditionalSync, Holds};
+use dialog_common::{Buffer, ConditionalSync, Holds};
 use dialog_effects::archive::prelude::ArchiveScope;
 use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
@@ -87,8 +87,9 @@ use dialog_query::concept::query::fixpoint::{Continuation, InMemoryAnswerTable};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output as _, Restriction};
 use dialog_query::source::SelectRules;
-use dialog_search_tree::Change;
+use dialog_search_tree::{Change, DialogSearchTreeError, LoadBlock};
 use dialog_storage::Blake3Hash;
+use futures_util::future::Either;
 use futures_util::stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 
@@ -101,6 +102,44 @@ use crate::{Branch, Index, NetworkedIndex, RemoteSite, Revision};
 /// window of 16 comes within 2% of the best modeled time on mobile,
 /// and a wider one holds more reads open for little gain.
 const MAINTAIN_WINDOW: usize = 16;
+
+/// Immutable blocks loaded while one graph poll checks several demand covers.
+/// A fresh cache per poll never crosses branch/authority contexts; failures and
+/// misses are not cached. It does not widen any query's demand.
+pub(crate) type DiffBlockCache = Arc<Mutex<HashMap<NodeHash, Buffer>>>;
+
+struct DiffStorage<'a, Env> {
+    storage: Env,
+    cache: Option<&'a DiffBlockCache>,
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+impl<Env> Provider<LoadBlock> for DiffStorage<'_, Env>
+where
+    Env: Provider<LoadBlock> + ConditionalSync,
+{
+    async fn execute(&self, load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
+        if let Some(cache) = self.cache
+            && let Some(buffer) = cache
+                .lock()
+                .expect("graph diff cache lock")
+                .get(&load.hash)
+                .cloned()
+        {
+            return Ok(Some(buffer));
+        }
+        let hash = load.hash.clone();
+        let result = Provider::<LoadBlock>::execute(&self.storage, load).await?;
+        if let (Some(cache), Some(buffer)) = (self.cache, result.as_ref()) {
+            cache
+                .lock()
+                .expect("graph diff cache lock")
+                .insert(hash, buffer.clone());
+        }
+        Ok(result)
+    }
+}
 
 /// The demand cover of one evaluation: every index key range the
 /// evaluation's selects read, recorded at the `Select` boundary.
@@ -653,6 +692,28 @@ where
             + ConditionalSync
             + 'static,
     {
+        self.poll_using(env, None).await
+    }
+
+    pub(crate) async fn poll_using<'a, Env>(
+        &'a mut self,
+        env: &'a Env,
+        diff_cache: Option<&'a DiffBlockCache>,
+    ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
+            + ConditionalSync
+            + 'static,
+    {
         let current = self.branch.revision();
         let sequence = self.branch.overlay().revision().sequence;
         if self.initialized {
@@ -670,7 +731,7 @@ where
             if !(head_moved && self.demand.depends_on_head()) {
                 let mut touched = Touched::Nothing;
                 if head_moved {
-                    touched = touched.merge(self.touched(env, &current).await?);
+                    touched = touched.merge(self.touched(env, &current, diff_cache).await?);
                 }
                 if overlay_moved && !matches!(touched, Touched::Rules) {
                     touched = touched.merge(self.touched_overlay(self.overlay_sequence));
@@ -755,6 +816,7 @@ where
         &'a self,
         env: &'a Env,
         current: &'a Option<Revision>,
+        diff_cache: Option<&'a DiffBlockCache>,
     ) -> Result<Touched, EvaluationError>
     where
         Env: Provider<BlobRead>
@@ -795,6 +857,10 @@ where
         // Keep the raw backend to fetch spilled value blocks by reference.
         let raw_store = store.clone();
         let storage = store;
+        let cached_storage = DiffStorage {
+            storage: storage.clone(),
+            cache: diff_cache,
+        };
         let index_at = |hash: Option<Blake3Hash>| match hash {
             Some(hash) => {
                 Index::from_hash_with_cache(NodeHash::from(hash), self.branch.node_cache())
@@ -806,7 +872,17 @@ where
         let previous = index_at(pinned);
         let next = index_at(target);
 
-        let changes = previous.differentiate_within(&next, &scope, &storage, &storage);
+        let changes = if diff_cache.is_some() {
+            Either::Left(previous.differentiate_within(
+                &next,
+                &scope,
+                &cached_storage,
+                &cached_storage,
+            ))
+        } else {
+            // Ordinary subscriptions retain their original storage path.
+            Either::Right(previous.differentiate_within(&next, &scope, &storage, &storage))
+        };
         let mut changes = Box::pin(changes);
         let mut subjects = BTreeSet::new();
         let mut asserted = Vec::new();
@@ -4979,3 +5055,76 @@ mod tests {
 
 #[cfg(test)]
 mod invariants;
+
+#[cfg(test)]
+mod graph_cache_tests {
+    use super::{DiffBlockCache, DiffStorage};
+    use dialog_capability::Provider;
+    use dialog_common::Buffer;
+    use dialog_search_tree::{DialogSearchTreeError, LoadBlock};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Flaky {
+        calls: AtomicUsize,
+        buffer: Buffer,
+    }
+
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    impl Provider<LoadBlock> for Flaky {
+        async fn execute(&self, _load: LoadBlock) -> Result<Option<Buffer>, DialogSearchTreeError> {
+            match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => Ok(None),
+                1 => Err(DialogSearchTreeError::Access("transient".into())),
+                _ => Ok(Some(self.buffer.clone())),
+            }
+        }
+    }
+
+    #[dialog_common::test]
+    async fn graph_diff_cache_retries_misses_and_failures_and_only_reads_requested_blocks()
+    -> anyhow::Result<()> {
+        let cache = DiffBlockCache::default();
+        let buffer = Buffer::from(vec![1, 2, 3]);
+        let hash = buffer.blake3_hash().clone();
+        let storage = DiffStorage {
+            storage: Flaky {
+                calls: AtomicUsize::new(0),
+                buffer,
+            },
+            cache: Some(&cache),
+        };
+        assert_eq!(storage.storage.calls.load(Ordering::SeqCst), 0);
+        assert!(
+            LoadBlock::new(hash.clone())
+                .perform(&storage)
+                .await?
+                .is_none()
+        );
+        assert!(
+            LoadBlock::new(hash.clone())
+                .perform(&storage)
+                .await
+                .is_err()
+        );
+        assert!(
+            LoadBlock::new(hash.clone())
+                .perform(&storage)
+                .await?
+                .is_some()
+        );
+        assert!(LoadBlock::new(hash).perform(&storage).await?.is_some());
+        assert_eq!(storage.storage.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(cache.lock().unwrap().len(), 1);
+        // A new poll has no shared entry, even against the same backend.
+        let next_cache = DiffBlockCache::default();
+        let next = DiffStorage {
+            storage: storage.storage,
+            cache: Some(&next_cache),
+        };
+        let hash = next.storage.buffer.blake3_hash().clone();
+        assert!(LoadBlock::new(hash).perform(&next).await?.is_some());
+        assert_eq!(next.storage.calls.load(Ordering::SeqCst), 4);
+        Ok(())
+    }
+}

@@ -10,6 +10,7 @@ use dialog_effects::memory::Resolve;
 use dialog_query::graph::{GraphDelta, GraphError, GraphQuery, GraphReader, GraphResult};
 use dialog_query::{ConceptDescriptor, ConceptQuery, Entity, Value};
 
+use super::subscription::DiffBlockCache;
 use crate::{Branch, RemoteSite, Subscription};
 
 // The constraint is serialized with its tagged Value representation, so distinct
@@ -113,8 +114,13 @@ impl GraphSubscription {
         }
         self.used.clear();
         let query = self.query.clone();
+        let diff_cache = DiffBlockCache::default();
         let next = query
-            .read(&mut SubscriptionReader { graph: self, env })
+            .read(&mut SubscriptionReader {
+                graph: self,
+                env,
+                diff_cache: &diff_cache,
+            })
             .await?;
         self.fields.retain(|key, subscription| {
             if self.used.contains(key) {
@@ -138,6 +144,7 @@ impl GraphSubscription {
 struct SubscriptionReader<'a, Env> {
     graph: &'a mut GraphSubscription,
     env: &'a Env,
+    diff_cache: &'a DiffBlockCache,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -158,7 +165,10 @@ where
         + 'static,
 {
     async fn roots(&mut self, _query: &ConceptQuery) -> Result<Vec<Entity>, GraphError> {
-        self.graph.root.poll(self.env).await?;
+        self.graph
+            .root
+            .poll_using(self.env, Some(self.diff_cache))
+            .await?;
         Ok(self
             .graph
             .root
@@ -195,7 +205,9 @@ where
             .fields
             .get_mut(&key)
             .expect("inserted field subscription");
-        subscription.poll(self.env).await?;
+        subscription
+            .poll_using(self.env, Some(self.diff_cache))
+            .await?;
         let mut values = Vec::new();
         for row in subscription.results() {
             let value = row.value(ConceptDescriptor::VALUE)?;
