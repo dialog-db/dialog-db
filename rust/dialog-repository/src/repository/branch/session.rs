@@ -277,6 +277,14 @@ impl<'a> QueryLayer<'a> {
         Ephemeral::holding(overlay)
     }
 
+    /// Stage a graph read over these same lines and overlay.
+    pub fn graph(&self, query: dialog_query::graph::GraphQuery) -> SelectGraph<'a> {
+        SelectGraph {
+            layer: self.clone(),
+            query,
+        }
+    }
+
     /// Stage a query application. Call `.perform(&operator)` to execute.
     pub fn select<Q: Application>(&self, query: Q) -> SelectQuery<'_, Q> {
         SelectQuery {
@@ -382,6 +390,54 @@ impl<'a, Q: Application> SelectQuery<'a, Q> {
                 yield result?;
             }
         }
+    }
+}
+
+/// A graph read over a query layer, preserving its overlay and metadata.
+pub struct SelectGraph<'a> {
+    layer: QueryLayer<'a>,
+    query: dialog_query::graph::GraphQuery,
+}
+
+impl<'a> SelectGraph<'a> {
+    /// Evaluate the matching and shaping stages in one query scope.
+    pub async fn perform<Env>(
+        self,
+        env: &'a Env,
+    ) -> Result<dialog_query::graph::GraphResult, dialog_query::graph::GraphError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<Identify>
+            + Provider<Hydrate>
+            + Provider<Preload>
+            + Provider<Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + Holds
+            + ConditionalSync
+            + 'static,
+    {
+        use futures_util::TryStreamExt as _;
+        let operator = Identify
+            .perform(env)
+            .await
+            .map_err(|e| dialog_query::graph::GraphError::Invalid(format!("identify: {e}")))?;
+        let overlay = self.layer.overlay(&operator);
+        let sources: Vec<Source> = self
+            .layer
+            .sources
+            .iter()
+            .map(|source| source.to_source())
+            .collect();
+        let query_env = QueryEnv::new(sources.clone(), overlay, env);
+        let results = Box::pin(futures_util::stream::once(self.query.perform(&query_env)));
+        let queue = Provider::<Speculation>::execute(env, ()).await;
+        let mut driven = Box::pin(Driven::new(results, sources, env, queue));
+        driven.try_next().await?.ok_or_else(|| {
+            dialog_query::graph::GraphError::Invalid("graph read ended without a result".into())
+        })
     }
 }
 

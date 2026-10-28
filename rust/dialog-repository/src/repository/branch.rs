@@ -99,6 +99,8 @@ mod session;
 use dialog_effects::archive::prelude::ArchiveScope;
 pub use session::*;
 
+mod graph;
+pub use graph::*;
 mod subscription;
 pub use subscription::*;
 

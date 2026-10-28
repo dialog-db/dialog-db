@@ -12,7 +12,7 @@ pub(crate) use induce::induction_ignores;
 mod query;
 mod succession;
 pub use batch::*;
-pub use query::{TransactionQuery, TransactionSelectQuery};
+pub use query::{TransactionQuery, TransactionSelectGraph, TransactionSelectQuery};
 pub(crate) use succession::ReadSettlement;
 
 use crate::Commit;
