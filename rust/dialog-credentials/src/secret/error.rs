@@ -27,7 +27,14 @@ pub enum SecretError {
     /// written before agreement keys were stored.
     AgreementKeyUnavailable,
 
-    /// The recipient's DID does not yield a usable agreement key.
+    /// The secret was concealed with X-Wing, and no [`XWingSecretKey`] was
+    /// given to reveal it with.
+    ///
+    /// [`XWingSecretKey`]: super::XWingSecretKey
+    XWingKeyUnavailable,
+
+    /// The recipient's DID, or its X-Wing public key, does not yield a usable
+    /// key.
     InvalidRecipient,
 
     /// A platform crypto operation failed: agreement, HKDF, AEAD, or
@@ -42,6 +49,12 @@ impl std::fmt::Display for SecretError {
             Self::Malformed => write!(f, "malformed sealed secret"),
             Self::AgreementKeyUnavailable => {
                 write!(f, "no agreement key available for this identity")
+            }
+            Self::XWingKeyUnavailable => {
+                write!(
+                    f,
+                    "secret was concealed with X-Wing and no X-Wing key was given"
+                )
             }
             Self::InvalidRecipient => write!(f, "recipient has no usable agreement key"),
             Self::Crypto(e) => write!(f, "crypto operation failed: {e}"),

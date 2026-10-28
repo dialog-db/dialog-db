@@ -1,36 +1,66 @@
-//! Sealed secrets: encrypt to a `did:key` with no prior interaction.
+//! Sealed secrets: encrypt to an identity so that only it can reveal them.
 //!
 //! A holder of someone's DID can conceal a secret so that only that identity
-//! can reveal it. Nothing has to be published or exchanged first -- the
-//! recipient's X25519 agreement key is derived from the Ed25519 key its DID
-//! already carries.
+//! can reveal it. Two schemes do this, told apart by the [`SealedSecret`]
+//! itself, and [`Secret::reveal`] opens both.
+//!
+//! [`Scheme::XWing`] conceals to the recipient's [`XWingPublicKey`], which the
+//! recipient publishes beside its DID. It holds against a quantum computer,
+//! and it is what to use whenever the recipient's key is at hand:
 //!
 //! ```no_run
-//! # use dialog_credentials::{Ed25519Signer, secret::Context};
+//! # use dialog_credentials::{Ed25519Signer, secret::{Context, XWingSecretKey}};
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! const VAULT: Context = Context::new("dialog/vault/v1");
 //!
 //! let profile = Ed25519Signer::generate().await?;
+//! // The profile keeps this key's seed, and publishes its public key.
+//! let x_wing = XWingSecretKey::generate()?;
+//! let published = x_wing.public_key();
 //! let vault_key = [7u8; 32];
 //!
-//! // Anyone holding the profile's DID can seal to it.
-//! let sealed = profile.ed25519_did().secret(VAULT).conceal(&vault_key).await?;
+//! // Anyone holding the profile's DID and its published key can seal to it.
+//! let sealed = profile
+//!     .ed25519_did()
+//!     .secret(VAULT)
+//!     .with(&published)
+//!     .conceal(&vault_key)
+//!     .await?;
 //!
 //! // Only the profile can open it.
-//! let revealed = profile.secret(VAULT).reveal(&sealed).await?;
+//! let revealed = profile.secret(VAULT).with(&x_wing).reveal(&sealed).await?;
 //! assert_eq!(revealed, vault_key);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! [`Scheme::X25519`] needs nothing but the DID -- the recipient's X25519
+//! agreement key is derived from the Ed25519 key its DID already carries --
+//! and it is what [`Seal::conceal`] does without a key. It does not hold
+//! against a quantum computer, which recovers the private key from the DID:
+//! anyone who stores such a secret today can reveal it then.
+//!
+//! ```no_run
+//! # use dialog_credentials::{Ed25519Signer, secret::Context};
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # const VAULT: Context = Context::new("dialog/vault/v1");
+//! # let profile = Ed25519Signer::generate().await?;
+//! let sealed = profile.ed25519_did().secret(VAULT).conceal(b"key").await?;
+//! assert_eq!(profile.secret(VAULT).reveal(&sealed).await?, b"key");
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! # Construction
 //!
-//! Each `conceal` generates a fresh ephemeral X25519 key pair, agrees with the
-//! recipient's derived key, and derives an AES-256-GCM key with HKDF-SHA256
-//! bound to the context label and both public keys. The ephemeral public key
-//! travels with the ciphertext; the ephemeral secret is discarded. Sealing
-//! twice therefore produces different bytes, and a later compromise of the
-//! sender's own keys does not open past messages.
+//! Each `conceal` encapsulates a fresh shared secret to the recipient: an
+//! ephemeral X25519 key pair agreeing with the recipient's derived key, or an
+//! X-Wing encapsulation to its X-Wing key. HKDF-SHA256 derives an AES-256-GCM
+//! key from it, bound to the context label, the scheme, the encapsulation and
+//! the recipient's public key, and the recipient's DID is the additional
+//! data. Nothing of the sender's own keys takes part, so sealing twice
+//! produces different bytes, and a later compromise of the sender's keys does
+//! not open past messages.
 
 use crate::ed25519::{
     Ed25519Signer, Ed25519Verifier, Extractable, Sealed, X25519PublicKey, X25519SecretKey,
@@ -41,9 +71,13 @@ use std::future::Future;
 mod error;
 mod message;
 mod platform;
+mod x_wing;
 
 pub use error::SecretError;
-pub use message::SealedSecret;
+pub use message::{Scheme, SealedSecret};
+pub use x_wing::{X_WING_PUBLIC_KEY_LEN, X_WING_SEED_LEN, XWingPublicKey, XWingSecretKey};
+
+use message::Encapsulation;
 
 /// A domain-separation label scoping a sealed secret to one purpose.
 ///
@@ -85,13 +119,29 @@ impl std::fmt::Display for Context {
 /// Obtained from [`Ed25519Verifier::secret`]. Holding only a public identity,
 /// this can conceal but not reveal -- revealing needs [`Secret`], which only a
 /// signer can produce.
+///
+/// Conceals with [`Scheme::X25519`] unless given the recipient's X-Wing key
+/// with [`Seal::with`].
 #[derive(Debug, Clone, Copy)]
 pub struct Seal<'a> {
     recipient: &'a Ed25519Verifier,
     context: Context,
+    key: Option<&'a XWingPublicKey>,
 }
 
-impl Seal<'_> {
+impl<'a> Seal<'a> {
+    /// Conceal with X-Wing, to the recipient's published `key`.
+    ///
+    /// The key has to be the recipient's: see the warning on
+    /// [`XWingPublicKey`].
+    #[must_use]
+    pub const fn with(self, key: &'a XWingPublicKey) -> Self {
+        Self {
+            key: Some(key),
+            ..self
+        }
+    }
+
     /// Conceal `plain` so that only the recipient can reveal it.
     ///
     /// # Errors
@@ -99,8 +149,13 @@ impl Seal<'_> {
     /// Returns an error if the recipient's DID yields no usable agreement key,
     /// or if a platform crypto operation fails.
     pub async fn conceal(&self, plain: &[u8]) -> Result<SealedSecret, SecretError> {
-        let recipient = X25519PublicKey::from_ed25519(self.recipient).await?;
-        platform::conceal(&recipient, self.recipient, self.context, plain).await
+        match self.key {
+            Some(key) => platform::conceal_x_wing(key, self.recipient, self.context, plain).await,
+            None => {
+                let recipient = X25519PublicKey::from_ed25519(self.recipient).await?;
+                platform::conceal(&recipient, self.recipient, self.context, plain).await
+            }
+        }
     }
 }
 
@@ -108,23 +163,49 @@ impl Seal<'_> {
 ///
 /// Obtained from [`Ed25519Signer::secret`]. Backed by a signing key, so it can
 /// both conceal (to itself) and reveal.
+///
+/// Reveals secrets concealed with [`Scheme::X25519`] from the signing key
+/// alone. Revealing one concealed with [`Scheme::XWing`] also takes the
+/// identity's X-Wing key, given with [`Secret::with`].
 #[derive(Debug, Clone, Copy)]
 pub struct Secret<'a, E = crate::ed25519::Sealed> {
     signer: &'a Ed25519Signer<E>,
     context: Context,
+    key: Option<&'a XWingSecretKey>,
 }
 
-impl<E> Secret<'_, E> {
-    /// Reveal a secret concealed to this identity.
+impl<'a, E> Secret<'a, E> {
+    /// Reveal, and conceal to self, with this identity's X-Wing `key` too.
+    #[must_use]
+    pub const fn with(self, key: &'a XWingSecretKey) -> Self {
+        Self {
+            key: Some(key),
+            ..self
+        }
+    }
+
+    /// Reveal a secret concealed to this identity, with either scheme.
     ///
     /// # Errors
     ///
     /// Returns [`SecretError::Failed`] if the message was sealed to a
     /// different identity or context, or if it has been tampered with. The
     /// cases are deliberately indistinguishable.
+    ///
+    /// Returns [`SecretError::XWingKeyUnavailable`] if the message was sealed
+    /// with X-Wing and no X-Wing key was given with [`Secret::with`].
     pub async fn reveal(&self, sealed: &SealedSecret) -> Result<Vec<u8>, SecretError> {
-        let key: X25519SecretKey = self.signer.agreement_key().await?;
-        platform::reveal(&key, self.signer.ed25519_did(), self.context, sealed).await
+        let recipient = self.signer.ed25519_did();
+        match &sealed.encapsulation {
+            Encapsulation::X25519(ephemeral) => {
+                let key: X25519SecretKey = self.signer.agreement_key().await?;
+                platform::reveal(&key, recipient, self.context, ephemeral, sealed).await
+            }
+            Encapsulation::XWing(encapsulated) => {
+                let key = self.key.ok_or(SecretError::XWingKeyUnavailable)?;
+                platform::reveal_x_wing(key, recipient, self.context, encapsulated, sealed).await
+            }
+        }
     }
 
     /// Derive a signer from this identity, deterministically.
@@ -176,17 +257,18 @@ impl<E> Secret<'_, E> {
 
     /// Conceal `plain` to this same identity.
     ///
-    /// Useful for sealing something only you can read back later.
+    /// Useful for sealing something only you can read back later. Conceals
+    /// with X-Wing when given an X-Wing key, and with X25519 otherwise.
     ///
     /// # Errors
     ///
     /// Returns an error if a platform crypto operation fails.
     pub async fn conceal(&self, plain: &[u8]) -> Result<SealedSecret, SecretError> {
-        self.signer
-            .ed25519_did()
-            .secret(self.context)
-            .conceal(plain)
-            .await
+        let seal = self.signer.ed25519_did().secret(self.context);
+        match self.key {
+            Some(key) => seal.with(&key.public_key()).conceal(plain).await,
+            None => seal.conceal(plain).await,
+        }
     }
 }
 
@@ -245,6 +327,7 @@ impl Ed25519Verifier {
         Seal {
             recipient: self,
             context,
+            key: None,
         }
     }
 }
@@ -256,6 +339,7 @@ impl<E> Ed25519Signer<E> {
         Secret {
             signer: self,
             context,
+            key: None,
         }
     }
 }
@@ -528,7 +612,7 @@ mod tests {
 
         assert_ne!(first.to_bytes(), second.to_bytes());
         assert_ne!(
-            first.ephemeral_public_key, second.ephemeral_public_key,
+            first.encapsulation, second.encapsulation,
             "each seal should use a fresh ephemeral key"
         );
 
@@ -719,6 +803,267 @@ mod web_tests {
                 Err(SecretError::AgreementKeyUnavailable)
             ),
             "a profile with no agreement key must fail, not derive"
+        );
+    }
+}
+
+/// X-Wing sealing, and its coexistence with the X25519 secrets that came
+/// before it.
+#[cfg(test)]
+mod x_wing_tests {
+    use super::*;
+
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_service_worker);
+
+    const VAULT: Context = Context::new("dialog/vault/v1");
+    const OTHER: Context = Context::new("dialog/other/v1");
+
+    async fn signer(seed: u8) -> Ed25519Signer {
+        Ed25519Signer::import(&[seed; 32]).await.unwrap()
+    }
+
+    fn key(seed: u8) -> XWingSecretKey {
+        XWingSecretKey::from_seed([seed; X_WING_SEED_LEN])
+    }
+
+    async fn sealed_to(
+        profile: &Ed25519Signer,
+        key: &XWingSecretKey,
+        plain: &[u8],
+    ) -> SealedSecret {
+        profile
+            .ed25519_did()
+            .secret(VAULT)
+            .with(&key.public_key())
+            .conceal(plain)
+            .await
+            .unwrap()
+    }
+
+    #[dialog_common::test]
+    async fn it_conceals_and_reveals_with_x_wing() {
+        let profile = signer(1).await;
+        let x_wing = key(1);
+
+        let sealed = sealed_to(&profile, &x_wing, &[7u8; 32]).await;
+
+        assert_eq!(sealed.scheme(), Scheme::XWing);
+        assert_eq!(
+            profile
+                .secret(VAULT)
+                .with(&x_wing)
+                .reveal(&sealed)
+                .await
+                .unwrap(),
+            [7u8; 32]
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_conceals_to_self_with_x_wing_when_given_a_key() {
+        let profile = signer(2).await;
+        let x_wing = key(2);
+        let secret = profile.secret(VAULT).with(&x_wing);
+
+        let sealed = secret.conceal(b"note to self").await.unwrap();
+
+        assert_eq!(sealed.scheme(), Scheme::XWing);
+        assert_eq!(secret.reveal(&sealed).await.unwrap(), b"note to self");
+    }
+
+    #[dialog_common::test]
+    async fn it_still_conceals_with_x25519_without_a_key() {
+        let profile = signer(3).await;
+
+        let sealed = profile
+            .ed25519_did()
+            .secret(VAULT)
+            .conceal(b"s")
+            .await
+            .unwrap();
+
+        assert_eq!(sealed.scheme(), Scheme::X25519);
+    }
+
+    /// The compatibility guarantee: holding an X-Wing key changes nothing for
+    /// a secret concealed with X25519, so a recipient that adopts X-Wing keeps
+    /// every secret it already has.
+    #[dialog_common::test]
+    async fn it_reveals_an_x25519_secret_with_an_x_wing_key_given() {
+        let profile = signer(4).await;
+        let sealed = profile
+            .ed25519_did()
+            .secret(VAULT)
+            .conceal(b"older")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            profile
+                .secret(VAULT)
+                .with(&key(4))
+                .reveal(&sealed)
+                .await
+                .unwrap(),
+            b"older"
+        );
+    }
+
+    #[dialog_common::test]
+    async fn it_needs_the_x_wing_key_to_reveal_an_x_wing_secret() {
+        let profile = signer(5).await;
+        let sealed = sealed_to(&profile, &key(5), b"secret").await;
+
+        let revealed = profile.secret(VAULT).reveal(&sealed).await;
+
+        assert!(
+            matches!(revealed, Err(SecretError::XWingKeyUnavailable)),
+            "the signing key alone must not reveal an X-Wing secret: {revealed:?}"
+        );
+    }
+
+    /// The X25519 half of X-Wing is not the identity's agreement key, so a
+    /// signer holding the right identity and the wrong X-Wing key reveals
+    /// nothing.
+    #[dialog_common::test]
+    async fn another_x_wing_key_cannot_reveal() {
+        let profile = signer(6).await;
+        let sealed = sealed_to(&profile, &key(6), b"secret").await;
+
+        assert!(matches!(
+            profile.secret(VAULT).with(&key(7)).reveal(&sealed).await,
+            Err(SecretError::Failed)
+        ));
+    }
+
+    /// The recipient's DID is the additional data, so a secret concealed to
+    /// one identity's X-Wing key does not open for another identity holding
+    /// that same key.
+    #[dialog_common::test]
+    async fn another_identity_cannot_reveal_with_the_same_x_wing_key() {
+        let profile = signer(8).await;
+        let intruder = signer(9).await;
+        let x_wing = key(8);
+        let sealed = sealed_to(&profile, &x_wing, b"secret").await;
+
+        assert!(matches!(
+            intruder.secret(VAULT).with(&x_wing).reveal(&sealed).await,
+            Err(SecretError::Failed)
+        ));
+    }
+
+    #[dialog_common::test]
+    async fn a_different_context_cannot_reveal_an_x_wing_secret() {
+        let profile = signer(10).await;
+        let x_wing = key(10);
+        let sealed = sealed_to(&profile, &x_wing, b"secret").await;
+
+        assert!(matches!(
+            profile.secret(OTHER).with(&x_wing).reveal(&sealed).await,
+            Err(SecretError::Failed)
+        ));
+    }
+
+    #[dialog_common::test]
+    async fn tampering_with_an_x_wing_secret_is_detected() {
+        let profile = signer(11).await;
+        let x_wing = key(11);
+        let sealed = sealed_to(&profile, &x_wing, b"secret").await;
+        let bytes = sealed.to_bytes();
+
+        // The X-Wing ciphertext, and the AES-GCM tag.
+        for at in [33, 33 + 1119, bytes.len() - 1] {
+            let mut tampered = bytes.clone();
+            tampered[at] ^= 0x01;
+            let tampered = SealedSecret::from_bytes(&tampered).unwrap();
+            assert!(
+                matches!(
+                    profile.secret(VAULT).with(&x_wing).reveal(&tampered).await,
+                    Err(SecretError::Failed)
+                ),
+                "a flipped byte at {at} must not reveal"
+            );
+        }
+    }
+
+    #[dialog_common::test]
+    async fn the_x_wing_wire_format_roundtrips() {
+        let profile = signer(12).await;
+        let x_wing = key(12);
+        let sealed = sealed_to(&profile, &x_wing, &[3u8; 32]).await;
+
+        let bytes = sealed.to_bytes();
+        assert_eq!(
+            bytes.len(),
+            32 + 1 + 1120 + 12 + 32 + 16,
+            "1213 bytes for a 32-byte secret"
+        );
+        assert_eq!(&bytes[..33], &[[0u8; 32].as_slice(), &[1]].concat());
+
+        let decoded = SealedSecret::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, sealed);
+        assert_eq!(
+            profile
+                .secret(VAULT)
+                .with(&x_wing)
+                .reveal(&decoded)
+                .await
+                .unwrap(),
+            [3u8; 32]
+        );
+    }
+
+    #[dialog_common::test]
+    async fn an_unknown_version_is_malformed() {
+        let mut bytes = vec![0u8; 32];
+        bytes.push(0x02);
+        bytes.extend_from_slice(&[0u8; 1120 + 12 + 16]);
+
+        assert!(matches!(
+            SealedSecret::from_bytes(&bytes),
+            Err(SecretError::Malformed)
+        ));
+    }
+
+    #[dialog_common::test]
+    async fn a_truncated_x_wing_secret_is_malformed() {
+        let profile = signer(13).await;
+        let bytes = sealed_to(&profile, &key(13), b"").await.to_bytes();
+
+        for len in [33, 33 + 1120, bytes.len() - 1] {
+            assert!(
+                matches!(
+                    SealedSecret::from_bytes(&bytes[..len]),
+                    Err(SecretError::Malformed)
+                ),
+                "{len} bytes must not decode"
+            );
+        }
+    }
+
+    #[dialog_common::test]
+    async fn x_wing_keys_roundtrip_through_their_encodings() {
+        let x_wing = key(14);
+
+        let restored = XWingSecretKey::from_seed(x_wing.to_seed());
+        assert_eq!(restored.public_key(), x_wing.public_key());
+
+        let public = x_wing.public_key();
+        let bytes = public.to_bytes();
+        assert_eq!(bytes.len(), X_WING_PUBLIC_KEY_LEN);
+        assert_eq!(XWingPublicKey::from_bytes(&bytes).unwrap(), public);
+        assert!(matches!(
+            XWingPublicKey::from_bytes(&bytes[..1215]),
+            Err(SecretError::InvalidRecipient)
+        ));
+    }
+
+    #[dialog_common::test]
+    async fn generated_x_wing_keys_differ() {
+        assert_ne!(
+            XWingSecretKey::generate().unwrap().public_key(),
+            XWingSecretKey::generate().unwrap().public_key()
         );
     }
 }
@@ -915,6 +1260,34 @@ mod interop_tests {
         0xf3, 0xc5, 0xab, 0xfb, 0x43, 0x80, 0x96, 0xf9, 0x73,
     ];
 
+    /// The X-Wing key seed of the recipient of [`X_WING_FIXTURE`].
+    const X_WING_SEED: [u8; X_WING_SEED_LEN] = [201u8; X_WING_SEED_LEN];
+
+    #[dialog_common::test]
+    async fn opens_an_x_wing_secret_sealed_on_the_other_platform() {
+        let recipient = Ed25519Signer::import(&RECIPIENT_SEED).await.unwrap();
+        let x_wing = XWingSecretKey::from_seed(X_WING_SEED);
+
+        let sealed = SealedSecret::from_bytes(X_WING_FIXTURE).unwrap();
+
+        assert_eq!(sealed.scheme(), Scheme::XWing);
+        assert_eq!(
+            recipient
+                .secret(VAULT)
+                .with(&x_wing)
+                .reveal(&sealed)
+                .await
+                .unwrap(),
+            PLAINTEXT,
+            "an X-Wing secret sealed on the other platform must open here"
+        );
+    }
+
+    /// `PLAINTEXT` sealed with X-Wing for `RECIPIENT_SEED` and `X_WING_SEED`
+    /// in context `dialog/vault/v1`. Regenerate with `print_fixture` if the
+    /// format changes, writing the bytes it prints to the file.
+    const X_WING_FIXTURE: &[u8; 1205] = include_bytes!("secret/fixtures/x-wing.bin");
+
     /// Prints a fixture for the constants above.
     ///
     /// Ignored by default; run explicitly to regenerate after a format change.
@@ -940,5 +1313,20 @@ mod interop_tests {
             k.public_key().to_bytes()
         });
         println!("FIXTURE ({} bytes): [{}]", bytes.len(), rendered);
+
+        let sealed = recipient
+            .ed25519_did()
+            .secret(VAULT)
+            .with(&XWingSecretKey::from_seed(X_WING_SEED).public_key())
+            .conceal(PLAINTEXT)
+            .await
+            .unwrap();
+        let bytes = sealed.to_bytes();
+        let rendered = bytes
+            .iter()
+            .map(|b| format!("0x{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!("X_WING_FIXTURE ({} bytes): [{}]", bytes.len(), rendered);
     }
 }

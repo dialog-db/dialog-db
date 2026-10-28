@@ -15,6 +15,7 @@ ed25519 = [
     "dep:aes-gcm",
     "dep:hkdf",
     "dep:sha2",
+    "dep:x-wing",
     "dep:getrandom",
     "dep:base58",
     "dialog-varsig/edwards25519",
@@ -51,6 +52,10 @@ aes-gcm = { workspace = true, optional = true }
 hkdf = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
+# X-Wing (X25519 + ML-KEM-768) for post-quantum sealing. Pure Rust on every
+# target: WebCrypto has no ML-KEM, so in the browser this key lives in wasm
+# memory rather than in a non-extractable `CryptoKey`.
+x-wing = { workspace = true, optional = true }
 base58 = { workspace = true, optional = true }
 
 # es256 (p256) feature deps
