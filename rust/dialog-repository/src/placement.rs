@@ -767,7 +767,7 @@ mod tests {
     use crate::helpers::test_repo;
     use crate::{Branch, RemoteSite};
     use anyhow::Result;
-    use dialog_artifacts::{ArtifactSelector, Entity, Value};
+    use dialog_artifacts::{Artifact, ArtifactSelector, Entity, Instruction, Pick, Value};
     use dialog_capability::{Fork, Provider};
     use dialog_common::ConditionalSync;
     use dialog_effects::archive::{Get, Put};
@@ -779,7 +779,7 @@ mod tests {
     use dialog_query::query::Output as _;
     use dialog_query::types::Scalar;
     use dialog_query::{AttributeQuery, InductiveRule, Term};
-    use futures_util::StreamExt as _;
+    use futures_util::{StreamExt as _, stream};
     use serde_json::json;
 
     fn session() -> Entity {
@@ -1284,6 +1284,282 @@ mod tests {
                 .await?
                 .is_empty(),
             "the conclusion never reaches the tree"
+        );
+        Ok(())
+    }
+
+    /// A rule that pings a target: `assert! ping/last{note: ?note} when
+    /// cmd.ping/target{this: ?command, target: ?this}, cmd.ping/note{this:
+    /// ?command, note: ?note}` reads two fields of one command.
+    fn ping_rule() -> Result<InductiveRule> {
+        Ok(serde_json::from_value(json!({
+            "assert!": {
+                "with": { "note": { "the": "ping/last", "as": "Text" } }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": {
+                            "target": { "the": "cmd.ping/target", "as": "Entity" },
+                            "note": { "the": "cmd.ping/note", "as": "Text" }
+                        }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "command" } },
+                        "target": { "?": { "name": "this" } },
+                        "note": { "?": { "name": "note" } }
+                    }
+                },
+                {
+                    "assert": {
+                        "with": { "name": { "the": "doc/name", "as": "Text" } }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "name": { "?": { "name": "name" } }
+                    }
+                }
+            ]
+        }))?)
+    }
+
+    /// A rule premised on a transient command and a stored fact fires when
+    /// the command is dispatched, and is not evaluated, and concludes
+    /// nothing, when only the stored fact changes: with no command in the
+    /// round, its premise matches nothing.
+    #[dialog_common::test]
+    async fn it_fires_a_rule_over_a_command_only_in_the_commands_round() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(TransientAttribute::new("cmd.ping/target".parse()?))
+            .assert(TransientAttribute::new("cmd.ping/note".parse()?))
+            .assert(ping_rule()?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        let doc: Entity = "doc:1".parse()?;
+        // The stored fact alone: no command, no firing.
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/name")
+                    .of(doc.clone())
+                    .is("a".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert!(
+            committed(&branch, &operator, "ping/last", &doc)
+                .await?
+                .is_empty(),
+            "no command, no firing"
+        );
+
+        // The command with the stored fact standing: the rule fires.
+        let command: Entity = "cmd:1".parse()?;
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("cmd.ping/target")
+                    .of(command.clone())
+                    .is(doc.clone()),
+            )
+            .assert(
+                dialog_query::the!("cmd.ping/note")
+                    .of(command)
+                    .is("hello".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            committed(&branch, &operator, "ping/last", &doc).await?,
+            vec![Value::String("hello".into())],
+            "the command fires the rule"
+        );
+
+        // The stored fact changes again with no command: nothing more.
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/name")
+                    .of(doc.clone())
+                    .is("b".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            committed(&branch, &operator, "ping/last", &doc).await?,
+            vec![Value::String("hello".into())],
+            "a later change with no command fires nothing"
+        );
+        Ok(())
+    }
+
+    /// A command that reaches the line outside a transaction, as a raw
+    /// commit or a pull brings it, is a fact of the next commit's round:
+    /// its rule fires on it there, though the attribute is transient.
+    #[dialog_common::test]
+    async fn it_fires_a_rule_over_a_command_that_arrives_by_the_lag() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        let doc: Entity = "doc:1".parse()?;
+        branch
+            .transaction()
+            .assert(TransientAttribute::new("cmd.ping/target".parse()?))
+            .assert(TransientAttribute::new("cmd.ping/note".parse()?))
+            .assert(ping_rule()?)
+            .assert(
+                dialog_query::the!("doc/name")
+                    .of(doc.clone())
+                    .is("a".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // Another writer commits the command raw: no induction runs.
+        let other = repo.branch("main").open().perform(&operator).await?;
+        let command: Entity = "cmd:1".parse()?;
+        let fact = |the: &str, is: Value| -> Result<Instruction> {
+            Ok(Instruction::Assert(
+                Artifact {
+                    the: the.parse()?,
+                    of: command.clone(),
+                    is,
+                    cause: None,
+                },
+                Pick::All,
+            ))
+        };
+        other
+            .commit(stream::iter(vec![
+                fact("cmd.ping/target", Value::Entity(doc.clone()))?,
+                fact("cmd.ping/note", Value::String("late".into()))?,
+            ]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // The next commit induces over the lag, which holds the command.
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("note/text")
+                    .of(doc.clone())
+                    .is("x".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            committed(&branch, &operator, "ping/last", &doc).await?,
+            vec![Value::String("late".into())],
+            "the command in the lag fires the rule"
+        );
+        Ok(())
+    }
+
+    /// A fact of a transient attribute that a line stores, written by a
+    /// writer that ran no induction, is joined like any stored fact: a
+    /// later commit that brings the rest of the rule's premises fires the
+    /// rule over it, though the round brings no transient of it.
+    #[dialog_common::test]
+    async fn it_joins_a_stored_fact_of_a_transient_attribute() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+        branch
+            .transaction()
+            .assert(TransientAttribute::new("cmd.ping/target".parse()?))
+            .assert(TransientAttribute::new("cmd.ping/note".parse()?))
+            .assert(ping_rule()?)
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // The command is stored raw, while its target has no name.
+        let doc: Entity = "doc:1".parse()?;
+        let command: Entity = "cmd:1".parse()?;
+        let fact = |the: &str, is: Value| -> Result<Instruction> {
+            Ok(Instruction::Assert(
+                Artifact {
+                    the: the.parse()?,
+                    of: command.clone(),
+                    is,
+                    cause: None,
+                },
+                Pick::All,
+            ))
+        };
+        let other = repo.branch("main").open().perform(&operator).await?;
+        other
+            .commit(stream::iter(vec![
+                fact("cmd.ping/target", Value::Entity(doc.clone()))?,
+                fact("cmd.ping/note", Value::String("stored".into()))?,
+            ]))
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+
+        // A commit induces over the lag: the command, with no name yet.
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("note/text")
+                    .of(doc.clone())
+                    .is("x".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert!(
+            committed(&branch, &operator, "ping/last", &doc)
+                .await?
+                .is_empty(),
+            "no name, no firing"
+        );
+
+        // The name arrives in a later commit, which brings no command.
+        branch
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/name")
+                    .of(doc.clone())
+                    .is("a".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        branch.refresh(&operator).await?;
+        assert_eq!(
+            committed(&branch, &operator, "ping/last", &doc).await?,
+            vec![Value::String("stored".into())],
+            "the stored command joins the name"
         );
         Ok(())
     }
