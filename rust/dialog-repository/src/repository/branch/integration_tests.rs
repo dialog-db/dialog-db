@@ -34,7 +34,8 @@ use dialog_credentials::SignerCredential;
 use dialog_effects::blob::BlobError;
 use dialog_effects::peer::prelude::*;
 use dialog_peer::helpers::{
-    open_peer, test_grant, test_session_with_peer, test_state, test_storage, unique_name,
+    Seed, open_peer, open_peer_as, test_grant, test_session_with_peer, test_state, test_storage,
+    unique_name,
 };
 // The first-contact rig builds its sites on temp storage; native-only
 // like every test that does.
@@ -6476,11 +6477,11 @@ async fn it_does_not_ship_an_asset_retracted_through_blob_retract(s3: S3Address)
 /// under one origin: the origin derives from the branch entity (subject,
 /// profile, branch name) and the issuer, and all four are the same.
 async fn same_key_replica(
-    seed: &dialog_peer::helpers::Seed,
+    seed: &Seed,
     s3: &S3Address,
 ) -> Result<(Peer<VolatileSpace, dialog_peer::Session>, Branch)> {
     let credential = seed.credential("profile").await?;
-    let profile = dialog_peer::helpers::open_peer_as(
+    let profile = open_peer_as(
         test_storage().await,
         Location::profile(format!("same-key-{:016x}", seed.value())),
         credential,
@@ -6591,7 +6592,7 @@ async fn sync(
 /// remote holds both facts.
 #[dialog_common::test]
 async fn it_keeps_both_writes_of_replicas_sharing_one_key(s3: S3Address) -> Result<()> {
-    let seed = dialog_peer::helpers::Seed::new(0x5a3e_15_5ee);
+    let seed = Seed::new(0x5a3e_155e);
     let (operator_a, a) = same_key_replica(&seed, &s3).await?;
     let (operator_b, b) = same_key_replica(&seed, &s3).await?;
 
@@ -6684,7 +6685,7 @@ async fn it_keeps_both_writes_of_replicas_sharing_one_key(s3: S3Address) -> Resu
 async fn it_does_not_take_a_rival_head_of_one_version_as_seen(s3: S3Address) -> Result<()> {
     use super::context::head_observes;
 
-    let seed = dialog_peer::helpers::Seed::new(0x5a3e_15_5ef);
+    let seed = Seed::new(0x5a3e_155f);
     let (operator_a, a) = same_key_replica(&seed, &s3).await?;
     let (operator_b, b) = same_key_replica(&seed, &s3).await?;
 
