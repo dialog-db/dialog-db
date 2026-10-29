@@ -2690,6 +2690,27 @@ mod tests {
             pub manager: Manager,
         }
 
+        /// The report's mentor (`report/mentor`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("report")]
+        pub struct Mentor(pub Entity);
+
+        /// Someone whose manager and mentor must both hold a badge:
+        /// two conformance premises in one non-local rule.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct Mentored {
+            /// The report entity.
+            pub this: Entity,
+            /// Their display name.
+            pub name: Name,
+            /// Their manager, who must hold a badge.
+            #[dialog(conforms = BadgeHolder)]
+            pub manager: Manager,
+            /// Their mentor, who must hold a badge.
+            #[dialog(conforms = BadgeHolder)]
+            pub mentor: Mentor,
+        }
+
         /// The chief's deputy (`chief/deputy`).
         #[derive(Attribute, Clone, PartialEq)]
         #[domain("chief")]
@@ -2981,6 +3002,77 @@ mod tests {
         );
         assert_eq!(subscription.recomputes(), 1);
         assert_eq!(subscription.maintenances(), 2);
+        Ok(())
+    }
+
+    /// Two facts retracted in one commit, each feeding a different
+    /// conformance premise of the same non-local rule, must still
+    /// retract the row they jointly supported. Each is bound into its
+    /// premise and the rest of the rule is joined against the *new*
+    /// state, where the other fact is already gone, so neither join
+    /// finds the head and the row is never over-deleted.
+    #[dialog_common::test]
+    async fn it_retracts_a_row_when_two_supporting_facts_go_together() -> anyhow::Result<()> {
+        use concepts::{Badge, Manager, Mentor, Mentored, Name};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?; // bob's manager, holds a badge
+        let dave = Entity::new()?; // bob's mentor, holds a badge
+        let bob = Entity::new()?;
+
+        branch
+            .transaction()
+            .assert(Badge::of(alice.clone()).is("A-1"))
+            .assert(Badge::of(dave.clone()).is("D-4"))
+            .assert(Name::of(bob.clone()).is("Bob"))
+            .assert(Manager::of(bob.clone()).is(alice.clone()))
+            .assert(Mentor::of(bob.clone()).is(dave.clone()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let row = Mentored {
+            this: bob.clone(),
+            name: Name("Bob".into()),
+            manager: Manager(alice.clone()),
+            mentor: Mentor(dave.clone()),
+        };
+        let mut subscription = branch.subscribe(Query::<Mentored>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(initial.asserted, vec![row.clone()]);
+
+        // Both badges go in one commit: bob no longer conforms.
+        branch
+            .transaction()
+            .retract(Badge::of(alice.clone()).is("A-1"))
+            .retract(Badge::of(dave.clone()).is("D-4"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let fresh: Vec<Mentored> = branch
+            .query()
+            .select(Query::<Mentored>::default())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(fresh.is_empty(), "a fresh evaluation has no rows");
+
+        let delta = subscription.poll(&operator).await?;
+        assert_eq!(
+            subscription.results(),
+            fresh.as_slice(),
+            "the maintained result matches a fresh evaluation \
+             (delta: {delta:?}, recomputes: {}, maintenances: {})",
+            subscription.recomputes(),
+            subscription.maintenances(),
+        );
         Ok(())
     }
 
