@@ -74,9 +74,34 @@ where
     Ok(Some(context))
 }
 
+/// Whether `theirs` is a rival of `head`: another revision minted under
+/// `head`'s own version, over a different tree.
+///
+/// A version names one revision only while its origin acts as one
+/// sequential writer. Two replicas writing with one key on one branch
+/// share an origin, and when both build on the same head each mints the
+/// next edition of it over its own tree (#705). Nothing keyed by version
+/// can tell those two apart: every context that holds one claims the
+/// other, so the gates that answer "has seen" from versions would take
+/// either head as holding the other's write, and a pull would keep it
+/// unmerged and a push replace it. Two revisions of one version over one
+/// tree are one revision (the head signature is deterministic over the
+/// same fields), so the tree tells them apart.
+///
+/// Compared from the heads in hand, the edition first: no read, no hash.
+pub(crate) fn rival(head: &Revision, theirs: &Revision) -> bool {
+    head.edition == theirs.edition
+        && head.tree != theirs.tree
+        && head.issuer == theirs.issuer
+        && head.branch == theirs.branch
+}
+
 /// Whether `head` has seen `version`, answered as cheaply as the head's
 /// shape allows, or `None` for a head minted before heads carried a
 /// context, whose answer only the ancestry walk gives.
+///
+/// A version does not tell two revisions minted under it apart, so a
+/// caller holding the other head checks it is not a [`rival`] first.
 ///
 /// A head's context holds its own version and is closed under ancestry,
 /// so this is also whether the head has seen everything `version`'s head

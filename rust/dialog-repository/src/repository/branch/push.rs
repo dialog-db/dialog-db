@@ -18,7 +18,7 @@ use dialog_search_tree::{
 use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::collections::HashSet;
 
-use super::context::{full_context, head_observes};
+use super::context::{full_context, head_observes, rival};
 use super::resolve::resolve;
 use super::upstream::Target;
 use crate::RemoteFallback;
@@ -215,6 +215,30 @@ impl Push<'_> {
     }
 }
 
+/// Refuse to push `head` over `theirs` when `theirs` is a rival of it: a
+/// revision under our head's own version over another tree, minted by a
+/// replica writing with our key on the head we built on (#705). Our head's
+/// context claims the rival's version, so [`holds`] would take the push
+/// for a fast-forward once a pull moved the sync base to the rival's tree,
+/// and the rival's write would be replaced. No pull can settle it either
+/// (see [`PullError::WriterRacedItself`](crate::PullError::WriterRacedItself)),
+/// so the push says so rather than asking for one. Decided before anything
+/// is sent, from the two heads in hand, at no read.
+fn refuse_rival(
+    branch: &Branch,
+    head: &Revision,
+    theirs: Option<&Revision>,
+) -> Result<(), PushError> {
+    match theirs {
+        Some(theirs) if rival(head, theirs) => Err(PushError::WriterRacedItself {
+            branch: branch.name().to_string(),
+            ours: Box::new(head.clone()),
+            theirs: Box::new(theirs.clone()),
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// Whether our `head` holds the upstream's head `theirs`, so that a push of
 /// it moves the upstream forward. The upstream's tree matching the sync
 /// base does not settle it: a reset can leave our head behind a base the
@@ -368,6 +392,7 @@ where
                     .await?;
 
                 let theirs = target.revision();
+                refuse_rival(branch, &revision, theirs.as_ref())?;
                 let current = theirs.as_ref().map(|r| r.tree.clone());
                 // The tree check first: a push it refuses reads nothing.
                 let forward = current == base
@@ -432,6 +457,7 @@ where
                     fetched
                         .verify()
                         .map_err(dialog_artifacts::DialogArtifactsError::from)?;
+                    refuse_rival(branch, &revision, Some(&fetched))?;
                 }
 
                 let current = upstream.revision().map(|r| r.tree);
@@ -2001,6 +2027,91 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    fn post(of: &str) -> Instruction {
+        Instruction::Assert(
+            Artifact {
+                the: "post/title".parse().expect("attribute parses"),
+                of: of.parse().expect("entity parses"),
+                is: Value::String(of.to_string()),
+                cause: None,
+            },
+            dialog_artifacts::Pick::All,
+        )
+    }
+
+    /// A head of the upstream that is another revision under the version
+    /// of our own head (#705) is neither pushed over nor pulled in: a push
+    /// would replace it, and a pull would take it as seen, so either way
+    /// its write would be dropped. Both are refused as a writer racing
+    /// itself, and neither moves a head or a sync base.
+    ///
+    /// Two replicas writing with one key mint such a pair (the integration
+    /// test `it_refuses_a_write_racing_a_replica_sharing_its_key` runs that
+    /// against a remote); here one writer mints it by rewinding, as a
+    /// release before #682 still can (`perform_unchecked`), which is the
+    /// shape a local upstream can be given in one process.
+    #[dialog_common::test]
+    async fn it_refuses_to_push_over_a_rival_head_of_its_own_version() -> Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let main = repo.branch("main").open().perform(&operator).await?;
+        let feature = repo.branch("feature").open().perform(&operator).await?;
+        feature.set_upstream(&main).perform(&operator).await?;
+
+        feature
+            .commit(stream::iter(vec![post("post:base")]))
+            .perform(&operator)
+            .await?;
+        let base = feature.revision().expect("a head");
+        feature.push().perform(&operator).await?;
+        feature
+            .commit(stream::iter(vec![post("post:pushed")]))
+            .perform(&operator)
+            .await?;
+        let pushed = feature.revision().expect("a head");
+        feature.push().perform(&operator).await?;
+
+        // Back to the base, and a commit there mints the pushed head's
+        // version again, over another tree.
+        feature.reset(base).perform_unchecked(&operator).await?;
+        feature
+            .commit(stream::iter(vec![post("post:rival")]))
+            .perform(&operator)
+            .await?;
+        let rival = feature.revision().expect("a head");
+        assert_eq!(rival.version(), pushed.version());
+        assert_ne!(rival.tree, pushed.tree);
+        let tracked = feature.tracked();
+
+        let refused = feature.push().perform(&operator).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(PushError::WriterRacedItself { ours, theirs, .. })
+                    if **ours == rival && **theirs == pushed
+            ),
+            "the push over the rival head is refused: {refused:?}"
+        );
+        let refused = feature.pull().perform(&operator).await;
+        assert!(
+            matches!(
+                &refused,
+                Err(crate::PullError::WriterRacedItself { ours, theirs, .. })
+                    if **ours == rival && **theirs == pushed
+            ),
+            "the pull of the rival head is refused: {refused:?}"
+        );
+
+        let upstream = repo.branch("main").open().perform(&operator).await?;
+        assert_eq!(upstream.revision(), Some(pushed), "the upstream stays");
+        let stored = repo.branch("feature").open().perform(&operator).await?;
+        assert_eq!(stored.revision().as_ref(), Some(&rival), "our head stays");
+        assert_eq!(feature.revision(), Some(rival));
+        assert_eq!(stored.tracked(), tracked, "our sync base stays");
+        assert_eq!(feature.tracked(), tracked);
         Ok(())
     }
 }

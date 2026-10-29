@@ -6476,10 +6476,33 @@ async fn it_does_not_ship_an_asset_retracted_through_blob_retract(s3: S3Address)
 /// nothing local, as two stateless workers holding one key do, yet mint
 /// under one origin: the origin derives from the branch entity (subject,
 /// profile, branch name) and the issuer, and all four are the same.
-async fn same_key_replica(
-    seed: &Seed,
-    s3: &S3Address,
-) -> Result<(Peer<VolatileSpace, dialog_peer::Session>, Branch)> {
+struct SameKeyReplica {
+    operator: Peer<VolatileSpace, dialog_peer::Session>,
+    repo: Repository<SignerCredential>,
+    branch: Branch,
+}
+
+impl SameKeyReplica {
+    /// `main` as this replica's storage holds it, through a fresh handle.
+    async fn stored(&self) -> Result<Branch> {
+        Ok(self
+            .repo
+            .branch("main")
+            .open()
+            .perform(&self.operator)
+            .await?)
+    }
+
+    async fn write(&self, of: &str, body: &str) -> Result<Revision> {
+        self.branch
+            .commit(stream::iter(vec![note(of, body)]))
+            .perform(&self.operator)
+            .await?;
+        self.branch.revision().context("the commit set a head")
+    }
+}
+
+async fn same_key_replica(seed: &Seed, s3: &S3Address) -> Result<SameKeyReplica> {
     let credential = seed.credential("profile").await?;
     let profile = open_peer_as(
         test_storage().await,
@@ -6512,7 +6535,40 @@ async fn same_key_replica(
         .set_upstream(remote_branch)
         .perform(&operator)
         .await?;
-    Ok((operator, branch))
+    Ok(SameKeyReplica {
+        operator,
+        repo,
+        branch,
+    })
+}
+
+/// A replica acting as another principal, with no head of its own, that
+/// has pulled `main` of `subject` from the S3 remote: it adopts the
+/// remote's head as it is.
+async fn remote_reader(
+    s3: &S3Address,
+    subject: &dialog_capability::Did,
+) -> Result<(Peer<VolatileSpace, dialog_peer::Session>, Branch)> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = profile
+        .space(unique_name("same-key-reader"))
+        .open()
+        .perform(&operator)
+        .await?;
+    profile
+        .secrets()
+        .site(s3_site_address(s3))
+        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
+        .perform(&profile)
+        .await?;
+    let origin = connect("origin", s3_site_address(s3), subject.clone(), &operator).await?;
+    let reader = repo.branch("main").open().perform(&operator).await?;
+    reader
+        .set_upstream(origin.branch("main").open().perform(&operator).await?)
+        .perform(&operator)
+        .await?;
+    reader.pull().perform(&operator).await?;
+    Ok((operator, reader))
 }
 
 fn note(of: &str, body: &str) -> Instruction {
@@ -6566,59 +6622,44 @@ async fn sync(
     anyhow::bail!("the push kept losing to the remote")
 }
 
-/// KNOWN FAILING: a regression test for a lost write, not yet fixed.
-///
-/// Two replicas acting with one key on one repository, with no local
+/// Two replicas writing with one key on one repository, with no local
 /// state in common (two stateless workers holding the same signing key),
 /// both build on the remote's head at edition N and each commits a
 /// different fact. Each commit mints version `(O, N+1)`: the origin `O`
 /// derives from the branch entity and the issuer, which the two share,
 /// and the edition from the base, which they share too. The tree is not
-/// part of the version.
+/// part of the version (#705).
 ///
-/// A's push lands. B's is refused as not a fast-forward, so B pulls, and
-/// the pull's "nothing new" gate asks whether B's head has seen the
-/// upstream's version `(O, N+1)`. One origin's revisions are taken to form
-/// one chain, so the answer comes from the editions alone (`head_observes`:
-/// `N+1 <= N+1`), B keeps its head without merging, and records A's tree
-/// as its sync base. B's next push then fast-forwards from that base and
-/// replaces A's head with its own. Both writers were told their write
-/// synced; the remote holds only B's fact, and A's replica, which keeps
-/// "having seen" B's head for the same reason, never converges with it.
-///
-/// Within one process the same race is refused (`merge_with_winner`: "the
-/// same writer raced itself"); across replicas nothing notices. The test
-/// asserts what should hold: once both writers report success, the
-/// remote holds both facts.
+/// A's sync lands. Before #705, B's push was refused as not a
+/// fast-forward, B's pull took A's head as seen (the "nothing new" gate
+/// answers a same-origin question from editions alone), kept B's head and
+/// moved the sync base to A's tree, and B's next push replaced A's head:
+/// both writers were told their write synced and the remote held only
+/// B's. Now B's push is refused as a writer racing itself, and so is the
+/// pull a sync loop would run next, and neither writes anything: B's head
+/// and sync base stay as they were, in memory and in storage, and the
+/// remote keeps A's head. B's write is not lost silently: written again
+/// on a replica that has not written, it lands on top of A's, and the
+/// remote holds both.
 #[dialog_common::test]
-async fn it_keeps_both_writes_of_replicas_sharing_one_key(s3: S3Address) -> Result<()> {
+async fn it_refuses_a_write_racing_a_replica_sharing_its_key(s3: S3Address) -> Result<()> {
     let seed = Seed::new(0x5a3e_155e);
-    let (operator_a, a) = same_key_replica(&seed, &s3).await?;
-    let (operator_b, b) = same_key_replica(&seed, &s3).await?;
+    let a = same_key_replica(&seed, &s3).await?;
+    let b = same_key_replica(&seed, &s3).await?;
 
     // The remote's head at edition N, which both replicas build on.
-    a.commit(stream::iter(vec![note("note:base", "base")]))
-        .perform(&operator_a)
-        .await?;
-    a.push().perform(&operator_a).await?;
-    b.pull().perform(&operator_b).await?;
+    a.write("note:base", "base").await?;
+    a.branch.push().perform(&a.operator).await?;
+    b.branch.pull().perform(&b.operator).await?;
     assert_eq!(
-        a.revision(),
-        b.revision(),
+        a.branch.revision(),
+        b.branch.revision(),
         "both replicas start from the remote's head"
     );
 
     // Each writes a fact of its own on that head.
-    a.commit(stream::iter(vec![note("note:a", "from A")]))
-        .perform(&operator_a)
-        .await?;
-    b.commit(stream::iter(vec![note("note:b", "from B")]))
-        .perform(&operator_b)
-        .await?;
-    let (a_head, b_head) = (
-        a.revision().context("A committed")?,
-        b.revision().context("B committed")?,
-    );
+    let a_head = a.write("note:a", "from A").await?;
+    let b_head = b.write("note:b", "from B").await?;
     assert_eq!(
         a_head.version(),
         b_head.version(),
@@ -6626,41 +6667,67 @@ async fn it_keeps_both_writes_of_replicas_sharing_one_key(s3: S3Address) -> Resu
     );
     assert_ne!(a_head.tree, b_head.tree, "over two different trees");
 
-    // A syncs first, then B: each reports its write synced. B's first
-    // push is refused, and the pull it runs then keeps B's head as it is,
-    // merging nothing: it takes A's head, of B's own version, as seen.
-    assert_eq!(sync(&a, &operator_a).await?, 0, "A's push lands");
-    assert_eq!(
-        sync(&b, &operator_b).await?,
-        1,
-        "B's push is refused once, then lands"
+    assert_eq!(sync(&a.branch, &a.operator).await?, 0, "A's push lands");
+
+    let tracked = b.branch.tracked();
+    let pushed = b.branch.push().perform(&b.operator).await;
+    assert!(
+        matches!(
+            &pushed,
+            Err(crate::PushError::WriterRacedItself { ours, theirs, .. })
+                if **ours == b_head && **theirs == a_head
+        ),
+        "B's push over A's head of its own version is refused: {pushed:?}"
     );
+    let pulled = b.branch.pull().perform(&b.operator).await;
+    assert!(
+        matches!(
+            &pulled,
+            Err(crate::PullError::WriterRacedItself { ours, theirs, .. })
+                if **ours == b_head && **theirs == a_head
+        ),
+        "B's pull of A's head of its own version is refused: {pulled:?}"
+    );
+
+    // Neither refusal wrote anything: not B's head, not its sync base,
+    // not the remote.
     assert_eq!(
-        b.revision().as_ref(),
+        b.branch.revision().as_ref(),
         Some(&b_head),
-        "B's pull merged nothing into its head"
+        "B's head stays"
+    );
+    assert_eq!(b.branch.tracked(), tracked, "B's sync base stays");
+    let stored = b.stored().await?;
+    assert_eq!(
+        stored.revision().as_ref(),
+        Some(&b_head),
+        "B's stored head stays"
+    );
+    assert_eq!(stored.tracked(), tracked, "B's stored sync base stays");
+    let (operator_c, c) = remote_reader(&s3, b.branch.of()).await?;
+    assert_eq!(
+        c.revision().as_ref(),
+        Some(&a_head),
+        "the remote keeps A's head"
+    );
+    assert_eq!(
+        notes(&c, &operator_c).await?,
+        vec!["note:a".to_string(), "note:base".to_string()],
+        "the remote holds A's write and nothing of B's"
     );
 
-    // A third replica, acting as another principal, reads the remote.
-    let (operator_c, profile_c) = test_session_with_peer().await;
-    let repo_c = profile_c
-        .space(unique_name("same-key-reader"))
-        .open()
-        .perform(&operator_c)
-        .await?;
-    profile_c
-        .secrets()
-        .site(s3_site_address(&s3))
-        .save(S3Credential::new(&s3.access_key_id, &s3.secret_access_key))
-        .perform(&profile_c)
-        .await?;
-    let origin_c = connect("origin", s3_site_address(&s3), b.of().clone(), &operator_c).await?;
-    let c = repo_c.branch("main").open().perform(&operator_c).await?;
-    c.set_upstream(origin_c.branch("main").open().perform(&operator_c).await?)
-        .perform(&operator_c)
-        .await?;
+    // B's write, made again on a replica of the same key that has not
+    // written, builds on A's head and lands.
+    let retry = same_key_replica(&seed, &s3).await?;
+    retry.branch.pull().perform(&retry.operator).await?;
+    assert_eq!(retry.branch.revision().as_ref(), Some(&a_head));
+    retry.write("note:b", "from B").await?;
+    assert_eq!(
+        sync(&retry.branch, &retry.operator).await?,
+        0,
+        "the write made again lands"
+    );
     c.pull().perform(&operator_c).await?;
-
     assert_eq!(
         notes(&c, &operator_c).await?,
         vec![
@@ -6668,60 +6735,63 @@ async fn it_keeps_both_writes_of_replicas_sharing_one_key(s3: S3Address) -> Resu
             "note:b".to_string(),
             "note:base".to_string()
         ],
-        "both writers reported their write synced, so the remote holds both"
+        "the remote holds both writes"
     );
     Ok(())
 }
 
-/// KNOWN FAILING: the gate behind
-/// `it_keeps_both_writes_of_replicas_sharing_one_key`, asked directly.
+/// The pull side of `it_refuses_a_write_racing_a_replica_sharing_its_key`,
+/// asked first: B pulls before it pushes, and the remote's head is A's,
+/// of B's own head's version over another tree.
 ///
-/// Two heads of one version over different trees are two different
-/// revisions, and neither has seen the other. `head_observes` answers
-/// a same-origin question from the editions alone, so each head is
-/// reported to have seen the other, and a pull between them merges
-/// nothing.
+/// Every context that holds one of the two heads claims the other, and
+/// the "nothing new" gate answers a same-origin question from editions
+/// alone (`head_observes`), so before #705 the pull kept B's head,
+/// merged nothing, and moved the sync base to A's tree. Now the two heads
+/// are compared first (`rival`), and the pull is refused before it
+/// writes anything.
 #[dialog_common::test]
 async fn it_does_not_take_a_rival_head_of_one_version_as_seen(s3: S3Address) -> Result<()> {
-    use super::context::head_observes;
+    use super::context::rival;
 
     let seed = Seed::new(0x5a3e_155f);
-    let (operator_a, a) = same_key_replica(&seed, &s3).await?;
-    let (operator_b, b) = same_key_replica(&seed, &s3).await?;
+    let a = same_key_replica(&seed, &s3).await?;
+    let b = same_key_replica(&seed, &s3).await?;
 
-    a.commit(stream::iter(vec![note("note:base", "base")]))
-        .perform(&operator_a)
-        .await?;
-    a.push().perform(&operator_a).await?;
-    b.pull().perform(&operator_b).await?;
-    a.commit(stream::iter(vec![note("note:a", "from A")]))
-        .perform(&operator_a)
-        .await?;
-    b.commit(stream::iter(vec![note("note:b", "from B")]))
-        .perform(&operator_b)
-        .await?;
-    let (a_head, b_head) = (
-        a.revision().context("A committed")?,
-        b.revision().context("B committed")?,
-    );
+    a.write("note:base", "base").await?;
+    a.branch.push().perform(&a.operator).await?;
+    b.branch.pull().perform(&b.operator).await?;
+    let a_head = a.write("note:a", "from A").await?;
+    let b_head = b.write("note:b", "from B").await?;
     assert_eq!(a_head.version(), b_head.version());
     assert_ne!(a_head.tree, b_head.tree);
+    assert!(rival(&b_head, &a_head) && rival(&a_head, &b_head));
+    assert!(!rival(&b_head, &b_head), "a head is not its own rival");
+    a.branch.push().perform(&a.operator).await?;
 
-    let store = crate::NetworkedIndex::erased(&operator_b, b.archive().index(), b.fallback());
-    let seen = head_observes(
-        &b_head,
-        &a_head.version(),
-        &b.contexts(),
-        &b.records(),
-        &store,
-        &b.node_cache(),
-    )
-    .await?;
+    let tracked = b.branch.tracked();
+    let pulled = b.branch.pull().perform(&b.operator).await;
+    assert!(
+        matches!(
+            &pulled,
+            Err(crate::PullError::WriterRacedItself { ours, theirs, .. })
+                if **ours == b_head && **theirs == a_head
+        ),
+        "B's pull of A's head of its own version is refused: {pulled:?}"
+    );
     assert_eq!(
-        seen,
-        Some(false),
-        "B's head has not seen A's head, though both are version {}",
-        a_head.version()
+        b.branch.revision().as_ref(),
+        Some(&b_head),
+        "B's head stays"
+    );
+    assert_eq!(b.branch.tracked(), tracked, "B's sync base stays");
+    let stored = b.stored().await?;
+    assert_eq!(stored.revision().as_ref(), Some(&b_head));
+    assert_eq!(stored.tracked(), tracked);
+    assert_eq!(
+        notes(&b.branch, &b.operator).await?,
+        vec!["note:b".to_string(), "note:base".to_string()],
+        "nothing of A's head was merged into B's"
     );
     Ok(())
 }

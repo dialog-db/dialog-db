@@ -14,6 +14,48 @@ says how to cut a release.
 
 ## Unreleased
 
+### A pull or a push that meets another revision under its own head's version is refused
+
+Fixing [#705](https://github.com/dialog-db/dialog-db/issues/705)
+
+Two replicas writing with one key on one branch share an origin, since
+an origin derives from the branch and the issuer. When both build on the
+same head, each mints the next edition of it over its own tree: two
+revisions under one version. Every context that holds one claims the
+other, so the second writer's pull took the first's head as already seen
+and merged nothing, and its push then replaced that head. Both writers
+were told their write synced, one write was gone, and the two replicas
+kept different trees under one version for good. A pull or a push now
+compares the upstream's head with the branch's own head first, and when
+they are the same version over different trees, refuses with an error
+that says so.
+
+What this changes for you:
+
+- `PullError::WriterRacedItself { branch, ours, theirs }` and
+  `PushError::WriterRacedItself { branch, ours, theirs }` are new. A pull
+  or a push that meets the rival head returns one and writes nothing: not
+  the branch's head, not its sync base, not the upstream. A sync loop
+  that pulls on `PushError::NonFastForward` and pushes again now stops
+  with this error instead of reporting the write synced.
+- The refused write is not lost: written again on a replica that has
+  not written (one that pulls the upstream fresh), it lands on top of the
+  rival. Writers that need to write at once each need a key of their
+  own, which is what dialog's model has always assumed.
+- A head that wrote first and a sync with no rival behave as before. The
+  check compares two heads already in hand, so it reads nothing.
+- Still not detected: a replica that minted two or more revisions on the
+  shared head before it syncs holds a head above the rival's edition,
+  and nothing on either head tells the rival from its own earlier
+  revision. One write per sync per key, as the stateless workers of #705
+  do, is caught.
+
+Why: concurrent writers sharing one identity are outside the model, but
+breaking that rule cost a write without an error. A refusal the writer
+can see is the least the replica owes it; keeping both writes by a merge
+cannot be done soundly, since each head's context already claims the
+other's write and the merge would screen it out as removed.
+
 ### A difference fetches the blocks it reads a batch at a time
 
 [#690](https://github.com/dialog-db/dialog-db/pull/690), part of [#646](https://github.com/dialog-db/dialog-db/issues/646)
@@ -1387,6 +1429,12 @@ thread multiplies whatever it holds by the size of the thread pool.
 
 ### Compatibility and migration
 
+- Nothing stored or synced changes for the refusal of a rival head of
+  one version (#705): nothing is rewritten on upgrade, and heads, trees
+  and the wire format are as before, so an older release reads all this
+  one writes. An older release still takes a rival head as seen, so a
+  write it races with one of this release under the same key can still
+  be dropped there; upgrade every replica that shares a key.
 - Nothing stored changes for the difference that prunes shared
   subtrees: no stored data is rewritten, trees are laid out as before,
   and an older release reads everything this one writes. Only how many
