@@ -48,7 +48,7 @@ use core::fmt::{self, Debug, Display};
 
 mod held;
 
-pub use held::{HeldHandOver, HeldReference, HeldRevoke, HeldShare};
+pub use held::{HeldClaim, HeldDelegate, HeldHandOver, HeldReference, HeldRevoke, HeldShare};
 
 use super::space::SPACE_KEY;
 use super::{Local, Mode, Peer, PeerSpace};

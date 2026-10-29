@@ -14,6 +14,22 @@ says how to cut a release.
 
 ## Unreleased
 
+### A held principal delegates without its key leaving the peer
+
+[#PR](https://github.com/dialog-db/dialog-db/pull/PR)
+
+`peer.held_principal(&did).claim(capability)` claims a capability as a
+principal whose key the peer holds, and `.delegate(audience)` signs a
+delegation of it with that key: `Subject::any()` for everything the
+principal has, or a subject for less, bounded by `.expires` and
+`.not_before`, with `.via(custodian)` when the peer keeps no copy of the
+key. The key is opened and dropped inside `perform`, as `share`, `revoke`
+and `hand_over` open it, and the delegation is handed back, not retained,
+so delegating writes nothing. Before this a caller that wanted, say, a
+short-lived session key to act as an agent's key had to read the sealed
+key out of the space itself and reveal it with the account's key. Nothing
+is removed, so nothing needs moving across.
+
 ### A difference fetches the blocks it reads a batch at a time
 
 [#690](https://github.com/dialog-db/dialog-db/pull/690), part of [#646](https://github.com/dialog-db/dialog-db/issues/646)
