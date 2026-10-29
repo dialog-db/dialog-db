@@ -9026,6 +9026,74 @@ mod tests {
         Ok(())
     }
 
+    /// A read that skips the bottom for an attribute placed on another
+    /// layer, because the bottom stored no fact of it, still meets a fact
+    /// of it that a later head of the bottom stores: what the bottom
+    /// stores is read again at each head, and a misplaced fact there is
+    /// reported as a read meets it.
+    #[dialog_common::test]
+    async fn it_reports_a_misplaced_fact_of_a_later_head() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        shared
+            .transaction()
+            .assert(Placement::new("site/path".parse()?, name("state")))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        let bottom = stack.layers()[0].address_entity();
+        let site: Entity = "site:1".parse()?;
+        assert!(
+            values::<String>(&stack, &operator, "site/path", &site)
+                .await?
+                .is_empty()
+        );
+        assert!(stack.divergences().is_empty(), "nothing misplaced yet");
+
+        // Another writer of the bottom stores a fact of the attribute.
+        let other = repo.branch("main").open().perform(&operator).await?;
+        other
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "site/path".parse()?,
+                    of: site.clone(),
+                    is: Value::String("/misplaced".into()),
+                    cause: None,
+                },
+                Pick::All,
+            )]))
+            .perform(&operator)
+            .await?;
+        stack.advance(&operator).await?;
+
+        assert!(
+            values::<String>(&stack, &operator, "site/path", &site)
+                .await?
+                .is_empty(),
+            "no read takes the misplaced fact"
+        );
+        assert_eq!(
+            stack.divergences(),
+            vec![Divergence {
+                attribute: "site/path".into(),
+                layer: bottom,
+                scope: Some(name("state")),
+            }],
+            "the read meets it at the new head"
+        );
+        Ok(())
+    }
+
     /// An attribute placed on a scope that no link of the stack binds, and
     /// that the bottom does not bind to its tree, has no layer in the
     /// stack: a fact of it in the bottom reaches no read, and is reported,

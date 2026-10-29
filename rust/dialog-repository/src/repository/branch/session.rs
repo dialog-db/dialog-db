@@ -29,7 +29,7 @@ use dialog_query::source::SelectRules;
 use dialog_query::{Claim, DeductiveRule, Negation, Premise, Proposition};
 use dialog_search_tree::{DialogSearchTreeError, LoadBlock, Manifest, PersistentNode};
 use futures_util::future::try_join_all;
-use futures_util::{TryStreamExt as _, stream};
+use futures_util::{StreamExt as _, TryStreamExt as _, stream};
 use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::OnceCell;
 
@@ -935,6 +935,28 @@ impl Clone for QueryEnv<'_> {
 /// not the setup's futures alongside it (together they came to 16 KiB,
 /// allocated and copied for every scan a query ran), and the scan is
 /// built in its box ([`Select::execute_boxed`](crate::Select)).
+/// Whether `source` stores a fact of `attribute` at its revision. Read
+/// once per revision and kept in the line's rule cache, since a guided
+/// read asks it of every attribute it reads from another layer.
+async fn stores(
+    source: SourceRef<'_>,
+    env: &Erased,
+    attribute: &ArtifactsRelation,
+) -> Result<bool, DialogArtifactsError> {
+    let Some(head) = source.revision() else {
+        return Ok(false);
+    };
+    let cache = source.rule_cache();
+    if let Some(stored) = cache.stores(attribute, &head) {
+        return Ok(stored);
+    }
+    let mut rows =
+        select_from_source(source, env, ArtifactSelector::new().the(attribute.clone())).await?;
+    let stored = rows.next().await.transpose()?.is_some();
+    cache.record_stores(attribute.clone(), head, stored);
+    Ok(stored)
+}
+
 pub(crate) async fn select_from_source<'a>(
     source: SourceRef<'_>,
     env: &'a Erased,
@@ -1015,6 +1037,19 @@ impl<'a> Provider<Select<'a>> for QueryEnv<'a> {
         // the rows of the attributes placed on its scopes.
         let guided = self.guided().await?;
         for (index, (source, line)) in self.sources.iter().zip(&format.lines).enumerate() {
+            // A read of one attribute that the guide takes from no row of
+            // this line, from a line that stores no fact of it, skips the
+            // line: it would find no row to return or to report. A line
+            // that stores one is read as ever, so the guide meets each
+            // misplaced row and reports it.
+            if let Some((guide, scopes)) = &guided
+                && let Some(layer) = guide.lines.get(index)
+                && let Some(the) = input.attribute()
+                && !guide.placed(layer, scopes, the.as_str()).0
+                && !stores(source.as_ref(), self.env, the).await?
+            {
+                continue;
+            }
             let mut raw = select_from_source(source.as_ref(), self.env, input.clone()).await?;
             if let Some((guide, scopes)) = &guided
                 && let Some(layer) = guide.lines.get(index)
