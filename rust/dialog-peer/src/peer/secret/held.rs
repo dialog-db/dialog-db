@@ -4,20 +4,28 @@
 //!
 //! Every key is opened, used and dropped inside `perform`: the peer's own
 //! copy opens it, or the account's, through a custodian of the account the
-//! principal is held for. Nothing here hands a key out.
+//! principal is held for. Nothing here hands a key out: what a key signs
+//! for its caller, such as a delegation, is signed inside `perform` too.
 
 use super::{
     ACCOUNT, SpaceVaultExt as _, Vault, VaultKey, copy, held_context, opened, reissue, retain,
     seal_key, sealable, session_writes_nothing, unavailable, unopened,
 };
 use crate::peer::{Mode, Peer, PeerSpace};
+use dialog_capability::access::{AuthorizeError, Prove};
+use dialog_capability::{Ability, Capability, Constraint, Provider};
+use dialog_common::ConditionalSync;
 use dialog_credentials::secret::SealedSecret;
 use dialog_credentials::{Ed25519Signer, SignerCredential};
 use dialog_effects::credential::CredentialError;
+use dialog_identity::access::Access;
 use dialog_repository::secrets::{self, HeldPrincipal};
 use dialog_repository::{Branch, BranchReference, RepositoryMemoryExt as _};
-use dialog_ucan::UcanDelegation;
+use dialog_ucan::{Ucan, UcanDelegation};
+use dialog_ucan_core::time::Timestamp;
 use dialog_varsig::{Did, Principal as _};
+use ipld_core::ipld::Ipld;
+use std::collections::BTreeMap;
 
 impl<S: PeerSpace, M: Mode> Peer<S, M> {
     /// The principal `principal`, whose key this peer holds: a space it
@@ -75,6 +83,134 @@ impl HeldReference {
             principal: self.principal,
             from: branch.into(),
         }
+    }
+
+    /// Claim `capability` as the principal, to delegate it signed with the
+    /// principal's key: `Subject::any()` for all the principal has, or a
+    /// subject and the commands below it for less. What
+    /// [`Access::claim`] is for the peer's own key.
+    pub fn claim<C: Constraint>(self, capability: impl Into<Capability<C>>) -> HeldClaim<C> {
+        HeldClaim {
+            principal: self.principal,
+            capability: capability.into(),
+            not_before: None,
+            expiration: None,
+            via: None,
+        }
+    }
+}
+
+/// A capability claimed as a held principal, with optional time bounds.
+/// Created by [`HeldReference::claim`].
+pub struct HeldClaim<C: Constraint> {
+    principal: Did,
+    capability: Capability<C>,
+    not_before: Option<Timestamp>,
+    expiration: Option<Timestamp>,
+    via: Option<SignerCredential>,
+}
+
+impl<C: Constraint> HeldClaim<C> {
+    /// Set the earliest time the claim is valid.
+    pub fn not_before(mut self, not_before: Timestamp) -> Self {
+        self.not_before = Some(not_before);
+        self
+    }
+
+    /// Set when the claim expires.
+    pub fn expires(mut self, expiration: Timestamp) -> Self {
+        self.expiration = Some(expiration);
+        self
+    }
+
+    /// Open the principal's key through the account `custodian` guards,
+    /// when the peer keeps no copy of its own.
+    pub fn via(mut self, custodian: &SignerCredential) -> Self {
+        self.via = Some(custodian.clone());
+        self
+    }
+
+    /// Chain into a delegation to `audience`.
+    pub fn delegate(self, audience: impl Into<Did>) -> HeldDelegate<C> {
+        HeldDelegate {
+            claim: self,
+            audience: audience.into(),
+            meta: None,
+        }
+    }
+}
+
+/// Delegate a capability claimed as a held principal. Created by
+/// [`HeldClaim::delegate`].
+///
+/// The delegation is the caller's to keep or hand on: the peer does not
+/// retain it, so delegating writes nothing.
+pub struct HeldDelegate<C: Constraint> {
+    claim: HeldClaim<C>,
+    audience: Did,
+    meta: Option<BTreeMap<String, Ipld>>,
+}
+
+impl<C: Constraint> HeldDelegate<C>
+where
+    Capability<C>: Ability,
+{
+    /// Entries for the delegation's signed `meta`.
+    #[must_use]
+    pub fn meta(mut self, meta: BTreeMap<String, Ipld>) -> Self {
+        self.meta = Some(meta);
+        self
+    }
+
+    /// Open the principal's key, prove its claim and sign the delegation
+    /// with it, yielding the delegation with the proofs it rests on. A
+    /// claim the principal cannot prove is `Withheld`. The key is dropped
+    /// once the delegation is signed. The peer's own act: a session is
+    /// refused.
+    pub async fn perform<S: PeerSpace, M: Mode>(
+        self,
+        peer: &Peer<S, M>,
+    ) -> Result<UcanDelegation, CredentialError>
+    where
+        Peer<S, M>: Provider<Prove<Ucan>> + ConditionalSync,
+    {
+        if !M::HOLDS_KEYS {
+            return Err(CredentialError::Withheld(format!(
+                "{} is a session: it opens no held key",
+                peer.did()
+            )));
+        }
+        let HeldClaim {
+            principal,
+            capability,
+            not_before,
+            expiration,
+            via,
+        } = self.claim;
+        let branch = opened(&BranchReference::from(peer.state()), peer).await?;
+        let held = open(&branch, &principal, via.as_ref(), peer).await?;
+        let credential = SignerCredential::from(
+            Ed25519Signer::import(&held.seed)
+                .await
+                .map_err(unavailable)?,
+        );
+        let mut claim = Access::new(&credential).claim(capability);
+        if let Some(not_before) = not_before {
+            claim = claim.not_before(not_before);
+        }
+        if let Some(expiration) = expiration {
+            claim = claim.expires(expiration);
+        }
+        let mut delegate = claim.delegate(self.audience);
+        if let Some(meta) = self.meta {
+            delegate = delegate.meta(meta);
+        }
+        delegate.perform(peer).await.map_err(|error| match error {
+            AuthorizeError::Unavailable { .. } | AuthorizeError::UnavailableProof { .. } => {
+                unavailable(error)
+            }
+            refused => CredentialError::Withheld(refused.to_string()),
+        })
     }
 }
 
@@ -481,7 +617,7 @@ mod tests {
     };
     use crate::{Mode, Peer, PeerSpace, SpaceVaultExt as _};
     use dialog_capability::Subject;
-    use dialog_capability::access::{Access, AuthorizeError, Prove};
+    use dialog_capability::access::{Access, AuthorizeError, Prove, Retain};
     use dialog_credentials::{Ed25519Signer, SignerCredential};
     use dialog_effects::credential::CredentialError;
     use dialog_effects::storage::Location;
@@ -493,6 +629,7 @@ mod tests {
     use dialog_ucan::{Parameters, Scope, Ucan};
     use dialog_ucan_core::command::Command as UcanCommand;
     use dialog_ucan_core::subject::Subject as UcanSubject;
+    use dialog_ucan_core::time::Timestamp;
     use dialog_varsig::{Did, Principal as _};
 
     /// A volatile space whose memory loses the publishes it is told to.
@@ -1002,6 +1139,186 @@ mod tests {
             "and its delegation"
         );
         proves(&peer, &other, &space).await?;
+        Ok(())
+    }
+
+    /// Retain `delegation` where `peer` proves from.
+    async fn retained<S: PeerSpace>(
+        peer: &Peer<S>,
+        delegation: dialog_ucan::UcanDelegation,
+    ) -> anyhow::Result<()> {
+        Subject::from(peer.home().clone())
+            .attenuate(Access)
+            .invoke(Retain::<Ucan>::new(delegation))
+            .perform(peer)
+            .await?;
+        Ok(())
+    }
+
+    /// A held principal delegates all it has to a key of the caller's, for
+    /// as long as the caller says: the delegation is the principal's,
+    /// signed with its key, and writes nothing. Once retained, the key
+    /// proves authority over a space shared with the principal through it.
+    #[dialog_common::test]
+    async fn it_delegates_all_a_held_principal_has() -> anyhow::Result<()> {
+        let (peer, _) = onboarded(test_storage().await).await?;
+        let space = created(&peer).await?;
+        let agent = created(&peer).await?;
+        peer.held_principal(&space)
+            .share(agent.clone())
+            .perform(&peer)
+            .await?;
+        let session = holder().await?;
+        let expiration = Timestamp::five_minutes_from_now();
+
+        let before = head(&peer).await?;
+        let delegation = peer
+            .held_principal(&agent)
+            .claim(Subject::any())
+            .expires(expiration)
+            .delegate(session.clone())
+            .perform(&peer)
+            .await?;
+        assert_eq!(head(&peer).await?, before, "nothing was written");
+        let chain = delegation.chain();
+        assert_eq!(chain.issuer(), &agent);
+        assert_eq!(chain.audience(), &session);
+        assert_eq!(chain.subject(), None, "a delegation of all it has");
+        assert_eq!(
+            chain.expiration().map(|time| time.to_unix()),
+            Some(expiration.to_unix())
+        );
+
+        assert!(proves(&peer, &session, &space).await.is_err());
+        retained(&peer, delegation).await?;
+        proves(&peer, &session, &space).await?;
+        Ok(())
+    }
+
+    /// A held principal delegates one subject it has authority over, the
+    /// delegation carrying the proofs that authority rests on.
+    #[dialog_common::test]
+    async fn it_delegates_a_subject_a_held_principal_has() -> anyhow::Result<()> {
+        let (peer, _) = onboarded(test_storage().await).await?;
+        let space = created(&peer).await?;
+        let agent = created(&peer).await?;
+        let shared = peer
+            .held_principal(&space)
+            .share(agent.clone())
+            .perform(&peer)
+            .await?;
+        let session = holder().await?;
+
+        let delegation = peer
+            .held_principal(&agent)
+            .claim(Subject::from(space.clone()))
+            .delegate(session.clone())
+            .perform(&peer)
+            .await?;
+        let chain = delegation.chain();
+        assert_eq!(chain.subject(), Some(&space));
+        assert_eq!(chain.issuer(), &space);
+        assert_eq!(chain.audience(), &session);
+        assert_eq!(chain.proof_cids().len(), 2);
+        assert_eq!(
+            chain.proof_cids()[0],
+            shared.chain().proof_cids()[0],
+            "resting on the space's delegation to the principal"
+        );
+        retained(&peer, delegation).await?;
+        proves(&peer, &session, &space).await?;
+        Ok(())
+    }
+
+    /// A subject the held principal has no authority over is withheld,
+    /// and so is a principal the peer holds no key of.
+    #[dialog_common::test]
+    async fn it_withholds_a_delegation_the_principal_cannot_make() -> anyhow::Result<()> {
+        let (peer, _) = onboarded(test_storage().await).await?;
+        let space = created(&peer).await?;
+        let agent = created(&peer).await?;
+        let session = holder().await?;
+        let before = head(&peer).await?;
+
+        let unproven = peer
+            .held_principal(&agent)
+            .claim(Subject::from(space))
+            .delegate(session.clone())
+            .perform(&peer)
+            .await
+            .map(|_| ());
+        assert!(
+            matches!(unproven, Err(CredentialError::Withheld(_))),
+            "{unproven:?}"
+        );
+        let stranger = holder().await?;
+        let unheld = peer
+            .held_principal(&stranger)
+            .claim(Subject::any())
+            .delegate(session)
+            .perform(&peer)
+            .await
+            .map(|_| ());
+        assert!(
+            matches!(unheld, Err(CredentialError::NotFound(_))),
+            "{unheld:?}"
+        );
+        assert_eq!(head(&peer).await?, before, "nothing was written");
+        Ok(())
+    }
+
+    /// A peer that keeps no copy of a held principal's key delegates as it
+    /// through the custodian of the account it is held for, and is refused
+    /// without one. A session is refused either way.
+    #[dialog_common::test]
+    async fn it_delegates_through_a_custodian() -> anyhow::Result<()> {
+        let storage = test_storage().await;
+        let (peer, custodian) = onboarded(storage.clone()).await?;
+        let space = created(&peer).await?;
+        let other = OpenCredential::open(unique_name("bob"))
+            .perform(&test_credential_store())
+            .await?;
+        let other = Peer::new(other)
+            .space(BranchReference::from(peer.state()))
+            .with(storage)
+            .grant(test_grant().await)
+            .await?;
+        let session = holder().await?;
+
+        let refused = other
+            .held_principal(&space)
+            .claim(Subject::any())
+            .delegate(session.clone())
+            .perform(&other)
+            .await
+            .map(|_| ());
+        assert!(
+            matches!(refused, Err(CredentialError::Withheld(_))),
+            "{refused:?}"
+        );
+        let delegation = other
+            .held_principal(&space)
+            .claim(Subject::any())
+            .via(&custodian)
+            .delegate(session.clone())
+            .perform(&other)
+            .await?;
+        assert_eq!(delegation.chain().issuer(), &space);
+        assert_eq!(delegation.chain().audience(), &session);
+
+        let (session_peer, peer) = test_session_with_peer().await;
+        let space = created(&peer).await?;
+        let refused = session_peer
+            .held_principal(&space)
+            .claim(Subject::any())
+            .delegate(session)
+            .perform(&session_peer)
+            .await
+            .map(|_| ());
+        assert!(
+            matches!(refused, Err(CredentialError::Withheld(_))),
+            "{refused:?}"
+        );
         Ok(())
     }
 }
