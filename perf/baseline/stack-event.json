@@ -15,12 +15,11 @@
     "span.apply_batch_reusing": 0,
     "span.buffer_records": 0,
     "span.commit": 0,
-    "span.resolve_bundle": 0,
-    "span.resolve_rules": 0,
+    "span.resolve_bundle": 2,
+    "span.resolve_rules": 2,
     "span.seal_batch": 0,
     "span.settle": 200,
-    "span.settle_cell": 200,
     "span.write_instructions": 0
   },
-  "instructions": 246467389
+  "instructions": 163849900
 }
