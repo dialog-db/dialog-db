@@ -63,6 +63,9 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Get>,
     ) -> Result<Option<Vec<u8>>, ArchiveError> {
+        if let Some(relay) = self.relay() {
+            return relay.get(invocation).await;
+        }
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
@@ -83,6 +86,9 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl Provider<ForkInvocation<UcanSite, Put>> for UcanSite {
     async fn execute(&self, invocation: ForkInvocation<UcanSite, Put>) -> Result<(), ArchiveError> {
+        if let Some(relay) = self.relay() {
+            return relay.put(invocation).await;
+        }
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
@@ -111,6 +117,9 @@ impl Provider<ForkInvocation<UcanSite, Resolve>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Resolve>,
     ) -> Result<Option<Edition<Vec<u8>>>, MemoryError> {
+        if let Some(relay) = self.relay() {
+            return relay.resolve(invocation).await;
+        }
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
@@ -140,6 +149,9 @@ impl Provider<ForkInvocation<UcanSite, Publish>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Publish>,
     ) -> Result<Version, MemoryError> {
+        if let Some(relay) = self.relay() {
+            return relay.publish(invocation).await;
+        }
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
@@ -173,6 +185,9 @@ impl Provider<ForkInvocation<UcanSite, Retract>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Retract>,
     ) -> Result<(), MemoryError> {
+        if let Some(relay) = self.relay() {
+            return relay.retract(invocation).await;
+        }
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
@@ -201,6 +216,9 @@ impl Provider<ForkInvocation<UcanSite, Read>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Read>,
     ) -> Result<BlobReader, BlobError> {
+        if let Some(relay) = self.relay() {
+            return relay.read(invocation).await;
+        }
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
@@ -229,6 +247,9 @@ impl Provider<ForkInvocation<UcanSite, Import>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Import>,
     ) -> Result<BlobWriter, BlobError> {
+        if let Some(relay) = self.relay() {
+            return relay.import(invocation).await;
+        }
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
@@ -288,6 +309,12 @@ impl Provider<ForkInvocation<UcanSite, Watch>> for UcanSite {
         &self,
         invocation: ForkInvocation<UcanSite, Watch>,
     ) -> Result<Editions, MemoryError> {
+        if self.relay().is_some() {
+            return Err(Rejection::Unsupported {
+                reason: "a relayed site follows no cell".into(),
+            }
+            .into());
+        }
         let Some(socket) = invocation.address.socket() else {
             return Err(Rejection::Unsupported {
                 reason: "the access service names no socket".into(),

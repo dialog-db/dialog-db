@@ -15,7 +15,10 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::authority::{self, OperatorExt};
 use dialog_remote_ucan_s3::{Ucan, UcanAuthorization, UcanSite as PermitSite};
 
+use std::sync::Arc;
+
 use crate::address::UcanAddress;
+use crate::relay::Relay;
 use crate::socket::Sockets;
 
 /// A UCAN site that proves and performs each operation in one request.
@@ -26,6 +29,7 @@ use crate::socket::Sockets;
 pub struct UcanSite {
     permits: PermitSite,
     sockets: Sockets,
+    relay: Option<Arc<dyn Relay>>,
 }
 
 impl UcanSite {
@@ -46,7 +50,24 @@ impl UcanSite {
         Self {
             permits: PermitSite::default(),
             sockets: Sockets::with_liveness(liveness),
+            relay: None,
         }
+    }
+
+    /// A site whose operations `relay` performs, in place of the site's own
+    /// requests: for code that has no network of its own, such as a guest
+    /// kernel whose embedder reaches the network for it.
+    pub fn relayed(relay: Arc<dyn Relay>) -> Self {
+        Self {
+            relay: Some(relay),
+            ..Self::default()
+        }
+    }
+
+    /// What performs this site's operations, when something other than its
+    /// own requests does.
+    pub(crate) fn relay(&self) -> Option<&dyn Relay> {
+        self.relay.as_deref()
     }
 }
 

@@ -71,6 +71,13 @@ impl Network {
         self
     }
 
+    /// Dispatch UCAN forks through `ucan`, such as a site whose operations
+    /// a relay performs (see [`UcanSite::relayed`]).
+    pub fn with_ucan(mut self, ucan: UcanSite) -> Self {
+        self.ucan = ucan;
+        self
+    }
+
     /// Dispatch iroh forks through a site built elsewhere.
     ///
     /// For an embedder that has to hold the site as well as give it
