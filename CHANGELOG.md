@@ -24,11 +24,21 @@ delegation of it with that key: `Subject::any()` for everything the
 principal has, or a subject for less, bounded by `.expires` and
 `.not_before`, with `.via(custodian)` when the peer keeps no copy of the
 key. The key is opened and dropped inside `perform`, as `share`, `revoke`
-and `hand_over` open it, and the delegation is handed back, not retained,
-so delegating writes nothing. Before this a caller that wanted, say, a
-short-lived session key to act as an agent's key had to read the sealed
-key out of the space itself and reveal it with the account's key. Nothing
-is removed, so nothing needs moving across.
+and `hand_over` open it, and the delegation is handed back with the proofs
+it rests on, not retained.
+
+What this changes for you:
+
+- New: `HeldReference::claim`, `HeldClaim` and `HeldDelegate`.
+- Delegating writes nothing; retain the delegation yourself if the peer
+  should prove from it.
+- A claim the principal cannot prove is `CredentialError::Withheld`, and a
+  session is refused with `Withheld`.
+
+Why: a caller that wanted a short-lived key to act as a held principal,
+such as a session key for an agent, had to read the sealed key out of the
+space and reveal it with the account's key itself, depending on how dialog
+seals it. Nothing is removed, so nothing needs moving across.
 
 ### A difference fetches the blocks it reads a batch at a time
 
