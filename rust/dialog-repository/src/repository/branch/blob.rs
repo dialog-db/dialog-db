@@ -73,7 +73,8 @@ use crate::repository::branch::asset::recorded_size;
 use crate::repository::remote::Step;
 use crate::repository::source::SourceRef;
 use crate::{
-    Branch, CommitError, Hydrate, Index, NetworkedIndex, RemoteFallback, RemoteSite, Snapshot,
+    Branch, CommitError, Hydrate, Index, NetworkedIndex, PublishError, RemoteFallback, RemoteSite,
+    Snapshot,
 };
 use dialog_artifacts::{Asset, BlobIndexExt as _, BlobRecord, Entity, Instruction};
 use dialog_capability::{Fork, Provider};
@@ -430,6 +431,10 @@ impl ReadBlob<'_> {
     }
 }
 
+/// How many times a blob write commits its asset again after losing a race
+/// with another writer of the line.
+const WRITE_ATTEMPTS: u32 = 3;
+
 /// Ingest a blob and record it as an asset in one new revision. Created by
 /// [`Blob::import`] then [`write`](BlobImportBuilder::write).
 pub struct WriteBlob<'a, S> {
@@ -467,19 +472,34 @@ where
         let branch = self.archive.branch()?;
         let asset = branch.asset(self.chunks).import().perform(env).await?;
         let entity = asset.entity()?;
+        let fact = asset.fact()?;
         // A replace, as a transaction's import records it: an asset has one
-        // size, and replacing a fact with the value it holds is a no-op.
-        Box::pin(
-            branch
-                .commit(stream::iter(vec![Instruction::Assert(
-                    asset.fact()?,
-                    dialog_artifacts::Pick::Last,
-                )]))
-                .machinery()
-                .perform(env),
-        )
-        .await?;
-        Ok(entity)
+        // size, and replacing a fact with the value it holds is a no-op. The
+        // bytes are already durable, so a commit that loses a race with
+        // another writer of the line is made again on the head that won.
+        let mut attempt = 0;
+        loop {
+            let committed = Box::pin(
+                branch
+                    .commit(stream::iter(vec![Instruction::Assert(
+                        fact.clone(),
+                        dialog_artifacts::Pick::Last,
+                    )]))
+                    .machinery()
+                    .perform(env),
+            )
+            .await;
+            match committed {
+                Ok(_) => return Ok(entity),
+                Err(CommitError::Publish(PublishError::VersionMismatch { .. }))
+                    if attempt < WRITE_ATTEMPTS =>
+                {
+                    attempt += 1;
+                    branch.refresh(env).await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 }
 
@@ -631,6 +651,66 @@ mod tests {
             .await?;
         assert_eq!(drain(reader).await, payload[10..19]);
 
+        Ok(())
+    }
+
+    /// A blob written through a handle whose view of the line went stale,
+    /// as another writer committed meanwhile, lands on the head that won,
+    /// and keeps what the other writer committed.
+    #[dialog_common::test]
+    async fn it_writes_a_blob_on_a_line_another_writer_moved() -> Result<()> {
+        use dialog_artifacts::{Artifact, Instruction, Value};
+        use futures_util::StreamExt as _;
+
+        let storage = test_storage().await;
+        let profile = open_peer(storage.clone(), Location::profile(unique_name("blob"))).await?;
+        let operator = profile
+            .session(b"test")
+            .space(profile.state())
+            .allow(Subject::any())
+            .await?;
+        let repo = profile
+            .space(unique_name("repo"))
+            .open()
+            .perform(&operator)
+            .await?;
+        let writing = repo.branch("main").open().perform(&operator).await?;
+        let other = repo.branch("main").open().perform(&operator).await?;
+        other
+            .commit(stream::iter(vec![Instruction::Assert(
+                Artifact {
+                    the: "user/name".parse()?,
+                    of: "user:a".parse()?,
+                    is: Value::String("Alice".to_string()),
+                    cause: None,
+                },
+                dialog_artifacts::Pick::All,
+            )]))
+            .perform(&operator)
+            .await?;
+
+        let entity = Blob::import(stream::iter(vec![Ok(b"raced".to_vec())]))
+            .write((&writing).into())
+            .perform(&operator)
+            .await?;
+
+        let line = repo.branch("main").open().perform(&operator).await?;
+        assert_eq!(
+            Blob::from(entity).size((&line).into()).perform(&operator).await?,
+            Some(5),
+            "the blob is recorded"
+        );
+        let names: Vec<Artifact> = line
+            .claims()
+            .select(dialog_artifacts::ArtifactSelector::new().the("user/name".parse()?))
+            .to_owned()
+            .perform(&operator)
+            .await?
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(names.len(), 1, "the other writer's commit stands");
         Ok(())
     }
 
