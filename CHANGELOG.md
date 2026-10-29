@@ -16,7 +16,7 @@ says how to cut a release.
 
 ### A held principal delegates without its key leaving the peer
 
-[#PR](https://github.com/dialog-db/dialog-db/pull/PR)
+[#709](https://github.com/dialog-db/dialog-db/pull/709)
 
 `peer.held_principal(&did).claim(capability)` claims a capability as a
 principal whose key the peer holds, and `.delegate(audience)` signs a
