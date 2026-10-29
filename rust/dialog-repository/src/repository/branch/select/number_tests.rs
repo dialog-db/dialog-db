@@ -766,51 +766,63 @@ macro_rules! lens_concept {
 
 lens_concept!(
     /// An item whose number is read through `u8`.
-    ByU8, U8
+    ByU8,
+    U8
 );
 lens_concept!(
     /// An item whose number is read through `u16`.
-    ByU16, U16
+    ByU16,
+    U16
 );
 lens_concept!(
     /// An item whose number is read through `u32`.
-    ByU32, U32
+    ByU32,
+    U32
 );
 lens_concept!(
     /// An item whose number is read through `u64`.
-    ByU64, U64
+    ByU64,
+    U64
 );
 lens_concept!(
     /// An item whose number is read through `u128`.
-    ByU128, U128
+    ByU128,
+    U128
 );
 lens_concept!(
     /// An item whose number is read through `i8`.
-    ByI8, I8
+    ByI8,
+    I8
 );
 lens_concept!(
     /// An item whose number is read through `i16`.
-    ByI16, I16
+    ByI16,
+    I16
 );
 lens_concept!(
     /// An item whose number is read through `i32`.
-    ByI32, I32
+    ByI32,
+    I32
 );
 lens_concept!(
     /// An item whose number is read through `i64`.
-    ByI64, I64
+    ByI64,
+    I64
 );
 lens_concept!(
     /// An item whose number is read through `i128`.
-    ByI128, I128
+    ByI128,
+    I128
 );
 lens_concept!(
     /// An item whose number is read through `f32`.
-    ByF32, F32
+    ByF32,
+    F32
 );
 lens_concept!(
     /// An item whose number is read through `f64`.
-    ByF64, F64
+    ByF64,
+    F64
 );
 
 /// Stores each case's number under `$the` on its own entity, queries the
