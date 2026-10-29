@@ -18,7 +18,7 @@ use dialog_effects::memory::{Publish, Resolve};
 use futures_util::TryStreamExt as _;
 use futures_util::future::{Either, join_all};
 
-use super::context::{full_context, head_observes, held, own_count, published_context};
+use super::context::{full_context, head_observes, held, own_count, published_context, rival};
 use super::fetch::fetch_one;
 use super::migrate::aligned;
 use super::resolve::resolve;
@@ -327,6 +327,25 @@ pub(crate) async fn prepare_upstream<'a, Env: ResolveEnv>(
         upstream_revision
             .verify()
             .map_err(dialog_artifacts::DialogArtifactsError::from)?;
+
+        // A rival head: the upstream's head is another revision under our
+        // head's own version, minted by a replica writing with our key on
+        // the same head we built on (#705). The gates below answer from
+        // versions, and would take it as held or seen (keeping our head,
+        // so its write is never merged and our next push replaces it) or
+        // as holding ours (adopting it over our write). Neither revision
+        // can be merged into the other, since each context claims the
+        // other's write, so the pull is refused before anything is
+        // written. Decided from the two heads in hand, at no read.
+        if let Some(current) = branch.revision()
+            && rival(&current, &upstream_revision)
+        {
+            return Err(PullError::WriterRacedItself {
+                branch: branch.name().to_string(),
+                ours: Box::new(current),
+                theirs: Box::new(upstream_revision),
+            });
+        }
 
         // `base` is the upstream tree at our last sync point with this
         // particular upstream (the divergence marker), `None` before any
