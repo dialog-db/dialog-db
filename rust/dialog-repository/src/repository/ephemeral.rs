@@ -525,6 +525,77 @@ impl Ephemeral {
         }
     }
 
+    /// This line as it stood before `instants`, its most recent
+    /// instants oldest first (see [`since`](Self::since)): a copy with
+    /// each of their moves undone, newest instant first. A fact an
+    /// instant stored is removed and one it made readable by lifting a
+    /// tombstone is hidden again; a fact it removed is stored again
+    /// and one it hid is readable again, its tombstone lifted. A fact
+    /// an instant both hid and made readable stood after it as it
+    /// did before, so nothing of it is undone. This line is left as it
+    /// was.
+    pub(crate) fn rewound(&self, instants: &[Instant]) -> Self {
+        let base = self.state.read();
+        let mut state = State {
+            facts: base.facts.clone(),
+            tombstones: base.tombstones.clone(),
+            shadowed: base.shadowed.clone(),
+            sequence: base.sequence,
+            hash: base.hash.clone(),
+            log: VecDeque::new(),
+            rules: base.rules.clone(),
+        };
+        drop(base);
+        let mut delta = Delta::default();
+        for instant in instants.iter().rev() {
+            let identity = |fact: &Artifact| {
+                (
+                    fact.of.to_string(),
+                    fact.the.to_string(),
+                    fact.is.to_bytes(),
+                )
+            };
+            let both: HashSet<_> = instant
+                .asserted
+                .iter()
+                .map(identity)
+                .filter(|moved| {
+                    instant
+                        .retracted
+                        .iter()
+                        .any(|fact| identity(fact) == *moved)
+                })
+                .collect();
+            for fact in &instant.asserted {
+                if both.contains(&identity(fact)) {
+                    continue;
+                }
+                if !state.remove(fact, &mut delta) {
+                    let key = sort_key(fact, state.facts.manifest());
+                    if let Entry::Vacant(slot) = state.shadowed.entry(key.clone()) {
+                        slot.insert(fact.clone());
+                        Arc::make_mut(&mut state.tombstones).insert(key);
+                    }
+                }
+            }
+            for fact in &instant.retracted {
+                if both.contains(&identity(fact)) {
+                    continue;
+                }
+                let key = sort_key(fact, state.facts.manifest());
+                if state.shadowed.contains_key(&key) {
+                    state.lift(&key, &mut delta);
+                } else {
+                    state.insert(fact.clone(), &mut delta);
+                }
+            }
+        }
+        state.mint(delta);
+        Self {
+            state: Arc::new(RwLock::new(state)),
+        }
+    }
+
     /// Assert a statement: its asserts and replaces land in the store
     /// with the tree's semantics, its retracts remove or tombstone.
     /// Chainable; use [`apply`](Self::apply) to get the instant minted.
