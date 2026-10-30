@@ -141,7 +141,7 @@ impl<'a> SourceRef<'a> {
     /// The remote block reads fall back to on a local miss: the first
     /// peer among a branch's upstreams, as last resolved (a branch that
     /// tracks a peer must hydrate blocks it holds by reference); none for
-    /// a snapshot.
+    /// a snapshot a caller mints, the branch's for a view of its past.
     ///
     /// An upstream whose peer could not be resolved is carried as
     /// [`RemoteFallback::Unavailable`] rather than dropped: reads the
@@ -150,7 +150,7 @@ impl<'a> SourceRef<'a> {
     pub(crate) fn fallback(self) -> RemoteFallback {
         match self {
             SourceRef::Branch(branch) => branch.fallback(),
-            SourceRef::Snapshot(_) => RemoteFallback::None,
+            SourceRef::Snapshot(snapshot) => snapshot.fallback(),
         }
     }
 

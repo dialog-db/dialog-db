@@ -45,8 +45,13 @@
 //! entities' facts (a conformance check, a variant's negation) —
 //! contribute delta-join heads: the changed fact bound into the
 //! premise it matches, the remaining premises joined sideways, the
-//! head variable projected. Recursion and shapes the discovery does
-//! not handle fall back to a full recompute, which is always sound.
+//! head variable projected. The join reads the state the derivation
+//! it looks for holds in: the branch as it is for a fact that became
+//! readable, and for one that stopped, the pinned revision under the
+//! session overlay rewound to the pinned sequence
+//! ([`Branch::view`], [`rewound`]). Recursion and shapes the
+//! discovery does not handle fall back to a full recompute, which is
+//! always sound.
 //! [`recomputes`](Subscription::recomputes) and
 //! [`maintenances`](Subscription::maintenances) expose which path
 //! each poll took.
@@ -66,7 +71,7 @@ use std::future::Future;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::repository::fetch::Driven;
 use dialog_artifacts::selector::Constrained;
@@ -94,7 +99,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use super::session::{QueryEnv, QueryLayer};
 use crate::repository::source::Source;
-use crate::{Branch, Index, NetworkedIndex, RemoteSite, Revision};
+use crate::{Branch, Ephemeral, Index, NetworkedIndex, RemoteSite, Revision};
 
 /// How many touched entities a maintained poll re-derives at once.
 /// Measured on the catch-up soak's hundred-entity poll (#646): a
@@ -487,14 +492,25 @@ fn touched_by(demand: &Demand, instants: Vec<crate::Instant>) -> Touched {
     if subjects.is_empty() {
         Touched::Nothing
     } else {
-        let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
         Touched::Facts {
             subjects,
-            facts,
             asserted,
             retracted,
         }
     }
+}
+
+/// `overlay` as it stood at `sequence`: a copy with every move its
+/// instants since then made undone ([`Ephemeral::rewound`]), so a
+/// read of the copy sees what a read at `sequence` saw. The handle
+/// itself when nothing moved since, and `None` when the ring no
+/// longer reaches `sequence`.
+fn rewound(overlay: &Ephemeral, sequence: u64) -> Option<Ephemeral> {
+    let instants = overlay.since(sequence)?;
+    if instants.is_empty() {
+        return Some(overlay.clone());
+    }
+    Some(overlay.rewound(&instants))
 }
 
 /// What the in-cover changes between two roots touched.
@@ -510,9 +526,6 @@ enum Touched {
     Facts {
         /// Subjects of the changed facts.
         subjects: BTreeSet<Entity>,
-        /// Every changed fact (asserted and retracted alike), for
-        /// delta-join discovery.
-        facts: Vec<Artifact>,
         /// Facts that became readable.
         asserted: Vec<Artifact>,
         /// Facts that stopped being readable.
@@ -530,24 +543,20 @@ impl Touched {
             (
                 Touched::Facts {
                     mut subjects,
-                    mut facts,
                     mut asserted,
                     mut retracted,
                 },
                 Touched::Facts {
                     subjects: more_subjects,
-                    facts: more_facts,
                     asserted: more_asserted,
                     retracted: more_retracted,
                 },
             ) => {
                 subjects.extend(more_subjects);
-                facts.extend(more_facts);
                 asserted.extend(more_asserted);
                 retracted.extend(more_retracted);
                 Touched::Facts {
                     subjects,
-                    facts,
                     asserted,
                     retracted,
                 }
@@ -683,13 +692,11 @@ where
                     }
                     Touched::Facts {
                         subjects,
-                        facts,
                         asserted,
                         retracted,
                     } => {
-                        if let Some(delta) = self
-                            .maintain(env, &subjects, &facts, &asserted, &retracted)
-                            .await?
+                        if let Some(delta) =
+                            self.maintain(env, &subjects, &asserted, &retracted).await?
                         {
                             self.maintenances += 1;
                             self.revision = current;
@@ -860,10 +867,8 @@ where
         if subjects.is_empty() {
             Ok(Touched::Nothing)
         } else {
-            let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
             Ok(Touched::Facts {
                 subjects,
-                facts,
                 asserted,
                 retracted,
             })
@@ -900,7 +905,6 @@ where
         &'a mut self,
         env: &'a Env,
         subjects: &'a BTreeSet<Entity>,
-        facts: &'a [Artifact],
         asserted: &'a [Artifact],
         retracted: &'a [Artifact],
     ) -> EvaluationFuture<'a, Option<Delta<Q::Conclusion>>>
@@ -944,9 +948,12 @@ where
                 // clone, no generator-local borrows) so the poll
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
-                let query_env: QueryEnv<'a> =
-                    QueryEnv::new(vec![Source::from(self.branch.clone())], overlay, env)
-                        .with_demand(self.demand.clone());
+                let query_env: QueryEnv<'a> = QueryEnv::new(
+                    vec![Source::from(self.branch.clone())],
+                    overlay.clone(),
+                    env,
+                )
+                .with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
                 if rules.recursion().is_some() {
                     // Fixpoint continuation: deletions retract via DRed,
@@ -976,7 +983,35 @@ where
                     self.results = results;
                     return Ok(Some(delta));
                 }
-                match affected_entities(concept, facts, &query_env).await? {
+                // The state the changes were applied to: the pinned
+                // revision under the session overlay as it stood at
+                // the pinned sequence. A derivation a retracted fact
+                // supported held there and nowhere else, so that is
+                // where the discovery joins it (#708). Built the first
+                // time a join asks for it, since rewinding the overlay
+                // copies it: a poll whose changes all join against the
+                // branch as it is never pays for it. A pin from before
+                // the branch's first commit, or one the overlay's ring
+                // no longer reaches, has no such view, and the poll
+                // recomputes.
+                let before: OnceLock<Option<QueryEnv<'a>>> = OnceLock::new();
+                let view = || {
+                    let pinned = self.revision.clone()?;
+                    let rewound = rewound(self.branch.overlay(), self.overlay_sequence)?;
+                    Some(
+                        QueryEnv::new(
+                            vec![Source::from(self.branch.view(pinned, rewound))],
+                            overlay.clone(),
+                            env,
+                        )
+                        .with_demand(self.demand.clone()),
+                    )
+                };
+                match affected_entities(concept, asserted, retracted, &query_env, || {
+                    before.get_or_init(view).as_ref()
+                })
+                .await?
+                {
                     Some(entities) => entities,
                     None => return Ok(None),
                 }
@@ -1176,10 +1211,10 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::Delta;
-    use crate::RemoteSite;
     use crate::helpers::test_repo;
+    use crate::{Ephemeral, RemoteSite};
     use async_trait::async_trait;
-    use dialog_artifacts::{Entity, Value};
+    use dialog_artifacts::{ArtifactSelector, Changes, Entity, Value};
     use dialog_artifacts::{NameShape, Relation as ArtifactsRelation, Symbol};
     use dialog_capability::Command;
     use dialog_capability::{Fork, Provider};
@@ -2690,6 +2725,27 @@ mod tests {
             pub manager: Manager,
         }
 
+        /// The report's mentor (`report/mentor`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("report")]
+        pub struct Mentor(pub Entity);
+
+        /// Someone whose manager and mentor must both hold a badge:
+        /// two conformance premises in one non-local rule.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct Mentored {
+            /// The report entity.
+            pub this: Entity,
+            /// Their display name.
+            pub name: Name,
+            /// Their manager, who must hold a badge.
+            #[dialog(conforms = BadgeHolder)]
+            pub manager: Manager,
+            /// Their mentor, who must hold a badge.
+            #[dialog(conforms = BadgeHolder)]
+            pub mentor: Mentor,
+        }
+
         /// The chief's deputy (`chief/deputy`).
         #[derive(Attribute, Clone, PartialEq)]
         #[domain("chief")]
@@ -2981,6 +3037,351 @@ mod tests {
         );
         assert_eq!(subscription.recomputes(), 1);
         assert_eq!(subscription.maintenances(), 2);
+        Ok(())
+    }
+
+    /// Two facts retracted in one commit, each feeding a different
+    /// conformance premise of the same non-local rule, retract the
+    /// row they jointly supported (#708). Bound into its premise,
+    /// each joins the rest of the rule against the state before the
+    /// change, where the other still holds; joined against the new
+    /// state, where the other is already gone, neither would find
+    /// the head and the row would never be over-deleted.
+    #[dialog_common::test]
+    async fn it_retracts_a_row_when_two_supporting_facts_go_together() -> anyhow::Result<()> {
+        use concepts::{Badge, Manager, Mentor, Mentored, Name};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?; // bob's manager, holds a badge
+        let dave = Entity::new()?; // bob's mentor, holds a badge
+        let bob = Entity::new()?;
+
+        branch
+            .transaction()
+            .assert(Badge::of(alice.clone()).is("A-1"))
+            .assert(Badge::of(dave.clone()).is("D-4"))
+            .assert(Name::of(bob.clone()).is("Bob"))
+            .assert(Manager::of(bob.clone()).is(alice.clone()))
+            .assert(Mentor::of(bob.clone()).is(dave.clone()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let row = Mentored {
+            this: bob.clone(),
+            name: Name("Bob".into()),
+            manager: Manager(alice.clone()),
+            mentor: Mentor(dave.clone()),
+        };
+        let mut subscription = branch.subscribe(Query::<Mentored>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(initial.asserted, vec![row.clone()]);
+
+        // Both badges go in one commit: bob no longer conforms.
+        branch
+            .transaction()
+            .retract(Badge::of(alice.clone()).is("A-1"))
+            .retract(Badge::of(dave.clone()).is("D-4"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let fresh: Vec<Mentored> = branch
+            .query()
+            .select(Query::<Mentored>::default())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(fresh.is_empty(), "a fresh evaluation has no rows");
+
+        let delta = subscription.poll(&operator).await?.expect("co-retraction");
+        assert_eq!(delta.retracted, vec![row]);
+        assert!(delta.asserted.is_empty());
+        assert_eq!(
+            subscription.results(),
+            fresh.as_slice(),
+            "the maintained result matches a fresh evaluation"
+        );
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "the row was reached by the delta-join, not a recompute"
+        );
+        assert_eq!(subscription.maintenances(), 1);
+        Ok(())
+    }
+
+    /// The same two facts retracted together through the session
+    /// overlay, as tombstones over the committed badges: the state
+    /// before the change is the pinned revision under the overlay
+    /// rewound to the pinned sequence, where both badges still hold.
+    #[dialog_common::test]
+    async fn it_retracts_a_row_when_two_supporting_facts_go_together_in_the_overlay()
+    -> anyhow::Result<()> {
+        use concepts::{Badge, Manager, Mentor, Mentored, Name};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let dave = Entity::new()?;
+        let bob = Entity::new()?;
+
+        branch
+            .transaction()
+            .assert(Badge::of(alice.clone()).is("A-1"))
+            .assert(Badge::of(dave.clone()).is("D-4"))
+            .assert(Name::of(bob.clone()).is("Bob"))
+            .assert(Manager::of(bob.clone()).is(alice.clone()))
+            .assert(Mentor::of(bob.clone()).is(dave.clone()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let row = Mentored {
+            this: bob.clone(),
+            name: Name("Bob".into()),
+            manager: Manager(alice.clone()),
+            mentor: Mentor(dave.clone()),
+        };
+        let mut subscription = branch.subscribe(Query::<Mentored>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(initial.asserted, vec![row.clone()]);
+
+        // Both badges go in one instant of the session overlay.
+        let mut changes = Changes::new();
+        changes.retract(Badge::of(alice.clone()).is("A-1"));
+        changes.retract(Badge::of(dave.clone()).is("D-4"));
+        branch.overlay().apply(changes)?;
+
+        let fresh: Vec<Mentored> = branch
+            .query()
+            .select(Query::<Mentored>::default())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(fresh.is_empty(), "a fresh evaluation has no rows");
+
+        let delta = subscription.poll(&operator).await?.expect("co-retraction");
+        assert_eq!(delta.retracted, vec![row.clone()]);
+        assert_eq!(subscription.results(), fresh.as_slice());
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 1);
+
+        // Both come back in one instant: the row returns, and the
+        // state before that change is the overlay as the last poll
+        // left it, with both badges hidden.
+        let mut changes = Changes::new();
+        changes.assert(Badge::of(alice.clone()).is("A-1"));
+        changes.assert(Badge::of(dave.clone()).is("D-4"));
+        branch.overlay().apply(changes)?;
+
+        let delta = subscription.poll(&operator).await?.expect("co-assertion");
+        assert_eq!(delta.asserted, vec![row]);
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 2);
+        Ok(())
+    }
+
+    /// Rewinding a session overlay to an earlier sequence undoes what
+    /// its instants since then changed: facts they added are gone and
+    /// facts they removed are back. The overlay itself is left as it
+    /// is.
+    #[dialog_common::test]
+    fn it_rewinds_an_overlay_to_a_pinned_sequence() -> anyhow::Result<()> {
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let overlay = Ephemeral::new();
+        overlay
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )?
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))?;
+        let pinned = overlay.revision().sequence;
+
+        // Three instants: a second name beside alice's, a new entity,
+        // a removal.
+        overlay.assert(
+            the!("person/name")
+                .of(alice.clone())
+                .is("Alicia".to_string()),
+        )?;
+        let carol = Entity::new()?;
+        overlay.assert(
+            the!("person/name")
+                .of(carol.clone())
+                .is("Carol".to_string()),
+        )?;
+        overlay.retract(the!("person/name").of(bob.clone()).is("Bob".to_string()))?;
+
+        let names = |line: &Ephemeral| -> anyhow::Result<Vec<(String, Value)>> {
+            let selector = ArtifactSelector::new()
+                .the(ArtifactsRelation::try_from("person/name".to_string())?);
+            let mut names: Vec<(String, Value)> = line
+                .scan(&selector)
+                .into_iter()
+                .map(|fact| (fact.of.to_string(), fact.is))
+                .collect();
+            names.sort_by(|left, right| left.0.cmp(&right.0));
+            Ok(names)
+        };
+        let named = |who: &Entity, name: &str| (who.to_string(), Value::String(name.to_string()));
+        let rewound = super::rewound(&overlay, pinned).expect("the ring reaches the pin");
+        let mut expected = vec![named(&alice, "Alice"), named(&bob, "Bob")];
+        expected.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            names(&rewound)?,
+            expected,
+            "the rewound line reads as it did"
+        );
+        let mut now = vec![
+            named(&alice, "Alice"),
+            named(&alice, "Alicia"),
+            named(&carol, "Carol"),
+        ];
+        now.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(names(&overlay)?, now, "the overlay is left as it is");
+
+        assert!(
+            super::rewound(&overlay, overlay.revision().sequence)
+                .is_some_and(|same| same.revision() == overlay.revision()),
+            "an up-to-date pin rewinds to the line itself"
+        );
+        Ok(())
+    }
+
+    /// Rewinding undoes a tombstone the way it was laid: a committed
+    /// fact the overlay hid since the pin is readable again beneath
+    /// the rewound line, not stored in it, so it stands at its own
+    /// edition; and a tombstone the overlay lifted since the pin is
+    /// laid again. The rewound line's export is the pinned line's.
+    #[dialog_common::test]
+    fn it_rewinds_tombstones_as_they_were_laid() -> anyhow::Result<()> {
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let committed =
+            |who: &Entity, name: &str| the!("person/name").of(who.clone()).is(name.to_string());
+        let overlay = Ephemeral::new();
+        // Bob's committed name is hidden at the pin; alice's is not.
+        overlay.retract(committed(&bob, "Bob"))?;
+        let pinned = overlay.export();
+        let sequence = overlay.revision().sequence;
+
+        overlay.retract(committed(&alice, "Alice"))?;
+        overlay.assert(committed(&bob, "Bob"))?;
+        // A fact hidden and shown again in one instant stands as it did.
+        let mut churn = Changes::new();
+        churn.retract(committed(&alice, "Alice"));
+        churn.assert(committed(&alice, "Alice"));
+        overlay.apply(churn)?;
+
+        let rewound = super::rewound(&overlay, sequence).expect("the ring reaches the pin");
+        assert_eq!(
+            rewound.export(),
+            pinned,
+            "the rewound line is the pinned line"
+        );
+        Ok(())
+    }
+
+    /// A concept subscription first polled before the branch's first
+    /// commit has no revision to read the state before a change from.
+    /// A poll whose changes all join against the branch as it is
+    /// still maintains; one that needs the state before, here a
+    /// retraction through the session overlay, recomputes instead,
+    /// with the same result. Once the branch has a revision, the same
+    /// retraction maintains, under the overlay rewound to the pin.
+    #[dialog_common::test]
+    async fn it_recomputes_when_a_join_needs_the_state_before_an_unborn_branch()
+    -> anyhow::Result<()> {
+        use concepts::{Badge, Manager, Name, Report};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let mut subscription = branch.subscribe(Query::<Report>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert!(initial.asserted.is_empty(), "an unborn branch has no rows");
+        assert_eq!(
+            (subscription.recomputes(), subscription.maintenances()),
+            (1, 0)
+        );
+
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let row = Report {
+            this: bob.clone(),
+            name: Name("Bob".into()),
+            manager: Manager(alice.clone()),
+        };
+        let mut arrival = Changes::new();
+        arrival.assert(Badge::of(alice.clone()).is("A-1"));
+        arrival.assert(Name::of(bob.clone()).is("Bob"));
+        arrival.assert(Manager::of(bob.clone()).is(alice.clone()));
+        branch.overlay().apply(arrival)?;
+        let delta = subscription.poll(&operator).await?.expect("arrival");
+        assert_eq!(delta.asserted, vec![row.clone()]);
+        assert_eq!(
+            (subscription.recomputes(), subscription.maintenances()),
+            (1, 1),
+            "facts arriving join against the branch as it is: maintained"
+        );
+
+        branch
+            .overlay()
+            .retract(Badge::of(alice.clone()).is("A-1"))?;
+        let delta = subscription.poll(&operator).await?.expect("retraction");
+        assert_eq!(delta.retracted, vec![row.clone()]);
+        assert_eq!(
+            (subscription.recomputes(), subscription.maintenances()),
+            (2, 1),
+            "a retraction needs the state before, and an unborn branch has none to view"
+        );
+
+        // A first commit gives the branch a revision to view.
+        let carol = Entity::new()?;
+        branch
+            .transaction()
+            .assert(Name::of(carol.clone()).is("Carol"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        // Carol's name may fall outside the cover; what matters is the
+        // pin the poll leaves.
+        subscription.poll(&operator).await?;
+        let (recomputes, maintenances) = (subscription.recomputes(), subscription.maintenances());
+        branch
+            .overlay()
+            .assert(Badge::of(alice.clone()).is("A-1"))?;
+        let delta = subscription.poll(&operator).await?.expect("badge back");
+        assert_eq!(delta.asserted, vec![row.clone()]);
+        branch
+            .overlay()
+            .retract(Badge::of(alice.clone()).is("A-1"))?;
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("badge gone again");
+        assert_eq!(delta.retracted, vec![row]);
+        assert_eq!(
+            (subscription.recomputes(), subscription.maintenances()),
+            (recomputes, maintenances + 2),
+            "pinned to a revision, the retraction maintains under the rewound overlay"
+        );
         Ok(())
     }
 
@@ -3416,12 +3817,13 @@ mod tests {
         pairs
     }
 
-    /// Election lifecycle, assertion side: a subscription electing over
-    /// a derived relation re-derives per poll. Asserting a candidate
-    /// that wins retracts the group's old elected row and asserts the
-    /// new one; a fact for a fresh group asserts a new row. The
-    /// election is the subscription's read, not a rule's: the rule
-    /// derives one candidate per member, and `max` chooses among them.
+    /// Election lifecycle, assertion side: asserting a candidate that
+    /// wins retracts the group's old elected row and asserts the new
+    /// one; a fact for a fresh group asserts a new row. The election is
+    /// the subscription's read, not a rule's: the rule derives one
+    /// candidate per member, and `max` chooses among them. It is per
+    /// group, the row's entity, so the group is maintained like any
+    /// other head: its candidates re-derived and the pick taken again.
     #[dialog_common::test]
     async fn it_updates_an_electing_subscription_on_asserts() -> anyhow::Result<()> {
         use concepts::{Dept, Salary, Staffed};
@@ -3471,8 +3873,8 @@ mod tests {
         assert_eq!(tops(&delta.asserted), vec![(dept_a.clone(), 150)]);
         assert_eq!(
             (subscription.recomputes(), subscription.maintenances()),
-            (2, 0),
-            "the elected delta comes from a recompute, never per-entity maintenance"
+            (1, 1),
+            "the elected delta comes from re-deriving the group, not a recompute"
         );
 
         // A fresh group appears without touching the existing one.
@@ -3494,7 +3896,10 @@ mod tests {
             tops(subscription.results()).contains(&(dept_a.clone(), 150)),
             "the retained result still carries dept-a's row"
         );
-        assert_eq!(subscription.recomputes(), 3);
+        assert_eq!(
+            (subscription.recomputes(), subscription.maintenances()),
+            (1, 2)
+        );
         Ok(())
     }
 
@@ -3574,7 +3979,11 @@ mod tests {
         assert_eq!(tops(&delta.retracted), vec![(dept_b.clone(), 70)]);
         assert!(delta.asserted.is_empty(), "an empty group yields no row");
         assert_eq!(tops(subscription.results()), vec![(dept_a.clone(), 100)]);
-        assert_eq!(subscription.maintenances(), 0, "recompute-per-poll");
+        assert_eq!(
+            (subscription.recomputes(), subscription.maintenances()),
+            (1, 2),
+            "each group is re-derived, the emptied one to no row"
+        );
         Ok(())
     }
 
