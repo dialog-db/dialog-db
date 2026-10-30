@@ -13,6 +13,19 @@
 //! Each affected head is then re-derived goal-directedly by the
 //! caller (DRed's delete/re-derive, per entity).
 //!
+//! A derivation the change touches exists in exactly one of the two
+//! states around it, and its remaining premises hold only there: a
+//! derivation through a fact that stopped being readable held
+//! *before* the change, one through a fact that became readable
+//! holds *after* it, and a negated premise swaps the two, since the
+//! derivation holds where the fact is absent. So the sideways join
+//! runs against the state the derivation exists in. Joining every
+//! change against the new state alone misses a derivation two
+//! retracted facts supported, since each is bound into its premise
+//! and the other is already gone from the state the rest is joined
+//! against (#708); the same holds mirrored for two facts asserted
+//! under negated premises.
+//!
 //! The discovery over-approximates but never misses: a fact bound
 //! into a premise it merely *could* match yields candidate heads,
 //! and re-derivation settles the truth per head. `None` means the
@@ -42,9 +55,93 @@ use crate::term::Term;
 use crate::types::Any;
 use crate::{Entity, Environment, Value};
 
+/// Which of the two states around a change something exists in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    /// The state the change was applied to.
+    Before,
+    /// The state the change produced.
+    After,
+}
+
+impl Side {
+    fn opposite(self) -> Side {
+        match self {
+            Side::Before => Side::After,
+            Side::After => Side::Before,
+        }
+    }
+
+    /// The side a derivation through a premise bound to something
+    /// that exists on `self` holds: the same side for a positive
+    /// premise, the opposite for a negated one, which holds where
+    /// what it is bound to is absent.
+    fn derivation(self, negated: bool) -> Side {
+        if negated { self.opposite() } else { self }
+    }
+}
+
+/// A changed fact and the side it is readable on: an asserted fact
+/// exists after the change, a retracted one before it.
+struct Change<'f> {
+    fact: &'f Artifact,
+    exists: Side,
+}
+
+/// The candidate heads of one concept, by the side the derivation
+/// the change touches is on: a head in `before` may have lost a
+/// derivation, one in `after` may have gained one. A head whose row
+/// merely changed is on both.
+#[derive(Clone, Debug, Default)]
+struct Heads {
+    before: BTreeSet<Entity>,
+    after: BTreeSet<Entity>,
+}
+
+impl Heads {
+    fn on(&mut self, side: Side) -> &mut BTreeSet<Entity> {
+        match side {
+            Side::Before => &mut self.before,
+            Side::After => &mut self.after,
+        }
+    }
+
+    fn sides(&self) -> impl Iterator<Item = (Side, &BTreeSet<Entity>)> {
+        [(Side::Before, &self.before), (Side::After, &self.after)].into_iter()
+    }
+
+    fn into_union(self) -> BTreeSet<Entity> {
+        let mut heads = self.before;
+        heads.extend(self.after);
+        heads
+    }
+}
+
+/// The two states around the change, each as an environment to
+/// evaluate against. Rules are resolved from `after`; a change that
+/// touched them makes the caller recompute instead.
+struct States<'a, Env> {
+    before: &'a Env,
+    after: &'a Env,
+}
+
+impl<'a, Env> States<'a, Env> {
+    fn on(&self, side: Side) -> &'a Env {
+        match side {
+            Side::Before => self.before,
+            Side::After => self.after,
+        }
+    }
+}
+
 /// The head entities of `concept` that the changed facts can
 /// affect, or `None` when the set cannot be bounded and the caller
 /// must re-evaluate in full.
+///
+/// `asserted` are the facts that became readable and `retracted`
+/// the ones that stopped; `after` reads the state the change
+/// produced and `before` the state it was applied to (see the
+/// [module docs](self) for why the discovery needs both).
 ///
 /// Nested concept premises are followed to arbitrary depth: the
 /// reachable concepts form an acyclic graph (recursion anywhere in
@@ -54,13 +151,27 @@ use crate::{Entity, Environment, Value};
 /// derivation layers.
 pub async fn affected_entities<'a, Env>(
     concept: &ConceptDescriptor,
-    facts: &[Artifact],
-    env: &'a Env,
+    asserted: &[Artifact],
+    retracted: &[Artifact],
+    after: &'a Env,
+    before: &'a Env,
 ) -> Result<Option<BTreeSet<Entity>>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
     let root = concept.this();
+    let states = States { before, after };
+    let changes: Vec<Change<'_>> = asserted
+        .iter()
+        .map(|fact| Change {
+            fact,
+            exists: Side::After,
+        })
+        .chain(retracted.iter().map(|fact| Change {
+            fact,
+            exists: Side::Before,
+        }))
+        .collect();
 
     // Collect the reachable concepts and their resolved rules.
     let mut rules_of: HashMap<Entity, Vec<DeductiveRule>> = HashMap::new();
@@ -71,7 +182,7 @@ where
         if rules_of.contains_key(&entity) {
             continue;
         }
-        let bundle = Provider::<SelectRules>::execute(env, descriptor).await?;
+        let bundle = Provider::<SelectRules>::execute(after, descriptor).await?;
         if bundle.recursion().is_some() {
             return Ok(None);
         }
@@ -88,7 +199,7 @@ where
         let mut targets = BTreeSet::new();
         for rule in &rules {
             for premise in rule.analysis().premises() {
-                if let Some(query) = concept_premise(premise) {
+                if let Some((query, _)) = concept_premise(premise) {
                     targets.insert(query.predicate.this());
                     queue.push(query.predicate.clone());
                 }
@@ -101,7 +212,7 @@ where
     // Bottom-up: a concept computes once every target it applies
     // has. The graph is acyclic (recursion returned above), so this
     // always makes progress.
-    let mut affected: HashMap<Entity, BTreeSet<Entity>> = HashMap::new();
+    let mut affected: HashMap<Entity, Heads> = HashMap::new();
     let mut pending: Vec<Entity> = rules_of.keys().cloned().collect();
     while !pending.is_empty() {
         let ready: Vec<Entity> = pending
@@ -118,7 +229,7 @@ where
             return Ok(None);
         }
         for entity in &ready {
-            let mut heads = BTreeSet::new();
+            let mut heads = Heads::default();
             for rule in &rules_of[entity] {
                 if rule.analysis().is_entity_local() {
                     // A change to E's facts only affects E's rows, and
@@ -128,16 +239,20 @@ where
                     // is a concept selecting stored attributes, so this
                     // is what keeps a change to one concept's facts
                     // from being joined through every other.
-                    heads.extend(
-                        facts
-                            .iter()
-                            .filter(|fact| reads_attribute(rule, fact))
-                            .map(|fact| fact.of.clone()),
-                    );
+                    for change in &changes {
+                        for negated in reading_attribute(rule, change.fact) {
+                            heads
+                                .on(change.exists.derivation(negated))
+                                .insert(change.fact.of.clone());
+                        }
+                    }
                     continue;
                 }
-                match rule_heads(rule, facts, &affected, env).await? {
-                    Some(found) => heads.extend(found),
+                match rule_heads(rule, &changes, &affected, &states).await? {
+                    Some(found) => {
+                        heads.before.extend(found.before);
+                        heads.after.extend(found.after);
+                    }
                     None => return Ok(None),
                 }
             }
@@ -146,70 +261,84 @@ where
         pending.retain(|entity| !ready.contains(entity));
     }
 
-    Ok(affected.remove(&root))
+    Ok(affected.remove(&root).map(Heads::into_union))
 }
 
-/// Whether some attribute premise of `rule` reads the attribute of
-/// `fact`: one naming it, or one over a variable attribute, which
-/// reads any.
-fn reads_attribute(rule: &DeductiveRule, fact: &Artifact) -> bool {
+/// The attribute premises of `rule` that read the attribute of
+/// `fact` — one naming it, or one over a variable attribute, which
+/// reads any — each as whether it is negated.
+fn reading_attribute<'r>(
+    rule: &'r DeductiveRule,
+    fact: &'r Artifact,
+) -> impl Iterator<Item = bool> + 'r {
     let attribute = Value::from(Relation::from(fact.the.clone()));
-    rule.analysis().premises().any(|premise| {
-        let the = match premise {
-            Premise::Assert(Proposition::Attribute(query)) => query.the(),
-            Premise::Assert(Proposition::OptionalAttribute(query)) => query.query().the(),
-            Premise::Unless(Negation(Proposition::Attribute(query))) => query.the(),
-            _ => return false,
+    rule.analysis().premises().filter_map(move |premise| {
+        let (the, negated) = match premise {
+            Premise::Assert(Proposition::Attribute(query)) => (query.the(), false),
+            Premise::Assert(Proposition::OptionalAttribute(query)) => (query.query().the(), false),
+            Premise::Unless(Negation(Proposition::Attribute(query))) => (query.the(), true),
+            _ => return None,
         };
-        the.as_constant().is_none_or(|value| *value == attribute)
+        the.as_constant()
+            .is_none_or(|value| *value == attribute)
+            .then_some(negated)
     })
 }
 
-/// The concept application of a premise, positive or negated.
-fn concept_premise(premise: &Premise) -> Option<&ConceptQuery> {
+/// The concept application of a premise, and whether it is negated.
+fn concept_premise(premise: &Premise) -> Option<(&ConceptQuery, bool)> {
     match premise {
-        Premise::Assert(Proposition::Concept(query)) => Some(query),
-        Premise::Unless(Negation(Proposition::Concept(query))) => Some(query),
+        Premise::Assert(Proposition::Concept(query)) => Some((query, false)),
+        Premise::Unless(Negation(Proposition::Concept(query))) => Some((query, true)),
         _ => None,
     }
 }
 
 /// The candidate head entities one non-local rule can produce or
 /// retract given the changed facts: per premise, bind what the
-/// change can match and join the remaining premises sideways.
-/// Concept premises bind their `this` slot from the target's
-/// already-computed affected heads.
+/// change can match and join the remaining premises sideways, on
+/// the side the derivation through that premise holds. Concept
+/// premises bind their `this` slot from the target's
+/// already-computed affected heads, side by side.
 async fn rule_heads<'a, Env>(
     rule: &DeductiveRule,
-    facts: &[Artifact],
-    affected: &HashMap<Entity, BTreeSet<Entity>>,
-    env: &'a Env,
-) -> Result<Option<BTreeSet<Entity>>, EvaluationError>
+    changes: &[Change<'_>],
+    affected: &HashMap<Entity, Heads>,
+    states: &States<'a, Env>,
+) -> Result<Option<Heads>, EvaluationError>
 where
     Env: crate::Scope<'a>,
 {
     let premises = &rule.analysis().premises;
-    let mut heads = BTreeSet::new();
+    let mut heads = Heads::default();
 
     for (index, premise) in premises.iter().enumerate() {
         // Attribute premises (positive, optional, or negated) are
         // matched directly by the changed facts.
         let attribute_terms = match premise {
-            Premise::Assert(Proposition::Attribute(query)) => {
-                Some((query.the().clone(), query.of().clone(), query.is().clone()))
-            }
+            Premise::Assert(Proposition::Attribute(query)) => Some((
+                query.the().clone(),
+                query.of().clone(),
+                query.is().clone(),
+                false,
+            )),
             Premise::Assert(Proposition::OptionalAttribute(query)) => Some((
                 query.query().the().clone(),
                 query.of().clone(),
                 query.is().clone(),
+                false,
             )),
-            Premise::Unless(Negation(Proposition::Attribute(query))) => {
-                Some((query.the().clone(), query.of().clone(), query.is().clone()))
-            }
+            Premise::Unless(Negation(Proposition::Attribute(query))) => Some((
+                query.the().clone(),
+                query.of().clone(),
+                query.is().clone(),
+                true,
+            )),
             _ => None,
         };
-        if let Some((the, of, is)) = attribute_terms {
-            for fact in facts {
+        if let Some((the, of, is, negated)) = attribute_terms {
+            for change in changes {
+                let fact = change.fact;
                 let mut matched = Match::new();
                 let mut scope = Environment::new();
                 if !bind_slot(
@@ -239,8 +368,11 @@ where
                 ) {
                     continue;
                 }
-                match sideways_heads(premises, index, matched, &scope, rule, env).await? {
-                    Some(found) => heads.extend(found),
+                let side = change.exists.derivation(negated);
+                match sideways_heads(premises, index, matched, &scope, rule, states.on(side))
+                    .await?
+                {
+                    Some(found) => heads.on(side).extend(found),
                     None => return Ok(None),
                 }
             }
@@ -250,29 +382,35 @@ where
         // Concept premises (positive or negated): the change's
         // effect on the target is its already-computed affected
         // set; each affected target head, bound into the premise's
-        // `this` slot, joins sideways to candidate heads.
-        if let Some(query) = concept_premise(premise) {
+        // `this` slot, joins sideways to candidate heads, on the
+        // side the target's derivation is on.
+        if let Some((query, negated)) = concept_premise(premise) {
             let Some(target_heads) = affected.get(&query.predicate.this()) else {
                 return Ok(None);
             };
             let Some(this) = query.terms.get("this") else {
                 return Ok(None);
             };
-            for entity in target_heads {
-                let mut matched = Match::new();
-                let mut scope = Environment::new();
-                if !bind_slot(
-                    &mut matched,
-                    &mut scope,
-                    this.as_constant(),
-                    this.name(),
-                    Value::Entity(entity.clone()),
-                ) {
-                    continue;
-                }
-                match sideways_heads(premises, index, matched, &scope, rule, env).await? {
-                    Some(found) => heads.extend(found),
-                    None => return Ok(None),
+            for (target_side, entities) in target_heads.sides() {
+                let side = target_side.derivation(negated);
+                for entity in entities {
+                    let mut matched = Match::new();
+                    let mut scope = Environment::new();
+                    if !bind_slot(
+                        &mut matched,
+                        &mut scope,
+                        this.as_constant(),
+                        this.name(),
+                        Value::Entity(entity.clone()),
+                    ) {
+                        continue;
+                    }
+                    match sideways_heads(premises, index, matched, &scope, rule, states.on(side))
+                        .await?
+                    {
+                        Some(found) => heads.on(side).extend(found),
+                        None => return Ok(None),
+                    }
                 }
             }
         }
@@ -382,15 +520,208 @@ mod tests {
         .expect("a well-formed concept")
     }
 
-    fn premise(concept: &ConceptDescriptor, terms: &[(&str, &str)]) -> Premise {
+    fn application(concept: &ConceptDescriptor, terms: &[(&str, &str)]) -> ConceptQuery {
         let mut parameters = Parameters::new();
         for (field, variable) in terms {
             parameters.insert(field.to_string(), Term::<Any>::var(*variable));
         }
-        Premise::Assert(Proposition::Concept(ConceptQuery {
+        ConceptQuery {
             terms: parameters,
             predicate: concept.clone(),
-        }))
+        }
+    }
+
+    fn premise(concept: &ConceptDescriptor, terms: &[(&str, &str)]) -> Premise {
+        Premise::Assert(Proposition::Concept(application(concept, terms)))
+    }
+
+    fn unless(concept: &ConceptDescriptor, terms: &[(&str, &str)]) -> Premise {
+        Premise::Unless(Negation(Proposition::Concept(application(concept, terms))))
+    }
+
+    fn fact(the: &str, of: &Entity, is: &str) -> anyhow::Result<Artifact> {
+        Ok(Artifact {
+            the: the.parse()?,
+            of: of.clone(),
+            is: Value::String(is.to_string()),
+            cause: None,
+        })
+    }
+
+    /// Someone whose manager and mentor both hold a badge: a rule with
+    /// two conformance premises, neither binding the head.
+    fn mentored(
+        named: &ConceptDescriptor,
+        managed: &ConceptDescriptor,
+        mentoring: &ConceptDescriptor,
+        badged: &ConceptDescriptor,
+    ) -> anyhow::Result<(ConceptDescriptor, DeductiveRule)> {
+        let mentored = concept("name", "report/mentored", Type::String);
+        let rule = DeductiveRule::new(
+            mentored.clone(),
+            vec![
+                premise(named, &[("this", "this"), ("name", "name")]),
+                premise(managed, &[("this", "this"), ("manager", "manager")]),
+                premise(mentoring, &[("this", "this"), ("mentor", "mentor")]),
+                premise(badged, &[("this", "manager"), ("badge", "managers")]),
+                premise(badged, &[("this", "mentor"), ("badge", "mentors")]),
+            ],
+        )?;
+        Ok((mentored, rule))
+    }
+
+    /// Someone neither of whose manager and mentor holds a badge: the
+    /// same shape under negation.
+    fn unmentored(
+        named: &ConceptDescriptor,
+        managed: &ConceptDescriptor,
+        mentoring: &ConceptDescriptor,
+        badged: &ConceptDescriptor,
+    ) -> anyhow::Result<(ConceptDescriptor, DeductiveRule)> {
+        let unmentored = concept("name", "report/alone", Type::String);
+        let rule = DeductiveRule::new(
+            unmentored.clone(),
+            vec![
+                premise(named, &[("this", "this"), ("name", "name")]),
+                premise(managed, &[("this", "this"), ("manager", "manager")]),
+                premise(mentoring, &[("this", "this"), ("mentor", "mentor")]),
+                unless(badged, &[("this", "manager")]),
+                unless(badged, &[("this", "mentor")]),
+            ],
+        )?;
+        Ok((unmentored, rule))
+    }
+
+    /// Two facts retracted together, each under a different premise of
+    /// one non-local rule, reach the head they jointly supported (#708).
+    /// The two states are two branches: `before` holds both badges,
+    /// `after` neither. Bound into its premise, a retracted badge
+    /// finds the head only where the other badge still holds, which
+    /// is the state before the change.
+    #[dialog_common::test]
+    async fn it_reaches_a_head_two_retracted_facts_supported() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let before = repo.branch("before").open().perform(&operator).await?;
+        let after = repo.branch("after").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let dave = Entity::new()?;
+        let bob = Entity::new()?;
+        for branch in [&before, &after] {
+            branch
+                .transaction()
+                .assert(the!("report/name").of(bob.clone()).is("Bob".to_string()))
+                .assert(the!("report/manager").of(bob.clone()).is(alice.clone()))
+                .assert(the!("report/mentor").of(bob.clone()).is(dave.clone()))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        before
+            .transaction()
+            .assert(
+                the!("credential/badge")
+                    .of(alice.clone())
+                    .is("A-1".to_string()),
+            )
+            .assert(
+                the!("credential/badge")
+                    .of(dave.clone())
+                    .is("D-4".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let named = concept("name", "report/name", Type::String);
+        let managed = concept("manager", "report/manager", Type::Entity);
+        let mentoring = concept("mentor", "report/mentor", Type::Entity);
+        let badged = concept("badge", "credential/badge", Type::String);
+        let (mentored, rule) = mentored(&named, &managed, &mentoring, &badged)?;
+        let mut registry = RuleRegistry::new();
+        registry.register(rule)?;
+        let before_env = TestEnv::new(&before, &operator, registry.clone());
+        let after_env = TestEnv::new(&after, &operator, registry);
+
+        let retracted = [
+            fact("credential/badge", &alice, "A-1")?,
+            fact("credential/badge", &dave, "D-4")?,
+        ];
+        assert_eq!(
+            affected_entities(&mentored, &[], &retracted, &after_env, &before_env).await?,
+            Some(BTreeSet::from([bob])),
+            "the row both badges supported is reached through either"
+        );
+        Ok(())
+    }
+
+    /// The mirror image: two facts asserted together, each under a
+    /// different negated premise of one rule, reach the head they
+    /// jointly undo. Neither badge holds in `before`, both in `after`;
+    /// a derivation under a negation holds where the fact is absent,
+    /// so the asserted badge joins the rest of the rule before the
+    /// change, where the other badge is still absent.
+    #[dialog_common::test]
+    async fn it_reaches_a_head_two_asserted_facts_negated() -> anyhow::Result<()> {
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let before = repo.branch("before").open().perform(&operator).await?;
+        let after = repo.branch("after").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let dave = Entity::new()?;
+        let bob = Entity::new()?;
+        for branch in [&before, &after] {
+            branch
+                .transaction()
+                .assert(the!("report/name").of(bob.clone()).is("Bob".to_string()))
+                .assert(the!("report/manager").of(bob.clone()).is(alice.clone()))
+                .assert(the!("report/mentor").of(bob.clone()).is(dave.clone()))
+                .commit()
+                .publish()
+                .perform(&operator)
+                .await?;
+        }
+        after
+            .transaction()
+            .assert(
+                the!("credential/badge")
+                    .of(alice.clone())
+                    .is("A-1".to_string()),
+            )
+            .assert(
+                the!("credential/badge")
+                    .of(dave.clone())
+                    .is("D-4".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let named = concept("name", "report/name", Type::String);
+        let managed = concept("manager", "report/manager", Type::Entity);
+        let mentoring = concept("mentor", "report/mentor", Type::Entity);
+        let badged = concept("badge", "credential/badge", Type::String);
+        let (unmentored, rule) = unmentored(&named, &managed, &mentoring, &badged)?;
+        let mut registry = RuleRegistry::new();
+        registry.register(rule)?;
+        let before_env = TestEnv::new(&before, &operator, registry.clone());
+        let after_env = TestEnv::new(&after, &operator, registry);
+
+        let asserted = [
+            fact("credential/badge", &alice, "A-1")?,
+            fact("credential/badge", &dave, "D-4")?,
+        ];
+        assert_eq!(
+            affected_entities(&unmentored, &asserted, &[], &after_env, &before_env).await?,
+            Some(BTreeSet::from([bob])),
+            "the row both badges undo is reached through either"
+        );
+        Ok(())
     }
 
     /// A change under an attribute no rule reads affects nothing: the
@@ -436,7 +767,7 @@ mod tests {
             cause: None,
         };
         assert_eq!(
-            affected_entities(&labelled, &[recoloured], &env).await?,
+            affected_entities(&labelled, &[recoloured], &[], &env, &env).await?,
             Some(BTreeSet::new()),
             "a colour change reaches no label"
         );
@@ -448,7 +779,7 @@ mod tests {
             cause: None,
         };
         assert_eq!(
-            affected_entities(&labelled, &[retagged], &env).await?,
+            affected_entities(&labelled, &[retagged], &[], &env, &env).await?,
             Some(BTreeSet::from([doc])),
             "a tag change reaches the document linking to it"
         );

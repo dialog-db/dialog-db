@@ -14,6 +14,45 @@ says how to cut a release.
 
 ## Unreleased
 
+### A subscription retracts a row whose supporting facts go together
+
+Fixing [#708](https://github.com/dialog-db/dialog-db/issues/708)
+
+A concept subscription maintained incrementally finds the rows a change
+can affect by binding each changed fact into the premise it matches and
+joining the rule's remaining premises sideways. It joined them against
+the state after the change, so a row two retracted facts had supported,
+each under a different premise of a non-local rule, was found through
+neither: bound into its premise, each was joined against a state the
+other had already left. The row stayed in the subscription's results,
+with an empty delta, while a fresh evaluation had none. The join now
+runs against the state the derivation it looks for holds in: the state
+before the change for a fact that stopped being readable, the state
+after it for one that became readable, and the other way round under a
+negated premise, where the mirror image (two facts asserted together
+under two `unless` premises) was missed the same way. The state before
+a change is the subscription's pinned revision under the session
+overlay rewound to the pinned sequence, so a change through the overlay
+is covered too.
+
+What this changes for you:
+
+- A poll after a commit or an overlay instant that retracts more than
+  one fact supporting the same row, or asserts more than one under
+  negated premises, now moves that row, through the maintenance path,
+  where it used to keep it with an empty delta. `Subscription::results`
+  matches a fresh evaluation again.
+- A concept subscription first polled before the branch's first commit
+  recomputes on its first maintainable poll instead of maintaining: it
+  has no revision to read the state before the change from. Its results
+  are the same.
+
+Why: a derivation a change touches holds on exactly one side of the
+change, and its other premises hold only there. Joining every change
+against the new state is exact for one changed fact, since every other
+premise reads the same facts on both sides, and silently incomplete for
+two.
+
 ### A difference fetches the blocks it reads a batch at a time
 
 [#690](https://github.com/dialog-db/dialog-db/pull/690), part of [#646](https://github.com/dialog-db/dialog-db/issues/646)

@@ -45,8 +45,13 @@
 //! entities' facts (a conformance check, a variant's negation) —
 //! contribute delta-join heads: the changed fact bound into the
 //! premise it matches, the remaining premises joined sideways, the
-//! head variable projected. Recursion and shapes the discovery does
-//! not handle fall back to a full recompute, which is always sound.
+//! head variable projected. The join reads the state the derivation
+//! it looks for holds in: the branch as it is for a fact that became
+//! readable, and for one that stopped, the pinned revision under the
+//! session overlay rewound to the pinned sequence
+//! ([`Branch::view`], [`rewound`]). Recursion and shapes the
+//! discovery does not handle fall back to a full recompute, which is
+//! always sound.
 //! [`recomputes`](Subscription::recomputes) and
 //! [`maintenances`](Subscription::maintenances) expose which path
 //! each poll took.
@@ -72,7 +77,8 @@ use crate::repository::fetch::Driven;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::tree::{fetch_spilled, selector_range};
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, AttributeKey, Entity, EntityKey, Key, Speculation, State, ValueKey,
+    Artifact, ArtifactSelector, AttributeKey, Changes, Entity, EntityKey, Key, Pick, Speculation,
+    State, Update as _, ValueKey,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::Blake3Hash as NodeHash;
@@ -94,7 +100,7 @@ use futures_util::{StreamExt as _, TryStreamExt as _};
 
 use super::session::{QueryEnv, QueryLayer};
 use crate::repository::source::Source;
-use crate::{Branch, Index, NetworkedIndex, RemoteSite, Revision};
+use crate::{Branch, Ephemeral, Index, NetworkedIndex, RemoteSite, Revision};
 
 /// How many touched entities a maintained poll re-derives at once.
 /// Measured on the catch-up soak's hundred-entity poll (#646): a
@@ -487,14 +493,51 @@ fn touched_by(demand: &Demand, instants: Vec<crate::Instant>) -> Touched {
     if subjects.is_empty() {
         Touched::Nothing
     } else {
-        let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
         Touched::Facts {
             subjects,
-            facts,
             asserted,
             retracted,
         }
     }
+}
+
+/// `overlay` as it stood at `sequence`: a copy with every fact its
+/// instants since then made readable hidden again, and every fact
+/// they hid readable again, so a read of the copy sees what a read
+/// at `sequence` saw. The handle itself when nothing moved since,
+/// and `None` when the ring no longer reaches `sequence`.
+///
+/// Each fact is moved back by its first move since `sequence`, which
+/// is the move away from how it stood: one that became readable was
+/// not, one that stopped being readable was. A fact an instant both
+/// hid and made readable is taken as hidden first, since its two
+/// moves keep no order.
+fn rewound(overlay: &Ephemeral, sequence: u64) -> Option<Ephemeral> {
+    let instants = overlay.since(sequence)?;
+    if instants.is_empty() {
+        return Some(overlay.clone());
+    }
+    let mut undo = Changes::new();
+    let mut moved = BTreeSet::new();
+    for instant in instants {
+        for (arrived, facts) in [(false, instant.retracted), (true, instant.asserted)] {
+            for fact in facts {
+                if !moved.insert((
+                    fact.of.to_string(),
+                    fact.the.to_string(),
+                    fact.is.to_bytes(),
+                )) {
+                    continue;
+                }
+                if arrived {
+                    undo.dissociate(fact.the, fact.of, fact.is);
+                } else {
+                    undo.associate(fact.the, fact.of, fact.is, Pick::All);
+                }
+            }
+        }
+    }
+    Some(overlay.extending(undo))
 }
 
 /// What the in-cover changes between two roots touched.
@@ -510,9 +553,6 @@ enum Touched {
     Facts {
         /// Subjects of the changed facts.
         subjects: BTreeSet<Entity>,
-        /// Every changed fact (asserted and retracted alike), for
-        /// delta-join discovery.
-        facts: Vec<Artifact>,
         /// Facts that became readable.
         asserted: Vec<Artifact>,
         /// Facts that stopped being readable.
@@ -530,24 +570,20 @@ impl Touched {
             (
                 Touched::Facts {
                     mut subjects,
-                    mut facts,
                     mut asserted,
                     mut retracted,
                 },
                 Touched::Facts {
                     subjects: more_subjects,
-                    facts: more_facts,
                     asserted: more_asserted,
                     retracted: more_retracted,
                 },
             ) => {
                 subjects.extend(more_subjects);
-                facts.extend(more_facts);
                 asserted.extend(more_asserted);
                 retracted.extend(more_retracted);
                 Touched::Facts {
                     subjects,
-                    facts,
                     asserted,
                     retracted,
                 }
@@ -683,13 +719,11 @@ where
                     }
                     Touched::Facts {
                         subjects,
-                        facts,
                         asserted,
                         retracted,
                     } => {
-                        if let Some(delta) = self
-                            .maintain(env, &subjects, &facts, &asserted, &retracted)
-                            .await?
+                        if let Some(delta) =
+                            self.maintain(env, &subjects, &asserted, &retracted).await?
                         {
                             self.maintenances += 1;
                             self.revision = current;
@@ -860,10 +894,8 @@ where
         if subjects.is_empty() {
             Ok(Touched::Nothing)
         } else {
-            let facts = asserted.iter().chain(retracted.iter()).cloned().collect();
             Ok(Touched::Facts {
                 subjects,
-                facts,
                 asserted,
                 retracted,
             })
@@ -900,7 +932,6 @@ where
         &'a mut self,
         env: &'a Env,
         subjects: &'a BTreeSet<Entity>,
-        facts: &'a [Artifact],
         asserted: &'a [Artifact],
         retracted: &'a [Artifact],
     ) -> EvaluationFuture<'a, Option<Delta<Q::Conclusion>>>
@@ -944,9 +975,12 @@ where
                 // clone, no generator-local borrows) so the poll
                 // future stays Send-general on native — see the note
                 // on `QueryEnv::branches`.
-                let query_env: QueryEnv<'a> =
-                    QueryEnv::new(vec![Source::from(self.branch.clone())], overlay, env)
-                        .with_demand(self.demand.clone());
+                let query_env: QueryEnv<'a> = QueryEnv::new(
+                    vec![Source::from(self.branch.clone())],
+                    overlay.clone(),
+                    env,
+                )
+                .with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
                 if rules.recursion().is_some() {
                     // Fixpoint continuation: deletions retract via DRed,
@@ -976,7 +1010,27 @@ where
                     self.results = results;
                     return Ok(Some(delta));
                 }
-                match affected_entities(concept, facts, &query_env).await? {
+                // The state the changes were applied to: the pinned
+                // revision under the session overlay as it stood at
+                // the pinned sequence. A derivation a retracted fact
+                // supported held there and nowhere else, so that is
+                // where the discovery joins it (#708). A pin from
+                // before the branch's first commit, or one the
+                // overlay's ring no longer reaches, has no such view,
+                // and the poll recomputes.
+                let Some(pinned) = self.revision.clone() else {
+                    return Ok(None);
+                };
+                let Some(rewound) = rewound(self.branch.overlay(), self.overlay_sequence) else {
+                    return Ok(None);
+                };
+                let before: QueryEnv<'a> = QueryEnv::new(
+                    vec![Source::from(self.branch.view(pinned, rewound))],
+                    overlay,
+                    env,
+                )
+                .with_demand(self.demand.clone());
+                match affected_entities(concept, asserted, retracted, &query_env, &before).await? {
                     Some(entities) => entities,
                     None => return Ok(None),
                 }
@@ -1176,10 +1230,10 @@ mod tests {
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
     use super::Delta;
-    use crate::RemoteSite;
     use crate::helpers::test_repo;
+    use crate::{Ephemeral, RemoteSite};
     use async_trait::async_trait;
-    use dialog_artifacts::{Entity, Value};
+    use dialog_artifacts::{ArtifactSelector, Changes, Entity, Value};
     use dialog_artifacts::{NameShape, Relation as ArtifactsRelation, Symbol};
     use dialog_capability::Command;
     use dialog_capability::{Fork, Provider};
@@ -2690,6 +2744,27 @@ mod tests {
             pub manager: Manager,
         }
 
+        /// The report's mentor (`report/mentor`).
+        #[derive(Attribute, Clone, PartialEq)]
+        #[domain("report")]
+        pub struct Mentor(pub Entity);
+
+        /// Someone whose manager and mentor must both hold a badge:
+        /// two conformance premises in one non-local rule.
+        #[derive(Concept, Debug, Clone, PartialEq)]
+        pub struct Mentored {
+            /// The report entity.
+            pub this: Entity,
+            /// Their display name.
+            pub name: Name,
+            /// Their manager, who must hold a badge.
+            #[dialog(conforms = BadgeHolder)]
+            pub manager: Manager,
+            /// Their mentor, who must hold a badge.
+            #[dialog(conforms = BadgeHolder)]
+            pub mentor: Mentor,
+        }
+
         /// The chief's deputy (`chief/deputy`).
         #[derive(Attribute, Clone, PartialEq)]
         #[domain("chief")]
@@ -2981,6 +3056,227 @@ mod tests {
         );
         assert_eq!(subscription.recomputes(), 1);
         assert_eq!(subscription.maintenances(), 2);
+        Ok(())
+    }
+
+    /// Two facts retracted in one commit, each feeding a different
+    /// conformance premise of the same non-local rule, retract the
+    /// row they jointly supported (#708). Bound into its premise,
+    /// each joins the rest of the rule against the state before the
+    /// change, where the other still holds; joined against the new
+    /// state, where the other is already gone, neither would find
+    /// the head and the row would never be over-deleted.
+    #[dialog_common::test]
+    async fn it_retracts_a_row_when_two_supporting_facts_go_together() -> anyhow::Result<()> {
+        use concepts::{Badge, Manager, Mentor, Mentored, Name};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?; // bob's manager, holds a badge
+        let dave = Entity::new()?; // bob's mentor, holds a badge
+        let bob = Entity::new()?;
+
+        branch
+            .transaction()
+            .assert(Badge::of(alice.clone()).is("A-1"))
+            .assert(Badge::of(dave.clone()).is("D-4"))
+            .assert(Name::of(bob.clone()).is("Bob"))
+            .assert(Manager::of(bob.clone()).is(alice.clone()))
+            .assert(Mentor::of(bob.clone()).is(dave.clone()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let row = Mentored {
+            this: bob.clone(),
+            name: Name("Bob".into()),
+            manager: Manager(alice.clone()),
+            mentor: Mentor(dave.clone()),
+        };
+        let mut subscription = branch.subscribe(Query::<Mentored>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(initial.asserted, vec![row.clone()]);
+
+        // Both badges go in one commit: bob no longer conforms.
+        branch
+            .transaction()
+            .retract(Badge::of(alice.clone()).is("A-1"))
+            .retract(Badge::of(dave.clone()).is("D-4"))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let fresh: Vec<Mentored> = branch
+            .query()
+            .select(Query::<Mentored>::default())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(fresh.is_empty(), "a fresh evaluation has no rows");
+
+        let delta = subscription.poll(&operator).await?.expect("co-retraction");
+        assert_eq!(delta.retracted, vec![row]);
+        assert!(delta.asserted.is_empty());
+        assert_eq!(
+            subscription.results(),
+            fresh.as_slice(),
+            "the maintained result matches a fresh evaluation"
+        );
+        assert_eq!(
+            subscription.recomputes(),
+            1,
+            "the row was reached by the delta-join, not a recompute"
+        );
+        assert_eq!(subscription.maintenances(), 1);
+        Ok(())
+    }
+
+    /// The same two facts retracted together through the session
+    /// overlay, as tombstones over the committed badges: the state
+    /// before the change is the pinned revision under the overlay
+    /// rewound to the pinned sequence, where both badges still hold.
+    #[dialog_common::test]
+    async fn it_retracts_a_row_when_two_supporting_facts_go_together_in_the_overlay()
+    -> anyhow::Result<()> {
+        use concepts::{Badge, Manager, Mentor, Mentored, Name};
+        use dialog_query::Query;
+
+        let (operator, profile) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &profile).await;
+        let branch = repo.branch("main").open().perform(&operator).await?;
+
+        let alice = Entity::new()?;
+        let dave = Entity::new()?;
+        let bob = Entity::new()?;
+
+        branch
+            .transaction()
+            .assert(Badge::of(alice.clone()).is("A-1"))
+            .assert(Badge::of(dave.clone()).is("D-4"))
+            .assert(Name::of(bob.clone()).is("Bob"))
+            .assert(Manager::of(bob.clone()).is(alice.clone()))
+            .assert(Mentor::of(bob.clone()).is(dave.clone()))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+
+        let row = Mentored {
+            this: bob.clone(),
+            name: Name("Bob".into()),
+            manager: Manager(alice.clone()),
+            mentor: Mentor(dave.clone()),
+        };
+        let mut subscription = branch.subscribe(Query::<Mentored>::default());
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(initial.asserted, vec![row.clone()]);
+
+        // Both badges go in one instant of the session overlay.
+        let mut changes = Changes::new();
+        changes.retract(Badge::of(alice.clone()).is("A-1"));
+        changes.retract(Badge::of(dave.clone()).is("D-4"));
+        branch.overlay().apply(changes)?;
+
+        let fresh: Vec<Mentored> = branch
+            .query()
+            .select(Query::<Mentored>::default())
+            .perform(&operator)
+            .try_vec()
+            .await?;
+        assert!(fresh.is_empty(), "a fresh evaluation has no rows");
+
+        let delta = subscription.poll(&operator).await?.expect("co-retraction");
+        assert_eq!(delta.retracted, vec![row.clone()]);
+        assert_eq!(subscription.results(), fresh.as_slice());
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 1);
+
+        // Both come back in one instant: the row returns, and the
+        // state before that change is the overlay as the last poll
+        // left it, with both badges hidden.
+        let mut changes = Changes::new();
+        changes.assert(Badge::of(alice.clone()).is("A-1"));
+        changes.assert(Badge::of(dave.clone()).is("D-4"));
+        branch.overlay().apply(changes)?;
+
+        let delta = subscription.poll(&operator).await?.expect("co-assertion");
+        assert_eq!(delta.asserted, vec![row]);
+        assert_eq!(subscription.recomputes(), 1);
+        assert_eq!(subscription.maintenances(), 2);
+        Ok(())
+    }
+
+    /// Rewinding a session overlay to an earlier sequence undoes what
+    /// its instants since then changed: facts they added are gone and
+    /// facts they removed are back. The overlay itself is left as it
+    /// is.
+    #[dialog_common::test]
+    fn it_rewinds_an_overlay_to_a_pinned_sequence() -> anyhow::Result<()> {
+        let alice = Entity::new()?;
+        let bob = Entity::new()?;
+        let overlay = Ephemeral::new();
+        overlay
+            .assert(
+                the!("person/name")
+                    .of(alice.clone())
+                    .is("Alice".to_string()),
+            )?
+            .assert(the!("person/name").of(bob.clone()).is("Bob".to_string()))?;
+        let pinned = overlay.revision().sequence;
+
+        // Three instants: a second name beside alice's, a new entity,
+        // a removal.
+        overlay.assert(
+            the!("person/name")
+                .of(alice.clone())
+                .is("Alicia".to_string()),
+        )?;
+        let carol = Entity::new()?;
+        overlay.assert(
+            the!("person/name")
+                .of(carol.clone())
+                .is("Carol".to_string()),
+        )?;
+        overlay.retract(the!("person/name").of(bob.clone()).is("Bob".to_string()))?;
+
+        let names = |line: &Ephemeral| -> anyhow::Result<Vec<(String, Value)>> {
+            let selector = ArtifactSelector::new()
+                .the(ArtifactsRelation::try_from("person/name".to_string())?);
+            let mut names: Vec<(String, Value)> = line
+                .scan(&selector)
+                .into_iter()
+                .map(|fact| (fact.of.to_string(), fact.is))
+                .collect();
+            names.sort_by(|left, right| left.0.cmp(&right.0));
+            Ok(names)
+        };
+        let named = |who: &Entity, name: &str| (who.to_string(), Value::String(name.to_string()));
+        let rewound = super::rewound(&overlay, pinned).expect("the ring reaches the pin");
+        let mut expected = vec![named(&alice, "Alice"), named(&bob, "Bob")];
+        expected.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            names(&rewound)?,
+            expected,
+            "the rewound line reads as it did"
+        );
+        let mut now = vec![
+            named(&alice, "Alice"),
+            named(&alice, "Alicia"),
+            named(&carol, "Carol"),
+        ];
+        now.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(names(&overlay)?, now, "the overlay is left as it is");
+
+        assert!(
+            super::rewound(&overlay, overlay.revision().sequence)
+                .is_some_and(|same| same.revision() == overlay.revision()),
+            "an up-to-date pin rewinds to the line itself"
+        );
         Ok(())
     }
 
