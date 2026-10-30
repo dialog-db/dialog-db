@@ -71,7 +71,7 @@ use std::future::Future;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::repository::fetch::Driven;
 use dialog_artifacts::selector::Constrained;
@@ -1014,23 +1014,31 @@ where
                 // revision under the session overlay as it stood at
                 // the pinned sequence. A derivation a retracted fact
                 // supported held there and nowhere else, so that is
-                // where the discovery joins it (#708). A pin from
-                // before the branch's first commit, or one the
-                // overlay's ring no longer reaches, has no such view,
-                // and the poll recomputes.
-                let Some(pinned) = self.revision.clone() else {
-                    return Ok(None);
+                // where the discovery joins it (#708). Built the first
+                // time a join asks for it, since rewinding the overlay
+                // copies it: a poll whose changes all join against the
+                // branch as it is never pays for it. A pin from before
+                // the branch's first commit, or one the overlay's ring
+                // no longer reaches, has no such view, and the poll
+                // recomputes.
+                let before: OnceLock<Option<QueryEnv<'a>>> = OnceLock::new();
+                let view = || {
+                    let pinned = self.revision.clone()?;
+                    let rewound = rewound(self.branch.overlay(), self.overlay_sequence)?;
+                    Some(
+                        QueryEnv::new(
+                            vec![Source::from(self.branch.view(pinned, rewound))],
+                            overlay.clone(),
+                            env,
+                        )
+                        .with_demand(self.demand.clone()),
+                    )
                 };
-                let Some(rewound) = rewound(self.branch.overlay(), self.overlay_sequence) else {
-                    return Ok(None);
-                };
-                let before: QueryEnv<'a> = QueryEnv::new(
-                    vec![Source::from(self.branch.view(pinned, rewound))],
-                    overlay,
-                    env,
-                )
-                .with_demand(self.demand.clone());
-                match affected_entities(concept, asserted, retracted, &query_env, &before).await? {
+                match affected_entities(concept, asserted, retracted, &query_env, || {
+                    before.get_or_init(view).as_ref()
+                })
+                .await?
+                {
                     Some(entities) => entities,
                     None => return Ok(None),
                 }

@@ -37,6 +37,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use dialog_capability::Provider;
+use dialog_common::ConditionalSync;
 use futures_util::TryStreamExt as _;
 
 use crate::artifact::Artifact;
@@ -119,17 +120,24 @@ impl Heads {
 
 /// The two states around the change, each as an environment to
 /// evaluate against. Rules are resolved from `after`; a change that
-/// touched them makes the caller recompute instead.
-struct States<'a, Env> {
-    before: &'a Env,
+/// touched them makes the caller recompute instead. The state before
+/// is asked for only when a join needs it, since the caller may have
+/// to build it, and may have none to offer.
+struct States<'a, Env, Before> {
+    before: Before,
     after: &'a Env,
 }
 
-impl<'a, Env> States<'a, Env> {
-    fn on(&self, side: Side) -> &'a Env {
+impl<'a, Env, Before> States<'a, Env, Before>
+where
+    Before: Fn() -> Option<&'a Env>,
+{
+    /// The environment of `side`, or `None` when there is no state
+    /// before the change to read.
+    fn on(&self, side: Side) -> Option<&'a Env> {
         match side {
-            Side::Before => self.before,
-            Side::After => self.after,
+            Side::Before => (self.before)(),
+            Side::After => Some(self.after),
         }
     }
 }
@@ -140,8 +148,11 @@ impl<'a, Env> States<'a, Env> {
 ///
 /// `asserted` are the facts that became readable and `retracted`
 /// the ones that stopped; `after` reads the state the change
-/// produced and `before` the state it was applied to (see the
-/// [module docs](self) for why the discovery needs both).
+/// produced and `before` yields the state it was applied to (see the
+/// [module docs](self) for why the discovery needs both). `before`
+/// is called only when a join needs that state, so a caller that has
+/// to build it pays for it only then, and one that has none to
+/// offer returns `None`, which makes the discovery return `None`.
 ///
 /// Nested concept premises are followed to arbitrary depth: the
 /// reachable concepts form an acyclic graph (recursion anywhere in
@@ -149,15 +160,16 @@ impl<'a, Env> States<'a, Env> {
 /// computed bottom-up — a target's affected heads feed the premises
 /// that apply it, so a change can propagate through any number of
 /// derivation layers.
-pub async fn affected_entities<'a, Env>(
+pub async fn affected_entities<'a, Env, Before>(
     concept: &ConceptDescriptor,
     asserted: &[Artifact],
     retracted: &[Artifact],
     after: &'a Env,
-    before: &'a Env,
+    before: Before,
 ) -> Result<Option<BTreeSet<Entity>>, EvaluationError>
 where
     Env: crate::Scope<'a>,
+    Before: Fn() -> Option<&'a Env> + ConditionalSync,
 {
     let root = concept.this();
     let states = States { before, after };
@@ -300,14 +312,15 @@ fn concept_premise(premise: &Premise) -> Option<(&ConceptQuery, bool)> {
 /// the side the derivation through that premise holds. Concept
 /// premises bind their `this` slot from the target's
 /// already-computed affected heads, side by side.
-async fn rule_heads<'a, Env>(
+async fn rule_heads<'a, Env, Before>(
     rule: &DeductiveRule,
     changes: &[Change<'_>],
     affected: &HashMap<Entity, Heads>,
-    states: &States<'a, Env>,
+    states: &States<'a, Env, Before>,
 ) -> Result<Option<Heads>, EvaluationError>
 where
     Env: crate::Scope<'a>,
+    Before: Fn() -> Option<&'a Env> + ConditionalSync,
 {
     let premises = &rule.analysis().premises;
     let mut heads = Heads::default();
@@ -369,9 +382,10 @@ where
                     continue;
                 }
                 let side = change.exists.derivation(negated);
-                match sideways_heads(premises, index, matched, &scope, rule, states.on(side))
-                    .await?
-                {
+                let Some(env) = states.on(side) else {
+                    return Ok(None);
+                };
+                match sideways_heads(premises, index, matched, &scope, rule, env).await? {
                     Some(found) => heads.on(side).extend(found),
                     None => return Ok(None),
                 }
@@ -405,9 +419,10 @@ where
                     ) {
                         continue;
                     }
-                    match sideways_heads(premises, index, matched, &scope, rule, states.on(side))
-                        .await?
-                    {
+                    let Some(env) = states.on(side) else {
+                        return Ok(None);
+                    };
+                    match sideways_heads(premises, index, matched, &scope, rule, env).await? {
                         Some(found) => heads.on(side).extend(found),
                         None => return Ok(None),
                     }
@@ -651,7 +666,7 @@ mod tests {
             fact("credential/badge", &dave, "D-4")?,
         ];
         assert_eq!(
-            affected_entities(&mentored, &[], &retracted, &after_env, &before_env).await?,
+            affected_entities(&mentored, &[], &retracted, &after_env, || Some(&before_env)).await?,
             Some(BTreeSet::from([bob])),
             "the row both badges supported is reached through either"
         );
@@ -717,7 +732,10 @@ mod tests {
             fact("credential/badge", &dave, "D-4")?,
         ];
         assert_eq!(
-            affected_entities(&unmentored, &asserted, &[], &after_env, &before_env).await?,
+            affected_entities(&unmentored, &asserted, &[], &after_env, || Some(
+                &before_env
+            ))
+            .await?,
             Some(BTreeSet::from([bob])),
             "the row both badges undo is reached through either"
         );
@@ -767,7 +785,7 @@ mod tests {
             cause: None,
         };
         assert_eq!(
-            affected_entities(&labelled, &[recoloured], &[], &env, &env).await?,
+            affected_entities(&labelled, &[recoloured], &[], &env, || Some(&env)).await?,
             Some(BTreeSet::new()),
             "a colour change reaches no label"
         );
@@ -779,7 +797,7 @@ mod tests {
             cause: None,
         };
         assert_eq!(
-            affected_entities(&labelled, &[retagged], &[], &env, &env).await?,
+            affected_entities(&labelled, &[retagged], &[], &env, || Some(&env)).await?,
             Some(BTreeSet::from([doc])),
             "a tag change reaches the document linking to it"
         );
