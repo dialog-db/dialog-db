@@ -18,6 +18,8 @@ use dialog_network::Network;
 use dialog_repository::{BranchReference, HeldCaches};
 use dialog_storage::provider::storage::Storage;
 use dialog_ucan::{Scope, Ucan, UcanCertificate};
+use dialog_ucan_core::crypto::nonce::Nonce;
+use dialog_ucan_core::delegation::policy::predicate::Predicate;
 use dialog_ucan_core::subject::Subject as UcanSubject;
 use dialog_ucan_core::{DelegationBuilder, time::Timestamp};
 use dialog_varsig::{Did, Principal as _};
@@ -804,12 +806,23 @@ impl<S: PeerSpace, M: Mode> PeerBuilder<PeerKey, Storage<S>, M> {
                             "the grant of {scope:?} has no expiration; use allow for an unbounded grant"
                         )));
                     }
+                    let policy = scope.policy();
+                    let nonce = grant_nonce(
+                        &issuer.did(),
+                        &audience,
+                        &scope.subject,
+                        scope.command.segments(),
+                        &policy,
+                        not_before,
+                        expiration,
+                    )?;
                     let mut builder = DelegationBuilder::new()
                         .issuer(issuer.signer().clone())
                         .audience(&audience)
                         .subject(scope.subject.clone())
                         .command(scope.command.segments().clone())
-                        .policy(scope.policy());
+                        .policy(policy)
+                        .nonce(nonce);
                     if let Some(not_before) = not_before {
                         builder = builder.not_before(not_before);
                     }
@@ -926,6 +939,40 @@ impl<S: PeerSpace, M: Mode> IntoFuture for PeerBuilder<PeerKey, Storage<S>, M> {
     }
 }
 
+/// The nonce for a grant minted at open, derived from everything the
+/// grant says rather than drawn at random.
+///
+/// A grant's nonce only keeps otherwise identical delegations distinct,
+/// and two grants that say the same thing are the same grant. Deriving
+/// it makes a session minted twice hold the same delegation (the
+/// signature is deterministic too, wherever Ed25519 signing is), so the
+/// delegation its commits record does not change what an otherwise
+/// identical history writes.
+fn grant_nonce(
+    issuer: &Did,
+    audience: &Did,
+    subject: &UcanSubject,
+    command: &[String],
+    policy: &[Predicate],
+    not_before: Option<Timestamp>,
+    expiration: Option<Timestamp>,
+) -> Result<Nonce, PeerError> {
+    let content = serde_ipld_dagcbor::to_vec(&(
+        issuer.to_string(),
+        audience.to_string(),
+        subject,
+        command,
+        policy,
+        not_before,
+        expiration,
+    ))
+    .map_err(|error| PeerError::Delegation(format!("unencodable grant: {error}")))?;
+    let digest = blake3::derive_key("dialog-peer grant nonce", &content);
+    let mut nonce = [0u8; 16];
+    nonce.copy_from_slice(&digest[..16]);
+    Ok(Nonce::Nonce16(nonce))
+}
+
 /// Errors that can occur when opening a peer.
 #[derive(Debug, thiserror::Error)]
 pub enum PeerError {
@@ -981,6 +1028,32 @@ mod tests {
 
     /// The context the certificate tests derive their session key for.
     const CONTEXT: &[u8] = b"certificate";
+
+    /// A session opened twice for the same context and scope holds the
+    /// same delegation, nonce included: the grant is derived from what it
+    /// says, so it is the one its peer's earlier sessions held, and the
+    /// delegation its commits record is the same too.
+    #[dialog_common::test]
+    async fn it_mints_the_same_session_grant_every_time() -> Result<()> {
+        let peer = test_peer().await;
+        let mut minted = Vec::new();
+        for _ in 0..2 {
+            let session = peer
+                .session(CONTEXT)
+                .space(peer.state())
+                .allow(Subject::any())
+                .await?;
+            let grants: Vec<Vec<u8>> = session
+                .grants()
+                .iter()
+                .map(|grant| grant.certificate.0.encoded().to_vec())
+                .collect();
+            minted.push(grants);
+        }
+        assert!(!minted[0].is_empty(), "the session holds its grant");
+        assert_eq!(minted[0], minted[1]);
+        Ok(())
+    }
 
     /// A fixture pinning the whole derivation: a fixed peer seed and a
     /// fixed context derive one fixed session DID, on every platform.
