@@ -372,10 +372,16 @@ impl<'s> Window<'s> {
 }
 
 /// The delta one write is accumulating, before it is minted.
-#[derive(Default)]
 struct Delta {
     asserted: Vec<Artifact>,
     retracted: Vec<Artifact>,
+    /// Whether to record how the line held each fact the write moves.
+    /// A session line records, since a subscription rewinds it by what
+    /// its instants found ([`Ephemeral::rewound`]); a line built for
+    /// one query ([`holding`](Ephemeral::holding),
+    /// [`extending`](Ephemeral::extending)) or by a rewind is never
+    /// rewound, and a query builds one every time, so it does not.
+    record: bool,
     /// How the line held each fact the write touches, as of its first
     /// touch, keyed to record each fact once.
     found: Vec<(Artifact, Hold)>,
@@ -383,27 +389,49 @@ struct Delta {
 }
 
 impl Delta {
+    /// A delta for a write to a line a subscription may rewind.
+    fn recorded() -> Self {
+        Self {
+            asserted: Vec::new(),
+            retracted: Vec::new(),
+            record: true,
+            found: Vec::new(),
+            touched: HashSet::new(),
+        }
+    }
+
+    /// A delta for a write to a line nothing rewinds.
+    fn unrecorded() -> Self {
+        Self {
+            record: false,
+            ..Self::recorded()
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.asserted.is_empty() && self.retracted.is_empty()
     }
 }
 
 impl State {
-    /// How this line holds `fact` now.
-    fn hold(&self, fact: &Artifact) -> Hold {
+    /// How this line holds `fact`, whose sort key is `key`, now.
+    fn hold(&self, fact: &Artifact, key: &SortKey) -> Hold {
         Hold {
             stored: self.facts.holds(fact),
-            hidden: self
-                .shadowed
-                .contains_key(&sort_key(fact, self.facts.manifest())),
+            hidden: self.shadowed.contains_key(key),
         }
     }
 
-    /// Record how `fact` is held before a write first moves it.
+    /// Record how `fact` is held before a write first moves it, when
+    /// the write records.
     fn note(&self, fact: &Artifact, delta: &mut Delta) {
+        if !delta.record {
+            return;
+        }
         let key = sort_key(fact, self.facts.manifest());
+        let hold = self.hold(fact, &key);
         if delta.touched.insert(key) {
-            delta.found.push((fact.clone(), self.hold(fact)));
+            delta.found.push((fact.clone(), hold));
         }
     }
 
@@ -451,7 +479,7 @@ impl State {
     /// Hold `fact` as `hold`: store or remove it, hide or show it,
     /// whichever of the two differ from how it is held now.
     fn restore(&mut self, fact: &Artifact, hold: Hold, delta: &mut Delta) {
-        let now = self.hold(fact);
+        let now = self.hold(fact, &sort_key(fact, self.facts.manifest()));
         if hold.stored && !now.stored {
             self.insert(fact.clone(), delta);
         } else if !hold.stored && now.stored {
@@ -567,7 +595,7 @@ impl Ephemeral {
         let line = Self::new();
         {
             let mut state = line.state.write();
-            let mut delta = Delta::default();
+            let mut delta = Delta::unrecorded();
             for instruction in changes.into_instructions() {
                 state.apply(instruction, &mut delta);
             }
@@ -596,7 +624,7 @@ impl Ephemeral {
             rules: base.rules.clone(),
         };
         drop(base);
-        let mut delta = Delta::default();
+        let mut delta = Delta::unrecorded();
         for instruction in changes.into_instructions() {
             state.apply(instruction, &mut delta);
         }
@@ -626,7 +654,7 @@ impl Ephemeral {
             rules: base.rules.clone(),
         };
         drop(base);
-        let mut delta = Delta::default();
+        let mut delta = Delta::unrecorded();
         for instant in instants.iter().rev() {
             for (fact, hold) in &instant.found {
                 state.restore(fact, *hold, &mut delta);
@@ -678,7 +706,7 @@ impl Ephemeral {
             return Ok(None);
         }
         let mut state = self.state.write();
-        let mut delta = Delta::default();
+        let mut delta = Delta::recorded();
         for instruction in changes.into_instructions() {
             state.apply(instruction, &mut delta);
         }
@@ -714,7 +742,7 @@ impl Ephemeral {
     /// short-lived entities. Returns whether anything was dropped.
     pub fn retain_entities<F: FnMut(&Entity) -> bool>(&self, mut keep: F) -> bool {
         let mut state = self.state.write();
-        let mut delta = Delta::default();
+        let mut delta = Delta::recorded();
         let dropped: Vec<Artifact> = state
             .facts
             .iter()
@@ -739,7 +767,7 @@ impl Ephemeral {
     /// Drop every fact and tombstone. Chainable.
     pub fn clear(&self) -> &Self {
         let mut state = self.state.write();
-        let mut delta = Delta::default();
+        let mut delta = Delta::recorded();
         let held: Vec<Artifact> = state.facts.iter().cloned().collect();
         for fact in held {
             state.remove(&fact, &mut delta);
