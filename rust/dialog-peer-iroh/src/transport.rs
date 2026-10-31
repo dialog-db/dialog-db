@@ -35,9 +35,9 @@ use dialog_ucan_core::revocation::RevocationChecker;
 
 use crate::channel::{Channel, ChannelError, Transfer};
 
-use crate::serve::{Answer, Responder, Store};
+use crate::serve::{Answer, Responder, Store, Watch};
 use crate::site::IrohAddress;
-use crate::wire::{BlobAnswer, Response, encode, frame, read_frame};
+use crate::wire::{BlobAnswer, Refusal, Response, encode, frame, read_frame};
 
 /// Run `future` to completion alongside this one.
 ///
@@ -371,6 +371,8 @@ where
     match responder.answer(&request).await {
         Answer::Value(response) => say(transfer, &response).await?,
 
+        Answer::Watching(watch) => return follow(transfer, &responder, *watch).await,
+
         Answer::Reading(mut reader) => {
             // The announcement goes first so the caller knows the rest
             // of the stream is blob and not another frame.
@@ -415,6 +417,110 @@ where
     transfer.finish().await
 }
 
+/// Why a watch's loop woke.
+enum Wake {
+    /// The cell was announced as changed.
+    Changed,
+    /// Time to check an idle watch's authority again.
+    Recheck,
+    /// The watcher stopped reading.
+    Stopped,
+}
+
+/// Answer a watch: the cell's state now, then its state again each time
+/// it is announced as changed, until the watcher goes away or the watch's
+/// authority stops holding.
+///
+/// Authority is checked again before every delivery, and on a timer while
+/// nothing changes, so a revoked grant ends an idle watch within
+/// [`Responder::recheck_interval`] and a busy one at its next delivery.
+/// It ends with a [`Response::Refused`] saying why, then the stream
+/// finishes.
+///
+/// A state equal to the last one sent is not sent again: an announcement
+/// says a cell may have changed, and a write that left it as it was is
+/// not news.
+async fn follow<S, Resolver, Revocations>(
+    transfer: &mut QuicTransfer,
+    responder: &Responder<S, Resolver, Revocations>,
+    watch: Watch,
+) -> Result<(), ChannelError>
+where
+    S: Store + ConditionalSend + 'static,
+    Resolver: Provider<Resolve> + ConditionalSync + 'static,
+    Revocations: RevocationChecker + ConditionalSync + 'static,
+{
+    use futures_util::future::{Either, select};
+    use std::pin::pin;
+
+    let (opening, failed) = responder.state(&watch).await;
+    let Some(mut last) = encoded(transfer, &opening).await? else {
+        return transfer.finish().await;
+    };
+    transfer.send(&frame(&last)).await?;
+    // A store failure is the watch's last answer: the client ends the
+    // watch on it, so following on would push frames nobody reads.
+    if failed {
+        return transfer.finish().await;
+    }
+
+    loop {
+        let wake = {
+            let changed = pin!(watch.changed());
+            let recheck = pin!(dialog_common::time::sleep(responder.recheck_interval()));
+            let stopped = pin!(transfer.send.stopped());
+            match select(changed, select(recheck, stopped)).await {
+                Either::Left(_) => Wake::Changed,
+                Either::Right((Either::Left(_), _)) => Wake::Recheck,
+                Either::Right((Either::Right(_), _)) => Wake::Stopped,
+            }
+        };
+
+        match wake {
+            Wake::Stopped => return Ok(()),
+            Wake::Recheck | Wake::Changed => {
+                if let Err(refusal) = responder.recheck(&watch).await {
+                    say(transfer, &Response::Refused(refusal)).await?;
+                    return transfer.finish().await;
+                }
+            }
+        }
+
+        if matches!(wake, Wake::Changed) {
+            let (state, failed) = responder.state(&watch).await;
+            let Some(next) = encoded(transfer, &state).await? else {
+                return transfer.finish().await;
+            };
+            if next != last {
+                transfer.send(&frame(&next)).await?;
+                last = next;
+            }
+            if failed {
+                return transfer.finish().await;
+            }
+        }
+    }
+}
+
+/// A watch's state, encoded. One that will not encode is this peer's own
+/// bug: the watcher is told so, and `None` says the watch is over.
+async fn encoded(
+    transfer: &mut QuicTransfer,
+    state: &Response,
+) -> Result<Option<Vec<u8>>, ChannelError> {
+    match encode("response", state) {
+        Ok(encoded) => Ok(Some(encoded)),
+        Err(error) => {
+            say(
+                transfer,
+                &Response::Refused(Refusal::Internal(error.to_string())),
+            )
+            .await?;
+            Ok(None)
+        }
+    }
+}
+
 /// Encode a response and send it as one frame.
 async fn say(transfer: &mut QuicTransfer, response: &Response) -> Result<(), ChannelError> {
     match encode("response", response) {
@@ -433,7 +539,7 @@ async fn say(transfer: &mut QuicTransfer, response: &Response) -> Result<(), Cha
 fn performed(answer: Result<BlobAnswer, dialog_effects::blob::BlobError>) -> Response {
     match encode("blob answer", &answer) {
         Ok(encoded) => Response::Performed(encoded),
-        Err(error) => Response::Refused(crate::wire::Refusal::Internal(format!(
+        Err(error) => Response::Refused(Refusal::Internal(format!(
             "could not encode the answer: {error}"
         ))),
     }
@@ -445,6 +551,9 @@ fn performed(answer: Result<BlobAnswer, dialog_effects::blob::BlobError>) -> Res
 // them runs iroh's relay server.
 #[cfg(all(test, feature = "iroh-tests", not(target_arch = "wasm32")))]
 mod tests;
+
+#[cfg(all(test, feature = "iroh-tests", not(target_arch = "wasm32")))]
+mod watch_tests;
 
 // Native-only for the same reason, and behind their own feature because
 // they reach n0's relays and address lookup over the internet.

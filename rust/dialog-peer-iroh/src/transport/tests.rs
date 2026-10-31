@@ -85,7 +85,7 @@ async fn a_block_crosses_a_real_stream_and_reads_back() {
     stored.expect("the peer performs the put");
 
     assert_eq!(
-        responder.store().get(&digest),
+        responder.store().inner().get(&digest),
         Some(bytes.clone()),
         "the block reached the peer's store"
     );
@@ -174,7 +174,7 @@ async fn a_blob_streams_both_ways() {
     let digest = writer.finish().await.expect("the peer commits the blob");
 
     assert_eq!(
-        responder.store().blob(&digest),
+        responder.store().inner().blob(&digest),
         Some(bytes.clone()),
         "every byte arrived, in order, and hashed to what the peer reported"
     );
@@ -234,7 +234,7 @@ async fn an_import_that_lies_about_its_digest_is_refused() {
     }
 
     assert_eq!(
-        responder.store().blob(&declared),
+        responder.store().inner().blob(&declared),
         None,
         "nothing was committed under the digest that was not delivered"
     );
@@ -303,7 +303,7 @@ async fn a_peer_is_reached_through_a_relay() {
     stored.expect("the relay carries the put");
 
     assert_eq!(
-        responder.store().get(&digest),
+        responder.store().inner().get(&digest),
         Some(bytes.clone()),
         "the block reached the peer's store"
     );

@@ -18,6 +18,7 @@ use dialog_common::{ConditionalSend, ConditionalSync};
 use dialog_effects::Rejection;
 use dialog_effects::authority::{self, OperatorExt as _};
 use dialog_effects::{archive, memory, peer};
+// `memory::Watch` is performed in `super::watch`, over a stream of its own.
 use dialog_ucan::Ucan;
 use dialog_ucan_core::container::Container;
 use dialog_ucan_core::container::bundle::InvocationBundle;
@@ -192,23 +193,6 @@ performs_by_value!(
     memory::Retract,
 );
 
-/// Following a cell needs a stream that stays open while the cell changes,
-/// which an exchange of one request and one answer is not. Until this site
-/// keeps one, a watch is refused by name, and the cell is read by resolving
-/// it again.
-#[dialog_capability::provider]
-impl Provider<ForkInvocation<Iroh, memory::Watch>> for Iroh {
-    async fn execute(
-        &self,
-        _: ForkInvocation<Iroh, memory::Watch>,
-    ) -> Result<memory::Editions, memory::MemoryError> {
-        Err(Rejection::Unsupported {
-            reason: "this peer site exchanges one request and one answer".into(),
-        }
-        .into())
-    }
-}
-
 /// A peer's refusal, in the caller's own vocabulary.
 ///
 /// Only [`Refusal::Unauthorized`] is an access decision, and it is the
@@ -216,7 +200,7 @@ impl Provider<ForkInvocation<Iroh, memory::Watch>> for Iroh {
 /// than retrying. The rest are this exchange failing, not authority
 /// being absent, so folding them into an access error would tell a
 /// caller to go looking for a delegation it already holds.
-fn refused<E: From<AuthorizeError> + From<Rejection>>(refusal: Refusal) -> E {
+pub(super) fn refused<E: From<AuthorizeError> + From<Rejection>>(refusal: Refusal) -> E {
     match refusal {
         Refusal::Unauthorized(reason) => E::from(AuthorizeError::Declined {
             // Presenting the same proof again gets the same answer; a

@@ -235,7 +235,7 @@ async fn a_put_travels_and_is_stored() {
         crate::wire::decode("output", &encoded).expect("the output decodes");
     outcome.expect("the put succeeds");
 
-    let stored = responder.store.blocks.lock().expect("not poisoned");
+    let stored = responder.store.inner().blocks.lock().expect("not poisoned");
     assert_eq!(
         stored.get(Buffer::from(bytes.clone()).blake3_hash()),
         Some(&bytes),
@@ -311,6 +311,7 @@ async fn an_unproven_invocation_is_refused() {
     assert!(
         responder
             .store
+            .inner()
             .blocks
             .lock()
             .expect("not poisoned")
@@ -342,7 +343,13 @@ async fn a_one_block_import_is_not_mistaken_for_a_put() {
         crate::wire::decode("output", &encoded).expect("the output decodes");
     outcome.expect("the import succeeds");
     assert_eq!(
-        responder.store.blocks.lock().expect("not poisoned").len(),
+        responder
+            .store
+            .inner()
+            .blocks
+            .lock()
+            .expect("not poisoned")
+            .len(),
         1
     );
 }
@@ -375,6 +382,7 @@ async fn an_import_carrying_a_wrong_block_is_refused() {
     assert!(
         responder
             .store
+            .inner()
             .blocks
             .lock()
             .expect("not poisoned")

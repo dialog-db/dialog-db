@@ -83,7 +83,7 @@ async fn round_trip(site: &Iroh, address: &IrohAddress, responder: &Peer) -> Res
     stored.map_err(|error| format!("the put failed: {error}"))?;
 
     assert_eq!(
-        responder.store().get(&digest),
+        responder.store().inner().get(&digest),
         Some(bytes.clone()),
         "the block reached the peer's store"
     );

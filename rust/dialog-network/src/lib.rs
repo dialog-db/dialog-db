@@ -221,6 +221,7 @@ mod tests {
         assert_eq!(
             responder
                 .store()
+                .inner()
                 .get(Buffer::from(bytes.clone()).blake3_hash()),
             Some(bytes),
             "the block reached the peer, so the iroh address picked the iroh site"
