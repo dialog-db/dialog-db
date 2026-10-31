@@ -71,6 +71,29 @@ pub struct EphemeralRevision {
     pub hash: Blake3Hash,
 }
 
+/// How a line holds one fact: stored in it, hidden beneath it by a
+/// tombstone, both, or neither. The two are independent: a fact
+/// asserted over its own tombstone is stored and hidden at once, so
+/// it reads from the line while whatever lies beneath stays hidden,
+/// and removing the stored copy leaves it hidden.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Hold {
+    stored: bool,
+    hidden: bool,
+}
+
+impl Hold {
+    /// Whether the line stores the fact.
+    pub fn stored(&self) -> bool {
+        self.stored
+    }
+
+    /// Whether the line hides the fact beneath it.
+    pub fn hidden(&self) -> bool {
+        self.hidden
+    }
+}
+
 /// One change to what readers of the line see.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Instant {
@@ -84,6 +107,13 @@ pub struct Instant {
     /// Facts that stopped being readable: removed, or shadowed
     /// beneath by a tombstone.
     pub retracted: Vec<Artifact>,
+    /// How the line held each fact this instant moved, before it did,
+    /// one entry per fact: what undoing the instant restores
+    /// ([`Ephemeral::rewound`]). The readable moves above do not
+    /// determine it, since a fact both stored and hidden reports a
+    /// removal like one merely stored, and clearing the line reports
+    /// it removed and un-hidden at once.
+    pub found: Vec<(Artifact, Hold)>,
 }
 
 /// A memory-backed line. Cheap to clone: clones share the store, so a
@@ -346,6 +376,10 @@ impl<'s> Window<'s> {
 struct Delta {
     asserted: Vec<Artifact>,
     retracted: Vec<Artifact>,
+    /// How the line held each fact the write touches, as of its first
+    /// touch, keyed to record each fact once.
+    found: Vec<(Artifact, Hold)>,
+    touched: HashSet<SortKey>,
 }
 
 impl Delta {
@@ -355,13 +389,33 @@ impl Delta {
 }
 
 impl State {
+    /// How this line holds `fact` now.
+    fn hold(&self, fact: &Artifact) -> Hold {
+        Hold {
+            stored: self.facts.holds(fact),
+            hidden: self
+                .shadowed
+                .contains_key(&sort_key(fact, self.facts.manifest())),
+        }
+    }
+
+    /// Record how `fact` is held before a write first moves it.
+    fn note(&self, fact: &Artifact, delta: &mut Delta) {
+        let key = sort_key(fact, self.facts.manifest());
+        if delta.touched.insert(key) {
+            delta.found.push((fact.clone(), self.hold(fact)));
+        }
+    }
+
     fn insert(&mut self, fact: Artifact, delta: &mut Delta) {
+        self.note(&fact, delta);
         if self.facts.insert(fact.clone()) {
             delta.asserted.push(fact);
         }
     }
 
     fn remove(&mut self, fact: &Artifact, delta: &mut Delta) -> bool {
+        self.note(fact, delta);
         if !self.facts.remove(fact) {
             return false;
         }
@@ -369,11 +423,44 @@ impl State {
         true
     }
 
+    /// Hide `fact` beneath this line, if it is not hidden already. A
+    /// tombstone is a change readers see (the fact disappears), so it
+    /// is reported as retracted.
+    fn shadow(&mut self, fact: Artifact, delta: &mut Delta) {
+        let key = sort_key(&fact, self.facts.manifest());
+        if self.shadowed.contains_key(&key) {
+            return;
+        }
+        self.note(&fact, delta);
+        self.shadowed.insert(key.clone(), fact.clone());
+        Arc::make_mut(&mut self.tombstones).insert(key);
+        delta.retracted.push(fact);
+    }
+
     /// Stop hiding the fact under `key`, if it was hidden.
     fn lift(&mut self, key: &SortKey, delta: &mut Delta) {
-        if let Some(fact) = self.shadowed.remove(key) {
-            Arc::make_mut(&mut self.tombstones).remove(key);
-            delta.asserted.push(fact);
+        let Some(fact) = self.shadowed.get(key).cloned() else {
+            return;
+        };
+        self.note(&fact, delta);
+        self.shadowed.remove(key);
+        Arc::make_mut(&mut self.tombstones).remove(key);
+        delta.asserted.push(fact);
+    }
+
+    /// Hold `fact` as `hold`: store or remove it, hide or show it,
+    /// whichever of the two differ from how it is held now.
+    fn restore(&mut self, fact: &Artifact, hold: Hold, delta: &mut Delta) {
+        let now = self.hold(fact);
+        if hold.stored && !now.stored {
+            self.insert(fact.clone(), delta);
+        } else if !hold.stored && now.stored {
+            self.remove(fact, delta);
+        }
+        if hold.hidden && !now.hidden {
+            self.shadow(fact.clone(), delta);
+        } else if !hold.hidden && now.hidden {
+            self.lift(&sort_key(fact, self.facts.manifest()), delta);
         }
     }
 
@@ -410,15 +497,8 @@ impl State {
                 if self.remove(&fact, delta) {
                     return;
                 }
-                // Not held here: hide it beneath. A tombstone is a
-                // change readers see (the fact disappears), so it is
-                // reported as retracted.
-                let key = sort_key(&fact, self.facts.manifest());
-                if let Entry::Vacant(slot) = self.shadowed.entry(key.clone()) {
-                    slot.insert(fact.clone());
-                    Arc::make_mut(&mut self.tombstones).insert(key);
-                    delta.retracted.push(fact);
-                }
+                // Not held here: hide it beneath.
+                self.shadow(fact, delta);
             }
         }
     }
@@ -462,6 +542,7 @@ impl State {
             hash: self.hash.clone(),
             asserted: delta.asserted,
             retracted: delta.retracted,
+            found: delta.found,
         };
         if self.log.len() == LOG_CAPACITY {
             self.log.pop_front();
@@ -527,13 +608,12 @@ impl Ephemeral {
 
     /// This line as it stood before `instants`, its most recent
     /// instants oldest first (see [`since`](Self::since)): a copy with
-    /// each of their moves undone, newest instant first. A fact an
-    /// instant stored is removed and one it made readable by lifting a
-    /// tombstone is hidden again; a fact it removed is stored again
-    /// and one it hid is readable again, its tombstone lifted. A fact
-    /// an instant both hid and made readable stood after it as it
-    /// did before, so nothing of it is undone. This line is left as it
-    /// was.
+    /// each fact they moved held again as the instant that first moved
+    /// it found it, newest instant first. What an instant found is
+    /// recorded as it lands ([`Instant::found`]), so the copy is exact
+    /// whatever the moves were: a fact stored over its own tombstone
+    /// gets both back, one the line was cleared of gets back whatever
+    /// of the two it had. This line is left as it was.
     pub(crate) fn rewound(&self, instants: &[Instant]) -> Self {
         let base = self.state.read();
         let mut state = State {
@@ -548,46 +628,8 @@ impl Ephemeral {
         drop(base);
         let mut delta = Delta::default();
         for instant in instants.iter().rev() {
-            let identity = |fact: &Artifact| {
-                (
-                    fact.of.to_string(),
-                    fact.the.to_string(),
-                    fact.is.to_bytes(),
-                )
-            };
-            let both: HashSet<_> = instant
-                .asserted
-                .iter()
-                .map(identity)
-                .filter(|moved| {
-                    instant
-                        .retracted
-                        .iter()
-                        .any(|fact| identity(fact) == *moved)
-                })
-                .collect();
-            for fact in &instant.asserted {
-                if both.contains(&identity(fact)) {
-                    continue;
-                }
-                if !state.remove(fact, &mut delta) {
-                    let key = sort_key(fact, state.facts.manifest());
-                    if let Entry::Vacant(slot) = state.shadowed.entry(key.clone()) {
-                        slot.insert(fact.clone());
-                        Arc::make_mut(&mut state.tombstones).insert(key);
-                    }
-                }
-            }
-            for fact in &instant.retracted {
-                if both.contains(&identity(fact)) {
-                    continue;
-                }
-                let key = sort_key(fact, state.facts.manifest());
-                if state.shadowed.contains_key(&key) {
-                    state.lift(&key, &mut delta);
-                } else {
-                    state.insert(fact.clone(), &mut delta);
-                }
+            for (fact, hold) in &instant.found {
+                state.restore(fact, *hold, &mut delta);
             }
         }
         state.mint(delta);
