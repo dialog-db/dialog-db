@@ -982,7 +982,13 @@ fn population_facts(changes: &[Change]) -> Vec<(Field, usize, Datum)> {
 /// read on one side only, the changed fact's or the after side
 /// ([`JuniorLedReport`], [`JuniorTaughtReport`]). Changing them,
 /// check that again, so each rule keeps its teeth.
-const SEEDS: [u64; 3] = [1, 708, 710];
+///
+/// Seeds 6, 11 and 35 diverged before the overlay rewind restored
+/// how each instant found its facts: each reaches a fact stored over
+/// its own tombstone, then a step that moves it (an overlay clear, an
+/// overlay instant, a commit), where the rewind that undid readable
+/// moves alone lost the fact from the view before the change.
+const SEEDS: [u64; 6] = [1, 708, 710, 6, 11, 35];
 
 /// Steps per seed.
 const STEPS: usize = 100;

@@ -3295,6 +3295,49 @@ mod tests {
         Ok(())
     }
 
+    /// A fact asserted over its own tombstone is stored and hidden at
+    /// once. Rewinding past an instant that moved such a fact gets
+    /// both back: a commit that takes the stored copy out leaves the
+    /// tombstone, which must not be mistaken for the tombstone having
+    /// been laid; and clearing the line lists the fact as removed and
+    /// un-hidden at once, which must not be mistaken for no move.
+    #[dialog_common::test]
+    fn it_rewinds_a_fact_stored_over_its_own_tombstone() -> anyhow::Result<()> {
+        let alice = Entity::new()?;
+        let committed = the!("person/name")
+            .of(alice.clone())
+            .is("Alice".to_string());
+        let overlay = Ephemeral::new();
+        overlay
+            .retract(committed.clone())?
+            .assert(committed.clone())?;
+        let pinned = overlay.export();
+        let sequence = overlay.revision().sequence;
+
+        // The stored copy goes, as a commit retracting the fact takes
+        // it out; the tombstone stays.
+        overlay.retract(committed.clone())?;
+        let rewound = super::rewound(&overlay, sequence).expect("the ring reaches the pin");
+        assert_eq!(
+            rewound.export(),
+            pinned,
+            "the stored copy is back, the tombstone kept"
+        );
+
+        // Back to both, then everything goes at once.
+        overlay.assert(committed)?;
+        let sequence = overlay.revision().sequence;
+        overlay.clear();
+        assert!(overlay.export().is_empty(), "the line is clear");
+        let rewound = super::rewound(&overlay, sequence).expect("the ring reaches the pin");
+        assert_eq!(
+            rewound.export(),
+            pinned,
+            "both the copy and the tombstone are back"
+        );
+        Ok(())
+    }
+
     /// A concept subscription first polled before the branch's first
     /// commit has no revision to read the state before a change from.
     /// A poll whose changes all join against the branch as it is
@@ -5054,6 +5097,7 @@ mod tests {
             hash: dialog_common::Blake3Hash::from([0u8; 32]),
             asserted: vec![fact],
             retracted: Vec::new(),
+            found: Vec::new(),
         };
         match super::touched_by(&demand, vec![instant.clone()]) {
             super::Touched::Facts { subjects, .. } => {
