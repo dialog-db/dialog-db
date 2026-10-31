@@ -211,7 +211,6 @@ async fn a_maintained_fixpoint_keeps_each_row_at_its_newest_surviving_derivation
     );
     Ok(())
 }
-
 /// A display name (`report/name`).
 #[derive(Attribute, Clone, PartialEq)]
 #[domain("report")]
@@ -227,11 +226,29 @@ pub struct Manager(pub Entity);
 #[domain("report")]
 pub struct Mentor(pub Entity);
 
-/// What the rule with negated premises derives (`report/alone`): the
-/// name of someone whose manager and mentor both hold no badge.
+/// A staff level (`staff/level`), which rules read as an optional
+/// field: none counts as 0.
+#[derive(Attribute, Clone, PartialEq)]
+#[domain("staff")]
+pub struct Level(pub u32);
+
+/// What [`unvouched_rule`] derives (`report/alone`): the name of
+/// someone whose manager and mentor both hold no badge.
 #[derive(Attribute, Clone, PartialEq)]
 #[domain("report")]
 pub struct Alone(pub String);
+
+/// What [`junior_led_rule`] derives (`report/junior-led`): the name of
+/// someone whose manager is a junior.
+#[derive(Attribute, Clone, PartialEq)]
+#[domain("report")]
+pub struct JuniorLed(pub String);
+
+/// What [`junior_taught_rule`] derives (`report/junior-taught`): the
+/// name of someone whose mentor's level reads below 2.
+#[derive(Attribute, Clone, PartialEq)]
+#[domain("report")]
+pub struct JuniorTaught(pub String);
 
 /// An entity's name.
 #[derive(Concept, Debug, Clone, PartialEq)]
@@ -258,6 +275,15 @@ pub struct Mentored {
     pub this: Entity,
     /// Its mentor.
     pub mentor: Mentor,
+}
+
+/// An entity's level, where it has one.
+#[derive(Concept, Debug, Clone, PartialEq)]
+pub struct Levelled {
+    /// The levelled entity.
+    pub this: Entity,
+    /// Its level.
+    pub level: Level,
 }
 
 /// Someone whose manager and mentor both hold a badge: two
@@ -287,40 +313,136 @@ pub struct Unvouched {
     pub alone: Alone,
 }
 
+/// Someone whose manager is a junior, read from `report/junior-led`,
+/// which only [`junior_led_rule`] derives.
+#[derive(Concept, Debug, Clone, PartialEq)]
+pub struct JuniorLedReport {
+    /// The report.
+    pub this: Entity,
+    /// Their name.
+    pub junior_led: JuniorLed,
+}
+
+/// Someone whose mentor's level reads below 2, read from
+/// `report/junior-taught`, which only [`junior_taught_rule`] derives.
+#[derive(Concept, Debug, Clone, PartialEq)]
+pub struct JuniorTaughtReport {
+    /// The report.
+    pub this: Entity,
+    /// Their name.
+    pub junior_taught: JuniorTaught,
+}
+
+/// A variable term in rule notation.
+fn var(name: &str) -> serde_json::Value {
+    serde_json::json!({ "?": { "name": name } })
+}
+
+/// A rule in notation, compiled.
+fn rule(notation: serde_json::Value) -> anyhow::Result<DeductiveRule> {
+    let descriptor: DeductiveRuleDescriptor = serde_json::from_value(notation)?;
+    Ok(descriptor.compile()?)
+}
+
+/// The premises reading `of`'s name as `name` and its level, none
+/// taken as 0, as below 2: a row exists or not by an optional field's
+/// value.
+fn level_below_two(of: &str, name: &str) -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "assert": { "with": {
+                "name": { "the": "report/name", "as": "text:" },
+                "level": { "the": "staff/level", "as": "natural:", "optional": true }
+            }},
+            "where": { "this": var(of), "name": var(name), "level": var("level") }
+        }),
+        serde_json::json!({
+            "assert": "coalesce",
+            "where": { "source": var("level"), "fallback": 0, "is": var("rank") }
+        }),
+        serde_json::json!({
+            "assert": "<",
+            "where": { "of": var("rank"), "with": 2 }
+        }),
+    ]
+}
+
+/// A premise reading `of`'s `field` (`report/<field>`) as `is`.
+fn report(field: &str, kind: &str, of: &str, is: &str) -> serde_json::Value {
+    serde_json::json!({
+        "assert": { "with": {
+            field: { "the": format!("report/{field}"), "as": kind }
+        }},
+        "where": { "this": var(of), field: var(is) }
+    })
+}
+
 /// `report/alone(this) := name :- report/name(this) = name,
 /// report/manager(this) = m, report/mentor(this) = t,
 /// unless BadgeHolder(m), unless BadgeHolder(t)`: the mirror of
 /// [`Vouched`], two concept premises under negation.
 fn unvouched_rule() -> anyhow::Result<DeductiveRule> {
-    let var = |name: &str| serde_json::json!({ "?": { "name": name } });
-    let descriptor: DeductiveRuleDescriptor = serde_json::from_value(serde_json::json!({
+    let badge = |of: &str| {
+        serde_json::json!({
+            "assert": { "with": { "badge": { "the": "credential/badge", "as": "text:" } } },
+            "where": { "this": var(of) }
+        })
+    };
+    rule(serde_json::json!({
         "deduce": { "with": { "alone": { "the": "report/alone", "as": "text:" } } },
         "when": [
-            {
-                "assert": { "with": { "name": { "the": "report/name", "as": "text:" } } },
-                "where": { "this": var("this"), "name": var("alone") }
-            },
-            {
-                "assert": { "with": { "manager": { "the": "report/manager", "as": "entity:" } } },
-                "where": { "this": var("this"), "manager": var("manager") }
-            },
-            {
-                "assert": { "with": { "mentor": { "the": "report/mentor", "as": "entity:" } } },
-                "where": { "this": var("this"), "mentor": var("mentor") }
-            }
+            report("name", "text:", "this", "alone"),
+            report("manager", "entity:", "this", "manager"),
+            report("mentor", "entity:", "this", "mentor")
         ],
-        "unless": [
+        "unless": [badge("manager"), badge("mentor")]
+    }))
+}
+
+/// `report/junior(this) := name :- report/name(this) = name,
+/// coalesce(staff/level(this), 0) < 2`: an entity-local concept whose
+/// rows exist by an optional field's value.
+fn junior_rule() -> anyhow::Result<DeductiveRule> {
+    rule(serde_json::json!({
+        "deduce": { "with": { "junior": { "the": "report/junior", "as": "text:" } } },
+        "when": level_below_two("this", "junior")
+    }))
+}
+
+/// `report/junior-led(this) := name :- report/name(this) = name,
+/// report/manager(this) = m, Junior(m)`: the optional field is read
+/// through a target concept, so a level change on the manager moves
+/// the report's row.
+fn junior_led_rule() -> anyhow::Result<DeductiveRule> {
+    rule(serde_json::json!({
+        "deduce": { "with": { "junior_led": { "the": "report/junior-led", "as": "text:" } } },
+        "when": [
+            report("name", "text:", "this", "junior_led"),
+            report("manager", "entity:", "this", "manager"),
             {
-                "assert": { "with": { "badge": { "the": "credential/badge", "as": "text:" } } },
-                "where": { "this": var("manager") }
-            },
-            {
-                "assert": { "with": { "badge": { "the": "credential/badge", "as": "text:" } } },
-                "where": { "this": var("mentor") }
+                "assert": { "with": { "junior": { "the": "report/junior", "as": "text:" } } },
+                "where": { "this": var("manager"), "junior": var("managers") }
             }
         ]
-    }))?;
-    Ok(descriptor.compile()?)
+    }))
+}
+
+/// `report/junior-taught(this) := name :- report/name(this) = name,
+/// report/mentor(this) = t, coalesce(staff/level(t), 0) < 2`: the
+/// optional field read in the non-local rule itself, for another
+/// entity.
+fn junior_taught_rule() -> anyhow::Result<DeductiveRule> {
+    let mut when = vec![
+        report("name", "text:", "this", "junior_taught"),
+        report("mentor", "entity:", "this", "mentor"),
+    ];
+    when.extend(level_below_two("mentor", "mentors"));
+    rule(serde_json::json!({
+        "deduce": { "with": {
+            "junior_taught": { "the": "report/junior-taught", "as": "text:" }
+        }},
+        "when": when
+    }))
 }
 
 /// The session every randomized run commits and reads through.
@@ -370,13 +492,16 @@ enum Field {
     Name,
     Manager,
     Mentor,
+    Level,
 }
 
-/// A value under a [`Field`]: text, or one of the [`PEOPLE`] by index.
+/// A value under a [`Field`]: text, one of the [`PEOPLE`] by index,
+/// or a level.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Datum {
     Text(&'static str),
     Person(usize),
+    Number(u32),
 }
 
 impl fmt::Display for Datum {
@@ -384,6 +509,7 @@ impl fmt::Display for Datum {
         match self {
             Datum::Text(text) => write!(f, "{text:?}"),
             Datum::Person(index) => write!(f, "p{index}"),
+            Datum::Number(number) => write!(f, "{number}"),
         }
     }
 }
@@ -405,6 +531,7 @@ impl fmt::Display for Change {
             Field::Name => "report/name",
             Field::Manager => "report/manager",
             Field::Mentor => "report/mentor",
+            Field::Level => "staff/level",
         };
         write!(f, "{sign} {the} p{} = {}", self.of, self.is)
     }
@@ -455,6 +582,10 @@ async fn visible(
         let to = Datum::Person(index_of(&row.mentor.0));
         facts.push((Field::Mentor, index_of(&row.this), to));
     }
+    for row in fresh::<Levelled>(branch, operator).await? {
+        let level = Datum::Number(row.level.0);
+        facts.push((Field::Level, index_of(&row.this), level));
+    }
     facts.sort();
     Ok(facts)
 }
@@ -491,16 +622,19 @@ where
 /// value is retracted or overwritten (a single-valued assert
 /// supersedes the old value, so it moves both ways at once); an empty
 /// one is asserted. Badges are drawn most, since they feed the
-/// non-local premises of both rules.
+/// non-local premises of two rules. Levels range over 0 to 3, so an
+/// overwrite can cross the threshold of 2 either way, and a
+/// retraction makes the level read as 0.
 fn draw(rng: &mut Xorshift, visible: &[(Field, usize, Datum)]) -> Vec<Change> {
     let count = 1 + rng.below(4);
     let mut cells: Vec<(Field, usize)> = Vec::new();
     while cells.len() < count {
-        let field = match rng.below(5) {
+        let field = match rng.below(6) {
             0 | 1 => Field::Badge,
             2 => Field::Name,
             3 => Field::Manager,
-            _ => Field::Mentor,
+            4 => Field::Mentor,
+            _ => Field::Level,
         };
         let cell = (field, rng.below(PEOPLE));
         if !cells.contains(&cell) {
@@ -528,6 +662,7 @@ fn draw(rng: &mut Xorshift, visible: &[(Field, usize, Datum)]) -> Vec<Change> {
                 Field::Badge => Datum::Text(TEXTS[rng.below(2)]),
                 Field::Name => Datum::Text(TEXTS[2 + rng.below(2)]),
                 Field::Manager | Field::Mentor => Datum::Person(rng.below(PEOPLE)),
+                Field::Level => Datum::Number(rng.below(4) as u32),
             };
             Change {
                 assert: true,
@@ -544,10 +679,6 @@ fn batch(changes: &[Change]) -> Changes {
     let mut batch = Changes::new();
     for change in changes {
         let of = person(change.of);
-        let (text, to) = match &change.is {
-            Datum::Text(text) => (text.to_string(), None),
-            Datum::Person(index) => (String::new(), Some(person(*index))),
-        };
         macro_rules! stage {
             ($statement:expr) => {
                 if change.assert {
@@ -557,11 +688,13 @@ fn batch(changes: &[Change]) -> Changes {
                 }
             };
         }
-        match change.field {
-            Field::Badge => stage!(Badge::of(of).is(text)),
-            Field::Name => stage!(Name::of(of).is(text)),
-            Field::Manager => stage!(Manager::of(of).is(to.expect("a person"))),
-            Field::Mentor => stage!(Mentor::of(of).is(to.expect("a person"))),
+        match (change.field, &change.is) {
+            (Field::Badge, Datum::Text(text)) => stage!(Badge::of(of).is(text.to_string())),
+            (Field::Name, Datum::Text(text)) => stage!(Name::of(of).is(text.to_string())),
+            (Field::Manager, Datum::Person(to)) => stage!(Manager::of(of).is(person(*to))),
+            (Field::Mentor, Datum::Person(to)) => stage!(Mentor::of(of).is(person(*to))),
+            (Field::Level, Datum::Number(level)) => stage!(Level::of(of).is(*level)),
+            (field, is) => unreachable!("{field:?} never holds {is}"),
         }
     }
     batch
@@ -605,7 +738,7 @@ fn minus(left: &[String], right: &[String]) -> Vec<String> {
 /// A subscription under test, with the result it held after its last
 /// poll and the step that poll followed.
 struct Watch<C: Predicate> {
-    label: &'static str,
+    label: String,
     subscription: Subscription<Query<C>>,
     previous: Vec<String>,
     polled_at: usize,
@@ -616,11 +749,7 @@ where
     C: Predicate<Conclusion = C> + Conclusion + PartialEq + Clone + fmt::Debug + ConditionalSync,
     C::Application: Default + Clone + ConditionalSync,
 {
-    async fn new(
-        label: &'static str,
-        branch: &Branch,
-        operator: &Operator,
-    ) -> anyhow::Result<Self> {
+    async fn new(label: String, branch: &Branch, operator: &Operator) -> anyhow::Result<Self> {
         let mut subscription = branch.subscribe(Query::<C>::default());
         subscription.poll(operator).await?;
         let previous = canonical(subscription.results());
@@ -678,10 +807,63 @@ where
     }
 }
 
-/// Run `steps` random steps from `seed`, holding the invariant on four
-/// subscriptions: [`Vouched`] and [`Unvouched`], each polled after
-/// every step and polled only now and then, so one delta can span
-/// several commits and overlay instants.
+/// Two subscriptions to the concept `C`: one polled after every step,
+/// and one polled only now and then, so one delta can span several
+/// commits and overlay instants.
+struct Watches<C: Predicate> {
+    every: Watch<C>,
+    lagging: Watch<C>,
+}
+
+impl<C> Watches<C>
+where
+    C: Predicate<Conclusion = C> + Conclusion + PartialEq + Clone + fmt::Debug + ConditionalSync,
+    C::Application: Default + Clone + ConditionalSync,
+{
+    async fn new(concept: &str, branch: &Branch, operator: &Operator) -> anyhow::Result<Self> {
+        Ok(Self {
+            every: Watch::new(format!("{concept}, polled every step"), branch, operator).await?,
+            lagging: Watch::new(format!("{concept}, polled now and then"), branch, operator)
+                .await?,
+        })
+    }
+
+    async fn check(
+        &mut self,
+        step: usize,
+        rng: &mut Xorshift,
+        branch: &Branch,
+        operator: &Operator,
+        log: &Log,
+    ) -> anyhow::Result<()> {
+        self.every.check(step, branch, operator, log).await?;
+        if rng.chance(1, 3) {
+            self.lagging.check(step, branch, operator, log).await?;
+        }
+        Ok(())
+    }
+
+    /// The invariant holding says something only if the polls were
+    /// maintained: a subscription that recomputed every time would
+    /// pass trivially.
+    fn ensure_maintained(&self, seed: u64) -> anyhow::Result<()> {
+        let recomputes = self.every.subscription.recomputes();
+        let maintenances = self.every.subscription.maintenances();
+        anyhow::ensure!(
+            maintenances > recomputes,
+            "{} (seed {seed}): {maintenances} maintained polls against {recomputes} \
+             recomputes; the delta-join path was not what the run exercised",
+            self.every.label
+        );
+        Ok(())
+    }
+}
+
+/// Run `steps` random steps from `seed`, holding the invariant on a
+/// pair of [`Watches`] for each rule: [`Vouched`] (positive concept
+/// premises), [`Unvouched`] (negated ones), [`JuniorLedReport`] (an
+/// optional field read through a target concept) and
+/// [`JuniorTaughtReport`] (an optional field read in the rule itself).
 async fn run(seed: u64, steps: usize) -> anyhow::Result<()> {
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
@@ -689,10 +871,10 @@ async fn run(seed: u64, steps: usize) -> anyhow::Result<()> {
     let mut rng = Xorshift::new(seed);
     let mut log = Log {
         seed,
-        steps: vec!["the rule, and a first population".into()],
+        steps: vec!["the rules, and a first population".into()],
     };
 
-    // Step 0 installs the rule with a first population, so every
+    // Step 0 installs the rules with a first population, so every
     // subscription first polls a born branch and maintains from then on.
     let mut population = Vec::new();
     for _ in 0..3 {
@@ -701,20 +883,21 @@ async fn run(seed: u64, steps: usize) -> anyhow::Result<()> {
     branch
         .transaction()
         .assert(&unvouched_rule()?)
+        .assert(&junior_rule()?)
+        .assert(&junior_led_rule()?)
+        .assert(&junior_taught_rule()?)
         .integrate(batch(&population))
         .commit()
         .publish()
         .perform(&operator)
         .await?;
 
-    let mut vouched =
-        Watch::<Vouched>::new("Vouched, polled every step", &branch, &operator).await?;
-    let mut unvouched =
-        Watch::<Unvouched>::new("Unvouched, polled every step", &branch, &operator).await?;
-    let mut vouched_lagging =
-        Watch::<Vouched>::new("Vouched, polled now and then", &branch, &operator).await?;
-    let mut unvouched_lagging =
-        Watch::<Unvouched>::new("Unvouched, polled now and then", &branch, &operator).await?;
+    let mut vouched = Watches::<Vouched>::new("Vouched", &branch, &operator).await?;
+    let mut unvouched = Watches::<Unvouched>::new("Unvouched", &branch, &operator).await?;
+    let mut junior_led =
+        Watches::<JuniorLedReport>::new("JuniorLedReport", &branch, &operator).await?;
+    let mut junior_taught =
+        Watches::<JuniorTaughtReport>::new("JuniorTaughtReport", &branch, &operator).await?;
 
     for step in 1..=steps {
         let before = visible(&branch, &operator).await?;
@@ -756,41 +939,24 @@ async fn run(seed: u64, steps: usize) -> anyhow::Result<()> {
             }
         }
 
-        vouched.check(step, &branch, &operator, &log).await?;
-        unvouched.check(step, &branch, &operator, &log).await?;
-        if rng.chance(1, 3) {
-            vouched_lagging
-                .check(step, &branch, &operator, &log)
-                .await?;
-        }
-        if rng.chance(1, 3) {
-            unvouched_lagging
-                .check(step, &branch, &operator, &log)
-                .await?;
-        }
+        vouched
+            .check(step, &mut rng, &branch, &operator, &log)
+            .await?;
+        unvouched
+            .check(step, &mut rng, &branch, &operator, &log)
+            .await?;
+        junior_led
+            .check(step, &mut rng, &branch, &operator, &log)
+            .await?;
+        junior_taught
+            .check(step, &mut rng, &branch, &operator, &log)
+            .await?;
     }
 
-    // The invariant held, but it says something only if the polls
-    // were maintained: a subscription that recomputed every time
-    // would pass trivially.
-    for (label, recomputes, maintenances) in [
-        (
-            vouched.label,
-            vouched.subscription.recomputes(),
-            vouched.subscription.maintenances(),
-        ),
-        (
-            unvouched.label,
-            unvouched.subscription.recomputes(),
-            unvouched.subscription.maintenances(),
-        ),
-    ] {
-        anyhow::ensure!(
-            maintenances > recomputes,
-            "{label} (seed {seed}): {maintenances} maintained polls against {recomputes} \
-             recomputes; the delta-join path was not what the run exercised"
-        );
-    }
+    vouched.ensure_maintained(seed)?;
+    unvouched.ensure_maintained(seed)?;
+    junior_led.ensure_maintained(seed)?;
+    junior_taught.ensure_maintained(seed)?;
     Ok(())
 }
 
@@ -810,10 +976,12 @@ fn population_facts(changes: &[Change]) -> Vec<(Field, usize, Datum)> {
 /// The seeds the randomized check runs. To reproduce a failure, its
 /// message names the seed and step; put that seed here alone.
 ///
-/// Each was checked to fail when every delta-join reads the state
-/// after the change (#708's class of bug): seed 1 through [`Vouched`],
-/// 708 and 710 through [`Unvouched`] too, on its own. Changing them,
-/// check that again, so both rules keep their teeth.
+/// Each was checked to fail, for every rule it names, under three
+/// mutations of the delta-join discovery: every join reading the
+/// state after the change (all four rules), and an optional premise
+/// read on one side only, the changed fact's or the after side
+/// ([`JuniorLedReport`], [`JuniorTaughtReport`]). Changing them,
+/// check that again, so each rule keeps its teeth.
 const SEEDS: [u64; 3] = [1, 708, 710];
 
 /// Steps per seed.
@@ -823,11 +991,13 @@ const STEPS: usize = 100;
 /// instants, a subscription's result is a fresh evaluation of its
 /// query, and the delta it reports is exactly the difference from its
 /// previous result. Each step changes several facts at once, in both
-/// directions, through a non-local rule with two conformance premises
-/// ([`Vouched`]) and its mirror under two negated ones
-/// ([`Unvouched`]): the shapes #708 found only when two facts
-/// supporting one row moved together, which no single-fact test
-/// reaches.
+/// directions, through the three ways a non-local rule reads a
+/// changed fact: positive concept premises ([`Vouched`]), negated ones
+/// ([`Unvouched`]), and an optional field whose value decides whether
+/// a row exists ([`JuniorLedReport`], [`JuniorTaughtReport`]). #708 and
+/// the holes #710 closed with it appeared only when such changes moved
+/// together, or moved a row through an optional field, which no
+/// single-fact test reaches.
 #[dialog_common::test]
 async fn a_maintained_subscription_matches_a_fresh_evaluation_after_random_changes()
 -> anyhow::Result<()> {
