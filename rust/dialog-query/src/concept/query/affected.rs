@@ -48,7 +48,7 @@ use dialog_common::ConditionalSync;
 use futures_util::TryStreamExt as _;
 
 use crate::artifact::Artifact;
-use crate::attribute::Relation;
+use crate::attribute::{Cardinality, Relation};
 use crate::concept::descriptor::ConceptDescriptor;
 use crate::concept::query::ConceptQuery;
 use crate::error::EvaluationError;
@@ -60,8 +60,132 @@ use crate::rule::deductive::DeductiveRule;
 use crate::selection::{Binding, Match};
 use crate::source::SelectRules;
 use crate::term::Term;
-use crate::types::Any;
+use crate::types::{Any, Typed};
 use crate::{Entity, Environment, Value};
+
+/// The attributes the rules reachable from a concept read as
+/// single-valued: what such a read sees of a cell is the one claim the
+/// attribute's pick elects, not every claim, so a change to one claim
+/// of the cell can change what is read of the others.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Elected {
+    /// Some premise reads a variable attribute as single-valued: any
+    /// cell may be read that way.
+    Any,
+    /// Exactly these attributes, as the constant terms naming them.
+    Of(Vec<Value>),
+}
+
+impl Elected {
+    /// Whether a cell under `the` may be read as single-valued.
+    pub fn includes(&self, the: &dialog_artifacts::Relation) -> bool {
+        match self {
+            Elected::Any => true,
+            Elected::Of(attributes) => {
+                attributes.contains(&Value::from(Relation::from(the.clone())))
+            }
+        }
+    }
+}
+
+/// The attributes the rules reachable from `concept` read as
+/// single-valued, through any depth of concept premises, recursion
+/// included. A maintenance that learns of changes as moved rows widens
+/// a move under one of these to the cell's other claims, since the
+/// move can change which of them is read.
+///
+/// None when every reachable rule is entity-local and none recurs: a
+/// change to an entity's facts then re-derives that entity whole,
+/// which reads each of its cells again and elects afresh, so the moved
+/// rows are all the maintenance has to learn of.
+pub async fn elected_attributes<'a, Env>(
+    concept: &ConceptDescriptor,
+    env: &'a Env,
+) -> Result<Elected, EvaluationError>
+where
+    Env: crate::Scope<'a>,
+{
+    let mut attributes = Vec::new();
+    let mut joins = false;
+    let mut seen = BTreeSet::new();
+    let mut queue = vec![concept.clone()];
+    while let Some(descriptor) = queue.pop() {
+        if !seen.insert(descriptor.this()) {
+            continue;
+        }
+        let bundle = Provider::<SelectRules>::execute(env, descriptor).await?;
+        joins |= bundle.recursion().is_some();
+        for rule in bundle.rules() {
+            joins |= !reads_only_this(rule);
+            for premise in rule.analysis().premises() {
+                let (the, cardinality) = match premise {
+                    Premise::Assert(Proposition::Attribute(query)) => {
+                        (query.the(), query.cardinality())
+                    }
+                    Premise::Assert(Proposition::OptionalAttribute(query)) => {
+                        (query.query().the(), query.query().cardinality())
+                    }
+                    Premise::Unless(Negation(Proposition::Attribute(query))) => {
+                        (query.the(), query.cardinality())
+                    }
+                    _ => {
+                        if let Some((query, _)) = concept_premise(premise) {
+                            queue.push(query.predicate.clone());
+                        }
+                        continue;
+                    }
+                };
+                if cardinality != Cardinality::One {
+                    continue;
+                }
+                match the.as_constant() {
+                    Some(value) => {
+                        if !attributes.contains(value) {
+                            attributes.push(value.clone());
+                        }
+                    }
+                    None => {
+                        attributes.clear();
+                        return Ok(if joins {
+                            Elected::Any
+                        } else {
+                            Elected::Of(attributes)
+                        });
+                    }
+                }
+            }
+        }
+    }
+    if !joins {
+        attributes.clear();
+    }
+    Ok(Elected::Of(attributes))
+}
+
+/// Whether every premise of `rule` is about the entity it derives:
+/// an attribute of `?this`, a concept applied to `?this`, or a
+/// constraint or formula over what those bind. Such a rule's rows for
+/// an entity depend on that entity's facts alone, read through concepts
+/// that are themselves about it when their rules read this way too,
+/// which [`elected_attributes`] checks as it reaches them. Wider than
+/// the analysis's entity-local, which admits no concept premise.
+fn reads_only_this(rule: &DeductiveRule) -> bool {
+    fn is_this<T: Typed>(term: &Term<T>) -> bool {
+        matches!(term, Term::Variable { name: Some(name), .. } if &**name == "this")
+    }
+    rule.analysis().is_entity_local()
+        || rule.analysis().premises().all(|premise| match premise {
+            Premise::Assert(Proposition::Attribute(query)) => is_this(query.of()),
+            Premise::Assert(Proposition::OptionalAttribute(query)) => is_this(query.of()),
+            Premise::Unless(Negation(Proposition::Attribute(query))) => is_this(query.of()),
+            Premise::Assert(Proposition::Constraint(_)) => true,
+            Premise::Assert(Proposition::Formula(_)) => true,
+            Premise::Unless(Negation(Proposition::Constraint(_))) => true,
+            _ => concept_premise(premise)
+                .and_then(|(query, _)| query.terms.get("this"))
+                .is_some_and(is_this),
+        })
+}
 
 /// Which of the two states around a change something exists in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

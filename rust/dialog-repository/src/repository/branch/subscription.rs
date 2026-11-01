@@ -87,7 +87,7 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
 use dialog_query::Conclusion;
-use dialog_query::concept::query::affected::affected_entities;
+use dialog_query::concept::query::affected::{Elected, affected_entities, elected_attributes};
 use dialog_query::concept::query::fixpoint::{Continuation, InMemoryAnswerTable};
 use dialog_query::error::EvaluationError;
 use dialog_query::query::{Application, Output as _, Restriction};
@@ -498,6 +498,69 @@ fn touched_by(demand: &Demand, instants: Vec<crate::Instant>) -> Touched {
             retracted,
         }
     }
+}
+
+/// `asserted` and `retracted` widened to the readable change under
+/// `elected`: for each touched cell of an attribute read as
+/// single-valued, every claim the cell holds now, read through `env`,
+/// is asserted, and every claim it held before, the same less the
+/// raw assertions plus the raw retractions, is retracted. A claim the
+/// move left in place lands on both sides, since which claim the pick
+/// elects may have changed either way; re-derivation settles it. A
+/// cell of an attribute read as many-valued is left as the moves
+/// report it: every claim is read, so the moves are the change.
+async fn widened<'a>(
+    env: &QueryEnv<'a>,
+    asserted: &[Artifact],
+    retracted: &[Artifact],
+    elected: &Elected,
+) -> Result<(Vec<Artifact>, Vec<Artifact>), EvaluationError> {
+    let identity = |fact: &Artifact| {
+        (
+            fact.of.to_string(),
+            fact.the.to_string(),
+            fact.is.to_bytes(),
+        )
+    };
+    let mut cells: Vec<(Entity, dialog_artifacts::Relation)> = Vec::new();
+    for fact in asserted.iter().chain(retracted) {
+        if elected.includes(&fact.the)
+            && !cells
+                .iter()
+                .any(|(of, the)| *of == fact.of && *the == fact.the)
+        {
+            cells.push((fact.of.clone(), fact.the.clone()));
+        }
+    }
+    let mut widened_asserted = asserted.to_vec();
+    let mut widened_retracted = retracted.to_vec();
+    if cells.is_empty() {
+        return Ok((widened_asserted, widened_retracted));
+    }
+    let raw_asserted: BTreeSet<_> = asserted.iter().map(identity).collect();
+    let mut have_asserted = raw_asserted.clone();
+    let mut have_retracted: BTreeSet<_> = retracted.iter().map(identity).collect();
+    for (of, the) in cells {
+        let selector = ArtifactSelector::new().the(the).of(of);
+        let claims: Vec<Artifact> =
+            Provider::<dialog_artifacts::Select<'_>>::execute(env, selector)
+                .await
+                .map_err(|error| EvaluationError::Store(format!("cell read: {error}")))?
+                .map(|row| row.and_then(|view| view.to_owned()))
+                .try_collect()
+                .await
+                .map_err(|error| EvaluationError::Store(format!("cell read: {error}")))?;
+        for claim in claims {
+            let key = identity(&claim);
+            if !raw_asserted.contains(&key) && have_retracted.insert(key.clone()) {
+                widened_retracted.push(claim.clone());
+            }
+            if have_asserted.insert(key) {
+                widened_asserted.push(claim);
+            }
+        }
+    }
+    Ok((widened_asserted, widened_retracted))
 }
 
 /// `overlay` as it stood at `sequence`: a copy with every move its
@@ -955,6 +1018,21 @@ where
                 )
                 .with_demand(self.demand.clone());
                 let rules = Provider::<SelectRules>::execute(&query_env, concept.clone()).await?;
+                // The poll reports the rows that moved. What a rule
+                // reads of a single-valued attribute is the one claim
+                // its pick elects from the cell, so a row moving can
+                // change what is read of the cell's other claims: a
+                // session value outvoting a committed one, a retracted
+                // winner uncovering the claim beneath it. For every
+                // touched cell of an attribute some reachable rule reads
+                // that way, every claim the cell holds now counts as
+                // asserted and every claim it held before as retracted,
+                // so the discovery and the fixpoint learn of the readable
+                // change, not the stored one.
+                let elected = elected_attributes(concept, &query_env).await?;
+                let (asserted, retracted) =
+                    widened(&query_env, asserted, retracted, &elected).await?;
+                let (asserted, retracted) = (asserted.as_slice(), retracted.as_slice());
                 if rules.recursion().is_some() {
                     // Fixpoint continuation: deletions retract via DRed,
                     // additions extend semi-naively — rebuilding into

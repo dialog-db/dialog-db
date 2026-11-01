@@ -14,6 +14,43 @@ says how to cut a release.
 
 ## Unreleased
 
+### A subscription learns of the readable change to a single-valued cell, not only the moved row
+
+Following [#710](https://github.com/dialog-db/dialog-db/pull/710) and
+[#714](https://github.com/dialog-db/dialog-db/pull/714)
+
+A poll told incremental maintenance which rows moved. What a rule reads
+of a single-valued attribute is the one claim its pick elects from the
+cell, and a cell can hold several: a session value over a committed one,
+or two committed claims after concurrent writers merged. A row moving
+then changes which claim is read without that claim moving: a session
+value outvoting a committed one reported only the session value arriving,
+and retracting a cell's winner reported only the winner going, not the
+claim beneath it coming back. A rule reading the cell from the entity it
+derives was unaffected, since that entity is re-derived whole; a
+recursive rule, or one reading another entity's cell by its value, kept
+a stale row. For every touched cell of an attribute some reachable rule
+reads as single-valued, when any reachable rule joins across entities or
+recurs, the poll now counts every claim the cell holds as asserted and
+every claim it held before as retracted, so the delta-join and the
+fixpoint learn of the readable change.
+
+What this changes for you:
+
+- A subscription over a recursive rule, a rule two concept layers deep,
+  or a rule reading another entity's single-valued attribute no longer
+  keeps a stale row when a session write outvotes a committed value or a
+  retraction uncovers an older one. Its results match a fresh evaluation.
+- Such a poll reads each touched single-valued cell once more. A
+  subscription whose rules are all entity-local pays nothing new.
+- `dialog_query::concept::query::affected::elected_attributes` and
+  `Elected` are new: the attributes a concept's reachable rules read as
+  single-valued.
+
+Why: the invariant that a maintained result equals a fresh evaluation
+holds only if maintenance learns of every change a reader can see, and
+election makes a cell's readable value a function of all its claims.
+
 ### A subscription's view of the state before a change is exact over a cleared or committed-over overlay
 
 Following [#710](https://github.com/dialog-db/dialog-db/pull/710)
