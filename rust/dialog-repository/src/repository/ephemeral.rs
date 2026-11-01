@@ -71,6 +71,29 @@ pub struct EphemeralRevision {
     pub hash: Blake3Hash,
 }
 
+/// How a line holds one fact: stored in it, hidden beneath it by a
+/// tombstone, both, or neither. The two are independent: a fact
+/// asserted over its own tombstone is stored and hidden at once, so
+/// it reads from the line while whatever lies beneath stays hidden,
+/// and removing the stored copy leaves it hidden.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Hold {
+    stored: bool,
+    hidden: bool,
+}
+
+impl Hold {
+    /// Whether the line stores the fact.
+    pub fn stored(&self) -> bool {
+        self.stored
+    }
+
+    /// Whether the line hides the fact beneath it.
+    pub fn hidden(&self) -> bool {
+        self.hidden
+    }
+}
+
 /// One change to what readers of the line see.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Instant {
@@ -84,6 +107,13 @@ pub struct Instant {
     /// Facts that stopped being readable: removed, or shadowed
     /// beneath by a tombstone.
     pub retracted: Vec<Artifact>,
+    /// How the line held each fact this instant moved, before it did,
+    /// one entry per fact: what undoing the instant restores
+    /// ([`Ephemeral::rewound`]). The readable moves above do not
+    /// determine it, since a fact both stored and hidden reports a
+    /// removal like one merely stored, and clearing the line reports
+    /// it removed and un-hidden at once.
+    pub found: Vec<(Artifact, Hold)>,
 }
 
 /// A memory-backed line. Cheap to clone: clones share the store, so a
@@ -342,26 +372,78 @@ impl<'s> Window<'s> {
 }
 
 /// The delta one write is accumulating, before it is minted.
-#[derive(Default)]
 struct Delta {
     asserted: Vec<Artifact>,
     retracted: Vec<Artifact>,
+    /// Whether to record how the line held each fact the write moves.
+    /// A session line records, since a subscription rewinds it by what
+    /// its instants found ([`Ephemeral::rewound`]); a line built for
+    /// one query ([`holding`](Ephemeral::holding),
+    /// [`extending`](Ephemeral::extending)) or by a rewind is never
+    /// rewound, and a query builds one every time, so it does not.
+    record: bool,
+    /// How the line held each fact the write touches, as of its first
+    /// touch, keyed to record each fact once.
+    found: Vec<(Artifact, Hold)>,
+    touched: HashSet<SortKey>,
 }
 
 impl Delta {
+    /// A delta for a write to a line a subscription may rewind.
+    fn recorded() -> Self {
+        Self {
+            asserted: Vec::new(),
+            retracted: Vec::new(),
+            record: true,
+            found: Vec::new(),
+            touched: HashSet::new(),
+        }
+    }
+
+    /// A delta for a write to a line nothing rewinds.
+    fn unrecorded() -> Self {
+        Self {
+            record: false,
+            ..Self::recorded()
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.asserted.is_empty() && self.retracted.is_empty()
     }
 }
 
 impl State {
+    /// How this line holds `fact`, whose sort key is `key`, now.
+    fn hold(&self, fact: &Artifact, key: &SortKey) -> Hold {
+        Hold {
+            stored: self.facts.holds(fact),
+            hidden: self.shadowed.contains_key(key),
+        }
+    }
+
+    /// Record how `fact` is held before a write first moves it, when
+    /// the write records.
+    fn note(&self, fact: &Artifact, delta: &mut Delta) {
+        if !delta.record {
+            return;
+        }
+        let key = sort_key(fact, self.facts.manifest());
+        let hold = self.hold(fact, &key);
+        if delta.touched.insert(key) {
+            delta.found.push((fact.clone(), hold));
+        }
+    }
+
     fn insert(&mut self, fact: Artifact, delta: &mut Delta) {
+        self.note(&fact, delta);
         if self.facts.insert(fact.clone()) {
             delta.asserted.push(fact);
         }
     }
 
     fn remove(&mut self, fact: &Artifact, delta: &mut Delta) -> bool {
+        self.note(fact, delta);
         if !self.facts.remove(fact) {
             return false;
         }
@@ -369,11 +451,44 @@ impl State {
         true
     }
 
+    /// Hide `fact` beneath this line, if it is not hidden already. A
+    /// tombstone is a change readers see (the fact disappears), so it
+    /// is reported as retracted.
+    fn shadow(&mut self, fact: Artifact, delta: &mut Delta) {
+        let key = sort_key(&fact, self.facts.manifest());
+        if self.shadowed.contains_key(&key) {
+            return;
+        }
+        self.note(&fact, delta);
+        self.shadowed.insert(key.clone(), fact.clone());
+        Arc::make_mut(&mut self.tombstones).insert(key);
+        delta.retracted.push(fact);
+    }
+
     /// Stop hiding the fact under `key`, if it was hidden.
     fn lift(&mut self, key: &SortKey, delta: &mut Delta) {
-        if let Some(fact) = self.shadowed.remove(key) {
-            Arc::make_mut(&mut self.tombstones).remove(key);
-            delta.asserted.push(fact);
+        let Some(fact) = self.shadowed.get(key).cloned() else {
+            return;
+        };
+        self.note(&fact, delta);
+        self.shadowed.remove(key);
+        Arc::make_mut(&mut self.tombstones).remove(key);
+        delta.asserted.push(fact);
+    }
+
+    /// Hold `fact` as `hold`: store or remove it, hide or show it,
+    /// whichever of the two differ from how it is held now.
+    fn restore(&mut self, fact: &Artifact, hold: Hold, delta: &mut Delta) {
+        let now = self.hold(fact, &sort_key(fact, self.facts.manifest()));
+        if hold.stored && !now.stored {
+            self.insert(fact.clone(), delta);
+        } else if !hold.stored && now.stored {
+            self.remove(fact, delta);
+        }
+        if hold.hidden && !now.hidden {
+            self.shadow(fact.clone(), delta);
+        } else if !hold.hidden && now.hidden {
+            self.lift(&sort_key(fact, self.facts.manifest()), delta);
         }
     }
 
@@ -410,15 +525,8 @@ impl State {
                 if self.remove(&fact, delta) {
                     return;
                 }
-                // Not held here: hide it beneath. A tombstone is a
-                // change readers see (the fact disappears), so it is
-                // reported as retracted.
-                let key = sort_key(&fact, self.facts.manifest());
-                if let Entry::Vacant(slot) = self.shadowed.entry(key.clone()) {
-                    slot.insert(fact.clone());
-                    Arc::make_mut(&mut self.tombstones).insert(key);
-                    delta.retracted.push(fact);
-                }
+                // Not held here: hide it beneath.
+                self.shadow(fact, delta);
             }
         }
     }
@@ -462,6 +570,7 @@ impl State {
             hash: self.hash.clone(),
             asserted: delta.asserted,
             retracted: delta.retracted,
+            found: delta.found,
         };
         if self.log.len() == LOG_CAPACITY {
             self.log.pop_front();
@@ -486,7 +595,7 @@ impl Ephemeral {
         let line = Self::new();
         {
             let mut state = line.state.write();
-            let mut delta = Delta::default();
+            let mut delta = Delta::unrecorded();
             for instruction in changes.into_instructions() {
                 state.apply(instruction, &mut delta);
             }
@@ -515,7 +624,7 @@ impl Ephemeral {
             rules: base.rules.clone(),
         };
         drop(base);
-        let mut delta = Delta::default();
+        let mut delta = Delta::unrecorded();
         for instruction in changes.into_instructions() {
             state.apply(instruction, &mut delta);
         }
@@ -527,13 +636,12 @@ impl Ephemeral {
 
     /// This line as it stood before `instants`, its most recent
     /// instants oldest first (see [`since`](Self::since)): a copy with
-    /// each of their moves undone, newest instant first. A fact an
-    /// instant stored is removed and one it made readable by lifting a
-    /// tombstone is hidden again; a fact it removed is stored again
-    /// and one it hid is readable again, its tombstone lifted. A fact
-    /// an instant both hid and made readable stood after it as it
-    /// did before, so nothing of it is undone. This line is left as it
-    /// was.
+    /// each fact they moved held again as the instant that first moved
+    /// it found it, newest instant first. What an instant found is
+    /// recorded as it lands ([`Instant::found`]), so the copy is exact
+    /// whatever the moves were: a fact stored over its own tombstone
+    /// gets both back, one the line was cleared of gets back whatever
+    /// of the two it had. This line is left as it was.
     pub(crate) fn rewound(&self, instants: &[Instant]) -> Self {
         let base = self.state.read();
         let mut state = State {
@@ -546,48 +654,10 @@ impl Ephemeral {
             rules: base.rules.clone(),
         };
         drop(base);
-        let mut delta = Delta::default();
+        let mut delta = Delta::unrecorded();
         for instant in instants.iter().rev() {
-            let identity = |fact: &Artifact| {
-                (
-                    fact.of.to_string(),
-                    fact.the.to_string(),
-                    fact.is.to_bytes(),
-                )
-            };
-            let both: HashSet<_> = instant
-                .asserted
-                .iter()
-                .map(identity)
-                .filter(|moved| {
-                    instant
-                        .retracted
-                        .iter()
-                        .any(|fact| identity(fact) == *moved)
-                })
-                .collect();
-            for fact in &instant.asserted {
-                if both.contains(&identity(fact)) {
-                    continue;
-                }
-                if !state.remove(fact, &mut delta) {
-                    let key = sort_key(fact, state.facts.manifest());
-                    if let Entry::Vacant(slot) = state.shadowed.entry(key.clone()) {
-                        slot.insert(fact.clone());
-                        Arc::make_mut(&mut state.tombstones).insert(key);
-                    }
-                }
-            }
-            for fact in &instant.retracted {
-                if both.contains(&identity(fact)) {
-                    continue;
-                }
-                let key = sort_key(fact, state.facts.manifest());
-                if state.shadowed.contains_key(&key) {
-                    state.lift(&key, &mut delta);
-                } else {
-                    state.insert(fact.clone(), &mut delta);
-                }
+            for (fact, hold) in &instant.found {
+                state.restore(fact, *hold, &mut delta);
             }
         }
         state.mint(delta);
@@ -636,7 +706,7 @@ impl Ephemeral {
             return Ok(None);
         }
         let mut state = self.state.write();
-        let mut delta = Delta::default();
+        let mut delta = Delta::recorded();
         for instruction in changes.into_instructions() {
             state.apply(instruction, &mut delta);
         }
@@ -672,7 +742,7 @@ impl Ephemeral {
     /// short-lived entities. Returns whether anything was dropped.
     pub fn retain_entities<F: FnMut(&Entity) -> bool>(&self, mut keep: F) -> bool {
         let mut state = self.state.write();
-        let mut delta = Delta::default();
+        let mut delta = Delta::recorded();
         let dropped: Vec<Artifact> = state
             .facts
             .iter()
@@ -697,7 +767,7 @@ impl Ephemeral {
     /// Drop every fact and tombstone. Chainable.
     pub fn clear(&self) -> &Self {
         let mut state = self.state.write();
-        let mut delta = Delta::default();
+        let mut delta = Delta::recorded();
         let held: Vec<Artifact> = state.facts.iter().cloned().collect();
         for fact in held {
             state.remove(&fact, &mut delta);

@@ -14,6 +14,37 @@ says how to cut a release.
 
 ## Unreleased
 
+### A subscription's view of the state before a change is exact over a cleared or committed-over overlay
+
+Following [#710](https://github.com/dialog-db/dialog-db/pull/710)
+
+A subscription maintained incrementally reads the state before a change
+from its pinned revision under the session overlay rewound to the pinned
+sequence. The rewind undid each instant's readable moves, and a session
+line holds a fact in two independent ways, stored in it and hidden
+beneath it by a tombstone, so one fact can be both at once: asserted over
+its own tombstone. The readable moves do not say which of the two an
+instant changed. A commit retracting such a fact takes the stored copy
+out and leaves the tombstone, which the rewind undid by lifting the
+tombstone instead; clearing the overlay lists the fact as removed and
+un-hidden at once, which the rewind took for no move. Either left the
+view before the change short of a fact, and a subscription could keep a
+row a fresh evaluation no longer returned. An instant now records how
+the line held each fact it moved, and the rewind restores exactly that.
+
+What this changes for you:
+
+- A subscription over a non-local rule no longer keeps a stale row after
+  an overlay clear, or a commit retracting a fact the overlay had
+  re-asserted over its own tombstone. Its results match a fresh
+  evaluation again.
+- `Instant` carries `found`: how the overlay held each fact the instant
+  moved, before it did, as a `Hold` (stored, hidden).
+
+Why: the rewind inverted a log that did not determine what it changed.
+Recording what each instant found makes the inverse exact for any move,
+instead of assuming one representation per fact.
+
 ### A subscription retracts a row whose supporting facts go together
 
 [#710](https://github.com/dialog-db/dialog-db/pull/710), fixing
