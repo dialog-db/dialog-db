@@ -4,11 +4,14 @@
 #[cfg(target_arch = "wasm32")]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
+use std::env::{self, VarError};
 use std::fmt;
+use std::thread;
 
 use super::{Delta, Subscription};
 use crate::Branch;
 use crate::helpers::test_repo;
+use anyhow::Context as _;
 use dialog_artifacts::{Changes, Entity};
 use dialog_common::ConditionalSync;
 use dialog_peer::helpers::test_session_with_peer;
@@ -973,8 +976,10 @@ fn population_facts(changes: &[Change]) -> Vec<(Field, usize, Datum)> {
     facts
 }
 
-/// The seeds the randomized check runs. To reproduce a failure, its
-/// message names the seed and step; put that seed here alone.
+/// The seeds the randomized check runs, unless `DIALOG_SUBSCRIPTION_SEEDS`
+/// names others (see [`seeds`]). To reproduce a failure, its message
+/// names the seed and step; run that seed alone with
+/// `DIALOG_SUBSCRIPTION_SEEDS=<seed>`, or put it here alone.
 ///
 /// Each was checked to fail, for every rule it names, under three
 /// mutations of the delta-join discovery: every join reading the
@@ -990,8 +995,81 @@ fn population_facts(changes: &[Change]) -> Vec<(Field, usize, Datum)> {
 /// moves alone lost the fact from the view before the change.
 const SEEDS: [u64; 6] = [1, 708, 710, 6, 11, 35];
 
-/// Steps per seed.
+/// Steps per seed, unless `DIALOG_SUBSCRIPTION_STEPS` names another
+/// count.
 const STEPS: usize = 100;
+
+/// The value of the environment variable `name`, if it is set.
+fn knob(name: &str) -> anyhow::Result<Option<String>> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(VarError::NotPresent) => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("reading {name}")),
+    }
+}
+
+/// The seeds to run: [`SEEDS`], or the comma-separated list in
+/// `DIALOG_SUBSCRIPTION_SEEDS`, each item a seed (`4711`) or a
+/// half-open range of seeds (`1000..1300`). A bare number is one seed,
+/// never a count, so the seed a failure names reproduces it alone.
+/// A malformed list fails the test rather than falling back, so a
+/// typo cannot shrink a sweep to the committed seeds unnoticed.
+fn seeds() -> anyhow::Result<Vec<u64>> {
+    let Some(list) = knob("DIALOG_SUBSCRIPTION_SEEDS")? else {
+        return Ok(SEEDS.to_vec());
+    };
+    let seed = |text: &str| -> anyhow::Result<u64> {
+        text.trim()
+            .parse()
+            .with_context(|| format!("DIALOG_SUBSCRIPTION_SEEDS={list:?}: {text:?} is not a seed"))
+    };
+    let mut seeds = Vec::new();
+    for item in list.split(',').filter(|item| !item.trim().is_empty()) {
+        match item.split_once("..") {
+            Some((start, end)) => {
+                let (start, end) = (seed(start)?, seed(end)?);
+                anyhow::ensure!(
+                    start < end,
+                    "DIALOG_SUBSCRIPTION_SEEDS={list:?}: the range {item:?} is empty"
+                );
+                seeds.extend(start..end);
+            }
+            None => seeds.push(seed(item)?),
+        }
+    }
+    anyhow::ensure!(
+        !seeds.is_empty(),
+        "DIALOG_SUBSCRIPTION_SEEDS={list:?} names no seed"
+    );
+    Ok(seeds)
+}
+
+/// Steps per seed: [`STEPS`], or the count in
+/// `DIALOG_SUBSCRIPTION_STEPS`.
+fn steps() -> anyhow::Result<usize> {
+    match knob("DIALOG_SUBSCRIPTION_STEPS")? {
+        Some(steps) => steps
+            .trim()
+            .parse()
+            .with_context(|| format!("DIALOG_SUBSCRIPTION_STEPS={steps:?} is not a count")),
+        None => Ok(STEPS),
+    }
+}
+
+/// Names its seed on stderr if the run holding it panics, which,
+/// unlike a divergence, carries no message naming the seed.
+struct Panicking(u64);
+
+impl Drop for Panicking {
+    fn drop(&mut self) {
+        if thread::panicking() {
+            eprintln!(
+                "seed {seed} panicked; reproduce with DIALOG_SUBSCRIPTION_SEEDS={seed}",
+                seed = self.0
+            );
+        }
+    }
+}
 
 /// After any sequence of multi-fact commits and session-overlay
 /// instants, a subscription's result is a fresh evaluation of its
@@ -1004,11 +1082,32 @@ const STEPS: usize = 100;
 /// the holes #710 closed with it appeared only when such changes moved
 /// together, or moved a row through an optional field, which no
 /// single-fact test reaches.
+///
+/// Every seed runs even after one fails, so a wide sweep (the nightly
+/// `soak:subscription` arm) reports each seed that diverges, with the
+/// first failure in full.
 #[dialog_common::test]
 async fn a_maintained_subscription_matches_a_fresh_evaluation_after_random_changes()
 -> anyhow::Result<()> {
-    for seed in SEEDS {
-        run(seed, STEPS).await?;
+    let seeds = seeds()?;
+    let steps = steps()?;
+    let mut failures = Vec::new();
+    for &seed in &seeds {
+        let _panicking = Panicking(seed);
+        if let Err(error) = run(seed, steps).await {
+            failures.push((seed, error));
+        }
     }
-    Ok(())
+    let Some((first, error)) = failures.first() else {
+        return Ok(());
+    };
+    let failing: Vec<String> = failures.iter().map(|(seed, _)| seed.to_string()).collect();
+    anyhow::bail!(
+        "{failed} of {total} seeds diverged at {steps} steps per seed: {failing}\n\
+         reproduce one with DIALOG_SUBSCRIPTION_SEEDS=<seed> DIALOG_SUBSCRIPTION_STEPS={steps}\n\
+         the first, seed {first}: {error:#}",
+        failed = failures.len(),
+        total = seeds.len(),
+        failing = failing.join(", "),
+    )
 }

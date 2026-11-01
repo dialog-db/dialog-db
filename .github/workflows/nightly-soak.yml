@@ -12,6 +12,12 @@ name: 'Nightly Soak'
 # join scenario over simulated network profiles (rust/dialog-soak) and
 # fails when round trips, bytes, or modeled join time regress past the
 # checked-in baseline under soak/baseline.
+#
+# The subscription arm sweeps the randomized subscription invariant
+# (rust/dialog-repository/src/repository/branch/subscription/
+# invariants.rs) over hundreds of seeds where the normal suite runs a
+# handful. It runs every seed, names each that diverged with the first
+# in full, and DIALOG_SUBSCRIPTION_SEEDS=<seed> reruns one alone.
 
 on:
   workflow_dispatch:
@@ -24,6 +30,10 @@ on:
         description: 'Artifact fuzz seed count'
         required: false
         default: '200'
+      subscription_seeds:
+        description: 'Subscription invariant seeds: a comma list of seeds and ranges such as 0..300'
+        required: false
+        default: '0..300'
       rehearse:
         description: >-
           Rehearse the report: name an arm to fail it; every arm skips its
@@ -65,6 +75,10 @@ jobs:
             command: 'soak:converge'
             env_name: ''
             env_value_input: ''
+          - name: 'subscription invariant sweep'
+            command: 'soak:subscription'
+            env_name: 'DIALOG_SUBSCRIPTION_SEEDS'
+            env_value_input: 'subscription_seeds'
           - name: 'sync cost over simulated networks'
             command: 'soak:sync'
             env_name: ''
