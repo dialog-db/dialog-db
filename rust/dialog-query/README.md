@@ -85,7 +85,7 @@ Provides modeling primitives for describing a domain: attributes, concepts, rule
 
 #### Attributes
 
-An attribute is a relation qualified by a value type and a pick. It extends the `domain/name` identifier with what kind of values the relation is read as and which of an entity's claims a read returns. A Rust-declared attribute picks by its cardinality: `last` for one, `all` for many.
+An attribute is a relation qualified by a value type and a pick. It extends the `domain/name` identifier with what kind of values the relation is read as and which of an entity's claims a read returns. A Rust-declared attribute is read under `last` unless it says `#[pick(..)]`.
 
 An attribute is defined as a newtype wrapping a value type. The **domain** is derived from the enclosing module name (underscores become hyphens), and the **name** from the struct name (converted to kebab-case):
 
@@ -128,7 +128,7 @@ mod employee {
 }
 ```
 
-> Note: cardinality affects whether an existing claim is retracted when a new one is asserted. Cardinality one implies replacement, cardinality many accumulates.
+> Note: the pick governs writes too. Under any pick but `all`, asserting a new value succeeds the claim a read under that pick returns; under `all`, claims accumulate.
 
 `Attribute::of(...).is(...)` constructs a statement that can be asserted or retracted:
 
