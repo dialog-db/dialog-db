@@ -336,6 +336,59 @@ pub struct JuniorTaughtReport {
     pub junior_taught: JuniorTaught,
 }
 
+/// Everyone above someone (`report/above`): their manager, their
+/// manager's manager, and on up the chain, which [`above_rules`]
+/// derive recursively. Every entity above is a value of its own, so
+/// the attribute is read under `all`.
+#[derive(Attribute, Clone, PartialEq)]
+#[domain("report")]
+#[pick(all)]
+pub struct Above(pub Entity);
+
+/// What [`alone_led_rule`] derives (`report/alone-led`): the name of
+/// someone whose manager is [`Unvouched`].
+#[derive(Attribute, Clone, PartialEq)]
+#[domain("report")]
+pub struct AloneLed(pub String);
+
+/// Someone with someone above them, read from `report/above`. Its
+/// rules are recursive, so a subscription to it is maintained by the
+/// fixpoint continuation (DRed for what stopped being readable,
+/// semi-naive extension for what became readable), not by the
+/// delta-join.
+#[derive(Concept, Debug, Clone, PartialEq)]
+pub struct Superior {
+    /// The one below.
+    pub this: Entity,
+    /// Someone above them.
+    pub above: Above,
+}
+
+/// Someone whose mentor is [`Vouched`], which in turn needs its
+/// manager and mentor to be [`BadgeHolder`]s: a badge change reaches
+/// this head through two layers of concept premises.
+#[derive(Concept, Debug, Clone, PartialEq)]
+pub struct VouchedMentee {
+    /// The mentee.
+    pub this: Entity,
+    /// Their name.
+    pub name: Name,
+    /// Their mentor, who must be vouched for.
+    #[dialog(conforms = Vouched)]
+    pub mentor: Mentor,
+}
+
+/// Someone whose manager is [`Unvouched`], read from
+/// `report/alone-led`, which only [`alone_led_rule`] derives: two
+/// non-local layers, the inner one negated.
+#[derive(Concept, Debug, Clone, PartialEq)]
+pub struct AloneLedReport {
+    /// The report.
+    pub this: Entity,
+    /// Their name.
+    pub alone_led: AloneLed,
+}
+
 /// A variable term in rule notation.
 fn var(name: &str) -> serde_json::Value {
     serde_json::json!({ "?": { "name": name } })
@@ -448,6 +501,100 @@ fn junior_taught_rule() -> anyhow::Result<DeductiveRule> {
     }))
 }
 
+/// The `report/above` field, read under `all`.
+fn above_field() -> serde_json::Value {
+    serde_json::json!({ "above": { "the": "report/above", "as": "entity:", "pick": "all" } })
+}
+
+/// `report/above(this) := up :- report/<edge>(this) = up` and
+/// `report/above(this) := up :- report/<edge>(this) = next,
+/// report/above(next) = up`: the chain of `edge` (`manager` or
+/// `mentor`) closed transitively. The second rule reads its own head,
+/// which makes [`Superior`] recursive.
+fn above_rules(edge: &str) -> anyhow::Result<Vec<DeductiveRule>> {
+    Ok(vec![
+        rule(serde_json::json!({
+            "deduce": { "with": above_field() },
+            "when": [report(edge, "entity:", "this", "above")]
+        }))?,
+        rule(serde_json::json!({
+            "deduce": { "with": above_field() },
+            "when": [
+                report(edge, "entity:", "this", "next"),
+                {
+                    "assert": { "with": above_field() },
+                    "where": { "this": var("next"), "above": var("above") }
+                }
+            ]
+        }))?,
+    ])
+}
+
+/// `report/alone-led(this) := name :- report/name(this) = name,
+/// report/manager(this) = m, Unvouched(m)`: a concept premise over a
+/// concept whose own rule reads other entities, so a badge change on
+/// the manager's manager or mentor moves this row through two
+/// delta-join layers.
+fn alone_led_rule() -> anyhow::Result<DeductiveRule> {
+    rule(serde_json::json!({
+        "deduce": { "with": { "alone_led": { "the": "report/alone-led", "as": "text:" } } },
+        "when": [
+            report("name", "text:", "this", "alone_led"),
+            report("manager", "entity:", "this", "manager"),
+            {
+                "assert": { "with": { "alone": { "the": "report/alone", "as": "text:" } } },
+                "where": { "this": var("manager"), "alone": var("managers") }
+            }
+        ]
+    }))
+}
+
+/// A premise holding when `of`'s badge is `B1`.
+fn badged_b1(of: &str) -> serde_json::Value {
+    serde_json::json!({
+        "assert": { "with": { "badge": { "the": "credential/badge", "as": "text:" } } },
+        "where": { "this": var(of), "badge": "B1" }
+    })
+}
+
+/// `report/alone(this) := name :- report/name(this) = name,
+/// credential/badge(this) = "B1"`: a second, entity-local derivation
+/// of [`Unvouched`] that rule steps install and remove.
+fn alone_by_own_badge_rule() -> anyhow::Result<DeductiveRule> {
+    rule(serde_json::json!({
+        "deduce": { "with": { "alone": { "the": "report/alone", "as": "text:" } } },
+        "when": [report("name", "text:", "this", "alone"), badged_b1("this")]
+    }))
+}
+
+/// `report/alone(this) := name :- report/name(this) = name,
+/// report/mentor(this) = t, credential/badge(t) = "B1"`: a non-local
+/// derivation of [`Unvouched`], which a rule step replaces
+/// [`alone_by_own_badge_rule`] with, and the other way around.
+fn alone_by_mentors_badge_rule() -> anyhow::Result<DeductiveRule> {
+    rule(serde_json::json!({
+        "deduce": { "with": { "alone": { "the": "report/alone", "as": "text:" } } },
+        "when": [
+            report("name", "text:", "this", "alone"),
+            report("mentor", "entity:", "this", "mentor"),
+            badged_b1("mentor")
+        ]
+    }))
+}
+
+/// The rules every run installs with its first commit.
+fn installed_rules() -> anyhow::Result<Vec<DeductiveRule>> {
+    let mut rules = vec![
+        unvouched_rule()?,
+        junior_rule()?,
+        junior_led_rule()?,
+        junior_taught_rule()?,
+        alone_led_rule()?,
+    ];
+    rules.extend(above_rules("manager")?);
+    Ok(rules)
+}
+
 /// The session every randomized run commits and reads through.
 type Operator = Peer<VolatileSpace, Session>;
 
@@ -547,6 +694,9 @@ enum Via {
     Overlay,
     /// The overlay drops every fact and tombstone it holds.
     Clear,
+    /// The branch's first commit, landing the rules with the step's
+    /// changes, in a run that subscribed before it.
+    Install,
 }
 
 /// The `index`th of the [`PEOPLE`].
@@ -860,58 +1010,309 @@ where
         );
         Ok(())
     }
+
+    /// A rule move under the subscribed concept can change any row, so
+    /// each one the run made recomputes, beyond the first poll.
+    fn ensure_recomputed(&self, toggle: &Toggle, seed: u64) -> anyhow::Result<()> {
+        let recomputes = self.every.subscription.recomputes();
+        anyhow::ensure!(
+            toggle.moves > 0 && recomputes > toggle.moves,
+            "{} (seed {seed}): {recomputes} recomputes after {} moves of {}",
+            self.every.label,
+            toggle.moves,
+            toggle.name
+        );
+        Ok(())
+    }
 }
 
-/// Run `steps` random steps from `seed`, holding the invariant on a
-/// pair of [`Watches`] for each rule: [`Vouched`] (positive concept
+/// Every subscription a randomized run holds to the invariant, a pair
+/// of [`Watches`] per rule shape: [`Vouched`] (positive concept
 /// premises), [`Unvouched`] (negated ones), [`JuniorLedReport`] (an
-/// optional field read through a target concept) and
-/// [`JuniorTaughtReport`] (an optional field read in the rule itself).
-async fn run(seed: u64, steps: usize) -> anyhow::Result<()> {
+/// optional field read through a target concept),
+/// [`JuniorTaughtReport`] (an optional field read in the rule itself),
+/// [`Superior`] (recursive rules), and [`VouchedMentee`] and
+/// [`AloneLedReport`] (concept premises two layers deep, positive and
+/// negated).
+struct Watched {
+    vouched: Watches<Vouched>,
+    unvouched: Watches<Unvouched>,
+    junior_led: Watches<JuniorLedReport>,
+    junior_taught: Watches<JuniorTaughtReport>,
+    superior: Watches<Superior>,
+    vouched_mentee: Watches<VouchedMentee>,
+    alone_led: Watches<AloneLedReport>,
+}
+
+impl Watched {
+    async fn new(branch: &Branch, operator: &Operator) -> anyhow::Result<Self> {
+        Ok(Self {
+            vouched: Watches::new("Vouched", branch, operator).await?,
+            unvouched: Watches::new("Unvouched", branch, operator).await?,
+            junior_led: Watches::new("JuniorLedReport", branch, operator).await?,
+            junior_taught: Watches::new("JuniorTaughtReport", branch, operator).await?,
+            superior: Watches::new("Superior", branch, operator).await?,
+            vouched_mentee: Watches::new("VouchedMentee", branch, operator).await?,
+            alone_led: Watches::new("AloneLedReport", branch, operator).await?,
+        })
+    }
+
+    /// Poll every subscription after `step`. The four shapes #711
+    /// added decide their lagging polls from `rng`, in the order they
+    /// always did, and the rest from `extra`, so a seed's steps are
+    /// the steps it drew before the rest were added.
+    async fn check(
+        &mut self,
+        step: usize,
+        rng: &mut Xorshift,
+        extra: &mut Xorshift,
+        branch: &Branch,
+        operator: &Operator,
+        log: &Log,
+    ) -> anyhow::Result<()> {
+        self.vouched.check(step, rng, branch, operator, log).await?;
+        self.unvouched
+            .check(step, rng, branch, operator, log)
+            .await?;
+        self.junior_led
+            .check(step, rng, branch, operator, log)
+            .await?;
+        self.junior_taught
+            .check(step, rng, branch, operator, log)
+            .await?;
+        self.superior
+            .check(step, extra, branch, operator, log)
+            .await?;
+        self.vouched_mentee
+            .check(step, extra, branch, operator, log)
+            .await?;
+        self.alone_led
+            .check(step, extra, branch, operator, log)
+            .await?;
+        Ok(())
+    }
+
+    fn ensure_maintained(&self, seed: u64) -> anyhow::Result<()> {
+        self.vouched.ensure_maintained(seed)?;
+        self.unvouched.ensure_maintained(seed)?;
+        self.junior_led.ensure_maintained(seed)?;
+        self.junior_taught.ensure_maintained(seed)?;
+        self.superior.ensure_maintained(seed)?;
+        self.vouched_mentee.ensure_maintained(seed)?;
+        self.alone_led.ensure_maintained(seed)?;
+        Ok(())
+    }
+}
+
+/// Rules a rule step moves between. A toggle stands at one of its
+/// variants, the first of which installs nothing; a move retracts the
+/// rules of the variant it stands at and asserts another's in one
+/// commit, so a move between two installing variants replaces one
+/// rule with another.
+struct Toggle {
+    name: &'static str,
+    variants: Vec<(&'static str, Vec<DeductiveRule>)>,
+    at: usize,
+    moves: usize,
+}
+
+/// The toggles of a run that moves rules: the mentor chains of the
+/// recursive [`Superior`], whose fixpoint a move must rebuild, and a
+/// second derivation of [`Unvouched`], local or not, which
+/// [`AloneLedReport`] reads a layer up.
+fn toggles() -> anyhow::Result<[Toggle; 2]> {
+    Ok([
+        Toggle {
+            name: "mentor chains",
+            variants: vec![("none", Vec::new()), ("installed", above_rules("mentor")?)],
+            at: 0,
+            moves: 0,
+        },
+        Toggle {
+            name: "alone by badge",
+            variants: vec![
+                ("none", Vec::new()),
+                ("own", vec![alone_by_own_badge_rule()?]),
+                ("mentor's", vec![alone_by_mentors_badge_rule()?]),
+            ],
+            at: 0,
+            moves: 0,
+        },
+    ])
+}
+
+/// Move one of `toggles` to another of its variants, in one commit,
+/// and describe the move for the log.
+async fn move_rule(
+    rng: &mut Xorshift,
+    toggles: &mut [Toggle],
+    branch: &Branch,
+    operator: &Operator,
+) -> anyhow::Result<String> {
+    let index = rng.below(toggles.len());
+    let toggle = &mut toggles[index];
+    let count = toggle.variants.len();
+    let to = (toggle.at + 1 + rng.below(count - 1)) % count;
+    let mut transaction = branch.transaction();
+    for rule in &toggle.variants[toggle.at].1 {
+        transaction = transaction.retract(rule);
+    }
+    for rule in &toggle.variants[to].1 {
+        transaction = transaction.assert(rule);
+    }
+    transaction.commit().publish().perform(operator).await?;
+    let described = format!(
+        "Rules {}: {} -> {}",
+        toggle.name, toggle.variants[toggle.at].0, toggle.variants[to].0
+    );
+    toggle.at = to;
+    toggle.moves += 1;
+    Ok(described)
+}
+
+/// Commit [`installed_rules`] together with `changes`.
+async fn install(branch: &Branch, operator: &Operator, changes: Changes) -> anyhow::Result<()> {
+    let mut transaction = branch.transaction();
+    for rule in installed_rules()? {
+        transaction = transaction.assert(rule);
+    }
+    transaction
+        .integrate(changes)
+        .commit()
+        .publish()
+        .perform(operator)
+        .await?;
+    Ok(())
+}
+
+/// How many steps a run that starts on an unborn branch takes through
+/// the session overlay alone before its first commit lands the rules.
+const UNBORN_STEPS: usize = 20;
+
+/// What a randomized run exercises beyond the fact steps every run
+/// takes.
+#[derive(Clone, Copy, Debug)]
+struct Shape {
+    seed: u64,
+    /// Subscribe before the branch's first commit, and change facts
+    /// only through the session overlay for [`UNBORN_STEPS`] steps,
+    /// until a commit lands the rules: the pin the subscriptions
+    /// maintain from has no revision to view the state before a
+    /// change in.
+    unborn: bool,
+    /// Interleave rule steps, each moving a [`Toggle`].
+    rules: bool,
+}
+
+impl fmt::Display for Shape {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match (self.unborn, self.rules) {
+            (true, _) => "unborn",
+            (false, true) => "moving",
+            (false, false) => "fixed",
+        };
+        write!(f, "{kind} {}", self.seed)
+    }
+}
+
+/// A run of `seed` with the rules fixed from the first commit on.
+const fn fixed(seed: u64) -> Shape {
+    Shape {
+        seed,
+        unborn: false,
+        rules: false,
+    }
+}
+
+/// A run of `seed` whose rules move between fact steps.
+const fn moving(seed: u64) -> Shape {
+    Shape {
+        seed,
+        unborn: false,
+        rules: true,
+    }
+}
+
+/// A run of `seed` subscribed before the branch's first commit.
+const fn unborn(seed: u64) -> Shape {
+    Shape {
+        seed,
+        unborn: true,
+        rules: false,
+    }
+}
+
+/// Run `steps` random fact steps of `shape`, holding the invariant on
+/// every subscription in [`Watched`] after each, and after each rule
+/// step a run that moves rules interleaves.
+async fn run(shape: Shape, steps: usize) -> anyhow::Result<()> {
+    let Shape {
+        seed,
+        unborn,
+        rules,
+    } = shape;
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
     let mut rng = Xorshift::new(seed);
+    // Everything added after #711 that draws (the new shapes' lagging
+    // polls, rule steps) draws from a stream of its own, so a fixed
+    // run of a seed takes the fact steps it took before.
+    let mut extra = Xorshift::new(seed ^ 0xA5A5_A5A5_A5A5_A5A5);
+    let mut toggles = toggles()?;
     let mut log = Log {
         seed,
-        steps: vec!["the rules, and a first population".into()],
+        steps: Vec::new(),
     };
 
-    // Step 0 installs the rules with a first population, so every
-    // subscription first polls a born branch and maintains from then on.
-    let mut population = Vec::new();
-    for _ in 0..3 {
-        population.extend(draw(&mut rng, &population_facts(&population)));
+    if unborn {
+        log.steps
+            .push("subscribed on an unborn branch, nothing installed".into());
+    } else {
+        // Step 0 installs the rules with a first population, so every
+        // subscription first polls a born branch and maintains from
+        // then on.
+        log.steps.push("the rules, and a first population".into());
+        let mut population = Vec::new();
+        for _ in 0..3 {
+            population.extend(draw(&mut rng, &population_facts(&population)));
+        }
+        install(&branch, &operator, batch(&population)).await?;
     }
-    branch
-        .transaction()
-        .assert(&unvouched_rule()?)
-        .assert(&junior_rule()?)
-        .assert(&junior_led_rule()?)
-        .assert(&junior_taught_rule()?)
-        .integrate(batch(&population))
-        .commit()
-        .publish()
-        .perform(&operator)
-        .await?;
+    let mut watched = Watched::new(&branch, &operator).await?;
 
-    let mut vouched = Watches::<Vouched>::new("Vouched", &branch, &operator).await?;
-    let mut unvouched = Watches::<Unvouched>::new("Unvouched", &branch, &operator).await?;
-    let mut junior_led =
-        Watches::<JuniorLedReport>::new("JuniorLedReport", &branch, &operator).await?;
-    let mut junior_taught =
-        Watches::<JuniorTaughtReport>::new("JuniorTaughtReport", &branch, &operator).await?;
+    let mut step = 0;
+    for taken in 0..steps {
+        let installed = !unborn || taken > UNBORN_STEPS;
+        if rules && installed && extra.chance(1, 8) {
+            step += 1;
+            let described = move_rule(&mut extra, &mut toggles, &branch, &operator).await?;
+            log.steps.push(described);
+            watched
+                .check(step, &mut rng, &mut extra, &branch, &operator, &log)
+                .await?;
+        }
 
-    for step in 1..=steps {
+        step += 1;
         let before = visible(&branch, &operator).await?;
-        let via = match rng.below(16) {
-            0 => Via::Clear,
-            1..=7 => Via::Commit,
-            _ => Via::Overlay,
+        let via = if unborn && taken < UNBORN_STEPS {
+            if rng.below(16) == 0 {
+                Via::Clear
+            } else {
+                Via::Overlay
+            }
+        } else if unborn && taken == UNBORN_STEPS {
+            Via::Install
+        } else {
+            match rng.below(16) {
+                0 => Via::Clear,
+                1..=7 => Via::Commit,
+                _ => Via::Overlay,
+            }
         };
         let changes = match via {
             Via::Clear => Vec::new(),
-            Via::Commit | Via::Overlay => draw(&mut rng, &before),
+            Via::Commit | Via::Overlay | Via::Install => draw(&mut rng, &before),
         };
         let described: Vec<String> = changes.iter().map(ToString::to_string).collect();
         let readable: Vec<String> = before
@@ -934,6 +1335,7 @@ async fn run(seed: u64, steps: usize) -> anyhow::Result<()> {
                     .perform(&operator)
                     .await?;
             }
+            Via::Install => install(&branch, &operator, batch(&changes)).await?,
             Via::Overlay => {
                 branch.overlay().apply(batch(&changes))?;
             }
@@ -942,24 +1344,18 @@ async fn run(seed: u64, steps: usize) -> anyhow::Result<()> {
             }
         }
 
-        vouched
-            .check(step, &mut rng, &branch, &operator, &log)
-            .await?;
-        unvouched
-            .check(step, &mut rng, &branch, &operator, &log)
-            .await?;
-        junior_led
-            .check(step, &mut rng, &branch, &operator, &log)
-            .await?;
-        junior_taught
-            .check(step, &mut rng, &branch, &operator, &log)
+        watched
+            .check(step, &mut rng, &mut extra, &branch, &operator, &log)
             .await?;
     }
 
-    vouched.ensure_maintained(seed)?;
-    unvouched.ensure_maintained(seed)?;
-    junior_led.ensure_maintained(seed)?;
-    junior_taught.ensure_maintained(seed)?;
+    watched.ensure_maintained(seed)?;
+    if rules {
+        let [mentor, alone] = &toggles;
+        watched.superior.ensure_recomputed(mentor, seed)?;
+        watched.unvouched.ensure_recomputed(alone, seed)?;
+        watched.alone_led.ensure_recomputed(alone, seed)?;
+    }
     Ok(())
 }
 
@@ -976,26 +1372,80 @@ fn population_facts(changes: &[Change]) -> Vec<(Field, usize, Datum)> {
     facts
 }
 
-/// The seeds the randomized check runs, unless `DIALOG_SUBSCRIPTION_SEEDS`
-/// names others (see [`seeds`]). To reproduce a failure, its message
-/// names the seed and step; run that seed alone with
-/// `DIALOG_SUBSCRIPTION_SEEDS=<seed>`, or put it here alone.
+/// The runs the randomized check takes, unless `DIALOG_SUBSCRIPTION_SEEDS`
+/// names seeds, each then a run with its rules fixed (see [`runs`]).
+/// To reproduce a failure, its message names the run and step; run a
+/// fixed run's seed alone with `DIALOG_SUBSCRIPTION_SEEDS=<seed>`, or
+/// put the run here alone.
 ///
-/// Each was checked to fail, for every rule it names, under three
-/// mutations of the delta-join discovery: every join reading the
-/// state after the change (all four rules), and an optional premise
-/// read on one side only, the changed fact's or the after side
-/// ([`JuniorLedReport`], [`JuniorTaughtReport`]). Changing them,
-/// check that again, so each rule keeps its teeth.
+/// The six fixed runs are the seeds #711 and #714 chose. Their fact
+/// steps are the ones they always drew: what the shapes added since
+/// draw from a stream of their own. Each was checked to fail, for
+/// every rule it names, under three mutations of the delta-join
+/// discovery: every join reading the state after the change (all four
+/// of [`Vouched`], [`Unvouched`], [`JuniorLedReport`] and
+/// [`JuniorTaughtReport`]), and an optional premise read on one side
+/// only, the changed fact's or the after side ([`JuniorLedReport`],
+/// [`JuniorTaughtReport`]). The first was checked again with the shapes
+/// added since.
 ///
 /// Seeds 6, 11 and 35 diverged before the overlay rewind restored
 /// how each instant found its facts: each reaches a fact stored over
 /// its own tombstone, then a step that moves it (an overlay clear, an
 /// overlay instant, a commit), where the rewind that undid readable
 /// moves alone lost the fact from the view before the change.
-const SEEDS: [u64; 6] = [1, 708, 710, 6, 11, 35];
+///
+/// The shapes added since were checked to fail under mutations of the
+/// paths they reach, on these runs:
+///
+/// - [`Superior`], on all ten, when the fixpoint continuation ignores
+///   what became readable (extension returns the retained table as
+///   is), when its retraction skips re-deriving the suspects, and when
+///   it skips cascading suspicion through recursive occurrences.
+/// - [`VouchedMentee`] and [`AloneLedReport`], on all ten, when the
+///   delta-join discovery keeps only the subscribed concept's own
+///   candidate heads, so a change reaches the head through one layer of
+///   concept premises and no more. [`JuniorLedReport`] fails too: its
+///   target's rule reads a formula, which the analysis does not count
+///   as entity-local, so it was already two layers deep.
+/// - When a commit's change to a rule-discovery range is taken for no
+///   change: [`Superior`], [`Unvouched`] and [`AloneLedReport`], whose
+///   rules the toggles move, on both runs that move rules; and every
+///   rule-derived shape on the unborn runs, whose first commit lands
+///   the rules. [`Superior`], on both runs that move rules, when a
+///   recompute reuses the retained fixpoint instead of rebuilding it.
+/// - [`Vouched`] (seed 4) and [`VouchedMentee`] (seeds 2 and 4) on the
+///   unborn runs, when the discovery joins against the state after the
+///   change where an unborn pin has no state before to view.
+///
+/// None of the added shapes passes on main yet. A write under a
+/// single-valued attribute can flip which of a cell's values is
+/// readable, and the poll's changes report only the write: an overlay
+/// value outvoting a committed one reports the overlay value arriving,
+/// not the committed one going, and retracting a cell's winner reports
+/// the winner going, not the value beneath coming back. A rule that
+/// reads the cell from its own subject re-derives that subject anyway;
+/// the fixpoint continuation, and a delta-join reaching the cell
+/// through another entity, do not. The three tests after this one pin
+/// it in small. The mutations above were checked with the poll's
+/// changes widened by every other value of each changed cell, from
+/// the tree at the pin and now and from the overlay, under which all
+/// ten runs pass. Changing these runs, check all of it again, so each
+/// shape keeps its teeth.
+const RUNS: [Shape; 10] = [
+    fixed(1),
+    fixed(708),
+    fixed(710),
+    fixed(6),
+    fixed(11),
+    fixed(35),
+    moving(3),
+    moving(8),
+    unborn(2),
+    unborn(4),
+];
 
-/// Steps per seed, unless `DIALOG_SUBSCRIPTION_STEPS` names another
+/// Fact steps per run, unless `DIALOG_SUBSCRIPTION_STEPS` names another
 /// count.
 const STEPS: usize = 100;
 
@@ -1008,15 +1458,16 @@ fn knob(name: &str) -> anyhow::Result<Option<String>> {
     }
 }
 
-/// The seeds to run: [`SEEDS`], or the comma-separated list in
-/// `DIALOG_SUBSCRIPTION_SEEDS`, each item a seed (`4711`) or a
-/// half-open range of seeds (`1000..1300`). A bare number is one seed,
-/// never a count, so the seed a failure names reproduces it alone.
-/// A malformed list fails the test rather than falling back, so a
-/// typo cannot shrink a sweep to the committed seeds unnoticed.
-fn seeds() -> anyhow::Result<Vec<u64>> {
+/// The runs to take: [`RUNS`], or a run with fixed rules per seed in
+/// the comma-separated list in `DIALOG_SUBSCRIPTION_SEEDS`, each item
+/// a seed (`4711`) or a half-open range of seeds (`1000..1300`). A
+/// bare number is one seed, never a count, so the seed a failure names
+/// reproduces it alone. A malformed list fails the test rather than
+/// falling back, so a typo cannot shrink a sweep to the committed runs
+/// unnoticed.
+fn runs() -> anyhow::Result<Vec<Shape>> {
     let Some(list) = knob("DIALOG_SUBSCRIPTION_SEEDS")? else {
-        return Ok(SEEDS.to_vec());
+        return Ok(RUNS.to_vec());
     };
     let seed = |text: &str| -> anyhow::Result<u64> {
         text.trim()
@@ -1041,7 +1492,7 @@ fn seeds() -> anyhow::Result<Vec<u64>> {
         !seeds.is_empty(),
         "DIALOG_SUBSCRIPTION_SEEDS={list:?} names no seed"
     );
-    Ok(seeds)
+    Ok(seeds.into_iter().map(fixed).collect())
 }
 
 /// Steps per seed: [`STEPS`], or the count in
@@ -1056,17 +1507,14 @@ fn steps() -> anyhow::Result<usize> {
     }
 }
 
-/// Names its seed on stderr if the run holding it panics, which,
-/// unlike a divergence, carries no message naming the seed.
-struct Panicking(u64);
+/// Names its run on stderr if the run panics, which, unlike a
+/// divergence, carries no message naming it.
+struct Panicking(Shape);
 
 impl Drop for Panicking {
     fn drop(&mut self) {
         if thread::panicking() {
-            eprintln!(
-                "seed {seed} panicked; reproduce with DIALOG_SUBSCRIPTION_SEEDS={seed}",
-                seed = self.0
-            );
+            eprintln!("run {} panicked", self.0);
         }
     }
 }
@@ -1075,12 +1523,16 @@ impl Drop for Panicking {
 /// instants, a subscription's result is a fresh evaluation of its
 /// query, and the delta it reports is exactly the difference from its
 /// previous result. Each step changes several facts at once, in both
-/// directions, through the three ways a non-local rule reads a
-/// changed fact: positive concept premises ([`Vouched`]), negated ones
-/// ([`Unvouched`]), and an optional field whose value decides whether
-/// a row exists ([`JuniorLedReport`], [`JuniorTaughtReport`]). #708 and
-/// the holes #710 closed with it appeared only when such changes moved
-/// together, or moved a row through an optional field, which no
+/// directions, through each way a rule reads a changed fact: positive
+/// concept premises ([`Vouched`]), negated ones ([`Unvouched`]), an
+/// optional field whose value decides whether a row exists
+/// ([`JuniorLedReport`], [`JuniorTaughtReport`]), concept premises two
+/// layers deep ([`VouchedMentee`], [`AloneLedReport`]), and recursive
+/// rules, maintained by the fixpoint continuation instead of the
+/// delta-join ([`Superior`]). Some runs also move rules between fact
+/// steps, and some subscribe before the branch's first commit. #708
+/// and the holes #710 closed with it appeared only when such changes
+/// moved together, or moved a row through an optional field, which no
 /// single-fact test reaches.
 ///
 /// Every seed runs even after one fails, so a wide sweep (the nightly
@@ -1089,25 +1541,189 @@ impl Drop for Panicking {
 #[dialog_common::test]
 async fn a_maintained_subscription_matches_a_fresh_evaluation_after_random_changes()
 -> anyhow::Result<()> {
-    let seeds = seeds()?;
+    let runs = runs()?;
     let steps = steps()?;
     let mut failures = Vec::new();
-    for &seed in &seeds {
-        let _panicking = Panicking(seed);
-        if let Err(error) = run(seed, steps).await {
-            failures.push((seed, error));
+    for &shape in &runs {
+        let _panicking = Panicking(shape);
+        if let Err(error) = run(shape, steps).await {
+            failures.push((shape, error));
         }
     }
     let Some((first, error)) = failures.first() else {
         return Ok(());
     };
-    let failing: Vec<String> = failures.iter().map(|(seed, _)| seed.to_string()).collect();
+    let failing: Vec<String> = failures
+        .iter()
+        .map(|(shape, _)| shape.to_string())
+        .collect();
     anyhow::bail!(
-        "{failed} of {total} seeds diverged at {steps} steps per seed: {failing}\n\
-         reproduce one with DIALOG_SUBSCRIPTION_SEEDS=<seed> DIALOG_SUBSCRIPTION_STEPS={steps}\n\
-         the first, seed {first}: {error:#}",
+        "{failed} of {total} runs diverged at {steps} steps per run: {failing}\n\
+         reproduce a fixed run with DIALOG_SUBSCRIPTION_SEEDS=<seed> DIALOG_SUBSCRIPTION_STEPS={steps}, \
+         another by putting it in RUNS alone\n\
+         the first, {first}: {error:#}",
         failed = failures.len(),
-        total = seeds.len(),
+        total = runs.len(),
         failing = failing.join(", "),
     )
+}
+
+/// A maintained subscription after `poll`, held against a fresh
+/// evaluation: the rows each holds, canonically ordered.
+async fn maintained_and_fresh<C>(
+    subscription: &mut Subscription<Query<C>>,
+    branch: &Branch,
+    operator: &Operator,
+) -> anyhow::Result<(Vec<String>, Vec<String>)>
+where
+    C: Predicate<Conclusion = C> + Conclusion + PartialEq + Clone + fmt::Debug + ConditionalSync,
+    C::Application: Default + Clone + ConditionalSync,
+{
+    subscription.poll(operator).await?;
+    Ok((
+        canonical(subscription.results()),
+        canonical(&fresh::<C>(branch, operator).await?),
+    ))
+}
+
+/// A session write under a single-valued attribute outvotes the
+/// committed value of the cell, which stops being readable without the
+/// overlay's instant reporting it: the overlay holds only its own
+/// store's moves. A recursive subscription maintains through the
+/// fixpoint continuation, whose retraction step is seeded by the
+/// changes the poll reports, so the row the outvoted value supported
+/// has to go all the same. p1's manager is committed as p0, then set
+/// to p2 in the session: p1 is below p2 alone.
+#[dialog_common::test]
+async fn an_overlay_value_outvoting_a_committed_one_retracts_what_it_derived_recursively()
+-> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let mut transaction = branch.transaction();
+    for rule in above_rules("manager")? {
+        transaction = transaction.assert(rule);
+    }
+    transaction
+        .assert(Manager::of(person(1)).is(person(0)))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let mut subscription = branch.subscribe(Query::<Superior>::default());
+    subscription.poll(&operator).await?;
+
+    branch
+        .overlay()
+        .assert(Manager::of(person(1)).is(person(2)))?;
+    let (maintained, fresh) =
+        maintained_and_fresh::<Superior>(&mut subscription, &branch, &operator).await?;
+    assert_eq!(
+        fresh,
+        canonical(&[Superior {
+            this: person(1),
+            above: Above(person(2)),
+        }]),
+        "the session's manager outvotes the committed one"
+    );
+    assert_eq!(maintained, fresh);
+    Ok(())
+}
+
+/// The delta-join has the same hole when a rule reads another
+/// entity's single-valued attribute by its value: p1 is alone while
+/// their mentor p0's committed badge is B1 ([`alone_by_mentors_badge_rule`]).
+/// The session sets p0's badge to B0, which outvotes B1; the only
+/// change reported is B0 arriving, which binds no derivation, so
+/// nothing finds p1 to re-derive.
+#[dialog_common::test]
+async fn an_overlay_value_outvoting_a_committed_one_retracts_a_row_read_through_another_entity()
+-> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    branch
+        .transaction()
+        .assert(&alone_by_mentors_badge_rule()?)
+        .assert(Name::of(person(1)).is("N0".to_string()))
+        .assert(Mentor::of(person(1)).is(person(0)))
+        .assert(Badge::of(person(0)).is("B1".to_string()))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let mut subscription = branch.subscribe(Query::<Unvouched>::default());
+    let initial = subscription.poll(&operator).await?.expect("initial");
+    assert_eq!(
+        initial.asserted.len(),
+        1,
+        "p1 is alone by their mentor's badge"
+    );
+
+    branch
+        .overlay()
+        .assert(Badge::of(person(0)).is("B0".to_string()))?;
+    let (maintained, fresh) =
+        maintained_and_fresh::<Unvouched>(&mut subscription, &branch, &operator).await?;
+    assert!(fresh.is_empty(), "B0 outvotes B1, so p1 is not alone");
+    assert_eq!(maintained, fresh);
+    Ok(())
+}
+
+/// A single-valued cell can hold two committed values: while the
+/// session's value wins the cell, a committed write succeeds the claim
+/// its reader observes, the session's, and leaves the committed one
+/// beneath it in place. Retracting the newer committed value then makes the older one
+/// readable again, and the commit's diff reports only the retraction.
+/// p1's manager is committed as p3, set to p1 in the session, committed
+/// as p2, and the session cleared before subscribing, so p1 is below
+/// p2. Retracting p2 makes p3 p1's manager again.
+#[dialog_common::test]
+async fn retracting_a_committed_winner_restores_the_value_it_outvoted() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let mut transaction = branch.transaction();
+    for rule in above_rules("manager")? {
+        transaction = transaction.assert(rule);
+    }
+    transaction
+        .assert(Manager::of(person(1)).is(person(3)))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    branch
+        .overlay()
+        .assert(Manager::of(person(1)).is(person(1)))?;
+    branch
+        .transaction()
+        .assert(Manager::of(person(1)).is(person(2)))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    branch.overlay().clear();
+    let below = |manager: usize| {
+        canonical(&[Superior {
+            this: person(1),
+            above: Above(person(manager)),
+        }])
+    };
+    let mut subscription = branch.subscribe(Query::<Superior>::default());
+    subscription.poll(&operator).await?;
+    assert_eq!(canonical(subscription.results()), below(2));
+
+    branch
+        .transaction()
+        .retract(Manager::of(person(1)).is(person(2)))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let (maintained, fresh) =
+        maintained_and_fresh::<Superior>(&mut subscription, &branch, &operator).await?;
+    assert_eq!(fresh, below(3), "the committed p3 is readable again");
+    assert_eq!(maintained, fresh);
+    Ok(())
 }
