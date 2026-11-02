@@ -2,16 +2,31 @@
 //!
 //! A query reads from a stack of layers — each branch in scope, its
 //! session overlay, and the per-query overlay. Just as facts are unioned across
-//! layers (see [`layer`](crate::layer)), *rules* are too: each layer
-//! reports the deductive rules it holds concluding a queried concept,
-//! and the union of those — plus the implicit per-descriptor rule built
-//! once — is what the query engine plans.
+//! layers (see [`layer`](crate::layer)), *rules* are too.
+//!
+//! Rules are found by attribute, not by concept. For each attribute a
+//! queried concept selects, each layer reports the deductive rules it
+//! holds deriving that attribute, and each such rule is re-headed onto
+//! the attribute, every head of one rule sharing a single evaluation of
+//! its body. A rule written against one concept is therefore seen by
+//! every concept selecting any attribute it derives, a plain
+//! one-attribute read included. The union of those heads, plus the
+//! implicit read of each attribute's stored facts, is what the query
+//! engine plans.
 //!
 //! # Storage shape (`dialog.rule/*`)
 //!
 //! A deductive rule is stored as facts:
-//! - `dialog.rule/conclusion` `of` rule-entity `is` the concept entity it
-//!   concludes — the index a layer looks rules up by.
+//! - `dialog.rule/derives` `of` rule-entity `is` `on:<domain>/<name>`, one
+//!   claim per attribute the rule's conclusion carries: the index a layer
+//!   looks rules up by.
+//! - `dialog.rule/conclusion` `of` rule-entity `is` the concept entity the
+//!   rule was written against. It is kept for tooling; resolution does
+//!   not read it, and a rule installed without the `derives` index is
+//!   inert until [`Branch::upgrade_rules`](crate::Branch::upgrade_rules).
+//! - `dialog.rule/reads` `of` rule-entity `is` `on:<domain>/<name>`, one
+//!   claim per attribute the rule's body names: the reverse index
+//!   commit-time dispatch closes its trigger footprint over.
 //! - `dialog.rule/source` `of` rule-entity `is` the canonical dag-cbor
 //!   `DeductiveRuleDescriptor` (a `Value::Bytes`) — the body, hydrated
 //!   via `DeductiveRule::decode`. (Bytes, not Record: `Value::Record`
