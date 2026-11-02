@@ -11,7 +11,7 @@ use std::thread;
 use super::{Delta, Subscription};
 use crate::RepositoryExt as _;
 use crate::helpers::test_repo;
-use crate::{Branch, Ephemeral, Placement, Stack, StackSubscription};
+use crate::{Branch, Ephemeral, Kind, Placement, ScopeKind, Stack, StackSubscription};
 use anyhow::Context as _;
 use dialog_artifacts::{Changes, Entity};
 use dialog_capability::Subject;
@@ -940,6 +940,11 @@ fn minus(left: &[String], right: &[String]) -> Vec<String> {
 /// recursive rule ([`Superior`]) climbs through either.
 const STACKED: [Field; 2] = [Field::Level, Field::Mentor];
 
+/// The field a stacked run places on its tick layer: badges, which feed
+/// the non-local premises of two rules, so a fact that lives one commit
+/// moves rows two layers away and takes them back when it expires.
+const TICKED: [Field; 1] = [Field::Badge];
+
 /// The attribute a [`Field`] writes.
 fn relation(field: Field) -> &'static str {
     match field {
@@ -956,13 +961,16 @@ fn relation(field: Field) -> &'static str {
 enum Target {
     Branch(Branch),
     /// A stack reading `branch` at the bottom, under `memory:space`,
-    /// and `state` above it, under `memory:state`, with the
-    /// [`STACKED`] fields placed on `state`. Every commit goes through
-    /// the stack, so it routes each fact by its placement.
+    /// `state` above it, under `memory:state`, with the [`STACKED`]
+    /// fields placed on `state`, and `input` above that, under
+    /// `memory:input`, a tick layer with the [`TICKED`] fields placed on
+    /// it. Every commit goes through the stack, so it routes each fact
+    /// by its placement, and expires what the tick layer held.
     Stack {
         stack: Stack,
         branch: Branch,
         state: Ephemeral,
+        input: Ephemeral,
     },
 }
 
@@ -972,16 +980,26 @@ impl Target {
     /// above it.
     async fn stacked(branch: Branch, operator: &Operator) -> anyhow::Result<Self> {
         let scope: Entity = "memory:state".parse()?;
-        let mut transaction = branch.transaction();
+        let ticked: Entity = "memory:input".parse()?;
+        let mut transaction = branch
+            .transaction()
+            .assert(ScopeKind::new(scope.clone(), Kind::Memory))
+            .assert(ScopeKind::new(ticked.clone(), Kind::Tick));
         for field in STACKED {
             transaction =
                 transaction.assert(Placement::new(relation(field).parse()?, scope.clone()));
         }
+        for field in TICKED {
+            transaction =
+                transaction.assert(Placement::new(relation(field).parse()?, ticked.clone()));
+        }
         transaction.commit().publish().perform(operator).await?;
         let state = Ephemeral::create().perform(operator).await;
+        let input = Ephemeral::create().perform(operator).await;
         let top = Ephemeral::create().perform(operator).await;
         let stack = Stack::open(top.clone())
-            .link(&top, &state, scope)
+            .link(&top, &input, ticked)
+            .link(&input, &state, scope)
             .link(&state, &branch, "memory:space".parse()?)
             .perform(operator)
             .await?;
@@ -989,6 +1007,7 @@ impl Target {
             stack,
             branch,
             state,
+            input,
         })
     }
 
@@ -1063,13 +1082,24 @@ impl Target {
             Target::Branch(branch) => {
                 branch.overlay().apply(batch(changes))?;
             }
-            Target::Stack { branch, state, .. } => {
+            Target::Stack {
+                branch,
+                state,
+                input,
+                ..
+            } => {
                 let (placed, rest): (Vec<Change>, Vec<Change>) = changes
                     .iter()
                     .cloned()
                     .partition(|change| STACKED.contains(&change.field));
+                let (ticked, rest): (Vec<Change>, Vec<Change>) = rest
+                    .into_iter()
+                    .partition(|change| TICKED.contains(&change.field));
                 if !placed.is_empty() {
                     state.apply(batch(&placed))?;
+                }
+                if !ticked.is_empty() {
+                    input.apply(batch(&ticked))?;
                 }
                 if !rest.is_empty() {
                     branch.overlay().apply(batch(&rest))?;
@@ -1088,13 +1118,22 @@ impl Target {
             Target::Branch(branch) => {
                 branch.overlay().clear();
             }
-            Target::Stack { branch, state, .. } => {
-                if extra.chance(1, 2) {
+            Target::Stack {
+                branch,
+                state,
+                input,
+                ..
+            } => match extra.below(3) {
+                0 => {
                     state.clear();
-                } else {
+                }
+                1 => {
+                    input.clear();
+                }
+                _ => {
                     branch.overlay().clear();
                 }
-            }
+            },
         }
     }
 }

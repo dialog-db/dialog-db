@@ -1629,6 +1629,11 @@ struct State {
     /// layer holds them, no read returns them as facts, and they stay
     /// across an advance, a pull and a rewiring.
     declared: Changes,
+    /// The scopes the last commit found declared as input kinds (tick or
+    /// queue), so a commit that writes nothing knows whether a layer may
+    /// hold inputs without resolving the placements first. `None` until
+    /// a commit resolved them, when every layer in memory may.
+    input_scopes: Option<HashSet<Entity>>,
 }
 
 /// The hold of a commit while it stages. A commit that fails, or whose
@@ -1832,6 +1837,7 @@ impl Stack {
                 watermark: None,
                 holds: Vec::new(),
                 declared,
+                input_scopes: None,
             })),
             divergences: Divergences::default(),
             turn: Arc::default(),
@@ -2444,6 +2450,7 @@ impl Stack {
             watermark: live.watermark.clone(),
             holds: Vec::new(),
             declared: live.declared.clone(),
+            input_scopes: live.input_scopes.clone(),
         };
         // An edit applies once its encloser is in the stack, so a
         // transaction may name its links in any order: a layer that a
@@ -3027,11 +3034,28 @@ impl<'a> StackCommit<'a> {
         // A layer in memory that holds facts may be an input layer, whose
         // facts a commit offers to the rules or expires, so a commit that
         // writes nothing still runs induction over such a stack.
+        let input_scopes = stack.state.read().input_scopes.clone();
+        let may_hold_inputs = |index: usize| match &input_scopes {
+            None => true,
+            Some(scopes) => scopes.iter().any(|scope| {
+                topology
+                    .bound
+                    .get(scope)
+                    .is_some_and(|indices| indices.contains(&index))
+            }),
+        };
         let inputs_possible = topology.primary().is_some()
             && topology
                 .layers
                 .iter()
-                .any(|layer| matches!(layer, Layer::Ephemeral(store) if !store.is_empty()));
+                .enumerate()
+                .any(|(index, layer)| match layer {
+                    Layer::Ephemeral(store) => {
+                        may_hold_inputs(index)
+                            && store.holds_any(|fact| !fact.the.as_str().starts_with("dialog."))
+                    }
+                    _ => false,
+                });
         if self.changes.is_empty()
             && self.transients.is_empty()
             && !rewired
@@ -3117,10 +3141,14 @@ impl<'a> StackCommit<'a> {
         let mut expiring: BTreeMap<usize, Vec<Artifact>> = BTreeMap::new();
         let mut inputs: Vec<(Entity, Artifact)> = Vec::new();
         let mut input_layers: HashMap<Entity, Kind> = HashMap::new();
+        let mut input_scopes: HashSet<Entity> = HashSet::new();
         for (scope, indices) in &topology.bound {
             let Some(kind) = staged.kind_of(scope) else {
                 continue;
             };
+            if matches!(kind, Kind::Tick | Kind::Queue) {
+                input_scopes.insert(scope.clone());
+            }
             for index in indices {
                 let layer = &topology.layers[*index];
                 if !layer.is_of(kind) {
@@ -3262,6 +3290,7 @@ impl<'a> StackCommit<'a> {
         }
         // A fact that entered a layer outside the scope of its placement
         // fires no rule, as it answers no query.
+        stack.state.write().input_scopes = Some(input_scopes);
         let scopes = staged.scopes();
         let admitted = |address: &Entity, fact: &Artifact| match &composite.guide {
             Some(guide) => guide

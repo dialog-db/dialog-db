@@ -1550,6 +1550,12 @@ impl Ephemeral {
         self.state.read().facts.is_empty()
     }
 
+    /// Whether the layer holds a fact that `keep` admits, without
+    /// copying what it holds.
+    pub(crate) fn holds_any(&self, mut keep: impl FnMut(&Artifact) -> bool) -> bool {
+        self.state.read().facts.iter().any(keep)
+    }
+
     /// The number of facts held.
     pub fn len(&self) -> usize {
         self.state.read().facts.len()
