@@ -3044,7 +3044,7 @@ impl<'a> StackCommit<'a> {
                     .is_some_and(|indices| indices.contains(&index))
             }),
         };
-        let inputs_possible = topology.primary().is_some()
+        let inputs_possible = matches!(topology.layers.first(), Some(Layer::Branch(_)))
             && topology
                 .layers
                 .iter()
@@ -3338,12 +3338,16 @@ impl<'a> StackCommit<'a> {
         // the layer after induction, where a read sees them for a tick
         // (or until they are retracted). Read as a pending stored write,
         // they would be matched in every round.
-        let mut own_inputs = changes.take_cells(|the| {
-            staged
-                .placement_of(the)
-                .and_then(|scope| staged.kind_of(scope))
-                .is_some_and(|kind| matches!(kind, Kind::Tick | Kind::Queue))
-        });
+        let mut own_inputs = if input_layers.is_empty() {
+            Changes::new()
+        } else {
+            changes.take_cells(|the| {
+                staged
+                    .placement_of(the)
+                    .and_then(|scope| staged.kind_of(scope))
+                    .is_some_and(|kind| matches!(kind, Kind::Tick | Kind::Queue))
+            })
+        };
         for instruction in own_inputs.clone().into_instructions() {
             if let Instruction::Assert(fact, _) = instruction
                 && offered.insert(key(&fact))
@@ -3354,8 +3358,9 @@ impl<'a> StackCommit<'a> {
         witness.offered = offered;
         // Induction reads the view without the input layers: their facts
         // reach a rule body through the round's transients alone.
+        let narrowed;
         let view = if input_layers.is_empty() {
-            composite.clone()
+            &composite
         } else {
             let mut view = composite.clone();
             if let Some(guide) = &composite.guide {
@@ -3384,12 +3389,13 @@ impl<'a> StackCommit<'a> {
                 view.ephemerals
                     .retain(|layer| !input_layers.contains_key(layer.entity()));
             }
-            view
+            narrowed = view;
+            &narrowed
         };
         let derived = induce(
             source,
             watermark,
-            &view,
+            view,
             &staged,
             Landing::Stores(topology.store_scopes()),
             &mut changes,
@@ -3399,8 +3405,10 @@ impl<'a> StackCommit<'a> {
             env,
         )
         .await?;
-        own_inputs.take_assets();
-        own_inputs.assert(&mut changes);
+        if !own_inputs.is_empty() {
+            own_inputs.take_assets();
+            own_inputs.assert(&mut changes);
+        }
 
         // Route by placement: the primary holds the declarations, the
         // stack's links bind the names. A name no link binds falls

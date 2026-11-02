@@ -63,7 +63,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
@@ -79,25 +79,33 @@ use crate::repository::source::SourceRef;
 use crate::rules::SharedRuleCache;
 use crate::{CommitError, Revision};
 
+// Each declaration attribute is parsed once: every commit and every
+// guided read asks for them several times.
+static SCOPE_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.attribute/scope").into());
+static DEFAULT_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.attribute/default").into());
+static TRANSIENT_ATTR: LazyLock<Relation> =
+    LazyLock::new(|| the!("dialog.attribute/transient").into());
+static KIND_ATTR: LazyLock<Relation> = LazyLock::new(|| the!("dialog.scope/kind").into());
+
 /// The `dialog.attribute/scope` declaration attribute.
 pub(crate) fn scope_attr() -> Relation {
-    the!("dialog.attribute/scope").into()
+    SCOPE_ATTR.clone()
 }
 
 /// The `dialog.attribute/default` declaration attribute.
 pub(crate) fn default_attr() -> Relation {
-    the!("dialog.attribute/default").into()
+    DEFAULT_ATTR.clone()
 }
 
 /// The `dialog.attribute/transient` declaration attribute.
 pub(crate) fn transient_placement_attr() -> Relation {
-    the!("dialog.attribute/transient").into()
+    TRANSIENT_ATTR.clone()
 }
 
 /// The attribute that declares a scope's kind: `dialog.scope/kind` of
 /// the scope entity, a text value that [`Kind`] names.
 pub(crate) fn kind_attr() -> Relation {
-    the!("dialog.scope/kind").into()
+    KIND_ATTR.clone()
 }
 
 /// Every attribute a placement declaration is written under.
