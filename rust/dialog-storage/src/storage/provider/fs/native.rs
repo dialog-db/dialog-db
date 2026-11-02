@@ -535,11 +535,11 @@ impl FileWriter {
     }
 }
 
-/// Acquire a cross-process PID lock for the given handle's CAS critical
+/// Acquire a cross-process write lock for the given handle's CAS critical
 /// section. The lock file lives at `{path}.lock`.
 pub(crate) async fn lock(handle: &FileSystemHandle) -> Result<LockGuard, FileSystemError> {
     let path: PathBuf = handle.try_into()?;
-    let lock_path = path.with_extension("lock");
+    let lock_path = lock_path(&path);
     // Ensure parent directory exists for the lock file
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| FileSystemError::Io(e.to_string()))?;
@@ -547,55 +547,64 @@ pub(crate) async fn lock(handle: &FileSystemHandle) -> Result<LockGuard, FileSys
     LockGuard::acquire(lock_path)
 }
 
-/// RAII guard that acquires a PID lock and releases it when dropped.
-///
-/// Handles stale lock detection and recovery automatically.
-pub(crate) struct LockGuard(pidlock::Pidlock);
-
-impl LockGuard {
-    /// Acquire a PID lock at the given path.
-    ///
-    /// If a stale lock exists (from a dead process), it will be automatically
-    /// cleaned up and the lock acquired.
-    ///
-    /// If the lock is held by an active process, returns an error immediately
-    /// rather than waiting. This is intentional - the STM layer will retry
-    /// the entire transaction, which is the correct behavior since the locked
-    /// value will likely change anyway.
-    fn acquire(path: PathBuf) -> Result<Self, FileSystemError> {
-        // pidlock 0.2 handles stale-lock cleanup atomically inside acquire()
-        // and surfaces malformed paths (directory at lock path, etc.) as
-        // PidlockError::IOError instead of panicking — so no defensive
-        // pre-check or retry loop is needed. new_validated also rejects
-        // unusable paths up front and creates the parent directory.
-        let mut lock = pidlock::Pidlock::new_validated(&path)
-            .map_err(|e| FileSystemError::Lock(format!("Invalid lock path: {e:?}")))?;
-
-        match lock.acquire() {
-            Ok(()) => Ok(Self(lock)),
-            Err(pidlock::PidlockError::LockExists) => {
-                // Holder is alive. Look up its PID for diagnostics; if we
-                // can't read it, just say so.
-                let holder = lock
-                    .get_owner()
-                    .ok()
-                    .flatten()
-                    .map(|pid| pid.to_string())
-                    .unwrap_or_else(|| "<unknown>".into());
-                Err(FileSystemError::Lock(format!(
-                    "Concurrent write in progress (lock held by pid {holder})",
-                )))
-            }
-            Err(e) => Err(FileSystemError::Lock(format!(
-                "Failed to acquire lock: {e:?}"
-            ))),
-        }
-    }
+/// The lock file for the cell at `path`: `{path}.lock`. The suffix is
+/// appended rather than set as the extension, so cells `a.x` and `a.y` get
+/// locks of their own instead of sharing `a.lock`.
+pub(crate) fn lock_path(path: &std::path::Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
 }
 
-impl Drop for LockGuard {
-    fn drop(&mut self) {
-        let _ = self.0.release();
+/// An exclusive OS file lock (`flock` on Unix, `LockFileEx` on Windows) on a
+/// cell's lock file, released when dropped.
+///
+/// The kernel decides who holds the lock, so two writers can never both hold
+/// it, and it is released when its holder's file is closed — including when
+/// the holder dies — so there is no stale lock to detect. Each acquire opens
+/// the file afresh, so two tasks in one process exclude each other too.
+///
+/// That holds on local filesystems. On Linux NFS the kernel emulates `flock`
+/// with a lock owned by the whole process, so two tasks in one process would
+/// both get it; stores are expected to be on local disk.
+///
+/// The lock file is never removed: unlinking a locked file would let a later
+/// writer lock a new file at the same path while another still holds the old.
+pub(crate) struct LockGuard {
+    // Held only so the lock lives until the guard drops; closing the file
+    // releases it.
+    _file: std::fs::File,
+}
+
+impl LockGuard {
+    /// Take the lock at the given path.
+    ///
+    /// If the lock is held, returns an error immediately rather than waiting.
+    /// Nothing retries it here: the caller gets the error, as it did with the
+    /// previous PID lock.
+    fn acquire(path: PathBuf) -> Result<Self, FileSystemError> {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&path).map_err(|e| {
+            FileSystemError::Lock(format!("Failed to open lock file {}: {e}", path.display()))
+        })?;
+
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(FileSystemError::Lock(format!(
+                "Concurrent write in progress (lock {} held)",
+                path.display()
+            ))),
+            Err(std::fs::TryLockError::Error(e)) => Err(FileSystemError::Lock(format!(
+                "Failed to acquire lock {}: {e}",
+                path.display()
+            ))),
+        }
     }
 }
 
@@ -606,8 +615,8 @@ mod tests {
     #[dialog_common::test]
     async fn it_fails_lock_when_held_by_same_process() -> anyhow::Result<()> {
         // Verifies that when our own process holds the lock, acquire returns
-        // an error immediately (not a spin). This matters because all tests
-        // run in the same process and share a PID.
+        // an error immediately (not a spin). This matters because all tests,
+        // and every task of one peer, take their locks in one process.
         let dir = tempfile::tempdir()?;
         let lock_path = dir.path().join("cell.lock");
         let _guard = LockGuard::acquire(lock_path.clone())?;
@@ -628,15 +637,14 @@ mod tests {
     #[dialog_common::test]
     async fn it_fails_lock_with_trailing_slash_path() -> anyhow::Result<()> {
         // Reproduces the bug where FileSystemHandle's trailing-slash URLs
-        // produced PathBufs like "/tmp/.../test.lock/" which pidlock can
-        // never create (create_new fails on trailing-slash paths) and
-        // get_owner returns None (no file exists), causing an infinite
-        // busy loop in the old unbounded retry code.
+        // produced PathBufs like "/tmp/.../test.lock/", which can never be
+        // opened as a file. That once caused an infinite busy loop in the
+        // old unbounded retry code.
         let dir = tempfile::tempdir()?;
         let bad_path = dir.path().join("cell.lock/"); // trailing slash
         let result = LockGuard::acquire(bad_path);
 
-        // Should fail with a bounded retry error, not spin forever
+        // Should fail with a Lock error, not spin forever
         let err = match result {
             Ok(_) => panic!("expected lock to fail with trailing-slash path"),
             Err(e) => e,
@@ -665,6 +673,90 @@ mod tests {
             matches!(err, FileSystemError::Lock(_)),
             "expected Lock error, got: {err:?}"
         );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_takes_a_lock_again_once_released() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
+        drop(LockGuard::acquire(lock_path.clone())?);
+        let _again = LockGuard::acquire(lock_path)?;
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_holds_a_lock_whose_file_is_empty() -> anyhow::Result<()> {
+        // The PID-file lock this replaced deleted a lock file it found empty
+        // as corrupt, which let a second writer in while the first had
+        // created the file but not yet written its PID. Holding the lock must
+        // not depend on what the file contains.
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
+        let _guard = LockGuard::acquire(lock_path.clone())?;
+        assert_eq!(std::fs::metadata(&lock_path)?.len(), 0);
+        assert!(matches!(
+            LockGuard::acquire(lock_path),
+            Err(FileSystemError::Lock(_))
+        ));
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_takes_a_lock_left_by_a_holder_that_is_gone() -> anyhow::Result<()> {
+        // A lock file left behind (as after a crash) is not a held lock.
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
+        std::fs::write(&lock_path, "999999")?;
+        let _guard = LockGuard::acquire(lock_path)?;
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    fn it_never_lets_two_writers_hold_one_lock() -> anyhow::Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir()?;
+        let lock_path = dir.path().join("cell.lock");
+        let inside = Arc::new(AtomicUsize::new(0));
+        let taken = Arc::new(AtomicUsize::new(0));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let lock_path = lock_path.clone();
+                let inside = inside.clone();
+                let taken = taken.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..2000 {
+                        if let Ok(_guard) = LockGuard::acquire(lock_path.clone()) {
+                            assert_eq!(inside.fetch_add(1, Ordering::SeqCst), 0);
+                            taken.fetch_add(1, Ordering::SeqCst);
+                            std::thread::yield_now();
+                            inside.fetch_sub(1, Ordering::SeqCst);
+                        }
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().expect("a writer saw the lock held twice");
+        }
+        // Passing must mean the lock was contended, not that it was never taken.
+        assert!(
+            taken.load(Ordering::SeqCst) > 0,
+            "no writer ever took the lock"
+        );
+        Ok(())
+    }
+
+    #[dialog_common::test]
+    async fn it_gives_cells_that_differ_only_in_extension_their_own_locks() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let x = lock_path(&dir.path().join("a.x"));
+        let y = lock_path(&dir.path().join("a.y"));
+        assert_eq!(x, dir.path().join("a.x.lock"));
+        assert_ne!(x, y);
+        let _x = LockGuard::acquire(x)?;
+        let _y = LockGuard::acquire(y)?;
         Ok(())
     }
 }

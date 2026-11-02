@@ -14,6 +14,34 @@ says how to cut a release.
 
 ## Unreleased
 
+### A file store's write lock is never taken by two writers at once
+
+A native file store guards each cell's compare-and-swap with a lock file.
+It was a PID lock taken through `pidlock`, whose acquire creates the file
+and writes the PID after; a second writer arriving in between read no PID,
+removed the file as corrupt, and took the lock too. Both then compared
+against the same version and both wrote, so the later write replaced the
+earlier one and each reported success: a commit racing a pull of the same
+branch could vanish without an error. The lock is now an OS file lock
+(`flock` on Unix, `LockFileEx` on Windows, through std's
+`File::try_lock`), so the kernel
+decides who holds it and releases it when its holder exits.
+
+What this changes for you:
+
+- Concurrent writers of one store, in one process or several, no longer
+  lose a write to each other. A writer that loses the lock is refused
+  with `Concurrent write in progress`, as before.
+- A crashed writer's lock is free at once; there is no stale-lock check.
+- Lock files hold no PID and are left in place after release, and the
+  refusal no longer names the holder's PID.
+- `pidlock` is no longer a dependency.
+
+Why: a write lock that two writers can hold at once does not guard the
+compare-and-swap, and the writes it loses are reported as successes, so
+nothing downstream can notice or repair them. A kernel-held lock has no
+window between creating the lock and claiming it.
+
 ### Distinct members inserted between the same neighbours get distinct positions
 
 A position's fractional tail comes from a bias derived from the member's

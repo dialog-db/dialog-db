@@ -3,7 +3,7 @@
 //! Layout: `{space_root}/memory/{space}/{cell}`
 //!
 //! Implements transactional cell storage with CAS (Compare-And-Swap) semantics.
-//! Uses PID-based file locking for cross-process coordination and BLAKE3
+//! Uses OS file locks (`flock`) for cross-process coordination and BLAKE3
 //! content hashing for edition tracking.
 
 use super::{FileSystem, FileSystemError, FileSystemHandle};
@@ -65,9 +65,10 @@ impl FileSystemHandle {
 
     /// Acquire a cross-writer lock on this handle for a CAS critical section.
     ///
-    /// On native this is a PID-based file lock at `{path}.lock`; on the web it
-    /// is a [Web Locks API][weblocks] lock keyed by this handle's URL. The
-    /// guard releases the lock when dropped.
+    /// On native this is an exclusive OS file lock (`flock`, or `LockFileEx`
+    /// on Windows) on `{path}.lock`, a file left in place after release; on
+    /// the web it is a [Web Locks API][weblocks] lock keyed by this handle's
+    /// URL. The guard releases the lock when dropped.
     ///
     /// [weblocks]: https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API
     async fn lock(&self) -> Result<super::LockGuard, FileSystemError> {
@@ -883,12 +884,12 @@ mod tests {
         // Manually create a stale lock file (as if a process crashed)
         let cell_handle = provider.memory()?.resolve("local")?.cell("test")?;
         let cell_path: std::path::PathBuf = cell_handle.try_into()?;
-        let lock_path = cell_path.with_extension("lock");
-        // Write a fake PID that does not correspond to a running process
+        let lock_path = super::super::native::lock_path(&cell_path);
+        // A lock file nobody holds, like the PID files an older store left
         std::fs::write(&lock_path, b"999999999")?;
         assert!(lock_path.exists(), "stale lock file should exist");
 
-        // Publish should succeed by clearing the stale lock
+        // Publish should succeed: a lock file is not a held lock
         let edition = did
             .clone()
             .reader()
