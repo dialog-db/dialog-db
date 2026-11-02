@@ -19,7 +19,7 @@
 //! ```
 //!
 //! Compare-And-Swap (CAS) semantics are accomplished through cross-writer
-//! locking (PID-based file locks on native, the [Web Locks API][weblocks] in
+//! locking (OS file locks on native, the [Web Locks API][weblocks] in
 //! the browser) and BLAKE3 content hashing for enforcing edition invariants.
 //!
 //! [fsapi]: https://developer.mozilla.org/en-US/docs/Web/API/File_System_API

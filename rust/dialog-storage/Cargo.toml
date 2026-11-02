@@ -53,7 +53,6 @@ tokio = { workspace = true, features = ["sync"] }
 url = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-pidlock = { workspace = true }
 tempfile = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync", "fs", "macros", "rt", "net", "io-util"] }
 http-body-util = { workspace = true, optional = true }
