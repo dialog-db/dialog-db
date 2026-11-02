@@ -19,17 +19,16 @@ facts are on, and a write goes there whatever handle made it.
 
 ## One primitive
 
-1. A **layer** holds facts and has a **kind**. There are five:
+1. A **layer** holds facts and has a **kind**. There are four:
 
    | kind         | lives in | survives a restart | reaches peers | a fact stays until          |
    |--------------|----------|--------------------|---------------|-----------------------------|
    | `replicated` | a branch | yes                | yes           | retracted                   |
    | `durable`    | a branch | yes                | no            | retracted                   |
    | `memory`     | memory   | no                 | no            | retracted                   |
-   | `queue`      | memory   | no                 | no            | retracted, by what handles it |
-   | `tick`       | memory   | no                 | no            | the commit after it entered |
+   | `event`      | memory   | no                 | no            | the commit after it entered |
 
-   A channel is a `memory`, `queue` or `tick` layer with a transport.
+   A channel is a `memory` or `event` layer with a transport.
    A branch's session store is a `memory` layer. There is no other
    store of facts.
 
@@ -78,7 +77,7 @@ facts are on, and a write goes there whatever handle made it.
    from another writer, from a pull, or over a channel, each exactly
    once.
 
-10. A fact in a `tick` layer is offered to the rules once, in the
+10. A fact in an `event` layer is offered to the rules once, in the
     commit it enters in (the next commit, for one asserted from
     outside; the same commit, for one the transaction writes), is read
     by queries and subscriptions as a stored fact while it is held, and
@@ -86,28 +85,31 @@ facts are on, and a write goes there whatever handle made it.
     not anything handled it. (This replaces transients, dispatch and
     witnesses.)
 
-11. A fact in a `queue` layer is offered to the rules at every commit
-    until the rule (`retract!`) or writer that handles it retracts it.
-    Delivery is at least once, and the entity is the idempotency key.
-    (This replaces commands that need a receipt.)
+11. An event reaches a rule body the way a dispatched transient does:
+    in the first round of the commit only, never as a stored fact of
+    the view. So a rule over an event and the state it changes (a click
+    and the count it increments) fires once and settles. A rule's head
+    placed on an event layer is a transient of the next round, and is
+    stored in the layer for a tick too: a rule carries an event forward
+    by deriving one.
 
-11a. An input (a tick or a queue fact) reaches a rule body the way a
-    dispatched transient does: in the first round of the commit only,
-    and not as a stored fact of the view. So a rule over an input and
-    the state it changes (a click and the count it increments) fires
-    once and settles.
+12. A command that must be handled later, by a rule or a writer that
+    is not there yet, is a fact of a `memory` layer: a rule installed
+    later fires over what is stored, as any installed rule does, and
+    the handler retracts it. There is no queue kind; a memory layer is
+    one.
 
-12. Movement between kinds of state is a rule: one attribute per
+13. Movement between kinds of state is a rule: one attribute per
     scope, and a rule that reads one and writes another. The same
     attribute never lives in two scopes.
 
 ## Peers
 
-13. A channel delivers a layer's state, not its history: a peer that
+14. A channel delivers a layer's state, not its history: a peer that
     fell behind reconciles against what the layer holds. The instant
     stream is an optimisation of that, never the only path.
 
-14. A channel sends what a commit wrote only once the commit
+15. A channel sends what a commit wrote only once the commit
     published; a commit that fails sends nothing.
 
 ## What this removes
@@ -127,9 +129,9 @@ randomized invariant.
 
 ## Order
 
-1. Scope kinds, `tick` and `queue` layers (dialog-db/dialog-db#720's
-   follow-up). Then migrate sapling's and tonk's commands onto them,
-   and delete transients.
+1. Scope kinds and the `event` layer (dialog-db/dialog-db#722). Then
+   migrate sapling's and tonk's commands onto them, and delete
+   transients.
 2. `Branch::overlay` becomes a `memory` layer; `branch.query()` is a
    one-layer stack.
 3. Memory enclosers read live and keep no link facts; capture stays
@@ -141,9 +143,9 @@ randomized invariant.
 
 ## Open
 
-- A `queue` fact that no rule ever handles: a clock (a periodic
-  `compact` input) retracts by age, or it stays. Leaning: it stays,
-  and the inspector shows it.
+- A command in a memory layer that nothing ever handles: a clock (a
+  periodic `compact` event) retracts by age, or it stays. Leaning: it
+  stays, and the inspector shows it.
 - Placements from a `replicated` layer that is not the bottom (a peer's
   space above a shared one): a higher durable layer outranks a lower.
   Not built.
