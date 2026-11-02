@@ -52,7 +52,7 @@ pub use compare::{Against, Comparison, Row, Tolerance, Verdict, compare_dirs};
 pub use report::Report;
 pub use run::run;
 pub use runner::Runner;
-pub use scenario::{Outcome, Prepared, Spec, catalog, spec};
+pub use scenario::{Outcome, Prepared, Spec, catalog, spec, ungated};
 pub use sweep::{SweepConfig, sweep};
 
 use std::ffi::c_void;

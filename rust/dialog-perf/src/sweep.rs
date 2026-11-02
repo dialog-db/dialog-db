@@ -14,14 +14,15 @@ use anyhow::{Context as _, Result, bail};
 
 use crate::report::Report;
 use crate::runner::Runner;
-use crate::scenario::catalog;
+use crate::scenario::{catalog, ungated};
 
 /// Configuration for one sweep.
 #[derive(Debug, Clone)]
 pub struct SweepConfig {
     /// Directory the per-scenario reports are written into.
     pub out_dir: PathBuf,
-    /// Scenario names to run; empty runs the whole catalog.
+    /// Scenario names to run; empty runs the whole gated catalog. An
+    /// ungated scenario runs only when named here.
     pub only: Vec<String>,
     /// Whether to run each scenario under callgrind for its instruction
     /// count. Off, the reports carry counters alone.
@@ -37,10 +38,14 @@ pub fn sweep(config: &SweepConfig) -> Result<Vec<Report>> {
         .with_context(|| format!("creating {}", config.out_dir.display()))?;
     Runner::current().write(&config.out_dir)?;
     let mut reports = Vec::new();
-    for spec in catalog() {
-        if !config.only.is_empty() && !config.only.iter().any(|name| name == spec.name) {
-            continue;
-        }
+    let named = |name: &str| config.only.iter().any(|only| only == name);
+    // An ungated scenario runs only when named, so a full sweep (the
+    // gate's) never writes a report with no baseline to compare it to.
+    let gated = catalog()
+        .into_iter()
+        .filter(|spec| config.only.is_empty() || named(spec.name));
+    let asked = ungated().into_iter().filter(|spec| named(spec.name));
+    for spec in gated.chain(asked) {
         let report = run_child(&exe, spec.name, config)?;
         let path = config.out_dir.join(format!("{}.json", spec.name));
         let mut text = serde_json::to_string_pretty(&report)?;

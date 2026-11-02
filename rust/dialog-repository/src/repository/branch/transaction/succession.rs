@@ -33,8 +33,7 @@
 //! leave.
 
 use crate::repository::CellSettlement;
-use crate::repository::branch::session::{Erased, QueryEnv};
-use crate::repository::source::Source;
+use crate::repository::branch::session::{Composite, Erased, QueryEnv};
 use crate::repository::staged::squash;
 use crate::rules::derives_attr;
 use crate::{CommitError, Ephemeral, Staged};
@@ -59,8 +58,10 @@ use futures_util::TryStreamExt;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 
-/// Settle a transaction's writes for its commit against `sources`,
-/// read with `overlay`. A write under a choosing pick succeeds the
+/// Settle a transaction's writes for its commit against `view`, its
+/// lines read with `overlay`. A write of an attribute in `stores` lands
+/// in a store, not a tree: it keeps its pick, and the store elects among
+/// its own rows of the cell. A write under a choosing pick succeeds the
 /// claim the pick elects. Where no rule is involved and the session
 /// overlay holds none of the cells, the tree sees every candidate: the
 /// batch passes through as written, and the tree elects in the descent
@@ -71,9 +72,10 @@ use std::fmt::Display;
 /// read.
 #[tracing::instrument(skip_all, name = "settle")]
 pub(crate) async fn settle(
-    sources: Vec<Source>,
+    view: &Composite,
     overlay: Ephemeral,
     staged: &Staged,
+    stores: &HashSet<ArtifactsRelation>,
     env: &Erased,
 ) -> Result<Changes, CommitError> {
     if !staged.has_successions() {
@@ -82,7 +84,7 @@ pub(crate) async fn settle(
 
     // What every write observed of the line: its claims, read once per
     // cell a succession writes.
-    let line = QueryEnv::new(sources.clone(), overlay.clone(), env);
+    let line = read(view, &overlay, env);
     // A commit leaves a cell to the tree unless the tree cannot see
     // every candidate the read elects among: a rule derives the
     // relation (one the line knows, or one this transaction installs,
@@ -93,13 +95,13 @@ pub(crate) async fn settle(
         let mut relations: Vec<&ArtifactsRelation> = Vec::new();
         let mut unseen = false;
         for (the, of, change) in staged.log() {
-            if !change.elects() {
+            if !change.elects() || stores.contains(the) {
                 continue;
             }
             if !relations.contains(&the) {
                 relations.push(the);
             }
-            if overlay_holds(&sources, the, of) {
+            if overlay_holds(view, the, of) {
                 unseen = true;
                 break;
             }
@@ -123,10 +125,13 @@ pub(crate) async fn settle(
     let mut settlement = staged
         .take_settlement(&observed)
         .unwrap_or_else(|| ReadSettlement::new(line.pending_edition()));
-    settlement.advance(&sources, &overlay, staged, env).await?;
+    settlement.advance(view, &overlay, staged, env).await?;
     // The settled cells replace the writes the export passes through.
     let mut settled = staged.export();
     for ((the, of), cell) in &settlement.cells {
+        if stores.contains(the) {
+            continue;
+        }
         settled.take_cell(the, of);
         settled.put_cell(the.clone(), of.clone(), cell.clone().squashed());
     }
@@ -171,11 +176,11 @@ impl ReadSettlement {
     }
 
     /// Settle the writes `layer` logs past [`upto`](Self::upto), against
-    /// the lines read with `overlay`.
+    /// `view`, its lines read with `overlay`.
     #[tracing::instrument(skip_all, name = "settle_cell")]
     pub(crate) async fn advance(
         &mut self,
-        sources: &[Source],
+        view: &Composite,
         overlay: &Ephemeral,
         layer: &Staged,
         env: &Erased,
@@ -184,7 +189,7 @@ impl ReadSettlement {
         if self.upto >= log.len() {
             return Ok(());
         }
-        let line = QueryEnv::new(sources.to_vec(), overlay.clone(), env);
+        let line = read(view, overlay, env);
         for index in self.upto..log.len() {
             let (the, of, change) = &log[index];
             let key = (the.clone(), of.clone());
@@ -212,10 +217,9 @@ impl ReadSettlement {
                 Change::Assert(_, policy)
                     if policy.elects() && self.derives.at(&line, the).await? =>
                 {
-                    let view = QueryEnv::new(sources.to_vec(), overlay.clone(), env)
-                        .with_layers(vec![self.prefix.clone()]);
-                    let candidates = derived_candidates(&view, the, of).await?;
-                    drop(view);
+                    let through = read(view, overlay, env).with_layers(vec![self.prefix.clone()]);
+                    let candidates = derived_candidates(&through, the, of).await?;
+                    drop(through);
                     candidates
                 }
                 _ => Vec::new(),
@@ -312,10 +316,19 @@ pub(crate) async fn resolve_against(
     Ok(())
 }
 
+/// How a settlement reads `view`: its lines with `overlay`, and its
+/// standalone ephemeral layers, whose rows a read elects among like the
+/// rows of a session overlay, guided by placement as a read of the
+/// stack is, so a claim outside its scope is no candidate.
+fn read<'a>(view: &Composite, overlay: &Ephemeral, env: &'a Erased) -> QueryEnv<'a> {
+    QueryEnv::over(view.clone(), overlay.clone(), env)
+}
+
 /// A claim or candidate a succession may elect: its value and its
 /// standing, and whether it is a stored claim a write can succeed. A
-/// candidate a rule derives is not; neither is a session overlay row,
-/// which only the session takes back.
+/// candidate a rule derives is not; neither is a row of a session
+/// overlay or of a standalone ephemeral layer, which only its own
+/// writer takes back.
 #[derive(Clone)]
 struct Candidate {
     value: Value,
@@ -323,12 +336,17 @@ struct Candidate {
     claim: bool,
 }
 
-/// Whether some line's session overlay holds a fact of the cell.
-fn overlay_holds(sources: &[Source], the: &ArtifactsRelation, of: &Entity) -> bool {
+/// Whether some line's session overlay, or some standalone ephemeral
+/// layer, holds a fact of the cell.
+fn overlay_holds(view: &Composite, the: &ArtifactsRelation, of: &Entity) -> bool {
     let selector = ArtifactSelector::new().the(the.clone()).of(of.clone());
-    sources
+    view.sources
         .iter()
         .any(|source| !source.as_ref().overlay().scan(&selector).is_empty())
+        || view
+            .ephemerals
+            .iter()
+            .any(|ephemeral| !ephemeral.scan(&selector).is_empty())
 }
 
 /// The claims a cell holds as `view` reads them: the stored claims a

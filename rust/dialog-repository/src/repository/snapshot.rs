@@ -76,11 +76,13 @@ use parking_lot::RwLock;
 
 use dialog_varsig::Principal;
 
+use crate::placement::Target as StoreTarget;
 use crate::repository::remote::Step;
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
-    BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, NetworkedIndex, PublishError,
-    RemoteFallback, RemoteSite, Repository, Revision, Select, SelectQuery, SnapshotError,
+    Bindings, BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, NetworkedIndex,
+    PublishError, RemoteFallback, RemoteSite, Repository, Revision, Select, SelectQuery,
+    SnapshotError,
 };
 use dialog_effects::MethodExt as _;
 
@@ -190,6 +192,7 @@ pub struct Snapshot {
     head: RwLock<Head>,
     caches: Caches,
     overlay: Ephemeral,
+    bindings: Bindings,
     /// Where a read that misses a block locally fetches it from:
     /// nowhere, for a snapshot a caller mints, which reads locally;
     /// the branch's remote for a view the branch mints of its own
@@ -241,6 +244,7 @@ impl Branch {
             }),
             caches: self.caches(),
             overlay: Ephemeral::default(),
+            bindings: self.bindings().clone(),
             fallback: RemoteFallback::None,
         })
     }
@@ -260,7 +264,21 @@ impl Branch {
             }),
             caches: self.caches(),
             overlay,
+            bindings: self.bindings().clone(),
             fallback: self.fallback(),
+        }
+    }
+}
+
+impl Snapshot {
+    /// This snapshot under `overlay` as its session line, in place of its
+    /// own: what a subscription reads the state before a change from,
+    /// with the overlay rewound to the pinned sequence. Shares the
+    /// snapshot's caches.
+    pub(crate) fn under(&self, overlay: Ephemeral) -> Snapshot {
+        Snapshot {
+            overlay,
+            ..self.clone()
         }
     }
 }
@@ -276,6 +294,7 @@ impl Snapshot {
             }),
             caches: Caches::new(),
             overlay: Ephemeral::default(),
+            bindings: Bindings::default(),
             fallback: RemoteFallback::None,
         }
     }
@@ -301,6 +320,7 @@ impl Snapshot {
             }),
             caches,
             overlay: Ephemeral::default(),
+            bindings: Bindings::default(),
             fallback: RemoteFallback::None,
         }
     }
@@ -411,6 +431,19 @@ impl Snapshot {
         &self.overlay
     }
 
+    /// Bind a scope to one of this snapshot's stores. See
+    /// [`Branch::bind`].
+    pub fn bind(&self, scope: Entity, target: StoreTarget) -> &Self {
+        self.bindings.bind(scope, target);
+        self
+    }
+
+    /// This snapshot's scope bindings. A snapshot minted from a branch
+    /// shares the branch's.
+    pub fn bindings(&self) -> &Bindings {
+        &self.bindings
+    }
+
     /// This snapshot's blob store, the target for [`Blob`](crate::Blob)
     /// reads. Blob writes advance the line through the branch's memory
     /// cell, which a snapshot does not have — see [`BlobArchive`].
@@ -486,6 +519,7 @@ impl Clone for Snapshot {
             }),
             caches: self.caches.clone(),
             overlay: self.overlay.clone(),
+            bindings: self.bindings.clone(),
             fallback: self.fallback.clone(),
         }
     }

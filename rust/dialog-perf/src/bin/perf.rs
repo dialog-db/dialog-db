@@ -21,7 +21,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
-use dialog_perf::{Against, SweepConfig, Tolerance, catalog, compare_dirs, run, sweep};
+use dialog_perf::{Against, SweepConfig, Tolerance, catalog, compare_dirs, run, sweep, ungated};
 
 /// The engine's cost matrix: counters and instruction counts per scenario.
 #[derive(Debug, Parser)]
@@ -107,6 +107,11 @@ fn main() -> Result<ExitCode> {
     match Cli::parse().command {
         Command::List => {
             for spec in catalog() {
+                println!("{:<20} size {:>5}  {}", spec.name, spec.size, spec.about);
+            }
+            println!();
+            println!("ungated (run or sweep --only by name; no baseline):");
+            for spec in ungated() {
                 println!("{:<20} size {:>5}  {}", spec.name, spec.size, spec.about);
             }
             Ok(ExitCode::SUCCESS)

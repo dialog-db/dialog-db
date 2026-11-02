@@ -14,6 +14,74 @@ says how to cut a release.
 
 ## Unreleased
 
+### A repository can read and write several layers as one stack
+
+[#578](https://github.com/dialog-db/dialog-db/pull/578),
+[notes/state-layers.md](./notes/state-layers.md)
+
+A stack links layers (branches, snapshots and ephemeral layers) under
+scopes and reads them as one composite at the heads it captured. Each
+write goes to the layer its attribute is placed in, a commit stages one
+chain per branch layer and publishes them bottom to top, and rules run
+over the whole view. Ephemeral layers are process resources the
+environment holds, observed through bounded per-observer queues, and a
+channel replicates one between peers. On top of that, a link can be
+read-only, each attribute is read only from the layers of its placement,
+rules run over what enters an upper layer, one layer can sit under two
+scopes, and a channel holds its instants until their commit publishes.
+
+What this changes for you:
+
+- New: `Stack`, `StackTransaction`, `StackQuery`, `StackSubscription`,
+  `Layer`, `Placement`, `DefaultScope`, `TransientAttribute`, `Ephemeral::create`
+  and `Ephemeral::open`, `Observer`, `Channel`.
+- A rule that a transaction dispatches as a command now takes part in
+  that transaction's induction: it fires on the transaction's delta, as a
+  committed rule does. Before, its triggers were not scanned and it did not
+  fire.
+- A placement held in a layer's session store is honoured beside the
+  committed ones, so a process can place its own session state without a
+  commit.
+- A rule whose head is under a pick that elects (`last`, `max`, ...) and
+  lands in a session store or an ephemeral layer succeeds the row it
+  concluded before, as a transaction's own write there does. Before, each
+  conclusion was added beside the last, so a counter a rule kept on an
+  ephemeral layer held every value it ever had.
+- A stack commit returns `Committed`: the heads the stack reads at, and
+  `derived`, every transient its rules concluded (the dispatched ones are
+  not among them). A caller that acts on what a commit derived reads it
+  there, and never observes a layer for it, where an observer that fell
+  behind would have lost it.
+- A stack holds its own declarations: `Stack::declare` and
+  `OpenStack::declare` take a `Placement`, a `TransientAttribute`, a
+  `DefaultScope`, or a `Changes` of them. They outrank what the bottom's
+  session store and tree declare, yield to what a transaction carries,
+  guide every read, route every commit, stay across an advance, a pull
+  and a rewiring, and reach no layer and no peer. Before, a process
+  declared them into the bottom's session store, and again after each
+  advance.
+- A later change of a declaration outranks an earlier one in the same
+  batch: a batch that asserts and then retracts a placement declares
+  nothing. Before, the assertion won.
+- Subscriptions over a stack hold the same invariant as those over a
+  branch: a maintained result is a fresh evaluation's. The randomized
+  check runs through a stack as well, with attributes placed on an
+  ephemeral layer above the branch, and the state before a change is
+  read with every store the subscription reads rewound, not only one
+  branch's session overlay.
+- Induction over a stack caches each rule's plan and the stored bytes of
+  each rule per head, and skips a firing that a transient premise
+  starves ([#697](https://github.com/dialog-db/dialog-db/pull/697)); a
+  guided read skips a line that stores no fact of the attribute it reads
+  ([#698](https://github.com/dialog-db/dialog-db/pull/698)). Neither
+  changes what a read returns or a rule concludes.
+
+Why: tonk keeps per-process and per-tab state beside a space's
+replicated branch, and needs to read and write both as one database
+without copying session facts into the tree. Sapling runs on this stack
+already: the subject at the bottom, the index under read-only links,
+and an application layer shared with its daemon through a channel.
+
 ### A subscription learns of the readable change to a single-valued cell, not only the moved row
 
 Following [#710](https://github.com/dialog-db/dialog-db/pull/710) and
@@ -66,8 +134,9 @@ out and leaves the tombstone, which the rewind undid by lifting the
 tombstone instead; clearing the overlay lists the fact as removed and
 un-hidden at once, which the rewind took for no move. Either left the
 view before the change short of a fact, and a subscription could keep a
-row a fresh evaluation no longer returned. An instant now records how
-the line held each fact it moved, and the rewind restores exactly that.
+row a fresh evaluation no longer returned. An instant now records each
+change it made to the store (stored or removed, hidden or shown), and the
+rewind undoes those changes in reverse.
 
 What this changes for you:
 
@@ -75,12 +144,14 @@ What this changes for you:
   an overlay clear, or a commit retracting a fact the overlay had
   re-asserted over its own tombstone. Its results match a fresh
   evaluation again.
-- `Instant` carries `found`: how the overlay held each fact the instant
-  moved, before it did, as a `Hold` (stored, hidden).
+- `Instant` carries `changes`: each change the instant made to the
+  store, as a `StoreChange` (`Insert`, `Remove`, `Shadow`, `Unshadow`).
+  [#578](https://github.com/dialog-db/dialog-db/pull/578) introduced
+  it for channels, and the rewind reads the same log.
 
 Why: the rewind inverted a log that did not determine what it changed.
-Recording what each instant found makes the inverse exact for any move,
-instead of assuming one representation per fact.
+Recording each change the instant made to the store makes the inverse
+exact for any move, instead of assuming one representation per fact.
 
 ### A subscription retracts a row whose supporting facts go together
 
@@ -556,6 +627,13 @@ has a tree to canonicalize even when the link itself wrote nothing.
 
 #### Compatibility and migration
 
+- Stacks store their wiring as ordinary facts: `dialog.link/*` on
+  `link:` entities, and placements as `dialog.attribute/scope` and
+  `dialog.attribute/default`, all under `Pick::Last`. Nothing an older
+  replica holds is rewritten. An older release reads and syncs these
+  facts as any others and ignores what they mean, so a branch that a
+  stack wrote to stays readable there. Nothing an embedder runs is
+  needed.
 - A reset that moves a branch forward only changes nothing stored or
   synced, and rewrites nothing. Heads an earlier release forked by a
   takeover and a commit keep their fork; nothing finds or repairs it.

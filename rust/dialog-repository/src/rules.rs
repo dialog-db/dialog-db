@@ -36,19 +36,20 @@
 //! These names are a dialog-repository convention (like
 //! `dialog.session/*`).
 //!
-//! # Two layers, two caches
+//! # Two rule sources, two caches
 //!
-//! - A **durable** layer reads a branch's committed tree. Its rule
+//! - A **durable** rule source reads a branch's committed tree. Its rule
 //!   discovery (the `derives` lookup) is cacheable by branch head —
 //!   the committed rule set for a concept only changes when the head
 //!   moves. Hydrated bodies are cached by content-addressed rule entity.
-//! - A **transient** layer reads an overlay: a line's session overlay,
-//!   the per-query overlay, or a transaction's staged writes. Overlay
-//!   rules (`tx.assert(rule)` / `.with(rule)`, uncommitted — the head
-//!   has NOT moved) are never head-cached: a rule set assembled over
-//!   them is keyed by the rule facts each layer holds (see [`RuleKey`]),
-//!   which is what makes the "overlay rule masked by a head-keyed cache"
-//!   bug structurally impossible.
+//! - A **transient** rule source reads an overlay: a line's session
+//!   overlay, a standalone ephemeral layer, the per-query overlay, or a
+//!   transaction's staged writes. Overlay rules (`tx.assert(rule)` /
+//!   `.with(rule)`, uncommitted — the head has NOT moved) are never
+//!   head-cached: a rule set assembled over them is keyed by the rule
+//!   facts each overlay holds (see [`RuleKey`]), which is what makes the
+//!   "overlay rule masked by a head-keyed cache" bug structurally
+//!   impossible.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::RangeInclusive;
@@ -66,17 +67,19 @@ use dialog_query::concept::descriptor::ConceptDescriptor;
 use dialog_query::concept::query::{ConceptRules, Exact, Installed, PlanCache};
 use dialog_query::error::EvaluationError;
 use dialog_query::formula::revision::{RevisionParentQuery, RevisionQuery};
+use dialog_query::planner::Conjunction;
 use dialog_query::rule::statement::{Reach, derives_entities};
 use dialog_query::session::Quarantine;
 use dialog_query::type_system::Type as Kind;
 use dialog_query::types::Any;
 use dialog_query::{
-    AttributeQuery, Cardinality, ConceptQuery, DeductiveRule, Descriptor, FormulaQuery,
-    InductiveRule, Parameters, Premise, Proposition, Term, the,
+    AttributeQuery, Cardinality, ConceptQuery, DeductiveRule, Descriptor, Environment,
+    FormulaQuery, InductiveRule, Parameters, Premise, Proposition, Term, the,
 };
 use dialog_search_tree::{Cache, Manifest};
 use parking_lot::RwLock;
 
+use crate::placement::CommittedPlacements;
 use crate::{Revision, schema};
 use dialog_common::Blake3Hash;
 
@@ -494,8 +497,9 @@ type Root = Option<[u8; 32]>;
 pub(crate) struct RuleKey {
     /// Each line's rules root.
     pub(crate) lines: Vec<Root>,
-    /// Each overlay (the lines' session overlays, then the query's own)
-    /// that holds rule facts, by its position and their hash.
+    /// Each overlay (the lines' session overlays, then each standalone
+    /// ephemeral layer, then the query's own) that holds rule facts, by
+    /// its position and their hash.
     pub(crate) overlays: Vec<(usize, Blake3Hash)>,
     /// Each staged layer that holds rule facts, likewise.
     pub(crate) staged: Vec<(usize, Blake3Hash)>,
@@ -516,9 +520,21 @@ struct RuleCacheInner {
     /// Committed deductive-rule entities whose bodies read an `on:`
     /// entity, as of a branch head.
     reads: HashMap<Entity, (Revision, Vec<Entity>)>,
+    /// A committed rule's stored bytes, or that the head stores none, as
+    /// of a branch head: whether the rule exists there, which only a read
+    /// of the line answers.
+    sources: HashMap<Entity, (Revision, Option<Vec<u8>>)>,
+    /// Whether a line stores a fact of an attribute, or a rule deriving
+    /// it, as of a branch head.
+    holds: HashMap<Relation, (Revision, bool)>,
+    /// Whether a line stores a fact of an attribute, as of a branch head.
+    stored: HashMap<Relation, (Revision, bool)>,
     /// Whether a concept carries the committed `dialog.concept/transient`
     /// marker, as of a branch head.
     transient: HashMap<Entity, (Revision, bool)>,
+    /// The committed attribute placements (`dialog.attribute/scope`),
+    /// as of a branch head. One range scan on a miss.
+    placements: Option<(Revision, CommittedPlacements)>,
     /// A concept's assembled rule set -- built-in, committed, overlay,
     /// and its program analysis attached -- as of the [`RuleKey`] it
     /// was resolved from. Assembling it is most of what planning a warm
@@ -559,12 +575,25 @@ pub(crate) struct RuleContent {
     bodies: Cache<(Entity, Blake3Hash), DeductiveRule>,
     /// Hydrated inductive bodies, keyed like `bodies`.
     inductive: Cache<(Entity, Blake3Hash), InductiveRule>,
+    /// An inductive rule's plan for a scope, keyed by the rule entity and
+    /// the variables bound before it runs (a seed's fields, or none). A
+    /// plan is a function of the rule's premises and that set alone, and
+    /// the entity is the premises' content address, so an entry is never
+    /// stale.
+    plans: Cache<(Entity, Vec<String>), Conjunction>,
     /// A selecting concept's rule and covering rule, keyed by the
     /// concept, the attributes it reads as derived and the one source
     /// rule deriving them (if one). Pure functions of their key, so
     /// never stale; kept with the descriptor, whose field names the
     /// rule binds.
     selecting: Cache<SelectingKey, Selecting>,
+}
+
+/// The variables `scope` binds, in order: what a plan is keyed by.
+fn bound(scope: &Environment) -> Vec<String> {
+    let mut names: Vec<String> = scope.iter().map(str::to_owned).collect();
+    names.sort_unstable();
+    names
 }
 
 /// How many spellings of one concept keep an assembled rule set each.
@@ -879,6 +908,60 @@ impl RuleCache {
         self.inner.write().reads.insert(on, (head, entities));
     }
 
+    /// The bytes `rule` is stored under at `head` (`Some(None)` when the
+    /// head stores none), if read at that head before.
+    pub(crate) fn source(&self, rule: &Entity, head: &Revision) -> Option<Option<Vec<u8>>> {
+        match self.inner.read().sources.get(rule) {
+            Some((read_at, bytes)) if read_at == head => Some(bytes.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record the bytes `rule` is stored under at `head`, or that it has
+    /// none there.
+    pub(crate) fn record_source(&self, rule: Entity, head: Revision, bytes: Option<Vec<u8>>) {
+        self.inner.write().sources.insert(rule, (head, bytes));
+    }
+
+    /// Whether the line stores a fact of `attribute`, or a rule deriving
+    /// it, at `head`, if read at that head before.
+    pub(crate) fn holds(&self, attribute: &Relation, head: &Revision) -> Option<bool> {
+        match self.inner.read().holds.get(attribute) {
+            Some((read_at, stored)) if read_at == head => Some(*stored),
+            _ => None,
+        }
+    }
+
+    /// Record whether the line stores a fact of `attribute`, or a rule
+    /// deriving it, at `head`.
+    pub(crate) fn record_holds(&self, attribute: Relation, head: Revision, stored: bool) {
+        self.inner.write().holds.insert(attribute, (head, stored));
+    }
+
+    /// Whether the line stores a fact of `attribute` at `head`, if read at
+    /// that head before.
+    pub(crate) fn stores(&self, attribute: &Relation, head: &Revision) -> Option<bool> {
+        match self.inner.read().stored.get(attribute) {
+            Some((read_at, stored)) if read_at == head => Some(*stored),
+            _ => None,
+        }
+    }
+
+    /// Record whether the line stores a fact of `attribute` at `head`.
+    pub(crate) fn record_stores(&self, attribute: Relation, head: Revision, stored: bool) {
+        self.inner.write().stored.insert(attribute, (head, stored));
+    }
+
+    /// The plan of inductive rule `rule` for `scope`, if planned before.
+    pub(crate) fn plan(&self, rule: &Entity, scope: &Environment) -> Option<Conjunction> {
+        self.content.plans.get_cached(&(rule.clone(), bound(scope)))
+    }
+
+    /// Cache the plan of inductive rule `rule` for `scope`.
+    pub(crate) fn record_plan(&self, rule: Entity, scope: &Environment, plan: Conjunction) {
+        self.content.plans.insert((rule, bound(scope)), plan);
+    }
+
     /// The inductive body `rule` decoded to from `bytes`, if decoded
     /// before.
     pub(crate) fn inductive(&self, rule: &Entity, bytes: &[u8]) -> Option<InductiveRule> {
@@ -911,10 +994,23 @@ impl RuleCache {
             .transient
             .insert(concept, (head, verdict));
     }
+
+    /// The committed attribute placements if scanned at `head`.
+    pub(crate) fn placements(&self, head: &Revision) -> Option<CommittedPlacements> {
+        match &self.inner.read().placements {
+            Some((scanned_at, placements)) if scanned_at == head => Some(placements.clone()),
+            _ => None,
+        }
+    }
+
+    /// Record the committed attribute placements at `head`.
+    pub(crate) fn record_placements(&self, head: Revision, placements: CommittedPlacements) {
+        self.inner.write().placements = Some((head, placements));
+    }
 }
 
 /// Assemble a [`ConceptRules`] for `concept` from the implicit rule plus
-/// the installed rules found across the layers' rule sets.
+/// the installed rules found across the rule sources' rule sets.
 ///
 /// `durable` are the rules read (and cached) from each branch's
 /// committed tree; `transient` are read fresh from the overlay. Both are

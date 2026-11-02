@@ -141,6 +141,12 @@ of its size (entities named by index, values by index) so two runs
 move the same blocks; `Env` and the builders in `src/env.rs` keep it
 so.
 
+A scenario that answers a question rather than guards a path can wait
+in `ungated()` instead: `list` shows it, `run` and `sweep --only` run
+it, and a full sweep, the gate's, never does. `compare` fails a
+scenario with no baseline, so promoting one into `catalog()` means
+recording its baseline, which is the maintainer's call.
+
 ## Limits
 
 The matrix runs natively. The counters are target-independent, so a

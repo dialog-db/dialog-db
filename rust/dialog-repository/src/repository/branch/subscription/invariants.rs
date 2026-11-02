@@ -9,15 +9,17 @@ use std::fmt;
 use std::thread;
 
 use super::{Delta, Subscription};
-use crate::Branch;
 use crate::RepositoryExt as _;
 use crate::helpers::test_repo;
+use crate::{Branch, Ephemeral, Placement, Stack, StackSubscription};
 use anyhow::Context as _;
 use dialog_artifacts::{Changes, Entity};
 use dialog_capability::Subject;
 use dialog_common::ConditionalSync;
 use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use dialog_peer::{Peer, Session};
+use dialog_query::error::EvaluationError;
+use dialog_query::query::Application;
 use dialog_query::rule::{DeductiveRule, DeductiveRuleDescriptor};
 use dialog_query::{Attribute, Concept, Conclusion, Output as _, Predicate, Query, Relation};
 use dialog_storage::provider::storage::VolatileSpace;
@@ -727,13 +729,7 @@ struct Change {
 impl fmt::Display for Change {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let sign = if self.assert { '+' } else { '-' };
-        let the = match self.field {
-            Field::Badge => "credential/badge",
-            Field::Name => "report/name",
-            Field::Manager => "report/manager",
-            Field::Mentor => "report/mentor",
-            Field::Level => "staff/level",
-        };
+        let the = relation(self.field);
         write!(f, "{sign} {the} p{} = {}", self.of, self.is)
     }
 }
@@ -766,27 +762,27 @@ fn index_of(entity: &Entity) -> usize {
 /// in, as `(field, of, is)`. The generator retracts from these, so a
 /// retraction usually removes something.
 async fn visible(
-    branch: &Branch,
+    target: &Target,
     operator: &Operator,
 ) -> anyhow::Result<Vec<(Field, usize, Datum)>> {
     let mut facts = Vec::new();
-    for row in fresh::<BadgeHolder>(branch, operator).await? {
+    for row in target.fresh::<BadgeHolder>(operator).await? {
         let text = text_datum(&row.badge.0);
         facts.push((Field::Badge, index_of(&row.this), text));
     }
-    for row in fresh::<Named>(branch, operator).await? {
+    for row in target.fresh::<Named>(operator).await? {
         let text = text_datum(&row.name.0);
         facts.push((Field::Name, index_of(&row.this), text));
     }
-    for row in fresh::<Managed>(branch, operator).await? {
+    for row in target.fresh::<Managed>(operator).await? {
         let to = Datum::Person(index_of(&row.manager.0));
         facts.push((Field::Manager, index_of(&row.this), to));
     }
-    for row in fresh::<Mentored>(branch, operator).await? {
+    for row in target.fresh::<Mentored>(operator).await? {
         let to = Datum::Person(index_of(&row.mentor.0));
         facts.push((Field::Mentor, index_of(&row.this), to));
     }
-    for row in fresh::<Levelled>(branch, operator).await? {
+    for row in target.fresh::<Levelled>(operator).await? {
         let level = Datum::Number(row.level.0);
         facts.push((Field::Level, index_of(&row.this), level));
     }
@@ -939,11 +935,218 @@ fn minus(left: &[String], right: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The fields a stacked run places on its ephemeral layer: levels
+/// and mentors, so the rules join facts of both layers, and a
+/// recursive rule ([`Superior`]) climbs through either.
+const STACKED: [Field; 2] = [Field::Level, Field::Mentor];
+
+/// The attribute a [`Field`] writes.
+fn relation(field: Field) -> &'static str {
+    match field {
+        Field::Badge => "credential/badge",
+        Field::Name => "report/name",
+        Field::Manager => "report/manager",
+        Field::Mentor => "report/mentor",
+        Field::Level => "staff/level",
+    }
+}
+
+/// What a randomized run writes and subscribes through: the branch
+/// alone, or a stack over it.
+enum Target {
+    Branch(Branch),
+    /// A stack reading `branch` at the bottom, under `memory:space`,
+    /// and `state` above it, under `memory:state`, with the
+    /// [`STACKED`] fields placed on `state`. Every commit goes through
+    /// the stack, so it routes each fact by its placement.
+    Stack {
+        stack: Stack,
+        branch: Branch,
+        state: Ephemeral,
+    },
+}
+
+impl Target {
+    /// Place the [`STACKED`] fields on `memory:state` in `branch`, and
+    /// open a stack with an ephemeral layer bound under that scope
+    /// above it.
+    async fn stacked(branch: Branch, operator: &Operator) -> anyhow::Result<Self> {
+        let scope: Entity = "memory:state".parse()?;
+        let mut transaction = branch.transaction();
+        for field in STACKED {
+            transaction =
+                transaction.assert(Placement::new(relation(field).parse()?, scope.clone()));
+        }
+        transaction.commit().publish().perform(operator).await?;
+        let state = Ephemeral::create().perform(operator).await;
+        let top = Ephemeral::create().perform(operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, scope)
+            .link(&state, &branch, "memory:space".parse()?)
+            .perform(operator)
+            .await?;
+        Ok(Target::Stack {
+            stack,
+            branch,
+            state,
+        })
+    }
+
+    /// A fresh evaluation of the concept `C` through the target now.
+    async fn fresh<C>(&self, operator: &Operator) -> anyhow::Result<Vec<C>>
+    where
+        C: Predicate<Conclusion = C> + Conclusion + ConditionalSync,
+        C::Application: Default + Clone + ConditionalSync,
+    {
+        match self {
+            Target::Branch(branch) => fresh::<C>(branch, operator).await,
+            Target::Stack { stack, .. } => Ok(stack
+                .query()
+                .select(Query::<C>::default())
+                .perform(operator)
+                .try_vec()
+                .await?),
+        }
+    }
+
+    /// Commit `changes` in one transaction that retracts `retract` and
+    /// asserts `assert`.
+    async fn commit(
+        &self,
+        operator: &Operator,
+        retract: &[DeductiveRule],
+        assert: &[DeductiveRule],
+        changes: Changes,
+    ) -> anyhow::Result<()> {
+        match self {
+            Target::Branch(branch) => {
+                let mut transaction = branch.transaction();
+                for rule in retract {
+                    transaction = transaction.retract(rule);
+                }
+                for rule in assert {
+                    transaction = transaction.assert(rule);
+                }
+                transaction
+                    .integrate(changes)
+                    .commit()
+                    .publish()
+                    .perform(operator)
+                    .await?;
+            }
+            Target::Stack { stack, .. } => {
+                let mut transaction = stack.transaction();
+                for rule in retract {
+                    transaction = transaction.retract(rule);
+                }
+                for rule in assert {
+                    transaction = transaction.assert(rule);
+                }
+                transaction
+                    .assert(changes)
+                    .commit()
+                    .publish()
+                    .perform(operator)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Land `changes` outside any commit: in the branch's session
+    /// overlay, or, through a stack, each in the store its placement
+    /// names, the [`STACKED`] fields in the ephemeral layer and the
+    /// rest in the bottom's session overlay. The stack learns of them
+    /// as facts that entered its layers.
+    fn session(&self, changes: &[Change]) -> anyhow::Result<()> {
+        match self {
+            Target::Branch(branch) => {
+                branch.overlay().apply(batch(changes))?;
+            }
+            Target::Stack { branch, state, .. } => {
+                let (placed, rest): (Vec<Change>, Vec<Change>) = changes
+                    .iter()
+                    .cloned()
+                    .partition(|change| STACKED.contains(&change.field));
+                if !placed.is_empty() {
+                    state.apply(batch(&placed))?;
+                }
+                if !rest.is_empty() {
+                    branch.overlay().apply(batch(&rest))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop every fact and tombstone of a session store: the branch's
+    /// overlay, or, through a stack, the ephemeral layer or the
+    /// bottom's overlay, drawn from `extra`, so a run of the branch
+    /// alone draws nothing for it.
+    fn clear(&self, extra: &mut Xorshift) {
+        match self {
+            Target::Branch(branch) => {
+                branch.overlay().clear();
+            }
+            Target::Stack { branch, state, .. } => {
+                if extra.chance(1, 2) {
+                    state.clear();
+                } else {
+                    branch.overlay().clear();
+                }
+            }
+        }
+    }
+}
+
+/// A subscription through a [`Target`].
+enum Watching<Q: Application> {
+    Branch(Subscription<Q>),
+    Stack(StackSubscription<Q>),
+}
+
+impl<Q> Watching<Q>
+where
+    Q: Application + Clone + ConditionalSync,
+    Q::Conclusion: Conclusion + PartialEq + Clone + ConditionalSync,
+{
+    async fn poll(
+        &mut self,
+        operator: &Operator,
+    ) -> Result<Option<Delta<Q::Conclusion>>, EvaluationError> {
+        match self {
+            Watching::Branch(subscription) => subscription.poll(operator).await,
+            Watching::Stack(subscription) => subscription.poll(operator).await,
+        }
+    }
+
+    fn results(&self) -> &[Q::Conclusion] {
+        match self {
+            Watching::Branch(subscription) => subscription.results(),
+            Watching::Stack(subscription) => subscription.results(),
+        }
+    }
+
+    fn recomputes(&self) -> usize {
+        match self {
+            Watching::Branch(subscription) => subscription.recomputes(),
+            Watching::Stack(subscription) => subscription.recomputes(),
+        }
+    }
+
+    fn maintenances(&self) -> usize {
+        match self {
+            Watching::Branch(subscription) => subscription.maintenances(),
+            Watching::Stack(subscription) => subscription.maintenances(),
+        }
+    }
+}
+
 /// A subscription under test, with the result it held after its last
 /// poll and the step that poll followed.
 struct Watch<C: Predicate> {
     label: String,
-    subscription: Subscription<Query<C>>,
+    subscription: Watching<Query<C>>,
     previous: Vec<String>,
     polled_at: usize,
 }
@@ -953,8 +1156,13 @@ where
     C: Predicate<Conclusion = C> + Conclusion + PartialEq + Clone + fmt::Debug + ConditionalSync,
     C::Application: Default + Clone + ConditionalSync,
 {
-    async fn new(label: String, branch: &Branch, operator: &Operator) -> anyhow::Result<Self> {
-        let mut subscription = branch.subscribe(Query::<C>::default());
+    async fn new(label: String, target: &Target, operator: &Operator) -> anyhow::Result<Self> {
+        let mut subscription = match target {
+            Target::Branch(branch) => Watching::Branch(branch.subscribe(Query::<C>::default())),
+            Target::Stack { stack, .. } => {
+                Watching::Stack(stack.query().subscribe(Query::<C>::default()))
+            }
+        };
         subscription.poll(operator).await?;
         let previous = canonical(subscription.results());
         Ok(Self {
@@ -971,12 +1179,12 @@ where
     async fn check(
         &mut self,
         step: usize,
-        branch: &Branch,
+        target: &Target,
         operator: &Operator,
         log: &Log,
     ) -> anyhow::Result<()> {
         let delta = self.subscription.poll(operator).await?;
-        let fresh = canonical(&fresh::<C>(branch, operator).await?);
+        let fresh = canonical(&target.fresh::<C>(operator).await?);
         let results = canonical(self.subscription.results());
         let (asserted, retracted) = match &delta {
             Some(Delta {
@@ -1024,10 +1232,10 @@ where
     C: Predicate<Conclusion = C> + Conclusion + PartialEq + Clone + fmt::Debug + ConditionalSync,
     C::Application: Default + Clone + ConditionalSync,
 {
-    async fn new(concept: &str, branch: &Branch, operator: &Operator) -> anyhow::Result<Self> {
+    async fn new(concept: &str, target: &Target, operator: &Operator) -> anyhow::Result<Self> {
         Ok(Self {
-            every: Watch::new(format!("{concept}, polled every step"), branch, operator).await?,
-            lagging: Watch::new(format!("{concept}, polled now and then"), branch, operator)
+            every: Watch::new(format!("{concept}, polled every step"), target, operator).await?,
+            lagging: Watch::new(format!("{concept}, polled now and then"), target, operator)
                 .await?,
         })
     }
@@ -1036,13 +1244,13 @@ where
         &mut self,
         step: usize,
         rng: &mut Xorshift,
-        branch: &Branch,
+        target: &Target,
         operator: &Operator,
         log: &Log,
     ) -> anyhow::Result<()> {
-        self.every.check(step, branch, operator, log).await?;
+        self.every.check(step, target, operator, log).await?;
         if rng.chance(1, 3) {
-            self.lagging.check(step, branch, operator, log).await?;
+            self.lagging.check(step, target, operator, log).await?;
         }
         Ok(())
     }
@@ -1099,17 +1307,17 @@ struct Watched {
 }
 
 impl Watched {
-    async fn new(branch: &Branch, operator: &Operator) -> anyhow::Result<Self> {
+    async fn new(target: &Target, operator: &Operator) -> anyhow::Result<Self> {
         Ok(Self {
-            vouched: Watches::new("Vouched", branch, operator).await?,
-            unvouched: Watches::new("Unvouched", branch, operator).await?,
-            junior_led: Watches::new("JuniorLedReport", branch, operator).await?,
-            junior_taught: Watches::new("JuniorTaughtReport", branch, operator).await?,
-            superior: Watches::new("Superior", branch, operator).await?,
-            vouched_mentee: Watches::new("VouchedMentee", branch, operator).await?,
-            alone_led: Watches::new("AloneLedReport", branch, operator).await?,
-            vouched_mentee_led: Watches::new("VouchedMenteeLed", branch, operator).await?,
-            alone_led_led: Watches::new("AloneLedLedReport", branch, operator).await?,
+            vouched: Watches::new("Vouched", target, operator).await?,
+            unvouched: Watches::new("Unvouched", target, operator).await?,
+            junior_led: Watches::new("JuniorLedReport", target, operator).await?,
+            junior_taught: Watches::new("JuniorTaughtReport", target, operator).await?,
+            superior: Watches::new("Superior", target, operator).await?,
+            vouched_mentee: Watches::new("VouchedMentee", target, operator).await?,
+            alone_led: Watches::new("AloneLedReport", target, operator).await?,
+            vouched_mentee_led: Watches::new("VouchedMenteeLed", target, operator).await?,
+            alone_led_led: Watches::new("AloneLedLedReport", target, operator).await?,
         })
     }
 
@@ -1122,34 +1330,34 @@ impl Watched {
         step: usize,
         rng: &mut Xorshift,
         extra: &mut Xorshift,
-        branch: &Branch,
+        target: &Target,
         operator: &Operator,
         log: &Log,
     ) -> anyhow::Result<()> {
-        self.vouched.check(step, rng, branch, operator, log).await?;
+        self.vouched.check(step, rng, target, operator, log).await?;
         self.unvouched
-            .check(step, rng, branch, operator, log)
+            .check(step, rng, target, operator, log)
             .await?;
         self.junior_led
-            .check(step, rng, branch, operator, log)
+            .check(step, rng, target, operator, log)
             .await?;
         self.junior_taught
-            .check(step, rng, branch, operator, log)
+            .check(step, rng, target, operator, log)
             .await?;
         self.superior
-            .check(step, extra, branch, operator, log)
+            .check(step, extra, target, operator, log)
             .await?;
         self.vouched_mentee
-            .check(step, extra, branch, operator, log)
+            .check(step, extra, target, operator, log)
             .await?;
         self.alone_led
-            .check(step, extra, branch, operator, log)
+            .check(step, extra, target, operator, log)
             .await?;
         self.vouched_mentee_led
-            .check(step, extra, branch, operator, log)
+            .check(step, extra, target, operator, log)
             .await?;
         self.alone_led_led
-            .check(step, extra, branch, operator, log)
+            .check(step, extra, target, operator, log)
             .await?;
         Ok(())
     }
@@ -1210,21 +1418,21 @@ fn toggles() -> anyhow::Result<[Toggle; 2]> {
 async fn move_rule(
     rng: &mut Xorshift,
     toggles: &mut [Toggle],
-    branch: &Branch,
+    target: &Target,
     operator: &Operator,
 ) -> anyhow::Result<String> {
     let index = rng.below(toggles.len());
     let toggle = &mut toggles[index];
     let count = toggle.variants.len();
     let to = (toggle.at + 1 + rng.below(count - 1)) % count;
-    let mut transaction = branch.transaction();
-    for rule in &toggle.variants[toggle.at].1 {
-        transaction = transaction.retract(rule);
-    }
-    for rule in &toggle.variants[to].1 {
-        transaction = transaction.assert(rule);
-    }
-    transaction.commit().publish().perform(operator).await?;
+    target
+        .commit(
+            operator,
+            &toggle.variants[toggle.at].1,
+            &toggle.variants[to].1,
+            Changes::new(),
+        )
+        .await?;
     let described = format!(
         "Rules {}: {} -> {}",
         toggle.name, toggle.variants[toggle.at].0, toggle.variants[to].0
@@ -1235,18 +1443,10 @@ async fn move_rule(
 }
 
 /// Commit [`installed_rules`] together with `changes`.
-async fn install(branch: &Branch, operator: &Operator, changes: Changes) -> anyhow::Result<()> {
-    let mut transaction = branch.transaction();
-    for rule in installed_rules()? {
-        transaction = transaction.assert(rule);
-    }
-    transaction
-        .integrate(changes)
-        .commit()
-        .publish()
-        .perform(operator)
-        .await?;
-    Ok(())
+async fn install(target: &Target, operator: &Operator, changes: Changes) -> anyhow::Result<()> {
+    target
+        .commit(operator, &[], &installed_rules()?, changes)
+        .await
 }
 
 /// How many steps a run that starts on an unborn branch takes through
@@ -1266,14 +1466,20 @@ struct Shape {
     unborn: bool,
     /// Interleave rule steps, each moving a [`Toggle`].
     rules: bool,
+    /// Write and subscribe through a stack with an ephemeral layer
+    /// above the branch, holding the [`STACKED`] fields (see
+    /// [`Target::stacked`]).
+    stacked: bool,
 }
 
 impl fmt::Display for Shape {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = match (self.unborn, self.rules) {
-            (true, _) => "unborn",
-            (false, true) => "moving",
-            (false, false) => "fixed",
+        let kind = match (self.stacked, self.unborn, self.rules) {
+            (true, _, true) => "stacked moving",
+            (true, _, false) => "stacked",
+            (false, true, _) => "unborn",
+            (false, false, true) => "moving",
+            (false, false, false) => "fixed",
         };
         write!(f, "{kind} {}", self.seed)
     }
@@ -1285,6 +1491,7 @@ const fn fixed(seed: u64) -> Shape {
         seed,
         unborn: false,
         rules: false,
+        stacked: false,
     }
 }
 
@@ -1294,6 +1501,28 @@ const fn moving(seed: u64) -> Shape {
         seed,
         unborn: false,
         rules: true,
+        stacked: false,
+    }
+}
+
+/// A run of `seed` through a stack, with the rules fixed.
+const fn stacked(seed: u64) -> Shape {
+    Shape {
+        seed,
+        unborn: false,
+        rules: false,
+        stacked: true,
+    }
+}
+
+/// A run of `seed` through a stack, whose rules move between fact
+/// steps.
+const fn stacked_moving(seed: u64) -> Shape {
+    Shape {
+        seed,
+        unborn: false,
+        rules: true,
+        stacked: true,
     }
 }
 
@@ -1303,6 +1532,7 @@ const fn unborn(seed: u64) -> Shape {
         seed,
         unborn: true,
         rules: false,
+        stacked: false,
     }
 }
 
@@ -1314,10 +1544,20 @@ async fn run(shape: Shape, steps: usize) -> anyhow::Result<()> {
         seed,
         unborn,
         rules,
+        stacked,
     } = shape;
+    anyhow::ensure!(
+        !(stacked && unborn),
+        "a stack opens over a born branch, which holds its placements"
+    );
     let (operator, profile) = test_session_with_peer().await;
     let repo = test_repo(&operator, &profile).await;
     let branch = repo.branch("main").open().perform(&operator).await?;
+    let target = if stacked {
+        Target::stacked(branch.clone(), &operator).await?
+    } else {
+        Target::Branch(branch.clone())
+    };
     let mut rng = Xorshift::new(seed);
     // Everything added after #711 that draws (the new shapes' lagging
     // polls, rule steps) draws from a stream of its own, so a fixed
@@ -1341,24 +1581,24 @@ async fn run(shape: Shape, steps: usize) -> anyhow::Result<()> {
         for _ in 0..3 {
             population.extend(draw(&mut rng, &population_facts(&population)));
         }
-        install(&branch, &operator, batch(&population)).await?;
+        install(&target, &operator, batch(&population)).await?;
     }
-    let mut watched = Watched::new(&branch, &operator).await?;
+    let mut watched = Watched::new(&target, &operator).await?;
 
     let mut step = 0;
     for taken in 0..steps {
         let installed = !unborn || taken > UNBORN_STEPS;
         if rules && installed && extra.chance(1, 8) {
             step += 1;
-            let described = move_rule(&mut extra, &mut toggles, &branch, &operator).await?;
+            let described = move_rule(&mut extra, &mut toggles, &target, &operator).await?;
             log.steps.push(described);
             watched
-                .check(step, &mut rng, &mut extra, &branch, &operator, &log)
+                .check(step, &mut rng, &mut extra, &target, &operator, &log)
                 .await?;
         }
 
         step += 1;
-        let before = visible(&branch, &operator).await?;
+        let before = visible(&target, &operator).await?;
         let via = if unborn && taken < UNBORN_STEPS {
             if rng.below(16) == 0 {
                 Via::Clear
@@ -1391,25 +1631,15 @@ async fn run(shape: Shape, steps: usize) -> anyhow::Result<()> {
 
         match via {
             Via::Commit => {
-                branch
-                    .transaction()
-                    .integrate(batch(&changes))
-                    .commit()
-                    .publish()
-                    .perform(&operator)
-                    .await?;
+                target.commit(&operator, &[], &[], batch(&changes)).await?;
             }
-            Via::Install => install(&branch, &operator, batch(&changes)).await?,
-            Via::Overlay => {
-                branch.overlay().apply(batch(&changes))?;
-            }
-            Via::Clear => {
-                branch.overlay().clear();
-            }
+            Via::Install => install(&target, &operator, batch(&changes)).await?,
+            Via::Overlay => target.session(&changes)?,
+            Via::Clear => target.clear(&mut extra),
         }
 
         watched
-            .check(step, &mut rng, &mut extra, &branch, &operator, &log)
+            .check(step, &mut rng, &mut extra, &target, &operator, &log)
             .await?;
     }
 
@@ -1626,6 +1856,55 @@ async fn a_maintained_subscription_matches_a_fresh_evaluation_after_random_chang
          the first, {first}: {error:#}",
         failed = failures.len(),
         total = runs.len(),
+        failing = failing.join(", "),
+    )
+}
+
+/// The runs [`a_maintained_stack_subscription_matches_a_fresh_evaluation_after_random_changes`]
+/// takes: the fixed seeds of [`RUNS`] that reached a fact stored over
+/// its own tombstone, and two that move rules, each through a stack.
+const STACK_RUNS: [Shape; 6] = [
+    stacked(1),
+    stacked(6),
+    stacked(11),
+    stacked(35),
+    stacked_moving(3),
+    stacked_moving(8),
+];
+
+/// The invariant of
+/// [`a_maintained_subscription_matches_a_fresh_evaluation_after_random_changes`],
+/// held through a stack: the branch at the bottom and an ephemeral
+/// layer above it holding levels and mentors, so every rule that reads
+/// either joins facts of two layers. Commits route each fact to the
+/// layer its placement names, session steps land in the ephemeral
+/// layer or the bottom's overlay, and a clear drops one of them. A
+/// maintained poll then has two stores to rewind to read the state
+/// before a change, and a guide that reads each attribute from its own
+/// layer.
+#[dialog_common::test]
+async fn a_maintained_stack_subscription_matches_a_fresh_evaluation_after_random_changes()
+-> anyhow::Result<()> {
+    let steps = steps()?;
+    let mut failures = Vec::new();
+    for &shape in &STACK_RUNS {
+        let _panicking = Panicking(shape);
+        if let Err(error) = run(shape, steps).await {
+            failures.push((shape, error));
+        }
+    }
+    let Some((first, error)) = failures.first() else {
+        return Ok(());
+    };
+    let failing: Vec<String> = failures
+        .iter()
+        .map(|(shape, _)| shape.to_string())
+        .collect();
+    anyhow::bail!(
+        "{failed} of {total} stacked runs diverged at {steps} steps per run: {failing}\n\
+         the first, {first}: {error:#}",
+        failed = failures.len(),
+        total = STACK_RUNS.len(),
         failing = failing.join(", "),
     )
 }
