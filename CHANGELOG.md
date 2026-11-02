@@ -52,6 +52,134 @@ Why: tonk keeps per-process and per-tab state beside a space's
 replicated branch, and needs to read and write both as one database
 without copying session facts into the tree.
 
+### A subscription learns of the readable change to a single-valued cell, not only the moved row
+
+Following [#710](https://github.com/dialog-db/dialog-db/pull/710) and
+[#714](https://github.com/dialog-db/dialog-db/pull/714)
+
+A poll told incremental maintenance which rows moved. What a rule reads
+of a single-valued attribute is the one claim its pick elects from the
+cell, and a cell can hold several: a session value over a committed one,
+or two committed claims after concurrent writers merged. A row moving
+then changes which claim is read without that claim moving: a session
+value outvoting a committed one reported only the session value arriving,
+and retracting a cell's winner reported only the winner going, not the
+claim beneath it coming back. A rule reading the cell from the entity it
+derives was unaffected, since that entity is re-derived whole; a
+recursive rule, or one reading another entity's cell by its value, kept
+a stale row. For every touched cell of an attribute some reachable rule
+reads as single-valued, when any reachable rule joins across entities or
+recurs, the poll now counts every claim the cell holds as asserted and
+every claim it held before as retracted, so the delta-join and the
+fixpoint learn of the readable change.
+
+What this changes for you:
+
+- A subscription over a recursive rule, a rule two concept layers deep,
+  or a rule reading another entity's single-valued attribute no longer
+  keeps a stale row when a session write outvotes a committed value or a
+  retraction uncovers an older one. Its results match a fresh evaluation.
+- Such a poll reads each touched single-valued cell once more. A
+  subscription whose rules are all entity-local pays nothing new.
+- `dialog_query::concept::query::affected::elected_attributes` and
+  `Elected` are new: the attributes a concept's reachable rules read as
+  single-valued.
+
+Why: the invariant that a maintained result equals a fresh evaluation
+holds only if maintenance learns of every change a reader can see, and
+election makes a cell's readable value a function of all its claims.
+
+### A subscription's view of the state before a change is exact over a cleared or committed-over overlay
+
+Following [#710](https://github.com/dialog-db/dialog-db/pull/710)
+
+A subscription maintained incrementally reads the state before a change
+from its pinned revision under the session overlay rewound to the pinned
+sequence. The rewind undid each instant's readable moves, and a session
+line holds a fact in two independent ways, stored in it and hidden
+beneath it by a tombstone, so one fact can be both at once: asserted over
+its own tombstone. The readable moves do not say which of the two an
+instant changed. A commit retracting such a fact takes the stored copy
+out and leaves the tombstone, which the rewind undid by lifting the
+tombstone instead; clearing the overlay lists the fact as removed and
+un-hidden at once, which the rewind took for no move. Either left the
+view before the change short of a fact, and a subscription could keep a
+row a fresh evaluation no longer returned. An instant now records each
+change it made to the store (stored or removed, hidden or shown), and the
+rewind undoes those changes in reverse.
+
+What this changes for you:
+
+- A subscription over a non-local rule no longer keeps a stale row after
+  an overlay clear, or a commit retracting a fact the overlay had
+  re-asserted over its own tombstone. Its results match a fresh
+  evaluation again.
+- `Instant` carries `changes`: each change the instant made to the
+  store, as a `StoreChange` (`Insert`, `Remove`, `Shadow`, `Unshadow`).
+  [#578](https://github.com/dialog-db/dialog-db/pull/578) introduced
+  it for channels, and the rewind reads the same log.
+
+Why: the rewind inverted a log that did not determine what it changed.
+Recording each change the instant made to the store makes the inverse
+exact for any move, instead of assuming one representation per fact.
+
+### A subscription retracts a row whose supporting facts go together
+
+[#710](https://github.com/dialog-db/dialog-db/pull/710), fixing
+[#708](https://github.com/dialog-db/dialog-db/issues/708)
+
+A concept subscription maintained incrementally finds the rows a change
+can affect by binding each changed fact into the premise it matches and
+joining the rule's remaining premises sideways. It joined them against
+the state after the change, so a row two retracted facts had supported,
+each under a different premise of a non-local rule, was found through
+neither: bound into its premise, each was joined against a state the
+other had already left. The row stayed in the subscription's results,
+with an empty delta, while a fresh evaluation had none. The join now
+runs against the state the derivation it looks for holds in: the state
+before the change for a fact that stopped being readable, the state
+after it for one that became readable, and the other way round under a
+negated premise, where the mirror image (two facts asserted together
+under two `unless` premises) was missed the same way. The state before
+a change is the subscription's pinned revision under the session
+overlay rewound to the pinned sequence, so a change through the overlay
+is covered too. An optional premise is read again on each side for the
+changed fact's subject, since the row through its old binding and the
+row through its new one both change; before, a row that came to exist
+because an optional value went absent, or stopped existing because one
+arrived, was missed the same way.
+
+What this changes for you:
+
+- `dialog_query::concept::query::affected::affected_entities` takes the
+  asserted and retracted facts separately, the environment of the state
+  after the change, and a function yielding the state before it, in
+  place of one list of facts and one environment.
+
+- A poll after a commit or an overlay instant that retracts more than
+  one fact supporting the same row, or asserts more than one under
+  negated premises, now moves that row, through the maintenance path,
+  where it used to keep it with an empty delta. `Subscription::results`
+  matches a fresh evaluation again.
+- A subscription whose rule has one premise that does not bind the
+  head, such as a department's salaries derived from each member's,
+  is now maintained per head instead of recomputed on every poll: the
+  join keeps the premise the change was bound into, so it reaches the
+  head through it. An election the subscription reads under (`max`,
+  `last`) is per entity, so re-deriving the entity takes it again.
+- A concept subscription first polled before the branch's first commit
+  has no revision to read the state before a change from, so a poll of
+  it that needs that state (a retraction, or an assertion under a
+  negation, through the session overlay) recomputes instead of
+  maintaining, until the branch has a revision. Its results are the
+  same.
+
+Why: a derivation a change touches holds on exactly one side of the
+change, and its other premises hold only there. Joining every change
+against the new state is exact for one changed fact, since every other
+premise reads the same facts on both sides, and silently incomplete for
+two.
+
 ### A difference fetches the blocks it reads a batch at a time
 
 [#690](https://github.com/dialog-db/dialog-db/pull/690), part of [#646](https://github.com/dialog-db/dialog-db/issues/646)

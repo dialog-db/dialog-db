@@ -35,7 +35,7 @@ use dialog_effects::archive::prelude::CatalogScope;
 /// erased. [`Unavailable`](RemoteFallback::Unavailable) keeps that cause
 /// attached: reads that the local archive can satisfy still succeed, and
 /// the first read that *needs* the remote fails naming it.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum RemoteFallback {
     /// No remote is tracked; a local miss is an ordinary `None`.
     None,

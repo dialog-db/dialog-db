@@ -1096,6 +1096,52 @@ impl Ephemeral {
         }
     }
 
+    /// This layer as it stood before `instants`, its most recent
+    /// instants oldest first (see [`since`](Self::since)): a copy with
+    /// every store change they made undone, newest first. An instant
+    /// records each change to the store exactly as it was made
+    /// ([`Instant::changes`]), so undoing them in reverse is exact
+    /// whatever they were: a fact stored over its own tombstone gets
+    /// both back, one the layer was cleared of gets back whatever of
+    /// the two it had. A transient's witness changes nothing in the
+    /// store, so there is nothing of it to undo. This layer is left as
+    /// it was.
+    pub(crate) fn rewound(&self, instants: &[Instant]) -> Self {
+        let base = self.state.read();
+        let mut state = State {
+            facts: base.facts.clone(),
+            tombstones: base.tombstones.clone(),
+            shadowed: base.shadowed.clone(),
+            sequence: base.sequence,
+            hash: base.hash.clone(),
+            log: VecDeque::new(),
+            rules: base.rules.clone(),
+            observers: Vec::new(),
+        };
+        drop(base);
+        let mut delta = Delta::default();
+        for instant in instants.iter().rev() {
+            for change in instant.changes.iter().rev() {
+                match change {
+                    StoreChange::Insert(fact) => {
+                        state.remove(fact, &mut delta);
+                    }
+                    StoreChange::Remove(fact) => state.insert(fact.clone(), &mut delta),
+                    StoreChange::Shadow(fact) => {
+                        let key = state.key(fact);
+                        state.unshadow(&key, &mut delta);
+                    }
+                    StoreChange::Unshadow(fact) => state.shadow(fact.clone(), &mut delta),
+                }
+            }
+        }
+        state.mint(delta);
+        Self {
+            entity: Arc::default(),
+            state: Arc::new(RwLock::new(state)),
+        }
+    }
+
     /// Mint a fresh layer through the environment, registered under
     /// its address so [`open`](Self::open) finds it.
     pub fn create() -> CreateEphemeral {

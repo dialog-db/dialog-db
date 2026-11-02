@@ -81,7 +81,8 @@ use crate::repository::remote::Step;
 use crate::repository::source::{Caches, SourceRef};
 use crate::{
     Bindings, BlobArchive, Branch, ConnectedReplica, Ephemeral, Index, NetworkedIndex,
-    PublishError, RemoteSite, Repository, Revision, Select, SelectQuery, SnapshotError,
+    PublishError, RemoteFallback, RemoteSite, Repository, Revision, Select, SelectQuery,
+    SnapshotError,
 };
 use dialog_effects::MethodExt as _;
 
@@ -192,6 +193,11 @@ pub struct Snapshot {
     caches: Caches,
     overlay: Ephemeral,
     bindings: Bindings,
+    /// Where a read that misses a block locally fetches it from:
+    /// nowhere, for a snapshot a caller mints, which reads locally;
+    /// the branch's remote for a view the branch mints of its own
+    /// past ([`Branch::view`]).
+    fallback: RemoteFallback,
 }
 
 /// What a snapshot's commits move: the revision, and the line they are
@@ -239,7 +245,41 @@ impl Branch {
             caches: self.caches(),
             overlay: Ephemeral::default(),
             bindings: self.bindings().clone(),
+            fallback: RemoteFallback::None,
         })
+    }
+
+    /// This branch as it stood at `revision`, under `overlay` as its
+    /// session line: what a subscription reads the state before a
+    /// change from, with the pinned revision and the overlay rewound
+    /// to the pinned sequence. Shares the branch's caches and reads
+    /// through its remote, so a block the replica never fetched is
+    /// reached the way the branch would reach it.
+    pub(crate) fn view(&self, revision: Revision, overlay: Ephemeral) -> Snapshot {
+        Snapshot {
+            subject: self.subject(),
+            head: RwLock::new(Head {
+                revision,
+                lineage: None,
+            }),
+            caches: self.caches(),
+            overlay,
+            bindings: self.bindings().clone(),
+            fallback: self.fallback(),
+        }
+    }
+}
+
+impl Snapshot {
+    /// This snapshot under `overlay` as its session line, in place of its
+    /// own: what a subscription reads the state before a change from,
+    /// with the overlay rewound to the pinned sequence. Shares the
+    /// snapshot's caches.
+    pub(crate) fn under(&self, overlay: Ephemeral) -> Snapshot {
+        Snapshot {
+            overlay,
+            ..self.clone()
+        }
     }
 }
 
@@ -255,6 +295,7 @@ impl Snapshot {
             caches: Caches::new(),
             overlay: Ephemeral::default(),
             bindings: Bindings::default(),
+            fallback: RemoteFallback::None,
         }
     }
 
@@ -280,7 +321,13 @@ impl Snapshot {
             caches,
             overlay: Ephemeral::default(),
             bindings: Bindings::default(),
+            fallback: RemoteFallback::None,
         }
+    }
+
+    /// Where a read that misses a block locally fetches it from.
+    pub(crate) fn fallback(&self) -> RemoteFallback {
+        self.fallback.clone()
     }
 
     /// The revision this snapshot names.
@@ -473,6 +520,7 @@ impl Clone for Snapshot {
             caches: self.caches.clone(),
             overlay: self.overlay.clone(),
             bindings: self.bindings.clone(),
+            fallback: self.fallback.clone(),
         }
     }
 }
