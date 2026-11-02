@@ -62,6 +62,7 @@
 //! the store's observers, for the one round it lives.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 
 use dialog_artifacts::selector::Constrained;
@@ -93,6 +94,22 @@ pub(crate) fn transient_placement_attr() -> Relation {
     the!("dialog.attribute/transient").into()
 }
 
+/// The attribute that declares a scope's kind: `dialog.scope/kind` of
+/// the scope entity, a text value that [`Kind`] names.
+pub(crate) fn kind_attr() -> Relation {
+    the!("dialog.scope/kind").into()
+}
+
+/// Every attribute a placement declaration is written under.
+pub(crate) fn declaration_attrs() -> [Relation; 4] {
+    [
+        scope_attr(),
+        default_attr(),
+        transient_placement_attr(),
+        kind_attr(),
+    ]
+}
+
 /// The pending placement declarations of a read: each batch of `held`
 /// (the declarations a stack holds, then those of a store or of a batch,
 /// read in that order, so a later one outranks an earlier) and those of
@@ -104,39 +121,34 @@ pub(crate) fn pending_declarations(
     held: impl IntoIterator<Item = Changes>,
     layers: &[crate::Staged],
 ) -> Changes {
-    let (scope, default, transient) = (scope_attr(), default_attr(), transient_placement_attr());
+    let attrs = declaration_attrs();
     let mut pending = crate::Staged::default();
     for held in held {
         pending.apply(held);
     }
     for layer in layers {
-        pending
-            .apply(layer.export_cells(|the| *the == scope || *the == default || *the == transient));
+        pending.apply(layer.export_cells(|the| attrs.contains(the)));
     }
     pending.export()
 }
 
 /// The placement declarations of `changes`, in their order.
 pub(crate) fn declarations_of(changes: &Changes) -> Changes {
-    let (scope, default, transient) = (scope_attr(), default_attr(), transient_placement_attr());
-    changes
-        .clone()
-        .take_cells(|the| *the == scope || *the == default || *the == transient)
+    let attrs = declaration_attrs();
+    changes.clone().take_cells(|the| attrs.contains(the))
 }
 
 /// The placement declarations `store` holds, as its
 /// [`export`](crate::Ephemeral::export) carries them.
 pub(crate) fn declarations_held(store: &crate::Ephemeral) -> Changes {
-    store.export_of(&[scope_attr(), default_attr(), transient_placement_attr()])
+    store.export_of(&declaration_attrs())
 }
 
-/// Whether a batch writes a placement declaration: a scope, a default
-/// or a transient marker.
+/// Whether a batch writes a placement declaration: a scope, a default,
+/// a transient marker or a scope's kind.
 pub(crate) fn touches_placements(changes: &Changes) -> bool {
-    let (scope, default, transient) = (scope_attr(), default_attr(), transient_placement_attr());
-    changes
-        .iter()
-        .any(|(_, the, _)| *the == scope || *the == default || *the == transient)
+    let attrs = declaration_attrs();
+    changes.iter().any(|(_, the, _)| attrs.contains(the))
 }
 
 /// Carry the committed placements cached at `previous` forward to
@@ -325,6 +337,127 @@ impl Statement for DefaultScope {
     }
 }
 
+/// What kind of layer a scope names: how long its facts live, and who
+/// sees them. Declared on the bottom beside the placements
+/// ([`ScopeKind`]), so every replica binds a scope to the same kind of
+/// layer, and a stack refuses a link of a layer of another kind at
+/// commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// A branch with upstreams: durable, reaches peers.
+    Replicated,
+    /// A branch with none: durable on this device.
+    Durable,
+    /// A store in memory: gone with the process, a fact stays until
+    /// retracted.
+    Memory,
+    /// A store in memory whose every fact is a change of every commit
+    /// until what handles it retracts it: delivery to a rule or a
+    /// writer is at least once, and the fact's entity is the key that
+    /// makes a handler idempotent.
+    Queue,
+    /// A store in memory whose facts live one commit: a commit retracts
+    /// what the layer held when it began. Rules and subscriptions react
+    /// to a fact in the commit it enters in, whether or not anything
+    /// handled it.
+    Tick,
+}
+
+impl Kind {
+    /// The text a `dialog.scope/kind` fact carries for this kind.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Kind::Replicated => "replicated",
+            Kind::Durable => "durable",
+            Kind::Memory => "memory",
+            Kind::Queue => "queue",
+            Kind::Tick => "tick",
+        }
+    }
+
+    /// The kind a `dialog.scope/kind` fact names, or `None` for a text
+    /// that names none.
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "replicated" => Kind::Replicated,
+            "durable" => Kind::Durable,
+            "memory" => Kind::Memory,
+            "queue" => Kind::Queue,
+            "tick" => Kind::Tick,
+            _ => return None,
+        })
+    }
+
+    /// Whether facts of this kind live in memory.
+    pub fn in_memory(&self) -> bool {
+        matches!(self, Kind::Memory | Kind::Queue | Kind::Tick)
+    }
+}
+
+impl fmt::Display for Kind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A declaration of a scope's [`Kind`]: a `dialog.scope/kind` fact of
+/// the scope entity, written like a placement, by a commit on the
+/// bottom, into its session store, or held by a stack
+/// ([`Stack::declare`](crate::Stack::declare)).
+///
+/// ```no_run
+/// # use dialog_repository::{ScopeKind, Kind};
+/// # fn main() -> anyhow::Result<()> {
+/// let input = ScopeKind::new("memory:input".parse()?, Kind::Tick);
+/// # let _ = input;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeKind {
+    /// The scope.
+    pub scope: Entity,
+    /// Its kind.
+    pub kind: Kind,
+}
+
+impl ScopeKind {
+    /// Declare that `scope` names layers of `kind`.
+    pub fn new(scope: Entity, kind: Kind) -> Self {
+        Self { scope, kind }
+    }
+}
+
+impl Statement for ScopeKind {
+    fn assert(self, update: &mut impl Update) {
+        update.associate(
+            kind_attr(),
+            self.scope,
+            Value::String(self.kind.as_str().into()),
+            Pick::Last,
+        );
+    }
+
+    fn retract(self, update: &mut impl Update) {
+        update.dissociate(
+            kind_attr(),
+            self.scope,
+            Value::String(self.kind.as_str().into()),
+        );
+    }
+}
+
+/// Read a kind declaration's value, or fail the commit.
+fn kind_value(scope: &Entity, value: &Value) -> Result<Kind, CommitError> {
+    match value {
+        Value::String(text) if let Some(kind) = Kind::parse(text) => Ok(kind),
+        other => Err(CommitError::InvalidPlacement {
+            attribute: format!("dialog.scope/kind of {scope}"),
+            value: format!("{other:?}"),
+        }),
+    }
+}
+
 /// Where a scope name is bound on a layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
@@ -372,6 +505,7 @@ pub(crate) struct Declared {
     attributes: HashMap<Relation, Entity>,
     default: Option<Entity>,
     transient: HashSet<Relation>,
+    kinds: HashMap<Entity, Kind>,
 }
 
 /// A shared handle to the committed declarations at a head.
@@ -389,6 +523,8 @@ pub(crate) struct Placements {
     default_retracted: Option<Entity>,
     transient: HashSet<Relation>,
     untransient: HashSet<Relation>,
+    kinds: HashMap<Entity, Kind>,
+    kinds_retracted: HashMap<Entity, Kind>,
 }
 
 /// Read a declaration value as a scope entity, or fail the commit.
@@ -458,6 +594,10 @@ impl Placements {
                 placements.transient.insert(attribute);
             }
         }
+        for claim in store.scan(&kinds_selector()) {
+            let kind = kind_value(&claim.of, &claim.is)?;
+            placements.kinds.insert(claim.of, kind);
+        }
         placements.lay(declared)?;
         placements.lay(changes)?;
         Ok(placements)
@@ -470,8 +610,23 @@ impl Placements {
         let scope = scope_attr();
         let default = default_attr();
         let transient = transient_placement_attr();
+        let kind = kind_attr();
         for (entity, the, change) in changes.iter() {
-            if *the == transient {
+            if *the == kind {
+                let (Change::Assert(value, _) | Change::Retract(value)) = change;
+                let named = kind_value(entity, value)?;
+                match change {
+                    Change::Retract(_) => {
+                        if placements.kinds.get(entity) == Some(&named) {
+                            placements.kinds.remove(entity);
+                        }
+                        placements.kinds_retracted.insert(entity.clone(), named);
+                    }
+                    _ => {
+                        placements.kinds.insert(entity.clone(), named);
+                    }
+                }
+            } else if *the == transient {
                 let Some(placed) = entity_attribute(entity) else {
                     continue;
                 };
@@ -543,6 +698,17 @@ impl Placements {
     pub(crate) fn scope_of(&self, attribute: &Relation) -> Option<&Entity> {
         self.placement_of(attribute)
             .or_else(|| self.default_scope())
+    }
+
+    /// The kind that `scope` is declared as, if any declaration names it.
+    pub(crate) fn kind_of(&self, scope: &Entity) -> Option<Kind> {
+        if let Some(kind) = self.kinds.get(scope) {
+            return Some(*kind);
+        }
+        match self.committed.kinds.get(scope) {
+            Some(kind) if self.kinds_retracted.get(scope) != Some(kind) => Some(*kind),
+            _ => None,
+        }
     }
 
     /// The scope that a placement of `attribute` names, if one does: no
@@ -715,6 +881,11 @@ fn transients_selector() -> ArtifactSelector<Constrained> {
     ArtifactSelector::new().the(transient_placement_attr())
 }
 
+/// Selector for every committed `dialog.scope/kind` declaration.
+fn kinds_selector() -> ArtifactSelector<Constrained> {
+    ArtifactSelector::new().the(kind_attr())
+}
+
 /// The committed declarations at `source`'s head — three range scans,
 /// cached per head.
 async fn committed_placements(
@@ -751,6 +922,10 @@ async fn committed_placements(
         if let (Some(attribute), Value::Boolean(true)) = (entity_attribute(&claim.of), &claim.is) {
             declared.transient.insert(attribute);
         }
+    }
+    for claim in committed(source, kinds_selector(), env).await? {
+        let kind = kind_value(&claim.of, &claim.is)?;
+        declared.kinds.insert(claim.of, kind);
     }
     let placements = Arc::new(declared);
     cache.record_placements(head, placements.clone());

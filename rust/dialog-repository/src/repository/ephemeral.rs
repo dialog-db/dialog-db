@@ -1235,13 +1235,15 @@ impl Ephemeral {
     /// Apply scope maintenance and its replacement facts under one
     /// write lock and mint one instant, so a re-stamp has no empty
     /// intermediate: drop everything when `clear`, else every fact and
-    /// tombstone of a `forgotten` entity, then land `changes`, under the
-    /// hold of the stack commit.
+    /// tombstone of a `forgotten` entity, and each `expired` fact the
+    /// layer still holds, then land `changes`, under the hold of the stack
+    /// commit.
     pub(crate) fn maintain(
         &self,
         changes: Changes,
         clear: bool,
         forgotten: &HashSet<Entity>,
+        expired: &[Artifact],
         hold: &Hold,
     ) {
         let mut state = self.state.write();
@@ -1254,6 +1256,13 @@ impl Ephemeral {
             .collect();
         for fact in dropped {
             state.remove(&fact, &mut delta);
+        }
+        // What expired is removed, never hidden beneath: a tick layer
+        // holds what it holds, and a fact it no longer holds is gone.
+        for fact in expired {
+            if state.facts.holds(fact) {
+                state.remove(fact, &mut delta);
+            }
         }
         let lifted: Vec<SortKey> = state
             .shadowed
