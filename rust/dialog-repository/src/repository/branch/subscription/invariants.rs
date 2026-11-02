@@ -10,11 +10,13 @@ use std::thread;
 
 use super::{Delta, Subscription};
 use crate::Branch;
+use crate::RepositoryExt as _;
 use crate::helpers::test_repo;
 use anyhow::Context as _;
 use dialog_artifacts::{Changes, Entity};
+use dialog_capability::Subject;
 use dialog_common::ConditionalSync;
-use dialog_peer::helpers::test_session_with_peer;
+use dialog_peer::helpers::{test_session_with_peer, unique_name};
 use dialog_peer::{Peer, Session};
 use dialog_query::rule::{DeductiveRule, DeductiveRuleDescriptor};
 use dialog_query::{Attribute, Concept, Conclusion, Output as _, Predicate, Query, Relation};
@@ -389,6 +391,37 @@ pub struct AloneLedReport {
     pub alone_led: AloneLed,
 }
 
+/// Someone whose manager is a [`VouchedMentee`]: three non-local
+/// layers, all positive, so a badge change on the manager's mentor's
+/// manager or mentor moves this row through three delta-join layers.
+#[derive(Concept, Debug, Clone, PartialEq)]
+pub struct VouchedMenteeLed {
+    /// The report.
+    pub this: Entity,
+    /// Their name.
+    pub name: Name,
+    /// Their manager, who must be a vouched mentee.
+    #[dialog(conforms = VouchedMentee)]
+    pub manager: Manager,
+}
+
+/// What [`alone_led_led_rule`] derives (`report/alone-led-led`): the
+/// name of someone whose manager is an [`AloneLedReport`].
+#[derive(Attribute, Clone, PartialEq)]
+#[domain("report")]
+pub struct AloneLedLed(pub String);
+
+/// Someone whose manager is [`AloneLedReport`], read from
+/// `report/alone-led-led`, which only [`alone_led_led_rule`] derives:
+/// three non-local layers, the innermost negated.
+#[derive(Concept, Debug, Clone, PartialEq)]
+pub struct AloneLedLedReport {
+    /// The report.
+    pub this: Entity,
+    /// Their name.
+    pub alone_led_led: AloneLedLed,
+}
+
 /// A variable term in rule notation.
 fn var(name: &str) -> serde_json::Value {
     serde_json::json!({ "?": { "name": name } })
@@ -549,6 +582,23 @@ fn alone_led_rule() -> anyhow::Result<DeductiveRule> {
     }))
 }
 
+/// `report/alone-led-led(this) := name :- report/name(this) = name,
+/// report/manager(this) = m, report/alone-led(m) = _`: a concept
+/// premise over [`AloneLedReport`], itself two non-local layers deep.
+fn alone_led_led_rule() -> anyhow::Result<DeductiveRule> {
+    rule(serde_json::json!({
+        "deduce": { "with": { "alone_led_led": { "the": "report/alone-led-led", "as": "text:" } } },
+        "when": [
+            report("name", "text:", "this", "alone_led_led"),
+            report("manager", "entity:", "this", "manager"),
+            {
+                "assert": { "with": { "alone_led": { "the": "report/alone-led", "as": "text:" } } },
+                "where": { "this": var("manager"), "alone_led": var("managers") }
+            }
+        ]
+    }))
+}
+
 /// A premise holding when `of`'s badge is `B1`.
 fn badged_b1(of: &str) -> serde_json::Value {
     serde_json::json!({
@@ -590,6 +640,7 @@ fn installed_rules() -> anyhow::Result<Vec<DeductiveRule>> {
         junior_led_rule()?,
         junior_taught_rule()?,
         alone_led_rule()?,
+        alone_led_led_rule()?,
     ];
     rules.extend(above_rules("manager")?);
     Ok(rules)
@@ -1031,9 +1082,10 @@ where
 /// premises), [`Unvouched`] (negated ones), [`JuniorLedReport`] (an
 /// optional field read through a target concept),
 /// [`JuniorTaughtReport`] (an optional field read in the rule itself),
-/// [`Superior`] (recursive rules), and [`VouchedMentee`] and
+/// [`Superior`] (recursive rules), [`VouchedMentee`] and
 /// [`AloneLedReport`] (concept premises two layers deep, positive and
-/// negated).
+/// negated), and [`VouchedMenteeLed`] and [`AloneLedLedReport`] (three
+/// layers deep, positive and negated).
 struct Watched {
     vouched: Watches<Vouched>,
     unvouched: Watches<Unvouched>,
@@ -1042,6 +1094,8 @@ struct Watched {
     superior: Watches<Superior>,
     vouched_mentee: Watches<VouchedMentee>,
     alone_led: Watches<AloneLedReport>,
+    vouched_mentee_led: Watches<VouchedMenteeLed>,
+    alone_led_led: Watches<AloneLedLedReport>,
 }
 
 impl Watched {
@@ -1054,6 +1108,8 @@ impl Watched {
             superior: Watches::new("Superior", branch, operator).await?,
             vouched_mentee: Watches::new("VouchedMentee", branch, operator).await?,
             alone_led: Watches::new("AloneLedReport", branch, operator).await?,
+            vouched_mentee_led: Watches::new("VouchedMenteeLed", branch, operator).await?,
+            alone_led_led: Watches::new("AloneLedLedReport", branch, operator).await?,
         })
     }
 
@@ -1089,6 +1145,12 @@ impl Watched {
         self.alone_led
             .check(step, extra, branch, operator, log)
             .await?;
+        self.vouched_mentee_led
+            .check(step, extra, branch, operator, log)
+            .await?;
+        self.alone_led_led
+            .check(step, extra, branch, operator, log)
+            .await?;
         Ok(())
     }
 
@@ -1100,6 +1162,8 @@ impl Watched {
         self.superior.ensure_maintained(seed)?;
         self.vouched_mentee.ensure_maintained(seed)?;
         self.alone_led.ensure_maintained(seed)?;
+        self.vouched_mentee_led.ensure_maintained(seed)?;
+        self.alone_led_led.ensure_maintained(seed)?;
         Ok(())
     }
 }
@@ -1417,21 +1481,19 @@ fn population_facts(changes: &[Change]) -> Vec<(Field, usize, Datum)> {
 /// - [`Vouched`] (seed 4) and [`VouchedMentee`] (seeds 2 and 4) on the
 ///   unborn runs, when the discovery joins against the state after the
 ///   change where an unborn pin has no state before to view.
+/// - [`VouchedMenteeLed`] and [`AloneLedLedReport`], on all ten, when
+///   the discovery drops the heads of every concept three layers of
+///   concept premises below the subscribed one. On the first run every
+///   shallower shape was still fresh when they diverged, so the third
+///   layer is theirs alone to cover.
 ///
-/// None of the added shapes passes on main yet. A write under a
-/// single-valued attribute can flip which of a cell's values is
-/// readable, and the poll's changes report only the write: an overlay
-/// value outvoting a committed one reports the overlay value arriving,
-/// not the committed one going, and retracting a cell's winner reports
-/// the winner going, not the value beneath coming back. A rule that
-/// reads the cell from its own subject re-derives that subject anyway;
-/// the fixpoint continuation, and a delta-join reaching the cell
-/// through another entity, do not. The three tests after this one pin
-/// it in small. The mutations above were checked with the poll's
-/// changes widened by every other value of each changed cell, from
-/// the tree at the pin and now and from the overlay, under which all
-/// ten runs pass. Changing these runs, check all of it again, so each
-/// shape keeps its teeth.
+/// The shapes reaching a cell through another entity ([`Superior`],
+/// [`VouchedMentee`], [`AloneLedReport`]) diverged on every run until
+/// #716 widened the poll's changes by every other value of each
+/// changed cell: a write under a single-valued attribute can flip
+/// which of a cell's values is readable, and the diff reports only the
+/// write. The three tests after this one pin it in small. Changing
+/// these runs, check all of it again, so each shape keeps its teeth.
 const RUNS: [Shape; 10] = [
     fixed(1),
     fixed(708),
@@ -1725,5 +1787,238 @@ async fn retracting_a_committed_winner_restores_the_value_it_outvoted() -> anyho
         maintained_and_fresh::<Superior>(&mut subscription, &branch, &operator).await?;
     assert_eq!(fresh, below(3), "the committed p3 is readable again");
     assert_eq!(maintained, fresh);
+    Ok(())
+}
+
+/// A recursive rule whose recursion steps only through badged managers:
+/// `above(this) = m :- manager(this) = m, badge(m) = "B1"`, and
+/// `above(this) = a :- manager(this) = m, badge(m) = "B1", above(m) = a`.
+/// The fixpoint continuation's suspicion cascade has to follow the join
+/// to the manager's badge, not only the recursive edge.
+fn badged_above_rules() -> anyhow::Result<Vec<DeductiveRule>> {
+    Ok(vec![
+        rule(serde_json::json!({
+            "deduce": { "with": above_field() },
+            "when": [report("manager", "entity:", "this", "above"), badged_b1("above")]
+        }))?,
+        rule(serde_json::json!({
+            "deduce": { "with": above_field() },
+            "when": [
+                report("manager", "entity:", "this", "next"),
+                badged_b1("next"),
+                {
+                    "assert": { "with": above_field() },
+                    "where": { "this": var("next"), "above": var("above") }
+                }
+            ]
+        }))?,
+    ])
+}
+
+/// A badge on a recursive chain going and coming back, by commit and
+/// through the session overlay, retracts and restores every row derived
+/// through it. p1 reports to p0, p0 to p2, both badged: p1 is above p0
+/// and p2, p0 above p2. Without p2's badge the chain stops at p0;
+/// without p0's it stops at once.
+#[dialog_common::test]
+async fn a_recursive_rule_follows_a_badge_on_its_chain() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    let mut transaction = branch.transaction();
+    for rule in badged_above_rules()? {
+        transaction = transaction.assert(rule);
+    }
+    transaction
+        .assert(Manager::of(person(1)).is(person(0)))
+        .assert(Manager::of(person(0)).is(person(2)))
+        .assert(Badge::of(person(0)).is("B1".to_string()))
+        .assert(Badge::of(person(2)).is("B1".to_string()))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let mut subscription = branch.subscribe(Query::<Superior>::default());
+    let initial = subscription.poll(&operator).await?.expect("initial");
+    assert_eq!(initial.asserted.len(), 3, "p1 above p0 and p2, p0 above p2");
+
+    let badge = |who: usize| Badge::of(person(who)).is("B1".to_string());
+    branch
+        .transaction()
+        .retract(badge(2))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let (maintained, fresh) =
+        maintained_and_fresh::<Superior>(&mut subscription, &branch, &operator).await?;
+    assert_eq!(fresh.len(), 1, "the chain stops at p0");
+    assert_eq!(
+        maintained, fresh,
+        "a committed badge retraction on the chain"
+    );
+    assert_eq!(subscription.maintenances(), 1, "maintained, not recomputed");
+
+    branch
+        .transaction()
+        .assert(badge(2))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let (maintained, fresh) =
+        maintained_and_fresh::<Superior>(&mut subscription, &branch, &operator).await?;
+    assert_eq!(fresh.len(), 3, "the chain is whole again");
+    assert_eq!(
+        maintained, fresh,
+        "a committed badge returning to the chain"
+    );
+
+    branch.overlay().retract(badge(0))?;
+    let (maintained, fresh) =
+        maintained_and_fresh::<Superior>(&mut subscription, &branch, &operator).await?;
+    assert_eq!(fresh.len(), 1, "p1 is above nobody; p0 is still above p2");
+    assert_eq!(maintained, fresh, "a session badge retraction on the chain");
+
+    branch.overlay().assert(badge(0))?;
+    let (maintained, fresh) =
+        maintained_and_fresh::<Superior>(&mut subscription, &branch, &operator).await?;
+    assert_eq!(fresh.len(), 3);
+    assert_eq!(maintained, fresh, "a session badge returning to the chain");
+    Ok(())
+}
+
+/// A rule installed through the session overlay, and removed through
+/// it, moves a subscription the way a committed rule change does: the
+/// rule range in the cover is touched, and the poll recomputes.
+#[dialog_common::test]
+async fn a_rule_installed_through_the_overlay_moves_the_subscription() -> anyhow::Result<()> {
+    let (operator, profile) = test_session_with_peer().await;
+    let repo = test_repo(&operator, &profile).await;
+    let branch = repo.branch("main").open().perform(&operator).await?;
+    branch
+        .transaction()
+        .assert(Name::of(person(1)).is("N0".to_string()))
+        .assert(Badge::of(person(1)).is("B1".to_string()))
+        .commit()
+        .publish()
+        .perform(&operator)
+        .await?;
+    let mut subscription = branch.subscribe(Query::<Unvouched>::default());
+    let initial = subscription.poll(&operator).await?.expect("initial");
+    assert!(initial.asserted.is_empty(), "no rule yet, no rows");
+
+    branch.overlay().assert(&alone_by_own_badge_rule()?)?;
+    let (maintained, fresh) =
+        maintained_and_fresh::<Unvouched>(&mut subscription, &branch, &operator).await?;
+    assert_eq!(fresh.len(), 1, "the session rule derives p1");
+    assert_eq!(maintained, fresh, "a rule arriving through the overlay");
+    assert_eq!(
+        (subscription.recomputes(), subscription.maintenances()),
+        (2, 0),
+        "a rule change recomputes"
+    );
+
+    branch.overlay().retract(&alone_by_own_badge_rule()?)?;
+    let (maintained, fresh) =
+        maintained_and_fresh::<Unvouched>(&mut subscription, &branch, &operator).await?;
+    assert!(fresh.is_empty());
+    assert_eq!(maintained, fresh, "a rule leaving through the overlay");
+    Ok(())
+}
+
+/// Two writers each commit a manager for p1 on their own first commit;
+/// one pulls the other, and the merge leaves both claims in the cell,
+/// with the pick electing one. A subscription on the puller sees the
+/// merge as a poll over the pulled changes; retracting the elected
+/// claim then makes the other readable, which the diff does not report.
+#[dialog_common::test]
+async fn a_merge_leaving_two_claims_in_a_cell_keeps_a_recursive_subscription_fresh()
+-> anyhow::Result<()> {
+    let (writer, profile) = test_session_with_peer().await;
+    let name = unique_name("repo");
+    profile.space(name.clone()).open().perform(&writer).await?;
+    let one = profile
+        .session(b"one")
+        .space(profile.state())
+        .allow(Subject::any())
+        .await?;
+    let two = profile
+        .session(b"two")
+        .space(profile.state())
+        .allow(Subject::any())
+        .await?;
+    let w1 = profile
+        .space(name.clone())
+        .open()
+        .perform(&one)
+        .await?
+        .branch("one")
+        .open()
+        .perform(&one)
+        .await?;
+    let w2 = profile
+        .space(name.clone())
+        .open()
+        .perform(&two)
+        .await?
+        .branch("two")
+        .open()
+        .perform(&two)
+        .await?;
+
+    // Concurrent first commits: w2 knows nothing of w1's claim.
+    w2.transaction()
+        .assert(Manager::of(person(1)).is(person(2)))
+        .commit()
+        .publish()
+        .perform(&two)
+        .await?;
+    let mut transaction = w1.transaction();
+    for rule in above_rules("manager")? {
+        transaction = transaction.assert(rule);
+    }
+    transaction
+        .assert(Manager::of(person(1)).is(person(0)))
+        .commit()
+        .publish()
+        .perform(&one)
+        .await?;
+
+    let mut subscription = w1.subscribe(Query::<Superior>::default());
+    let initial = subscription.poll(&one).await?.expect("initial");
+    assert_eq!(initial.asserted.len(), 1, "p1 is above p0");
+
+    w1.pull().from(&w2).perform(&one).await?;
+    let (maintained, expected) =
+        maintained_and_fresh::<Superior>(&mut subscription, &w1, &one).await?;
+    assert_eq!(
+        expected.len(),
+        1,
+        "the cell holds two claims and the pick elects one"
+    );
+    assert_eq!(maintained, expected, "after the merge");
+    let elected = fresh::<Superior>(&w1, &one).await?[0].above.0.clone();
+    let other = if elected == person(0) {
+        person(2)
+    } else {
+        person(0)
+    };
+
+    w1.transaction()
+        .retract(Manager::of(person(1)).is(elected))
+        .commit()
+        .publish()
+        .perform(&one)
+        .await?;
+    let rows = fresh::<Superior>(&w1, &one).await?;
+    assert_eq!(rows.len(), 1, "the other claim is readable now");
+    assert_eq!(rows[0].above.0, other);
+    let (maintained, expected) =
+        maintained_and_fresh::<Superior>(&mut subscription, &w1, &one).await?;
+    assert_eq!(
+        maintained, expected,
+        "retracting the elected claim uncovers the other"
+    );
     Ok(())
 }
