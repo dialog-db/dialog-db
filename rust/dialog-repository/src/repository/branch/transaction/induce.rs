@@ -45,6 +45,7 @@ use dialog_effects::archive::{Get, Put};
 use dialog_effects::authority::Identify;
 use dialog_effects::memory::Resolve;
 use dialog_query::attribute::The;
+use dialog_query::planner::Conjunction;
 use dialog_query::rule::inductive::Polarity;
 use dialog_query::rule::statement::Reach;
 use dialog_query::{Any, Binding, Environment, InductiveRule, Match, Term};
@@ -55,7 +56,8 @@ use crate::repository::branch::QueryLayer;
 use crate::repository::branch::session::{Composite, QueryEnv};
 use crate::repository::source::SourceRef;
 use crate::rules::{
-    TriggerFootprint, hydrate, hydrate_inductive, on_attr, reads_attr, source_attr, transient_attr,
+    TriggerFootprint, builtin_derives, derives_attr, derives_selector, hydrate, hydrate_inductive,
+    on_attr, reads_attr, source_attr, transient_attr,
 };
 use crate::{CommitError, Ephemeral, RemoteSite, Revision, RuleCache, Staged};
 
@@ -203,6 +205,7 @@ where
     let heads = Heads {
         placements,
         landing,
+        plans: dispatch.body_cache(),
     };
 
     let mut round: u32 = 0;
@@ -335,6 +338,21 @@ where
         // row cannot seed.
         let expanded: BTreeSet<Reach> = touched.difference(&direct).cloned().collect();
 
+        // The attributes this round holds a fact of that no line stores:
+        // its transients and its stimulus. A transient attribute is read
+        // only from these.
+        let present: BTreeSet<Relation> = transient_overlay
+            .iter()
+            .map(|(_, attribute, _)| attribute.clone())
+            .chain(stimulus.iter().map(|instruction| match instruction {
+                Instruction::Assert(a, _) | Instruction::Retract(a) => a.the.clone(),
+            }))
+            .collect();
+
+        // Whether the view could hold a fact of a transient attribute the
+        // round brings none of, resolved once per attribute per round.
+        let mut sourced: HashMap<Relation, bool> = HashMap::new();
+
         let mut novelty = Changes::new();
         let mut emitted_transients = Changes::new();
         for entity in candidates {
@@ -345,6 +363,28 @@ where
                 .is_transient(&rule.conclusion().this(), &overlay, env)
                 .await?
                 || concludes_transient(&rule, placements);
+            // A rule whose premise nothing in the view can match has no
+            // firing to find: it is not evaluated.
+            let mut starved = false;
+            for attribute in unsupplied(&rule, placements, &present, &expanded) {
+                let could = match sourced.get(&attribute) {
+                    Some(could) => *could,
+                    None => {
+                        let could = dispatch
+                            .could_hold(&attribute, &[changes, &transient_overlay], env)
+                            .await?;
+                        sourced.insert(attribute, could);
+                        could
+                    }
+                };
+                if !could {
+                    starved = true;
+                    break;
+                }
+            }
+            if starved {
+                continue;
+            }
 
             // Delta restriction: bind stimulus rows into the premises
             // they match and evaluate with those bindings fixed, so
@@ -367,6 +407,7 @@ where
             if full {
                 fire(
                     &rule,
+                    &entity,
                     transient_head,
                     &heads,
                     &view,
@@ -377,6 +418,7 @@ where
             } else {
                 fire_seeded(
                     &rule,
+                    &entity,
                     transient_head,
                     &heads,
                     &assert_rows,
@@ -403,6 +445,89 @@ where
     Ok(induced)
 }
 
+impl Dispatch<'_> {
+    /// Whether the view could hold a fact of `attribute` that the round
+    /// does not bring: a line stores one, or a rule deriving it, at its
+    /// head; a line's session store or an ephemeral layer holds one, or
+    /// such a rule; `staged` (the commit's writes and the round's
+    /// transients) asserts such a rule; or a built-in rule derives it.
+    /// What a line stores is read once per head.
+    async fn could_hold<Env>(
+        &self,
+        attribute: &Relation,
+        staged: &[&Changes],
+        env: &Env,
+    ) -> Result<bool, CommitError>
+    where
+        Env: Provider<BlobRead>
+            + Provider<Get>
+            + Provider<Put>
+            + Provider<Resolve>
+            + Provider<crate::Hydrate>
+            + Provider<dialog_artifacts::Preload>
+            + Provider<dialog_artifacts::Speculation>
+            + Provider<Fork<RemoteSite, Resolve>>
+            + ConditionalSync
+            + 'static,
+    {
+        let probes = Reach::Relation(attribute.clone()).probes();
+        if probes.iter().any(builtin_derives) {
+            return Ok(true);
+        }
+        let derives = derives_attr();
+        let staged_rule = staged.iter().flat_map(|changes| changes.iter()).any(
+            |(_, the, change)| {
+                *the == derives
+                    && matches!(change, Change::Assert(Value::Entity(on), _) if probes.contains(on))
+            },
+        );
+        if staged_rule {
+            return Ok(true);
+        }
+        let facts = ArtifactSelector::new().the(attribute.clone());
+        let holds = |store: &Ephemeral| {
+            !store.scan(&facts).is_empty()
+                || probes
+                    .iter()
+                    .any(|on| !store.scan(&derives_selector(on)).is_empty())
+        };
+        if self.memories.iter().any(|memory| holds(memory)) {
+            return Ok(true);
+        }
+        for slice in &self.trees {
+            if holds(slice.source.overlay()) {
+                return Ok(true);
+            }
+            let Some(head) = &slice.head else {
+                continue;
+            };
+            let cache = slice.source.rule_cache();
+            let stored = match cache.holds(attribute, head) {
+                Some(stored) => stored,
+                None => {
+                    let mut stored = !committed(slice.source, facts.clone(), env)
+                        .await?
+                        .is_empty();
+                    for on in &probes {
+                        if stored {
+                            break;
+                        }
+                        stored = !committed(slice.source, derives_selector(on), env)
+                            .await?
+                            .is_empty();
+                    }
+                    cache.record_holds(attribute.clone(), head.clone(), stored);
+                    stored
+                }
+            };
+            if stored {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
 /// Where the heads of a commit's rules land: in a tree, or in a store
 /// (a session store or an ephemeral layer), as the commit routes the
 /// settled batch.
@@ -413,14 +538,34 @@ pub(crate) enum Landing<'a> {
     Stores(HashSet<Entity>),
 }
 
-/// What emitting a head needs to know of the commit: the placements it
-/// routes by, and where they land.
+/// What firing a rule needs to know of the commit: the placements its
+/// heads route by, where they land, and the cache its plans are kept in.
 struct Heads<'a> {
     placements: &'a Placements,
     landing: Landing<'a>,
+    plans: Option<Arc<RuleCache>>,
 }
 
 impl Heads<'_> {
+    /// The plan of `rule`, stored as `entity`, for `scope`. A plan depends
+    /// on the rule and on which variables `scope` binds alone, so a rule
+    /// that fires every commit is planned once per seed shape rather than
+    /// once per firing.
+    fn plan(&self, entity: &Entity, rule: &InductiveRule, scope: &Environment) -> Conjunction {
+        if let Some(plan) = self
+            .plans
+            .as_ref()
+            .and_then(|plans| plans.plan(entity, scope))
+        {
+            return plan;
+        }
+        let plan = rule.plan(scope);
+        if let Some(plans) = &self.plans {
+            plans.record_plan(entity.clone(), scope, plan.clone());
+        }
+        plan
+    }
+
     /// Whether a head written under `the` lands in a store, where the
     /// store elects among its own rows of the cell, as it does for a
     /// transaction's own write to it.
@@ -480,6 +625,43 @@ fn take_transient(changes: &mut Changes, placements: &Placements) -> Changes {
         }
     }
     asserted
+}
+
+/// The transient attributes that a positive premise of `rule` reads in a
+/// required field and that the round brings no fact of (`present` is
+/// every attribute among its transients and its stimulus), leaving out
+/// any the deductive closure reaches this round (`expanded`). Such a
+/// premise matches only a fact the view holds apart from the round; when
+/// [`Dispatch::could_hold`] finds no way it could hold one, the body
+/// cannot hold, and evaluating it would only find that out.
+fn unsupplied(
+    rule: &InductiveRule,
+    placements: &Placements,
+    present: &BTreeSet<Relation>,
+    expanded: &BTreeSet<Reach>,
+) -> BTreeSet<Relation> {
+    use dialog_query::{Premise, Proposition};
+
+    let mut attributes = BTreeSet::new();
+    for premise in &rule.analysis().premises {
+        let Premise::Assert(Proposition::Concept(query)) = premise else {
+            continue;
+        };
+        for (_, field) in query.predicate.with().iter() {
+            let The::Relation(the) = field.descriptor().the() else {
+                continue;
+            };
+            let attribute = Relation::from(the);
+            if !field.is_optional()
+                && placements.is_transient(&attribute)
+                && !present.contains(&attribute)
+                && !expanded.iter().any(|reach| reach.covers(&attribute))
+            {
+                attributes.insert(attribute);
+            }
+        }
+    }
+    attributes
 }
 
 /// Whether a rule's conclusion is transient attributes alone: its
@@ -1036,11 +1218,23 @@ impl<'a> Dispatch<'a> {
             })
         }
         for slice in &self.trees {
-            if slice.head.is_none() {
+            let Some(head) = &slice.head else {
                 continue;
-            }
-            if let Some(bytes) = bytes_of(committed(slice.source, selector.clone(), env).await?) {
-                return Ok(Some(bytes));
+            };
+            // Whether the rule is stored at this head, and as what: kept
+            // with the head, so a rule that fires every commit reads its
+            // bytes once per head rather than once per firing.
+            let cache = slice.source.rule_cache();
+            let bytes = match cache.source(entity, head) {
+                Some(bytes) => bytes,
+                None => {
+                    let bytes = bytes_of(committed(slice.source, selector.clone(), env).await?);
+                    cache.record_source(entity.clone(), head.clone(), bytes.clone());
+                    bytes
+                }
+            };
+            if bytes.is_some() {
+                return Ok(bytes);
             }
         }
         Ok(self
@@ -1248,15 +1442,17 @@ async fn select<'a>(
 /// Evaluate one rule's body against the frozen round view and emit its
 /// head for every binding: transient heads into `transients`, durable
 /// heads (novelty-checked against the view) into `novelty`.
+#[allow(clippy::too_many_arguments)]
 async fn fire<'a>(
     rule: &InductiveRule,
+    entity: &Entity,
     transient_head: bool,
     heads: &Heads<'_>,
     view: &QueryEnv<'a>,
     novelty: &mut Changes,
     transients: &mut Changes,
 ) -> Result<(), CommitError> {
-    let plan = rule.plan(&Environment::new());
+    let plan = heads.plan(entity, rule, &Environment::new());
     let matches: Vec<Match> = plan
         .evaluate(Match::new().seed(), view)
         .try_collect()
@@ -1309,6 +1505,7 @@ fn premise_reach(rule: &InductiveRule) -> (BTreeSet<Reach>, BTreeSet<Reach>) {
 #[allow(clippy::too_many_arguments)]
 async fn fire_seeded<'a>(
     rule: &InductiveRule,
+    entity: &Entity,
     transient_head: bool,
     heads: &Heads<'_>,
     rows: &[Artifact],
@@ -1371,7 +1568,7 @@ async fn fire_seeded<'a>(
                 continue;
             }
 
-            let plan = rule.plan(&scope);
+            let plan = heads.plan(entity, rule, &scope);
             let seeded_matches: Vec<Match> = plan
                 .evaluate(matched.seed(), view)
                 .try_collect()
