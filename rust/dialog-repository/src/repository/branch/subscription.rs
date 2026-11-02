@@ -942,10 +942,13 @@ where
             + ConditionalSync
             + 'static,
     {
-        let (Some(_), Some(bottom)) = (&self.guide, self.sources.first()) else {
+        let (Some(guide), Some(bottom)) = (&self.guide, self.sources.first()) else {
             return Ok(None);
         };
-        let pending = pending_declarations(declarations_of(&self.changes), &self.layers);
+        let pending = pending_declarations(
+            [guide.declared.clone(), declarations_of(&self.changes)],
+            &self.layers,
+        );
         let placements = Placements::resolve(bottom.as_ref(), &pending, env)
             .await
             .map_err(|error| EvaluationError::Store(format!("resolve the placements: {error}")))?;

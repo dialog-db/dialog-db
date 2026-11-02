@@ -93,16 +93,22 @@ pub(crate) fn transient_placement_attr() -> Relation {
     the!("dialog.attribute/transient").into()
 }
 
-/// The pending placement declarations of a read: those `held` (the
-/// declarations of a store, or of a batch, read first) and those of each
-/// staged layer after it, folded in order as the read sees them. It is
+/// The pending placement declarations of a read: each batch of `held`
+/// (the declarations a stack holds, then those of a store or of a batch,
+/// read in that order, so a later one outranks an earlier) and those of
+/// each staged layer after them, folded in order as the read sees them. It is
 /// all that [`Placements::resolve`] reads of the pending writes, at the
 /// cost of the declarations alone rather than of everything the layers
 /// hold.
-pub(crate) fn pending_declarations(held: Changes, layers: &[crate::Staged]) -> Changes {
+pub(crate) fn pending_declarations(
+    held: impl IntoIterator<Item = Changes>,
+    layers: &[crate::Staged],
+) -> Changes {
     let (scope, default, transient) = (scope_attr(), default_attr(), transient_placement_attr());
     let mut pending = crate::Staged::default();
-    pending.apply(held);
+    for held in held {
+        pending.apply(held);
+    }
     for layer in layers {
         pending
             .apply(layer.export_cells(|the| *the == scope || *the == default || *the == transient));
@@ -404,6 +410,20 @@ impl Placements {
         changes: &Changes,
         env: &Erased,
     ) -> Result<Self, CommitError> {
+        Self::resolve_over(source, &Changes::new(), changes, env).await
+    }
+
+    /// Resolve as [`resolve`](Self::resolve) does, with `declared`, the
+    /// declarations a stack holds, laid over the session store's and
+    /// under the batch's: this process's own placements, which no layer
+    /// holds, outrank what the bottom's store and tree declare, and
+    /// yield to what the batch itself declares.
+    pub(crate) async fn resolve_over(
+        source: SourceRef<'_>,
+        declared: &Changes,
+        changes: &Changes,
+        env: &Erased,
+    ) -> Result<Self, CommitError> {
         let committed = committed_placements(source, env).await?;
         let mut placements = Placements {
             committed,
@@ -438,6 +458,15 @@ impl Placements {
                 placements.transient.insert(attribute);
             }
         }
+        placements.lay(declared)?;
+        placements.lay(changes)?;
+        Ok(placements)
+    }
+
+    /// Lay the declarations of `changes` over what is resolved so far: a
+    /// later one for the same attribute outranks an earlier.
+    fn lay(&mut self, changes: &Changes) -> Result<(), CommitError> {
+        let placements = self;
         let scope = scope_attr();
         let default = default_attr();
         let transient = transient_placement_attr();
@@ -446,8 +475,14 @@ impl Placements {
                 let Some(placed) = entity_attribute(entity) else {
                     continue;
                 };
+                // A later change of the same declaration outranks an
+                // earlier: a retraction of what was declared undeclares
+                // it.
                 match change {
-                    Change::Retract(_) => placements.untransient.insert(placed),
+                    Change::Retract(_) => {
+                        placements.transient.remove(&placed);
+                        placements.untransient.insert(placed)
+                    }
                     _ => placements.transient.insert(placed),
                 };
             } else if *the == scope {
@@ -457,19 +492,29 @@ impl Placements {
                 let (Change::Assert(value, _) | Change::Retract(value)) = change;
                 let target = scope_value(placed.as_str(), value)?;
                 match change {
-                    Change::Retract(_) => placements.retracted.insert(placed, target),
+                    Change::Retract(_) => {
+                        if placements.declared.get(&placed) == Some(&target) {
+                            placements.declared.remove(&placed);
+                        }
+                        placements.retracted.insert(placed, target)
+                    }
                     _ => placements.declared.insert(placed, target),
                 };
             } else if *the == default {
                 let (Change::Assert(value, _) | Change::Retract(value)) = change;
                 let target = scope_value("dialog.attribute/default", value)?;
                 match change {
-                    Change::Retract(_) => placements.default_retracted = Some(target),
+                    Change::Retract(_) => {
+                        if placements.default.as_ref() == Some(&target) {
+                            placements.default = None;
+                        }
+                        placements.default_retracted = Some(target)
+                    }
                     _ => placements.default = Some(target),
                 }
             }
         }
-        Ok(placements)
+        Ok(())
     }
 
     /// The scope undeclared attributes belong to, if one is declared.

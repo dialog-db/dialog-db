@@ -55,7 +55,7 @@ pub use placement::{Bindings, DefaultScope, Placement, TransientAttribute, attri
 
 pub mod stack;
 pub use stack::{
-    AsLayer, Audience, Divergence, Head, Layer, OpenStack, Stack, StackCommit, StackEnv,
+    AsLayer, Audience, Committed, Divergence, Head, Layer, OpenStack, Stack, StackCommit, StackEnv,
     StackError, StackPublish, StackQuery, StackSelect, StackSubscription, StackTransaction,
 };
 

@@ -817,7 +817,10 @@ impl QueryEnv<'_> {
             .get_or_try_init(|| async {
                 // Only the declarations: every read of a stack resolves
                 // this, and the layers may hold a great deal else.
-                let pending = pending_declarations(declarations_held(&self.overlay), self.layers());
+                let pending = pending_declarations(
+                    [guide.declared.clone(), declarations_held(&self.overlay)],
+                    self.layers(),
+                );
                 Placements::resolve(bottom.as_ref(), &pending, self.env)
                     .await
                     .map(|placements| Arc::new(placements.scopes()))

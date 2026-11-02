@@ -959,9 +959,18 @@ struct Recorded {
 pub struct OpenStack {
     top: Layer,
     edits: Vec<LinkEdit>,
+    declared: Changes,
 }
 
 impl OpenStack {
+    /// Hold `declaration` in the stack once it is open, as
+    /// [`Stack::declare`] would: in force from its first commit and its
+    /// first read.
+    pub fn declare<S: Statement>(mut self, declaration: S) -> Self {
+        declaration.assert(&mut self.declared);
+        self
+    }
+
     /// Link `from` to `to` under `name` once the stack is open, as
     /// [`StackTransaction::link`] would. A layer linked beneath another
     /// enters just beneath it, so of the layers that one layer links side
@@ -1003,7 +1012,7 @@ impl OpenStack {
         Env: StackSyncEnv,
     {
         let topology = walk(self.top, env).await?;
-        let stack = Stack::from_topology(topology);
+        let stack = Stack::from_topology(topology, self.declared);
         if !self.edits.is_empty() {
             let mut transaction = stack.transaction();
             transaction.edits = self.edits;
@@ -1592,6 +1601,11 @@ struct State {
     /// instants wait in each channel until the chains publish, and
     /// never leave if the chains are dropped. See [`Channel`](crate::Channel).
     holds: Vec<Hold>,
+    /// The declarations this stack holds: this process's own placements,
+    /// transient markers and default scope (see [`Stack::declare`]). No
+    /// layer holds them, no read returns them as facts, and they stay
+    /// across an advance, a pull and a rewiring.
+    declared: Changes,
 }
 
 /// The hold of a commit while it stages. A commit that fails, or whose
@@ -1754,10 +1768,34 @@ impl Stack {
         OpenStack {
             top: layer.into(),
             edits: Vec::new(),
+            declared: Changes::new(),
         }
     }
 
-    fn from_topology(topology: Topology) -> Self {
+    /// Hold `declaration` in this stack: a placement, a transient marker
+    /// or a default scope ([`Placement`](crate::Placement),
+    /// [`TransientAttribute`](crate::TransientAttribute),
+    /// [`DefaultScope`](crate::DefaultScope)), or a [`Changes`] of them,
+    /// whose retractions undo what an earlier call declared, or what the
+    /// bottom declares. It is this process's own: it outranks a
+    /// declaration the bottom's session store or tree holds, yields to one
+    /// a transaction carries, guides every read and routes every commit
+    /// of the stack from now on, and reaches no layer and no peer. A
+    /// stack keeps what it declares across an advance, a pull and a
+    /// rewiring, so a process that knows where its facts belong declares
+    /// it once. Chainable.
+    pub fn declare<S: Statement>(&self, declaration: S) -> &Self {
+        declaration.assert(&mut self.state.write().declared);
+        self
+    }
+
+    /// The declarations this stack holds, as [`declare`](Self::declare)
+    /// accumulated them.
+    pub fn declared(&self) -> Changes {
+        self.state.read().declared.clone()
+    }
+
+    fn from_topology(topology: Topology, declared: Changes) -> Self {
         let published: Vec<Head> = topology.layers.iter().map(Layer::head).collect();
         let versions = versions_of(&topology.layers);
         let staged = topology.layers.iter().map(|_| None).collect();
@@ -1770,6 +1808,7 @@ impl Stack {
                 induced: None,
                 watermark: None,
                 holds: Vec::new(),
+                declared,
             })),
             divergences: Divergences::default(),
             turn: Arc::default(),
@@ -2141,6 +2180,7 @@ impl Stack {
         let mut guide = Guide {
             lines: Vec::new(),
             ephemerals: Vec::new(),
+            declared: self.state.read().declared.clone(),
             bound: topology.bound.keys().cloned().collect(),
             bottom: match topology.layers.first() {
                 Some(Layer::Branch(branch)) => branch.bindings().clone(),
@@ -2378,6 +2418,7 @@ impl Stack {
             induced: None,
             watermark: live.watermark.clone(),
             holds: Vec::new(),
+            declared: live.declared.clone(),
         };
         // An edit applies once its encloser is in the stack, so a
         // transaction may name its links in any order: a layer that a
@@ -2794,6 +2835,24 @@ impl<'a> StackTransaction<'a> {
     }
 }
 
+/// What a commit of a stack left: the heads the stack reads at, and the
+/// transients its rules derived.
+#[derive(Debug, Clone)]
+pub struct Committed {
+    /// The heads the stack reads at after the commit, bottom first: what
+    /// [`Stack::captured`] gives, or [`Stack::published`] once the commit
+    /// published.
+    pub heads: Vec<Head>,
+    /// Every transient that a rule head of the commit emitted, across its
+    /// rounds, the way a round saw it: a command that a rule concluded,
+    /// which a later round consumed. The transients the transaction
+    /// dispatched are not among them. They are handed back here, not
+    /// only witnessed on the layers, so a caller that acts on what a
+    /// commit derived never has to observe a layer for it, and never
+    /// loses one to an observer that fell behind.
+    pub derived: Changes,
+}
+
 /// Command staging a [`StackTransaction`].
 pub struct StackCommit<'a> {
     stack: &'a Stack,
@@ -2813,12 +2872,12 @@ impl<'a> StackCommit<'a> {
     /// stack reads at, route by placement, and stage the layers bottom
     /// to top. Never moves a branch head: the staged chains wait for
     /// [`Stack::publish`]. Returns the heads the stack reads at
-    /// afterwards, bottom first.
+    /// afterwards, bottom first, and the transients the commit derived.
     ///
     /// A commit that fails while the layers stage drops every staged
     /// chain, those of earlier commits not yet published included, since a
     /// chain may hold part of it: run those commits again.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Vec<Head>, StackError>
+    pub async fn perform<Env>(self, env: &Env) -> Result<Committed, StackError>
     where
         Env: StackEnv,
     {
@@ -2931,7 +2990,11 @@ impl<'a> StackCommit<'a> {
                 .await?;
             stack.hold_until_published(pending.keep());
             drop(stack.entered.drain(stack.id));
-            return Ok(heads);
+            // A stack with no branch runs no rule: nothing is derived.
+            return Ok(Committed {
+                heads,
+                derived: Changes::new(),
+            });
         }
         let Some(primary) = topology.primary() else {
             return Err(CommitError::Detached.into());
@@ -2958,7 +3021,8 @@ impl<'a> StackCommit<'a> {
         for line in &composite.sources {
             view = view.join(QueryLayer::from(line.as_ref()));
         }
-        let declared = Placements::resolve(source, &self.changes.export(), env).await?;
+        let held = stack.declared();
+        let declared = Placements::resolve_over(source, &held, &self.changes.export(), env).await?;
         let stores: HashSet<_> = self
             .changes
             .log()
@@ -2974,7 +3038,7 @@ impl<'a> StackCommit<'a> {
             env,
         ))
         .await?;
-        let staged = Placements::resolve(source, &changes, env).await?;
+        let staged = Placements::resolve_over(source, &held, &changes, env).await?;
         // The bottom's lag is what induction reads past its watermark: the
         // head it reads at, and where the watermark stands, settle once
         // the commit publishes. A bottom under a read-only link is never
@@ -3094,7 +3158,7 @@ impl<'a> StackCommit<'a> {
                 false => Instruction::Retract(fact.clone()),
             })
             .collect();
-        induce(
+        let derived = induce(
             source,
             watermark,
             &composite,
@@ -3113,7 +3177,7 @@ impl<'a> StackCommit<'a> {
         // back to a tree binding on the primary, so a single-layer
         // stack routes exactly as the branch would; the primary's own
         // session store is not a layer and gets nothing.
-        let placements = Placements::resolve(source, &changes, env).await?;
+        let placements = Placements::resolve_over(source, &held, &changes, env).await?;
         for instruction in changes.into_instructions() {
             let (op, artifact) = split(instruction);
             let targets = route(&topology, &placements, &primary, &artifact)?;
@@ -3182,7 +3246,7 @@ impl<'a> StackCommit<'a> {
         if !waits && !caught_up {
             stack.catch_up_induction(lagged, env).await?;
         }
-        Ok(heads)
+        Ok(Committed { heads, derived })
     }
 }
 
@@ -3193,14 +3257,16 @@ pub struct StackPublish<'a> {
 
 impl StackPublish<'_> {
     /// Stage the transaction, then publish every staged chain bottom
-    /// to top. Returns the heads the stack reads at afterwards.
-    pub async fn perform<Env>(self, env: &Env) -> Result<Vec<Head>, StackError>
+    /// to top. Returns the heads the stack reads at afterwards, and the
+    /// transients the commit derived.
+    pub async fn perform<Env>(self, env: &Env) -> Result<Committed, StackError>
     where
         Env: StackSyncEnv,
     {
         let stack = self.commit.stack;
-        self.commit.perform(env).await?;
-        stack.publish(env).await
+        let Committed { derived, .. } = self.commit.perform(env).await?;
+        let heads = stack.publish(env).await?;
+        Ok(Committed { heads, derived })
     }
 }
 
@@ -3413,7 +3479,7 @@ mod tests {
     use crate::helpers::test_repo;
     use crate::{Demand, Drained};
     use anyhow::Result;
-    use dialog_artifacts::{ArtifactSelector, Value};
+    use dialog_artifacts::{ArtifactSelector, Change, Value};
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::{AttributeStatement, Relation};
     use dialog_query::rule::DeductiveRuleDescriptor;
@@ -3505,7 +3571,7 @@ mod tests {
             .publish()
             .perform(&operator)
             .await?;
-        assert_eq!(heads.len(), 3);
+        assert_eq!(heads.heads.len(), 3);
         shared.refresh(&operator).await?;
 
         assert_eq!(
@@ -5148,6 +5214,103 @@ mod tests {
         Ok(())
     }
 
+    /// A commit hands back the transients its rules derived, and not the
+    /// ones the transaction dispatched: a dispatched increment makes a
+    /// rule conclude a notice, itself transient, and the commit returns
+    /// the notice alone. No observer is registered on any layer, so what
+    /// the commit derived reaches the caller without one, and cannot be
+    /// lost to a queue that fell behind.
+    #[dialog_common::test]
+    async fn it_hands_back_the_transients_a_commit_derived() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        // A notice of the counter, concluded from the increment command.
+        let notify: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "counter": { "the": "cmd.notify/counter", "as": "Entity" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "counter": { "the": "cmd.increment/counter", "as": "Entity" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "counter": { "?": { "name": "counter" } }
+                }
+            }]
+        }))?;
+        let counter: Entity = "ctr:1".parse()?;
+        shared
+            .transaction()
+            .assert(Placement::new(
+                "cmd.increment/counter".parse()?,
+                name("state"),
+            ))
+            .assert(Placement::new("cmd.notify/counter".parse()?, name("state")))
+            .assert(crate::TransientAttribute::new(
+                "cmd.notify/counter".parse()?,
+            ))
+            .assert(notify)
+            .assert(increment_rule())
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&state, &shared, name("shared"))
+            .link(&top, &state, name("state"))
+            .perform(&operator)
+            .await?;
+
+        let command: Entity = "cmd:1".parse()?;
+        let landed = stack
+            .transaction()
+            .dispatch(
+                dialog_query::the!("cmd.increment/counter")
+                    .of(command.clone())
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+
+        let derived: Vec<(String, String, Value)> = landed
+            .derived
+            .iter()
+            .map(|(of, the, change)| {
+                let (Change::Assert(is, _) | Change::Retract(is)) = change;
+                (the.to_string(), of.to_string(), is.clone())
+            })
+            .collect();
+        assert_eq!(
+            derived,
+            vec![(
+                "cmd.notify/counter".to_string(),
+                command.to_string(),
+                Value::Entity(counter.clone())
+            )],
+            "the commit hands back the notice its rule derived, and not the dispatched increment"
+        );
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)],
+            "the increment still lands"
+        );
+        Ok(())
+    }
+
     /// A transient whose attribute is placed on an ephemeral scope is
     /// witnessed on that layer, not on the bottom's session store; the
     /// rule it fires still lands its conclusion by placement.
@@ -5523,6 +5686,231 @@ mod tests {
                 .await?
                 .is_empty(),
             "nor the declaration"
+        );
+        Ok(())
+    }
+
+    /// A placement the stack holds routes a commit as one in the
+    /// bottom's session store does, and survives an advance: the process
+    /// declares once where its facts belong, no layer holds the
+    /// declaration, and a commit after the stack advanced still routes
+    /// by it.
+    #[dialog_common::test]
+    async fn it_routes_by_a_declaration_the_stack_holds() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, &shared, name("shared"))
+            .declare(Placement::new("site/path".parse()?, name("state")))
+            .perform(&operator)
+            .await?;
+
+        let site: Entity = "site:1".parse()?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("site/path")
+                    .of(site.clone())
+                    .is("/a".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            values::<String>(&stack, &operator, "site/path", &site).await?,
+            vec![Value::String("/a".into())]
+        );
+        assert_eq!(
+            state.scan(&ArtifactSelector::new().of(site.clone())).len(),
+            1,
+            "the fact landed on the layer the scope names"
+        );
+        assert!(
+            committed(&shared, &operator, "site/path", &site)
+                .await?
+                .is_empty(),
+            "the tree never sees the fact"
+        );
+        let placement: Entity = crate::attribute_entity(&"site/path".parse()?);
+        assert!(
+            committed(&shared, &operator, "dialog.attribute/scope", &placement)
+                .await?
+                .is_empty(),
+            "nor the declaration"
+        );
+        assert!(
+            shared
+                .overlay()
+                .scan(&ArtifactSelector::new().of(placement))
+                .is_empty(),
+            "nor does the session store of the bottom"
+        );
+
+        // Another writer moves the bottom; the stack advances, and still
+        // holds its declaration.
+        let other = repo.branch("main").open().perform(&operator).await?;
+        other
+            .transaction()
+            .assert(
+                dialog_query::the!("doc/title")
+                    .of("doc:1".parse::<Entity>()?)
+                    .is("Notes".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        stack.advance(&operator).await?;
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("site/path")
+                    .of(site.clone())
+                    .is("/b".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            state.scan(&ArtifactSelector::new().of(site.clone())).len(),
+            2,
+            "the declaration routes the commit after the advance too"
+        );
+        assert!(
+            committed(&shared, &operator, "site/path", &site)
+                .await?
+                .is_empty(),
+            "the tree still never sees the fact"
+        );
+        Ok(())
+    }
+
+    /// A placement the stack holds guides reads, and outranks one the
+    /// bottom commits, as a placement in the bottom's session store does:
+    /// the bottom commits `site/path` onto its own scope, the stack
+    /// declares it on the ephemeral layer, and a fact of it in the bottom
+    /// is not read. A subscription over the attribute re-evaluates when
+    /// the stack declares.
+    #[dialog_common::test]
+    async fn it_reads_by_a_declaration_the_stack_holds_first() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let site: Entity = "site:1".parse()?;
+        shared
+            .transaction()
+            .assert(
+                dialog_query::the!("site/path")
+                    .of(site.clone())
+                    .is("/committed".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared
+            .transaction()
+            .assert(Placement::new("site/path".parse()?, name("shared")))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        assert_eq!(
+            values::<String>(&stack, &operator, "site/path", &site).await?,
+            vec![Value::String("/committed".into())],
+            "the committed placement names the bottom"
+        );
+        let mut subscription = stack.query().subscribe(AttributeQuery::from(
+            Term::<Relation>::from(dialog_query::the!("site/path"))
+                .of(Term::<Entity>::var("e"))
+                .is(Term::<String>::var("v")),
+        ));
+        let initial = subscription.poll(&operator).await?.expect("initial");
+        assert_eq!(initial.asserted.len(), 1);
+
+        stack.declare(Placement::new("site/path".parse()?, name("state")));
+        assert!(
+            values::<String>(&stack, &operator, "site/path", &site)
+                .await?
+                .is_empty(),
+            "the stack's declaration moves the attribute to the ephemeral layer"
+        );
+        assert_eq!(stack.divergences().len(), 1);
+        let delta = subscription
+            .poll(&operator)
+            .await?
+            .expect("the declaration re-evaluates the subscription");
+        assert_eq!(delta.retracted.len(), 1, "the row of the bottom goes");
+
+        // A retraction of the declaration, through a batch of changes,
+        // gives the attribute back to the committed placement.
+        let mut changes = Changes::new();
+        Placement::new("site/path".parse()?, name("state")).retract(&mut changes);
+        stack.declare(changes);
+        assert_eq!(
+            values::<String>(&stack, &operator, "site/path", &site).await?,
+            vec![Value::String("/committed".into())],
+            "the retracted declaration yields to the committed placement"
+        );
+        Ok(())
+    }
+
+    /// A placement a transaction carries outranks one the stack holds,
+    /// as it outranks one in the bottom's session store: the stack
+    /// declares `site/path` on the ephemeral layer, the transaction
+    /// declares it on the bottom's scope, and its fact lands in the tree.
+    #[dialog_common::test]
+    async fn it_routes_by_a_transactions_declaration_over_the_stacks() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, &shared, name("shared"))
+            .declare(Placement::new("site/path".parse()?, name("state")))
+            .perform(&operator)
+            .await?;
+        let site: Entity = "site:1".parse()?;
+        stack
+            .transaction()
+            .assert(Placement::new("site/path".parse()?, name("shared")))
+            .assert(
+                dialog_query::the!("site/path")
+                    .of(site.clone())
+                    .is("/a".to_string()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "site/path", &site).await?,
+            vec![Value::String("/a".into())],
+            "the transaction's declaration sends the fact to the tree"
+        );
+        assert!(
+            state
+                .scan(&ArtifactSelector::new().of(site.clone()))
+                .is_empty(),
+            "and not to the layer the stack declared"
         );
         Ok(())
     }

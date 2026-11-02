@@ -860,7 +860,71 @@ it needs before its workers move onto stacks. Each is offered upstream.
 6. ~~Channels: replicated ephemeral layers with a peer-offset log.~~
    Done in-process: increment 6. Still open: the transport binding.
 
-## What remains
+## Landing the port (2026-11)
+
+The branch that lands is the port with main merged in, #697 and #698,
+and what the two consumers that run on it asked for. Sapling
+(`sapling-dialog/src/stack.rs`) runs its worker on a stack: the subject
+at the bottom, each index layer under a read-only link, an application
+layer shared with the daemon through a channel, and a library layer for
+the guest's rules. Tonk (#1053) runs its reactor on `[branch, state,
+top]`. Both still reached into the bottom's session store for two
+things, and lost what a commit's rules derived when an observer fell
+behind. Each is now a property of the stack:
+
+- **A commit returns what it derived.** `StackCommit::perform` and
+  `StackPublish::perform` return `Committed { heads, derived }`:
+  `derived` is every transient a rule head emitted across the commit's
+  rounds, the dispatched ones left out. Induction had it in hand and
+  threw it away; both consumers recovered it by observing the bottom's
+  session store and the application layer with `observe_everything`,
+  and an observer that falls behind by more than its queue holds gaps,
+  so a command a rule concluded was lost to the caller. The rounds are
+  still witnessed on the layers for observers that want them (a channel
+  does).
+- **A stack holds its declarations.** `Stack::declare` and
+  `OpenStack::declare` take placements, transient markers and defaults.
+  They rank between the bottom's session store and a transaction's own
+  declarations, guide reads, route commits, and stay across an advance,
+  a pull and a rewiring. Sapling re-declared into the session store at
+  every advance, since a member can commit a placement into the subject;
+  tonk declared into `branch.overlay()`. Neither needs the session store
+  for it now. A stack-held declaration is not a fact of any layer, so no
+  rule can premise on it; a process that wants its declarations readable
+  commits them.
+- **One rewind for every ephemeral store.** Main's #714 made a
+  subscription's view of the state before a change exact by recording,
+  per instant, how the overlay held each fact it moved. The port already
+  records each change an instant makes to the store (`Instant::changes`,
+  for channels), and undoing that log in reverse is exact, so the second
+  record is gone, and the rewind is built for every tree line's session
+  store and every standalone ephemeral layer a subscription reads, from
+  a sequence pinned per store. The randomized invariant of #711 runs
+  through a stack too (`a_maintained_stack_subscription_matches_a_fresh_evaluation_after_random_changes`),
+  with levels and mentors placed on an ephemeral layer above the branch,
+  and fails on every run when either store is not rewound.
+
+### Not done, and why
+
+- **Placements from every durable layer.** `Placements::resolve` reads
+  committed declarations from the bottom alone. A stack of several
+  repositories (tonk's `memory:peer`, a peer's space linked above a
+  shared one) would want each repository's declarations honoured for its
+  own attributes. Not built here: it needs a rule for two durable layers
+  that place one attribute differently, and the rule that fits the rest
+  of this design is the session store's, a higher layer outranks a lower
+  one. Until then a stack-held declaration (`Stack::declare`) places
+  such attributes for the process, which is what both consumers do
+  today.
+- **The observer's bound stays.** An observer still gaps past 1024
+  matching instants, and a channel's log past its bound. A subscription
+  recovers by recomputing, the stack's watch of what entered recovers
+  from the layer's facts, and a caller's own commit no longer depends on
+  an observer. What is still lost in a gap is a transient another writer
+  witnessed, which is where the model is thin: a transient is a value
+  that exists only in queues, and a command that must not be lost is
+  not a transient but a fact with a receipt (see *Open questions*).
+
 
 - Descriptor blobs in the archive, `Stack::open` by a stack identity
   alone, `named`, the registry metadata.
@@ -981,3 +1045,52 @@ and not accidents:
   unresolved. Leaning: no. A snapshot in a stack is a pin, and a
   stack that wants to write opens a branch at that revision instead;
   `Snapshot::transaction` stays the single-layer way to advance one.
+- **A command is a transient, and a transient lives only in queues.**
+  A round's transients are witnessed as instants, and an instant lives
+  in each observer's bounded queue and a channel's bounded log: past
+  the bound it is gone, and nothing says so to the writer. A commit's
+  own derived transients now come back with the commit, but one that a
+  peer witnessed, or that a channel carried, is delivered at most once.
+  Sapling's daemon and tonk's workers both run commands that must not
+  be lost (join, create, invite). The alternative, worked through in
+  the design thread of 2026-10-27, is that a command that needs a
+  receipt is a fact with an audience, retained until a receipt names
+  it, and a provider is a standing query over "addressed to me, unless
+  receipt": delivery becomes at-least-once with the invocation entity
+  as the idempotency key, and only events that may be dropped (a click,
+  a tick) stay transients. Not decided.
+- **Placement gives each attribute one home.** A value that moves
+  between kinds of state, a local draft becoming durable, is a second
+  attribute plus a rule or an explicit write, since one attribute has
+  one scope. Whether that is the intended model of movement across
+  layers, or whether the same attribute should move, is undecided; the
+  former is what sapling and tonk do today.
+- **Reads are pinned, so every consumer advances first.** A stack
+  reads at captured heads and sees outside movement only on `advance`
+  or `pull`. Every write path in sapling and in tonk#1053 calls
+  `advance` before it commits, and a commit that races a sync advances
+  and runs again. For a stack whose only layers above the bottom are
+  ephemeral, nothing durable records the capture, so the pin buys no
+  recoverability; reading the bottom live there, and reserving capture
+  for a durable encloser, would remove most of those calls. Undecided.
+- **Rules across layers across commits.** Within a commit, induction
+  runs to a fixpoint over the whole view. Across commits, a rule that
+  writes layer B from layer A and another that writes A from B fire
+  again on what the previous commit landed, since each layer's lag is
+  the next commit's change. Nothing bounds that today beyond the rules
+  themselves. Whether that is a hazard in practice, or a property to
+  document, is unchecked.
+- **A scope is a bare name.** Durability and audience are properties of
+  the layer a replica binds under a name, known to the builder and to no
+  one else: two replicas can bind `memory:application` to layers of
+  different kinds and a placement onto it then means different things
+  on each. A fixed vocabulary of scope kinds, or a kind declared with
+  the scope, would let a commit refuse a mismatch. Undecided.
+- **Two mechanisms for process-local state remain.** A branch's session
+  overlay and an ephemeral layer are the same store, read the same way
+  and rewound the same way since this merge, but attached differently:
+  the overlay rides on the branch and a layer is linked. With
+  declarations and derived transients no longer needing the overlay,
+  making `Branch::overlay` an ephemeral layer linked above the branch
+  (a one-layer stack) is an API change, not engine work, and would leave
+  one mechanism. Not done here.

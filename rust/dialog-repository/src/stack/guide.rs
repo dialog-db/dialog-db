@@ -30,7 +30,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
-use dialog_artifacts::Entity;
+use dialog_artifacts::{Changes, Entity};
 use parking_lot::Mutex;
 
 use crate::placement::{Bindings, ScopeMap, Target};
@@ -148,6 +148,11 @@ pub(crate) struct Guide {
     /// the bottom only when the bottom binds it to its tree.
     pub(crate) bottom: Bindings,
     pub(crate) divergences: Divergences,
+    /// The declarations the stack holds (see [`Stack::declare`]), which a
+    /// guided read resolves its placements over.
+    ///
+    /// [`Stack::declare`]: crate::Stack::declare
+    pub(crate) declared: Changes,
 }
 
 impl Guide {

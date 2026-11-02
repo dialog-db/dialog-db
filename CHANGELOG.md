@@ -47,10 +47,40 @@ What this changes for you:
   concluded before, as a transaction's own write there does. Before, each
   conclusion was added beside the last, so a counter a rule kept on an
   ephemeral layer held every value it ever had.
+- A stack commit returns `Committed`: the heads the stack reads at, and
+  `derived`, every transient its rules concluded (the dispatched ones are
+  not among them). A caller that acts on what a commit derived reads it
+  there, and never observes a layer for it, where an observer that fell
+  behind would have lost it.
+- A stack holds its own declarations: `Stack::declare` and
+  `OpenStack::declare` take a `Placement`, a `TransientAttribute`, a
+  `DefaultScope`, or a `Changes` of them. They outrank what the bottom's
+  session store and tree declare, yield to what a transaction carries,
+  guide every read, route every commit, stay across an advance, a pull
+  and a rewiring, and reach no layer and no peer. Before, a process
+  declared them into the bottom's session store, and again after each
+  advance.
+- A later change of a declaration outranks an earlier one in the same
+  batch: a batch that asserts and then retracts a placement declares
+  nothing. Before, the assertion won.
+- Subscriptions over a stack hold the same invariant as those over a
+  branch: a maintained result is a fresh evaluation's. The randomized
+  check runs through a stack as well, with attributes placed on an
+  ephemeral layer above the branch, and the state before a change is
+  read with every store the subscription reads rewound, not only one
+  branch's session overlay.
+- Induction over a stack caches each rule's plan and the stored bytes of
+  each rule per head, and skips a firing that a transient premise
+  starves ([#697](https://github.com/dialog-db/dialog-db/pull/697)); a
+  guided read skips a line that stores no fact of the attribute it reads
+  ([#698](https://github.com/dialog-db/dialog-db/pull/698)). Neither
+  changes what a read returns or a rule concludes.
 
 Why: tonk keeps per-process and per-tab state beside a space's
 replicated branch, and needs to read and write both as one database
-without copying session facts into the tree.
+without copying session facts into the tree. Sapling runs on this stack
+already: the subject at the bottom, the index under read-only links,
+and an application layer shared with its daemon through a channel.
 
 ### A subscription learns of the readable change to a single-valued cell, not only the moved row
 
