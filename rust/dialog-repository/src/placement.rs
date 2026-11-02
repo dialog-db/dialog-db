@@ -359,16 +359,14 @@ pub enum Kind {
     /// A store in memory: gone with the process, a fact stays until
     /// retracted.
     Memory,
-    /// A store in memory whose every fact is a change of every commit
-    /// until what handles it retracts it: delivery to a rule or a
-    /// writer is at least once, and the fact's entity is the key that
-    /// makes a handler idempotent.
-    Queue,
     /// A store in memory whose facts live one commit: a commit retracts
-    /// what the layer held when it began. Rules and subscriptions react
-    /// to a fact in the commit it enters in, whether or not anything
-    /// handled it.
-    Tick,
+    /// what the layer held when it began. Rules see a fact of it once,
+    /// as they see a dispatched transient, in the first round of the
+    /// commit it enters in; queries and subscriptions see it as a stored
+    /// fact while it is held, whether or not anything handled it. A
+    /// rule's head placed on such a layer is a transient of the next
+    /// round, stored in the layer for a tick too.
+    Event,
 }
 
 impl Kind {
@@ -378,8 +376,7 @@ impl Kind {
             Kind::Replicated => "replicated",
             Kind::Durable => "durable",
             Kind::Memory => "memory",
-            Kind::Queue => "queue",
-            Kind::Tick => "tick",
+            Kind::Event => "event",
         }
     }
 
@@ -390,15 +387,14 @@ impl Kind {
             "replicated" => Kind::Replicated,
             "durable" => Kind::Durable,
             "memory" => Kind::Memory,
-            "queue" => Kind::Queue,
-            "tick" => Kind::Tick,
+            "event" => Kind::Event,
             _ => return None,
         })
     }
 
     /// Whether facts of this kind live in memory.
     pub fn in_memory(&self) -> bool {
-        matches!(self, Kind::Memory | Kind::Queue | Kind::Tick)
+        matches!(self, Kind::Memory | Kind::Event)
     }
 }
 
@@ -416,7 +412,7 @@ impl fmt::Display for Kind {
 /// ```no_run
 /// # use dialog_repository::{ScopeKind, Kind};
 /// # fn main() -> anyhow::Result<()> {
-/// let input = ScopeKind::new("memory:input".parse()?, Kind::Tick);
+/// let input = ScopeKind::new("memory:input".parse()?, Kind::Event);
 /// # let _ = input;
 /// # Ok(())
 /// # }
@@ -691,14 +687,20 @@ impl Placements {
         }
     }
 
-    /// Whether facts under `attribute` live one round: declared
-    /// transient, in this commit or at the head, and not undeclared in
-    /// this commit.
+    /// Whether facts under `attribute` live one round for the rules:
+    /// declared transient, in this commit or at the head, and not
+    /// undeclared in this commit; or placed on a scope of
+    /// [`Kind::Event`], whose layer stores them for a tick besides.
     pub(crate) fn is_transient(&self, attribute: &Relation) -> bool {
         if self.transient.contains(attribute) {
             return true;
         }
-        self.committed.transient.contains(attribute) && !self.untransient.contains(attribute)
+        if self.committed.transient.contains(attribute) && !self.untransient.contains(attribute) {
+            return true;
+        }
+        self.placement_of(attribute)
+            .and_then(|scope| self.kind_of(scope))
+            == Some(Kind::Event)
     }
 
     /// The scope `attribute`'s facts live in, or `None` for the tree

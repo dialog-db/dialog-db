@@ -1629,8 +1629,8 @@ struct State {
     /// layer holds them, no read returns them as facts, and they stay
     /// across an advance, a pull and a rewiring.
     declared: Changes,
-    /// The scopes the last commit found declared as input kinds (tick or
-    /// queue), so a commit that writes nothing knows whether a layer may
+    /// The scopes the last commit found declared as event scopes, so a
+    /// commit that writes nothing knows whether a layer may
     /// hold inputs without resolving the placements first. `None` until
     /// a commit resolved them, when every layer in memory may.
     input_scopes: Option<HashSet<Entity>>,
@@ -2644,9 +2644,9 @@ struct StackWitness<'a> {
     /// Each round's shares, by layer, or `None` for the bottom's session
     /// store, in the order induction ran them.
     rounds: Vec<BTreeMap<Option<usize>, Changes>>,
-    /// The inputs offered to the first round from a tick or a queue
-    /// layer, by attribute, entity and value: a layer holds them, so they
-    /// are not witnessed.
+    /// The inputs offered to the first round from an event layer, by
+    /// attribute, entity and value: a layer holds them, so they are not
+    /// witnessed.
     offered: HashSet<(String, String, Vec<u8>)>,
 }
 
@@ -2741,7 +2741,7 @@ struct Keep {
     /// Drop every fact and tombstone of these entities.
     forgotten: HashSet<Entity>,
     /// Drop these facts, which the layer held when the commit began and
-    /// which live one commit ([`Kind::Tick`]). One the commit asserts
+    /// which live one commit ([`Kind::Event`]). One the commit asserts
     /// again is not among them.
     expired: Vec<Artifact>,
 }
@@ -3130,14 +3130,13 @@ impl<'a> StackCommit<'a> {
         let staged = Placements::resolve_over(source, &held, &changes, env).await?;
         // A scope's kind is schema: a layer of another kind under it is
         // refused here, before induction runs and before any layer changes.
-        // A tick or a queue layer is an input layer: what it holds when
-        // the commit begins is offered to the rules as the transients of
-        // the first round, the way a dispatched transient is, and not as
-        // stored facts of the view, so a rule that reads an input and the
-        // state it changes (a click and the count it increments) fires
-        // once and settles. What a tick layer holds expires with this
-        // commit; what a queue layer holds is offered again at every
-        // commit until it is retracted.
+        // An event layer is an input layer: a fact that entered it, and
+        // one the transaction writes to it, is offered to the rules as a
+        // transient of the first round, the way a dispatched transient
+        // is, and never as a stored fact of the view, so a rule that
+        // reads an event and the state it changes (a click and the count
+        // it increments) fires once and settles. What an event layer
+        // holds when the commit begins expires with it.
         let mut expiring: BTreeMap<usize, Vec<Artifact>> = BTreeMap::new();
         let mut inputs: Vec<(Entity, Artifact)> = Vec::new();
         let mut input_layers: HashMap<Entity, Kind> = HashMap::new();
@@ -3146,7 +3145,7 @@ impl<'a> StackCommit<'a> {
             let Some(kind) = staged.kind_of(scope) else {
                 continue;
             };
-            if matches!(kind, Kind::Tick | Kind::Queue) {
+            if kind == Kind::Event {
                 input_scopes.insert(scope.clone());
             }
             for index in indices {
@@ -3158,7 +3157,7 @@ impl<'a> StackCommit<'a> {
                         layer: Box::new(layer.address_entity()),
                     });
                 }
-                let (Layer::Ephemeral(store), Kind::Tick | Kind::Queue) = (layer, kind) else {
+                let (Layer::Ephemeral(store), Kind::Event) = (layer, kind) else {
                     continue;
                 };
                 let address = layer.address_entity();
@@ -3172,18 +3171,12 @@ impl<'a> StackCommit<'a> {
                     .into_iter()
                     .filter(|fact| !fact.the.as_str().starts_with("dialog."))
                     .collect();
-                match kind {
-                    // A tick fact is offered once, in the commit it enters
-                    // in: from outside, below, with what entered; from the
-                    // stack, in the commit that writes it. What the layer
-                    // held when this commit began expires with it.
-                    Kind::Tick => {
-                        expiring.insert(*index, held);
-                    }
-                    // A queued fact is offered at every commit until it is
-                    // retracted.
-                    _ => inputs.extend(held.into_iter().map(|fact| (address.clone(), fact))),
-                }
+                // An event is offered once, in the commit it enters in:
+                // from outside, below, with what entered; from the
+                // transaction, in the commit that writes it; from a rule,
+                // to the next round of the commit that derives it. What
+                // the layer held when this commit began expires with it.
+                expiring.insert(*index, held);
             }
         }
         // The bottom's lag is what induction reads past its watermark: the
@@ -3303,7 +3296,7 @@ impl<'a> StackCommit<'a> {
         // What entered an input layer is offered as an input below, not as
         // a change of a stored fact.
         for (address, fact, stored) in &entered {
-            if *stored && input_layers.get(address) == Some(&Kind::Tick) {
+            if *stored && input_layers.contains_key(address) {
                 inputs.push((address.clone(), fact.clone()));
             }
         }
@@ -3333,20 +3326,21 @@ impl<'a> StackCommit<'a> {
                 transients.associate(fact.the, fact.of, fact.is, Pick::All);
             }
         }
-        // The transaction's own writes of an attribute placed on an input
+        // The transaction's own writes of an attribute placed on an event
         // layer are inputs too: offered to the first round, and routed to
-        // the layer after induction, where a read sees them for a tick
-        // (or until they are retracted). Read as a pending stored write,
-        // they would be matched in every round.
+        // the layer after induction, where a read sees them for a tick.
+        // Read as a pending stored write, they would be matched in every
+        // round.
+        let placed_on_events = |the: &dialog_artifacts::Relation| {
+            staged
+                .placement_of(the)
+                .and_then(|scope| staged.kind_of(scope))
+                == Some(Kind::Event)
+        };
         let mut own_inputs = if input_layers.is_empty() {
             Changes::new()
         } else {
-            changes.take_cells(|the| {
-                staged
-                    .placement_of(the)
-                    .and_then(|scope| staged.kind_of(scope))
-                    .is_some_and(|kind| matches!(kind, Kind::Tick | Kind::Queue))
-            })
+            changes.take_cells(placed_on_events)
         };
         for instruction in own_inputs.clone().into_instructions() {
             if let Instruction::Assert(fact, _) = instruction
@@ -3408,6 +3402,19 @@ impl<'a> StackCommit<'a> {
         if !own_inputs.is_empty() {
             own_inputs.take_assets();
             own_inputs.assert(&mut changes);
+        }
+        // A rule's head placed on an event layer was a transient of the
+        // round after it fired; it is stored in the layer for a tick too,
+        // so a read sees it, and expires with the next commit, which
+        // offers it to no rule again.
+        if !input_layers.is_empty() {
+            for (of, the, change) in derived.iter() {
+                if let Change::Assert(is, pick) = change
+                    && placed_on_events(the)
+                {
+                    changes.associate(the.clone(), of.clone(), is.clone(), pick.clone());
+                }
+            }
         }
 
         // Route by placement: the primary holds the declarations, the
@@ -6241,20 +6248,20 @@ mod tests {
         Ok(())
     }
 
-    /// A tick layer's facts live one commit. A click asserted into the
+    /// An event layer's facts live one commit. A click asserted into the
     /// input layer outside the stack fires the rule at the next commit,
     /// which retracts the click; a subscription sees it arrive and go;
     /// a later commit fires nothing. A click the commit itself writes
     /// into the layer lives until the commit after.
     #[dialog_common::test]
-    async fn it_expires_what_a_tick_layer_held_when_the_commit_began() -> Result<()> {
+    async fn it_expires_what_an_event_layer_held_when_the_commit_began() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let counter: Entity = "ctr:1".parse()?;
         shared
             .transaction()
-            .assert(crate::ScopeKind::new(name("input"), Kind::Tick))
+            .assert(crate::ScopeKind::new(name("input"), Kind::Event))
             .assert(Placement::new(
                 "cmd.increment/counter".parse()?,
                 name("input"),
@@ -6360,24 +6367,69 @@ mod tests {
         Ok(())
     }
 
-    /// A queue layer's facts are a change of every commit until what
-    /// handles them retracts them: a command no rule consumes fires its
-    /// rule at each commit; one a `retract!` rule consumes fires once,
-    /// and the queue is empty after. Delivery is at least once.
+    /// A rule's head placed on an event layer is a transient of the next
+    /// round, so a rule reading it fires in the same commit, and is stored
+    /// in the layer for a tick, so a read sees it; the commit hands it
+    /// back as derived; the next commit expires it and fires nothing.
     #[dialog_common::test]
-    async fn it_fires_a_queued_fact_at_every_commit_until_it_is_retracted() -> Result<()> {
+    async fn it_stores_an_event_a_rule_derives_for_a_tick() -> Result<()> {
         let (operator, peer) = test_session_with_peer().await;
         let repo = test_repo(&operator, &peer).await;
         let shared = repo.branch("main").open().perform(&operator).await?;
         let counter: Entity = "ctr:1".parse()?;
+        // `cmd.notify/counter` from the click, both on the event layer; the
+        // count increments on the notice.
+        let notify: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "counter": { "the": "cmd.notify/counter", "as": "Entity" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "counter": { "the": "ui/click", "as": "Entity" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "counter": { "?": { "name": "counter" } }
+                }
+            }]
+        }))?;
+        let increment: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "count": { "the": "counter/count", "as": "UnsignedInteger" } }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": { "counter": { "the": "cmd.notify/counter", "as": "Entity" } }
+                    },
+                    "where": { "counter": { "?": { "name": "this" } } }
+                },
+                {
+                    "assert": {
+                        "with": { "count": { "the": "counter/count", "as": "UnsignedInteger" } }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "count": { "?": { "name": "prev" } }
+                    }
+                },
+                {
+                    "assert": "math/sum",
+                    "where": {
+                        "of": { "?": { "name": "prev" } },
+                        "with": 1,
+                        "is": { "?": { "name": "count" } }
+                    }
+                }
+            ]
+        }))?;
         shared
             .transaction()
-            .assert(crate::ScopeKind::new(name("queue"), Kind::Queue))
-            .assert(Placement::new(
-                "cmd.increment/counter".parse()?,
-                name("queue"),
-            ))
-            .assert(increment_rule())
+            .assert(crate::ScopeKind::new(name("input"), Kind::Event))
+            .assert(Placement::new("ui/click".parse()?, name("input")))
+            .assert(Placement::new("cmd.notify/counter".parse()?, name("input")))
+            .assert(notify)
+            .assert(increment)
             .assert(
                 dialog_query::the!("counter/count")
                     .of(counter.clone())
@@ -6388,53 +6440,21 @@ mod tests {
             .perform(&operator)
             .await?;
         shared.refresh(&operator).await?;
-        let queue = Ephemeral::create().perform(&operator).await;
+        let input = Ephemeral::create().perform(&operator).await;
         let top = Ephemeral::create().perform(&operator).await;
         let stack = Stack::open(top.clone())
-            .link(&top, &queue, name("queue"))
-            .link(&queue, &shared, name("shared"))
+            .link(&top, &input, name("input"))
+            .link(&input, &shared, name("shared"))
             .perform(&operator)
             .await?;
 
-        queue.assert(
-            dialog_query::the!("cmd.increment/counter")
-                .of("cmd:1".parse::<Entity>()?)
+        input.assert(
+            dialog_query::the!("ui/click")
+                .of("click:1".parse::<Entity>()?)
                 .is(counter.clone()),
         )?;
-        for expected in [2u128, 3, 4] {
-            stack
-                .transaction()
-                .commit()
-                .publish()
-                .perform(&operator)
-                .await?;
-            shared.refresh(&operator).await?;
-            assert_eq!(
-                committed(&shared, &operator, "counter/count", &counter).await?,
-                vec![Value::UnsignedInt(expected)],
-                "an unhandled command fires at every commit"
-            );
-        }
-        assert_eq!(held(&queue).len(), 1, "and stays queued");
-
-        // A handler: a rule that retracts the command it acts on.
-        let consume: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
-            "retract!": {
-                "with": { "counter": { "the": "cmd.increment/counter", "as": "Entity" } }
-            },
-            "when": [{
-                "assert": {
-                    "with": { "counter": { "the": "cmd.increment/counter", "as": "Entity" } }
-                },
-                "where": {
-                    "this": { "?": { "name": "this" } },
-                    "counter": { "?": { "name": "counter" } }
-                }
-            }]
-        }))?;
-        stack
+        let landed = stack
             .transaction()
-            .assert(consume)
             .commit()
             .publish()
             .perform(&operator)
@@ -6442,10 +6462,24 @@ mod tests {
         shared.refresh(&operator).await?;
         assert_eq!(
             committed(&shared, &operator, "counter/count", &counter).await?,
-            vec![Value::UnsignedInt(5)],
-            "the commit that installs the handler fires the rule once more"
+            vec![Value::UnsignedInt(2)],
+            "the notice the click derived fires the increment in the same commit"
         );
-        assert!(held(&queue).is_empty(), "the handler consumed the command");
+        let stored: Vec<String> = held(&input)
+            .iter()
+            .map(|fact| fact.the.to_string())
+            .collect();
+        assert_eq!(
+            stored,
+            vec!["cmd.notify/counter".to_string()],
+            "the click expired, and the derived notice is stored for a tick"
+        );
+        assert_eq!(
+            landed.derived.iter().count(),
+            1,
+            "the commit hands the notice back as derived"
+        );
+
         stack
             .transaction()
             .commit()
@@ -6453,10 +6487,11 @@ mod tests {
             .perform(&operator)
             .await?;
         shared.refresh(&operator).await?;
+        assert!(held(&input).is_empty(), "the notice expired");
         assert_eq!(
             committed(&shared, &operator, "counter/count", &counter).await?,
-            vec![Value::UnsignedInt(5)],
-            "a consumed command fires nothing"
+            vec![Value::UnsignedInt(2)],
+            "and fired nothing again"
         );
         Ok(())
     }

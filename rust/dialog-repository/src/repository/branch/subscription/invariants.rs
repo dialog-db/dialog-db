@@ -940,10 +940,11 @@ fn minus(left: &[String], right: &[String]) -> Vec<String> {
 /// recursive rule ([`Superior`]) climbs through either.
 const STACKED: [Field; 2] = [Field::Level, Field::Mentor];
 
-/// The field a stacked run places on its tick layer: badges, which feed
-/// the non-local premises of two rules, so a fact that lives one commit
-/// moves rows two layers away and takes them back when it expires.
-const TICKED: [Field; 1] = [Field::Badge];
+/// The field a stacked run places on its event layer: badges, which
+/// feed the non-local premises of two rules, so a fact that lives one
+/// commit moves rows two layers away and takes them back when it
+/// expires.
+const EVENTED: [Field; 1] = [Field::Badge];
 
 /// The attribute a [`Field`] writes.
 fn relation(field: Field) -> &'static str {
@@ -963,9 +964,9 @@ enum Target {
     /// A stack reading `branch` at the bottom, under `memory:space`,
     /// `state` above it, under `memory:state`, with the [`STACKED`]
     /// fields placed on `state`, and `input` above that, under
-    /// `memory:input`, a tick layer with the [`TICKED`] fields placed on
-    /// it. Every commit goes through the stack, so it routes each fact
-    /// by its placement, and expires what the tick layer held.
+    /// `memory:input`, an event layer with the [`EVENTED`] fields placed
+    /// on it. Every commit goes through the stack, so it routes each
+    /// fact by its placement, and expires what the event layer held.
     Stack {
         stack: Stack,
         branch: Branch,
@@ -984,12 +985,12 @@ impl Target {
         let mut transaction = branch
             .transaction()
             .assert(ScopeKind::new(scope.clone(), Kind::Memory))
-            .assert(ScopeKind::new(ticked.clone(), Kind::Tick));
+            .assert(ScopeKind::new(ticked.clone(), Kind::Event));
         for field in STACKED {
             transaction =
                 transaction.assert(Placement::new(relation(field).parse()?, scope.clone()));
         }
-        for field in TICKED {
+        for field in EVENTED {
             transaction =
                 transaction.assert(Placement::new(relation(field).parse()?, ticked.clone()));
         }
@@ -1094,7 +1095,7 @@ impl Target {
                     .partition(|change| STACKED.contains(&change.field));
                 let (ticked, rest): (Vec<Change>, Vec<Change>) = rest
                     .into_iter()
-                    .partition(|change| TICKED.contains(&change.field));
+                    .partition(|change| EVENTED.contains(&change.field));
                 if !placed.is_empty() {
                     state.apply(batch(&placed))?;
                 }

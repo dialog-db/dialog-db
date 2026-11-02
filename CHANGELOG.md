@@ -76,27 +76,26 @@ What this changes for you:
   ([#698](https://github.com/dialog-db/dialog-db/pull/698)). Neither
   changes what a read returns or a rule concludes.
 - A scope has a kind, declared as schema beside the placements:
-  `ScopeKind::new(scope, Kind::Tick)` writes `dialog.scope/kind` of the
-  scope entity (`replicated`, `durable`, `memory`, `queue` or `tick`),
-  by a commit, into the bottom's session store, or held by the stack.
-  A stack refuses, at commit and before any layer changes, a layer
-  linked under a scope of another kind (`StackError::Kind`): a store in
-  memory under a durable scope, a branch under one in memory.
-- Two kinds of input layer replace transients and commands. A `tick`
-  layer's facts live one commit: a fact asserted into it fires the
-  rules once, in the commit it enters in, moves subscriptions as a
-  stored fact does, and is retracted by the commit after, whether or
-  not anything handled it. A `queue` layer's facts are offered to the
-  rules at every commit until what handles them retracts them, by a
-  `retract!` rule or a transaction: delivery is at least once, and the
-  fact's entity is the key a handler is idempotent by. A rule reads an
-  input the way it reads a dispatched transient, in the first round
-  only, so a rule over an input and the state it changes (a click and
-  the count it increments) fires once and settles. The transaction's
-  own writes placed on an input layer are inputs of its commit too.
-- A commit that writes nothing still runs over a stack whose layers in
-  memory hold facts, since an input layer may be among them. Before, it
-  only applied maintenance.
+  `ScopeKind::new(scope, Kind::Event)` writes `dialog.scope/kind` of the
+  scope entity (`replicated`, `durable`, `memory` or `event`), by a
+  commit, into the bottom's session store, or held by the stack. A
+  stack refuses, at commit and before any layer changes, a layer linked
+  under a scope of another kind (`StackError::Kind`): a store in memory
+  under a durable scope, a branch under one in memory.
+- An `event` layer replaces transients and commands. Its facts live one
+  commit: a fact asserted into it fires the rules once, in the commit
+  it enters in, is read by queries and subscriptions as a stored fact
+  while held, and is retracted by the commit after, whether or not
+  anything handled it. A rule reads an event the way it reads a
+  dispatched transient, in the first round only, so a rule over an
+  event and the state it changes (a click and the count it increments)
+  fires once and settles; a rule's head placed on an event layer is a
+  transient of the next round, and is stored in the layer for a tick
+  too. A command that must be handled later is a fact of a `memory`
+  layer, which a rule installed later fires over as over any stored
+  fact.
+- A commit that writes nothing still runs over a stack whose event
+  layers hold facts. Before, it only applied maintenance.
 
 Why: tonk keeps per-process and per-tab state beside a space's
 replicated branch, and needs to read and write both as one database

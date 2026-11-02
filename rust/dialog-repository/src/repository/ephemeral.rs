@@ -1257,7 +1257,7 @@ impl Ephemeral {
         for fact in dropped {
             state.remove(&fact, &mut delta);
         }
-        // What expired is removed, never hidden beneath: a tick layer
+        // What expired is removed, never hidden beneath: an event layer
         // holds what it holds, and a fact it no longer holds is gone.
         for fact in expired {
             if state.facts.holds(fact) {

@@ -904,17 +904,19 @@ behind. Each is now a property of the stack:
   with levels and mentors placed on an ephemeral layer above the branch,
   and fails on every run when either store is not rewound.
 
-- **Scope kinds, and two kinds of input layer.** A scope's kind is
-  schema (`ScopeKind`, `dialog.scope/kind`), declared beside the
-  placements and checked at commit, so every replica binds a scope to
-  the same kind of layer. Two kinds are input layers, and are what
-  transients and commands become: a `tick` layer, whose facts live one
-  commit, and a `queue` layer, whose facts are offered at every commit
-  until what handles them retracts them. A commit offers an input to
-  the rules as it offers a dispatched transient, in the first round
-  only, and reads the view without the input layers; what a tick layer
-  held when the commit began expires with it, less what the commit
-  asserts again. See `notes/layers.md` for the model.
+- **Scope kinds, and the event layer.** A scope's kind is schema
+  (`ScopeKind`, `dialog.scope/kind`), declared beside the placements
+  and checked at commit, so every replica binds a scope to the same
+  kind of layer. An `event` layer is what transients and commands
+  become: its facts live one commit. A commit offers an event to the
+  rules as it offers a dispatched transient, in the first round only,
+  and reads the view without the event layers; a rule's head placed on
+  an event layer is a transient of the next round and is stored for a
+  tick too; what an event layer held when the commit began expires with
+  it, less what the commit asserts again. A command that must be
+  handled later is a plain fact of a memory layer: a rule installed
+  later fires over stored facts already, so no queue kind is needed.
+  See `notes/layers.md` for the model.
 
 ### Not done, and why
 
