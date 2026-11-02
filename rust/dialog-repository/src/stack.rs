@@ -101,8 +101,8 @@ use base58::ToBase58 as _;
 use dialog_artifacts::history::Version as HistoryVersion;
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::{
-    Artifact, ArtifactSelector, ArtifactView, AssetChange, Changes, DialogArtifactsError, Entity,
-    Instruction, Pick, Statement, Update as _, Value,
+    Artifact, ArtifactSelector, ArtifactView, AssetChange, Change, Changes, DialogArtifactsError,
+    Entity, Instruction, Pick, Statement, Update as _, Value,
 };
 use dialog_capability::{Fork, Provider};
 use dialog_common::{Blake3Hash, ConditionalSync};
@@ -122,7 +122,7 @@ mod guide;
 pub use guide::Divergence;
 pub(crate) use guide::{Divergences, Guide, GuidedLayer};
 
-use crate::placement::{Bindings, Placements, Target, elected};
+use crate::placement::{Bindings, Kind, Placements, Target, elected};
 use crate::repository::branch::QueryLayer;
 use crate::repository::branch::registry::RegistryEnv;
 use crate::repository::branch::resolve::ResolveEnv;
@@ -307,6 +307,17 @@ impl Layer {
             }
             (Layer::Ephemeral(a), Layer::Ephemeral(b)) => a.is(b),
             _ => false,
+        }
+    }
+
+    /// Whether this layer is one a scope of `kind` may name: a store in
+    /// memory for a kind in memory, a branch or a snapshot for a durable
+    /// one. A branch with no upstream today may gain one, so a branch
+    /// stands under `replicated` and `durable` alike.
+    pub fn is_of(&self, kind: Kind) -> bool {
+        match self {
+            Layer::Ephemeral(_) => kind.in_memory(),
+            Layer::Branch(_) | Layer::Snapshot(_) => !kind.in_memory(),
         }
     }
 
@@ -514,6 +525,18 @@ pub enum StackError {
     ReadOnly {
         /// The scope the write is placed on.
         scope: Entity,
+    },
+    /// A layer is linked under a scope declared as a kind the layer is
+    /// not: a store in memory under a durable scope, or a branch under
+    /// one in memory. Refused at commit, before any layer changes.
+    #[error("Layer {layer} is linked under scope {scope}, which is declared {kind}")]
+    Kind {
+        /// The scope.
+        scope: Entity,
+        /// The kind it is declared as.
+        kind: Kind,
+        /// The address entity of the layer.
+        layer: Box<Entity>,
     },
     /// A write or maintenance names a scope no link of this stack binds.
     #[error("No layer is linked under scope {scope}")]
@@ -1606,6 +1629,11 @@ struct State {
     /// layer holds them, no read returns them as facts, and they stay
     /// across an advance, a pull and a rewiring.
     declared: Changes,
+    /// The scopes the last commit found declared as event scopes, so a
+    /// commit that writes nothing knows whether a layer may
+    /// hold inputs without resolving the placements first. `None` until
+    /// a commit resolved them, when every layer in memory may.
+    input_scopes: Option<HashSet<Entity>>,
 }
 
 /// The hold of a commit while it stages. A commit that fails, or whose
@@ -1809,6 +1837,7 @@ impl Stack {
                 watermark: None,
                 holds: Vec::new(),
                 declared,
+                input_scopes: None,
             })),
             divergences: Divergences::default(),
             turn: Arc::default(),
@@ -2271,7 +2300,7 @@ impl Stack {
         index: usize,
         heads: &[Head],
         mut batch: Changes,
-        maintenance: Option<&(bool, HashSet<Entity>)>,
+        maintenance: Option<&Keep>,
         hold: &Hold,
         env: &Env,
     ) -> Result<Option<Head>, CommitError>
@@ -2335,7 +2364,9 @@ impl Stack {
                     // Maintenance clears user state while the stack keeps
                     // its wiring, re-stamped by the link facts above, and
                     // the layer's share of the commit lands with it.
-                    Some((clear, forgotten)) => ephemeral.maintain(batch, *clear, forgotten, hold),
+                    Some(keep) => {
+                        ephemeral.maintain(batch, keep.clear, &keep.forgotten, &keep.expired, hold)
+                    }
                     None => {
                         ephemeral.apply_held(batch, hold)?;
                     }
@@ -2419,6 +2450,7 @@ impl Stack {
             watermark: live.watermark.clone(),
             holds: Vec::new(),
             declared: live.declared.clone(),
+            input_scopes: live.input_scopes.clone(),
         };
         // An edit applies once its encloser is in the stack, so a
         // transaction may name its links in any order: a layer that a
@@ -2612,6 +2644,10 @@ struct StackWitness<'a> {
     /// Each round's shares, by layer, or `None` for the bottom's session
     /// store, in the order induction ran them.
     rounds: Vec<BTreeMap<Option<usize>, Changes>>,
+    /// The inputs offered to the first round from an event layer, by
+    /// attribute, entity and value: a layer holds them, so they are not
+    /// witnessed.
+    offered: HashSet<(String, String, Vec<u8>)>,
 }
 
 impl StackWitness<'_> {
@@ -2647,6 +2683,13 @@ impl Witness for StackWitness<'_> {
         let mut shares: BTreeMap<Option<usize>, Changes> = BTreeMap::new();
         for instruction in transients.clone().into_instructions() {
             let (op, artifact) = split(instruction);
+            if self.offered.contains(&(
+                artifact.the.to_string(),
+                artifact.of.to_string(),
+                artifact.is.to_bytes(),
+            )) {
+                continue;
+            }
             // A scope that links bind decides first, as for routing.
             let targets: Vec<Option<usize>> = match self.placements.placement_of(&artifact.the) {
                 None => vec![None],
@@ -2683,11 +2726,25 @@ pub struct StackTransaction<'a> {
     stores: Vec<(Entity, Maintenance)>,
 }
 
-/// The maintenance a commit applies per layer, by index: whether to
-/// clear the layer, and the entities to forget. Applied in the same
-/// instant as the layer's share of the commit, so readers and
+/// The maintenance a commit applies per layer, by index. Applied in the
+/// same instant as the layer's share of the commit, so readers and
 /// observers never see an entity between forget and its re-stamp.
-type Upkeep = BTreeMap<usize, (bool, HashSet<Entity>)>;
+type Upkeep = BTreeMap<usize, Keep>;
+
+/// What a commit does to one ephemeral layer besides writing its share:
+/// clear it, forget entities, and expire what a tick layer held when
+/// the commit began.
+#[derive(Debug, Default)]
+struct Keep {
+    /// Drop every fact and tombstone.
+    clear: bool,
+    /// Drop every fact and tombstone of these entities.
+    forgotten: HashSet<Entity>,
+    /// Drop these facts, which the layer held when the commit began and
+    /// which live one commit ([`Kind::Event`]). One the commit asserts
+    /// again is not among them.
+    expired: Vec<Artifact>,
+}
 
 /// What a transaction does to the ephemeral layers under a scope,
 /// besides writing facts.
@@ -2934,10 +2991,12 @@ impl<'a> StackCommit<'a> {
                 if !topology.writable(*index) {
                     return Err(StackError::ReadOnly { scope });
                 }
-                let (clear, forgotten) = maintenance.entry(*index).or_default();
+                let keep = maintenance.entry(*index).or_default();
                 match &operation {
-                    Maintenance::Clear => *clear = true,
-                    Maintenance::Forget(entities) => forgotten.extend(entities.iter().cloned()),
+                    Maintenance::Clear => keep.clear = true,
+                    Maintenance::Forget(entities) => {
+                        keep.forgotten.extend(entities.iter().cloned())
+                    }
                 }
             }
         }
@@ -2969,10 +3028,40 @@ impl<'a> StackCommit<'a> {
                 .iter()
                 .position(|layer| layer.address_entity() == *address)
                 .and_then(|index| maintenance.get(&index))
-                .is_none_or(|(clear, forgotten)| !*clear && !forgotten.contains(&fact.of))
+                .is_none_or(|keep| !keep.clear && !keep.forgotten.contains(&fact.of))
         });
 
-        if self.changes.is_empty() && self.transients.is_empty() && !rewired && entered.is_empty() {
+        // A layer in memory that holds facts may be an input layer, whose
+        // facts a commit offers to the rules or expires, so a commit that
+        // writes nothing still runs induction over such a stack.
+        let input_scopes = stack.state.read().input_scopes.clone();
+        let may_hold_inputs = |index: usize| match &input_scopes {
+            None => true,
+            Some(scopes) => scopes.iter().any(|scope| {
+                topology
+                    .bound
+                    .get(scope)
+                    .is_some_and(|indices| indices.contains(&index))
+            }),
+        };
+        let inputs_possible = matches!(topology.layers.first(), Some(Layer::Branch(_)))
+            && topology
+                .layers
+                .iter()
+                .enumerate()
+                .any(|(index, layer)| match layer {
+                    Layer::Ephemeral(store) => {
+                        may_hold_inputs(index)
+                            && store.holds_any(|fact| !fact.the.as_str().starts_with("dialog."))
+                    }
+                    _ => false,
+                });
+        if self.changes.is_empty()
+            && self.transients.is_empty()
+            && !rewired
+            && entered.is_empty()
+            && !inputs_possible
+        {
             // Maintenance alone: each store's lands as one instant, its
             // wiring re-stamped, through the same staging pass a write
             // takes.
@@ -3039,6 +3128,57 @@ impl<'a> StackCommit<'a> {
         ))
         .await?;
         let staged = Placements::resolve_over(source, &held, &changes, env).await?;
+        // A scope's kind is schema: a layer of another kind under it is
+        // refused here, before induction runs and before any layer changes.
+        // An event layer is an input layer: a fact that entered it, and
+        // one the transaction writes to it, is offered to the rules as a
+        // transient of the first round, the way a dispatched transient
+        // is, and never as a stored fact of the view, so a rule that
+        // reads an event and the state it changes (a click and the count
+        // it increments) fires once and settles. What an event layer
+        // holds when the commit begins expires with it.
+        let mut expiring: BTreeMap<usize, Vec<Artifact>> = BTreeMap::new();
+        let mut inputs: Vec<(Entity, Artifact)> = Vec::new();
+        let mut input_layers: HashMap<Entity, Kind> = HashMap::new();
+        let mut input_scopes: HashSet<Entity> = HashSet::new();
+        for (scope, indices) in &topology.bound {
+            let Some(kind) = staged.kind_of(scope) else {
+                continue;
+            };
+            if kind == Kind::Event {
+                input_scopes.insert(scope.clone());
+            }
+            for index in indices {
+                let layer = &topology.layers[*index];
+                if !layer.is_of(kind) {
+                    return Err(StackError::Kind {
+                        scope: scope.clone(),
+                        kind,
+                        layer: Box::new(layer.address_entity()),
+                    });
+                }
+                let (Layer::Ephemeral(store), Kind::Event) = (layer, kind) else {
+                    continue;
+                };
+                let address = layer.address_entity();
+                if input_layers.insert(address.clone(), kind).is_some() {
+                    continue;
+                }
+                // The machinery a layer holds, its wiring above all, is
+                // no input.
+                let held: Vec<Artifact> = store
+                    .facts()
+                    .into_iter()
+                    .filter(|fact| !fact.the.as_str().starts_with("dialog."))
+                    .collect();
+                // An event is offered once, in the commit it enters in:
+                // from outside, below, with what entered; from the
+                // transaction, in the commit that writes it; from a rule,
+                // to the next round of the commit that derives it. What
+                // the layer held when this commit began expires with it.
+                expiring.insert(*index, held);
+            }
+        }
         // The bottom's lag is what induction reads past its watermark: the
         // head it reads at, and where the watermark stands, settle once
         // the commit publishes. A bottom under a read-only link is never
@@ -3078,6 +3218,7 @@ impl<'a> StackCommit<'a> {
             bottom: primary.overlay(),
             rounds: Vec::new(),
             hold: &hold,
+            offered: HashSet::new(),
         };
         // A write placed on a read-only scope fails before induction; so
         // does a dispatched transient, whose witness would land in that
@@ -3142,35 +3283,139 @@ impl<'a> StackCommit<'a> {
         }
         // A fact that entered a layer outside the scope of its placement
         // fires no rule, as it answers no query.
+        stack.state.write().input_scopes = Some(input_scopes);
         let scopes = staged.scopes();
+        let admitted = |address: &Entity, fact: &Artifact| match &composite.guide {
+            Some(guide) => guide
+                .ephemerals
+                .iter()
+                .find(|layer| layer.address == *address)
+                .is_none_or(|layer| guide.admits(layer, &scopes, fact.the.as_str())),
+            None => true,
+        };
+        // What entered an input layer is offered as an input below, not as
+        // a change of a stored fact.
+        for (address, fact, stored) in &entered {
+            if *stored && input_layers.contains_key(address) {
+                inputs.push((address.clone(), fact.clone()));
+            }
+        }
         let stimulus: Vec<Instruction> = entered
             .iter()
-            .filter(|(address, fact, _)| match &composite.guide {
-                Some(guide) => guide
-                    .ephemerals
-                    .iter()
-                    .find(|layer| layer.address == *address)
-                    .is_none_or(|layer| guide.admits(layer, &scopes, fact.the.as_str())),
-                None => true,
+            .filter(|(address, fact, _)| {
+                !input_layers.contains_key(address) && admitted(address, fact)
             })
             .map(|(_, fact, stored)| match stored {
                 true => Instruction::Assert(fact.clone(), Pick::All),
                 false => Instruction::Retract(fact.clone()),
             })
             .collect();
+        let key = |fact: &Artifact| {
+            (
+                fact.the.to_string(),
+                fact.of.to_string(),
+                fact.is.to_bytes(),
+            )
+        };
+        // The inputs join the dispatched transients of the first round.
+        // They are not witnessed again: a layer already holds them.
+        let mut transients = self.transients.export();
+        let mut offered: HashSet<(String, String, Vec<u8>)> = HashSet::new();
+        for (address, fact) in inputs {
+            if admitted(&address, &fact) && offered.insert(key(&fact)) {
+                transients.associate(fact.the, fact.of, fact.is, Pick::All);
+            }
+        }
+        // The transaction's own writes of an attribute placed on an event
+        // layer are inputs too: offered to the first round, and routed to
+        // the layer after induction, where a read sees them for a tick.
+        // Read as a pending stored write, they would be matched in every
+        // round.
+        let placed_on_events = |the: &dialog_artifacts::Relation| {
+            staged
+                .placement_of(the)
+                .and_then(|scope| staged.kind_of(scope))
+                == Some(Kind::Event)
+        };
+        let mut own_inputs = if input_layers.is_empty() {
+            Changes::new()
+        } else {
+            changes.take_cells(placed_on_events)
+        };
+        for instruction in own_inputs.clone().into_instructions() {
+            if let Instruction::Assert(fact, _) = instruction
+                && offered.insert(key(&fact))
+            {
+                transients.associate(fact.the, fact.of, fact.is, Pick::All);
+            }
+        }
+        witness.offered = offered;
+        // Induction reads the view without the input layers: their facts
+        // reach a rule body through the round's transients alone.
+        let narrowed;
+        let view = if input_layers.is_empty() {
+            &composite
+        } else {
+            let mut view = composite.clone();
+            if let Some(guide) = &composite.guide {
+                let mut guide = Guide::clone(guide);
+                let kept: Vec<bool> = guide
+                    .ephemerals
+                    .iter()
+                    .map(|layer| !input_layers.contains_key(&layer.address))
+                    .collect();
+                guide.ephemerals = guide
+                    .ephemerals
+                    .into_iter()
+                    .zip(&kept)
+                    .filter(|(_, keep)| **keep)
+                    .map(|(layer, _)| layer)
+                    .collect();
+                view.ephemerals = view
+                    .ephemerals
+                    .into_iter()
+                    .zip(&kept)
+                    .filter(|(_, keep)| **keep)
+                    .map(|(layer, _)| layer)
+                    .collect();
+                view.guide = Some(Arc::new(guide));
+            } else {
+                view.ephemerals
+                    .retain(|layer| !input_layers.contains_key(layer.entity()));
+            }
+            narrowed = view;
+            &narrowed
+        };
         let derived = induce(
             source,
             watermark,
-            &composite,
+            view,
             &staged,
             Landing::Stores(topology.store_scopes()),
             &mut changes,
-            self.transients.export(),
+            transients,
             stimulus,
             &mut witness,
             env,
         )
         .await?;
+        if !own_inputs.is_empty() {
+            own_inputs.take_assets();
+            own_inputs.assert(&mut changes);
+        }
+        // A rule's head placed on an event layer was a transient of the
+        // round after it fired; it is stored in the layer for a tick too,
+        // so a read sees it, and expires with the next commit, which
+        // offers it to no rule again.
+        if !input_layers.is_empty() {
+            for (of, the, change) in derived.iter() {
+                if let Change::Assert(is, pick) = change
+                    && placed_on_events(the)
+                {
+                    changes.associate(the.clone(), of.clone(), is.clone(), pick.clone());
+                }
+            }
+        }
 
         // Route by placement: the primary holds the declarations, the
         // stack's links bind the names. A name no link binds falls
@@ -3192,6 +3437,29 @@ impl<'a> StackCommit<'a> {
                     op.clone(),
                     artifact.clone(),
                 );
+            }
+        }
+        for (index, held) in expiring {
+            let asserted: HashSet<_> = batches
+                .get(&index)
+                .map(|batch| {
+                    batch
+                        .iter()
+                        .filter_map(|(of, the, change)| match change {
+                            Change::Assert(is, _) => {
+                                Some((the.to_string(), of.to_string(), is.to_bytes()))
+                            }
+                            Change::Retract(_) => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let expired: Vec<Artifact> = held
+                .into_iter()
+                .filter(|fact| !asserted.contains(&key(fact)))
+                .collect();
+            if !expired.is_empty() {
+                maintenance.entry(index).or_default().expired = expired;
             }
         }
         witness.land()?;
@@ -3479,7 +3747,7 @@ mod tests {
     use crate::helpers::test_repo;
     use crate::{Demand, Drained};
     use anyhow::Result;
-    use dialog_artifacts::{ArtifactSelector, Change, Value};
+    use dialog_artifacts::{Artifact, ArtifactSelector, Change, Value};
     use dialog_peer::helpers::test_session_with_peer;
     use dialog_query::attribute::{AttributeStatement, Relation};
     use dialog_query::rule::DeductiveRuleDescriptor;
@@ -5911,6 +6179,319 @@ mod tests {
                 .scan(&ArtifactSelector::new().of(site.clone()))
                 .is_empty(),
             "and not to the layer the stack declared"
+        );
+        Ok(())
+    }
+
+    /// The facts `store` holds apart from the stack's own machinery (its
+    /// wiring): what a test of an input layer counts.
+    fn held(store: &Ephemeral) -> Vec<Artifact> {
+        store
+            .facts()
+            .into_iter()
+            .filter(|fact| !fact.the.as_str().starts_with("dialog."))
+            .collect()
+    }
+
+    /// A scope's kind is schema: a layer of another kind linked under it
+    /// is refused at commit, before induction and before any layer
+    /// changes, whether the kind is committed or held by the stack.
+    #[dialog_common::test]
+    async fn it_refuses_a_layer_of_another_kind_under_a_scope() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        shared
+            .transaction()
+            .assert(crate::ScopeKind::new(name("state"), Kind::Durable))
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let state = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let refused = Stack::open(top.clone())
+            .link(&top, &state, name("state"))
+            .link(&state, &shared, name("shared"))
+            .perform(&operator)
+            .await;
+        match refused {
+            Err(StackError::Kind { scope, kind, .. }) => {
+                assert_eq!(scope, name("state"));
+                assert_eq!(kind, Kind::Durable);
+            }
+            other => panic!("a store in memory under a durable scope is refused: {other:?}"),
+        }
+        assert!(top.facts().is_empty(), "no wiring was stamped");
+
+        // The stack's own declaration refuses the same way, and a branch
+        // under a scope in memory too.
+        let device = repo.branch("device").open().perform(&operator).await?;
+        let top = Ephemeral::create().perform(&operator).await;
+        let refused = Stack::open(top.clone())
+            .link(&top, &shared, name("shared"))
+            .link(&top, &device, name("device"))
+            .declare(crate::ScopeKind::new(name("device"), Kind::Memory))
+            .perform(&operator)
+            .await;
+        assert!(
+            matches!(
+                refused,
+                Err(StackError::Kind {
+                    kind: Kind::Memory,
+                    ..
+                })
+            ),
+            "a branch under a scope in memory is refused: {refused:?}"
+        );
+        Ok(())
+    }
+
+    /// An event layer's facts live one commit. A click asserted into the
+    /// input layer outside the stack fires the rule at the next commit,
+    /// which retracts the click; a subscription sees it arrive and go;
+    /// a later commit fires nothing. A click the commit itself writes
+    /// into the layer lives until the commit after.
+    #[dialog_common::test]
+    async fn it_expires_what_an_event_layer_held_when_the_commit_began() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let counter: Entity = "ctr:1".parse()?;
+        shared
+            .transaction()
+            .assert(crate::ScopeKind::new(name("input"), Kind::Event))
+            .assert(Placement::new(
+                "cmd.increment/counter".parse()?,
+                name("input"),
+            ))
+            .assert(increment_rule())
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let input = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &input, name("input"))
+            .link(&input, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+        let mut clicks = stack.query().subscribe(AttributeQuery::from(
+            Term::<Relation>::from(dialog_query::the!("cmd.increment/counter"))
+                .of(Term::<Entity>::var("e"))
+                .is(Term::<Entity>::var("v")),
+        ));
+        let initial = clicks.poll(&operator).await?.expect("initial");
+        assert!(initial.asserted.is_empty());
+
+        // A click from outside the stack: the UI reacts before any commit.
+        input.assert(
+            dialog_query::the!("cmd.increment/counter")
+                .of("click:1".parse::<Entity>()?)
+                .is(counter.clone()),
+        )?;
+        let seen = clicks.poll(&operator).await?.expect("the click arrives");
+        assert_eq!(seen.asserted.len(), 1);
+
+        // The next commit fires the rule on it, and expires it.
+        stack
+            .transaction()
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)],
+            "the click fired the rule once"
+        );
+        assert!(held(&input).is_empty(), "the click expired with the commit");
+        let gone = clicks.poll(&operator).await?.expect("the click goes");
+        assert_eq!(gone.retracted.len(), 1);
+
+        // Nothing fires again.
+        stack
+            .transaction()
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)],
+            "an expired click fires nothing"
+        );
+
+        // A click the commit writes itself lives until the next commit.
+        stack
+            .transaction()
+            .assert(
+                dialog_query::the!("cmd.increment/counter")
+                    .of("click:2".parse::<Entity>()?)
+                    .is(counter.clone()),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(3)],
+            "the commit's own click fires in its commit"
+        );
+        assert_eq!(held(&input).len(), 1, "and lives one tick");
+        stack
+            .transaction()
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert!(held(&input).is_empty(), "then expires");
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(3)],
+            "without firing again"
+        );
+        Ok(())
+    }
+
+    /// A rule's head placed on an event layer is a transient of the next
+    /// round, so a rule reading it fires in the same commit, and is stored
+    /// in the layer for a tick, so a read sees it; the commit hands it
+    /// back as derived; the next commit expires it and fires nothing.
+    #[dialog_common::test]
+    async fn it_stores_an_event_a_rule_derives_for_a_tick() -> Result<()> {
+        let (operator, peer) = test_session_with_peer().await;
+        let repo = test_repo(&operator, &peer).await;
+        let shared = repo.branch("main").open().perform(&operator).await?;
+        let counter: Entity = "ctr:1".parse()?;
+        // `cmd.notify/counter` from the click, both on the event layer; the
+        // count increments on the notice.
+        let notify: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "counter": { "the": "cmd.notify/counter", "as": "Entity" } }
+            },
+            "when": [{
+                "assert": {
+                    "with": { "counter": { "the": "ui/click", "as": "Entity" } }
+                },
+                "where": {
+                    "this": { "?": { "name": "this" } },
+                    "counter": { "?": { "name": "counter" } }
+                }
+            }]
+        }))?;
+        let increment: dialog_query::InductiveRule = serde_json::from_value(serde_json::json!({
+            "assert!": {
+                "with": { "count": { "the": "counter/count", "as": "UnsignedInteger" } }
+            },
+            "when": [
+                {
+                    "assert": {
+                        "with": { "counter": { "the": "cmd.notify/counter", "as": "Entity" } }
+                    },
+                    "where": { "counter": { "?": { "name": "this" } } }
+                },
+                {
+                    "assert": {
+                        "with": { "count": { "the": "counter/count", "as": "UnsignedInteger" } }
+                    },
+                    "where": {
+                        "this": { "?": { "name": "this" } },
+                        "count": { "?": { "name": "prev" } }
+                    }
+                },
+                {
+                    "assert": "math/sum",
+                    "where": {
+                        "of": { "?": { "name": "prev" } },
+                        "with": 1,
+                        "is": { "?": { "name": "count" } }
+                    }
+                }
+            ]
+        }))?;
+        shared
+            .transaction()
+            .assert(crate::ScopeKind::new(name("input"), Kind::Event))
+            .assert(Placement::new("ui/click".parse()?, name("input")))
+            .assert(Placement::new("cmd.notify/counter".parse()?, name("input")))
+            .assert(notify)
+            .assert(increment)
+            .assert(
+                dialog_query::the!("counter/count")
+                    .of(counter.clone())
+                    .is(1u64),
+            )
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        let input = Ephemeral::create().perform(&operator).await;
+        let top = Ephemeral::create().perform(&operator).await;
+        let stack = Stack::open(top.clone())
+            .link(&top, &input, name("input"))
+            .link(&input, &shared, name("shared"))
+            .perform(&operator)
+            .await?;
+
+        input.assert(
+            dialog_query::the!("ui/click")
+                .of("click:1".parse::<Entity>()?)
+                .is(counter.clone()),
+        )?;
+        let landed = stack
+            .transaction()
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)],
+            "the notice the click derived fires the increment in the same commit"
+        );
+        let stored: Vec<String> = held(&input)
+            .iter()
+            .map(|fact| fact.the.to_string())
+            .collect();
+        assert_eq!(
+            stored,
+            vec!["cmd.notify/counter".to_string()],
+            "the click expired, and the derived notice is stored for a tick"
+        );
+        assert_eq!(
+            landed.derived.iter().count(),
+            1,
+            "the commit hands the notice back as derived"
+        );
+
+        stack
+            .transaction()
+            .commit()
+            .publish()
+            .perform(&operator)
+            .await?;
+        shared.refresh(&operator).await?;
+        assert!(held(&input).is_empty(), "the notice expired");
+        assert_eq!(
+            committed(&shared, &operator, "counter/count", &counter).await?,
+            vec![Value::UnsignedInt(2)],
+            "and fired nothing again"
         );
         Ok(())
     }

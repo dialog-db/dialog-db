@@ -75,6 +75,27 @@ What this changes for you:
   guided read skips a line that stores no fact of the attribute it reads
   ([#698](https://github.com/dialog-db/dialog-db/pull/698)). Neither
   changes what a read returns or a rule concludes.
+- A scope has a kind, declared as schema beside the placements:
+  `ScopeKind::new(scope, Kind::Event)` writes `dialog.scope/kind` of the
+  scope entity (`replicated`, `durable`, `memory` or `event`), by a
+  commit, into the bottom's session store, or held by the stack. A
+  stack refuses, at commit and before any layer changes, a layer linked
+  under a scope of another kind (`StackError::Kind`): a store in memory
+  under a durable scope, a branch under one in memory.
+- An `event` layer replaces transients and commands. Its facts live one
+  commit: a fact asserted into it fires the rules once, in the commit
+  it enters in, is read by queries and subscriptions as a stored fact
+  while held, and is retracted by the commit after, whether or not
+  anything handled it. A rule reads an event the way it reads a
+  dispatched transient, in the first round only, so a rule over an
+  event and the state it changes (a click and the count it increments)
+  fires once and settles; a rule's head placed on an event layer is a
+  transient of the next round, and is stored in the layer for a tick
+  too. A command that must be handled later is a fact of a `memory`
+  layer, which a rule installed later fires over as over any stored
+  fact.
+- A commit that writes nothing still runs over a stack whose event
+  layers hold facts. Before, it only applied maintenance.
 
 Why: tonk keeps per-process and per-tab state beside a space's
 replicated branch, and needs to read and write both as one database
