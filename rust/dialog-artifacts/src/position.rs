@@ -33,7 +33,9 @@
 //!   positions must fit an attribute (64 bytes with the namespace),
 //!   and a handful of uniform digits already makes same-slot
 //!   collisions vanishingly rare. Truncation is deterministic, so the
-//!   convergence property is unaffected.
+//!   convergence property is unaffected. The digits are taken from the
+//!   identifier's BLAKE3 digest: the leading digits of the identifier
+//!   itself are the same for every entity of one scheme and length.
 //! - **No out-of-alphabet sentinels**: the POC models open bounds with
 //!   bytes outside base62 (`/`, `{`); `/` is the attribute namespace
 //!   separator, so here open bounds are explicit (`Bound::Open`) and
@@ -184,7 +186,7 @@ impl TryFrom<&str> for Position {
 }
 
 /// The bias a member's identity contributes to derived positions:
-/// [`BIAS_DIGITS`] base62 digits of the identity bytes.
+/// [`BIAS_DIGITS`] base62 digits of the identity's digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bias(Vec<u8>);
 
@@ -196,11 +198,19 @@ impl Bias {
     }
 
     /// Derive the bias from a member's identity bytes (its entity
-    /// reference): the leading [`BIAS_DIGITS`] digits of the bytes
-    /// re-encoded into base62. Deterministic, so every replica derives
+    /// reference): the leading [`BIAS_DIGITS`] base62 digits of the
+    /// identity's BLAKE3 digest. Deterministic, so every replica derives
     /// the same bias for the same member.
+    ///
+    /// Hashed, not re-encoded directly: base62 is a big-endian
+    /// re-encoding, so its leading digits are fixed by the identity's
+    /// leading bytes and its length. Every `did:key:z6Mk…` entity shares
+    /// that prefix and length, so every one of them got the same bias and
+    /// distinct members inserted between the same neighbours collided
+    /// instead of dispersing.
     pub fn derive(identity: &[u8]) -> Self {
-        let mut digits = to_base62(identity);
+        let digest = blake3::hash(identity);
+        let mut digits = to_base62(digest.as_bytes());
         digits.truncate(BIAS_DIGITS);
         Bias(digits)
     }
@@ -918,6 +928,38 @@ mod tests {
 
         let bread = insert(&bias(b"bread"), &low..&high).expect("derives");
         assert_ne!(milk_here, bread, "distinct members disperse");
+    }
+
+    /// Members whose identities share a prefix and a length still get
+    /// distinct biases. Entity references are exactly that shape: every
+    /// `did:key:z6Mk…` is the same length and starts with the same bytes,
+    /// and a bias read off the identity's leading digits gave all of them
+    /// the same one.
+    #[dialog_common::test]
+    fn it_disperses_members_that_share_a_prefix() {
+        let members = [
+            "did:key:z6Mk8Zd4DSY5RqsmJeB1U8AXw1swKBQDG4oUUGm6X7W6dWfq",
+            "did:key:z6MkHcggCT8Uuz74QoCBpGa6Kv45NMZHEKm9ZsTMR2GyjoXB",
+            "did:key:z6Mk6LNJD7BAhSQMYuotSbBQU7h2t7MqFRVD8ophnvzSFUVN",
+            "did:key:z6MkE3wZ5GHZddSstPkiA66tk8iLWzAUhJfKq2ZVvtv8ivUo",
+        ];
+        let biases: std::collections::BTreeSet<Vec<u8>> = members
+            .iter()
+            .map(|member| bias(member.as_bytes()).0)
+            .collect();
+        assert_eq!(biases.len(), members.len(), "one bias per member");
+
+        let low = position("N");
+        let high = position("O");
+        let positions: std::collections::BTreeSet<Position> = members
+            .iter()
+            .map(|member| insert(&bias(member.as_bytes()), &low..&high).expect("derives"))
+            .collect();
+        assert_eq!(
+            positions.len(),
+            members.len(),
+            "same-slot inserts of distinct members disperse"
+        );
     }
 
     /// Equal bounds return the shared position (a benign collision);
