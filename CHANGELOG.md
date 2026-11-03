@@ -14,6 +14,33 @@ says how to cut a release.
 
 ## Unreleased
 
+### A commit's subscriptions read each changed block once, and a read finds its remote without hashing every upstream
+
+A subscription re-checks a commit by diffing its pinned tree against the
+new one within its demand. That diff read every block from storage,
+never from the branch's node cache, so N subscriptions over one commit
+read the same changed path N times. They now read through the cache:
+the first reads the path and the rest find it in memory. Separately,
+every read asked the branch where to fall back to by building its full
+upstream list, which derives and compares a hash per upstream; it now
+finds the first route at a peer directly.
+
+What this changes for you:
+
+- `PersistentTree::differentiate_within_cached` and
+  `TreeDifference::compute_within_cached` diff through the trees' node
+  caches. `differentiate_within` is unchanged and still reads storage.
+- A poll after a commit that adds one note, with a subscription per
+  note of 200 (the `subscribe-fanout` perf scenario), reads 0 blocks
+  instead of 806 (32 MB). In a browser over IndexedDB, a write from
+  another device showed on a 200-note page in about 0.4 s instead of
+  2 to 3 s.
+- `subscribe-repoll` reads 0 blocks instead of 6.
+
+Why: in Tonk every item on screen holds a subscription, and IndexedDB
+pays a transaction per block read, so a single remote write cost about
+1,500 reads before it could render.
+
 ### A rule's conclusion under `last` succeeds the claim its body read
 
 Fixes [#724](https://github.com/dialog-db/dialog-db/issues/724)
