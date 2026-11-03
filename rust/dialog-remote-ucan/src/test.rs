@@ -750,6 +750,43 @@ async fn it_answers_a_lost_publish_as_retryable_and_the_retry_finds_it(
     Ok(())
 }
 
+/// A request the service never answers, as one sent on a pooled
+/// connection a NAT forgot, is answered as unavailable once the answer
+/// deadline passes, rather than holding its caller for ever; the read
+/// tried again, with an invocation of its own, is answered. Runs on
+/// native and in the browser alike.
+#[dialog_common::test(fault = crate::helpers::Fault::Unanswered { times: 1 })]
+async fn it_answers_a_request_the_service_never_answers_as_unavailable(
+    service: UcanServiceAddress,
+) -> anyhow::Result<()> {
+    let (signer, subject) = owner().await;
+    let cell = CellScope::new(subject, "local", "head");
+    let site = UcanSite::with_liveness(crate::socket::Liveness {
+        answer: std::time::Duration::from_millis(500),
+        ..quick()
+    });
+    let resolve = cell.clone().resolve();
+    let authorization = issued(&signer, &resolve).await;
+    let resolved = Provider::<ForkInvocation<UcanSite, Resolve>>::execute(
+        &site,
+        ForkInvocation::new(resolve, UcanAddress::new(&service.endpoint), authorization),
+    )
+    .await;
+    assert!(
+        matches!(
+            resolved,
+            Err(MemoryError::Rejected(
+                dialog_effects::Rejection::Unavailable { .. }
+            ))
+        ),
+        "{resolved:?}"
+    );
+
+    let again = perform(&service, &signer, cell.resolve()).await?;
+    assert_eq!(again, None, "the read tried again is answered");
+    Ok(())
+}
+
 /// `capability`, invoked by `signer` at `address`.
 async fn perform_at<Fx>(
     address: UcanAddress,

@@ -29,6 +29,26 @@ const PERMIT_MEDIA_TYPE: &str = "application/cbor";
 /// How much of a refusal body is read for its reason.
 const MAX_ERROR_BODY_BYTES: usize = 8 * 1024;
 
+/// The slowest upload a request is given time for, in bytes per second:
+/// about 128 kbit/s, below what a poor mobile link sustains.
+const SLOWEST_UPLOAD: u64 = 16 * 1024;
+
+/// How long a request carrying `payload` bytes waits for the service to
+/// begin answering: `answer`, the time an invocation over the socket
+/// waits ([`Liveness::answer`](crate::socket::Liveness::answer)), plus
+/// the time the payload takes to upload at [`SLOWEST_UPLOAD`].
+///
+/// A request is not otherwise bounded, and one sent on a connection the
+/// network silently dropped (a NAT or a mobile network that forgot an
+/// idle pooled connection, a laptop that changed networks) is never
+/// answered and never fails: whatever waits on it, a sync and every sync
+/// queued behind it, waits for minutes. Given up on, it is answered as
+/// unavailable, to be tried again with an invocation of its own, and the
+/// request is aborted, which drops the connection it was sent on.
+pub(crate) fn deadline(answer: std::time::Duration, payload: usize) -> std::time::Duration {
+    answer + std::time::Duration::from_millis(payload as u64 * 1000 / SLOWEST_UPLOAD)
+}
+
 /// The `Authorization` header value that carries `container`: the
 /// scheme, a space, and the container in the spec's text serialization,
 /// gzipped when that comes out shorter.
@@ -160,11 +180,16 @@ impl Answer {
 /// permit in place of the outcome, from a service that verified the
 /// invocation but performs nothing; or a refusal to read the request,
 /// from a service that looks for the invocation in the body.
+///
+/// A service that has not begun answering by the [`deadline`] for
+/// `answer` and the payload is given up on, as a transport failure.
 pub(crate) async fn invoke(
+    answer: std::time::Duration,
     address: &UcanAddress,
     authorization: &UcanAuthorization,
     payload: Option<Vec<u8>>,
 ) -> Result<Answer, S3Error> {
+    let limit = deadline(answer, payload.as_ref().map_or(0, Vec::len));
     let chain = authorization.invocation().chain();
     let url = labeled(address.endpoint(), chain);
     let credential =
@@ -179,7 +204,13 @@ pub(crate) async fn invoke(
             .header("Content-Type", OBJECT_MEDIA_TYPE)
             .body(payload);
     }
-    let response = request.send().await?;
+    let Some(sent) = crate::socket::within(limit, request.send()).await else {
+        return Err(S3Error::Transport(format!(
+            "the service did not begin answering within {} ms",
+            limit.as_millis()
+        )));
+    };
+    let response = sent?;
 
     let status = response.status().as_u16();
     let etag = response

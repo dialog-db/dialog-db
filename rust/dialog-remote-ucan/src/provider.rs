@@ -66,7 +66,13 @@ impl Provider<ForkInvocation<UcanSite, Get>> for UcanSite {
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
-        let answer = direct::invoke(&invocation.address, &invocation.authorization, None).await?;
+        let answer = direct::invoke(
+            self.answer(),
+            &invocation.address,
+            &invocation.authorization,
+            None,
+        )
+        .await?;
         match answer {
             answer if answer.is_success() => Ok(Some(answer.bytes().await?)),
             answer if answer.status == 404 => Ok(None),
@@ -88,6 +94,7 @@ impl Provider<ForkInvocation<UcanSite, Put>> for UcanSite {
         }
         let payload = invocation.capability.content().to_vec();
         let answer = direct::invoke(
+            self.answer(),
             &invocation.address,
             &invocation.authorization,
             Some(payload),
@@ -204,7 +211,13 @@ impl Provider<ForkInvocation<UcanSite, Read>> for UcanSite {
         if invocation.address.exchange() == Exchange::Permit {
             return through_permits(self, invocation).await;
         }
-        let answer = direct::invoke(&invocation.address, &invocation.authorization, None).await?;
+        let answer = direct::invoke(
+            self.answer(),
+            &invocation.address,
+            &invocation.authorization,
+            None,
+        )
+        .await?;
         match answer {
             answer if answer.is_success() => Ok(answer.source()),
             answer if answer.status == 404 => Err(BlobError::NotFound(
@@ -233,6 +246,7 @@ impl Provider<ForkInvocation<UcanSite, Import>> for UcanSite {
             return through_permits(self, invocation).await;
         }
         Ok(Box::new(Upload {
+            answer: self.answer(),
             invocation,
             buffer: Vec::new(),
         }))
@@ -242,6 +256,8 @@ impl Provider<ForkInvocation<UcanSite, Import>> for UcanSite {
 /// Gathers a blob's bytes and sends them, in the request that proves
 /// the import, once they have been checked against the declared digest.
 struct Upload {
+    /// How long the request waits for its answer (see [`direct::deadline`]).
+    answer: std::time::Duration,
     invocation: ForkInvocation<UcanSite, Import>,
     buffer: Vec<u8>,
 }
@@ -255,7 +271,11 @@ impl BlobSink for Upload {
     }
 
     async fn finish(self: Box<Self>) -> Result<Blake3Hash, BlobError> {
-        let Upload { invocation, buffer } = *self;
+        let Upload {
+            answer: within,
+            invocation,
+            buffer,
+        } = *self;
         let expected = invocation.capability.digest().clone();
         let hash = Blake3Hash::hash(&buffer);
         if hash != expected {
@@ -264,8 +284,13 @@ impl BlobSink for Upload {
                 actual: hash.as_bytes().to_base58(),
             });
         }
-        let answer =
-            direct::invoke(&invocation.address, &invocation.authorization, Some(buffer)).await?;
+        let answer = direct::invoke(
+            within,
+            &invocation.address,
+            &invocation.authorization,
+            Some(buffer),
+        )
+        .await?;
         match answer {
             answer if answer.is_success() => Ok(hash),
             answer if answer.is_refusal() => Err(answer.refusal().await.into()),
@@ -328,7 +353,7 @@ async fn exchange(
     payload: Option<Vec<u8>>,
 ) -> Result<direct::Answer, S3Error> {
     let Some(socket) = address.socket() else {
-        return direct::invoke(address, authorization, payload)
+        return direct::invoke(site.answer(), address, authorization, payload)
             .await
             .map_err(unanswered);
     };
@@ -338,7 +363,7 @@ async fn exchange(
         .connect(&per_space(socket, chain.subject().as_str()))
         .await
     else {
-        return direct::invoke(address, authorization, payload)
+        return direct::invoke(site.answer(), address, authorization, payload)
             .await
             .map_err(unanswered);
     };
@@ -356,7 +381,7 @@ async fn exchange(
         Ok(other) => Err(S3Error::Rejected(Rejection::Unclassified {
             detail: format!("the service answered an invocation with {other:?}"),
         })),
-        Err(Failed::NotSent) => direct::invoke(address, authorization, payload)
+        Err(Failed::NotSent) => direct::invoke(site.answer(), address, authorization, payload)
             .await
             .map_err(unanswered),
         Err(Failed::Lost(error)) => Err(S3Error::Rejected(Rejection::unavailable(format!(

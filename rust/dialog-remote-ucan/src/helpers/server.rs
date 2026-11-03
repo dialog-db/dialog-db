@@ -67,9 +67,10 @@ struct ServerState {
     faulted: std::sync::atomic::AtomicUsize,
 }
 
-/// A failure the service's socket plays out, so a test can see what a
-/// client does when its connection fails the ways real ones do. The
-/// service's endpoint answers requests as always.
+/// A failure the service plays out, so a test can see what a client does
+/// when its connection fails the ways real ones do. Each fails the socket
+/// but [`Fault::Unanswered`], which fails the endpoint, and the other
+/// answers as always.
 #[derive(Debug, Clone, Default)]
 pub enum Fault {
     /// Nothing fails.
@@ -98,6 +99,13 @@ pub enum Fault {
     /// that landed and was lost in flight.
     LosePublish {
         /// How many publishes are lost.
+        times: usize,
+    },
+    /// The first `times` requests to the endpoint are read and never
+    /// answered, their connection held open: a request sent on a pooled
+    /// connection the network forgot, as a NAT does a quiet one.
+    Unanswered {
+        /// How many requests go unanswered.
         times: usize,
     },
 }
@@ -599,6 +607,11 @@ async fn handle(
 ) -> Result<Response<Body>, Infallible> {
     if req.method() == Method::OPTIONS {
         return Ok(respond(StatusCode::NO_CONTENT).body(body("")).unwrap());
+    }
+    if let Fault::Unanswered { times } = state.fault
+        && state.fault_again(times)
+    {
+        return std::future::pending().await;
     }
     if req.method() != Method::POST {
         return Ok(respond(StatusCode::METHOD_NOT_ALLOWED)
