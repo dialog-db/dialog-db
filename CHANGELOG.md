@@ -35,7 +35,8 @@ What this changes for you:
   error. Either may be tried again with an invocation of its own.
 - `UcanSite::with_liveness` now bounds these requests too.
 - A block or blob read the service has not begun answering after 3 s
-  is sent again, up to four copies, and the first answer is taken. A
+  is sent again, up to seven copies (one more than the connections a
+  browser keeps to one host), and the first answer is taken. A
   read that met connections the network forgot is answered in seconds
   rather than failing after 30 s each. The copies carry one invocation,
   so a service may see it presented more than once; the refusal of a

@@ -64,7 +64,10 @@ pub(crate) fn deadline(answer: std::time::Duration, payload: usize) -> std::time
 /// connections is answered within a few of these intervals, where it
 /// would wait out the deadline on each one.
 const RESEND_READ_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
-const MOST_READ_COPIES: usize = 4;
+/// One more than the connections a browser keeps open to one host over
+/// HTTP/1.1, so that when every one of them was forgotten the last copy
+/// opens a new one.
+const MOST_READ_COPIES: usize = 7;
 
 /// [`invoke`] a read, which carries no payload and changes nothing,
 /// sending it again every [`RESEND_READ_AFTER`] while no copy has been
